@@ -1,0 +1,133 @@
+def int add(int a, int b):
+    a + b
+
+def string greet(string name, string greeting = "Hello"):
+    "{greeting}, {name}!"
+
+def int factorial(int n):
+    if n <= 1: 1 else n * factorial(n - 1)
+
+def int sum_all([int] nums):
+    var total = 0
+    for n in nums:
+        total = total + n
+    total
+
+print "{add(3, 4)}"
+print "{greet("Alice")}"
+print "{greet("Bob", greeting = "Hi")}"
+print "{factorial(5)}"
+print "{sum_all([1, 2, 3, 4, 5])}"
+
+# Multiple return values via tuple
+def (int, int) minmax([int] arr):
+    var lo = arr[0]
+    var hi = arr[0]
+    for v in arr:
+        if v < lo: lo = v
+        if v > hi: hi = v
+    (lo, hi)
+
+let mn, mx = minmax([3, 1, 4, 1, 5, 9, 2, 6])
+print "min={mn}, max={mx}"
+
+# throws function
+def int safe_div(int a, int b) throws:
+    guard b != 0 else throw "div-by-zero"
+    a / b
+
+let r = try safe_div(10, 2) else -1
+print r
+let r2 = try safe_div(10, 0) else -1
+print r2
+
+# default param
+def string greetdp(string name = "world"):
+    "Hello, {name}!"
+
+print greetdp("Alice")
+print greetdp()
+
+# variadic
+def int sumv(int... args):
+    var total = 0
+    for n in args:
+        total = total + n
+    total
+
+print sumv(1, 2, 3)
+print sumv()
+
+# labeled args
+def string describela(string first, string last):
+    "{first} {last}"
+
+print describela(last= "Doe", first= "John")
+print describela("Jane", last= "Smith")
+
+# void function
+def void greetv(string name):
+    print "hi " + name
+
+greetv("World")
+
+# void literal
+let vv = void
+print "void-ok"
+
+# nested fn basic
+def int compute(int x):
+    def int double(int n): n * 2
+    def int addOne(int n): n + 1
+    double(addOne(x))
+
+print compute(20)
+
+# nested fn captures
+def int makeAdder(int base):
+    def int add(int n): base + n
+    add(10)
+
+print makeAdder(32)
+
+# pass fn
+def void foopass(): pass
+let pres = foopass()
+print "pass-ok"
+
+# pass fn inline
+def void noop(int x): pass
+noop(42)
+print "noop-ok"
+
+# pass struct
+struct Empty: pass
+let ee = Empty()
+print "empty-ok"
+
+# pass enum
+enum Nothing: pass
+print "nothing-ok"
+
+# must-use ok cases
+def void sayhi():
+    print "hi"
+
+sayhi()
+
+def int answer():
+    42
+
+_ = answer()
+print "discard-ok"
+
+let bound = answer()
+print bound
+
+struct WrapperMU:
+    init(pub int val)
+    req int peek(): self.val
+
+let wmu = WrapperMU(7)
+_ = wmu.peek()
+print "method-discard-ok"

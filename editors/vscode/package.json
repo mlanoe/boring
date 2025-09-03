@@ -1,0 +1,30 @@
+{
+  "name": "boring-lang",
+  "displayName": "Boring Language",
+  "description": "Syntax highlighting for the Boring programming language (.br files)",
+  "version": "0.1.0",
+  "publisher": "mlanoe",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "boring",
+        "aliases": ["Boring", "boring"],
+        "extensions": [".br"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "boring",
+        "scopeName": "source.boring",
+        "path": "./syntaxes/boring.tmLanguage.json"
+      }
+    ]
+  }
+}

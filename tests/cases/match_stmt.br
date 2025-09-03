@@ -1,0 +1,174 @@
+# Basic match
+let v = 2
+match v:
+    1: print "one"
+    2: print "two"
+    _: print "other"
+
+# Match with guard
+let score = 85
+match score:
+    s if s >= 90: print "A"
+    s if s >= 80: print "B"
+    s if s >= 70: print "C"
+    _: print "F"
+
+# Or-patterns
+let day = "Mon"
+match day:
+    "Sat" | "Sun": print "weekend"
+    _: print "weekday"
+
+# Match as expression
+let label = match v:
+    1: "uno"
+    2: "dos"
+    _: "otro"
+print label
+
+# Enum match — bare variant names inside match
+enum Color:
+    Red
+    Green
+    Blue
+
+let c = Color.Green
+match c:
+    Red:   print "red"
+    Green: print "green"
+    Blue:  print "blue"
+
+# Enum with associated values
+enum Shape:
+    Circle(float r)
+    Rect(float w, float h)
+
+def float area(Shape s):
+    match s:
+        Circle(r):   3.14159 * r * r
+        Rect(w, h):  w * h
+
+print "{area(Shape.Circle(2.0))}"
+print "{area(Shape.Rect(3.0, 4.0))}"
+
+# match guards
+def string classify(int n):
+    match n:
+        0: "zero"
+        x if x > 0: "positive"
+        _: "negative"
+
+print classify(5)
+print classify(-3)
+print classify(0)
+
+enum MOpt:
+    Some(int value)
+    None
+
+def string describe(MOpt'auto o):
+    match o:
+        Some(n) if n > 10: "big"
+        Some(n): "small"
+        None: "nothing"
+
+print describe(MOpt.Some(42))
+print describe(MOpt.Some(3))
+
+def string checkor(int n):
+    match n:
+        1 | 2 | 3 if true: "one-two-three"
+        _: "other"
+print checkor(2)
+
+def string checkft(int n):
+    match n:
+        x if x > 100: "huge"
+        x if x > 10: "big"
+        _: "small"
+print checkft(50)
+
+# struct destructure
+struct MPoint:
+    int x
+    int y
+
+def int sumpt(MPoint p):
+    match p:
+        MPoint(x, y): x + y
+
+print sumpt(MPoint(x=3, y=4))
+
+def int get_x(MPoint p):
+    match p:
+        MPoint(x, _): x
+
+print get_x(MPoint(x=10, y=99))
+
+struct MCircle:
+    float radius
+
+struct MSquare:
+    float side
+
+def string shape<S>(S s):
+    match s:
+        MCircle(_): "circle"
+        MSquare(_): "square"
+        _: "unknown"
+
+print shape(MCircle(radius=1.0))
+
+struct MInner:
+    int value
+
+struct MOuter:
+    MInner inner
+
+def int deep(MOuter o):
+    match o:
+        MOuter(MInner(v)): v
+
+print deep(MOuter(inner=MInner(value=42)))
+
+# or-pattern enum variants
+enum MColor:
+    Red
+    Green
+    Blue
+
+let mc = MColor.Red
+let opl = match mc:
+    Red | Blue: "warm"
+    Green: "cool"
+print opl
+
+# nested enum pattern
+enum NInner:
+    A(int x)
+    B
+
+enum NOuter:
+    Wrap(NInner' v)
+    Empty
+
+let no = NOuter.Wrap(NInner.A(42))
+let nrel = match no:
+    Wrap(A(n)): n
+    _: 0
+print nrel
+
+# nested fn
+def int outerfn():
+    def int inner(): 1
+    inner()
+print outerfn()
+
+# nested struct
+def int makePoint():
+    struct LPoint:
+        int x
+        int y
+    let p = LPoint(x = 3, y = 4)
+    p.x + p.y
+print makePoint()

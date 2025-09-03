@@ -1,0 +1,9 @@
+struct Box:
+    init(pub int val)
+
+def int bad():
+    let a = Box(val = 42)
+    let b' = a
+    return a.val
+
+let result = bad()

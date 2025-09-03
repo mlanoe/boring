@@ -1,0 +1,101 @@
+let double = (n): n * 2
+let add = (a, b): a + b
+
+print "{double(7)}"
+print "{add(3, 4)}"
+
+# Higher-order function — param type: `int f(int)`
+def int apply(int f(int), int x):
+    f(x)
+
+print "{apply(double, 5)}"
+print "{apply((x): x * x, 4)}"
+
+# Closure captures environment
+let base = 10
+let adder = (n): n + base
+print "{adder(5)}"
+
+# map / filter / reduce
+let nums = [1, 2, 3, 4, 5]
+let doubled = nums.map((n): n * 2)
+print "{doubled}"
+
+let evens = nums.filter((n): n % 2 == 0)
+print "{evens}"
+
+let total = nums.reduce(0, (acc, n): acc + n)
+print total
+
+# Chaining (single line)
+let result = [1, 2, 3, 4, 5, 6].filter((n): n % 2 == 0).map((n): n * n).reduce(0, (acc, n): acc + n)
+print result
+
+# Closure with block body
+let classify = (int n):
+    if n > 0:
+        "pos"
+    elif n < 0:
+        "neg"
+    else:
+        "zero"
+
+print "{classify(5)}, {classify(-1)}, {classify(0)}"
+
+# Closure as callback — use it inline
+let arr2 = [10, 20, 30]
+for v in arr2.map((v): v + 1):
+    print v
+
+# trailing closures
+let tcr1 = [1, 2, 3].map (x): x * 2
+print tcr1
+
+let tcr2 = [1, 2, 3].reduce(0) (acc, x): acc + x
+print tcr2
+
+let tcr3 = [1, 2, 3].filter (x): x > 1
+                        .map (x): x * 10
+print tcr3
+
+# no-paren closures
+let fnp = x: x * 2
+print fnp(21)
+
+let tnp = [1, 2, 3].map x: x * 2
+print tnp
+
+let cnp = [1, 2, 3].filter(x: x > 1)
+print cnp
+
+# fn-type req as def
+def int apply(def int(int) f, int x): f(x)
+def int doubleft(int n) throws: n * 2
+print apply(doubleft, 21)
+
+use Pure as req int (int)
+def int applyp(Pure f, int x): f(x)
+def int triple(int n) throws: n * 3
+print applyp(triple, 14)
+
+use Mutating as def int (int)
+def int applym(Mutating f, int x): f(x)
+def int incm(int n) throws: n + 1
+print applym(incm, 41)
+
+# task req combined
+use PureWorker as req task int () throws
+task def int runpw(PureWorker f): try f() else 0
+task def int workpw() throws: 42
+let resw = runpw(workpw)
+print resw
+
+# closure explicit task
+def int run_task(int f() task): f()
+print run_task(() task: 42)
+
+def int safe(int f() throws): try f() else 0
+print safe(() throws: 42)
+
+def int runtt(int f() task throws): try f() else 0
+print runtt(() task throws: 42)

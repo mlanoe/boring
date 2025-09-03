@@ -1,0 +1,110 @@
+# collections2.br — tests for new array/string/dict/set methods added to transpiler
+
+# ── Array: sorted, sortedBy, min, max, sum ────────────────────────────────────
+let arr = [3, 1, 4, 1, 5]
+print arr.sorted()
+print arr.min()
+print arr.max()
+print arr.sum()
+
+# ── Array: any, all ───────────────────────────────────────────────────────────
+print arr.any(n: n > 3)
+print arr.all(n: n > 0)
+print arr.any(n: n > 10)
+print arr.all(n: n > 2)
+
+# ── Array: count with closure ─────────────────────────────────────────────────
+print arr.count(n: n > 2)
+
+# ── Array: take, drop ─────────────────────────────────────────────────────────
+print arr.take(3)
+print arr.drop(2)
+
+# ── Array: slice ──────────────────────────────────────────────────────────────
+print arr.slice(1, 3)
+
+# ── Array: indexOf — store in optional var so nil prints correctly ─────────────
+let nums = [10, 20, 30]
+let int? idx1 = nums.indexOf(20)
+let int? idx2 = nums.indexOf(99)
+print idx1
+print idx2
+
+# ── Array: flatMap, flat ──────────────────────────────────────────────────────
+print arr.flatMap(n: [n, n * 2])
+let nested = [[1, 2], [3, 4]]
+print nested.flat()
+
+# ── Array: zip, enumerate ─────────────────────────────────────────────────────
+let z = [1, 2, 3].zip([4, 5, 6])
+print z.length
+let e = [10, 20, 30].enumerate()
+print e.length
+
+# ── Array: sortedBy ───────────────────────────────────────────────────────────
+let arr2 = [5, 3, 1, 4, 2]
+print arr2.sortedBy(x: x)
+
+# ── String: parseInt, parseFloat ──────────────────────────────────────────────
+let s = "42"
+let int? parsed = s.parseInt()
+print parsed
+let f = "3.14"
+let float? fv = f.parseFloat()
+print fv != nil
+
+# ── String: indexOf — store in optional var ────────────────────────────────────
+var str = "hello world"
+let int? si1 = str.indexOf("world")
+let int? si2 = str.indexOf("xyz")
+print si1
+print si2
+
+# ── String: slice ─────────────────────────────────────────────────────────────
+print str.slice(0, 5)
+
+# ── Dict: keys, values, get ───────────────────────────────────────────────────
+let {string=int} d1 = {"a" = 1, "b" = 2}
+let ks = d1.keys()
+print ks.length
+let vs = d1.values()
+print vs.length
+let gv = d1.get("a", 0)
+print gv
+let gv2 = d1.get("z", 99)
+print gv2
+
+# ── Set: toArray, union, intersection, difference ─────────────────────────────
+let {int} s1 = {1, 2, 3}
+let {int} s2 = {2, 3, 4}
+let ta = s1.toArray()
+print ta.length
+let u = s1.union(s2)
+print u.length
+let i = s1.intersection(s2)
+print i.length
+let d = s1.difference(s2)
+print d.length
+
+# ── Dict: chained map → filter → keys (expression receivers) ─────────────────
+def {string=int} make_dict():
+    {"a" = 1, "b" = 2, "c" = 3}
+
+# literal receiver — no variable
+let lit_keys = {"x" = 10, "y" = 20}.keys()
+print lit_keys.length
+
+# function-return receiver
+let fn_keys = make_dict().keys()
+print fn_keys.length
+
+# chained: map then filter
+let {string=int} base = {"a" = 1, "b" = 2, "c" = 3}
+let filtered = base.filter((k, v): v > 1).keys()
+print filtered.length
+
+# ── Set: chained union → toArray ─────────────────────────────────────────────
+let {int} sa = {1, 2, 3}
+let {int} sb = {3, 4, 5}
+let chain_len = sa.union(sb).toArray().length
+print chain_len

@@ -1,0 +1,41 @@
+# let shadowing — same name, different type
+let val = 10
+let val = "toto"
+print val
+
+# shadow used in its own rhs
+let n = "42"
+let n = (n as int) else 0
+print n
+
+# shadow let → let (chain)
+let x = 1
+let x = x + 1
+let x = x * 3
+print x
+
+# shadow var → let (result is immutable)
+var score = 100
+let score = score + 1
+print score
+
+# shadow let → var (result is mutable)
+let count = 0
+var count = count + 10
+count = count + 5
+print count
+
+# inner scope shadow doesn't affect outer
+let outer = 7
+if true:
+    let outer = outer * 2
+    print outer    # 14
+print outer        # 7 — outer unchanged
+
+# shadow in function
+def void test():
+    let a = "hello"
+    let a = a.length
+    print a
+
+test()

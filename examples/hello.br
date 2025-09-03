@@ -1,0 +1,1344 @@
+# boring language showcase
+# Run with:        boring hello.br
+# Transpile with:  boring --emit-rust hello.br
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. Bindings
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let name = "World"           # String'const (&str) inferred from literal
+let int x = 42               # explicit type annotation before name
+var counter = 0              # mutable binding
+let float pi = 3.14159
+
+# Tuple + destructuring
+let pair = (10, 20)
+let lo, hi = pair
+
+counter = counter + 1
+print "name={name}, x={x}, lo={lo}, hi={hi}, counter={counter}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. String interpolation & format specifiers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let n = 255
+let ratio = 0.753
+print "hex: {n:x}, HEX: {n:X}, bin: {n:b}, oct: {n:o}"
+print "float: {ratio:.3}, sci: {ratio:.2e}, sign: {ratio:+.2}"
+print "padded: '{n:8}', zero-pad: '{n:08}'"
+
+# Positional print style: {} placeholders, args after the string
+print "n={}, ratio={}", n, ratio
+# str() for formatted strings; format() is an alias
+let s1 = str("n={}, ratio={}", n, ratio)
+let s2 = str("{n} in hex is {n:x}")
+print "str: {s1}"
+print "str: {s2}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. Functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def int add(int a, int b):
+    a + b
+
+# Multi-line parameter list — trailing comma optional
+def int add_ml(
+    int a,
+    int b,
+):
+    a + b
+
+let ml_result = add_ml(
+    10,
+    20,
+)
+print "multi-line call: {ml_result}"
+
+def string greet(str who):
+    "Hello, {who}!"
+
+# Optional parameter + guard let
+def string display(string? name):
+    guard let n = name else return "nobody"
+    "Hello, {n}!"
+
+# Default parameter
+def string say(string msg = "hi"):
+    msg
+
+# throws — untyped: return type is Result<T, Box<dyn Error>>
+def int divide(int a, int b) throws:
+    guard b != 0 else throw "division by zero"
+    a / b
+
+# throws Type — typed error: return type is Result<T, ErrorType>
+enum CalcError:
+    DivByZero
+    Overflow
+
+def int checked_divide(int a, int b) throws CalcError:
+    guard b != 0 else throw CalcError.DivByZero
+    guard (a / b) < 1000000 else throw CalcError.Overflow
+    a / b
+
+let r1 = try checked_divide(10, 2) else -1     # 5
+let r2 = try checked_divide(10, 0) else -1     # -1  (DivByZero)
+print "checked: {r1}, {r2}"
+
+# Generic functions
+def T identity(T x):
+    x
+
+def T first([T] items):
+    items[0]
+
+# Variadic parameter — last param collects remaining args as an array
+def string join(str sep, string parts...):
+    var result = ""
+    var first = true
+    for p in parts:
+        if first:
+            result = p
+            first = false
+        else:
+            result = "{result}{sep}{p}"
+    result
+
+def int sum(int values...):
+    var total = 0
+    for v in values:
+        total = total + v
+    total
+
+print "{add(3, 4)}, {greet("boring")}, {display("Alice")}, {display(nil)}"
+print "say: {say()}, {say("yo")}"
+print "identity: {identity(42)}, {identity("hi")}"
+print "first: {first([10, 20, 30])}"
+print "join: {join(", ", "a", "b", "c")}"
+print "sum: {sum(1, 2, 3, 4, 5)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. Control flow
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# if / elif / else as expression — inline and block forms both work
+def string sign(int n):
+    if n > 0: "+" elif n < 0: "-" else "0"
+
+print "signs: {sign(5)}, {sign(-3)}, {sign(0)}"
+
+# if-let
+let string? maybe = "found"
+if let v = maybe:
+    print "if-let: {v}"
+
+# guard
+def string check(int n):
+    guard n >= 0 else return "negative"
+    "ok ({n})"
+
+print "{check(5)}, {check(-1)}"
+
+# match — literals, or-patterns, guard, wildcard
+def string describe(int n):
+    match n:
+        0:         "zero"
+        1 | 2 | 3: "small"
+        x if x < 0: "negative"
+        _:         "large"
+
+print "{describe(0)}, {describe(2)}, {describe(-5)}, {describe(99)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. Loops
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# while
+var i = 1
+var wsum = 0
+while i <= 5:
+    wsum = wsum + i
+    i = i + 1
+print "while sum 1..=5 = {wsum}"
+
+# while let — loop while expr != nil, binding the value each iteration
+def int? countdown_val(int n):
+    if n > 0: n - 1 else nil
+
+var cn = 3
+while let v = countdown_val(cn):
+    print "countdown: {v}"
+    cn = v
+print "while let done"
+
+# for over collection
+for w in ["boring", "is", "fun"]:
+    print "  word: {w}"
+
+# for over inclusive range (1..=5 = 1 to 5)
+var rsum = 0
+for k in 1..=5:
+    rsum = rsum + k
+print "range sum 1..=5 = {rsum}"
+
+# for exclusive range — no binding needed, just repeat
+var rep = 0
+for _ in 1..4:
+    rep = rep + 1
+print "repeat count = {rep}"
+
+# for without variable — omit binding entirely (implicit _)
+var ticks = 0
+for 1..=3:
+    ticks = ticks + 1
+print "ticks = {ticks}"
+
+# loop + break + continue
+var acc = 0
+var idx = 0
+loop:
+    idx = idx + 1
+    if idx % 2 == 0: continue
+    acc = acc + idx
+    if idx >= 7: break
+print "odd sum 1..7 = {acc}"
+
+# do-while
+var j = 0
+do:
+    j = j + 1
+while j < 3
+print "do-while j = {j}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. Collections
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let numbers = [1, 2, 3, 4, 5]
+let doubled  = numbers.map((n): n * 2)
+let evens    = numbers.filter((n): n % 2 == 0)
+print "doubled: {doubled}"
+print "evens: {evens}"
+
+# Chained transformations
+let big_evens = numbers.filter((n): n % 2 == 0).map((n): n * 10)
+print "big_evens: {big_evens}"
+
+# Dict
+let {string=int} scores = {"Alice" = 90, "Bob" = 85}
+print "Alice: {scores["Alice"]}, Bob: {scores["Bob"]}"
+
+# Set (unordered, deduplicates)
+let {int} unique = {1, 2, 3, 2, 1}
+print "set size: {unique.length}, contains 2: {unique.contains(2)}, contains 9: {unique.contains(9)}"
+
+# Empty containers
+let [int] empty_arr    = []
+let {int=int} empty_map = {=}
+let {int} empty_set    = {}
+print "empty array length: {empty_arr.length}"
+
+# Functions returning Set and Dict
+def {int} distinct_squares():
+    {1, 4, 9, 4, 1}    # duplicates removed
+
+def {string=int} word_lengths():
+    {"hello" = 5, "world" = 5, "boring" = 6}
+
+let sq = distinct_squares()
+print "distinct squares: size={sq.length}, has 9: {sq.contains(9)}"
+let wl = word_lengths()
+print "word_lengths size: {wl.length}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. Structs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Vec2:
+    float x
+    float y
+
+    req float len():
+        sqrt(self.x * self.x + self.y * self.y)
+
+    req Vec2 add(Vec2 other):
+        Vec2(x = self.x + other.x, y = self.y + other.y)
+
+    as string:
+        "({self.x}, {self.y})"
+
+let v1 = Vec2(x = 3.0, y = 4.0)
+let v2 = Vec2(x = 1.0, y = 0.0)
+let v3 = v1.add(v2)
+print "v1={v1 as string}, len={v1.len()}"
+print "v1+v2={v3 as string}"
+
+# Mutable field
+struct Counter:
+    var int value = 0
+
+    def void inc():
+        self.value = self.value + 1
+
+    req int get():
+        self.value
+
+var ctr = Counter()
+ctr.inc()
+ctr.inc()
+ctr.inc()
+print "counter = {ctr.get()}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. Enums
+# ═══════════════════════════════════════════════════════════════════════════════
+
+enum Expr:
+    Num(int value)
+    Add(int left, int right)
+    Mul(int left, int right)
+
+def int eval_expr(Expr e):
+    match e:
+        Num(v): v
+        Add(l, r): l + r
+        Mul(l, r): l * r
+
+let exprs = [Expr.Num(7), Expr.Add(3, 4), Expr.Mul(3, 4)]
+for e in exprs:
+    print "eval = {eval_expr(e)}"
+
+# Enum match with guard
+def string classify_expr(Expr e):
+    match e:
+        Num(v) if v == 0: "zero literal"
+        Num(_): "literal"
+        Add(_, _): "addition"
+        Mul(_, _): "multiplication"
+
+print "{classify_expr(Expr.Num(0))}, {classify_expr(Expr.Add(1, 2))}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. Traits & conformance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+trait Named:
+    req string name()
+
+trait Describable:
+    req string describe()
+
+struct Animal as Named, Describable:
+    string species
+    string sound
+
+    req string name():
+        self.species
+
+    req string describe():
+        "{self.species} says {self.sound}"
+
+let cat = Animal(species = "Cat", sound = "meow")
+let dog = Animal(species = "Dog", sound = "woof")
+print "{cat.name()}: {cat.describe()}"
+print "{dog.name()}: {dog.describe()}"
+
+# ext — add methods to an existing type
+ext Animal:
+    req bool louder_than(Animal other):
+        self.sound.length > other.sound.length
+
+print "cat louder than dog: {cat.louder_than(dog)}"
+
+# ext with trait conformance
+trait Greetable:
+    req string greet()
+
+ext Animal as Greetable:
+    req string greet():
+        "Hi, I'm a {self.name()}!"
+
+print "{cat.greet()}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. Error handling
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# try-else inline
+let r1 = try divide(10, 2) else 0
+let r2 = try divide(10, 0) else -1
+print "10/2={r1}, 10/0={r2}"
+
+# try-catch block
+def int safe_parse(str s):
+    let int? v = s as int
+    v else -1
+
+print "parse: {safe_parse("42")}, {safe_parse("bad")}"
+
+# throws + guard
+def string read_file(str path) throws:
+    guard path.length > 0 else throw "empty path"
+    "contents of {path}"
+
+let content = try read_file("data.txt") else "<missing>"
+print "file: {content}"
+
+# try / catch block
+def string try_catch_demo() throws:
+    throw "something went wrong"
+
+var caught = "none"
+try:
+    try_catch_demo()
+catch:
+    caught = "caught!"
+print "try-catch: {caught}"
+
+# try / catch with re-use of throwing fn
+var result = "ok"
+try:
+    let _ = divide(5, 0)
+catch:
+    result = "caught divide-by-zero"
+print "try-catch divide: {result}"
+
+# typed catch — multiple throwing calls, String errors only
+var typed_result = "none"
+try:
+    let q = divide(10, 2)
+    let content = read_file("notes.txt")
+    print "  q={q}, content={content}"
+    throw "specific error"
+catch String:
+    typed_result = "string error: {error}"
+catch:
+    typed_result = "other error"
+print "typed catch: {typed_result}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. Closures & higher-order
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Inline closure — type inferred
+let double  = (n): n * 2
+let add_one = (n): n + 1
+
+print "double(7)={double(7)}, add_one(7)={add_one(7)}"
+
+# Closure with block body
+let classify_n = (int n):
+    if n > 0:
+        "pos"
+    elif n < 0:
+        "neg"
+    else:
+        "zero"
+
+print "{classify_n(5)}, {classify_n(-1)}, {classify_n(0)}"
+
+# Higher-order function
+def int apply(int f(int), int x):
+    f(x)
+
+print "apply(double, 21) = {apply(double, 21)}"
+
+# Pipeline of closures
+let pipeline = [double, add_one, double]
+var pval = 3
+for fn in pipeline:
+    pval = fn(pval)
+print "pipeline(3) = {pval}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. Optionals & nil coalescing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let int? some_val = 42
+let int? no_val   = nil
+
+print "optional: {some_val else 0}, {no_val else 0}"
+
+# Struct with optional fields
+struct Config:
+    string? host
+    int?    port
+
+let cfg       = Config(host = "localhost", port = 8080)
+let empty_cfg = Config(host = nil, port = nil)
+
+# Guard with multiple optional bindings
+def string connect(Config c):
+    guard let host = c.host else return "no host"
+    guard let port = c.port else return "no port"
+    "Connecting to {host}:{port}"
+
+print "{connect(cfg)}"
+print "{connect(empty_cfg)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. Tuples
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def (int, int) minmax([int] nums):
+    var mn = nums[0]
+    var mx = nums[0]
+    for num in nums:
+        if num < mn: mn = num
+        if num > mx: mx = num
+    (mn, mx)
+
+let mn, mx = minmax([5, 3, 8, 1, 9, 2])
+print "min={mn}, max={mx}"
+
+# Nested if as expression — inline else (no colon needed)
+def string quadrant(int px, int py):
+    if px > 0:
+        if py > 0: "I" else "IV"
+    else:
+        if py > 0: "II" else "III"
+
+print "quadrant(1,1)={quadrant(1,1)}, (-1,1)={quadrant(-1,1)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 14. Type cast
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let parsed = ("42" as int) else -1
+let bad    = ("oops" as int) else -999
+let as_flt = 42 as float
+let as_str = 3 as string
+print "cast: {parsed}, bad={bad}, float={as_flt}, str={as_str}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 15. Defer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def string with_cleanup():
+    var log = ""
+    defer: log = log + "+closed"
+    log = log + "open+work"
+    log
+
+print "defer: {with_cleanup()}"    # "open+work+closed"
+
+# LIFO — last registered defer runs first
+def string lifo():
+    var log = ""
+    defer: log = log + "A"
+    defer: log = log + "B"
+    defer: log = log + "C"
+    log
+
+print "lifo: {lifo()}"     # "CBA"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 16. Macros (Rust interop)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+println!("macro println: {}", 42)
+assert!(2 + 2 == 4)
+assert_eq!(add(2, 3), 5)
+let fmsg = format!("{} + {} = {}", 1, 2, add(1, 2))
+print "format!: {fmsg}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 17. Attributes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@derive(Debug, Clone, PartialEq)
+struct Color:
+    int r
+    int g
+    int b
+
+    as string:
+        "rgb({self.r},{self.g},{self.b})"
+
+let red   = Color(r = 255, g = 0,   b = 0)
+let green = Color(r = 0,   g = 255, b = 0)
+print "red={red as string}, green={green as string}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 18. Modules & use
+# ═══════════════════════════════════════════════════════════════════════════════
+
+mod math_utils:
+    pub def float hypot(float a, float b):
+        sqrt(a * a + b * b)
+
+    pub def float clamp_f(float v, float lo, float hi):
+        max(lo, min(v, hi))
+
+    pub def float circle_area(float r):
+        3.14159 * r * r
+
+# Import all public items
+use math_utils.*
+
+# Import specific items by name
+use math_utils.clamp_f
+
+print "hypot(3,4) = {hypot(3.0, 4.0)}"
+print "clamp(12, 0, 10) = {clamp_f(12.0, 0.0, 10.0)}"
+print "circle area r=5 = {circle_area(5.0)}"
+
+# Type aliases
+use Score as int                    # i64 — rename a primitive
+
+let Score top = 100
+let double_it = (x): x * 2.0
+print "score={top}, doubled={double_it(3.5)}"
+
+# Newtype wrappers — distinct types that wrap an existing type
+# `type N as T` vs `use N as T`:
+#   use  → transparent alias, same Rust type (type N = T)
+#   type → opaque wrapper,    distinct type  (struct N(T))
+type UserId  as uint
+type OrderId as uint
+type Email   as str
+
+let uid   = UserId(1)
+let oid   = OrderId(42)
+let email = Email("alice@example.com")
+
+# Unwrap with `as` cast — same syntax as any other conversion
+let raw_id = uid as uint
+print "uid={uid}  order={oid}  email={email}  raw={raw_id}"
+
+# UserId and OrderId are incompatible — the compiler rejects mix-ups:
+# let bad: OrderId = uid    # error: expected OrderId, found UserId
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 19. Ownership qualifiers (type annotations)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Shorthands (aliases):
+# T        = T'stack      → T            (stack, Rust default)
+# T'       = T'heap       → Box<T>       (exclusive heap ownership)
+# T?       = T'option     → Option<T>    (optional value)
+# str      = String'const → &str         (borrowed string slice)
+# string   = String'task → Arc<String>  (thread-safe shared)
+# int      = Int'copy     → i64
+# uint     = Uint'copy    → u64
+# float    = Float'copy   → f64
+# bool     = Bool'copy    → bool
+# Other qualifiers:
+# T'auto   = Rc<T>        (single-thread shared reference-count)
+# T'task = Arc<T>       (multi-thread shared reference-count)
+# T'weak = Weak<T> or sync::Weak<T> (non-owning, inferred from RHS qualifier)
+#   T'auto'weak  = Weak<T>                     (explicit form, rc — single-thread)
+#   T'task'weak  = std::sync::Weak<T>          (explicit form, arc — task-safe)
+#   T'actor'weak = std::sync::Weak<Mutex<T>>   (explicit form, actor — task-safe)
+# T'const  = &'static T   (compile-time constant)
+
+let string owned = "shared"   # forces Arc<String>
+let slice = "constant"        # &str inferred (String'const)
+print "owned={owned}, slice={slice}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A. Labeled arguments
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def string greet_full(string name, string greeting):
+    "{greeting}, {name}!"
+
+# positional
+let ga1 = greet_full("Alice", "Hello")
+# all labeled, any order
+let ga2 = greet_full(greeting = "Hi", name = "Bob")
+# mix: positional then labeled
+let ga3 = greet_full("Carol", greeting = "Hey")
+print "labeled: {ga1}, {ga2}, {ga3}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# B. Mutable parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def int countdown(var int n):
+    var total = 0
+    while n > 0:
+        total = total + n
+        n = n - 1
+    total
+
+print "countdown(5)={countdown(5)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C. do: scoped block
+# ═══════════════════════════════════════════════════════════════════════════════
+
+let block_result = do:
+    let a = 10
+    let b = a * 2
+    b + 1
+
+print "do block = {block_result}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D. init constructor
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Point:
+    init(pub float x, pub float y)
+
+let p = Point(1.0, 2.0)
+print "point=({p.x}, {p.y})"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E. Property getter + setter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Temperature:
+    var float celsius
+
+    req float fahrenheit():
+        self.celsius * 9.0 / 5.0 + 32.0
+
+    set fahrenheit(float f):
+        self.celsius = (f - 32.0) * 5.0 / 9.0
+
+var t = Temperature(celsius = 0.0)
+print "0°C = {t.fahrenheit}°F"
+t.fahrenheit = 212.0
+print "212°F = {t.celsius}°C"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F. Type-level members
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Counter2:
+    int value
+
+    pub type let int MAX = 100
+    pub type def Counter2 zero():
+        Counter2(value = 0)
+
+let c2 = Counter2.zero()
+print "Counter2.MAX={Counter2.MAX}, zero.value={c2.value}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# G. Optional chaining ?.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Profile:
+    string name
+
+struct User2:
+    Profile? profile
+
+let alice2 = User2(profile = Profile(name = "Alice"))
+let ghost  = User2(profile = nil)
+
+print "alice name: {alice2.profile?.name else "none"}"
+print "ghost name: {ghost.profile?.name else "none"}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# H. Generic structs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Pair<T, U>:
+    T first
+    U second
+
+let p2 = Pair(10, "hello")
+print "{p2.first} / {p2.second}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# I. Trait constraints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def string describe_val<T as Display>(T x):
+    "value: {x}"
+
+print describe_val(3.14)
+print describe_val("boring")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# J. Transient fields — lazy / cache pattern
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# A `transient` field can be written from a `req` (non-mutating) method.
+# This is the Boring way to express lazy initialisation / memoisation.
+# The transpiler maps it to Cell<T> (Copy types) or RefCell<T> (non-Copy types).
+
+struct TextStats:
+    string text
+    transient int? _length = nil     # cached character count
+
+    req int length():
+        if let cached = self._length:
+            return cached
+        let n = self.text.length
+        self._length = n             # write from req — allowed because field is transient
+        n
+
+let ts = TextStats(text = "hello, world")
+print "length = {ts.length}"    # computes: 12
+print "length = {ts.length}"    # served from cache: 12
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 20. Tasks / async
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# `task` accepts the usual qualifiers: `task def`, `task req`, `task set`.
+# When the return type is present, the qualifier can be omitted (shorthand).
+#   task int f()       ≡  task def int f()    (method or free function)
+#   task req int f()   →  async fn f(&self)
+#   task set prop(T v) →  async fn set_prop(&mut self, v: T)
+
+# 20-a: basic async function + spawning + .value
+task int compute(int n):
+    n * n
+
+# 20-b: fire-and-forget detached task helper
+task void log_bg(str msg):
+    print "bg: {msg}"
+
+# 20-c: parallel tasks helpers
+task int fetch_add(int a, int b):
+    a + b
+
+task string fetch_greet(str name):
+    "hello, {name}"
+
+# 20-d: data capture helper
+task string transform(str s):
+    "done: {s}"
+
+# 20-e: task method on Worker (let T'task = Arc<T>, read-only shared)
+struct Worker:
+    string name
+    int jobs
+
+task void Worker.run():
+    print "worker {self.name} processing {self.jobs} jobs"
+
+# 20-f: T'actor = Arc<Mutex<T>> — shared MUTABLE state across tasks
+# All field reads/writes and method calls go through .lock().await automatically.
+struct SharedCount:
+    var int value = 0
+    def void inc():
+        self.value += 1
+    req int get():
+        self.value
+
+# run_tasks is called from the top-level with `task run_tasks()`
+task void run_tasks():
+    let f = task compute(7)
+    let result = f.value
+    print "compute(7)={result}"
+    task log_bg("ping")
+    let f1 = task fetch_add(10, 20)
+    let f2 = task fetch_greet("world")
+    print "fetch_add={f1.value}, fetch_greet={f2.value}"
+    let string label = "shared"
+    let ft = task transform(label)
+    print "label still: {label}"
+    print "transform: {ft.value}"
+    # let T'task: read-only Arc<T>, task method receiver is Arc<Self>
+    let Worker'task w = Worker(name = "alice", jobs = 5)
+    let fw = task w.run()
+    print "w.name={w.name}"
+    fw.value
+    # var T'task: reassignable Arc pointer, but def methods still blocked
+    var Worker'task w2 = Worker(name = "bob", jobs = 3)
+    var Worker'task w3 = Worker(name = "carol", jobs = 7)
+    w2 = w3                    # OK — reassign the Arc pointer
+    print "w2.name after reassign: {w2.name}"    # carol (req method, allowed)
+    # T'actor: Arc<Mutex<T>>, all accesses go through .lock().await
+    var SharedCount'actor c = SharedCount()
+    c.inc()
+    c.inc()
+    print "counter = {c.value}"    # c.lock().await.value
+
+# spawning the task demo from top-level auto-promotes main to async
+let t = task run_tasks()
+t.value
+
+# ── 20-g: future.wait — await without capturing the result ──────────────────
+# `f.wait` is the void form of `f.value`: it waits for the task to finish
+# but discards the result. Useful for fire-and-wait side-effect tasks.
+
+task void notify(str msg):
+    print "notify: {msg}"
+
+task void run_wait_demo():
+    let fw = task notify("done")
+    fw.wait                     # wait, discard result (void)
+    print "after wait"
+
+let tw = task run_wait_demo()
+tw.value
+
+# ── 20-h: drop — explicit ownership release ──────────────────────────────────
+# `drop(x)` immediately releases ownership of `x`.  In the interpreter
+# this is a no-op (reference-counting handles it); in Rust it calls drop().
+
+let big = [1, 2, 3, 4, 5]
+drop(big)                       # release early, before the scope ends
+print "drop: released"
+
+# ── 21: Explicit lifetimes ──────────────────────────────────────────────────
+# T&a = &'a T  — a borrow with an explicit lifetime.
+# The lifetime 'a appears only in the borrow position: T&a, T'heap&a, etc.
+# It is declared as a type parameter with the <'a> syntax, just like in Rust.
+#
+# Classic example: both parameters must outlive the returned reference.
+def str&a longest(str&a x, str&a y):
+    if x.len() > y.len(): x else y
+
+let str w1 = "long string is long"
+let str w2 = "short"
+print "longest: {longest(w1, w2)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# K. Associated types
+# ═══════════════════════════════════════════════════════════════════════════════
+
+trait Container:
+    type Item
+
+    req Item first()
+    req int  count()
+
+struct IntBox as Container:
+    [int] values
+
+    type Item = int
+
+    req Item first():
+        self.values[0]
+
+    req int count():
+        self.values.length
+
+let box1 = IntBox(values = [10, 20, 30])
+print "first={box1.first()}, count={box1.count()}"
+
+# Transformer: Input → Output (bare names are equivalent to Self.Input / Self.Output)
+trait Transformer:
+    type Input
+    type Output
+
+    req Output transform(Input value)
+
+struct Doubler as Transformer:
+    type Input  = int
+    type Output = int
+
+    req Output transform(Input value):
+        value * 2
+
+let d = Doubler()
+print "doubled: {d.transform(21)}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L. loop as expression
+# ═══════════════════════════════════════════════════════════════════════════════
+
+var ln = 0
+let loop_result = loop:
+    ln = ln + 1
+    if ln >= 5: break ln * 2
+
+print "loop result: {loop_result}"    # 10
+
+# Search first even number > 3 in a list
+let haystack = [1, 3, 5, 4, 6, 7]
+var lh_idx = 0
+let found_val = loop:
+    if lh_idx >= haystack.length: break -1
+    let v = haystack[lh_idx]
+    lh_idx = lh_idx + 1
+    if v > 3 and v % 2 == 0: break v
+
+print "found: {found_val}"    # 4
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# M. Default method implementations in traits
+# ═══════════════════════════════════════════════════════════════════════════════
+
+trait Speaker:
+    req string name()
+
+    req string speak():           # default implementation
+        "Hi, I'm {self.name()}!"
+
+struct Parrot as Speaker:
+    string label
+
+    req string name():
+        self.label
+    # speak() inherited — uses default
+
+struct Robot as Speaker:
+    string id
+
+    req string name():
+        self.id
+
+    req string speak():       # override
+        "Beep boop, I am {self.id}."
+
+let p = Parrot(label = "Polly")
+let r = Robot(id = "R2D2")
+print "{p.speak()}"    # Hi, I'm Polly!
+print "{r.speak()}"    # Beep boop, I am R2D2.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# N. Struct destructuring in match
+# ═══════════════════════════════════════════════════════════════════════════════
+
+struct Point2D:
+    init(pub float x, pub float y)
+
+def string classify_point(Point2D p):
+    match p:
+        Point2D(0.0, 0.0): "origin"
+        Point2D(x, 0.0):   "x-axis at {x}"
+        Point2D(0.0, y):   "y-axis at {y}"
+        Point2D(x, y):     "({x}, {y})"
+
+print classify_point(Point2D(0.0, 0.0))   # origin
+print classify_point(Point2D(3.0, 0.0))   # x-axis at 3
+print classify_point(Point2D(0.0, 5.0))   # y-axis at 5
+print classify_point(Point2D(1.0, 2.0))   # (1, 2)
+
+# Guard on destructured struct fields
+def string on_diagonal(Point2D p):
+    match p:
+        Point2D(x, y) if x == y: "diagonal at {x}"
+        Point2D(x, y):           "off-diagonal ({x}, {y})"
+
+print on_diagonal(Point2D(3.0, 3.0))   # diagonal at 3
+print on_diagonal(Point2D(1.0, 2.0))   # off-diagonal (1, 2)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# O. Weak references  (T'weak — qualifier inferred from RHS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 'weak on a let binding infers the base qualifier ('auto/'task/'actor) from
+# the right-hand side.  The explicit compound forms (T'auto'weak, T'task'weak,
+# T'actor'weak) are used in type annotations and function signatures.
+
+struct Resource:
+    init(pub string label)
+
+# Strong Rc reference — owns the object
+let Resource'auto  strong  = Resource(label = "config.toml")
+
+# Explicit form in type annotation: T'auto'weak → Weak<Resource> (rc::Weak)
+let Resource'auto'weak  w1 = strong
+let r1 = w1.upgrade()
+print "w1: {r1.label}"            # w1: config.toml
+
+# Inferred form on let binding — 'weak infers 'auto from `a`
+let a'auto  = Resource(label = "rc-inferred")
+let b'weak  = a                   # Weak<Resource> (rc::Weak)
+let rb = b.upgrade()
+print "b: {rb.label}"             # b: rc-inferred
+
+# Arc-backed weak ref — T'task'weak → std::sync::Weak<Resource>
+let Resource'task  shared  = Resource(label = "arc.toml")
+let Resource'task'weak  w2 = shared
+let r2 = w2.upgrade()
+print "w2: {r2.label}"            # w2: arc.toml
+
+# Inferred form on let binding — 'weak infers 'task from `c`
+let c'task  = Resource(label = "arc-inferred")
+let d'weak  = c                   # sync::Weak<Resource> (arc::Weak)
+let rd = d.upgrade()
+print "d: {rd.label}"             # d: arc-inferred
+
+# Weak refs work in function parameters
+def string describe_resource(Resource'auto'weak w):
+    let r = w.upgrade()
+    "resource: {r.label}"
+
+print describe_resource(w1)       # resource: config.toml
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P. Opaque Index  (collection cursor)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Array iteration with firstIndex / nextIndex
+var tab = [10, 20, 30, 40]
+var i = tab.firstIndex()
+while let idx = i:
+    print "array elem: {tab[idx]}"
+    i = tab.nextIndex(idx)
+
+# removeAt returns a new collection without that element
+tab = tab.removeAt(tab.firstIndex())
+print "after removeAt: {tab}"    # [20, 30, 40]
+
+# Set iteration — must use getAt (sets can't be subscripted with s[idx])
+var s = {10, 20, 30}
+var j = s.firstIndex()
+while let idx = j:
+    print "set elem: {s.getAt(idx)}"
+    j = s.nextIndex(idx)
+
+# Optional type annotation
+var Index<[int]> cursor = tab.firstIndex()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Q. throws io.Error  (qualified error type path)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Dot notation in throws clauses references types from another module.
+# Dots become `::` in Rust:
+#   def string read_file(string path) throws io.Error:  →  Result<_, io::Error>
+#   def void query(string sql) throws db.QueryError:    →  Result<_, db::QueryError>
+
+# Runnable example with a local enum — same throws / try / guard mechanics:
+
+enum SafeDivError:
+    DivByZero
+
+def int safe_div(int a, int b) throws SafeDivError:
+    guard b != 0 else throw SafeDivError.DivByZero
+    a / b
+
+let r  = try safe_div(10, 2) else -1
+print "10 / 2 = {r}"      # 10 / 2 = 5
+
+let r2 = try safe_div(10, 0) else -1
+print "10 / 0 = {r2}"     # 10 / 0 = -1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# R. Generic args at use sites  (lifetimes &a and bounds T as Bound)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# In type positions, generic args accept lifetime params (&a → 'a) and
+# trait bounds (T as Clone) to annotate intent without creating new constraints:
+#
+#   var Container<&a, T as Clone> c = ...   -- at a variable declaration
+#   def void f(Container<&a, T as Clone> x):  -- at a parameter
+#
+# Bounds at use sites are informational — stripped by the transpiler.
+# Call-site type inference is used in the interpreter; explicit type args
+# are resolved by the transpiler when targeting Rust.
+
+struct Box2<T>:
+    init(pub [T] items)
+
+def void print_all<T as Clone+Display>(Box2<T> b):
+    for item in b.items:
+        print "item: {item}"
+
+let Box2<int> b2 = Box2(items = [1, 2, 3])
+print_all(b2)   # T inferred as int
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# S. Generic Associated Types (GAT)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# A trait can declare an associated type parameterised by a lifetime.
+# `type Item<&a>` is a Generic Associated Type (GAT); it transpiles to
+# `type Item<'a>;` in Rust.  The interpreter resolves it as a plain Item.
+trait Producer:
+    type Item<&a>             # GAT — parameterised by lifetime 'a
+
+    req Item next()           # method uses Item (interpreter resolves plain name)
+
+struct IntCounter as Producer:
+    init(pub int value)
+
+    type Item<&a> = int       # concrete definition at struct body level
+
+    req Item next():
+        self.value + 1
+
+let ic = IntCounter(value = 10)
+print "next: {ic.next()}"     # next: 11
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T. Closure shorthand  (:expr)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ":expr" is a one-argument closure shorthand: ":field" means "(x): x.field"
+# and ":method()" means "(x): x.method()".
+
+struct Person:
+    string name
+    int    age
+
+    req bool is_adult():
+        self.age >= 18
+
+let people = [Person(name = "Alice", age = 30), Person(name = "Bob", age = 15)]
+
+# Long form — explicit closure
+let names_long   = people.map((p): p.name)
+let adults_long  = people.filter((p): p.is_adult())
+
+# Shorthand
+let names   = people.map(:name)           # (p): p.name
+let adults  = people.filter(:is_adult())  # (p): p.is_adult()
+
+print "names: {names}"
+print "adults: {adults}"
+
+# Chaining: ":a.b" means "(x): x.a.b"
+struct Address:
+    string city
+
+struct Employee:
+    string label
+    Address address
+
+let emp1 = Employee(label = "E1", address = Address(city = "Paris"))
+let emp2 = Employee(label = "E2", address = Address(city = "London"))
+let emps = [emp1, emp2]
+
+let cities = emps.map(:address.city)    # (e): e.address.city
+print "cities: {cities}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# U. Enum variant shorthand  (.Variant)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# When the expected type is known from context, ".Variant" can be used instead
+# of "Enum.Variant".  The dot signals that the identifier is a variant of the
+# enum expected at that position.
+
+enum Direction:
+    North
+    South
+    East
+    West
+
+def string dir_label(Direction d):
+    match d:
+        North: "north"
+        South: "south"
+        East:  "east"
+        West:  "west"
+
+# Full form
+print dir_label(Direction.North)    # north
+
+# Shorthand — type inferred from the parameter annotation
+print dir_label(.South)             # south
+print dir_label(.East)              # east
+
+# Works in typed let bindings too
+let Direction facing = .West
+print "facing: {dir_label(facing)}" # facing: west
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V. Pipe operator  (|>)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# `lhs |> f(args)` chains operations left-to-right.
+# If `f` is a known function, it desugars to `f(lhs, args)`.
+# Otherwise `f` is treated as a method: `lhs.f(args)`.
+
+def int double(int n): n * 2
+def int inc(int n):    n + 1
+
+# Single-line: 5 → double → inc → inc = 12
+let piped = 5 |> double() |> inc() |> inc()
+print piped   # 12
+
+# Multi-line (continuation lines indented):
+let chained = 5
+    |> double()
+    |> inc()
+print chained # 11
+
+# Method dispatch — trim and uppercased are string methods:
+let shout = "  hello  "
+    |> trim()
+    |> upper()
+print shout   # HELLO
+
+# Mixed: keep_positive is a function, then map/reversed are array methods:
+def [int] keep_positive([int] arr):
+    arr.filter(n: n > 0)
+
+let nums = [-1, 2, -3, 4, -5, 6]
+    |> keep_positive()
+    |> map(n: n * 10)
+    |> reversed()
+print nums    # [60, 40, 20]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VI. Async streams  (stream / yield)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# `stream T fn(params):` declares a lazy generator function.
+# `yield expr` produces the next value; callers iterate with `for item in fn():`.
+# Stream bodies may contain `await` — they are implicitly async.
+
+stream int count_up(int n):
+    var i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+stream string greet_msgs(string name):
+    yield "Hello, " + name + "!"
+    yield "Goodbye, " + name + "!"
+
+stream string greet_all([string] names):
+    for name in names:
+        for msg in greet_msgs(name):
+            yield msg
+
+print "\nstream count_up(5):"
+for x in count_up(5):
+    print x
+
+print "\nstream greet_all:"
+for msg in greet_all(["Alice", "Bob"]):
+    print msg
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VII. Channels  (channel<T> / channel)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# `channel<T>(capacity)` creates a buffered mpsc channel pair (sender, receiver).
+# The type can also be specified via the binding annotation: `let T tx, rx = channel(n)`.
+# `tx.send(value)` sends a message; `for msg in rx:` receives them.
+
+# ── Syntax A: explicit type argument ─────────────────────────────────────────
+let tx, rx = channel<int>(4)
+
+# Producer task: sends three values then drops the sender to close the channel
+let h1 = task:
+    tx.send(10)
+    tx.send(20)
+    tx.send(30)
+    drop(tx)
+
+# Consumer task: iterates until the channel is closed
+print "channel<int> output:"
+let h2 = task:
+    for n in rx:
+        print n
+
+h1.wait
+h2.wait
+
+# ── Syntax B: type from binding annotation ────────────────────────────────────
+let string tx2, rx2 = channel(4)
+
+let h3 = task:
+    tx2.send("Alice")
+    tx2.send("Bob")
+    drop(tx2)
+
+print "\nchannel string output:"
+let h4 = task:
+    for msg in rx2:
+        print msg
+
+h3.wait
+h4.wait
+
+print "\n── all features demonstrated ──"

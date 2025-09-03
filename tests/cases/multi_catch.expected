@@ -1,0 +1,6 @@
+string or int: a string error
+string or int: 42
+bool fallback: true
+scalar: 3.14
+string wins
+true

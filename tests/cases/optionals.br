@@ -1,0 +1,168 @@
+let int? a = 42
+let int? b = nil
+
+print "{a else 0}"
+print "{b else 0}"
+
+# if-let
+if let v = a:
+    print "a = {v}"
+
+if let v = b:
+    print "b = {v}"
+else:
+    print "b is nil"
+
+# guard let
+def string show_val(int? v):
+    guard let n = v else return "nil"
+    "value={n}"
+
+print "{show_val(a)}"
+print "{show_val(b)}"
+
+# Function returning optional
+def int? find([int] arr, int target):
+    for v in arr:
+        if v == target: return v
+    nil
+
+let found   = find([1, 2, 3, 4, 5], 3)
+let missing = find([1, 2, 3], 9)
+
+print "{found else -1}"
+print "{missing else -1}"
+
+# Optional field with guard
+struct Config:
+    string? host
+    int?    port
+
+def string connect(Config cfg):
+    guard let host = cfg.host else return "no host"
+    guard let port = cfg.port else return "no port"
+    "Connecting to {host}:{port}"
+
+let cfg1 = Config(host = "localhost", port = 8080)
+let cfg2 = Config(host = nil, port = nil)
+print "{connect(cfg1)}"
+print "{connect(cfg2)}"
+
+# if-let some
+def string oigreet(string? name):
+    var result = "nobody"
+    if let n = name:
+        result = "hello " + n
+    return result
+print oigreet("Alice")
+
+# if-let nil
+def string oigreet2(string? name):
+    if let n = name:
+        return "hello " + n
+    else:
+        return "nobody"
+    return "unreachable"
+
+print oigreet2("Bob")
+print oigreet2(nil)
+
+# if-let inline
+let string? oix = "hi"
+var oirel = "none"
+if let s = oix: oirel = s else: oirel = "bye"
+print oirel
+
+# optional chaining field
+struct OUser:
+    string ouname
+
+let OUser'? ouu = OUser("Alice")
+let outname = ouu?.ouname
+print outname
+
+let OUser'? oun = nil
+let ounn = oun?.ouname
+let ounn2 = ounn else "nil"
+print ounn2
+
+# optional chaining method
+struct OGreeter:
+    def string ohello(): "hello!"
+
+let OGreeter'? ogg = OGreeter()
+let ogres = ogg?.ohello()
+print ogres
+
+let OGreeter'? ognn = nil
+let ognres = ognn?.ohello()
+let ognres2 = ognres else "nil"
+print ognres2
+
+# optional chaining with else
+let OUser'? ouEl = nil
+let ouElr = ouEl?.ouname else "anonymous"
+print ouElr
+
+# if-let single
+def string olsg(string? name):
+    if let n = name: return "hello " + n
+    return "nobody"
+
+print olsg("Alice")
+print olsg(nil)
+
+# if-let multi binding
+def string oboth(string? a, string? b):
+    if let x = a, let y = b:
+        return x + " " + y
+    return "missing"
+
+print oboth("hello", "world")
+print oboth("hello", nil)
+print oboth(nil, "world")
+
+# if-let bool condition
+def string ocheck(int? val):
+    if let x = val, x > 0:
+        return "positive"
+    return "nope"
+
+print ocheck(5)
+print ocheck(-3)
+print ocheck(nil)
+
+# if-let second uses first
+def int osum(int? a, int? b):
+    if let x = a, let y = b:
+        return x + y
+    return 0
+
+print osum(10, 32)
+
+# cast nil on failure
+let oca = "42" as int
+let ocb = "oops" as int
+let occ = "3.14" as float
+let ocd = "bad" as float
+let oce = true as int
+let ocf = 42 as bool
+print oca
+let ocbr = ocb else "nil"
+print ocbr
+print occ
+let ocdr = ocd else "nil"
+print ocdr
+print oce
+let ocfr = ocf else "nil"
+print ocfr
+
+# else nil coalescing
+let int? oeln = nil
+let oelnr = oeln else 42
+print oelnr
+
+# if inline no colon else
+let oix5 = 5
+let oirr = if oix5 > 3: "big" else "small"
+print oirr

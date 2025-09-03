@@ -1,0 +1,125 @@
+def int divide(int a, int b) throws:
+    guard b != 0 else throw "division by zero"
+    a / b
+
+# Basic try-else inline
+let r1 = try divide(10, 2) else 0
+let r2 = try divide(10, 0) else -1
+print "{r1}, {r2}"
+
+# try/catch block
+var caught = "none"
+try:
+    let _ = divide(10, 0)
+catch:
+    caught = "caught!"
+print caught
+
+# Nested throws propagation
+def int double_div(int a, int b) throws:
+    let r = divide(a, b)
+    r * 2
+
+print "{try double_div(8, 2) else -1}"
+print "{try double_div(8, 0) else -1}"
+
+# Typed catch — String errors
+def string risky() throws:
+    throw "oops"
+
+var typed = "none"
+try:
+    risky()
+catch String:
+    typed = "string error: {error}"
+print typed
+
+# Typed catch without fallback — unmatched errors propagate to caller
+def void only_catches_string() throws:
+    try:
+        throw 42
+    catch String:
+        print "caught string"
+    # int error is not String → propagates
+
+var propagated = "no"
+try:
+    only_catches_string()
+catch:
+    propagated = "propagated: {error}"
+print propagated
+
+# Typed catch matches — does NOT propagate
+def void catches_string() throws:
+    try:
+        throw "oops"
+    catch String:
+        print "caught: {error}"
+
+catches_string()
+
+# guard + throws combo
+def string read_file(str path) throws:
+    guard path.length > 0 else throw "empty path"
+    "contents of {path}"
+
+print "{try read_file("data.txt") else "<missing>"}"
+print "{try read_file("") else "<missing>"}"
+
+# try/catch with typed error type
+enum FileError:
+    NotFound
+    PermissionDenied
+
+def string open_file(str path) throws FileError:
+    guard path != "secret" else throw FileError.PermissionDenied
+    guard path.length > 0 else throw FileError.NotFound
+    "opened {path}"
+
+var file_result = "none"
+try:
+    file_result = open_file("secret")
+catch FileError:
+    file_result = "file error"
+print file_result
+
+# throws typed parses
+struct EMyError:
+    string message
+
+def int edivide(int a, int b) throws EMyError:
+    if b == 0: throw EMyError("division by zero")
+    return a / b
+
+let edres = try edivide(10, 2) else -1
+print edres
+
+# throws typed propagates
+struct EIOErr:
+    string message
+
+def string ereadFile(string path) throws EIOErr:
+    throw EIOErr("not found")
+
+var emsg = "ok"
+try:
+    ereadFile("x.txt")
+catch:
+    emsg = "caught"
+print emsg
+
+# throws untyped still works
+def int esafe(int x) throws:
+    if x < 0: throw "negative"
+    return x
+
+let eut = try esafe(7) else -1
+print eut
+
+# assert_eq pass
+assert_eq(1 + 1, 2)
+print "assert_eq_ok"
+
+# assert_neq pass
+assert_neq(1, 2)
+print "assert_neq_ok"

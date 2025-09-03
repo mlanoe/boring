@@ -1,0 +1,123 @@
+# Arrays
+let arr = [1, 2, 3, 4, 5]
+print arr.length
+print arr[0]
+print "{arr[arr.length - 1]}"
+
+var mut_arr = [10, 20, 30]
+mut_arr.push(40)
+print "{mut_arr}"
+
+mut_arr.insert(0, 5)
+print "{mut_arr[0]}"
+
+mut_arr.remove(0)
+print "{mut_arr[0]}"
+
+print "{arr.contains(3)}"
+print "{arr.contains(9)}"
+
+# Index API
+var idx = arr.firstIndex()
+while idx != nil:
+    print arr[idx]
+    idx = arr.nextIndex(idx)
+
+# Dicts
+let {string=int} d = {"a" = 1, "b" = 2, "c" = 3}
+print d.length
+print "{d["a"]}"
+print "{d["b"]}"
+
+var {string=int} md = {"x" = 10, "y" = 20}
+md["x"] = 99          # update existing key
+md["z"] = 30          # insert new key
+print "{md["x"]}"
+print "{md["z"]}"
+print md.length
+md.remove("y")
+print md.length
+print "{md.contains("y")}"
+print "{md.contains("x")}"
+
+# Sets
+let {int} s = {1, 2, 3, 2, 1}
+print s.length
+print "{s.contains(2)}"
+print "{s.contains(9)}"
+
+var {int} ms = {10, 20, 30}
+ms.add(40)
+print ms.length
+ms.remove(10)
+print "{ms.contains(10)}"
+
+# dict set mutating
+var cd = { "a" = 1 }
+cd.set("b", 2)
+cd.put("c", 3)
+print cd["a"]
+print cd["b"]
+print cd["c"]
+
+# set equality
+let csa = {1, 2, 3}
+let csb = {3, 1, 2}
+print csa == csb
+print csa == {1, 2}
+
+# is reference identity
+struct CDog:
+    string name
+
+let cda = CDog(name = "Rex")
+let cdb = cda
+print cdb is cda
+let cdc = CDog(name = "Rex")
+print cdc is cda
+
+# empty brace is set
+let ces = {}
+print ces.len()
+
+# empty dict literal
+var ced = {=}
+ced.set("x", 42)
+print ced["x"]
+
+# set literal nonempty
+let csl = {1, 2, 3}
+print csl.len()
+
+# dict literal nonempty
+let cdl = {"a" = 1, "b" = 2}
+print cdl["a"]
+print cdl["b"]
+
+# dict type annotation with empty literal
+var {string=int} cmap = {=}
+cmap.set("hello", 99)
+print cmap["hello"]
+
+# hashmap as dict
+use std.collections.HashMap
+var {string=int} cscores = HashMap()
+cscores.set("alice", 42)
+cscores.set("bob", 17)
+print cscores["alice"]
+print cscores["bob"]
+
+# native hashmap no import
+var cnhm = HashMap()
+cnhm.set("x", 10)
+print cnhm["x"]
+
+# native hashset no import
+var cnhs = HashSet()
+print cnhs.len()
+
+# native vec no import
+var cnvec = Vec()
+cnvec.push(1)
+cnvec.push(2)
+print cnvec.len()

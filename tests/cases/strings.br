@@ -1,0 +1,13 @@
+let s = "Hello, World!"
+print s.length
+print "{s.upper()}"
+print "{s.lower()}"
+print "{s.contains("World")}"
+print "{s.startsWith("Hello")}"
+print "{s.endsWith("!")}"
+print "{s.replace("World", "boring")}"
+print "{s.split(", ")[0]}"
+print "{s.trim()}"
+let n = 42
+print "n = {n}, doubled = {n * 2}"
+print "abc" + "def"

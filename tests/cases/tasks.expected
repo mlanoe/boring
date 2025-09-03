@@ -1,0 +1,14 @@
+compute(7)=49
+notify: done
+add=30, greet=hello, world
+label still: shared
+transform: done: shared
+worker alice processing 5 jobs
+w.name=alice
+fire-ok
+42
+42
+198
+42
+shorthand-void-ok
+1

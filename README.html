@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The new programming language is Boring</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring</h2>
+    <p>Overview</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="the-new-programming-language-is-boring">The new programming language is Boring</h1>
+<p>Rust is arguably the best programming language for the future. It is fast, safe, expressive, and gives you fine-grained control over memory without a garbage collector. The community is thriving, the ecosystem is mature, and more and more systems — from operating systems to web backends to embedded firmware — are being rewritten in Rust.</p>
+<p>There is only one problem: <strong>Rust is not boring enough to write</strong>.</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// A simple function that reads a file and parses its first line as an integer</span>
+<span class="kw">fn</span> <span class="fn">read_first_line</span>(path: &amp;str) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+    <span class="kw">let</span> content = std::fs::<span class="fn">read_to_string</span>(path)?;
+    <span class="kw">let</span> line = content.<span class="fn">lines</span>().<span class="fn">next</span>().<span class="fn">ok_or</span>(<span class="s">&quot;empty file&quot;</span>)?;
+    <span class="kw">let</span> n: i64 = line.<span class="fn">trim</span>().<span class="fn">parse</span>()?;
+    <span class="kw">Ok</span>(n)
+}</code></pre></div>
+<p>Ownership annotations, lifetime specifiers, trait bounds, <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>, <code>Box&lt;dyn Error&gt;</code>, <code>.unwrap()</code> everywhere — Rust asks a lot of the programmer before the first line of business logic is written. That cognitive overhead is the price you pay for the guarantees Rust provides. It is a fair trade. But it makes Rust genuinely <em>hard</em> to write quickly, especially for newcomers.</p>
+<p><strong>Boring</strong> is an attempt to make that trade cheaper.</p>
+<hr>
+<h2 id="what-is-boring">What is Boring?</h2>
+<p>Boring is a language that compiles to Rust. It borrows its look and feel from <strong>Python</strong> and <strong>Swift</strong> — two languages celebrated for their readability — and maps every concept directly onto idiomatic Rust. The result is code that is fast to write, easy to read, and that produces real, auditable Rust output.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name, <span class="kt">int</span> visits) <span class="kw">throws</span>:
+    <span class="kw">guard</span> visits &gt; <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"no visits recorded"</span>
+    <span class="kw">let</span> who = name <span class="kw">else</span> <span class="s">"stranger"</span>
+    <span class="s">"Welcome back, <span class="si">{who}</span>! Visit number <span class="si">{visits}</span>."</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt;, visits: i64)
+    -&gt; <span class="kw">Result</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt;
+{
+    <span class="kw">if</span> visits &lt;= <span class="nb">0</span> {
+        <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">Str</span>(<span class="s">&quot;no visits recorded&quot;</span>)));
+    }
+    <span class="kw">let</span> who = name.<span class="fn">unwrap_or_else</span>(|| <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;stranger&quot;</span>.<span class="fn">to_string</span>()));
+    <span class="kw">Ok</span>(<span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;Welcome back, {}! Visit number {}.&quot;</span>, who, visits)))
+}</code></pre></div>
+<p>Same semantics. A fraction of the noise.</p>
+<p>Boring is not a toy. It has a full interpreter for rapid prototyping and a <code>--emit-rust</code> transpiler that outputs clean, readable Rust source you can inspect, modify, and ship.</p>
+<hr>
+<h2 id="a-taste-of-the-simplifications">A taste of the simplifications</h2>
+<h3 id="functions-and-error-handling">Functions and error handling</h3>
+<p>Rust requires explicit <code>Result</code> types, <code>?</code> operators, and trait objects for errors. Boring replaces all of that with a single <code>throws</code> keyword — just like Swift.</p>
+<table><thead><tr><th></th><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td>Declaration</td><td><code>def int divide(int a, int b) throws:</code></td><td><code>fn divide(a: i64, b: i64) -&gt; Result&lt;i64, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td>Early exit</td><td><code>guard b != 0 else throw &quot;division by zero&quot;</code></td><td><code>if b == 0 { return Err(&quot;division by zero&quot;.into()); }</code></td></tr><tr><td>Call + fallback</td><td><code>let r = try divide(10, 0) else -1</code></td><td><code>let r = divide(10, 0).unwrap_or(-1)</code></td></tr></tbody></table>
+<h3 id="strings-and-interpolation">Strings and interpolation</h3>
+<p>Rust has no built-in string interpolation; every formatted value goes through <code>format!</code>. Boring supports Swift-style <code>{expression}</code> inside any string literal.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> name = <span class="s">"World"</span>
+<span class="kw">let</span> n = <span class="nb">42</span>
+print <span class="s">"Hello, <span class="si">{name}</span>! The answer is <span class="si">{n}</span>."</span>
+print <span class="s">"pi ≈ <span class="si">{3.14159:.3}</span>, hex = <span class="si">{255:x}</span>"</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Rust equivalent</span>
+<span class="fm">println!</span>(<span class="s">&quot;Hello, {}! The answer is {}.&quot;</span>, name, n);
+<span class="fm">println!</span>(<span class="s">&quot;pi ≈ {:.3}, hex = {:x}&quot;</span>, <span class="nb">3.14159_f64</span>, <span class="nb">255_i64</span>);</code></pre></div>
+<h3 id="types-and-ownership">Types and ownership</h3>
+<p>Rust&#x27;s ownership system is powerful but verbose. Boring provides a concise qualifier syntax inspired by Swift&#x27;s value/reference types — the right ownership is inferred from context, and common cases have short aliases.</p>
+<table><thead><tr><th>Boring</th><th>Rust</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>copy integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>copy float</td></tr><tr><td><code>string</code></td><td><em>(optimised internally)</em></td><td>string — the default for most uses</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td>optional value</td></tr><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td>heap-allocated exclusive</td></tr><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared reference</td></tr></tbody></table>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name):
+    <span class="kw">guard</span> <span class="kw">let</span> n = name <span class="kw">else</span> <span class="kw">return</span> <span class="s">"Hello, stranger!"</span>
+    <span class="s">"Hello, <span class="si">{n}</span>!"</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt;) -&gt; <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; {
+    <span class="kw">let</span> <span class="kw">Some</span>(n) = name <span class="kw">else</span> {
+        <span class="kw">return</span> <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;Hello, stranger!&quot;</span>.<span class="fn">to_string</span>());
+    };
+    <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;Hello, {}!&quot;</span>, n))
+}</code></pre></div>
+<h3 id="structs-and-methods">Structs and methods</h3>
+<p>Rust separates struct definitions from their <code>impl</code> blocks. Boring puts methods directly inside the struct, like Swift and Python classes. <code>req</code> (read-only, <code>&amp;self</code>) and <code>def</code> (mutating, <code>&amp;mut self</code>) replace the Rust receiver distinction.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+
+    <span class="kw">req</span> <span class="kt">int</span> <span class="fn">get</span>():
+        <span class="kw">self</span>.value
+
+    <span class="kw">def</span> <span class="fn">inc</span>():
+        <span class="kw">self</span>.value = <span class="kw">self</span>.value + <span class="nb">1</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">struct</span> <span class="kt">Counter</span> { value: i64 }
+
+<span class="kw">impl</span> <span class="kt">Counter</span> {
+    <span class="kw">fn</span> <span class="fn">get</span>(&amp;<span class="kw">self</span>) -&gt; i64 { <span class="kw">self</span>.value }
+    <span class="kw">fn</span> <span class="fn">inc</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>) { <span class="kw">self</span>.value += <span class="nb">1</span>; }
+}</code></pre></div>
+<h3 id="pipe-operator-and-data-pipelines">Pipe operator and data pipelines</h3>
+<p>Rust has no pipe operator — chaining transformations requires nesting calls or intermediate variables.</p>
+<p>Boring&#x27;s <code>|&gt;</code> threads a value left-to-right through any sequence of operations.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> words = <span class="s">"the quick brown fox jumps over the lazy dog"</span>.<span class="fn">split</span>(<span class="s">" "</span>)
+
+<span class="kw">let</span> result = words
+    |&gt; <span class="fn">filter</span>(:length &gt; <span class="nb">3</span>)
+    |&gt; <span class="fn">map</span>(:<span class="fn">upper</span>())
+    |&gt; <span class="fn">sorted</span>()
+
+<span class="kw">for</span> w <span class="kw">in</span> result:
+    print w</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> words: <span class="kw">Vec</span>&lt;&amp;str&gt; = <span class="s">&quot;the quick brown fox jumps over the lazy dog&quot;</span>.<span class="fn">split</span>(&#x27; &#x27;).<span class="fn">collect</span>();
+
+<span class="kw">let</span> <span class="kw">mut</span> result: <span class="kw">Vec</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt; = words.<span class="fn">iter</span>()
+    .<span class="fn">filter</span>(|__x| __x.<span class="fn">len</span>() <span class="kw">as</span> i64 &gt; <span class="nb">3</span>)
+    .<span class="fn">map</span>(|__x| <span class="kw">Arc</span>::<span class="fn">new</span>(__x.<span class="fn">to_uppercase</span>()))
+    .<span class="fn">collect</span>();
+result.<span class="fn">sort</span>();
+
+<span class="kw">for</span> w <span class="kw">in</span> &amp;result { <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, w); }</code></pre></div>
+<h3 id="async--concurrency">Async / concurrency</h3>
+<p>Rust async requires <code>async fn</code>, <code>tokio::spawn</code>, <code>.await</code> at every call site, and explicit <code>Arc::clone</code> before moving values across threads. Boring uses a single <code>task</code> keyword; capture analysis is automatic.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">transform</span>(<span class="kt">string</span> s):
+    <span class="s">"done: <span class="si">{s}</span>"</span>
+
+<span class="kw">task</span> <span class="fn">main</span>():
+    <span class="kw">let</span> label = <span class="s">"shared"</span>
+    <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">transform</span>(label)   <span class="co"># Arc::clone inserted automatically</span>
+    print label                    <span class="co"># still accessible</span>
+    print f.value                  <span class="co"># awaits the result</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">transform</span>(s: <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;) -&gt; <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; {
+    <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;done: {}&quot;</span>, s))
+}
+
+<span class="at">#[tokio::main]</span>
+<span class="kw">async</span> <span class="kw">fn</span> <span class="fn">main</span>() {
+    <span class="kw">let</span> label: <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; = <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;shared&quot;</span>.<span class="fn">into</span>());
+    <span class="kw">let</span> f = tokio::<span class="fn">spawn</span>({
+        <span class="kw">let</span> label = <span class="kw">Arc</span>::<span class="fn">clone</span>(&amp;label);
+        <span class="kw">async</span> <span class="kw">move</span> { <span class="fn">transform</span>(label).<span class="kw">await</span> }
+    });
+    <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, label);
+    <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, f.<span class="kw">await</span>.<span class="fn">unwrap</span>());
+}</code></pre></div>
+<hr>
+<h2 id="getting-started">Getting started</h2>
+<h3 id="prerequisites">Prerequisites</h3>
+<ul><li><a href="https://rustup.rs/">Rust toolchain</a> (edition 2021)</li><li>For async features: <code>tokio</code> (added automatically when using <code>cargo</code>)</li></ul>
+<h3 id="build-and-install">Build and install</h3>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>git clone https://github.com/mlanoe/boring
+cd boring
+cargo install --path .</code></pre></div>
+<p>This compiles the <code>boring</code> binary and places it in <code>~/.cargo/bin</code>, which is already on your <code>PATH</code> if you installed Rust via <code>rustup</code>.</p>
+<h3 id="run-a-program">Run a program</h3>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code><span class="co"># Interpret directly</span>
+boring examples/hello.br
+
+<span class="co"># Transpile to Rust (generates a Cargo project)</span>
+boring --emit-rust examples/hello.br
+cd examples/hello_rust &amp;&amp; cargo run</code></pre></div>
+<h3 id="the-showcase">The showcase</h3>
+<p><code>examples/hello.br</code> is a runnable tour of every language feature: bindings, functions, control flow, structs, enums, traits, error handling, closures, generics, modules, async tasks, and more. Run it or read it — it is the fastest way to see what Boring looks like.</p>
+<hr>
+<h2 id="repository-layout">Repository layout</h2>
+<div class="code-block"><pre><code>boring/
+├── src/
+│   ├── main.rs           # CLI entry point (--emit-rust flag)
+│   ├── parser/           # Lexer + recursive-descent parser → AST
+│   ├── interpreter/      # Tree-walk interpreter (for rapid iteration)
+│   └── transpiler/       # AST → idiomatic Rust source
+├── docs/
+│   └── book.md           # Full language reference
+├── spec/
+│   └── grammar.bnf       # Formal BNF grammar
+├── examples/
+│   ├── hello.br          # Feature showcase (Boring source)
+│   └── hello.rs          # Generated Rust (from --emit-rust)
+├── LICENSE               # GNU General Public License v3
+├── CLA.md                # Contributor License Agreement
+└── CLA-signatories.md    # List of CLA signatories</code></pre></div>
+<hr>
+<h2 id="language-reference">Language reference</h2>
+<p>The complete language reference is in <a href="docs/book.md">`docs/book.md`</a>. It covers every construct with Boring source, Rust equivalent, and explanatory notes.</p>
+<hr>
+<h2 id="contributing">Contributing</h2>
+<p>Contributions are welcome — bug reports, feature suggestions, and pull requests alike.</p>
+<p>Before your first Pull Request can be merged, you must sign the <a href="CLA.md">Contributor License Agreement</a>. The process is simple: add your name to <a href="CLA-signatories.md">`CLA-signatories.md`</a> as part of your PR. The CLA lets you keep your copyright while giving the project owner the flexibility to relicense the project in the future.</p>
+<hr>
+<h2 id="license">License</h2>
+<p>Copyright (C) 2026 Mickaël LANOË</p>
+<p>This program is free software: you can redistribute it and/or modify it under the terms of the <a href="LICENSE">GNU General Public License v3.0</a> as published by the Free Software Foundation.</p>
+<p>This program is distributed in the hope that it will be useful, but <strong>without any warranty</strong>. See the LICENSE file for the full terms.</p>
+<hr>
+<h2 id="philosophy">Philosophy</h2>
+<p>The name is intentional. Boring code is predictable code. It does what it says, says what it does, and does not surprise you at 2 a.m. The goal of this language is not to be clever — it is to make writing correct, fast, Rust-backed programs as uneventful as possible.</p>
+<hr>
+<p><em>Mickaël LANOË</em></p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

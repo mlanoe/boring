@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — collection index traits
+#
+# These traits implement the Boring index API on Rust's standard collections.
+# Three traits so each collection has its own natural index type:
+#   [T]    → ArrayIndex  (index: uint)
+#   {K: V} → DictIndex   (index: K)
+#   {T}    → SetIndex    (index: uint, positional)
+
+trait ArrayIndex:
+    type Item as Clone
+    req uint?       first_index()
+    req uint?       next_index(uint i)
+    req [Self.Item] remove_at(uint? i)
+    req Self.Item   get_at(uint i)
+
+ext Vec<T as Clone> as ArrayIndex:
+    type Item = T
+    req uint? first_index():
+        if self.isEmpty(): nil else 0
+    req uint? next_index(uint i):
+        if i + 1 < self.len(): i + 1 else nil
+    req [T] remove_at(uint? i):
+        var v = self.clone()
+        if let idx = i:
+            if idx < v.len():
+                v.remove(idx)
+        v
+    req T get_at(uint i):
+        self[i].clone()
+
+
+trait DictIndex:
+    type Key as Clone
+    req Self.Key?  first_index()
+    req Self.Key?  next_index(Self.Key k)
+    req Self       remove_at(Self.Key? k)
+
+ext HashMap<K as Clone+Eq+Hash, V as Clone> as DictIndex:
+    type Key = K
+    req K? first_index():
+        self.keys().next().cloned()
+    req K? next_index(K k):
+        let keys = self.keys().collect()
+        let pos = keys.iter().position(kk: kk == k)
+        pos.and_then(p: keys.get(p + 1)).map(kk: kk.clone())
+    req HashMap<K, V> remove_at(K? k):
+        var m = self.clone()
+        if let key = k:
+            m.remove(key)
+        m
+
+
+trait SetIndex:
+    type Item as Clone
+    req uint?       first_index()
+    req uint?       next_index(uint i)
+    req Self        remove_at(uint? i)
+    req Self.Item   get_at(uint i)
+
+ext HashSet<T as Clone+Eq+Hash> as SetIndex:
+    type Item = T
+    req uint? first_index():
+        if self.isEmpty(): nil else 0
+    req uint? next_index(uint i):
+        if i + 1 < self.len(): i + 1 else nil
+    req HashSet<T> remove_at(uint? i):
+        let elem = i.and_then(i: self.iter().nth(i).cloned())
+        var s = self.clone()
+        if let e = elem:
+            s.remove(e)
+        s
+    req T get_at(uint i):
+        self.iter().nth(i).cloned().unwrap()

@@ -1,0 +1,36 @@
+let s1 = format!("{} + {} = {}", 1, 2, 3)
+print s1
+
+let s2 = format!("{:x}", 255)
+print s2
+
+let v = vec![10, 20, 30]
+print v.len()
+print v[0]
+
+println!("hello {}", "world")
+print!("x")
+print ""
+
+assert!(1 + 1 == 2)
+assert!(true, "must be true")
+print "assert_ok"
+
+assert_eq!(2 + 2, 4)
+print "assert_eq_ok"
+
+assert_ne!(1, 2)
+print "assert_ne_ok"
+
+let v2 = dbg!(42)
+print v2
+
+let s3 = concat!("hello", " ", "world")
+print s3
+
+let v3 = vec![1, 2, 3]
+print v3.len()
+
+let n = 7
+let s4 = format!("n = {}", n)
+print s4

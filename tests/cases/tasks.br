@@ -1,0 +1,94 @@
+# Basic task function
+task int compute(int n):
+    n * n
+
+let f = task compute(7)
+print "compute(7)={f.value}"
+
+# Fire-and-forget with .wait
+task void notify(str msg):
+    print "notify: {msg}"
+
+let fw = task notify("done")
+fw.wait
+
+# Parallel tasks
+task int fetch_add(int a, int b):
+    a + b
+
+task string fetch_greet(str name):
+    "hello, {name}"
+
+let f1 = task fetch_add(10, 20)
+let f2 = task fetch_greet("world")
+print "add={f1.value}, greet={f2.value}"
+
+# Task with captured static string
+task string transform(str s):
+    "done: {s}"
+
+let string label = "shared"
+let ft = task transform(label)
+print "label still: {label}"
+print "transform: {ft.value}"
+
+# Task method on Arc<T>
+struct Worker:
+    string name
+    int jobs
+
+task void Worker.run():
+    print "worker {self.name} processing {self.jobs} jobs"
+
+let Worker'task w = Worker(name = "alice", jobs = 5)
+let fw2 = task w.run()
+fw2.value
+print "w.name={w.name}"
+
+# fire and forget
+task def void twork():
+    let x = 42
+
+task twork()
+print "fire-ok"
+
+# task future value
+task def int tcompute():
+    42
+
+let tf = task tcompute()
+print tf.value
+
+# task block future
+task def int tdouble(int x):
+    x * 2
+
+let tf2 = task:
+    tdouble(21)
+print tf2.value
+
+# task colon optional
+task def int tget():
+    99
+
+let ta = task tget()
+let tb = task: tget()
+print ta.value + tb.value
+
+# task shorthand top level
+task int tdbl(int x): x * 2
+print tdbl(21)
+
+# task shorthand void
+task void tnop(int x):
+    let _ = x
+tnop(42)
+print "shorthand-void-ok"
+
+# task shorthand struct method
+struct TCounter:
+    pub int value = 0
+    task int inc(): self.value + 1
+
+let tcc = TCounter()
+print tcc.inc()

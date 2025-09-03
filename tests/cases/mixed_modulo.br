@@ -1,0 +1,6 @@
+# Float % Int and Int % Float — same promotion as other arithmetic ops
+
+print 7.5 % 2.0    # 1.5
+print 7.5 % 2      # 1.5  (int promoted to float)
+print 7 % 2.5      # 2.0  (int promoted to float)
+print 10 % 3       # 1    (pure int)

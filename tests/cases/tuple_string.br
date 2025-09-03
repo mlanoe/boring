@@ -1,0 +1,22 @@
+# Tuple with string: string literals coerced in return context
+
+# Inferred tuple: string literal stays as &'static str
+let t1 = (1, "hello")
+print t1.0
+print t1.1
+
+# Function returning (int, string): string slot must be Arc<String>
+def (int, string) make():
+    return (42, "answer")
+
+let r = make()
+print r.0
+print r.1
+
+# Function returning (string, int)
+def (string, int) pair():
+    return ("ok", 99)
+
+let p = pair()
+print p.0
+print p.1

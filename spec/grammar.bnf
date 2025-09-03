@@ -1,0 +1,735 @@
+# ─── Boring Language Grammar ─────────────────────────────────────────────────
+#
+# Notation: `?` = optional, `*` = zero or more, `+` = one or more, `ε` = empty
+# Layout tokens (INDENT / DEDENT / NEWLINE) are produced by the lexer.
+# Blank lines and `#`-comments are discarded before parsing.
+
+# ─── Top-level ───────────────────────────────────────────────────────────────
+
+program         ::= item* EOF
+
+item            ::= attr* "pub"? use_decl
+                  | attr* "pub"? fn_decl
+                  | attr* "pub"? struct_decl
+                  | attr* "pub"? enum_decl
+                  | attr* "pub"? trait_decl
+                  | ext_decl
+                  | mod_decl
+                  | let_stmt
+                  | stmt             # scripting mode: bare statements at top level
+
+# ─── Attributes ──────────────────────────────────────────────────────────────
+#
+# Attributes annotate item declarations for the transpiler.
+# They become `#[name(args)]` in Rust output; the interpreter ignores them.
+# Multiple attributes may be stacked, one per line, before the item.
+#
+# Examples:
+#   @derive(Debug, Clone, PartialEq)
+#   struct Point:
+#
+#   @inline
+#   def int add(int x, int y): x + y
+#
+#   @serde(rename_all = "camelCase")
+#   struct Config:
+
+attr            ::= "@" IDENT ("(" attr_arg ("," attr_arg)* ")")? NEWLINE?
+attr_arg        ::= IDENT ("=" (IDENT | STRING | INT))?
+                  | STRING
+                  | INT
+
+# ─── Imports ─────────────────────────────────────────────────────────────────
+
+use_decl        ::= "use" mod_path ".*" NEWLINE                          # glob — all pub items
+                  | "use" mod_path "." IDENT ("," IDENT)* NEWLINE        # selective import
+                  | "use" IDENT "as" type NEWLINE                         # type alias
+
+mod_path        ::= IDENT ("." IDENT)*
+# The last dot-segment is always an item name, never a module name.
+#
+# Three uniform forms, all using dots:
+#   use a.b.c.*              — glob: all pub items from module a.b.c
+#   use a.b.c.X              — single item X from module a.b.c
+#   use a.b.c.X, Y, Z        — multiple items from module a.b.c
+#
+# ── boring stdlib ─────────────────────────────────────────────────────────────
+#   use boring.collections.*            — all collections (Stack, Queue, …)
+#   use boring.collections.Stack        — one item
+#   use boring.math.*                   — math module namespace (math.sqrt, …)
+#
+# ── Built-in namespaces (no `use` needed) ────────────────────────────────────
+#
+#   fs — file-system operations (interpreter: std::fs; transpiler: tokio::fs in async)
+#
+#   fs.read(path)              → string          read entire file as text
+#   fs.readLines(path)         → [string]        read file as array of lines
+#   fs.write(path, text)       → void            write (overwrite) file
+#   fs.append(path, text)      → void            append to file
+#   fs.exists(path)            → bool            true if path exists
+#   fs.isDir(path)             → bool            true if path is a directory
+#   fs.isFile(path)            → bool            true if path is a regular file
+#   fs.mkdir(path)             → void            create directory (and parents)
+#   fs.remove(path)            → void            remove file or directory tree
+#   fs.rename(from, to)        → void            rename / move a path (alias: fs.move)
+#   fs.copy(from, to)          → void            copy file
+#   fs.list(path)              → [string]        list directory entries (names only)
+#   fs.readBytes(path)         → [uint]          read file as byte array
+#   fs.writeBytes(path, bytes) → void            write byte array to file
+#
+# ── Native Rust types (pre-registered — no `use` needed) ─────────────────────
+#   HashMap / BTreeMap  →  {K=V}  (Dict)
+#   HashSet / BTreeSet  →  {T}    (Set)
+#   Vec / VecDeque      →  [T]    (Array)
+#   string              →  Arc<String>
+#   Box, Rc, Arc, Option, Result  →  opaque
+#
+# ── Rust stdlib ───────────────────────────────────────────────────────────────
+#   use std.fs.File                  — single Rust type
+#   use std.io.Write, BufRead        — multiple Rust types
+#
+# ── External crates ───────────────────────────────────────────────────────────
+#   use crate.models.User, Post      — opaque types from current crate
+
+# ─── Declarations ────────────────────────────────────────────────────────────
+
+# Return type comes before the function name (Go/C style).
+# Omitting the return type means void (inferred from body).
+# Qualified name `Type.name` marks struct/trait method implementations.
+# Modifiers `throws` and `task` may appear in either order after `)`.
+
+fn_decl         ::= def_decl | req_decl | stream_decl
+
+# `def` — mutating method (`&mut self`); callable on `var` bindings only.
+def_decl        ::= attr* "def" type? (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
+
+# `req` — non-mutating method (`&self`); callable on both `let` and `var` bindings.
+# Zero-parameter `req` methods may be called without `()` (property-style access).
+req_decl        ::= attr* "req" type? (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
+
+# `stream` — generator function; body may use `yield`; returns an iterable stream.
+stream_decl     ::= attr* ("stream" "def" | "stream" "req") type? (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
+                  | attr* "stream" type (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body  # shorthand: stream int next():
+
+modifier        ::= "throws" IDENT?  # may raise; optional concrete error type: `throws MyError`
+                  | "task"            # async; may block / runs concurrently
+
+fn_body         ::= expr NEWLINE                     # inline — implicit return
+                  | block                            # indented block
+                  | "pass" NEWLINE                   # empty body placeholder
+                  | "native" NEWLINE                 # implemented by the runtime
+
+# param_list supports both single-line and multi-line forms:
+#   single-line:  def int add(int a, int b) throws:
+#   multi-line:   def void process(
+#                     TotoList'actor todo_list,
+#                     Metrics'shared metrics,
+#                     uint count,
+#                 ) task:
+# Newlines and indentation inside `(…)` are ignored.
+param_list      ::= param ("," param)* ","?   # trailing comma allowed
+
+# Type comes before the parameter name.
+# A function-typed parameter has param types after the name: `int f(int, int)`.
+# `any Trait` parameters accept any type implementing Trait.
+param           ::= "var"? type IDENT "(" type_list? ")"   # function-typed parameter
+                  | "var"? type IDENT ("=" expr)?           # typed parameter, optional default
+                  | "var"? IDENT                            # untyped, inferred
+
+# Type and generic parameters declared in `<...>`.
+# Used in struct and enum declarations; functions infer their lifetime params automatically.
+#
+# Type params: uppercase idents with optional trait constraints via `as`.
+# Lifetime params: `&a`, `&b`, … — for Rust transpilation only; the interpreter ignores them.
+# Constraints are written inline: `<T as Trait, U as (Trait1, Trait2)>`.
+# No separate `where` clause.
+#
+# Examples:
+#   struct Pair<T, U as Display>:
+#   struct Excerpt<&a>:               — struct holding a borrowed reference
+#   struct Cache<&a, T as Display>:   — lifetime + type param
+type_params     ::= "<" type_or_generic_param ("," type_or_generic_param)* ">"
+type_or_generic_param ::= lifetime_param | type_param
+lifetime_param  ::= "&" LOWERCASE_IDENT                    # e.g. &a, &b  (stored as 'a for Rust)
+type_param      ::= IDENT ("as" (IDENT | "(" IDENT ("," IDENT)* ")"))?
+
+# Functions do NOT need explicit lifetime params: they are auto-inferred from the signature.
+#   def str&a longest(str&a x, str&a y):   — transpiles to fn longest<'a>(…) automatically
+
+struct_decl     ::= attr* "struct" IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
+                      struct_member+
+                    DEDENT
+                  | attr* "struct" IDENT type_params? ("as" type_list)? ":" "pass" NEWLINE    # empty struct
+                  | attr* "struct" IDENT type_params? ("as" type_list)? ":" "native" NEWLINE  # runtime struct
+
+struct_member   ::= field_decl
+                  | init_decl
+                  | "pub"? fn_decl
+                  | "pub"? set_decl
+                  | conformance_decl
+                  | as_decl
+
+# No keyword → public immutable field.
+# `let` → private immutable. `var` → private mutable. `pub var` → public mutable.
+# `transient` → physically mutable even from `req` methods (lazy/cache pattern). Implies `var`.
+field_decl      ::= "pub"? "transient"? ("let" | "var")? type IDENT ("=" expr)? NEWLINE
+
+# ─── Constructors ─────────────────────────────────────────────────────────────
+#
+# No body: all params automatically declare and initialise struct fields.
+#   `pub`     → public immutable field
+#   `pub var` → public mutable field
+#   `var`     → private mutable field
+#   (none)    → private immutable field
+#   Default values on params become the field defaults.
+#
+# With body: params are plain local variables. Fields must be declared in the struct body
+# and assigned via `self.field = …`. `let` fields are writable inside `init` bodies.
+#
+# Either form may delegate to another `init` via `init(…)` as a statement.
+#
+# Pattern 1 — no `init`: struct built with named-field syntax `Point(x=1, y=2)`.
+# Pattern 2 — `init` without body: constructor with no computation needed.
+# Pattern 3 — `init` with body: computed construction (validation, derived fields, etc.).
+
+init_decl       ::= "init" "(" init_param_list? ")" NEWLINE          # no body — params = fields
+                  | "init" "(" init_param_list? ")" ":" fn_body       # with body — params = locals
+
+init_param_list ::= init_param ("," init_param)*
+
+init_param      ::= "pub" "var"? type IDENT ("=" expr)?   # pub [mutable] field / pub local
+                  | "var"? type IDENT ("=" expr)?          # [mutable] private field / local
+                  | "var"? IDENT                           # untyped param
+
+set_decl        ::= "set" IDENT "(" type IDENT ")" ":" fn_body
+
+# `as Trait:` block — groups method implementations for a given trait or parent struct.
+conformance_decl ::= "as" IDENT ":" NEWLINE INDENT
+                       fn_decl+
+                     DEDENT
+
+# Explicit conversion declaration — last expression is the converted value.
+# `as string:` is honoured by print/write/log-level builtins and string interpolation `{expr}`.
+# `as Trait:` groups method implementations for a conformance (implemented by ext blocks too).
+as_decl         ::= "as" type ":" (expr NEWLINE | block)
+
+enum_decl       ::= attr* "enum" IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
+                      enum_variant+
+                      enum_member*
+                    DEDENT
+                  | attr* "enum" IDENT type_params? ("as" type_list)? ":" "pass" NEWLINE
+                  | attr* "enum" IDENT type_params? ("as" type_list)? ":" "native" NEWLINE
+
+enum_variant    ::= IDENT ("(" variant_fields ")")? NEWLINE
+variant_fields  ::= variant_field ("," variant_field)*
+variant_field   ::= type IDENT?              # type first, optional name (consistent with params)
+
+enum_member     ::= "pub"? fn_decl
+                  | "pub"? set_decl
+                  | as_decl
+                  | conformance_decl
+
+trait_decl      ::= "trait" IDENT ("as" type_list)? ":" NEWLINE INDENT
+                      fn_signature+
+                    DEDENT
+
+fn_signature    ::= ("def" | "req") type? IDENT "(" param_list? ")" modifier* NEWLINE
+
+ext_decl        ::= "ext" IDENT ("as" type_list)? ":" NEWLINE INDENT
+                      ext_member+
+                    DEDENT
+
+ext_member      ::= "pub"? fn_decl
+                  | "pub"? set_decl
+                  | as_decl
+
+# Module grouping — flat scoping at runtime; structure preserved for the transpiler.
+mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
+                      item+
+                    DEDENT
+
+# ─── Statements ──────────────────────────────────────────────────────────────
+
+block           ::= NEWLINE INDENT stmt+ DEDENT
+
+stmt            ::= let_stmt
+                  | return_stmt
+                  | throw_stmt
+                  | defer_stmt
+                  | if_stmt
+                  | match_stmt
+                  | while_stmt
+                  | while_let_stmt
+                  | do_while_stmt
+                  | loop_stmt
+                  | for_stmt
+                  | try_stmt
+                  | guard_stmt
+                  | fn_decl
+                  | struct_decl    # local struct — invisible outside the enclosing function
+                  | enum_decl      # local enum  — invisible outside the enclosing function
+                  | mod_decl       # local module — flat scoping, same as top-level mod
+                  | alias_stmt     # local type alias
+                  | expr NEWLINE
+
+# Local type alias — `use` inside a function/method body.
+alias_stmt      ::= "use" IDENT "as" type NEWLINE
+
+# Type annotation comes BEFORE the name (consistent with params and fields).
+# `pub` makes the binding visible outside its module.
+# `static` makes it a module-level singleton (no re-evaluation on repeated calls).
+#
+# Move syntax: appending `'` to the binding name requests ownership transfer.
+#   `let b = a`   — borrow by default: `b` is a reference, `a` remains valid
+#   `let b' = a`  — move: `b` takes ownership, `a` is invalidated
+let_stmt        ::= "pub"? "static"? ("let" | "var") type? IDENT "'"? "=" expr NEWLINE
+                  | "pub"? "static"? ("let" | "var") destructure "=" expr NEWLINE
+
+destructure     ::= "(" binding ("," binding)* ")"   # parenthesised form
+                  | binding ("," binding)+             # bare form (two bindings minimum)
+
+binding         ::= type IDENT    # typed binding
+                  | IDENT         # inferred binding
+                  | "_"           # ignored slot
+
+return_stmt     ::= "return" expr? NEWLINE
+
+throw_stmt      ::= "throw" expr? NEWLINE
+                  # bare `throw` re-throws the implicit `error` variable in a catch block
+
+# `defer` registers a cleanup block that runs when the enclosing function exits,
+# regardless of whether it exits normally, via early return, or via exception.
+# Multiple defers execute in LIFO order (last registered, first executed).
+defer_stmt      ::= "defer" ":" block        # multiline block
+                  | "defer" ":" stmt         # inline with colon
+                  | "defer" stmt             # inline without colon
+
+if_stmt         ::= "if" expr ":" fn_body
+                    ("elif" expr ":" fn_body)*
+                    ("else" ":"? fn_body)?
+
+# Multi-clause if-let: one or more `let` bindings and/or boolean conditions.
+# All clauses must pass (short-circuit); bindings are visible in the `then` body.
+if_let_stmt     ::= "if" cond_clause ("," cond_clause)* ":" fn_body
+                    ("else" ":"? fn_body)?
+
+cond_clause     ::= "let" pattern "=" expr  # destructuring bind: if let Some(x) = opt:
+                  | "let" IDENT "=" expr    # simple bind: if let v = opt:
+                  | "let" IDENT             # shorthand: if let v:  ≡  if let v = v:
+                  | expr                    # boolean condition
+
+match_stmt      ::= "match" expr ":" NEWLINE INDENT
+                      match_arm+
+                    DEDENT
+
+match_arm       ::= pattern ("|" pattern)* ("if" expr)? ":" (expr NEWLINE | block)
+
+while_stmt      ::= "while" expr ":" block
+
+while_let_stmt  ::= "while" "let" pattern "=" expr ":" block   # pattern: while let Some(x) = f():
+                  | "while" "let" IDENT "=" expr ":" block      # simple:  while let v = f():
+                  | "while" "let" IDENT ":" block               # shorthand: while let v:  ≡  while let v = v:
+
+do_while_stmt   ::= "do" ":" block "while" expr NEWLINE
+                  # Note: `do:` without a trailing `while` is a `do_expr` (see below)
+
+loop_stmt       ::= "loop" ":" block
+
+for_stmt        ::= "for" IDENT ("," IDENT)* "in" expr ":" block   # with binding
+                  | "for" expr ":"  block                           # no binding (implicit `_`)
+
+try_stmt        ::= "try" ":" block
+                    catch_clause*
+
+catch_clause    ::= "catch" (IDENT ("," IDENT)*)? ":" block
+                  # empty type list = catch-all; `error` is bound automatically
+
+guard_stmt      ::= "guard" guard_cond "else" ":"? (stmt | block)
+guard_cond      ::= cond_clause ("," cond_clause)*   # let-bindings bind in ENCLOSING scope
+                  | expr
+
+# ─── Expressions ─────────────────────────────────────────────────────────────
+#
+# Precedence (low → high):
+#   |>  (pipe)
+#   else (nil-coalescing / try-else)
+#   or
+#   and
+#   not
+#   == != < > <= >= is is not
+#   + -
+#   * / %
+#   unary: - not
+#   postfix: call, field, index, as, ?.
+#   primary
+
+expr            ::= try_else_expr
+                  | else_expr
+                  | assign_expr
+
+assign_expr     ::= postfix_expr "=" expr
+                  | or_expr
+
+else_expr       ::= pipe_expr "else" ":"? (expr | block)
+try_else_expr   ::= "try" pipe_expr "else" ":"? (expr | block)  # inline try,  inline or block else — `error` bound
+                  | "try" ":" block "else" ":"? (expr | block)   # block try,   inline or block else — `error` bound
+                  | "try" "?" pipe_expr                          # shorthand: ≡ try expr else nil  (→ .ok() in Rust)
+
+pipe_expr       ::= or_expr ("|>" IDENT ("(" arg_list? ")")?)*  # left pipe: x |> f(…)
+
+or_expr         ::= and_expr ("or" and_expr)*
+and_expr        ::= not_expr ("and" not_expr)*
+not_expr        ::= "not" not_expr | cmp_expr
+cmp_expr        ::= add_expr (cmp_op add_expr)*
+cmp_op          ::= "==" | "!=" | "<" | ">" | "<=" | ">="
+                  | "is"           # reference identity / type check / nil check
+                  | "is" "not"     # negated form
+
+add_expr        ::= mul_expr (("+" | "-") mul_expr)*
+mul_expr        ::= unary_expr (("*" | "/" | "%") unary_expr)*
+unary_expr      ::= "-" unary_expr | postfix_expr
+postfix_expr    ::= primary_expr postfix*
+
+postfix         ::= "(" arg_list? ")"             # call
+                  | "." IDENT                     # field access
+                  | "?." IDENT                    # optional chaining — field
+                  | "." IDENT "(" arg_list? ")"   # method call
+                  | "?." IDENT "(" arg_list? ")"  # optional chaining — method
+                  | "[" expr "]"                  # index
+                  | "as" type                     # cast
+
+arg_list        ::= arg ("," arg)*
+arg             ::= (IDENT "=")? expr             # labeled or positional
+
+primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
+                  | IDENT
+                  | "." IDENT               # dot-prefix enum shorthand: `.Red`
+                  | "self"
+                  | "(" expr ")"            # grouping or tuple
+                  | "(" expr "," expr ("," expr)* ")"   # tuple
+                  | "[" (expr ("," expr)*)? "]"          # array
+                  | "{" "}"                              # empty set  `{}`  → HashSet::new()
+                  | "{" "=" "}"                          # empty dict `{=}` → HashMap::new()
+                  | "{" dict_or_set "}"                  # dict or set (non-empty)
+                  | range_expr
+                  | closure_expr
+                  | if_expr
+                  | match_expr
+                  | task_expr
+                  | do_expr                              # scoped block with own defer frame
+                  | block_expr
+                  | macro_call
+
+range_expr      ::= expr ".." expr      # exclusive range  [start, end)
+                  | expr "..=" expr     # inclusive range  [start, end]
+
+closure_expr    ::= "(" param_list? ")" modifier* ":" fn_body  # standard: (x, y): x + y
+                  | IDENT ":" fn_body                          # no-paren single param: x: x * 2
+                  | ":" IDENT                                  # field shorthand: :name  ≡  (x): x.name
+                  | ":" IDENT "(" arg_list? ")"               # method shorthand: :upper()
+                  # `modifier`: `throws`, `task` (either order, both optional).
+                  # `return` is NOT allowed inside closure bodies.
+
+if_expr         ::= if_stmt                 # if used as expression — all branches must yield a value
+match_expr      ::= match_stmt              # match used as expression
+
+# task as expression — creates a Future
+task_expr       ::= "task" ":"? expr        # inline: `task fetch()` or `task: fetch()`
+                  | "task" ":" block        # block: last expression is the Future value
+                  # `return` is NOT allowed inside task blocks.
+
+# `do:` scoped block — executes once; own scope + own defer frame.
+# `defer` statements run when the block exits (not the enclosing function).
+# `return`/`break`/`continue` propagate to the enclosing function/loop.
+# Disambiguation: `do: … while cond` → do_while_stmt; `do:` without `while` → do_expr.
+do_expr         ::= "do" ":" block
+
+block_expr      ::= ":" block              # block used as expression (in else:, guard else:, etc.)
+
+# ─── Macro calls ─────────────────────────────────────────────────────────────
+#
+# Syntax: IDENT "!" macro_args
+# `!` is the Bang token; the parser distinguishes macro calls from logical-NOT
+# by lookahead: `ident!(` → macro call, `!expr` → unary not.
+#
+macro_call      ::= IDENT "!" macro_args
+macro_args      ::= "(" (expr ("," expr)*)? ")"
+                  | "[" (expr ("," expr)*)? "]"
+                  | "{" (expr ("," expr)*)? "}"
+
+dict_or_set     ::= expr "=" expr ("," expr "=" expr)*     # dict: `{k = v, ...}`
+                  | expr ("," expr)*                        # set:  `{a, b, ...}`
+
+# ─── String interpolation ─────────────────────────────────────────────────────
+#
+# Boring uses `{expr}` inside string literals. No escape prefix needed.
+# An optional format specifier follows a `:` inside the braces.
+#
+# Examples:
+#   "Hello, {name}!"
+#   "pi ≈ {3.14159:.3}"       — 3 decimal places
+#   "hex = {255:x}"           — lowercase hex
+#   "padded = {n:05}"         — zero-padded 5 digits
+#   literal brace: "{{" → "{"
+#
+# Format specifiers (Rust-compatible):
+#   :.Nf   — N decimal places:   "{pi:.2f}" → "3.14"
+#   :Nd    — minimum N digits:   "{n:5d}"   → "   42"
+#   :0Nd   — zero-padded:        "{n:05d}"  → "00042"
+#   :+.Nf  — with sign:          "{x:+.2f}" → "+3.14"
+#   :.Ne   — scientific:         "{x:.2e}"  → "3.14e0"
+#   :.N%   — percentage:         "{x:.1%}"  → "31.4%"
+#   :x     — lowercase hex       :X — uppercase hex
+#   :b     — binary              :o — octal
+#   :?     — debug representation
+
+STRING_INTERP   ::= '"' (char | "{" expr (":" fmt_spec)? "}")* '"'
+fmt_spec        ::= [+]? [0]? [0-9]* ("." [0-9]+)? ("f" | "d" | "e" | "%" | "x" | "X" | "b" | "o" | "?")?
+
+# ─── Patterns ────────────────────────────────────────────────────────────────
+
+pattern         ::= "_"                                          # wildcard
+                  | IDENT                                        # bind
+                  | IDENT "(" pattern ("," pattern)* ")"        # enum variant with fields
+                  | lit_pattern
+                  | "nil"
+
+lit_pattern     ::= INT | FLOAT | STRING | BOOL
+
+# ─── Types ───────────────────────────────────────────────────────────────────
+
+type            ::= primitive_type
+                  | numeric_type
+                  | "any" type                         # existential type → dyn Trait in Rust
+                  | IDENT                              # named: struct, enum, trait
+                  | IDENT "<" type_list ">"            # generic: Stack<Int>
+                  | type "?"                           # optional: T?  →  Option<T>
+                  | "[" type "]"                       # array: [T]  →  Vec<T>
+                  | "(" type ("," type)* ")"           # tuple: (T, U)
+                  | "{" type "=" type "}"              # dict: {K = V}  →  HashMap<K,V>
+                  | "{" type "}"                       # set: {T}  →  HashSet<T>
+                  | type "(" type_list? ")"            # function type: ReturnType (ParamTypes)
+                  | type "'" owner_qual                # heap / smart-pointer ownership qualifier
+                  | type "&" borrow_qual               # borrow / reference qualifier
+
+# ─── Ownership qualifiers ─────────────────────────────────────────────────────
+#
+# The tick `'` is exclusively an OWNERSHIP qualifier — it never produces a reference.
+# Lifetimes are written only in borrow position (see borrow_qual below).
+#
+# Default: stack allocation (T).  Heap allocation is always explicit.
+#
+#   T  /  T'stack   →  T                   stack-owned (Rust default)
+#   T' /  T'heap    →  Box<T>              heap-owned, exclusive move
+#   T'copy          →  T (Copy)            copied on every use: int, float, bool, …
+#   T'const         →  &'static T          compile-time constant / string literal
+#   T'auto          →  Rc<T>              ref-counted, single-thread
+#   T'shared        →  Arc<T>             ref-counted, thread-safe (read-only sharing)
+#   T'actor         →  Arc<Mutex<T>>      shared mutable; all accesses auto-locked
+#   T'weak          →  Weak<T>            non-owning; .upgrade() → T'auto?
+#
+# Built-in type aliases (use these instead of explicit qualifiers):
+#   str    →  String'const  →  &str
+#   string →  String'shared →  Arc<String>
+#   int    →  Int'copy      →  i64
+#   uint   →  Uint'copy     →  u64
+#   float  →  Float'copy    →  f64
+#   bool   →  Bool'copy     →  bool
+#
+owner_qual      ::= "heap" | "copy" | "const" | "auto" | "shared" | "actor" | "weak" | "stack"
+                  | ε          # bare tick → same as 'heap (Box<T>)
+
+# ─── Borrow qualifiers ────────────────────────────────────────────────────────
+#
+# `&` always means a REFERENCE (borrow). It never means ownership.
+# The qualifier after `&` selects which smart-pointer type to borrow into.
+#
+# Prefix forms (T& or T&qual):
+#   T&              →  &T             plain immutable borrow
+#   var T&          →  &mut T         mutable borrow (`var` prefix absorbed into type)
+#   T&heap          →  &Box<T>        borrow a heap value
+#   T&auto          →  &Rc<T>         borrow an Rc (use sparingly)
+#   T&shared        →  &Arc<T>        borrow an Arc (use sparingly)
+#   T&option        →  &Option<T>     borrow an optional
+#   T&weak          →  &Weak<T>       borrow a weak pointer
+#   T&a             →  &'a T          borrow with explicit lifetime 'a
+#
+# Postfix forms (T'qual& or T'qual&a) — natural with type aliases:
+#   T'heap&         →  &Box<T>        same as T&heap
+#   T'auto&         →  &Rc<T>         same as T&auto
+#   T'shared&       →  &Arc<T>        same as T&shared
+#   T'heap&a        →  &'a Box<T>     heap borrow with lifetime
+#   T'shared&a      →  &'a Arc<T>     shared borrow with lifetime
+#
+# Alias pattern: `use NodeRef as Node'shared;  def walk(NodeRef& n):`
+# → the `&` after an alias resolves to the smart-pointer borrow of the aliased type.
+#
+# Lifetime letter is a single ASCII lowercase letter: a, b, c, …
+# Declared automatically from usage — no explicit `<&a>` needed in function signatures.
+# `<&a>` is only written explicitly in struct/enum type params.
+#
+borrow_qual     ::= "heap" | "auto" | "shared" | "actor" | "option" | "weak"
+                  | LOWERCASE_IDENT    # single lowercase letter → lifetime: &a, &b, …
+                  | ε                  # plain borrow &T
+
+# Coercion rules (implicit conversions at call sites):
+#   T'const  →  anywhere              (literals feed anywhere)
+#   T'shared →  T                     (&*arc — deref coercion)
+#   T'auto   →  T                     (&*rc  — deref coercion)
+#   T'       →  T                     (&*box — deref coercion)
+#   T'auto and T'shared are parallel branches — not interconvertible once aliased.
+#   T'weak must be upgraded: .upgrade() → T'auto?
+
+primitive_type  ::= "Int" | "Float" | "String" | "Bool" | "Nil" | "Never"
+
+# Precise numeric type aliases — same runtime semantics as the primitive, but the name is
+# preserved in the AST for the Rust transpiler to emit the exact integer/float width.
+#   Signed integers:   i8  i16  i32  i64  isize  (→ interpreter: int'copy)
+#   Unsigned integers: u8  u16  u32  u64  usize  (→ interpreter: uint'copy)
+#   Floats:            f32  f64                  (→ interpreter: float'copy)
+numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "isize"
+                  | "u8" | "u16" | "u32" | "u64" | "usize"
+                  | "f32" | "f64"
+
+type_list       ::= type ("," type)*
+
+# ─── Compound assignment ──────────────────────────────────────────────────────
+#
+# Boring desugars compound assignment in the parser:
+#   x += n    →  x = x + n
+#   x -= n    →  x = x - n
+#   x *= n    →  x = x * n
+#   x /= n    →  x = x / n
+# The transpiler re-folds them back to `+=`, `-=`, `*=`, `/=` in Rust output
+# (except for string concatenation, which uses `Arc::new(…)` instead).
+
+# ─── Exception semantics ─────────────────────────────────────────────────────
+#
+# A function marked `throws` may raise an exception with `throw expr`.
+# Bare `throw` re-throws the implicit `error` variable inside a catch block.
+# Exceptions propagate up the call stack until caught by `try/catch`.
+#
+# `throws` with a type narrows the Rust error type from `Box<dyn Error>` to a concrete type:
+#   def int divide(int a, int b) throws:           →  Result<i64, Box<dyn Error>>
+#   def int divide(int a, int b) throws CalcError: →  Result<i64, CalcError>
+#
+# `try expr else default` catches any exception from expr and returns default.
+# The default can be a block (last expression = value):
+#   let data = try fetch() else:
+#       log("failed")
+#       []
+#
+# All four combinations of try/else bodies are valid and always bind `error`:
+#
+#   try expr    else expr           # inline / inline
+#   try expr    else: block         # inline / block
+#   try: block  else expr           # block  / inline
+#   try: block  else: block         # block  / block
+#
+# In every case `error` is bound in the else scope to the **original thrown value**
+# (not a string conversion).  This means `match error:` works with typed enum variants:
+#
+#   try risky() else:
+#       match error:
+#           AppError.NotFound:          "not found"
+#           AppError.InvalidInput(msg): "invalid: {msg}"
+#           _:                          "other: {error}"
+#
+# String interpolation `{error}` still works for any thrown value because every
+# Boring value has a Display representation.
+# The only exception is `try? expr` which has no else body (no `error` binding).
+#
+#   let value = try:
+#       let x = compute()
+#       transform(x)
+#   else:
+#       print "failed: " + error
+#       0
+#
+# Inline try with block else (error still available):
+#   let value = try risky() else:
+#       log("failed: " + error)
+#       -1
+#
+# Block try with inline else:
+#   let value = try:
+#       risky()
+#   else -1
+#
+# `error` is automatically bound in each catch clause body and in `try:…else:` else blocks.
+# Typed catch: `catch NetworkError, TimeoutError:` matches by type name.
+# Catch-all: `catch:` matches any exception.
+
+# ─── Task / concurrency semantics ────────────────────────────────────────────
+#
+# A function marked `task` may block on I/O or be long-running.
+# `task expr` creates a Future — the expression is scheduled for evaluation.
+# `future.value` blocks until the Future resolves and returns its value.
+#
+# Two ownership patterns for shared data across tasks:
+#
+#   T'shared  →  Arc<T>               read-only sharing across tasks
+#               task methods: `def void T.run() task:` — receiver is Arc<Self>
+#               binding must be declared with `let T'shared name`
+#
+#   T'actor   →  Arc<Mutex<T>>        shared MUTABLE state across tasks
+#               all field reads/writes/method calls auto-locked via .lock().await
+#               binding can be `let` or `var` — mutation goes through the lock
+#
+# Capture analysis is automatic — no explicit `Arc::clone` or `move` keyword needed.
+#
+# fire-and-forget:  task fetch()
+# future:           let f = task fetch()
+#                   let data = f.value
+
+# ─── Operator overloading ────────────────────────────────────────────────────
+#
+# When a binary or unary operator is applied to a struct instance, the interpreter
+# looks for a method with the corresponding name.
+#
+# Binary operators → method names:
+#   +   → add(rhs)   -   → sub(rhs)   *   → mul(rhs)   /   → div(rhs)   %   → rem(rhs)
+#   ==  → eq(rhs)    !=  → ne(rhs) (or !eq(rhs) if ne not defined)
+#   <   → lt(rhs)    >   → gt(rhs)    <=  → le(rhs)    >=  → ge(rhs)
+#
+# Unary: -  → neg()
+#
+# Example:
+#   struct Vec2:
+#       float x
+#       float y
+#   ext Vec2:
+#       def Vec2' add(Vec2' rhs): Vec2(self.x + rhs.x, self.y + rhs.y)
+#       def Vec2' neg():          Vec2(-self.x, -self.y)
+#       req bool  eq(Vec2' rhs):  self.x == rhs.x and self.y == rhs.y
+
+# ─── Lexical conventions ─────────────────────────────────────────────────────
+
+INT             ::= [0-9]+ ("_" [0-9]+)*    # underscores allowed: 1_000_000
+FLOAT           ::= [0-9]+ "." [0-9]+ (("e"|"E") ("+"|"-")? [0-9]+)?
+STRING          ::= '"' char* '"'
+STRING_INTERP   ::= '"' (char | "{" expr (":" fmt_spec)? "}" | "{{" | "}}")* '"'
+fmt_spec        ::= [+]? [0]? [0-9]* ("." [0-9]+)? [fdeEbBoxX%?]?
+BOOL            ::= "true" | "false"
+IDENT           ::= [a-zA-Z_][a-zA-Z0-9_]*
+LOWERCASE_IDENT ::= [a-z]    # single ASCII lowercase letter (used for lifetime params)
+
+INDENT          ::= increase in leading whitespace
+DEDENT          ::= decrease in leading whitespace
+NEWLINE         ::= end of logical line
+COMMENT         ::= "#" .* NEWLINE     # ignored by parser
+
+# Keywords (reserved):
+# def, req, transient, let, var, pub, return, if, elif, else, match, while, do, loop, for, in,
+# struct, enum, trait, ext, use, as, and, or, not, guard,
+# break, continue, self, init,
+# try, catch, throw, throws, defer,
+# task, set,
+# true, false, nil, is,
+# native, stream, yield, static, void, any, pass, mod
+
+# ─── Naming conventions ──────────────────────────────────────────────────────
+#
+# Types (struct, enum, trait): uppercase first letter, ≥ 2 characters. Examples: Dog, Animal.
+# Variables and functions: lowercase first letter or underscore.
+# Modules: lowercase, snake_case.

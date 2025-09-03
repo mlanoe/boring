@@ -1,0 +1,4 @@
+def int boom() throws:
+    throw "something went wrong"
+
+boom()

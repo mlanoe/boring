@@ -1,0 +1,225 @@
+trait Describable:
+    req string describe()
+
+struct Circle:
+    float radius
+
+    req float area():
+        3.14159 * self.radius * self.radius
+
+ext Circle as Describable:
+    req string describe():
+        "Circle(r={self.radius})"
+
+struct Rectangle:
+    float width
+    float height
+
+    req float area():
+        self.width * self.height
+
+ext Rectangle as Describable:
+    req string describe():
+        "Rect({self.width}x{self.height})"
+
+let c = Circle(radius = 5.0)
+let r = Rectangle(width = 3.0, height = 4.0)
+
+print "{c.describe()}"
+print "{r.describe()}"
+print "{c.area() + r.area()}"
+
+# ext — add methods to existing type
+trait Greetable:
+    req string greet()
+
+struct Animal:
+    string species
+
+ext Animal as Greetable:
+    req string greet():
+        "Hi, I'm a {self.species}!"
+
+let cat = Animal(species = "Cat")
+print "{cat.greet()}"
+
+# conformance as block
+trait PAnimal:
+    req string speak()
+
+struct PADog: pass
+
+ext PADog as PAnimal:
+    req string speak(): "woof"
+
+let pad = PADog()
+print pad.speak()
+
+# qualified conformance
+struct PCat:
+    req string PAnimal.speak(): "meow"
+
+let pcat = PCat()
+print pcat.speak()
+
+# header declaration
+struct PDog2 as PAnimal:
+    req string speak(): "woof"
+
+let pd2 = PDog2()
+print pd2.speak()
+
+# multi header
+trait PPrintable:
+    req string printdesc()
+
+struct PDog3 as PAnimal, PPrintable:
+    string name
+    req string speak(): "woof"
+    req string printdesc(): "Dog(" + self.name + ")"
+
+let pd3 = PDog3("Rex")
+print pd3.speak() + "|" + pd3.printdesc()
+
+# ext adds method
+struct PDog4:
+    string name
+
+ext PDog4:
+    req string greet(): "Woof, I am {self.name}!"
+
+let pd4 = PDog4(name = "Rex")
+print pd4.greet()
+
+# ext overrides
+struct PDog5:
+    req string pspeak(): "woof"
+
+ext PDog5:
+    req string pspeak(): "WOOF"
+
+let pd5 = PDog5()
+print pd5.pspeak()
+
+# ext as conformance
+trait PPrint2:
+    req string describe()
+
+struct PDog6:
+    string name
+
+ext PDog6 as PPrint2:
+    req string describe(): "Dog({self.name})"
+
+def string print_it(PPrint2'task p): p.describe()
+
+let pd6 = PDog6(name = "Fido")
+print print_it(pd6)
+
+# ext multiple traits
+trait PNamed:
+    req string nm()
+
+trait PAged:
+    req int ag()
+
+struct PCat2:
+    string cat_name
+    int cat_age
+
+ext PCat2 as PNamed, PAged:
+    req string nm(): self.cat_name
+    req int ag(): self.cat_age
+
+def string describepc(PNamed'task n, PAged'task a): "{n.nm()} is {a.ag()}"
+
+let pc2 = PCat2(cat_name = "Mimi", cat_age = 3)
+print describepc(pc2, pc2)
+
+# ext as conversion
+struct PCelsius:
+    float degrees
+
+ext PCelsius:
+    as float:
+        return self.degrees
+    as string:
+        return "{self.degrees}°C"
+
+let pcel = PCelsius(degrees= 100.0)
+print pcel as float
+print pcel as string
+
+# ext getter setter
+struct PCounter:
+    var int _value
+
+ext PCounter:
+    req int value(): self._value
+    set value(int v):
+        self._value = v
+
+var pctr = PCounter(_value= 0)
+pctr.value = 42
+print pctr.value
+
+# ext pub
+struct PPoint:
+    float x
+    float y
+
+ext PPoint:
+    pub def float magnitude():
+        (self.x * self.x + self.y * self.y) as float
+    pub req string label(): "({self.x}, {self.y})"
+    pub as string: "Point({self.x}, {self.y})"
+
+let pp = PPoint(x = 3.0, y = 4.0)
+print pp.label
+print pp as string
+
+# enum protocol header
+trait PDrawable:
+    req string drw()
+
+enum PColorH as PDrawable:
+    RedH
+    BlueH
+    req string drw(): "painted"
+
+let pchr = PColorH.RedH
+print pchr.drw()
+
+# enum conformance block
+enum PShape:
+    Circle
+    Square
+
+ext PShape as PDrawable:
+    req string drw(): "shape drawn"
+
+let psh = PShape.Circle
+print psh.drw()
+
+# enum multiple protocols
+trait PPrint3:
+    req string descr()
+
+enum PDirM as PPrint3:
+    NorthM
+    SouthM
+    req string descr(): "a direction"
+
+let pdir = PDirM.NorthM
+print pdir.descr()
+
+# enum structural conformance
+enum PColorS:
+    RedS
+    BlueS
+    req string drw(): "color drawn"
+
+def string render<T as PDrawable>(T item):
+    item.drw()
+
+print render(PColorS.RedS)

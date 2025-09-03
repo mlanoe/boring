@@ -1,0 +1,119 @@
+trait Greeter:
+    req string greet():
+        "hello"
+
+struct Bot as Greeter: pass
+
+let b = Bot()
+print b.greet()
+
+struct FrenchBot as Greeter:
+    req string greet(): "bonjour"
+
+let fb = FrenchBot()
+print fb.greet()
+
+trait Animal:
+    req string name()
+    req string speak():
+        "..."
+
+struct Dog as Animal:
+    req string name(): "dog"
+
+struct Cat as Animal:
+    req string name(): "cat"
+    req string speak(): "meow"
+
+let d = Dog()
+let c = Cat()
+print d.speak()
+print c.speak()
+
+trait Printable:
+    req string describe():
+        "object"
+
+struct PPoint as Printable:
+    int x
+    int y
+
+let pp = PPoint(x=1, y=2)
+print pp.describe()
+
+trait Producible:
+    type Output
+    req Output produce()
+
+struct IntProducer as Producible:
+    type Output = int
+    req Output produce(): 42
+
+let ip = IntProducer()
+print ip.produce()
+
+trait Wrapper:
+    type Inner
+    req Self.Inner unwrap()
+    req Inner peek()
+
+struct BoxInt as Wrapper:
+    type Inner = int
+    req Self.Inner unwrap(): 99
+    req Inner peek(): 99
+
+let bi = BoxInt()
+print bi.unwrap()
+
+trait Displayable:
+    type Display as string
+    req Display show()
+
+struct DPoint as Displayable:
+    type Display = string
+    req Display show(): "point"
+
+let dp = DPoint()
+print dp.show()
+
+trait Transformer:
+    type Input
+    type Output
+    req Output transform(Input value)
+
+struct Doubler as Transformer:
+    type Input = int
+    type Output = int
+    req Output transform(Input value): value * 2
+
+let dbl = Doubler()
+print dbl.transform(21)
+
+trait Greet:
+    req string greet()
+
+struct Hello: pass
+
+ext Hello as Greet:
+    req string greet(): "hello"
+
+def Greet make_greeter():
+    return Hello()
+
+let gh = make_greeter()
+print gh.greet()
+
+trait Addable:
+    req int get_val()
+
+struct Num:
+    int n
+
+ext Num as Addable:
+    req int get_val(): self.n
+
+def int extract(Addable x):
+    return x.get_val()
+
+let nn = Num(42)
+print extract(nn)

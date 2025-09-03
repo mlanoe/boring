@@ -1,0 +1,15 @@
+5, -1
+caught!
+8
+-1
+string error: oops
+propagated: 42
+caught: oops
+contents of data.txt
+<missing>
+file error
+5
+caught
+7
+assert_eq_ok
+assert_neq_ok

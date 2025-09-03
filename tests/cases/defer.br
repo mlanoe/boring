@@ -1,0 +1,65 @@
+var log1 = ""
+
+def string greet(string name):
+    defer: log1 = log1 + "defer"
+    log1 = log1 + "body "
+    "hi " + name
+
+let r = greet("Alice")
+print r
+print log1
+
+var log2 = ""
+
+def int safe_div(int a, int b):
+    defer: log2 = log2 + "defer"
+    guard b != 0 else:
+        log2 = log2 + "guard "
+        return -1
+    a / b
+
+let r2 = safe_div(10, 0)
+print r2
+print log2
+
+var log3 = ""
+
+def int fail() throws:
+    defer: log3 = log3 + "defer"
+    log3 = log3 + "body "
+    throw "oops"
+    0
+
+let r3 = try fail() else -1
+print r3
+print log3
+
+var log4 = ""
+
+def void multi():
+    defer: log4 = log4 + "1"
+    defer: log4 = log4 + "2"
+    defer: log4 = log4 + "3"
+
+multi()
+print log4
+
+var log5 = ""
+
+def void work():
+    defer log5 = log5 + "defer"
+    log5 = log5 + "body "
+
+work()
+print log5
+
+var log6 = ""
+
+def void work2():
+    defer:
+        log6 = log6 + "a"
+        log6 = log6 + "b"
+    log6 = log6 + "body "
+
+work2()
+print log6

@@ -1,0 +1,71 @@
+# Read: bare field name resolves to self.field
+struct Point:
+    float x
+    float y
+
+    req float distance(Point other):
+        let dx = x - other.x   # x → self.x
+        let dy = y - other.y   # y → self.y
+        sqrt(dx * dx + dy * dy)
+
+    req string label():
+        "({x}, {y})"           # x, y → self.x, self.y in interpolation
+
+let p1 = Point(x = 0.0, y = 0.0)
+let p2 = Point(x = 3.0, y = 4.0)
+print p1.distance(p2)
+print p1.label()
+print p2.label()
+
+# Write: bare assignment to field name updates self.field
+struct Counter:
+    var int value = 0
+
+    def void inc():
+        value = value + 1     # read + write via implicit self
+
+    def void add(int n):
+        value = value + n
+
+    req int get():
+        value
+
+var ctr = Counter()
+ctr.inc()
+ctr.inc()
+ctr.add(3)
+print ctr.get()
+
+# Local variable shadows field name (no implicit self)
+struct Box:
+    int width
+    int height
+
+    req int scaled(int factor):
+        let width = factor * 2   # local `width` shadows self.width
+        width + height            # local width, but self.height
+
+let b = Box(width = 10, height = 5)
+print b.scaled(3)             # 3*2 + 5 = 11
+
+# Implicit self in init body
+struct Circle:
+    float radius
+    var float area = 0.0
+    init(float r):
+        radius = r            # self.radius
+        area = 3.14159 * r * r  # self.area
+
+let c = Circle(2.0)
+print c.radius
+print c.area
+
+# Struct with string field
+struct Greeter:
+    string name
+
+    req string greet():
+        "Hello, {name}!"      # name → self.name
+
+let g = Greeter(name = "World")
+print g.greet()

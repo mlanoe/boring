@@ -1,0 +1,242 @@
+let a = 42
+let b = a
+print a
+print b
+
+struct OBox:
+    init(pub int val)
+
+let ob1 = OBox(val = 42)
+let ob2' = ob1
+print ob2.val
+
+struct ODog:
+    init(pub string name)
+
+let od1 = ODog(name = "Rex")
+let od2' = od1
+print od2.name
+
+struct OPoint:
+    init(pub var int x, pub var int y)
+
+let op1 = OPoint(x = 1, y = 2)
+var op2' = op1
+op2.x = 10
+print op2.x
+
+struct OToken:
+    init(pub int id)
+
+def int transfer():
+    let a2 = OToken(id = 7)
+    let b2' = a2
+    return b2.id
+
+print transfer()
+
+let copya = 99
+let copyb' = copya
+print copya
+print copyb
+
+struct WDog:
+    init(pub string name)
+
+def WDog'auto'weak get_weak(WDog'auto d):
+    let WDog'auto'weak w = d
+    w
+
+let WDog'auto wd = WDog(name = "Rex")
+let ww = get_weak(wd)
+print "weak-sig-ok"
+
+struct WNode:
+    init(pub int val)
+
+let WNode'auto strong = WNode(val = 42)
+let WNode'auto'weak weakn = strong
+let upgraded = weakn.upgrade()
+print upgraded.val
+
+let wa'auto = WDog(name = "Rex")
+let wb'weak = wa
+let wup = wb.upgrade()
+print wup.name
+
+struct WDog2:
+    init(pub int age)
+
+let wc'task = WDog2(age = 5)
+let wd2'weak = wc
+let wupg = wd2.upgrade()
+print wupg.age
+
+let WDog'auto strong2 = WDog(name = "Buddy")
+let WDog'auto'weak  w2 = strong2
+let upgr2 = w2.upgrade()
+print upgr2.name
+
+def int clamp(var int x, int lo, int hi):
+    if x < lo: x = lo
+    if x > hi: x = hi
+    return x
+
+print clamp(5, 0, 10)
+print clamp(-3, 0, 10)
+print clamp(42, 0, 10)
+
+let [int]'task items = [1, 2, 3]
+let fsync = task: items.len()
+print fsync.value
+
+let [int]'const citems = [1, 2, 3]
+let fconst = task: citems.len()
+print fconst.value
+
+struct OCounter:
+    init(int n)
+
+def int peek1(OCounter&auto c):
+    c.n
+
+let OCounter'auto obj1 = OCounter(10)
+print peek1(obj1)
+
+def int peek2(OCounter&task c):
+    c.n
+
+let OCounter'task obj2 = OCounter(7)
+print peek2(obj2)
+
+struct OBoxB:
+    init(int value)
+
+def OBoxB&auto identity(OBoxB&auto b):
+    b
+
+let OBoxB'auto ob_b = OBoxB(99)
+print identity(ob_b).value
+
+struct OItem:
+    init(int v)
+
+let OItem'auto raw = OItem(55)
+let OItem&auto x = raw
+print x.v
+
+def int peek3(OCounter'auto& c):
+    c.n
+print peek3(obj1)
+
+def int peek4(OCounter'task& c):
+    c.n
+print peek4(obj2)
+
+struct OTree:
+    init(int value)
+
+use ONode as OTree'auto
+
+def int readt(ONode& n):
+    n.value
+
+let ONode root = OTree(42)
+print readt(root)
+
+def OBoxB'auto& identity2(OBoxB'auto& b):
+    b
+
+let OBoxB'auto ob_b2 = OBoxB(99)
+print identity2(ob_b2).value
+
+struct OPointB:
+    init(pub int x, pub int y)
+
+def int sum_o(OPointB p):
+    p.x + p.y
+
+let op = OPointB(3, 4)
+print sum_o(op)
+
+def int sum_or(OPointB& p):
+    p.x + p.y
+print sum_or(op)
+
+struct OCounterB:
+    init(pub int n)
+
+let OCounterB cc = OCounterB(42)
+print cc.n
+
+struct OItemB:
+    init(pub int v)
+
+def int read_stack(OItemB i): i.v
+def int read_borrow(OItemB& i): i.v
+def int read_heap(OItemB' i): i.v
+
+let OItemB ii = OItemB(10)
+print read_stack(ii) + read_borrow(ii) + read_heap(ii)
+
+struct ADog:
+    init(pub string name)
+
+use ADog2 as ADog'stack
+let ad = ADog2("rex")
+print ad.name
+
+struct APoint:
+    init(pub int x, pub int y)
+
+use AP as APoint'
+let ap = AP(3, 4)
+print ap.x + ap.y
+
+struct ACounter:
+    init(pub int n)
+
+use SharedCounter as ACounter'auto
+let sc = SharedCounter(10)
+print sc.n
+
+struct ATree:
+    init(pub int value)
+
+use ANode as ATree'auto
+
+def int read2(ANode& n):
+    n.value
+
+let an = ANode(99)
+print read2(an)
+
+struct MCounter:
+    init(pub var int n)
+
+def void increment(var MCounter& c):
+    c.n = c.n + 1
+
+var mc = MCounter(0)
+increment(mc)
+increment(mc)
+print mc.n
+
+struct MPoint:
+    init(pub var int x, pub var int y)
+
+var mp = MPoint(3, 4)
+var MPoint& refp = mp
+refp.x = 10
+print mp.x
+
+struct MVal:
+    init(pub var int n)
+
+def void copy_into(MVal& src, var MVal& dst):
+    dst.n = src.n
+
+var ma = MVal(42)
+var mb = MVal(0)
+copy_into(ma, mb)
+print mb.n

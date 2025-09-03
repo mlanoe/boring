@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — built-in global functions.
+#
+# All functions below are pre-loaded by the runtime; no `use` statement is
+# needed.  Import this file only if your editor or toolchain requires
+# explicit scope to resolve names.
+#
+#   use stdlib.builtins
+
+# ── I/O ────────────────────────────────────────────────────────────────────────
+def void   print(any msg):     native   # println! — also variadic: print("{}", x)
+def void   write(any msg):     native   # print!  without trailing newline
+def string readLine():         native   # one line from stdin, trailing \n stripped
+
+# ── Type conversion ────────────────────────────────────────────────────────────
+def int    int(any v):    native   # int / float / bool / string → int
+def uint   uint(any v):   native   # same, unsigned
+def float  float(any v):  native   # int / string → float
+def string str(any v):    native   # any value → its string representation
+
+# ── Collections ────────────────────────────────────────────────────────────────
+def int len(any coll): native   # length of string, [T], {K:V}, or {T}
+
+# ── Math ───────────────────────────────────────────────────────────────────────
+def float abs(float x):                         native   # also accepts int
+def int   floor(float x):                       native
+def int   ceil(float x):                        native
+def int   round(float x):                       native
+def float sqrt(float x):                        native
+def float pow(float base, float exp):           native
+def float log(float x):                         native   # natural logarithm (ln)
+def float log2(float x):                        native
+def float log10(float x):                       native
+def float sin(float x):                         native
+def float cos(float x):                         native
+def float tan(float x):                         native
+def float asin(float x):                        native
+def float acos(float x):                        native
+def float atan(float x):                        native
+def float atan2(float y, float x):              native
+def float clamp(float x, float lo, float hi):   native   # also accepts int
+def float sign(float x):                        native   # -1.0, 0.0, or 1.0
+def bool  isNaN(float x):                       native
+def bool  isInfinite(float x):                  native
+def float min(float a, float b):                native   # also: min([T])
+def float max(float a, float b):                native   # also: max([T])
+
+# ── Assertions ─────────────────────────────────────────────────────────────────
+def void assert(bool cond, any msg):  native   # msg is optional
+def void assert_eq(any a, any b):     native
+def void assert_neq(any a, any b):    native
+def void panic(any msg):              native   # unconditional fatal error
+
+# ── Ownership ──────────────────────────────────────────────────────────────────
+def void drop(any v): native   # explicit early drop (no-op in interpreter)
+
+# ── Result constructors ────────────────────────────────────────────────────────
+def any Ok(any value):   native   # wrap value in Result::Ok
+def any Err(any error):  native   # wrap error in Result::Err
+
+# ── Math constants ─────────────────────────────────────────────────────────────
+# These identifiers are pre-defined; no declaration needed:
+#   PI   = 3.141592653589793
+#   E    = 2.718281828459045
+#   INF  = +∞  (float)
+#   NAN  = not-a-number (float)

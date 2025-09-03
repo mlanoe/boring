@@ -1,0 +1,199 @@
+struct Point:
+    float x
+    float y
+
+    req float distance(Point other):
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        sqrt(dx * dx + dy * dy)
+
+    req Point translated(float dx, float dy):
+        Point(x = self.x + dx, y = self.y + dy)
+
+    as string:
+        "({self.x}, {self.y})"
+
+let p1 = Point(x = 0.0, y = 0.0)
+let p2 = Point(x = 3.0, y = 4.0)
+print "{p1 as string}"
+print "{p2 as string}"
+print "{p1.distance(p2)}"
+
+let p3 = p1.translated(1.0, 2.0)
+print "{p3 as string}"
+
+# Struct with optional fields
+struct Person:
+    string name
+    int age
+    string? email
+
+    req string greet():
+        "Hi, I'm {self.name}"
+
+let alice = Person(name = "Alice", age = 30, email = "alice@example.com")
+let bob   = Person(name = "Bob",   age = 25, email = nil)
+print "{alice.greet()}"
+print "{bob.greet()}"
+print "{alice.email else "none"}"
+print "{bob.email else "none"}"
+
+# Mutable field
+struct Counter:
+    var int value = 0
+
+    def void inc():
+        self.value = self.value + 1
+
+    req int get():
+        self.value
+
+var ctr = Counter()
+ctr.inc()
+ctr.inc()
+ctr.inc()
+print "counter = {ctr.get()}"
+
+# getter basic
+struct SDog:
+    string _name
+    req string name(): self._name
+
+let sdog = SDog("Rex")
+print sdog.name
+
+# setter
+struct SDog2:
+    var string _name
+    req string name(): self._name
+    set name(string val): self._name = val
+
+var sdog2 = SDog2("Rex")
+sdog2.name = "Buddy"
+print sdog2.name
+
+# getter computed
+struct SCircle:
+    float radius
+    req float area(): 3.14159 * self.radius * self.radius
+
+let scir = SCircle(2.0)
+print scir.area
+
+# composition
+struct SAnimal:
+    init(pub string name)
+
+struct SDog3:
+    init(pub SAnimal base, pub string breed)
+    req string describe(): self.base.name + " (" + self.breed + ")"
+
+let scomp = SDog3(base = SAnimal(name = "Rex"), breed = "Labrador")
+print scomp.describe()
+
+# as conversion
+struct SDog4:
+    init(pub SAnimal base, pub string breed)
+    as SAnimal:
+        self.base
+
+let sd4 = SDog4(base = SAnimal(name = "Rex"), breed = "Labrador")
+let sa = sd4 as SAnimal
+print sa.name
+
+def string greetan(SAnimal a): "Hello " + a.name
+print greetan(sd4 as SAnimal)
+
+# composition with trait
+trait SPrintable:
+    req string print()
+
+struct SDog5 as SPrintable:
+    init(pub SAnimal base)
+    req string print(): "Dog:" + self.base.name
+
+let sd5 = SDog5(base = SAnimal(name = "Rex"))
+print sd5.print()
+
+# init form2
+struct SPerson:
+    init(pub string name, pub int age = 0)
+
+let sp = SPerson("Alice", 30)
+print sp.name
+
+let sp2 = SPerson("Bob")
+print sp2.age
+
+# init form3
+struct SCircle2:
+    pub float radius
+    pub float area
+    init(float r):
+        self.radius = r
+        self.area = 3.14159 * r * r
+
+let sc2 = SCircle2(1.0)
+print sc2.radius
+
+let sc3 = SCircle2(2.0)
+print sc3.area
+
+# init private field
+struct SSecret:
+    init(string value)
+    req string reveal(): self.value
+
+let ssec = SSecret("hidden")
+print ssec.reveal()
+
+# init private mutable
+struct SCounter:
+    init(var int count = 0)
+    def void increment(): self.count = self.count + 1
+    req int value(): self.count
+
+var sctr = SCounter()
+sctr.increment()
+sctr.increment()
+print sctr.value()
+
+# req callable on let
+struct RCounter:
+    int value
+    req int doubled(): self.value * 2
+
+let rc = RCounter(value= 5)
+print rc.doubled()
+
+# req as property
+struct RCircle:
+    float radius
+    req float area(): 3.14159 * self.radius * self.radius
+
+let rci = RCircle(radius= 1.0)
+print rci.area
+
+# transient
+struct RCache:
+    int base
+    transient int? _cached = nil
+
+    req int value():
+        if let v = self._cached:
+            return v
+        self._cached = self.base * 2
+        self._cached else 0
+
+let rcc = RCache(base= 21)
+print rcc.value()
+
+# nested struct basic (revisit)
+def int makeNest():
+    struct NPoint:
+        int x
+        int y
+    let np = NPoint(x = 3, y = 4)
+    np.x + np.y
+
+print makeNest()

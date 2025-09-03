@@ -1,0 +1,42 @@
+let t = (10, 20, 30)
+let x, y, z = t
+print x
+print y
+print z
+
+let tm = (1, 2)
+var r = "none"
+match tm:
+    1, 2: r = "one-two"
+    1, _: r = "one-any"
+    _:    r = "other"
+print r
+
+let tb = (1, "hello", true)
+let (a, b, c) = tb
+print a
+print b
+print c
+
+let tw = (10, 20, 30)
+let (xw, _, zw) = tw
+print xw
+print zw
+
+let (p, q) = (42, "world")
+print p
+print q
+
+let tm2 = (1, 2)
+var r2 = "none"
+match tm2:
+    (1, 2): r2 = "one-two"
+    (1, _): r2 = "one-any"
+    _:      r2 = "other"
+print r2
+
+let point = (3, 4)
+var dist = 0
+match point:
+    (px, py): dist = px * px + py * py
+print dist

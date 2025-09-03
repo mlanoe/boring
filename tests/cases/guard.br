@@ -1,0 +1,31 @@
+def int check(int x):
+    guard x > 0 else: return -1
+    return x * 2
+
+let r1 = check(5)
+print r1
+
+let r2 = check(-3)
+print r2
+
+def string greet(string? name):
+    guard let n = name else: return "nobody"
+    return "hello " + n
+
+print greet("Alice")
+print greet(nil)
+
+def string concat(string? a, string? b):
+    guard let x = a, let y = b else: return "missing"
+    return x + y
+
+print concat("foo", "bar")
+print concat("foo", nil)
+
+def int safe_sqrt(int? val):
+    guard let x = val, x >= 0 else: return -1
+    return x
+
+print safe_sqrt(9)
+print safe_sqrt(-1)
+print safe_sqrt(nil)

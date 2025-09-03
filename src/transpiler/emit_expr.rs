@@ -1,0 +1,2026 @@
+use super::*;
+use crate::ast::*;
+use super::Transpiler;
+use super::helpers::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+impl Transpiler {
+    pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Int(n)   => n.to_string(),
+            ExprKind::Float(f) => {
+                let s = format!("{}", f);
+                if s.contains('.') || s.contains('e') || s.contains('E') { s }
+                else { format!("{}.0", s) }
+            }
+            ExprKind::Str(s) => format!("\"{}\"", escape_str(s)),
+            ExprKind::StringInterp(segs) => self.emit_interp(segs),
+            ExprKind::Bool(b)  => b.to_string(),
+            ExprKind::Nil      => "None".into(),
+            ExprKind::Void     => "()".into(),
+            ExprKind::Var(n)   => {
+                // In init body, `self` is the local `__self` variable.
+                if self.in_init_body && n == "self" {
+                    return "__self".to_string();
+                }
+                // Implicit self: inside a struct method, a bare field name maps to `self.field`
+                // only when it is NOT already declared as a local variable.
+                if let Some(struct_name) = &self.self_type {
+                    if !self.known_local_vars.contains(n.as_str()) {
+                        if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                            if fields.iter().any(|(f, _)| f == n) {
+                                let self_ref = if self.in_init_body { "__self" } else { "self" };
+                                return format!("{}.{}", self_ref, escape_rust_keyword(n));
+                            }
+                        }
+                    }
+                }
+                self.map_builtin_var(n)
+            }
+
+            ExprKind::BinOp(op, l, r) => {
+                // Reference equality ===
+                if matches!(op, BinOp::RefEq) {
+                    let ls = self.emit_expr(l);
+                    let rs = self.emit_expr(r);
+                    return format!("Arc::ptr_eq(&{}, &{})", ls, rs);
+                }
+                // `x is SomeType` / `x is not SomeType` — type/nil check
+                if matches!(op, BinOp::Is | BinOp::IsNot) {
+                    let is_not = matches!(op, BinOp::IsNot);
+                    // `x is nil` / `x is not nil` — right side is Nil
+                    if matches!(r.kind, ExprKind::Nil) {
+                        // Check if left side is an optional variable
+                        let is_optional = matches!(&l.kind, ExprKind::Var(v) if
+                            self.optional_vars.contains(v.as_str()));
+                        if is_optional {
+                            let ls = self.emit_expr(l);
+                            return if is_not {
+                                format!("({} != None)", ls)
+                            } else {
+                                format!("({} == None)", ls)
+                            };
+                        }
+                        // Left side is `None` literal — comparing nil to nil
+                        if matches!(l.kind, ExprKind::Nil) {
+                            return if is_not { "false".to_string() } else { "true".to_string() };
+                        }
+                        // Non-optional value: `x is nil` is always false, `x is not nil` always true
+                        return if is_not { "true".to_string() } else { "false".to_string() };
+                    }
+                    // `x is y` — reference identity between Rc-wrapped struct variables
+                    if let (ExprKind::Var(lv), ExprKind::Var(rv)) = (&l.kind, &r.kind) {
+                        if self.rc_identity_vars.contains(lv.as_str())
+                            && self.rc_identity_vars.contains(rv.as_str())
+                        {
+                            return if is_not {
+                                format!("(!Rc::ptr_eq(&{}, &{}))", lv, rv)
+                            } else {
+                                format!("(Rc::ptr_eq(&{}, &{}))", lv, rv)
+                            };
+                        }
+                    }
+                    // `x is TypeName` — struct type check
+                    if let ExprKind::Var(type_name) = &r.kind {
+                        if self.struct_fields.contains_key(type_name.as_str()) {
+                            let ls = self.emit_expr(l);
+                            return if is_not {
+                                format!("!matches!({}, {} {{ .. }})", ls, type_name)
+                            } else {
+                                format!("matches!({}, {} {{ .. }})", ls, type_name)
+                            };
+                        }
+                        // Enum variant check — `x is EnumVariant` (unit variant)
+                        if let Some(enum_name) = self.enum_variants.get(type_name.as_str()) {
+                            let ls = self.emit_expr(l);
+                            let qualified = format!("{}::{}", enum_name, type_name);
+                            return if is_not {
+                                format!("!matches!({}, {})", ls, qualified)
+                            } else {
+                                format!("matches!({}, {})", ls, qualified)
+                            };
+                        }
+                    }
+                }
+                // String concatenation: if either side is a string expression, emit as Arc::<str>::from(format!(...))
+                // This handles: string literal, string interp, known string vars, and nested string +.
+                if matches!(op, BinOp::Add) && (self.is_string_expr(l) || self.is_string_expr(r)) {
+                    // Flatten the whole chain into a single format! call.
+                    let mut parts: Vec<String> = Vec::new();
+                    self.collect_string_parts(expr, &mut parts);
+                    let fmt = parts.iter().map(|_| "{}").collect::<Vec<_>>().join("");
+                    return format!("Arc::<str>::from(format!(\"{}\", {}))", fmt, parts.join(", "));
+                }
+                // Numeric type coercion: when adding/subtracting/multiplying typed numeric vars
+                // of different widths (i8 + i16, etc.), cast both to the wider type.
+                // Also handle mixed float-literal/int-literal arithmetic: `7.5 % 2` → `7.5_f64 % 2_f64`.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) {
+                    let l_is_float_lit = matches!(l.kind, ExprKind::Float(_));
+                    let r_is_float_lit = matches!(r.kind, ExprKind::Float(_));
+                    let l_is_int_lit   = matches!(l.kind, ExprKind::Int(_));
+                    let r_is_int_lit   = matches!(r.kind, ExprKind::Int(_));
+                    if (l_is_float_lit && r_is_int_lit) || (l_is_int_lit && r_is_float_lit) {
+                        let ls_raw = self.emit_expr(l);
+                        let rs_raw = self.emit_expr(r);
+                        let ls = if l_is_int_lit { format!("{}_f64", ls_raw) } else { ls_raw };
+                        let rs = if r_is_int_lit { format!("{}_f64", rs_raw) } else { rs_raw };
+                        return format!("({} {} {})", ls, binop_str(op), rs);
+                    }
+                    if let Some((l_ty, r_ty)) = self.get_numeric_types(l, r) {
+                        if l_ty != r_ty {
+                            let wider = wider_numeric_type(&l_ty, &r_ty);
+                            let ls_raw = self.emit_expr(l);
+                            let rs_raw = self.emit_expr(r);
+                            let ls = if l_ty != wider { format!("({} as {})", ls_raw, wider) } else { ls_raw };
+                            let rs = if r_ty != wider { format!("({} as {})", rs_raw, wider) } else { rs_raw };
+                            return format!("({} {} {})", ls, binop_str(op), rs);
+                        }
+                    }
+                }
+                // Struct operator method dispatch: `a + b` → `a.clone().add(b.clone())`
+                // when the left operand's struct type has an operator method registered.
+                let method_name = match op {
+                    BinOp::Add   => Some("add"),
+                    BinOp::Sub   => Some("sub"),
+                    BinOp::Mul   => Some("mul"),
+                    BinOp::Div   => Some("div"),
+                    BinOp::Rem   => Some("rem"),
+                    BinOp::Eq    => Some("eq"),
+                    BinOp::NotEq => Some("ne"),
+                    BinOp::Lt    => Some("lt"),
+                    BinOp::LtEq  => Some("le"),
+                    BinOp::Gt    => Some("gt"),
+                    BinOp::GtEq  => Some("ge"),
+                    _ => None,
+                };
+                if let Some(mname) = method_name {
+                    // Determine struct type from left operand.
+                    let struct_ty = if let ExprKind::Var(vname) = &l.kind {
+                        self.var_struct_types.get(vname.as_str()).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(sty) = struct_ty {
+                        let key = format!("{}::{}", sty, mname);
+                        if self.struct_operator_methods.contains(&key) {
+                            let ls = self.emit_expr(l);
+                            // Look up param types to decide if rhs needs Box::new() wrapping.
+                            let param_types = self.struct_operator_param_types.get(&key).cloned();
+                            let rs_raw = self.emit_expr(r);
+                            let rs = if let Some(ptypes) = param_types {
+                                if let Some(pty) = ptypes.first() {
+                                    if matches!(pty, Type::Qualified(_, OwnerQual::Owned)) {
+                                        // Need to clone before boxing to avoid moving `rs_raw`
+                                        // when it's used multiple times (e.g. e3 == e3).
+                                        let clone_expr = if rs_raw.ends_with(".clone()") {
+                                            rs_raw.clone()
+                                        } else {
+                                            format!("{}.clone()", rs_raw)
+                                        };
+                                        format!("Box::new({})", clone_expr)
+                                    } else {
+                                        rs_raw
+                                    }
+                                } else {
+                                    rs_raw
+                                }
+                            } else {
+                                rs_raw
+                            };
+                            return format!("{}.clone().{}({})", ls, mname, rs);
+                        }
+                    }
+                }
+                // Arc<str> equality: if one side is a known Arc<str> expression and the
+                // other is a raw string literal (&str), wrap the literal in Arc::<str>::from(...)
+                // so both sides have the same type for PartialEq.
+                if matches!(op, BinOp::Eq | BinOp::NotEq) {
+                    let l_is_arc_str = self.is_string_expr(l);
+                    let r_is_arc_str = self.is_string_expr(r);
+                    let l_is_raw_lit = matches!(&l.kind, ExprKind::Str(_));
+                    let r_is_raw_lit = matches!(&r.kind, ExprKind::Str(_));
+                    if (l_is_arc_str && r_is_raw_lit) || (r_is_arc_str && l_is_raw_lit) {
+                        let ls = if l_is_raw_lit {
+                            if let ExprKind::Str(s) = &l.kind {
+                                format!("Arc::<str>::from(\"{}\")", escape_str(s))
+                            } else { self.emit_expr(l) }
+                        } else { self.emit_expr(l) };
+                        let rs = if r_is_raw_lit {
+                            if let ExprKind::Str(s) = &r.kind {
+                                format!("Arc::<str>::from(\"{}\")", escape_str(s))
+                            } else { self.emit_expr(r) }
+                        } else { self.emit_expr(r) };
+                        return format!("({} {} {})", ls, binop_str(op), rs);
+                    }
+                }
+                let ls = self.emit_expr(l);
+                let rs = self.emit_expr(r);
+                format!("({} {} {})", ls, binop_str(op), rs)
+            }
+            ExprKind::UnaryOp(op, e) => {
+                let s = self.emit_expr(e);
+                // Struct unary neg dispatch: `-a` → `a.clone().neg()`
+                if matches!(op, UnaryOp::Neg) {
+                    if let ExprKind::Var(vname) = &e.kind {
+                        if let Some(sty) = self.var_struct_types.get(vname.as_str()).cloned() {
+                            let key = format!("{}::neg", sty);
+                            if self.struct_operator_methods.contains(&key) {
+                                return format!("{}.clone().neg()", s);
+                            }
+                        }
+                    }
+                }
+                match op {
+                    UnaryOp::Neg    => format!("(-{})", s),
+                    UnaryOp::Not    => format!("(!{})", s),
+                    UnaryOp::BitNot => format!("(!{})", s),
+                }
+            }
+            ExprKind::Assign(target, value) => {
+                // Global mutable var assignment: `logX = val` → `*LOGX.lock().unwrap() = val`.
+                if let ExprKind::Var(var_name) = &target.kind {
+                    if self.global_vars_used_in_fns.contains(var_name.as_str()) {
+                        let static_name = var_name.to_uppercase();
+                        let val_s = self.emit_expr_owned(value);
+                        return format!("*{}.lock().unwrap() = {}", static_name, val_s);
+                    }
+                }
+                if let ExprKind::Field(obj, field) = &target.kind {
+                    // Instance setter property: `t.prop = v` → `t.set_prop(v)`.
+                    // Check if `field` is registered as a setter for any struct.
+                    let is_instance_setter = self.struct_setters.iter()
+                        .any(|k| k.ends_with(&format!("::{}", field)));
+                    if is_instance_setter {
+                        let obj_s = self.emit_expr(obj);
+                        let val_s = self.emit_expr_owned(value);
+                        return format!("{}.set_{}({})", obj_s, field, val_s);
+                    }
+                    // If assigning to a type var that has a type setter, call the setter function.
+                    if let ExprKind::Var(type_name) = &obj.kind {
+                        if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            let key = format!("{}::{}", type_name, field);
+                            if self.struct_type_mut_var_names.contains(&key) {
+                                // Invoke the type setter if one exists, unless already inside it
+                                let has_setter = !self.in_type_setter
+                                    && self.struct_type_method_sigs.get(type_name.as_str())
+                                        .and_then(|m| m.get(field.as_str()))
+                                        .map(|k| matches!(k, TypeMethodKind::Set))
+                                        .unwrap_or(false);
+                                if has_setter {
+                                    let val_s = self.emit_expr_owned(value);
+                                    return format!("{}::set_{}({})", type_name, field, val_s);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Transient field write: self.field = v → self.field.set(v) (Cell) or *self.field.borrow_mut() = v (RefCell)
+                // When the field type is Optional, the assigned value is coerced to Some(v).
+                if let ExprKind::Field(obj, field) = &target.kind {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if v == "self" {
+                            let key = self.self_type.as_deref()
+                                .map(|t| format!("{}::{}", t, field));
+                            if let Some(k) = key {
+                                if let Some((is_copy, field_ty, _)) = self.transient_fields.get(&k) {
+                                    let is_copy = *is_copy;
+                                    // Wrap in Some() if field is Optional and value is not nil
+                                    let raw_val = self.emit_expr_owned(value);
+                                    let is_nil = matches!(value.kind, ExprKind::Nil);
+                                    let val_s = if !is_nil && matches!(field_ty, Type::Optional(_)) {
+                                        if raw_val.starts_with("Some(") || raw_val == "None" {
+                                            raw_val
+                                        } else {
+                                            format!("Some({})", raw_val)
+                                        }
+                                    } else {
+                                        raw_val
+                                    };
+                                    return if is_copy {
+                                        format!("self.{}.set({})", field, val_s)
+                                    } else {
+                                        format!("*self.{}.borrow_mut() = {}", field, val_s)
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                // Mutex field write: w.field = v → { let mut __g = w.lock().await; __g.field = v; }
+                if let ExprKind::Field(obj, field) = &target.kind {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if self.var_mutex_types.contains(v.as_str()) {
+                            let val_s = self.emit_expr_owned(value);
+                            return format!("{{ let mut __g = {}.lock().await; __g.{} = {}; }}", v, field, val_s);
+                        }
+                    }
+                    // self.worker.field = v → { let mut __g = self.worker.lock().await; __g.field = v; }
+                    if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {
+                        if let ExprKind::Var(v) = &inner_obj.kind {
+                            if v == "self" {
+                                let key = self.self_type.as_deref()
+                                    .map(|t| format!("{}::{}", t, mutex_field));
+                                if let Some(k) = key {
+                                    if self.struct_mutex_fields.contains(&k) {
+                                        let val_s = self.emit_expr_owned(value);
+                                        return format!("{{ let mut __g = self.{}.lock().await; __g.{} = {}; }}", mutex_field, field, val_s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // RwLock field write: c.field = v → { let mut __wg = c.write().await; __wg.field = v; }
+                if let ExprKind::Field(obj, field) = &target.kind {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if self.var_rwlock_types.contains(v.as_str()) {
+                            let val_s = self.emit_expr_owned(value);
+                            return format!("{{ let mut __wg = {}.write().await; __wg.{} = {}; }}", v, field, val_s);
+                        }
+                    }
+                    // self.data.field = v → { let mut __wg = self.data.write().await; __wg.field = v; }
+                    if let ExprKind::Field(inner_obj, rwlock_field) = &obj.kind {
+                        if let ExprKind::Var(v) = &inner_obj.kind {
+                            if v == "self" {
+                                let key = self.self_type.as_deref()
+                                    .map(|t| format!("{}::{}", t, rwlock_field));
+                                if let Some(k) = key {
+                                    if self.struct_rwlock_fields.contains(&k) {
+                                        let val_s = self.emit_expr_owned(value);
+                                        return format!("{{ let mut __wg = self.{}.write().await; __wg.{} = {}; }}", rwlock_field, field, val_s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Compound assignment: `x = x op rhs` → `x op= rhs` (idiomatic Rust).
+                // Detected by matching BinOp(op, lhs_copy, rhs) where lhs_copy emits the same
+                // string as target — safe because the parser already desugared `x op= rhs`.
+                // Exception: string addition (`Arc<str>` does not implement `AddAssign`).
+                if let ExprKind::BinOp(op, lhs_copy, rhs) = &value.kind {
+                    let is_string_add = matches!(op, BinOp::Add)
+                        && (matches!(lhs_copy.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                            || matches!(rhs.kind, ExprKind::Str(_) | ExprKind::StringInterp(_)));
+                    if !is_string_add {
+                        let compound_op = match op {
+                            BinOp::Add => Some("+="),
+                            BinOp::Sub => Some("-="),
+                            BinOp::Mul => Some("*="),
+                            BinOp::Div => Some("/="),
+                            BinOp::Rem => Some("%="),
+                            _ => None,
+                        };
+                        if let Some(op_str) = compound_op {
+                            let target_s = self.emit_expr(target);
+                            let lhs_s    = self.emit_expr(lhs_copy);
+                            if target_s == lhs_s {
+                                let rhs_s = self.emit_expr_owned(rhs);
+                                return format!("{} {} {}", target_s, op_str, rhs_s);
+                            }
+                        }
+                    }
+                }
+                // Dict subscript assignment: dict[key] = val → dict.insert(key_owned, val)
+                if let ExprKind::Index(dict_obj, key) = &target.kind {
+                    if let ExprKind::Var(dict_name) = &dict_obj.kind {
+                        if self.dict_vars.contains(dict_name.as_str()) {
+                            let key_owned = self.emit_dict_key_owned(key);
+                            let val_s = self.emit_expr_owned(value);
+                            return format!("{}.insert({}, {})", dict_name, key_owned, val_s);
+                        }
+                    }
+                }
+                // emit_expr_owned wraps string literals in Arc::from; falls through for other types
+                format!("{} = {}", self.emit_expr(target), self.emit_expr_owned(value))
+            }
+            ExprKind::Field(obj, field) => {
+                // Special case: `(task expr).value` / `(task expr).wait` where the task body
+                // captures non-Arc local variables.  We cannot safely `tokio::spawn(async move {})`
+                // because that would move the variable — leaving the outer scope without it.
+                // Solution: inline the async call instead of spawning.
+                if field == "value" || field == "wait" {
+                    if let ExprKind::Task(inner_e) = &obj.kind {
+                        let captured = collect_var_names(inner_e);
+                        let has_non_arc_captures = captured.iter().any(|v| {
+                            self.known_local_vars.contains(v.as_str())
+                                && !self.arc_vars.contains(v.as_str())
+                                && !self.string_arc_vars.contains(v.as_str())
+                                && !self.weak_vars.contains(v.as_str())
+                        });
+                        if has_non_arc_captures {
+                            // Inline: emit the inner expression (method call already gets .await
+                            // appended by emit_expr for async methods).
+                            let inner_s = self.emit_expr(inner_e);
+                            return if field == "wait" {
+                                format!("{{ let _ = {}; }}", inner_s)
+                            } else {
+                                inner_s
+                            };
+                        }
+                    }
+                }
+                // Type-level access: `Counter.MAX` → `Counter::MAX`, `Counter.count` → `Counter::count()`
+                if let ExprKind::Var(type_name) = &obj.kind {
+                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        let key = format!("{}::{}", type_name, field);
+                        if self.struct_type_var_names.contains(&key) {
+                            // type let → associated const (UPPER_CASE in Rust)
+                            return format!("{}::{}", type_name, field.to_uppercase());
+                        }
+                        if self.struct_type_mut_var_names.contains(&key) {
+                            // type var → module-level static Mutex: read via lock().unwrap()
+                            return format!("*{}.lock().unwrap()", field.to_uppercase());
+                        }
+                        // Fieldless enum variant (no args): CalcError.DivByZero → CalcError::DivByZero
+                        if self.enum_variant_fields.contains_key(&key) {
+                            return format!("{}::{}", type_name, field);
+                        }
+                        // Fallback for external PascalCase types (Ordering, Duration, etc.):
+                        // `Ordering.SeqCst` → `Ordering::SeqCst`
+                        if !self.known_local_vars.contains(type_name.as_str()) {
+                            return format!("{}::{}", type_name, field);
+                        }
+                    }
+                    // oneshot rx.value → rx.await.unwrap() (receive the single value)
+                    if field == "value" && self.oneshot_receivers.contains(type_name.as_str()) {
+                        return if self.in_throws || self.in_try_body {
+                            format!("{}.await?", type_name)
+                        } else {
+                            format!("{}.await.unwrap()", type_name)
+                        };
+                    }
+                    // watch rx.value → current value without waiting
+                    if field == "value" && self.watch_receivers.contains(type_name.as_str()) {
+                        return format!("{}.borrow().clone()", type_name);
+                    }
+                    // future.value / future.wait on a spawned JoinHandle or async param.
+                    //
+                    // Three cases:
+                    //  (a) throws JoinHandle  — JoinHandle<Result<T,BoringError>>
+                    //      throws ctx : f.await.unwrap()?      — unwrap JoinError, propagate inner
+                    //      plain ctx  : f.await.unwrap().unwrap()  — panic on inner error
+                    //  (b) plain JoinHandle   — JoinHandle<T>
+                    //      always     : f.await.unwrap()       — just unwrap JoinError
+                    //  (c) async fn param     — impl Future<Output=T> (or Result<T,_>)
+                    //      throws ctx + value : f.await?
+                    //      otherwise          : f.await.unwrap()
+                    if (field == "value" || field == "wait") && self.task_vars.contains(type_name.as_str()) {
+                        let in_throws_ctx = self.in_throws || self.in_try_body;
+                        let is_throws_handle = self.throws_join_handle_vars.contains(type_name.as_str());
+                        let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
+                        return if field == "wait" {
+                            if is_throws_handle && in_throws_ctx {
+                                // Propagate inner BoringError even on void await
+                                format!("{{ let _ = {}.await.unwrap()?; }}", type_name)
+                            } else if is_throws_handle {
+                                format!("{{ let _ = {}.await.unwrap().unwrap(); }}", type_name)
+                            } else {
+                                format!("{{ let _ = {}.await; }}", type_name)
+                            }
+                        } else {
+                            // .value
+                            if is_throws_handle {
+                                if in_throws_ctx {
+                                    format!("{}.await.unwrap()?", type_name)
+                                } else {
+                                    format!("{}.await.unwrap().unwrap()", type_name)
+                                }
+                            } else if is_join_handle {
+                                // Plain JoinHandle<T> — no inner Result to unwrap
+                                format!("{}.await.unwrap()", type_name)
+                            } else if in_throws_ctx {
+                                // Async fn parameter: Future<Output=Result<T,_>>
+                                format!("{}.await?", type_name)
+                            } else {
+                                format!("{}.await.unwrap()", type_name)
+                            }
+                        };
+                    }
+                }
+                let obj_s = self.emit_expr(obj);
+                // `.value` / `.wait` on a JoinHandle → `.await.unwrap()`.
+                // Covers inline task expressions `(task ...).value` and loop vars `future.wait`
+                // that aren't tracked in task_vars.
+                if field == "value" || field == "wait" {
+                    let is_future = matches!(&obj.kind, ExprKind::Task(_))
+                        || obj_s.contains("tokio::spawn")
+                        || obj_s.contains("async move");
+                    if is_future {
+                        return if field == "wait" {
+                            format!("{{ let _ = {}.await; }}", obj_s)
+                        } else {
+                            format!("{}.await.unwrap()", obj_s)
+                        };
+                    }
+                    // Loop variable holding a JoinHandle: only treat as future if the var is
+                    // not a known struct instance, not `self`, and not an actor/mutex var.
+                    // Using var_struct_types (struct instance) or struct_fields (field "value"
+                    // exists) as a heuristic to distinguish struct field access from JoinHandle.
+                    if let ExprKind::Var(v) = &obj.kind {
+                        let is_known_struct = self.var_struct_types.contains_key(v.as_str())
+                            || self.struct_fields.contains_key(v.as_str());
+                        if v != "self"
+                            && !self.var_mutex_types.contains(v.as_str())
+                            && !is_known_struct
+                        {
+                            return if field == "wait" {
+                                format!("{{ let _ = {}.await; }}", obj_s)
+                            } else {
+                                format!("{}.await.unwrap()", obj_s)
+                            };
+                        }
+                    }
+                }
+                // Check if this field access is a getter property (req method with no params).
+                // (a) `self.field` where `self` is the current struct instance and `field` is a getter.
+                // (b) `var.field` where `var` is any variable, and `field` is registered as a getter
+                //     in any struct — cross-struct fallback for `let t = Temperature(); t.fahrenheit`.
+                // Both guards require obj to be a plain Var (not a chained field access like `self.text`)
+                // to avoid incorrectly treating built-in properties (`.length` on strings/arrays).
+                let is_getter = if let ExprKind::Var(v) = &obj.kind {
+                    if v == "self" {
+                        // Case (a): receiver is `self` — check the current struct's getters.
+                        self.self_type.as_deref()
+                            .map(|t| self.struct_getters.contains(&format!("{}::{}", t, field)))
+                            .unwrap_or(false)
+                    } else {
+                        // Case (b): other variable — look up its struct or enum type and check for a getter.
+                        // This handles `t.fahrenheit` where `t` is a Temperature instance,
+                        // and `ed.label` where `ed` is an EDirection enum value.
+                        let from_struct = self.var_struct_types.get(v.as_str())
+                            .map(|type_name| self.struct_getters.contains(&format!("{}::{}", type_name, field)))
+                            .unwrap_or(false);
+                        let from_enum = if !from_struct {
+                            // Also check var_types for Named types (enums registered in struct_getters).
+                            if let Some(Type::Named(type_name)) = self.var_types.get(v.as_str()) {
+                                self.struct_getters.contains(&format!("{}::{}", type_name, field))
+                            } else { false }
+                        } else { false };
+                        from_struct || from_enum
+                    }
+                } else {
+                    false
+                };
+                if is_getter {
+                    return format!("{}.{}()", obj_s, field);
+                }
+                // Mutex var access: w.field → w.lock().await.field
+                if let ExprKind::Var(v) = &obj.kind {
+                    if self.var_mutex_types.contains(v.as_str()) {
+                        return format!("{}.lock().await.{}", v, field);
+                    }
+                }
+                // Mutex struct field: self.worker.field → self.worker.lock().await.field
+                if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {
+                    if let ExprKind::Var(v) = &inner_obj.kind {
+                        if v == "self" {
+                            let key = self.self_type.as_deref()
+                                .map(|t| format!("{}::{}", t, mutex_field));
+                            if let Some(k) = key {
+                                if self.struct_mutex_fields.contains(&k) {
+                                    return format!("self.{}.lock().await.{}", mutex_field, field);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Transient field read: self.field → self.field.get() (Cell) or self.field.borrow().clone() (RefCell)
+                if obj_s == "self" {
+                    let key = self.self_type.as_deref()
+                        .map(|t| format!("{}::{}", t, field));
+                    if let Some(k) = key {
+                        if let Some((is_copy, _, _)) = self.transient_fields.get(&k) {
+                            return if *is_copy {
+                                format!("self.{}.get()", field)
+                            } else {
+                                format!("self.{}.borrow().clone()", field)
+                            };
+                        }
+                    }
+                }
+                // Determine if the receiver is a module/type path (use `::`) or instance (use `.`).
+                // A receiver is a path when:
+                //   (a) it is an uppercase Var (type name like `Ordering`, `Duration`, `File`)
+                //   (b) it is a lowercase Var NOT in known_local_vars and NOT `self`
+                //       (e.g. `mpsc`, `tokio` — module names imported but not declared as locals)
+                //   (c) the emitted receiver already contains `::` (cascaded path: `tokio::time`)
+                let is_path_receiver = match &obj.kind {
+                    ExprKind::Var(v) => {
+                        if v == "self" { false }
+                        else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
+                        else { !self.known_local_vars.contains(v.as_str()) }
+                    }
+                    // A field access on another field/call is a path only if the receiver is also
+                    // a plain path (contains `::` but is NOT a call result ending with `)`)
+                    _ => obj_s.contains("::") && !obj_s.ends_with(')'),
+                };
+                if is_path_receiver {
+                    return format!("{}::{}", obj_s, field);
+                }
+                // Don't apply map_field to user-defined struct fields (e.g. a field named
+                // `count` should not be remapped to `len()` on a user struct).
+                let mapped = if let ExprKind::Var(v) = &obj.kind {
+                    let is_user_field = (v == "self")
+                        .then(|| self.self_type.as_deref())
+                        .flatten()
+                        .and_then(|t| self.struct_fields.get(t))
+                        .map(|fields| fields.iter().any(|(fname, _)| fname == field))
+                        .unwrap_or(false);
+                    if is_user_field { field.as_str() } else { map_field(field) }
+                } else {
+                    map_field(field)
+                };
+                format!("{}.{}", obj_s, mapped)
+            }
+            ExprKind::Index(obj, idx) => {
+                // When the index is an opaque collection index var (Option<usize> from
+                // firstIndex/nextIndex), use the get_at(Option<usize>) trait method.
+                if let ExprKind::Var(v) = &idx.kind {
+                    if self.index_vars.contains(v.as_str()) {
+                        return format!("{}.get_at({})", self.emit_expr(obj), v);
+                    }
+                }
+                // Dict vars (HashMap): use .get().cloned().unwrap() for bare access.
+                // When wrapped in `else` (ExprKind::Else), that handler rebuilds the get
+                // directly as .unwrap_or_else() to avoid a double-unwrap.
+                if let ExprKind::Var(obj_var) = &obj.kind {
+                    if self.dict_vars.contains(obj_var.as_str()) {
+                        let key_ref = self.emit_dict_key_borrow(idx);
+                        return format!("{}.get({}).cloned().unwrap()", obj_var, key_ref);
+                    }
+                }
+                // For string literal keys (HashMap), use the string key directly (Arc<str>: Deref<Target=str>)
+                let idx_s = if matches!(&idx.kind, ExprKind::Str(_)) {
+                    format!("&{}", self.emit_expr_owned(idx))
+                } else {
+                    // Rust requires usize for slice indexing; cast integer expressions.
+                    let raw = self.emit_expr(idx);
+                    match &idx.kind {
+                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) => format!("({}) as usize", raw),
+                        _ => raw,
+                    }
+                };
+                // Add .clone() so generic T values can be moved out of collections
+                format!("{}[{}].clone()", self.emit_expr(obj), idx_s)
+            }
+            ExprKind::Call(callee, args) => self.emit_call(callee, args),
+            ExprKind::MethodCall(obj, method, args) => self.emit_method_call(obj, method, args),
+            ExprKind::Pipe(lhs, name, args) => self.emit_pipe(lhs, name, args),
+            ExprKind::GenericCall(callee, type_args, args) => self.emit_generic_call(callee, type_args, args),
+
+            ExprKind::TryElse(e, default) => {
+                // `try expr else default` — calls a throws/Result function and returns the Ok
+                // value or the default on error.
+                // The inner expression must NOT get `?` propagation — TryElse handles the error
+                // locally. Use a sub-transpiler with throws flags cleared.
+                let mut sub = self.make_sub();
+                sub.in_throws = false;
+                sub.in_try_body = false;
+                let inner = sub.emit_expr(e);
+                // `try? expr` desugars to TryElse(expr, Nil) — emit the idiomatic `.ok()`
+                // (Result<T,E> → Option<T>) rather than .unwrap_or_else(|_| None).
+                if matches!(default.kind, ExprKind::Nil) {
+                    return format!("{}.ok()", inner);
+                }
+                let default_s = self.emit_expr_owned(default);
+                format!("{}.unwrap_or_else(|_| {})", inner, default_s)
+            }
+
+            ExprKind::TryElseBlock(try_stmts, else_stmts) => {
+                // `try … else …` — try/else expression in all four body combinations.
+                //
+                // Sync context (not inside an async fn):
+                //   { match (|| -> Result<_, Box<dyn Error + Send + Sync>> { … })() {
+                //       Ok(__boring_v)  => __boring_v,
+                //       Err(__boring_e) => { let error = …; <else body> } } }
+                //
+                // Async context (inside a task/async fn):
+                //   { let __boring_r: Result<_, Box<dyn Error + Send + Sync>> =
+                //       async { … }.await;
+                //     match __boring_r {
+                //       Ok(__boring_v)  => __boring_v,
+                //       Err(__boring_e) => { let error = …; <else body> } } }
+                //
+                // The async form avoids the E0728 "await inside non-async closure" error
+                // that arises when the try body contains task function calls (.await).
+                let mut try_sub = self.make_sub();
+                try_sub.in_throws = true;
+                try_sub.fn_returns_void = false;
+                try_sub.emit_body(try_stmts);
+
+                let mut else_sub = self.make_sub();
+                else_sub.in_throws = false;
+                else_sub.fn_returns_void = false;
+                else_sub.known_local_vars.insert("error".to_string());
+                else_sub.emit_body(else_stmts);
+
+                // `error` is bound as the original `Box<dyn Error>`, not as a string.
+                // • `{error}` in string interpolation works — Box<dyn Error> implements Display.
+                // • `match error:` with string patterns works (compare via Display string).
+                // • For typed enum dispatch use `try … catch MyEnum:` which emits the
+                //   appropriate downcast_ref automatically.
+                if self.in_async {
+                    format!(
+                        "{{\nlet __boring_r: Result<_, Box<dyn std::error::Error + Send + Sync>> = async {{\n{}}}.await;\nmatch __boring_r {{\nOk(__boring_v) => __boring_v,\nErr(__boring_e) => {{\nlet error = __boring_e;\n{}}},\n}}\n}}",
+                        try_sub.out,
+                        else_sub.out,
+                    )
+                } else {
+                    format!(
+                        "{{\nmatch (|| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {{\n{}}})() {{\nOk(__boring_v) => __boring_v,\nErr(__boring_e) => {{\nlet error = __boring_e;\n{}}},\n}}\n}}",
+                        try_sub.out,
+                        else_sub.out,
+                    )
+                }
+            }
+
+            ExprKind::Else(e, default) => {
+                // `x as T else default` — cast with fallback: always use unwrap_or (never ?)
+                if let ExprKind::Cast(inner, ty) = &e.kind {
+                    let src = self.emit_expr(inner);
+                    let dv = self.emit_expr_owned(default);
+                    return match ty {
+                        Type::Int => format!("{}.trim().parse::<i64>().unwrap_or({})", src, dv),
+                        Type::Uint => format!("{}.trim().parse::<u64>().unwrap_or({})", src, dv),
+                        Type::Float => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
+                        Type::Bool => format!("({} == \"true\")", src),
+                        Type::Named(n) if n == "int" =>
+                            format!("{}.trim().parse::<i64>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "uint" =>
+                            format!("{}.trim().parse::<u64>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "float" =>
+                            format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
+                        _ => format!("{}.unwrap_or({})", self.emit_expr(e), dv),
+                    };
+                }
+                // `dict[key] else default` — rebuild .get() directly to avoid double-unwrap
+                // (ExprKind::Index for dict vars emits .unwrap() for bare access).
+                if let ExprKind::Index(dict_obj, key) = &e.kind {
+                    if let ExprKind::Var(dict_name) = &dict_obj.kind {
+                        if self.dict_vars.contains(dict_name.as_str()) {
+                            let key_ref = self.emit_dict_key_borrow(key);
+                            let dv = self.emit_expr_owned(default);
+                            return format!("{}.get({}).cloned().unwrap_or_else(|| {})",
+                                dict_name, key_ref, dv);
+                        }
+                    }
+                }
+                // `expr else default` — nil coalescing / Option unwrap
+                let e_s = self.emit_expr(e);
+                let dv = self.emit_expr_owned(default);
+                // When a numeric optional (Option<i64/f64>) is coalesced with a string default,
+                // unwrap_or_else won't compile — use map_or_else to convert the value to string.
+                let is_numeric_opt_var = matches!(&e.kind, ExprKind::Var(v)
+                    if self.optional_numeric_vars.contains(v.as_str()));
+                // When an always-None optional is coalesced with a string default, emit default directly.
+                let is_always_none = matches!(&e.kind, ExprKind::Var(v)
+                    if self.always_none_vars.contains(v.as_str()));
+                if is_always_none && (dv.starts_with("Arc::new(") || dv.starts_with("Arc::<str>::from(")) {
+                    // This optional is always None — the result is always the default value.
+                    dv
+                } else if is_numeric_opt_var && (dv.starts_with("Arc::new(") || dv.starts_with("Arc::<str>::from(")) {
+                    format!("{}.as_ref().map_or_else(|| {}, |v| Arc::<str>::from(format!(\"{{}}\", v)))", e_s, dv)
+                } else {
+                    format!("{}.unwrap_or_else(|| {})", e_s, dv)
+                }
+            }
+
+            ExprKind::Array(elems) => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
+                format!("vec![{}]", es.join(", "))
+            }
+            ExprKind::Tuple(elems) => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
+                format!("({})", es.join(", "))
+            }
+            ExprKind::Dict(pairs) => {
+                if pairs.is_empty() {
+                    "HashMap::new()".into()
+                } else {
+                    // Use emit_expr_owned for both keys and values so string literals
+                    // become Arc<str> (string dicts are HashMap<Arc<str>, Arc<str>>).
+                    let ps: Vec<String> = pairs.iter()
+                        .map(|(k, v)| format!("({}, {})", self.emit_expr_owned(k), self.emit_expr_owned(v)))
+                        .collect();
+                    format!("HashMap::from([{}])", ps.join(", "))
+                }
+            }
+            ExprKind::Set(elems) => {
+                if elems.is_empty() {
+                    // Provide a default element type so Rust can infer the HashSet type.
+                    "HashSet::<i64>::new()".into()
+                } else {
+                    let es: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
+                    format!("HashSet::from([{}])", es.join(", "))
+                }
+            }
+
+            ExprKind::DotIdent(name) => {
+                // Enum variant shorthand: `.North` → `Direction::North`
+                if let Some(enum_name) = self.enum_variants.get(name) {
+                    format!("{}::{}", enum_name, name)
+                } else {
+                    name.clone() // unknown variant — emit bare name, will be caught by rustc
+                }
+            }
+            ExprKind::Range { start, end, inclusive } => {
+                let s = self.emit_expr(start);
+                let e = self.emit_expr(end);
+                if *inclusive { format!("({}..={})", s, e) } else { format!("({}..{})", s, e) }
+            }
+            ExprKind::Cast(e, ty) => {
+                let src = self.emit_expr(e);
+                let dst = self.emit_type(ty);
+                // User-defined `as Type:` conversion → call the generated `into_type()` method.
+                // Use the lowercased emitted type name for primitive types (float → f64, etc.)
+                // as well as named types. Only apply if the source is a struct/enum variable —
+                // do not transform string/numeric literal casts.
+                let src_is_struct_or_enum = match &e.kind {
+                    ExprKind::Var(v) =>
+                        self.var_struct_types.contains_key(v.as_str())
+                        || self.var_struct_type.contains_key(v.as_str())
+                        || matches!(self.var_types.get(v.as_str()),
+                            Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str())),
+                    ExprKind::Field(_, _) => true, // field access on struct
+                    _ => false,
+                };
+                let key = match ty {
+                    Type::Named(n) => Some(n.to_lowercase()),
+                    _ if src_is_struct_or_enum => Some(dst.to_lowercase()),
+                    _ => None,
+                };
+                // Never route `as string` through user_conv_targets — the Display impl's
+                // Arc::<str>::from(x.to_string()) path handles it correctly without generating
+                // a method name like `into_arc<string>` which is invalid Rust.
+                let is_string_cast = matches!(ty, Type::Str)
+                    || matches!(ty, Type::Named(n) if n == "string" || n == "str");
+                if !is_string_cast {
+                    if let Some(k) = key {
+                        // Try both the boring type name (e.g. "float") and the Rust type name (e.g. "f64").
+                        // user_conv_targets stores the lowercased Rust emit form, but the key from
+                        // Type::Named("float") is "float". Try the boring name first, then the emitted form.
+                        // Only apply user conversions when the source is a struct/enum instance —
+                        // don't call into_f64() on numeric expressions, only on struct variables/fields.
+                        if self.user_conv_targets.contains(k.as_str()) {
+                            let method = format!("into_{}", k);
+                            return format!("{}.{}()", src, method);
+                        } else if src_is_struct_or_enum {
+                            let rust_key = dst.to_lowercase();
+                            if k != rust_key && self.user_conv_targets.contains(rust_key.as_str()) {
+                                let method = format!("into_{}", rust_key);
+                                return format!("{}.{}()", src, method);
+                            }
+                        }
+                    }
+                }
+                // Newtype unwrap: `id as uint` where `id` is a known newtype variable → `id.0`.
+                // Works for let bindings and function parameters tracked in var_newtype_type.
+                if let ExprKind::Var(v) = &e.kind {
+                    if let Some(nt_name) = self.var_newtype_type.get(v.as_str()) {
+                        if let Some(inner_rust) = self.newtype_inner.get(nt_name.as_str()) {
+                            if *inner_rust == dst {
+                                return format!("{}.0", src);
+                            }
+                        }
+                    }
+                }
+                // Newtype construction: `42 as UserId` → `UserId(42)`.
+                if let Type::Named(n) = ty {
+                    if self.newtype_types.contains(n.as_str()) {
+                        return format!("{}({})", n, src);
+                    }
+                }
+                // Cast to Optional type: `s as int?` → parse().ok(), not unwrap_or.
+                if let Type::Optional(inner) = ty {
+                    let parse_ty = match inner.as_ref() {
+                        Type::Int                           => Some("i64"),
+                        Type::Uint                          => Some("u64"),
+                        Type::Float                         => Some("f64"),
+                        Type::Named(n) if n == "int"        => Some("i64"),
+                        Type::Named(n) if n == "uint"       => Some("u64"),
+                        Type::Named(n) if n == "float"      => Some("f64"),
+                        _                                   => None,
+                    };
+                    return if let Some(pt) = parse_ty {
+                        format!("{}.trim().parse::<{}>().ok()", src, pt)
+                    } else {
+                        format!("{}.try_into().ok()", src)
+                    };
+                }
+                let src_is_numeric_lit = matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
+                let src_is_bool = matches!(&e.kind, ExprKind::Bool(_))
+                    || matches!(&e.kind, ExprKind::Var(v) if {
+                        // bool variable (rough heuristic: not in known numeric vars)
+                        let _ = v; false
+                    });
+                let src_is_bool_lit = matches!(&e.kind, ExprKind::Bool(_));
+                let src_is_numeric_var = matches!(&e.kind, ExprKind::Var(v)
+                    if !self.string_vars.contains(v.as_str()));
+                let is_float_ty = matches!(ty, Type::Float)
+                    || matches!(ty, Type::Named(n) if n == "float");
+                let is_int_ty = matches!(ty, Type::Int | Type::Uint)
+                    || matches!(ty, Type::Named(n) if n == "int" || n == "uint");
+                let is_bool_ty = matches!(ty, Type::Bool)
+                    || matches!(ty, Type::Named(n) if n == "bool");
+
+                // Numeric computation (BinOp/Call/UnaryOp) → numeric cast: use `as T`, not .parse()
+                let src_is_expr = matches!(&e.kind,
+                    ExprKind::BinOp(_, _, _) | ExprKind::Call(_, _) | ExprKind::UnaryOp(_, _));
+                if src_is_expr && is_float_ty {
+                    return format!("({} as f64)", src);
+                }
+                if src_is_expr && is_int_ty {
+                    return format!("({} as i64)", src);
+                }
+
+                // bool → int: direct cast (true=1, false=0), always succeeds
+                if src_is_bool_lit && is_int_ty {
+                    return format!("({} as i64)", src);
+                }
+                // int/float literal → float: use `as f64`, not .parse()
+                if src_is_numeric_lit && is_float_ty {
+                    return format!("({} as f64)", src);
+                }
+                // numeric literal → bool: always nil (int-to-bool not meaningful in Boring)
+                if src_is_numeric_lit && is_bool_ty {
+                    return "None".into();
+                }
+                // Non-string (numeric var) → bool: None (invalid cast)
+                if src_is_numeric_var && is_bool_ty {
+                    return "None".into();
+                }
+
+                match ty {
+                    // string → int: .ok() returns Option<i64> (nil on failure).
+                    // Only use `?` (propagate) when inside an explicit `try:` body.
+                    Type::Int => if self.in_try_body {
+                        format!("{}.trim().parse::<i64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<i64>().ok()", src)
+                    },
+                    // string → uint
+                    Type::Uint => if self.in_try_body {
+                        format!("{}.trim().parse::<u64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<u64>().ok()", src)
+                    },
+                    // string → float
+                    Type::Float => if self.in_try_body {
+                        format!("{}.trim().parse::<f64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<f64>().ok()", src)
+                    },
+                    Type::Named(n) if n == "int" => if self.in_try_body {
+                        format!("{}.trim().parse::<i64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<i64>().ok()", src)
+                    },
+                    Type::Named(n) if n == "uint" => if self.in_try_body {
+                        format!("{}.trim().parse::<u64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<u64>().ok()", src)
+                    },
+                    Type::Named(n) if n == "float" => if self.in_try_body {
+                        format!("{}.trim().parse::<f64>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<f64>().ok()", src)
+                    },
+                    // string → bool: equality check
+                    Type::Bool => format!("({} == \"true\")", src),
+                    Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
+                    // numeric/value → string
+                    Type::Str => format!("Arc::<str>::from({}.to_string())", src),
+                    Type::Named(n) if n == "string" => format!("Arc::<str>::from({}.to_string())", src),
+                    // everything else: primitive Rust cast
+                    _ => format!("({} as {})", src, dst),
+                }
+            }
+
+            ExprKind::OptionalField(obj, field) => {
+                // Use .clone() so the result is Option<T> (owned), not Option<&T>.
+                // This makes nil-coalescing (`?.field else default`) work with matching types.
+                format!("{}.as_ref().map(|__v| __v.{}.clone())", self.emit_expr(obj), field)
+            }
+            ExprKind::OptionalMethodCall(obj, method, args) => {
+                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+                // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
+                // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
+                format!("{}.clone().map(|mut __v| __v.{}({}))", self.emit_expr(obj), method, args_s.join(", "))
+            }
+
+            ExprKind::Closure(params, _ret_ty, body, throws, task) => {
+                let ps: Vec<String> = params.iter().map(|p| {
+                    let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
+                    if let Some(ty) = &p.ty {
+                        format!("{}: {}", name, self.emit_type(ty))
+                    } else {
+                        name
+                    }
+                }).collect();
+                // Emit the closure body with params registered as known locals so that
+                // `param.method()` doesn't get misread as a module path `param::method()`.
+                let mut sub = self.make_sub();
+                for p in params.iter() {
+                    sub.known_local_vars.insert(p.name.clone());
+                    // Remove any outer-scope var_struct_types entry for this param name.
+                    // Without this, a closure param `p` would inherit the type of an outer
+                    // variable named `p` (e.g. `p: Parrot`), causing field accesses like
+                    // `p.name` to be incorrectly emitted as getter calls `p.name()`.
+                    sub.var_struct_types.remove(&p.name);
+                }
+                // `task` closures: wrap body in `async move { ... }` so they return a Future.
+                // `throws` closures: wrap return value in Ok(...).
+                if *task {
+                    // When the body is a bare `task: ...` expression whose body references Arc
+                    // variables from the outer scope, those Arcs would be moved by `async move`.
+                    // This is fine for a FnOnce closure but breaks FnMut (e.g. `.map(|x| ...)`)
+                    // because the same Arc can't be moved on every call.
+                    //
+                    // Fix: detect Arc captures in the task body and pre-clone them at the start
+                    // of the sync closure body so each invocation creates fresh owned clones
+                    // before the `async move` takes them.
+                    let param_names: std::collections::HashSet<&str> =
+                        params.iter().map(|p| p.name.as_str()).collect();
+                    // Collect Arc captures from the task body — works for both:
+                    //   ClosureBody::Expr(ExprKind::Task(inner))       — single-line `(x): task: expr`
+                    //   ClosureBody::Block([Stmt::Expr(ExprKind::Task(inner)), ...])  — multiline
+                    let task_inner_expr: Option<&Expr> = match body {
+                        ClosureBody::Expr(e) => {
+                            if let ExprKind::Task(inner) = &e.kind { Some(inner.as_ref()) } else { None }
+                        }
+                        ClosureBody::Block(stmts) => {
+                            // Last statement may be the task expression.
+                            stmts.last().and_then(|s| match s {
+                                Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
+                                    if let ExprKind::Task(inner) = &e.kind { Some(inner.as_ref()) } else { None }
+                                }
+                                _ => None,
+                            })
+                        }
+                    };
+                    let pre_clones: String = if let Some(inner) = task_inner_expr {
+                        let captured = collect_var_names(inner);
+                        let arc_caps: Vec<String> = captured.iter()
+                            .filter(|v| {
+                                (sub.arc_vars.contains(*v) || sub.string_arc_vars.contains(*v))
+                                    && !param_names.contains(v.as_str())
+                            })
+                            .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                            .collect();
+                        arc_caps.join(" ")
+                    } else {
+                        String::new()
+                    };
+
+                    let body_s = match body {
+                        ClosureBody::Expr(e) => {
+                            let val = sub.emit_expr(e);
+                            if *throws { format!("Ok({})", val) } else { val }
+                        }
+                        ClosureBody::Block(stmts) => {
+                            sub.fn_returns_void = false;
+                            sub.in_throws = *throws;
+                            let n = stmts.len();
+                            let inner: Vec<String> = stmts.iter().enumerate().map(|(i, s)| {
+                                if i + 1 == n {
+                                    sub.emit_stmt_inline(s)
+                                } else {
+                                    format!("{};", sub.emit_stmt_inline(s))
+                                }
+                            }).collect();
+                            inner.join(" ")
+                        }
+                    };
+                    if pre_clones.is_empty() {
+                        return format!("|{}| async move {{ {} }}", ps.join(", "), body_s);
+                    } else {
+                        // Pre-clone Arcs in a sync wrapper block, then return the async future.
+                        return format!("|{}| {{ {} async move {{ {} }} }}", ps.join(", "), pre_clones, body_s);
+                    }
+                }
+                match body {
+                    ClosureBody::Expr(e) => {
+                        let val = sub.emit_expr(e);
+                        if *throws {
+                            format!("|{}| Ok({})", ps.join(", "), val)
+                        } else {
+                            format!("|{}| {}", ps.join(", "), val)
+                        }
+                    }
+                    ClosureBody::Block(stmts) => {
+                        // Closure blocks: the last statement should be a value expression.
+                        // Clear in_throws and fn_returns_void so if/match branches emit
+                        // values without Ok()-wrapping or trailing semicolons.
+                        sub.fn_returns_void = false;
+                        sub.in_throws = false;
+                        let n = stmts.len();
+                        let inner: Vec<String> = stmts.iter().enumerate().map(|(i, s)| {
+                            if i + 1 == n {
+                                // Last stmt: emit as value (if/match need is_last=true).
+                                match s {
+                                    Stmt::If(if_s) => {
+                                        let prev_out = std::mem::take(&mut sub.out);
+                                        sub.emit_if(if_s, true);
+                                        let result = std::mem::replace(&mut sub.out, prev_out);
+                                        result.trim_end_matches('\n').to_string()
+                                    }
+                                    Stmt::Match(m_s) => {
+                                        let prev_out = std::mem::take(&mut sub.out);
+                                        sub.emit_match(m_s, true);
+                                        let result = std::mem::replace(&mut sub.out, prev_out);
+                                        result.trim_end_matches('\n').to_string()
+                                    }
+                                    _ => sub.emit_stmt_inline(s),
+                                }
+                            } else {
+                                let v = sub.emit_stmt_inline(s);
+                                format!("{};", v)
+                            }
+                        }).collect();
+                        format!("|{}| {{ {} }}", ps.join(", "), inner.join(" "))
+                    }
+                }
+            }
+
+            ExprKind::If(s) => {
+                // If-as-expression: branches must return values (no semicolons on last stmt).
+                // Use a sub-emitter with in_throws=false and fn_returns_void=false so that
+                // branch bodies don't get Ok() wrapping or void-function semicolons.
+                let mut sub = self.make_sub();
+                sub.fn_returns_void = false;
+                sub.in_throws = false; // prevent Ok() wrapping in branch bodies
+                for (i, (cond, body)) in s.branches.iter().enumerate() {
+                    let kw = if i == 0 { "if" } else { "} else if" };
+                    let cond_s = sub.emit_expr(cond);
+                    sub.line(&format!("{} {} {{", kw, cond_s));
+                    sub.indent += 1;
+                    sub.emit_body(body);
+                    sub.indent -= 1;
+                }
+                if let Some(else_body) = &s.else_body {
+                    sub.line("} else {");
+                    sub.indent += 1;
+                    sub.emit_body(else_body);
+                    sub.indent -= 1;
+                }
+                sub.line("}");
+                format!("{{\n{}}}", sub.out)
+            }
+            ExprKind::Match(s) => {
+                let mut sub = self.make_sub();
+                // Match used as an expression — arms must return values, never add `;`.
+                sub.fn_returns_void = false;
+                sub.in_throws = false;
+                sub.emit_match(s, true);
+                sub.out.trim_end().to_string()
+            }
+            ExprKind::Block(stmts) => {
+                let inner: Vec<String> = stmts.iter().map(|s| self.emit_stmt_inline(s)).collect();
+                format!("{{ {} }}", inner.join(" "))
+            }
+            ExprKind::Do(stmts) => {
+                // `do:` block — emit as a proper block using a sub-emitter so that
+                // complex statements (for loops, if, etc.) are rendered correctly.
+                // Do not inherit `in_throws` from the parent: the block's last expression
+                // is not a Result — it's the block's value, not a function return.
+                let mut sub = self.make_sub();
+                sub.in_throws = false;
+                sub.emit_body(stmts);
+                format!("{{\n{}}}", sub.out)
+            }
+            ExprKind::Loop(s) => {
+                // Use a sub-emitter so each statement in the body gets proper semicolons/formatting.
+                let mut sub = self.make_sub();
+                sub.emit_loop(s);
+                sub.out.trim_end().to_string()
+            }
+            ExprKind::Task(e) => {
+                // Arc<T> variables captured by the task body must be cloned so the outer
+                // binding remains valid after the spawn (tokio::spawn moves its captures).
+                let captured = collect_var_names(e);
+                let arc_captures: Vec<&str> = captured.iter()
+                    .filter(|v| self.arc_vars.contains(*v))
+                    .map(String::as_str)
+                    .collect();
+
+                // Emit the task body. Block bodies use a sub-emitter for proper statement
+                // formatting (semicolons, indentation). Single-expression bodies get braces.
+                let inner_s = if let ExprKind::Block(stmts) = &e.kind {
+                    let mut sub = self.make_sub();
+                    sub.in_async = true;
+                    // Spawned tasks are independent closures — they don't inherit the outer
+                    // function's `throws` context, so the last expression must NOT be wrapped
+                    // in Ok(...).
+                    sub.in_throws = false;
+                    sub.emit_body(stmts);
+                    format!("{{\n{}}}", sub.out)
+                } else {
+                    // Single expression: wrap in braces so `async move { expr }` is valid Rust.
+                    // Use a sub-emitter with in_throws=false for the same reason as block bodies:
+                    // the spawn closure is independent — it must NOT inherit the outer throws ctx.
+                    // A throws fn call inside gets `.await` (no `?`), so the block's return type
+                    // is Result<T, BoringError> — the JoinHandle wraps the Result directly,
+                    // and .value / .wait unwrap it correctly outside.
+                    let mut sub = self.make_sub();
+                    sub.in_async = true;
+                    sub.in_throws = false;
+                    format!("{{ {} }}", sub.emit_expr(e))
+                };
+
+                if arc_captures.is_empty() {
+                    if self.in_async {
+                        format!("tokio::spawn(async move {})", inner_s)
+                    } else {
+                        format!("async move {}", inner_s)
+                    }
+                } else {
+                    // Shadow each Arc variable with a clone before moving it into the block.
+                    let clones: String = arc_captures.iter()
+                        .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if self.in_async {
+                        format!("tokio::spawn({{ {} async move {} }})", clones, inner_s)
+                    } else {
+                        format!("{{ {} async move {} }}", clones, inner_s)
+                    }
+                }
+            }
+            ExprKind::JoinAll(handles) => {
+                // Standalone `join [f1, f2]` — emit tokio::join! directly
+                let exprs: Vec<String> = handles.iter().map(|e| self.emit_expr(e)).collect();
+                format!("tokio::join!({})", exprs.join(", "))
+            }
+            ExprKind::MacroCall { name, args } => self.emit_macro(name, args),
+        }
+    }
+
+    pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
+        if let ExprKind::Var(name) = &callee.kind {
+            // Type constructors (PascalCase) — emit as struct literal or ::new()
+            let is_type = name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            if is_type {
+                return self.emit_constructor(name, args);
+            }
+            // User-defined functions take priority over built-in name mappings.
+            if self.fn_sigs.contains_key(name.as_str()) {
+                let args_s = self.emit_args_coerced(name, args);
+                let base = format!("{}({})", escape_rust_keyword(name), args_s);
+                let is_task = self.in_async
+                    && self.task_fns.contains(name.as_str())
+                    && !self.stream_fns.contains(name.as_str());
+                let propagates = (self.in_try_body || self.in_throws) && self.fn_throws.contains(name.as_str());
+                // Correct ordering: async task calls must be `.await` then `?` (not `?` then `.await`).
+                return match (is_task, propagates) {
+                    (true,  true)  => format!("{}.await?", base),
+                    (true,  false) => format!("{}.await",  base),
+                    (false, true)  => format!("{}?",       base),
+                    (false, false) => base,
+                };
+            }
+            // Special case: `sleep(dur)` → `tokio::time::sleep(dur).await` in async context.
+            if name == "sleep" && args.len() == 1 && self.in_async {
+                let dur = self.emit_expr(&args[0].value);
+                return format!("tokio::time::sleep({}).await", dur);
+            }
+            // Special case: `timeout(dur, future_expr)` — the second arg must be a future.
+            // `tokio::time::timeout` takes `F: Future`, so the second arg should be the future
+            // expression directly (e.g. `tokio::time::sleep(dur)` or a closure async block).
+            // When the second arg is a `task expr` (Task node), emit the inner expression
+            // directly as a future rather than spawning. This avoids the JoinHandle type mismatch.
+            if name == "timeout" && args.len() == 2 && self.in_async {
+                let dur = self.emit_expr(&args[0].value);
+                // For `task inner` args: emit the inner expression directly (already a Future).
+                // For async method calls that end with `.await`, wrap in `async move { }` so
+                // timeout receives a `Future<Output=T>` rather than the already-awaited value.
+                // For plain futures (e.g. tokio::time::sleep): pass through as-is.
+                let future_expr = {
+                    // `timeout` needs a Future<Output=T>, not an already-awaited value.
+                    // Strip any trailing `.await` added by the expression emitter so the
+                    // future is passed un-polled to tokio::time::timeout.
+                    let raw = match &args[1].value.kind {
+                        ExprKind::Task(inner_e) => self.emit_expr(inner_e),
+                        _ => self.emit_expr(&args[1].value),
+                    };
+                    if let Some(stripped) = raw.strip_suffix(".await") {
+                        stripped.to_string()
+                    } else if let Some(stripped) = raw.strip_suffix(".await?") {
+                        stripped.to_string()
+                    } else {
+                        raw
+                    }
+                };
+                // In a cancellable function: use select! to race future vs timer vs cancel.
+                if self.in_cancellable_fn {
+                    return if self.in_throws || self.in_try_body {
+                        format!(
+                            "{{ tokio::select! {{ __boring_r = ({}) => Ok(__boring_r), _ = tokio::time::sleep({}) => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Expired) as Box<dyn BoringVal + Send + Sync>))), _ = __task_cancel.cancelled() => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Cancelled) as Box<dyn BoringVal + Send + Sync>))), }} }}?",
+                            future_expr, dur
+                        )
+                    } else {
+                        format!(
+                            "{{ tokio::select! {{ __boring_r = ({}) => Some(__boring_r), _ = tokio::time::sleep({}) => None, _ = __task_cancel.cancelled() => None, }} }}",
+                            future_expr, dur
+                        )
+                    };
+                }
+                // Always add .await — TryElse clears in_throws/in_try_body to avoid adding `?`.
+                let base = format!("tokio::time::timeout({}, {}).await", dur, future_expr);
+                // In throws/try context, propagate Elapsed errors with `?`.
+                return if self.in_throws || self.in_try_body {
+                    format!("{}?", base)
+                } else {
+                    base
+                };
+            }
+            // Task fn params: calling them produces a future that needs .await.
+            // When the param type is also `throws` (returns Future<Output=Result<T,_>>),
+            // add `?` in a throws / try context so errors propagate correctly.
+            if self.in_async && self.task_vars.contains(name.as_str()) {
+                let args_s = self.emit_args(args);
+                let call_s = format!("{}({})", escape_rust_keyword(name), args_s);
+                return if self.in_throws || self.in_try_body {
+                    format!("{}.await?", call_s)
+                } else {
+                    format!("{}.await", call_s)
+                };
+            }
+            // Non-task fn params declared as `throws` return Result — add `?` in throws context.
+            if (self.in_throws || self.in_try_body) && self.throws_fn_params.contains(name.as_str()) {
+                let args_s = self.emit_args(args);
+                let call_s = format!("{}({})", escape_rust_keyword(name), args_s);
+                return format!("{}?", call_s);
+            }
+            return self.emit_builtin_call(name, args);
+        }
+        let callee_s = self.emit_expr(callee);
+        let args_s = self.emit_args(args);
+        format!("{}({})", callee_s, args_s)
+    }
+
+    pub(crate) fn emit_generic_call(&self, callee: &Expr, type_args: &[Type], args: &[Arg]) -> String {
+        if let ExprKind::Var(name) = &callee.kind {
+            match name.as_str() {
+                "channel" => {
+                    let ty = type_args.first()
+                        .map(|t| self.emit_type(t))
+                        .unwrap_or_else(|| "_".to_string());
+                    let cap = args.first()
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "0".to_string());
+                    return format!("tokio::sync::mpsc::channel::<{}>({})", ty, cap);
+                }
+                "oneshot" => {
+                    let ty = type_args.first()
+                        .map(|t| self.emit_type(t))
+                        .unwrap_or_else(|| "_".to_string());
+                    return format!("tokio::sync::oneshot::channel::<{}>()", ty);
+                }
+                "broadcast" => {
+                    let ty = type_args.first()
+                        .map(|t| self.emit_type(t))
+                        .unwrap_or_else(|| "_".to_string());
+                    let cap = args.first()
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "16".to_string());
+                    return format!("tokio::sync::broadcast::channel::<{}>({})", ty, cap);
+                }
+                "watch" => {
+                    let ty = type_args.first()
+                        .map(|t| self.emit_type(t))
+                        .unwrap_or_else(|| "_".to_string());
+                    let init = args.first()
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "Default::default()".to_string());
+                    return format!("tokio::sync::watch::channel::<{}>({})", ty, init);
+                }
+                "timeout" => {
+                    // timeout(dur, fut) — contextual:
+                    //   cancellable fn  → select! racing future / sleep / cancel token
+                    //   throws context  → .await?     (Elapsed propagated as error)
+                    //   otherwise       → .await.ok() (returns T?)
+                    let dur = args.first()
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "Duration::from_secs(0)".to_string());
+                    let raw_fut = args.get(1)
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "async {}".to_string());
+                    // Strip trailing .await so we pass a Future, not its value.
+                    let fut = raw_fut.strip_suffix(".await")
+                        .or_else(|| raw_fut.strip_suffix(".await?"))
+                        .unwrap_or(&raw_fut)
+                        .to_string();
+                    if self.in_cancellable_fn {
+                        return if self.in_throws || self.in_try_body {
+                            format!(
+                                "{{ tokio::select! {{ __boring_r = ({}) => Ok(__boring_r), _ = tokio::time::sleep({}) => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Expired) as Box<dyn BoringVal + Send + Sync>))), _ = __task_cancel.cancelled() => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Cancelled) as Box<dyn BoringVal + Send + Sync>))), }} }}?",
+                                fut, dur
+                            )
+                        } else {
+                            format!(
+                                "{{ tokio::select! {{ __boring_r = ({}) => Some(__boring_r), _ = tokio::time::sleep({}) => None, _ = __task_cancel.cancelled() => None, }} }}",
+                                fut, dur
+                            )
+                        };
+                    }
+                    let base = format!("tokio::time::timeout({}, {}).await", dur, fut);
+                    return if self.in_throws || self.in_try_body {
+                        format!("{}?", base)
+                    } else {
+                        format!("{}.ok()", base)
+                    };
+                }
+                // from_json<T>(s) → serde_json::from_str::<T>(&s)
+                // In a throws/try context propagates the error; otherwise wraps in .ok().
+                "fromJson" => {
+                    self.uses_serde.set(true);
+                    let ty = type_args.first()
+                        .map(|t| self.emit_type(t))
+                        .unwrap_or_else(|| "_".to_string());
+                    let s = args.first()
+                        .map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "\"\"".to_string());
+                    let base = format!("serde_json::from_str::<{}>(&{})", ty, s);
+                    return if self.in_throws || self.in_try_body {
+                        format!("{}?", base)
+                    } else {
+                        format!("{}.ok()", base)
+                    };
+                }
+                _ => {}
+            }
+            // Fallback: emit as a regular call, ignore type args
+            let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
+            let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            format!("{}::<{}>({})", name, ty_args_s.join(", "), args_s.join(", "))
+        } else {
+            let callee_s = self.emit_expr(callee);
+            let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
+            let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            format!("{}::<{}>({})", callee_s, ty_args_s.join(", "), args_s.join(", "))
+        }
+    }
+
+    pub(crate) fn emit_pipe(&self, lhs: &Expr, name: &str, args: &[Arg]) -> String {
+        // If the name is a known standalone function, insert lhs as first argument.
+        // Otherwise treat it as a method call on lhs.
+        if self.fn_sigs.contains_key(name) {
+            let lhs_s = self.emit_expr(lhs);
+            let rest: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            let all_args = if rest.is_empty() {
+                lhs_s
+            } else {
+                format!("{}, {}", lhs_s, rest.join(", "))
+            };
+            let base = format!("{}({})", escape_rust_keyword(name), all_args);
+            let is_task = self.in_async && self.task_fns.contains(name);
+            let propagates = (self.in_try_body || self.in_throws) && self.fn_throws.contains(name);
+            match (is_task, propagates) {
+                (true,  true)  => format!("{}.await?", base),
+                (true,  false) => format!("{}.await",  base),
+                (false, true)  => format!("{}?",       base),
+                (false, false) => base,
+            }
+        } else {
+            // Method call: delegate directly to emit_method_call with the real lhs expr.
+            self.emit_method_call(lhs, name, args)
+        }
+    }
+
+    pub(crate) fn emit_constructor(&self, name: &str, args: &[Arg]) -> String {
+        let result = self.emit_constructor_inner(name, args);
+        // Check if the current function returns Box<Name> — if so, wrap the constructor result.
+        let needs_box = match &self.fn_return_ty {
+            Some(Type::Qualified(inner, OwnerQual::Owned)) => {
+                matches!(inner.as_ref(), Type::Named(n) if n == name)
+            }
+            _ => false,
+        };
+        if needs_box {
+            format!("Box::new({})", result)
+        } else {
+            result
+        }
+    }
+
+    pub(crate) fn emit_constructor_inner(&self, name: &str, args: &[Arg]) -> String {
+        // Result constructors: `Ok(v)` / `Err(e)` are Rust built-ins, not struct types.
+        if name == "Ok" || name == "Err" {
+            let args_s = self.emit_args(args);
+            return format!("{}({})", name, args_s);
+        }
+        // Non-fn type alias resolving to a qualified type: construct via the alias.
+        // e.g. `AP(3, 4)` where `AP = APoint'` (Box<APoint>) → `Box::new(APoint::new(3, 4))`.
+        // e.g. `ANode(99)` where `ANode = ATree'auto` (Rc<ATree>) → `Rc::new(ATree::new(99))`.
+        if let Some(resolved) = self.non_fn_type_aliases.get(name) {
+            let resolved = resolved.clone();
+            match &resolved {
+                Type::Qualified(inner, OwnerQual::Owned) => {
+                    if let Type::Named(inner_name) = inner.as_ref() {
+                        let inner_s = self.emit_constructor_inner(inner_name, args);
+                        return format!("Box::new({})", inner_s);
+                    }
+                }
+                Type::Qualified(inner, OwnerQual::Auto) => {
+                    if let Type::Named(inner_name) = inner.as_ref() {
+                        let inner_s = self.emit_constructor_inner(inner_name, args);
+                        return format!("Rc::new({})", inner_s);
+                    }
+                }
+                Type::Qualified(inner, OwnerQual::Task) => {
+                    if let Type::Named(inner_name) = inner.as_ref() {
+                        let inner_s = self.emit_constructor_inner(inner_name, args);
+                        return format!("Arc::new({})", inner_s);
+                    }
+                }
+                Type::Qualified(inner, OwnerQual::Stack | OwnerQual::Copy) => {
+                    if let Type::Named(inner_name) = inner.as_ref() {
+                        return self.emit_constructor_inner(inner_name, args);
+                    }
+                }
+                Type::Named(inner_name) => {
+                    // Simple named alias (e.g. `ADog2 = ADog`) → emit inner constructor.
+                    let inner_name = inner_name.clone();
+                    return self.emit_constructor_inner(&inner_name, args);
+                }
+                _ => {}
+            }
+        }
+        // Newtype wrapper: `UserId(42)` → `UserId(42)` (tuple struct constructor).
+        if self.newtype_types.contains(name) {
+            let arg_s = if let Some(a) = args.first() {
+                // String newtypes have inner type `String`; emit_expr_owned converts
+                // string literals from `&str` → `"...".to_string()`.
+                let inner = self.newtype_inner.get(name).cloned().unwrap_or_default();
+                if inner == "String" {
+                    // Newtype inner is String (owned); convert literals directly without Arc.
+                    match &a.value.kind {
+                        ExprKind::Str(s) => format!("\"{}\".to_string()", escape_str(s)),
+                        ExprKind::StringInterp(_) => self.emit_expr(&a.value),
+                        _ => {
+                            // Variable or expression: may be Arc<str> — unwrap to String.
+                            let raw = self.emit_expr(&a.value);
+                            format!("(*{}).clone()", raw)
+                        }
+                    }
+                } else {
+                    self.emit_expr(&a.value)
+                }
+            } else {
+                "Default::default()".to_string()
+            };
+            return format!("{}({})", name, arg_s);
+        }
+        if args.is_empty() {
+            // Stdlib collection constructors need turbofish to avoid "type annotations needed".
+            match name {
+                "HashSet" => return "HashSet::<i64>::new()".into(),
+                "HashMap" => return "HashMap::<Arc<str>, i64>::new()".into(),
+                _ => {}
+            }
+            // No-field struct: emit `Struct {}` instead of `Struct::new()`.
+            if self.struct_fields.get(name).map(|f| f.is_empty()).unwrap_or(false) {
+                return format!("{} {{}}", name);
+            }
+            // If the struct has an init body, call ::new() — filling in defaults if available.
+            if self.struct_has_init_body.contains(name) {
+                if let Some(defaults) = self.struct_init_defaults.get(name).cloned() {
+                    let def_args: Vec<String> = defaults.iter().filter_map(|d| d.clone()).collect();
+                    return format!("{}::new({})", name, def_args.join(", "));
+                }
+                return format!("{}::new()", name);
+            }
+            // Struct has fields but no init body — use struct literal with defaults.
+            if let Some(fields) = self.struct_fields.get(name).cloned() {
+                if !fields.is_empty() {
+                    let init_defaults = self.struct_init_defaults.get(name).cloned().unwrap_or_default();
+                    let lit_fields: Vec<String> = fields.iter().enumerate()
+                        .filter_map(|(i, (fname, fty))| {
+                            let key = format!("{}::{}", name, fname);
+                            if let Some((is_copy, _, default_val)) = self.transient_fields.get(&key) {
+                                let init = if *is_copy {
+                                    format!("std::cell::Cell::new({})", default_val)
+                                } else {
+                                    format!("std::cell::RefCell::new({})", default_val)
+                                };
+                                Some(format!("{}: {}", fname, init))
+                            } else if let Some(Some(def)) = init_defaults.get(i) {
+                                Some(format!("{}: {}", fname, def))
+                            } else if matches!(fty, Type::Optional(_)) {
+                                Some(format!("{}: None", fname))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if lit_fields.len() == fields.len() || !lit_fields.is_empty() {
+                        return format!("{} {{ {} }}", name, lit_fields.join(", "));
+                    }
+                }
+            }
+            return format!("{}::new()", name);
+        }
+        // Struct spread: `Name(..base, field = override, ...)` → `Name { field: override, ..base }`
+        // Rust struct update syntax requires the `..base` to be last.
+        let has_spread = args.iter().any(|a| a.spread);
+        if has_spread {
+            let spread_exprs: Vec<String> = args.iter()
+                .filter(|a| a.spread)
+                .map(|a| self.emit_expr(&a.value))
+                .collect();
+            let labeled_fields: Vec<String> = args.iter()
+                .filter(|a| a.label.is_some())
+                .map(|a| {
+                    let label = a.label.as_ref().unwrap();
+                    let field_ty = self.struct_fields.get(name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == label))
+                        .map(|(_, ty)| ty);
+                    let val = self.emit_let_value(field_ty, &a.value);
+                    format!("{}: {}", label, val)
+                })
+                .collect();
+            // Combine: explicit fields first, then spread bases.
+            // Use `.clone()` so that spreading the same base twice doesn't
+            // move it on the first use and leave it inaccessible on the second.
+            let mut parts = labeled_fields;
+            parts.extend(spread_exprs.iter().map(|e| format!("..{}.clone()", e)));
+            return format!("{} {{ {} }}", name, parts.join(", "));
+        }
+
+        // If all args are labeled → struct literal { field: value, ... }
+        let all_labeled = args.iter().all(|a| a.label.is_some());
+        if all_labeled {
+            let mut fields: Vec<String> = args.iter()
+                .map(|a| {
+                    let label = a.label.as_ref().unwrap();
+                    // Look up declared field type for proper Optional/string coercion
+                    let field_ty = self.struct_fields.get(name)
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == label))
+                        .map(|(_, ty)| ty);
+                    let mutex_key = format!("{}::{}", name, label);
+                    let val = if self.struct_mutex_fields.contains(&mutex_key) {
+                        // var T'task field: wrap provided value in Arc<Mutex<T>>
+                        let inner_ty = field_ty.and_then(Self::mutex_inner);
+                        let raw = self.emit_let_value(inner_ty, &a.value);
+                        format!("Arc::new(tokio::sync::Mutex::new({}))", raw)
+                    } else {
+                        self.emit_let_value(field_ty, &a.value)
+                    };
+                    format!("{}: {}", label, val)
+                })
+                .collect();
+            // Append transient fields that weren't provided by the user.
+            let provided: std::collections::HashSet<&str> = args.iter()
+                .filter_map(|a| a.label.as_deref())
+                .collect();
+            for (key, (is_copy, _, default_val)) in &self.transient_fields {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        let init = if *is_copy {
+                            format!("std::cell::Cell::new({})", default_val)
+                        } else {
+                            format!("std::cell::RefCell::new({})", default_val)
+                        };
+                        fields.push(format!("{}: {}", field_name, init));
+                    }
+                }
+            }
+            // Append var T'task fields missing from the call with a Mutex-wrapped default.
+            for key in &self.struct_mutex_fields {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        fields.push(format!("{}: Arc::new(tokio::sync::Mutex::new(Default::default()))", field_name));
+                    }
+                }
+            }
+            // Append regular optional/T'auto/T'weak fields not provided — default to None.
+            if let Some(known_fields) = self.struct_fields.get(name).cloned() {
+                for (fname, fty) in &known_fields {
+                    if !provided.contains(fname.as_str()) {
+                        // Skip transient and mutex fields already handled above.
+                        let tkey = format!("{}::{}", name, fname);
+                        if self.transient_fields.contains_key(&tkey)
+                            || self.struct_mutex_fields.contains(&tkey)
+                        {
+                            continue;
+                        }
+                        // Optional fields (including Optional<Qualified<...>>) default to None.
+                        if matches!(fty, Type::Optional(_)) {
+                            fields.push(format!("{}: None", fname));
+                        }
+                    }
+                }
+            }
+            format!("{} {{ {} }}", name, fields.join(", "))
+        } else {
+            // Positional args: if struct fields are known and no explicit new() exists
+            // (e.g. generic structs), emit a struct literal using fields in declaration order.
+            // Otherwise fall back to ::new(args).
+
+            // If the struct has an init with a body, route to ::new(args) — the body may
+            // set computed fields (e.g. `self.area = 3.14 * r * r`) that can't be in a literal.
+            if self.struct_has_init_body.contains(name) {
+                // Fill in default args for any omitted trailing params.
+                let mut all_args: Vec<String> = args.iter()
+                    .map(|a| self.emit_expr(&a.value))
+                    .collect();
+                if let Some(defaults) = self.struct_init_defaults.get(name).cloned() {
+                    for i in all_args.len()..defaults.len() {
+                        if let Some(def) = &defaults[i] {
+                            all_args.push(def.clone());
+                        }
+                    }
+                }
+                let args_s = all_args.join(", ");
+                return format!("{}::new({})", name, args_s);
+            }
+
+            if let Some(fields) = self.struct_fields.get(name) {
+                if !fields.is_empty() && args.len() <= fields.len() {
+                    // Check if the struct has an init (new() function); if so, use ::new().
+                    // Heuristic: if all args are positional and fields are known, use struct literal.
+                    let lit_fields: Vec<String> = args.iter().enumerate()
+                        .map(|(i, a)| {
+                            let (fname, fty) = &fields[i];
+                            // `name: expr` in Boring struct call is parsed as a single-param
+                            // closure `|name| expr` when `:` is used. If the closure param
+                            // matches the field name, unwrap and treat as a labeled value.
+                            let effective_value = if let ExprKind::Closure(params, _, body, _, _) = &a.value.kind {
+                                if params.len() == 1 && params[0].name == *fname {
+                                    match body {
+                                        ClosureBody::Expr(e) => e.as_ref(),
+                                        _ => &a.value,
+                                    }
+                                } else { &a.value }
+                            } else { &a.value };
+                            let val = self.emit_let_value(Some(fty), effective_value);
+                            format!("{}: {}", fname, val)
+                        })
+                        .collect();
+                    // Fill missing fields with defaults if any.
+                    // Priority: init param defaults > transient Cell defaults > Optional → None.
+                    let init_defaults = self.struct_init_defaults.get(name).cloned().unwrap_or_default();
+                    let extra_fields: Vec<String> = fields.iter().skip(args.len()).enumerate()
+                        .filter_map(|(offset_i, (fname, fty))| {
+                            let param_idx = args.len() + offset_i;
+                            let key = format!("{}::{}", name, fname);
+                            if let Some((is_copy, _, default_val)) = self.transient_fields.get(&key) {
+                                let init = if *is_copy {
+                                    format!("std::cell::Cell::new({})", default_val)
+                                } else {
+                                    format!("std::cell::RefCell::new({})", default_val)
+                                };
+                                Some(format!("{}: {}", fname, init))
+                            } else if let Some(Some(def)) = init_defaults.get(param_idx) {
+                                // Init param had an explicit default value.
+                                Some(format!("{}: {}", fname, def))
+                            } else if matches!(fty, Type::Optional(_)) {
+                                Some(format!("{}: None", fname))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let mut all_fields = lit_fields;
+                    all_fields.extend(extra_fields);
+                    return format!("{} {{ {} }}", name, all_fields.join(", "));
+                }
+            }
+            // Fallback: call ::new(args) (requires a new() function to exist)
+            let args_s = self.emit_args(args);
+            // Semaphore::new and similar tokio primitives expect usize, but Boring's
+            // `uint` maps to u64. Cast the first argument to usize automatically.
+            if matches!(name, "Semaphore" | "RwLock") {
+                return format!("{}::new({} as usize)", name, args_s);
+            }
+            format!("{}::new({})", name, args_s)
+        }
+    }
+
+    pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {
+        match name {
+            "print" | "println" => {
+                self.emit_print_call(true, args)
+            }
+            "write" | "eprint" => {
+                self.emit_print_call(false, args)
+            }
+            "format" => {
+                self.emit_print_call_named("format", args)
+            }
+            // Log-level builtins: map to the `log` crate macros.
+            // Requires `log = "0.4"` in Cargo.toml.
+            "error" | "warn" | "info" | "debug" | "trace" => {
+                self.uses_log.set(true);
+                self.emit_print_call_named(&format!("log::{}", name), args)
+            }
+            "assert" => {
+                if args.len() == 1 {
+                    format!("assert!({})", self.emit_expr(&args[0].value))
+                } else {
+                    let cond = self.emit_expr(&args[0].value);
+                    let msg = self.emit_expr(&args[1].value);
+                    format!("assert!({}, \"{{:?}}\", {})", cond, msg)
+                }
+            }
+            "assert_eq" => {
+                let a = self.emit_expr(&args[0].value);
+                let b = self.emit_expr(&args[1].value);
+                if args.len() > 2 {
+                    let msg = self.emit_expr(&args[2].value);
+                    format!("assert_eq!({}, {}, \"{{:?}}\", {})", a, b, msg)
+                } else {
+                    format!("assert_eq!({}, {})", a, b)
+                }
+            }
+            "assert_neq" => {
+                let a = self.emit_expr(&args[0].value);
+                let b = self.emit_expr(&args[1].value);
+                format!("assert_ne!({}, {})", a, b)
+            }
+            "panic" => {
+                if args.is_empty() {
+                    "panic!(\"explicit panic\")".into()
+                } else {
+                    format!("panic!(\"{{:?}}\", {})", self.emit_expr(&args[0].value))
+                }
+            }
+            "len" => {
+                // For actor (Arc<Mutex<T>>) variables, lock first.
+                if let Some(first) = args.first() {
+                    if let ExprKind::Var(v) = &first.value.kind {
+                        if self.var_mutex_types.contains(v.as_str()) && self.in_async {
+                            return format!("{}.lock().await.len()", v);
+                        }
+                    }
+                }
+                let a = self.emit_expr(&args[0].value);
+                format!("{}.len()", a)
+            }
+            "int"   => format!("({} as i64)", self.emit_expr(&args[0].value)),
+            "uint"  => format!("({} as u64)", self.emit_expr(&args[0].value)),
+            "float" => format!("({} as f64)", self.emit_expr(&args[0].value)),
+            "str"   => {
+                // Single non-string arg → conversion.
+                // String first arg (with optional extra args) → format like format().
+                if let Some(first) = args.first() {
+                    if matches!(&first.value.kind, ExprKind::StringInterp(_)) || args.len() >= 2 {
+                        return self.emit_print_call_named("format", args);
+                    }
+                }
+                format!("{}.to_string()", self.emit_expr(&args[0].value))
+            }
+            // Math functions: boring global → Rust method on f64.
+            // Cast argument to f64 to avoid "ambiguous numeric type" errors on literals.
+            "sqrt"       => format!("({} as f64).sqrt()", self.emit_expr(&args[0].value)),
+            "abs"        => format!("({} as f64).abs()", self.emit_expr(&args[0].value)),
+            "floor"      => format!("({} as f64).floor()", self.emit_expr(&args[0].value)),
+            "ceil"       => format!("({} as f64).ceil()", self.emit_expr(&args[0].value)),
+            "round"      => format!("({} as f64).round()", self.emit_expr(&args[0].value)),
+            "sin"        => format!("({} as f64).sin()", self.emit_expr(&args[0].value)),
+            "cos"        => format!("({} as f64).cos()", self.emit_expr(&args[0].value)),
+            "tan"        => format!("({} as f64).tan()", self.emit_expr(&args[0].value)),
+            "asin"       => format!("({} as f64).asin()", self.emit_expr(&args[0].value)),
+            "acos"       => format!("({} as f64).acos()", self.emit_expr(&args[0].value)),
+            "atan"       => format!("({} as f64).atan()", self.emit_expr(&args[0].value)),
+            "atan2"      => {
+                let y = self.emit_expr(&args[0].value);
+                let x = self.emit_expr(&args[1].value);
+                format!("({} as f64).atan2({} as f64)", y, x)
+            }
+            "exp"        => format!("({} as f64).exp()", self.emit_expr(&args[0].value)),
+            "log"        => format!("({} as f64).ln()", self.emit_expr(&args[0].value)),
+            "log2"       => format!("({} as f64).log2()", self.emit_expr(&args[0].value)),
+            "log10"      => format!("({} as f64).log10()", self.emit_expr(&args[0].value)),
+            "pow"        => {
+                let b = self.emit_expr(&args[0].value);
+                let e = self.emit_expr(&args[1].value);
+                format!("({} as f64).powf({} as f64)", b, e)
+            }
+            "min"        => {
+                if args.len() == 1 {
+                    format!("{}.iter().cloned().reduce(f64::min).unwrap()", self.emit_expr(&args[0].value))
+                } else {
+                    let a = self.emit_expr(&args[0].value);
+                    let b = self.emit_expr(&args[1].value);
+                    format!("({}).min({})", a, b)
+                }
+            }
+            "max"        => {
+                if args.len() == 1 {
+                    format!("{}.iter().cloned().reduce(f64::max).unwrap()", self.emit_expr(&args[0].value))
+                } else {
+                    let a = self.emit_expr(&args[0].value);
+                    let b = self.emit_expr(&args[1].value);
+                    format!("({}).max({})", a, b)
+                }
+            }
+            "clamp"      => {
+                let x  = self.emit_expr(&args[0].value);
+                let lo = self.emit_expr(&args[1].value);
+                let hi = self.emit_expr(&args[2].value);
+                format!("({}).clamp({}, {})", x, lo, hi)
+            }
+            "sign"       => format!("({}).signum()", self.emit_expr(&args[0].value)),
+            "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
+            "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
+            "readLine"   => {
+                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).unwrap(); __line.trim().to_string() }".into()
+            }
+            // drop(x) — explicitly releases ownership, maps directly to Rust's drop()
+            "drop" => {
+                let a = self.emit_expr(&args[0].value);
+                format!("drop({})", a)
+            }
+            // json(v) → serde_json::to_string(&v).unwrap_or_default()
+            "json" => {
+                self.uses_serde.set(true);
+                let a = self.emit_expr(&args[0].value);
+                format!("serde_json::to_string(&{}).unwrap_or_default()", a)
+            }
+            _ => {
+                // Look up registered signature for optional-arg coercion
+                let args_s = self.emit_args_coerced(name, args);
+                format!("{}({})", escape_rust_keyword(name), args_s)
+            }
+        }
+    }
+
+    pub(crate) fn emit_print_call(&self, newline: bool, args: &[Arg]) -> String {
+        let macro_name = if newline { "println" } else { "print" };
+        self.emit_print_call_named(macro_name, args)
+    }
+
+    pub(crate) fn emit_print_call_named(&self, macro_name: &str, args: &[Arg]) -> String {
+        if args.is_empty() {
+            return format!("{}!()", macro_name);
+        }
+        // Positional substitution: `print "..{}..", expr, expr2`
+        // First arg is a string template where `{}` holes bind to extra args in order.
+        // Inline `{name}` holes are interleaved naturally (left-to-right).
+        if args.len() >= 2 {
+            if let ExprKind::StringInterp(segs) = &args[0].value.kind {
+                let positional: Vec<String> = args[1..].iter()
+                    .map(|a| self.emit_expr(&a.value))
+                    .collect();
+                let (fmt, combined) = self.build_positional_format(segs, &positional);
+                return if combined.is_empty() {
+                    format!("{}!(\"{}\")", macro_name, fmt)
+                } else {
+                    format!("{}!(\"{}\", {})", macro_name, fmt, combined.join(", "))
+                };
+            }
+        }
+        // If the single arg is a string interp, unfold it
+        if args.len() == 1 {
+            if let ExprKind::StringInterp(segs) = &args[0].value.kind {
+                let (fmt, extra_args) = self.build_format_string(segs);
+                return if extra_args.is_empty() {
+                    format!("{}!(\"{}\")", macro_name, fmt)
+                } else {
+                    format!("{}!(\"{}\", {})", macro_name, fmt, extra_args.join(", "))
+                };
+            }
+            if let ExprKind::Str(s) = &args[0].value.kind {
+                return format!("{}!(\"{}\")", macro_name, escape_str(s));
+            }
+        }
+        // General case: println!("{}", arg) or println!("{} {}", a, b)
+        // Vec collections use BoringFmt(&v) with "{}" so strings show without debug quotes.
+        // HashMap/HashSet fall back to "{:?}" since they have no Display impl.
+        // Optional values are unwrapped: `bm1` (Option<T>) → `bm1.as_ref().map_or(...)`.
+        let args_with_specs: Vec<(String, &str)> = args.iter().map(|a| {
+            let is_optional_var = matches!(&a.value.kind,
+                ExprKind::Var(n) if self.optional_vars.contains(n.as_str()));
+            // Also detect function calls that return Optional types.
+            let is_optional_call = !is_optional_var && matches!(&a.value.kind,
+                ExprKind::Call(callee, _) | ExprKind::GenericCall(callee, _, _)
+                if matches!(&callee.kind, ExprKind::Var(n)
+                    if matches!(self.fn_return_types.get(n.as_str()), Some(Type::Optional(_)))));
+            let is_optional = is_optional_var || is_optional_call;
+            let expr_s = if is_optional {
+                let v = self.emit_expr(&a.value);
+                format!("{}.as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", v)
+            } else {
+                self.emit_expr(&a.value)
+            };
+            if is_optional {
+                return (expr_s, "{}");
+            }
+            let is_vec_var = matches!(&a.value.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()));
+            let is_col = looks_like_collection(&expr_s)
+                || matches!(&a.value.kind, ExprKind::Var(n) if self.collection_vars.contains(n.as_str()))
+                || matches!(&a.value.kind, ExprKind::Array(_))
+                || self.expr_returns_collection(&a.value);
+            let (expr_s, spec) = boring_vec_fmt(expr_s, is_col, is_vec_var);
+            (expr_s, spec)
+        }).collect();
+        let placeholders: String = args_with_specs.iter().map(|(_, s)| *s).collect::<Vec<_>>().join(" ");
+        let args_s: Vec<String> = args_with_specs.into_iter().map(|(e, _)| e).collect();
+        format!("{}!(\"{}\", {})", macro_name, placeholders, args_s.join(", "))
+    }
+
+}

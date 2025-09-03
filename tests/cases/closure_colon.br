@@ -1,0 +1,38 @@
+# Colon closure syntax tests
+
+# w: body  (named param, no parens)
+let double = n: n * 2
+print double(5)
+
+# filter with named param and field access
+let words = ["the", "quick", "brown", "fox", "jumps"]
+
+let long_words = words.filter(w: w.length > 3)
+print long_words
+
+# :field  (implicit param, field access only)
+let lengths = words.map(:length)
+print lengths
+
+# :field op expr  (implicit param, binary continuation)
+let filtered = words.filter(:length > 3)
+print filtered
+
+# :method()  (implicit param, method call)
+let uppered = words.map(:upper())
+print uppered
+
+# chaining with colon closures via pipe
+let result = words
+    |> filter(w: w.length > 3)
+    |> map(w: w.upper())
+print result
+
+# multi-param still uses parens
+let nums = [1, 2, 3, 4, 5]
+let total = nums.reduce(0, (acc, n): acc + n)
+print total
+
+# :field op expr on strings
+let long_filtered = words.filter(:length == 5)
+print long_filtered

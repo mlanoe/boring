@@ -1,0 +1,33 @@
+# Decimal integers
+let million = 1_000_000
+let billion = 1_000_000_000
+print million
+print billion
+
+# Floats
+let pi = 3.141_592_653
+let avogadro = 6.022_140_76
+print pi
+print avogadro
+
+# Hex
+let color = 0xFF_AA_00
+let max16 = 0xFF_FF
+print color
+print max16
+
+# Binary
+let byte = 0b1111_0000
+let nibble = 0b0000_1111
+print byte
+print nibble
+
+# Octal
+let perm = 0o755
+let perm2 = 0o7_5_5
+print perm
+print perm2
+
+# Arithmetic still works
+let x = 1_0 + 2_0
+print x

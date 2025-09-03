@@ -1,0 +1,39 @@
+def i32 add_i32(i32 x, i32 y):
+    return x + y
+print add_i32(10, 32)
+
+def u64 double_u64(u64 x):
+    return x * 2
+print double_u64(21)
+
+def f32 half_f32(f32 x):
+    return x / 2.0
+print half_f32(3.14)
+
+let usize nu = 10
+let usize ru = nu + 5
+print ru
+
+let isize ni = -10
+let isize ri = ni + 5
+print ri
+
+let i8 a = 1
+let i16 b = 2
+let i32 c = 3
+let i64 d = 4
+let isize e = 5
+print a + b + c + d + e
+
+let u8 ua = 1
+let u16 ub = 2
+let u32 uc = 3
+let u64 ud = 4
+let usize ue = 5
+print ua + ub + uc + ud + ue
+
+let int xint = 42
+print xint + 1
+
+let string sname = "Alice"
+print "Hello, " + sname

@@ -1,0 +1,46 @@
+# if / else
+let x = 5
+if x > 3:
+    print "big"
+else:
+    print "small"
+
+if x == 5: print "five"
+
+let y = if x > 0: "pos" else "neg"
+print y
+
+# while
+var i = 0
+while i < 3:
+    print i
+    i = i + 1
+
+# for over array
+for n in [10, 20, 30]:
+    print n
+
+# for over range
+var rsum = 0
+for k in 1..=5:
+    rsum = rsum + k
+print rsum
+
+# break and continue
+var acc = 0
+for v in 1..=10:
+    if v % 2 == 0: continue
+    if v > 7: break
+    acc = acc + v
+print acc
+
+# elif chain
+let a = 3
+if a == 1:
+    print "one"
+elif a == 2:
+    print "two"
+elif a == 3:
+    print "three"
+else:
+    print "other"

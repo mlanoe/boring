@@ -1,0 +1,4 @@
+# Tell GitHub Linguist to highlight .br files as Swift (closest approximation).
+# Boring is inspired by Swift and Python; Swift gives the best keyword coverage
+# (let, var, guard, struct, throws, defer, nil, etc.).
+*.br linguist-language=Swift

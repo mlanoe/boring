@@ -1,0 +1,45 @@
+# Struct spread — Config(..base, field = override)
+
+struct Config:
+    init(pub string host, pub int port, pub bool tls)
+
+let defaults = Config(host = "localhost", port = 8080, tls = false)
+
+# spread all fields, override two
+let prod = Config(..defaults, host = "prod.example.com", tls = true)
+print prod.host
+print prod.port
+print prod.tls
+
+# spread all fields, override one
+let staging = Config(..defaults, port = 9090)
+print staging.host
+print staging.port
+print staging.tls
+
+# pure spread — identical copy
+let copy = Config(..defaults)
+print copy.host
+print copy.port
+print copy.tls
+
+# source object unchanged
+print defaults.host
+print defaults.port
+print defaults.tls
+
+# spread from a derived value
+let base2 = Config(..prod, port = 443)
+print base2.host
+print base2.port
+print base2.tls
+
+# struct with default fields (no init)
+struct Point:
+    float x
+    float y
+
+let origin = Point(x = 0.0, y = 0.0)
+let shifted = Point(..origin, x = 5.0)
+print shifted.x
+print shifted.y

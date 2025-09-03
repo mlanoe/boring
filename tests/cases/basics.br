@@ -1,0 +1,59 @@
+let x = 42
+let s = "hello"
+let f = 3.14
+let b = true
+print x
+print s
+print f
+print b
+print "{1 + 2}"
+print "{10 / 3}"
+print "{10 % 3}"
+print "hello " + "world"
+print "x = {x}"
+print "{0 - x}"
+print "{x * 2}"
+
+# return type ok
+def int bgood():
+    42
+let bg = bgood()
+print bg
+
+# return type optional nil ok
+def int? bmaybe(bool flag):
+    if flag: 1 else nil
+let bm1 = bmaybe(true)
+let bm2 = bmaybe(false)
+print bm1
+let bm2r = bm2 else 0
+print bm2r
+
+# param type ok
+def int bdouble(int n):
+    n * 2
+print bdouble(21)
+
+# is type check
+struct BDog:
+    string name
+
+let bd = BDog(name = "Rex")
+print bd is BDog
+
+# is nil
+let bx = nil
+let by = 42
+print bx is nil
+print by is not nil
+
+# main basic — top-level scripting mode
+let bres = 21 * 2
+print bres
+
+# uint coercion
+def uint pass_uint(uint n):
+    n
+
+let bu = pass_uint(7)
+print bu

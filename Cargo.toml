@@ -1,0 +1,23 @@
+[package]
+name        = "boring"
+version     = "0.1.0"
+edition     = "2021"
+description = "A language that compiles to Rust — clean syntax, zero-cost abstractions, no boilerplate"
+license     = "GPL-3.0"
+repository  = "https://github.com/mlanoe/boring"
+homepage    = "https://github.com/mlanoe/boring"
+readme      = "README.md"
+keywords    = ["language", "compiler", "transpiler", "rust", "boring"]
+categories  = ["compilers", "command-line-utilities"]
+
+[[bin]]
+name = "boring"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
+
+[[example]]
+name = "hello"
+path = "examples/hello.rs"

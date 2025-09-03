@@ -1,0 +1,24 @@
+# Bare Some/None in match patterns
+
+let a = 42
+let b = nil
+
+# Bare Some: matches any non-nil optional
+match a:
+    Some: print "a has value"
+    None: print "a is nil"
+
+match b:
+    Some: print "b has value"
+    None: print "b is nil"
+
+# Some(x): binds the value
+match a:
+    Some(v): print v
+    None: print "nil"
+
+# none pattern
+let c = nil
+match c:
+    none: print "none matched"
+    some: print "some matched"

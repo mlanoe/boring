@@ -1,0 +1,54 @@
+# ?= — assign only if nil (nil-coalescing assignment)
+
+# nil → assigns
+var x = nil
+x ?= 42
+print x
+
+# non-nil → keeps original
+var y = 10
+y ?= 99
+print y
+
+# chained: only first ?= takes effect
+var name = nil
+name ?= "Alice"
+name ?= "Bob"
+print name
+
+# rhs is an expression
+var r = nil
+r ?= 3 + 4
+print r
+
+# on optional field
+struct Config:
+    var string? host = nil
+    var int?    port = nil
+
+    def void set_defaults():
+        host ?= "localhost"
+        port ?= 8080
+
+var cfg = Config()
+cfg.set_defaults()
+print (cfg.host else "?")
+print (cfg.port else 0)
+
+# second call does nothing (already set)
+cfg.host = "example.com"
+cfg.set_defaults()
+print (cfg.host else "?")    # example.com — not overwritten
+
+# ?= with transient field (lazy cache)
+struct TextStats:
+    string text
+    transient int? _length = nil
+
+    req int length():
+        _length ?= text.length
+        _length else 0
+
+let s = TextStats(text = "hello, world")
+print s.length
+print s.length

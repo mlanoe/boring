@@ -1,0 +1,27 @@
+stream int count_up(int n):
+    var i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+stream int squares(int n):
+    for i in 1..=n:
+        yield i * i
+
+for v in count_up(4):
+    print v
+
+for v in squares(5):
+    print v
+
+stream string greet_msgs(string name):
+    yield "Hello, " + name + "!"
+    yield "Goodbye, " + name + "!"
+
+stream string greet_all([string] names):
+    for name in names:
+        for msg in greet_msgs(name):
+            yield msg
+
+for msg in greet_all(["Alice", "Bob"]):
+    print msg

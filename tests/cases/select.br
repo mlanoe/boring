@@ -1,0 +1,27 @@
+# select: statement — tokio::select! wrapper
+task def void run_select():
+    let tx, rx = channel<string>(4)
+
+    task:
+        tx.send("hello")
+        tx.send("world")
+        drop(tx)
+
+    loop:
+        select:
+            msg = rx.recv():
+                print msg
+                if msg == "world": break
+            after Duration.from_millis(100):
+                print "timeout"
+                break
+
+task def void sleep_forever():
+    sleep(Duration.from_secs(999999))
+
+task def void run_after():
+    select:
+        _ = sleep_forever():
+            print "done"
+        after Duration.from_secs(1):
+            print "timed out"

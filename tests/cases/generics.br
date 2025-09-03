@@ -1,0 +1,107 @@
+def T identity(T x):
+    x
+
+print identity(42)
+print identity("hello")
+print identity(true)
+
+def (V, T) swap(T a, V b):
+    (b, a)
+
+let t = swap(1, "x")
+print t.0
+print t.1
+
+struct Pair<T, V>:
+    T left
+    V right
+
+let p = Pair(10, "hello")
+print p.left
+print p.right
+
+struct Box<T>:
+    var T value
+
+    def T get():
+        self.value
+
+    def void set(T v):
+        self.value = v
+
+var b = Box(42)
+print b.get()
+b.set(99)
+print b.get()
+
+trait Printable:
+    req string describe()
+
+struct Animal:
+    string name
+
+    req string describe():
+        self.name
+
+def string show<T as Printable>(T item):
+    item.describe()
+
+let a = Animal("cat")
+print show(a)
+
+trait Greetable:
+    req string greet()
+
+struct Person:
+    string name
+
+    req string describe():
+        self.name
+
+    req string greet():
+        "Hello from {self.name}!"
+
+def string show_and_greet<T as Printable + Greetable>(T item):
+    item.describe()
+
+let pr = Person("Alice")
+print show_and_greet(pr)
+
+enum Result<T, E>:
+    Ok(T)
+    Err(E)
+
+let r1 = Result.Ok(42)
+let r2 = Result.Err("oops")
+match r1:
+    Ok(v): print v
+    _: print "?"
+match r2:
+    Err(e): print e
+    _: print "?"
+
+def T unwrap_or(T? opt, T default):
+    opt else default
+
+print unwrap_or(nil, 42)
+print unwrap_or(7, 42)
+
+def T id(T x):
+    x
+
+print id(99)
+print id("hi")
+print id(false)
+
+def (T, V) make_pair(T a, V b):
+    (a, b)
+
+let tp = make_pair(1, "x")
+print tp.0
+print tp.1
+
+def T? wrap(T x):
+    x
+
+print wrap(7)
+print wrap("z")

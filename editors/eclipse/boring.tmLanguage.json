@@ -1,0 +1,132 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Boring",
+  "scopeName": "source.boring",
+  "fileTypes": [".br"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#function-definition" },
+    { "include": "#type-definition" },
+    { "include": "#keywords" },
+    { "include": "#builtin-types" },
+    { "include": "#attribute" },
+    { "include": "#ownership-qualifier" },
+    { "include": "#builtin-functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.hash.boring",
+      "match": "#.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.boring",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.boring",
+          "match": "\\\\[ntr\\\\\"0]|\\\\u\\{[0-9A-Fa-f]+\\}"
+        },
+        {
+          "name": "meta.interpolation.boring",
+          "begin": "\\{(?!\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.interpolation.begin.boring" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.interpolation.end.boring" }
+          },
+          "patterns": [
+            { "include": "#comment" },
+            { "include": "#string" },
+            { "include": "#number" },
+            { "include": "#keywords" },
+            { "include": "#builtin-types" },
+            { "include": "#attribute" },
+            { "include": "#ownership-qualifier" },
+            { "include": "#builtin-functions" },
+            { "include": "#operators" }
+          ]
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.boring",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.boring",
+          "match": "\\b(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)\\b"
+        }
+      ]
+    },
+    "function-definition": {
+      "match": "\\b(def)\\s+(?:[A-Za-z_][A-Za-z0-9_?<>, ]*\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+      "captures": {
+        "1": { "name": "keyword.other.declaration.boring" },
+        "2": { "name": "entity.name.function.boring" }
+      }
+    },
+    "type-definition": {
+      "match": "\\b(struct|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.declaration.boring" },
+        "2": { "name": "entity.name.type.boring" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "constant.language.boring",
+          "match": "\\b(true|false|nil)\\b"
+        },
+        {
+          "name": "variable.language.self.boring",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "keyword.control.boring",
+          "match": "\\b(if|elif|else|while|do|loop|for|in|break|continue|guard|match|return|throw|try|catch|defer|yield)\\b"
+        },
+        {
+          "name": "keyword.other.declaration.boring",
+          "match": "\\b(let|var|def|struct|enum|trait|use|ext|as|type|mod|init|pub|native|req|transient|set|task|stream|static)\\b"
+        },
+        {
+          "name": "keyword.operator.word.boring",
+          "match": "\\b(and|or|not|is|throws|pass|void)\\b"
+        }
+      ]
+    },
+    "builtin-types": {
+      "name": "storage.type.boring",
+      "match": "\\b(int|float|bool|string|any)\\b"
+    },
+    "attribute": {
+      "name": "meta.attribute.boring",
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.attribute.boring" },
+        "2": { "name": "meta.attribute.boring" }
+      }
+    },
+    "ownership-qualifier": {
+      "name": "storage.modifier.ownership.boring",
+      "match": "'(?:rc|task|copy|static|stack|auto|weak|shared)\\b|'(?=[A-Z\\s(])"
+    },
+    "builtin-functions": {
+      "name": "support.function.builtin.boring",
+      "match": "\\b(print|println|assert_eq|assert_neq|drop|len|abs|min|max|sqrt|floor|ceil|round|pow|log|sin|cos|tan)\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.boring",
+      "match": "\\.\\.=|\\.\\.|->|\\|>|\\+\\=|\\-=|\\*=|/=|%=|&=|\\|=|\\^=|==|!=|<=|>=|[+\\-*/%=<>&|^~!]"
+    }
+  }
+}

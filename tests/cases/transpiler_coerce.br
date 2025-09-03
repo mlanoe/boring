@@ -1,0 +1,23 @@
+# Transpiler coercion: string literals in dict/array return values
+
+# Dict with string values
+def {string=string} labels():
+    return {"name" = "Alice", "role" = "admin"}
+
+let d = labels()
+print d["name"]
+print d["role"]
+
+# Array of strings from function
+def [string] greetings():
+    return ["hello", "world"]
+
+let g = greetings()
+print g[0]
+print g[1]
+print g.length
+
+# Inline dict literal stored in typed var
+let {string=int} scores = {"Alice" = 10, "Bob" = 20}
+print scores["Alice"]
+print scores["Bob"]

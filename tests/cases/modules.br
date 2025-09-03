@@ -1,0 +1,90 @@
+mod utils:
+    def int double(int x):
+        return x * 2
+
+print double(21)
+
+mod geometry:
+    struct GPoint:
+        int x
+        int y
+
+let gp = GPoint(3, 4)
+print gp.x + gp.y
+
+mod outer:
+    mod inner:
+        def int val():
+            return 42
+
+print val()
+
+mod mathm:
+    def int add(int x, int y): return x + y
+    def int mul(int x, int y): return x * y
+
+print add(6, mul(4, 9))
+
+print sqrt(4.0)
+print sqrt(9.0)
+print PI > 3.14
+print round(sin(PI / 2.0) * 100.0)
+
+def int divide(int a, int b) throws:
+    if b == 0: throw "division by zero"
+    a / b
+
+let dres = try divide(10, 2)
+print dres
+
+var sa = []
+sa.push(1)
+sa.push(2)
+sa.push(3)
+print sa.length
+
+use std.collections.HashMap
+var mhm = HashMap()
+print "hm-ok"
+
+use std.collections.HashMap, HashSet
+var mhm2 = HashMap()
+var shs = HashSet()
+print "sel-multi"
+
+print sqrt(16.0)
+
+use Worker as task int () throws
+
+task def int runw(Worker f):
+    try f() else 0
+
+task def int work() throws: 42
+
+print runw(work)
+
+struct LPoint:
+    pub int x
+    pub int y
+
+def void lmain():
+    use Pt as LPoint'
+    def int describe(Pt p): p.x + p.y
+    let p = LPoint(x = 10, y = 32)
+    print describe(p)
+
+lmain()
+
+use Transformer as int (int) throws
+
+def int apply2(int x, Transformer f): try f(x) else 0
+
+def int dbl(int x) throws: x * 2
+
+print apply2(21, dbl)
+
+def void print2(string... texts): native
+print "native-shadow-ok"
+
+def int myRuntimeFn(int x): native
+print "native-new-ok"

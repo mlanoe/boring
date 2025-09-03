@@ -1,0 +1,17 @@
+# Range end accepts unary expressions (was: parse_primary, now: parse_unary)
+
+# Negated variable as range end — previously would have been a parse error
+let limit = 5
+let neg_one = -1
+let end_val = neg_one + limit + 1    # = 5
+
+var count = 0
+for i in 0..end_val:
+    count = count + 1
+print count    # 5
+
+# Normal range
+var sum = 0
+for i in 1..4:
+    sum = sum + i
+print sum    # 6

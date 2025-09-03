@@ -1,0 +1,30 @@
+# for i, v in arr: — auto-enumerate (no .enumerate() needed)
+let fruits = ["apple", "banana", "cherry"]
+for i, v in fruits:
+    print "{i}: {v}"
+
+# works the same as .enumerate()
+for i, v in fruits.enumerate():
+    print "{i}={v}"
+
+# for k, v in dict: — direct key-value iteration
+var scores = {"Alice" = 90, "Bob" = 85}
+var total = 0
+for k, v in scores:
+    total += v
+print "total: {total}"
+
+# dict: verify both vars are bound
+let single = {"x" = 42}
+for k, v in single:
+    print "key={k} val={v}"
+
+# nested: auto-enumerate over ints
+let nums = [10, 20, 30]
+for idx, n in nums:
+    print "{idx}*{n}"
+
+# array of tuples → tuple destructuring (NOT auto-enumerate)
+let pairs = [(1, "one"), (2, "two"), (3, "three")]
+for a, b in pairs:
+    print "{a}-{b}"

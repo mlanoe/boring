@@ -1,0 +1,58 @@
+# if let Some(x) — happy path
+let int? maybe = 42
+if let Some(v) = maybe:
+    print "got {v}"
+else:
+    print "none"
+
+# nil path
+let int? empty = nil
+if let Some(v) = empty:
+    print "got {v}"
+else:
+    print "none"
+
+# combined let + bool guard
+let int? x = 7
+if let Some(n) = x, n > 5:
+    print "big: {n}"
+
+let int? y = 2
+if let Some(n) = y, n > 5:
+    print "big"
+else:
+    print "small"
+
+# while let Some(x) using a function
+def int? next(var int counter):
+    if counter <= 0: return nil
+    counter = counter - 1
+    return counter + 1
+
+var c = 3
+while let Some(n) = next(c):
+    print "tick {n}"
+    c = c - 1
+
+# Swift-style shorthand rebind: `if let v:` ≡ `if let v = v:`
+let int? p = 99
+if let p:
+    print "p = {p}"
+else:
+    print "no p"
+
+let int? q = nil
+if let q:
+    print "q = {q}"
+else:
+    print "no q"
+
+# Shorthand with guard
+def void greet(string? name):
+    guard let name else:
+        print "anonymous"
+        return
+    print "hello {name}"
+
+greet("Alice")
+greet(nil)

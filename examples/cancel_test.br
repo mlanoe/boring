@@ -1,0 +1,14 @@
+task def void do_work():
+    let _ = 42
+
+task def void process() throws:
+    select:
+        cancelled:
+            throw "cancelled"
+        _ = do_work():
+            let _ = 1
+
+task def void run() throws:
+    let f = task: process()
+    f.cancel()
+    f.wait

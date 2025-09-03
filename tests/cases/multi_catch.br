@@ -1,0 +1,43 @@
+# catch with multiple types in one clause
+try:
+    throw "a string error"
+catch String, Int:
+    print "string or int: {error}"
+
+try:
+    throw 42
+catch String, Int:
+    print "string or int: {error}"
+
+# unmatched falls through to untyped catch
+try:
+    throw true
+catch String, Int:
+    print "should not reach"
+catch:
+    print "bool fallback: {error}"
+
+# three types
+try:
+    throw 3.14
+catch String, Int, Float:
+    print "scalar: {error}"
+
+# multiple typed clauses — first match wins
+try:
+    throw "hello"
+catch Int:
+    print "int"
+catch String:
+    print "string wins"
+
+# multi-catch with no fallback — unmatched propagates up
+var propagated = false
+try:
+    try:
+        throw true
+    catch String, Int:
+        print "should not reach"
+catch:
+    propagated = true
+print propagated

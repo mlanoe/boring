@@ -1,0 +1,186 @@
+enum Direction:
+    North
+    South
+    East
+    West
+
+def string dir_label(Direction d):
+    match d:
+        North: "north"
+        South: "south"
+        East:  "east"
+        West:  "west"
+
+print "{dir_label(Direction.North)}"
+print "{dir_label(.South)}"
+
+# Shorthand .Variant from typed binding
+let Direction facing = .West
+print "facing: {dir_label(facing)}"
+
+# Enum with associated values
+enum Expr:
+    Num(int value)
+    Add(int left, int right)
+    Mul(int left, int right)
+
+def int eval(Expr e):
+    match e:
+        Num(v):    v
+        Add(l, r): l + r
+        Mul(l, r): l * r
+
+let exprs = [Expr.Num(7), Expr.Add(3, 4), Expr.Mul(3, 4)]
+for e in exprs:
+    print "{eval(e)}"
+
+# Match with guard on enum
+def string classify(Expr e):
+    match e:
+        Num(v) if v == 0: "zero"
+        Num(_):            "literal"
+        Add(_, _):         "addition"
+        Mul(_, _):         "multiplication"
+
+print "{classify(Expr.Num(0))}, {classify(Expr.Add(1, 2))}"
+
+# Optional enum result
+enum ParseResult:
+    Ok(int value)
+    Err(string msg)
+
+def ParseResult parse(str s):
+    let int? v = s as int
+    if let n = v: return ParseResult.Ok(n)
+    return ParseResult.Err("bad input: {s}")
+
+match parse("42"):
+    Ok(n):  print "parsed: {n}"
+    Err(e): print "error: {e}"
+
+match parse("bad"):
+    Ok(n):  print "parsed: {n}"
+    Err(e): print "error: {e}"
+
+# enum method
+enum EColor:
+    Red
+    Green
+    Blue
+
+    def string ename():
+        match self:
+            Red: "red"
+            Green: "green"
+            Blue: "blue"
+
+let ec = EColor.Red
+print ec.ename()
+
+# enum getter
+enum EDirection:
+    North
+    South
+    East
+    West
+
+    req string label():
+        match self:
+            North: "nord"
+            South: "sud"
+            East: "est"
+            _: "ouest"
+
+let ed = EDirection.South
+print ed.label
+
+# enum as conversion
+enum EStatus:
+    Ok
+    Err
+
+    as string:
+        match self:
+            Ok: "ok"
+            _: "error"
+
+let est = EStatus.Ok
+print est as string
+
+# dot-prefix unit variant
+enum EColorB:
+    RedB
+    GreenB
+    BlueB
+
+def string namee(EColorB' c):
+    match c:
+        RedB: "red"
+        GreenB: "green"
+        BlueB: "blue"
+
+print namee(.RedB)
+
+# dot prefix in let
+enum EDir:
+    NorthD
+    SouthD
+
+let edd = .NorthD
+var derel = 0
+match edd:
+    NorthD: derel = 1
+    SouthD: derel = 2
+print derel
+
+# enum variant named field access
+enum EPair:
+    Both(int first, int second)
+
+let epair = EPair.Both(10, 32)
+print epair.first + epair.second
+
+# enum variant single named field
+enum EWrapper:
+    Value(int n)
+
+let ew = EWrapper.Value(42)
+print ew.n
+
+# nested enum basic
+def string describeColor():
+    enum NColor:
+        Red
+        Green
+        Blue
+    let c = NColor.Red
+    match c:
+        Red: "red"
+        _: "other"
+
+print describeColor()
+
+# pub field syntax
+struct EPerson:
+    pub let string name
+    pub var int age
+
+var epp = EPerson(name = "Alice", age = 30)
+epp.age = 31
+print epp.name
+print epp.age
+
+# enum pub method
+enum EShape:
+    Circle
+    Square
+    Triangle
+
+    pub def int sides():
+        match self:
+            Circle: 0
+            Square: 4
+            Triangle: 3
+
+let esh = EShape.Triangle
+print esh.sides()

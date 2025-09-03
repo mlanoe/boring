@@ -1,0 +1,10 @@
+# string.len() must return character count (not bytes), consistent with .length
+
+let s = "hello"
+print s.len()       # 5
+print s.length      # 5
+
+# ASCII-only: both agree
+let a = "abc"
+print a.len()       # 3
+print a.length      # 3

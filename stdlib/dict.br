@@ -1,0 +1,63 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — dict ({K: V}) and set ({T}) built-in methods.
+#
+# All methods are implemented by the runtime; this file documents their
+# signatures.  Loadable via `use stdlib.dict` if explicit scope is needed.
+
+# ── Dict ({K: V}) ──────────────────────────────────────────────────────────────
+
+ext HashMap<K, V>:
+    # Mutation (def)
+    def void set(K key, V value):       native   # also: put
+    def void remove(K key):             native
+
+    # Access (req)
+    req V?   get(K key):                native   # nil if key absent
+    req bool contains(K key):           native   # also: containsKey, has
+    req bool isEmpty():                 native
+    req int  count():                   native   # also: len, length
+
+    # Derived (req)
+    req [any]    map(any f):            native   # map over (key, value) pairs
+    req [any]    filter(any pred):      native   # filter (key, value) pairs
+
+    # Index-based iteration (for compatibility with ArrayIndex cursor pattern)
+    req any?     firstIndex():          native
+    req any?     nextIndex(any k):      native
+    req any      getAt(any k):          native
+    req HashMap<K, V> removeAt(any k):  native
+
+
+# ── Set ({T}) ──────────────────────────────────────────────────────────────────
+
+ext HashSet<T>:
+    # Mutation (def)
+    def void add(T item):               native   # insert into set
+    def void remove(T item):            native   # remove from set
+
+    # Access (req)
+    req bool contains(T item):          native
+    req bool isEmpty():                 native
+    req int  count():                   native   # also: len, length
+
+    # Set operations (req) — return new sets
+    req [any] union([any] other):       native
+    req [any] intersection([any] other): native
+    req [any] difference([any] other):  native
+    req bool  isSubset([any] other):    native
+
+    # Index-based iteration
+    req uint?      firstIndex():        native
+    req uint?      nextIndex(uint i):   native
+    req T          getAt(uint i):       native
+    req HashSet<T> removeAt(uint? i):   native

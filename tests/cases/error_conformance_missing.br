@@ -1,0 +1,8 @@
+trait Animal:
+    def string speak()
+    def void walk()
+
+struct Fish: pass
+
+ext Fish as Animal:
+    def string speak(): "..."

@@ -1,0 +1,30 @@
+let pi = 3.14159
+print "{pi:.2}"
+
+let xfloat = 2.9
+print "{xfloat:.0}"
+
+let n = 42
+print "{n:05}"
+print "{n:6}"
+
+let xsci = 12345.6789
+print "{xsci:.2e}"
+
+let xs = 3.14
+print "{xs:+.2}"
+
+let price = 9.5
+let qty = 3
+print "{qty:2} items at {price:.2} each"
+
+struct Person:
+    pub let string name
+    pub var int age
+
+var p = Person(name = "Alice", age = 30)
+print p.name
+print p.age
+
+let d = { "key" = "val" }
+print d["key"]

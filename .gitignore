@@ -1,0 +1,6 @@
+/target
+# Generated Rust projects from --emit-rust
+tests/cases/*_rust/
+examples/*_rust/
+stdlib/*_rust/
+Cargo.lock

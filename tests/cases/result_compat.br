@@ -1,0 +1,24 @@
+# Ok / Err constructors and if let pattern matching
+
+def Result<int, string> divide(int a, int b):
+    if b == 0: return Err("division by zero")
+    return Ok(a / b)
+
+let r1 = divide(10, 2)
+if let Ok(v) = r1:
+    print "ok: {v}"
+
+let r2 = divide(10, 0)
+if let Err(e) = r2:
+    print "err: {e}"
+
+# while let Ok
+def Result<int, string> next_ok(var int n):
+    if n <= 0: return Err("done")
+    n = n - 1
+    return Ok(n + 1)
+
+var c = 3
+while let Ok(n) = next_ok(c):
+    print "val: {n}"
+    c = c - 1

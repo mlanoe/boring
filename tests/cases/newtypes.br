@@ -1,0 +1,24 @@
+type UserId  as uint
+type OrderId as uint
+type Email   as str
+
+let uid   = UserId(1)
+let oid   = OrderId(42)
+let email = Email("alice@example.com")
+
+print uid
+print oid
+print email
+
+# Unwrap with `as`
+let raw_id = uid as uint
+print raw_id
+
+# Newtype in struct
+struct User:
+    UserId  id
+    Email   email
+
+let user = User(id = UserId(99), email = Email("bob@example.com"))
+print "{user.id}"
+print "{user.email}"

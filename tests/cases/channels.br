@@ -1,0 +1,41 @@
+# channel<T> generic form
+let tx, rx = channel<int>(4)
+
+let h1 = task:
+    tx.send(1)
+    tx.send(2)
+    tx.send(3)
+    drop(tx)
+
+h1.wait
+
+for v in rx:
+    print v
+
+# channel with binding annotation
+let string tx2, rx2 = channel(4)
+
+let h2 = task:
+    tx2.send("hello")
+    tx2.send("world")
+    drop(tx2)
+
+h2.wait
+
+for msg in rx2:
+    print msg
+
+# Channel with accumulation
+let tx3, rx3 = channel<int>(8)
+
+let h3 = task:
+    for n in 1..=5:
+        tx3.send(n * 10)
+    drop(tx3)
+
+h3.wait
+
+var sum = 0
+for v in rx3:
+    sum = sum + v
+print sum

@@ -1,0 +1,42 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+SELECT *
+FROM users
+WHERE age > 18
+
+SELECT *
+FROM orders
+LIMIT 100
+
+{"key": "value"}
+
+Hello, World!
+<a href="https://boring.dev">Boring</a>
+
+first
+second
+
+fourth
+
+42

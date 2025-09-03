@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — array ([T]) built-in methods.
+#
+# All methods are implemented by the runtime; this file documents their
+# signatures.  Loadable via `use stdlib.array` if explicit scope is needed.
+#
+# `def` methods mutate the array in place (require `var` binding).
+# `req` methods return a new value without modifying the receiver.
+
+ext Vec<T>:
+    # ── Mutation (def) ──────────────────────────────────────────────────────────
+    def void push(T item):              native   # append to end
+    def void insert(int i, T item):     native   # insert at index i
+    def void remove(T item):            native   # remove first occurrence of item
+    def void removeAt(int i):           native   # remove element at index i
+    def void append([T] other):         native   # extend with all elements of other
+    def void reverse():                 native   # reverse in place
+    def void sort():                    native   # sort in place (natural order)
+
+    # ── Access ──────────────────────────────────────────────────────────────────
+    req T?   pop():                     native   # remove and return last element (nil if empty)
+    req T?   first():                   native   # first element or nil
+    req T?   last():                    native   # last element or nil
+    req T?   find(any pred):            native   # first element matching predicate closure
+    req int  indexOf(T item):           native   # index of first occurrence, -1 if absent
+    req int  firstIndex():              native   # cursor for index-based iteration
+    req int  nextIndex(int i):          native   # next cursor after i
+
+    # ── Derived collections (req) ───────────────────────────────────────────────
+    req [T]  reversed():                native   # new reversed array
+    req [T]  sorted():                  native   # new sorted array (natural order)
+    req [T]  sortedBy(any key):         native   # new sorted array (by key closure)
+    req [T]  slice(int from, int to):   native   # subarray [from, to)
+    req [T]  take(int n):               native   # first n elements
+    req [T]  drop(int n):               native   # all elements after the first n
+    req [T]  filter(any pred):          native   # elements matching predicate closure
+    req [any] map(any f):               native   # transform each element
+    req [any] flatMap(any f):           native   # map then flatten one level
+    req [any] flat():                   native   # flatten one level of nesting
+    req [any] zip([any] other):         native   # pair elements from two arrays
+    req [any] enumerate():              native   # [(index, element), …]
+
+    # ── Aggregation ─────────────────────────────────────────────────────────────
+    req any  reduce(any init, any f):   native   # fold left
+    req bool any(any pred):             native   # true if at least one element matches
+    req bool all(any pred):             native   # true if all elements match
+    req int  count():                   native   # number of elements (also: len, length)
+    req bool isEmpty():                 native
+    req bool contains(T item):          native
+    req int  sum():                     native   # sum of numeric elements
+    req any  min():                     native   # minimum numeric value
+    req any  max():                     native   # maximum numeric value
+
+    # ── String ──────────────────────────────────────────────────────────────────
+    req string join(string sep):        native   # join string elements with separator
+    req string joined(string sep):      native   # alias for join

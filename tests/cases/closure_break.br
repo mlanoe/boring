@@ -1,0 +1,27 @@
+# break inside a closure must not escape to the enclosing loop
+
+var arr = [1, 2, 3, 4, 5]
+
+# break inside map closure: stops that iteration, produces void for that slot
+let mapped = arr.map((n):
+    if n == 3: break
+    n * 2
+)
+print mapped.length    # 5
+
+# outer loop is NOT broken by the break inside the closure
+var count = 0
+for _ in arr:
+    _ = arr.map((n):
+        if n == 1: break
+        n
+    )
+    count = count + 1
+print count    # 5
+
+# break with a value: the closure returns that value
+let mapped2 = arr.map((n):
+    if n > 3: break 0
+    n * 10
+)
+print mapped2    # [10, 20, 30, 0, 0]

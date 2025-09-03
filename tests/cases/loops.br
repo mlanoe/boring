@@ -1,0 +1,39 @@
+var count = 0
+for 1..4:
+    count = count + 1
+print count
+
+var count2 = 0
+for 1..=4:
+    count2 = count2 + 1
+print count2
+
+var sum = 0
+for i in 1..4:
+    sum = sum + i
+print sum
+
+let r1 = loop:
+    break 42
+print r1
+
+var i = 0
+let r2 = loop:
+    i = i + 1
+    if i == 5:
+        break i
+print r2
+
+var n = 0
+let r3 = loop:
+    n = n + 1
+    if n >= 3:
+        break "done"
+print r3
+
+var j = 0
+loop:
+    j = j + 1
+    if j == 3:
+        break
+print j

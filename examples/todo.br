@@ -1,0 +1,355 @@
+use std.sync.atomic.AtomicUsize, Ordering
+use tokio.sync.Semaphore, mpsc
+use tokio.fs.File
+use tokio.io.AsyncBufReadExt, AsyncWriteExt, BufReader
+use tokio.time.Duration, timeout
+use std.path.Path
+
+@derive(Debug, Clone)
+struct Task:
+    uint id
+    string description
+    bool completed
+
+
+struct Metrics:
+    AtomicUsize tasks_added = AtomicUsize(0)
+    AtomicUsize tasks_completed = AtomicUsize(0)
+    AtomicUsize tasks_failed = AtomicUsize(0)
+
+    req increment_added():
+        self.tasks_added.fetch_add(1, Ordering.SeqCst)
+
+    req increment_completed():
+        self.tasks_completed.fetch_add(1, Ordering.SeqCst)
+
+    req increment_failed():
+        self.tasks_failed.fetch_add(1, Ordering.SeqCst)
+
+    req print():
+        let added = self.tasks_added.load(Ordering.SeqCst)
+        let completed_count = self.tasks_completed.load(Ordering.SeqCst)
+        let failed = self.tasks_failed.load(Ordering.SeqCst)
+        print "Metrics: Added={added}, Completed={completed_count}, Failed={failed}"
+
+trait AsyncTaskManager:
+    task uint add_task(string description)
+    task req [Task] list_tasks()
+    task complete_task(uint id) throws string
+    task delete_task(uint id) throws string
+    task req save_to_file(str& path) throws io.Error
+    task load_from_file(str& path) throws io.Error
+@derive(Debug)
+struct TodoList as AsyncTaskManager:
+    [Task] tasks = []
+    uint next_id = 0
+
+    task uint add_task(string description):
+        # fake long computing
+        try timeout(
+            Duration.from_millis(100),
+            task tokio.time.sleep(Duration.from_millis(100))
+        ) else:
+            print "Timeout lors de l'ajout de la tâche"
+
+        let id = self.next_id
+        self.tasks.push(Task(
+            id,
+            description,
+            completed = false
+        ))
+        self.next_id += 1
+        id
+
+    task req [Task] list_tasks():
+        self.tasks.clone()
+
+    task complete_task(uint id) throws string:
+        # fake long computing
+        try timeout(
+            Duration.from_millis(200),
+            task tokio.time.sleep(Duration.from_millis(150))
+        ) else:
+            throw "Timeout lors de la complétion de la tâche"
+            
+       
+        if let t = self.tasks.find((t): t.id == id):
+            t.completed = true
+        else:
+            throw "Task with ID {id} not found"
+
+    task delete_task(uint id) throws string:
+        if let index = self.tasks.indexOf((t): t.id == id):
+            self.tasks.remove(index)
+        else:
+            throw "Task with ID {id} not found"
+
+    task req save_to_file(str& path) throws io.Error:
+        var file = File.create(path)
+        for t in self.tasks:
+            let line = "{t.id},{t.description},{t.completed}\n"
+            file.write_all(line.as_bytes())
+
+    task load_from_file(str& path) throws io.Error:
+        if !Path.new(path).exists():
+            return
+        let file = File.open(path)
+        var reader = BufReader(file)
+        var line = ""
+        while reader.read_line(line) > 0:
+            let parts = line.trim().split(",")
+            if parts.len() == 3:
+                let id = parts[0] as uint else 0
+                let completed = parts[2] as bool else false
+                self.tasks.push(Task(
+                    id,
+                    description: parts[1],
+                    completed
+                ))
+                if id >= self.next_id:
+                    self.next_id = id + 1
+            line.clear()
+
+# --- Fonction pour afficher une tâche ---
+req print_task(Task& t):
+    let mark = if t.completed: "✓" else " "
+    print "[{mark}] {t.id} - {t.description}"
+
+# --- Fonction pour afficher le menu ---
+req print_menu():
+    print "\n--- Todo List (Ultime) ---"
+    print "1. Add task (sequential)"
+    print "2. Add 5 tasks in parallel (with semaphore)"
+    print "3. List tasks"
+    print "4. Complete task (sequential)"
+    print "5. Complete all tasks in parallel (with channels)"
+    print "6. Delete task"
+    print "7. Save to file"
+    print "8. Load from file"
+    print "9. Add tasks with timeout and cancellation"
+    print "10. Print metrics"
+    print "11. Exit"
+
+# --- Ajoute des tâches en parallèle avec un sémaphore ---
+task void add_tasks_in_parallel_with_semaphore(
+    var TodoList'actor todo_list,
+    Metrics'task metrics,
+    uint count,
+    uint max_concurrent
+):
+    let semaphore'task = Semaphore(max_concurrent)
+    var futures = []
+
+    for i in 0..count:
+        let future = task:
+            _ = semaphore.acquire()
+            let id = todo_list.add_task("Parallel task {i}")
+            metrics.increment_added()
+
+        futures.push(future)
+
+    for future in futures:
+        future.wait
+
+# --- Complète des tâches en parallèle avec des canaux ---
+task void complete_tasks_with_channels(
+    var TodoList'actor todo_list,
+    Metrics'task metrics
+):
+    let sender, receiver = mpsc.channel(32)
+
+    do:
+        for t in todo_list.list_tasks():
+            if !t.completed:
+                _ = sender.send(t.id)
+
+    drop sender
+
+    let receiver'actor = receiver
+    var futures = []
+    for 0..4:
+        let future = task:
+            while let task_id = receiver.recv():
+                try:
+                    todo_list.complete_task(task_id)
+                    metrics.increment_completed()
+                catch:
+                    print "Error completing task {task_id}: {error}"
+                    metrics.increment_failed()
+        futures.push(future)
+        
+    for future in futures:
+        future.wait
+ 
+
+# --- Ajoute des tâches avec timeout et annulation ---
+task void add_tasks_with_timeout_and_cancellation(
+    TodoList'actor todo_list,
+    Metrics'task metrics
+):
+    var futures = []
+
+    for i in 0..3:
+        let future = task:
+            try:
+                let id = timeout(
+                    Duration.from_millis(50),
+                    todo_list.add_task("Task with timeout {i}")
+                )
+                metrics.increment_added()
+                print "Task {id} added successfully"
+            catch:
+                metrics.increment_failed()
+                print "Task {i} failed due to timeout"
+
+        futures.push(future)
+
+    tokio.time.sleep(Duration.from_millis(10))
+    if let last_handle = futures.last():
+        last_handle.abort()
+        print "Last task was cancelled"
+
+    for future in futures:
+        future.wait
+
+# --- Exemple de gestion d'erreurs groupées ---
+task void add_and_complete_tasks(
+    TodoList'actor todo_list,
+    Metrics'task metrics,
+    [string] descriptions
+) throws string:
+    let futures = descriptions.map((desc):
+        task:
+            let id = todo_list.add_task(desc)
+            metrics.increment_added()
+    )
+
+    for future in futures:
+        future.wait
+  
+task def void main():
+    let todo_list'actor = TodoList()
+    let metrics'task = Metrics()
+    let file_path = "tasks.txt"
+
+    # Charger les tâches depuis un fichier
+    do:
+        _ = todo_list.load_from_file(file_path)
+
+    loop:
+        print_menu()
+        print "Choose an option:"
+        var string input = ""
+        std.io.stdin().read_line(input)
+        match input.trim():
+            "1":
+                print "Enter task description:"
+                var string description = ""
+                io.stdin().read_line(description)
+                let id = todo_list.add_task(description.trim())
+                metrics.increment_added()
+                print "Added task with ID: {id}"
+            "2":
+                print "Adding 5 tasks in parallel (max 2 concurrent)..."
+                add_tasks_in_parallel_with_semaphore(
+                    todo_list,
+                    metrics,
+                    5,
+                    2,
+                )
+                print "5 tasks added with semaphore!"
+            "3":
+                print "\nTasks:"
+                for t in todo_list.list_tasks():
+                    print_task(t)
+            "4":
+                print "Enter task ID to complete:"
+                var string id_input = ""
+                io.stdin().read_line(id_input)
+                try:
+                    let id = id_input.trim() as uint
+                    try:
+                        todo_list.complete_task(id)
+                        metrics.increment_completed()
+                    catch:
+                        metrics.increment_failed()
+                catch:
+                    print "Invalid ID"
+            "5":
+                print "Completing all tasks in parallel with channels..."
+                complete_tasks_with_channels(todo_list, metrics)
+                print "All tasks completed with channels!"
+            "6":
+                print "Enter task ID to delete:"
+                var string id_input = ""
+                io.stdin().read_line(id_input)
+                try:
+                    let id = id_input.trim() as uint
+                    try:
+                        todo_list.delete_task(id)
+                    catch:
+                        print "Error: {error}"
+                catch:
+                    print "Invalid ID"
+            "7":
+                try:
+                    todo_list.save_to_file(file_path)
+                    print "Tasks saved to {file_path}"
+                catch:
+                    print "Error saving file: {error}"
+            "8":
+                try:
+                    todo_list.load_from_file(file_path)
+                    print "Tasks loaded from {file_path}"
+                catch:
+                    print "Error loading file: {error}"
+            "9":
+                print "Adding tasks with timeout and cancellation..."
+                add_tasks_with_timeout_and_cancellation(
+                    todo_list,
+                    metrics
+                )
+                print "Tasks with timeout added!"
+            "10":
+                metrics.print()
+            "11": break
+            _:
+                print "Invalid option"
+
+@cfg(test)
+mod tests:
+    use super.*
+
+    @test
+    task test_add_task():
+        var todo_list = TodoList()
+        let id = (task todo_list.add_task("Test task")).value
+        assert_eq(todo_list.next_id, 0)
+        assert_eq((task todo_list.list_tasks()).value.len(), 1)
+
+    @test
+    task test_parallel_tasks_with_semaphore():
+        let todo_list'actor = TodoList()
+        let metrics'task = Metrics()
+        (task:
+            add_tasks_in_parallel_with_semaphore(
+                todo_list,
+                metrics,
+                3,
+                2,
+            )
+        ).wait
+        assert_eq(todo_list.list_tasks().len(), 3)
+        assert_eq(metrics.tasks_added.load(Ordering.SeqCst), 3)
+
+    @test
+    task test_timeout_and_cancellation():
+        let todo_list'actor = TodoList()
+        let metrics'task = Metrics()
+        (task:
+            add_tasks_with_timeout_and_cancellation(
+                todo_list,
+                metrics,
+            )
+        ).wait
+        assert(metrics.tasks_failed.load(Ordering.SeqCst) > 0)

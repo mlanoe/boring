@@ -1,0 +1,64 @@
+struct Vec2:
+    float x
+    float y
+
+ext Vec2:
+    def Vec2' add(Vec2' rhs):
+        return Vec2(self.x + rhs.x, self.y + rhs.y)
+    def Vec2' sub(Vec2' rhs):
+        return Vec2(self.x - rhs.x, self.y - rhs.y)
+    def Vec2' mul(float rhs):
+        return Vec2(self.x * rhs, self.y * rhs)
+    def Vec2' neg():
+        return Vec2(-self.x, -self.y)
+    req bool eq(Vec2' rhs):
+        return self.x == rhs.x and self.y == rhs.y
+
+let a = Vec2(1.0, 2.0)
+let b = Vec2(3.0, 4.0)
+let c = a + b
+print c.x
+print c.y
+
+let a2 = Vec2(5.0, 8.0)
+let b2 = Vec2(3.0, 4.0)
+let c2 = a2 - b2
+print c2.x
+
+let am = Vec2(2.0, 3.0)
+let bm = am * 4.0
+print bm.x
+
+let an = Vec2(1.0, 2.0)
+let bn = -an
+print bn.x
+
+let e1 = Vec2(1.0, 2.0)
+let e2 = Vec2(1.0, 2.0)
+let e3 = Vec2(3.0, 4.0)
+print e1 == e2
+print e1 == e3
+print e1 != e3
+
+struct Wrapper:
+    int val
+
+ext Wrapper:
+    req bool lt(Wrapper' rhs):
+        return self.val < rhs.val
+
+let w1 = Wrapper(3)
+let w2 = Wrapper(5)
+print w1 < w2
+
+struct Mod:
+    int n
+
+ext Mod:
+    def Mod' rem(Mod' rhs):
+        return Mod(self.n % rhs.n)
+
+let m1 = Mod(10)
+let m2 = Mod(3)
+let m3 = m1 % m2
+print m3.n

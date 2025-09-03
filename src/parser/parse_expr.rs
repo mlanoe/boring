@@ -1,0 +1,1398 @@
+// Copyright (C) 2026 Mickaël LANOË
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This file is part of Boring.
+// Boring is free software: you can redistribute it and/or modify it
+// under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// See the LICENSE file at the project root for the full text.
+
+use super::*;
+use crate::ast::*;
+use crate::lexer::{lex, Token, TokenKind, RawInterpPart};
+
+impl Parser {
+    // ─── Expressions ────────────────────────────────────────────────────────
+
+    pub(crate) fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        // Assignment is a statement only — expressions never produce Assign nodes
+        self.parse_else_expr()
+    }
+
+    /// Parse a single statement for inline body positions (match arms, if-let inline,
+    /// setter body, defer inline) where no trailing newline is consumed.
+    /// Handles assignment (`lhs = rhs`) and compound assignment (`lhs op= rhs`).
+    pub(crate) fn parse_inline_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_inline_stmt_impl(false)
+    }
+
+    /// Like `parse_inline_stmt` but uses `parse_or` instead of `parse_else_expr` for
+    /// expressions, so that a bare `else` token is NOT consumed as nil-coalescing.
+    /// Used for inline if/elif bodies where `else` must remain available for the else-branch.
+    pub(crate) fn parse_inline_if_body(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_inline_stmt_impl(true)
+    }
+
+    pub(crate) fn parse_inline_stmt_impl(&mut self, stop_at_else: bool) -> Result<Stmt, ParseError> {
+        let line = self.line();
+        // Allow control-flow keywords in inline positions
+        if self.check(&TokenKind::Return) {
+            self.advance();
+            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+                None
+            } else {
+                Some(self.parse_or()?)
+            };
+            return Ok(Stmt::Return(ReturnStmt { value, line }));
+        }
+        if self.check(&TokenKind::Throw) {
+            let line = self.line();
+            self.advance();
+            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+                None
+            } else {
+                Some(self.parse_or()?)
+            };
+            return Ok(Stmt::Throw(ThrowStmt { value, line }));
+        }
+        if self.check(&TokenKind::Break) {
+            self.advance();
+            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+                None
+            } else {
+                Some(self.parse_or()?)
+            };
+            return Ok(Stmt::Break(line, value));
+        }
+        if self.check(&TokenKind::Continue) {
+            self.advance();
+            return Ok(Stmt::Continue(line));
+        }
+        let lhs = if stop_at_else { self.parse_or()? } else { self.parse_else_expr()? };
+        // Simple assignment — use parse_or (not parse_else_expr) to avoid consuming
+        // the `else` of an enclosing if-let as nil-coalescing
+        if self.eat(&TokenKind::Eq) {
+            let rhs = self.parse_or()?;
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line }));
+        }
+        // Compound assignment
+        let op = match self.peek() {
+            TokenKind::PlusEq      => Some(BinOp::Add),
+            TokenKind::MinusEq     => Some(BinOp::Sub),
+            TokenKind::StarEq      => Some(BinOp::Mul),
+            TokenKind::SlashEq     => Some(BinOp::Div),
+            TokenKind::PercentEq   => Some(BinOp::Rem),
+            TokenKind::AmpersandEq => Some(BinOp::BitAnd),
+            TokenKind::PipeEq      => Some(BinOp::BitOr),
+            TokenKind::CaretEq     => Some(BinOp::BitXor),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.advance();
+            let rhs = self.parse_or()?;
+            let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line };
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line }));
+        }
+        // Nil-coalescing assignment: `lhs ?= rhs` → `lhs = lhs else rhs`
+        if self.eat(&TokenKind::QuestionEq) {
+            let rhs = self.parse_or()?;
+            let else_expr = Expr { kind: ExprKind::Else(Box::new(lhs.clone()), Box::new(rhs)), line };
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(else_expr)), line }));
+        }
+        // Command-style call: `print "hello"` or `foo arg1, arg2`
+        // Same logic as in parse_stmt, but here we don't consume the trailing newline
+        // (that's the caller's responsibility in inline contexts).
+        let expr = if let ExprKind::Var(_) = &lhs.kind {
+            if self.peek_starts_expr() {
+                let mut args = Vec::new();
+                loop {
+                    let arg = self.parse_or()?;
+                    args.push(Arg { label: None, value: arg , spread: false});
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                Expr { kind: ExprKind::Call(Box::new(lhs), args), line }
+            } else {
+                lhs
+            }
+        } else {
+            lhs
+        };
+        Ok(Stmt::Expr(expr))
+    }
+
+    pub(crate) fn parse_else_expr(&mut self) -> Result<Expr, ParseError> {
+        // try expr else default  OR  expr else default
+        let line = self.line();
+        if self.check(&TokenKind::Try) {
+            self.advance();
+
+            // `try: block else ...` — multi-line try body.
+            // Detected when the token after `try` is `:` followed by a newline.
+            if self.check(&TokenKind::Colon) && (self.check2(&TokenKind::Newline) || self.check2(&TokenKind::Eof)) {
+                self.advance(); // consume `:`
+                self.expect_newline()?;
+                let try_stmts = self.parse_block()?;
+                // Expect `else` followed by either an inline expr or an indented block.
+                // Both forms bind `error` in the else scope.
+                self.expect(&TokenKind::Else)?;
+                let else_stmts = self.parse_else_body_stmts()?;
+                return Ok(Expr {
+                    kind: ExprKind::TryElseBlock(try_stmts, else_stmts),
+                    line,
+                });
+            }
+
+            // `try? expr` — shorthand for `try expr else nil` (Result → Option).
+            // Only form that does NOT bind `error` (there is no else body).
+            if self.eat(&TokenKind::Question) {
+                let inner = self.parse_pipe()?;
+                return Ok(Expr {
+                    kind: ExprKind::TryElse(
+                        Box::new(inner),
+                        Box::new(Expr { kind: ExprKind::Nil, line }),
+                    ),
+                    line,
+                });
+            }
+
+            // `try expr else ...` — inline try expression with an else branch.
+            // Fold into TryElseBlock so that `error` is always bound in the else scope,
+            // regardless of whether the else body is inline or a block.
+            //
+            // We use parse_else_body_expr (not parse_else_body_stmts) so that the
+            // inline form `try f() else 0` does NOT consume the trailing newline that
+            // belongs to the enclosing statement.  The block form `try f() else: block`
+            // returns ExprKind::Block whose stmts we unwrap directly.
+            let inner = self.parse_pipe()?;
+            if self.check(&TokenKind::Else) {
+                self.advance();
+                let else_expr = self.parse_else_body_expr()?;
+                let else_stmts = match else_expr.kind {
+                    ExprKind::Block(stmts) => stmts,
+                    other => vec![Stmt::Expr(Expr { kind: other, line: else_expr.line })],
+                };
+                return Ok(Expr {
+                    kind: ExprKind::TryElseBlock(
+                        vec![Stmt::Expr(inner)],
+                        else_stmts,
+                    ),
+                    line,
+                });
+            }
+            // bare `try expr` without else — just wrap it
+            return Ok(inner);
+        }
+        let expr = self.parse_pipe()?;
+        if self.check(&TokenKind::Else) {
+            self.advance();
+            let default = self.parse_else_body_expr()?;
+            let line = expr.line;
+            return Ok(Expr {
+                kind: ExprKind::Else(Box::new(expr), Box::new(default)),
+                line,
+            });
+        }
+        Ok(expr)
+    }
+
+    pub(crate) fn parse_pipe(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_or()?;
+        let mut indent_depth: i32 = 0;
+        loop {
+            // Support multi-line pipe chains: eat newline+indent before `|>`
+            // so the user can write:
+            //   numbers
+            //       |> filter(n: n > 0)
+            //       |> map(n: n * 2)
+            let skipped = if self.check(&TokenKind::Newline) {
+                self.peek_pipe_after_newlines()
+            } else {
+                None
+            };
+            if let Some((offset, indents)) = skipped {
+                self.skip_to_offset(offset);
+                indent_depth += indents;
+            }
+            if !self.check(&TokenKind::PipeArrow) {
+                break;
+            }
+            let line = self.line();
+            self.advance(); // consume `|>`
+            // RHS must be an identifier (function or method name)
+            let name = self.expect_ident()?;
+            // Optional argument list
+            let args = if self.check(&TokenKind::LParen) {
+                self.parse_call_args()?
+            } else {
+                vec![]
+            };
+            lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line };
+        }
+        // Consume Dedents corresponding to any Indents we skipped over
+        if indent_depth > 0 {
+            let saved = self.pos;
+            self.skip_newlines();
+            let mut consumed = 0;
+            while consumed < indent_depth && self.check(&TokenKind::Dedent) {
+                self.advance();
+                consumed += 1;
+            }
+            if consumed < indent_depth {
+                self.pos = saved;
+            }
+        }
+        Ok(lhs)
+    }
+
+    /// Peek ahead past newlines and indents to see if a `|>` token follows.
+    /// Returns `(pipe_arrow_offset, indents_consumed)` or None.
+    pub(crate) fn peek_pipe_after_newlines(&self) -> Option<(usize, i32)> {
+        let mut i = self.pos;
+        let mut indents: i32 = 0;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::Newline => i += 1,
+                TokenKind::Indent  => { indents += 1; i += 1; }
+                // Do NOT cross Dedent — that would chain past a block boundary
+                TokenKind::PipeArrow => return Some((i, indents)),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    pub(crate) fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_and()?;
+        while self.check(&TokenKind::Or) {
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_and()?;
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::Or, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_not()?;
+        while self.check(&TokenKind::And) {
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_not()?;
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::And, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_not(&mut self) -> Result<Expr, ParseError> {
+        if self.check(&TokenKind::Not) {
+            let line = self.line();
+            self.advance();
+            let expr = self.parse_not()?;
+            return Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(expr)), line });
+        }
+        self.parse_comparison()
+    }
+
+    pub(crate) fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bitor()?;
+        loop {
+            // Handle `is` and `is not` specially (need to peek ahead for `not`)
+            if self.check(&TokenKind::Is) {
+                let line = self.line();
+                self.advance(); // consume `is`
+                let op = if self.check(&TokenKind::Not) {
+                    self.advance(); // consume `not`
+                    BinOp::IsNot
+                } else {
+                    BinOp::Is
+                };
+                let rhs = self.parse_bitor()?;
+                lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line };
+                continue;
+            }
+            let op = match self.peek() {
+                TokenKind::EqEqEq => BinOp::RefEq,
+                TokenKind::EqEq   => BinOp::Eq,
+                TokenKind::BangEq => BinOp::NotEq,
+                TokenKind::LtEq   => BinOp::LtEq,
+                TokenKind::GtEq   => BinOp::GtEq,
+                // `<` is comparison only when NOT followed by another `<` (which would be shift)
+                TokenKind::Lt if !self.check2(&TokenKind::Lt) => BinOp::Lt,
+                // `>` is comparison only when NOT followed by another `>` (which would be shift)
+                TokenKind::Gt if !self.check2(&TokenKind::Gt) => BinOp::Gt,
+                _ => break,
+            };
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_bitor()?;
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_bitor(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bitxor()?;
+        while self.check(&TokenKind::Pipe) {
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_bitxor()?;
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitOr, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_bitxor(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bitand()?;
+        while self.check(&TokenKind::Caret) {
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_bitand()?;
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitXor, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_shift()?;
+        while self.check(&TokenKind::Ampersand) {
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_shift()?;
+            lhs = Expr { kind: ExprKind::BinOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_add()?;
+        loop {
+            // `<<`: two consecutive Lt tokens
+            if self.check(&TokenKind::Lt) && self.check2(&TokenKind::Lt) {
+                let line = self.line();
+                self.advance(); self.advance();
+                let rhs = self.parse_add()?;
+                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shl, Box::new(lhs), Box::new(rhs)), line };
+            // `>>`: two consecutive Gt tokens
+            } else if self.check(&TokenKind::Gt) && self.check2(&TokenKind::Gt) {
+                let line = self.line();
+                self.advance(); self.advance();
+                let rhs = self.parse_add()?;
+                lhs = Expr { kind: ExprKind::BinOp(BinOp::Shr, Box::new(lhs), Box::new(rhs)), line };
+            } else {
+                break;
+            }
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_add(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_mul()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Plus  => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_mul()?;
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_mul(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_unary()?;
+        loop {
+            let op = match self.peek() {
+                TokenKind::Star    => BinOp::Mul,
+                TokenKind::Slash   => BinOp::Div,
+                TokenKind::Percent => BinOp::Rem,
+                _ => break,
+            };
+            let line = self.line();
+            self.advance();
+            let rhs = self.parse_unary()?;
+            lhs = Expr { kind: ExprKind::BinOp(op, Box::new(lhs), Box::new(rhs)), line };
+        }
+        Ok(lhs)
+    }
+
+    pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let line = self.line();
+        match self.peek().clone() {
+            TokenKind::Minus => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Neg, Box::new(expr)), line })
+            }
+            TokenKind::Bang => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(expr)), line })
+            }
+            TokenKind::Tilde => {
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::BitNot, Box::new(expr)), line })
+            }
+            _ => self.parse_postfix_top_level(),
+        }
+    }
+
+    pub(crate) fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+        self.parse_postfix_inner(false)
+    }
+
+    /// Like parse_postfix but allows chaining across Newline+Indent for trailing closures.
+    /// Call this from statement-level parsing where chain continuation is valid.
+    pub(crate) fn parse_postfix_top_level(&mut self) -> Result<Expr, ParseError> {
+        self.parse_postfix_inner(true)
+    }
+
+    pub(crate) fn parse_postfix_inner(&mut self, allow_chain_continuation: bool) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary()?;
+        // Track how many Indent tokens we consumed for chain continuation so we
+        // can consume the matching Dedent tokens after the chain ends.
+        let mut continuation_indent_depth: i32 = 0;
+        // Whether we've seen at least one trailing closure (enables chain continuation)
+        let mut seen_trailing_closure = false;
+        loop {
+            // Allow chaining across newlines when the next non-whitespace token after
+            // newlines/indents is a `.` (method/field chain continuation).
+            // This supports inline trailing closures like:
+            //   [1,2,3].filter (x): x > 1
+            //           .map (x): x * 2
+            // Chain continuation is only enabled when:
+            // 1. We're at the top-level postfix (allow_chain_continuation = true), AND
+            // 2. We've already parsed at least one trailing closure
+            if self.check(&TokenKind::Newline) && allow_chain_continuation && seen_trailing_closure {
+                if let Some((dot_offset, indents_consumed)) = self.peek_dot_after_newlines_and_indents() {
+                    // Consume the newlines and any indent/dedent up to the dot
+                    self.skip_to_offset(dot_offset);
+                    continuation_indent_depth += indents_consumed;
+                } else {
+                    break;
+                }
+            } else if self.check(&TokenKind::Newline) {
+                break;
+            }
+            let line = self.line();
+            match self.peek().clone() {
+                TokenKind::Dot => {
+                    self.advance();
+                    // Support tuple index access: `t.0`, `t.1`, etc.
+                    // Also allow keywords as field/method names (e.g. `future.wait`, `list.join()`).
+                    let field = if let TokenKind::Int(n) = self.peek().clone() {
+                        self.advance();
+                        n.to_string()
+                    } else {
+                        self.expect_ident_or_keyword()?
+                    };
+                    // Check for trailing closure FIRST (before regular call args),
+                    // since `(x):` looks like an LParen but is actually a closure param list.
+                    if self.peek_is_trailing_closure() {
+                        // Method call with only a trailing closure (no parentheses for regular args)
+                        let args = self.parse_trailing_closure(vec![])?;
+                        seen_trailing_closure = true;
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line };
+                    } else if self.check(&TokenKind::LParen) {
+                        let mut args = self.parse_call_args()?;
+                        // Check for trailing closure after the argument list
+                        if self.peek_is_trailing_closure() {
+                            args = self.parse_trailing_closure(args)?;
+                            seen_trailing_closure = true;
+                        } else if self.peek_is_trailing_closure_no_paren() {
+                            args = self.parse_trailing_closure_no_paren(args)?;
+                            seen_trailing_closure = true;
+                        }
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line };
+                    } else if self.peek_is_trailing_closure_no_paren() {
+                        // Method call with only a no-paren trailing closure: `expr.method x: body`
+                        let args = self.parse_trailing_closure_no_paren(vec![])?;
+                        seen_trailing_closure = true;
+                        expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line };
+                    } else {
+                        expr = Expr { kind: ExprKind::Field(Box::new(expr), field), line };
+                    }
+                }
+                TokenKind::QuestionDot => {
+                    // Optional chaining: ?.field or ?.method(args)
+                    self.advance();
+                    let field = self.expect_ident_or_keyword()?;
+                    if self.peek_is_trailing_closure() {
+                        let args = self.parse_trailing_closure(vec![])?;
+                        seen_trailing_closure = true;
+                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line };
+                    } else if self.check(&TokenKind::LParen) {
+                        let mut args = self.parse_call_args()?;
+                        if self.peek_is_trailing_closure() {
+                            args = self.parse_trailing_closure(args)?;
+                            seen_trailing_closure = true;
+                        }
+                        expr = Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr), field, args), line };
+                    } else {
+                        expr = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line };
+                    }
+                }
+                TokenKind::LBracket => {
+                    self.advance();
+                    let idx = self.parse_expr()?;
+                    self.expect(&TokenKind::RBracket)?;
+                    expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), line };
+                }
+                TokenKind::LParen => {
+                    // Check for trailing closure FIRST before trying to parse as regular call
+                    if self.peek_is_trailing_closure() {
+                        let args = self.parse_trailing_closure(vec![])?;
+                        seen_trailing_closure = true;
+                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line };
+                    } else {
+                        let mut args = self.parse_call_args()?;
+                        // Check for trailing closure after the argument list
+                        if self.peek_is_trailing_closure() {
+                            args = self.parse_trailing_closure(args)?;
+                            seen_trailing_closure = true;
+                        }
+                        expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line };
+                    }
+                }
+                TokenKind::As => {
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line };
+                }
+                TokenKind::DotDot | TokenKind::DotDotEq => {
+                    let inclusive = self.peek() == &TokenKind::DotDotEq;
+                    self.advance();
+                    let end = self.parse_primary()?;
+                    expr = Expr {
+                        kind: ExprKind::Range {
+                            start: Box::new(expr),
+                            end: Box::new(end),
+                            inclusive,
+                        },
+                        line,
+                    };
+                }
+                TokenKind::Ident(_) if self.peek_is_trailing_closure_no_paren() => {
+                    // `expr x: body` — single-param trailing closure without parens
+                    let args = self.parse_trailing_closure_no_paren(vec![])?;
+                    seen_trailing_closure = true;
+                    expr = Expr {
+                        kind: ExprKind::Call(Box::new(expr), args),
+                        line,
+                    };
+                }
+                _ => break,
+            }
+        }
+        // Consume any Dedent tokens that were produced by indent levels we skipped
+        // for chain continuation. We may need to skip a Newline first.
+        if continuation_indent_depth > 0 {
+            // Skip to the Dedents: skip Newline, then eat matching Dedents
+            let saved_pos = self.pos;
+            self.skip_newlines();
+            let mut consumed = 0;
+            while consumed < continuation_indent_depth && self.check(&TokenKind::Dedent) {
+                self.advance();
+                consumed += 1;
+            }
+            // If we didn't find all the expected Dedents, restore position
+            if consumed < continuation_indent_depth {
+                self.pos = saved_pos;
+            }
+        }
+        Ok(expr)
+    }
+
+    /// Peek ahead past Newline/Indent tokens and return `(dot_position, indents_consumed)`
+    /// if the first non-whitespace, non-Indent token is a Dot, otherwise return None.
+    /// Only crosses Newline and Indent tokens (not Dedent) to allow visual-alignment chaining.
+    pub(crate) fn peek_dot_after_newlines_and_indents(&self) -> Option<(usize, i32)> {
+        let mut i = self.pos;
+        let mut indents_consumed: i32 = 0;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::Newline => i += 1,
+                TokenKind::Indent => { indents_consumed += 1; i += 1; }
+                // Do NOT cross Dedent — that would chain past a block boundary
+                TokenKind::Dot => return Some((i, indents_consumed)),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Advance `self.pos` to the given absolute offset.
+    pub(crate) fn skip_to_offset(&mut self, offset: usize) {
+        self.pos = offset;
+    }
+
+    /// Returns true if the current token can start a primary expression (used for command-style calls).
+    /// Excludes newline, EOF, dedent, and tokens that would be ambiguous in statement position.
+    pub(crate) fn peek_starts_expr(&self) -> bool {
+        match self.tokens.get(self.pos).map(|t| &t.kind) {
+            Some(TokenKind::Str(_))
+            | Some(TokenKind::StringInterp(_))
+            | Some(TokenKind::Int(_))
+            | Some(TokenKind::Float(_))
+            | Some(TokenKind::Bool(_))
+            | Some(TokenKind::Nil)
+            | Some(TokenKind::LParen)
+            | Some(TokenKind::LBracket)
+            | Some(TokenKind::Ident(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if the current position looks like a no-paren single-param trailing closure: `Ident ':'`.
+    pub(crate) fn peek_is_trailing_closure_no_paren(&self) -> bool {
+        self.allow_noparen_closure
+            && matches!(self.tokens.get(self.pos).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Colon))
+    }
+
+    /// Returns true if the current token position starts a trailing closure: `(params):`.
+    /// Scans ahead to find the matching `)` and checks if the next token is `:`.
+    pub(crate) fn peek_is_trailing_closure(&self) -> bool {
+        if !self.allow_trailing_closure {
+            return false;
+        }
+        if !matches!(self.tokens.get(self.pos).map(|t| &t.kind), Some(TokenKind::LParen)) {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // check next token is Colon
+                        return matches!(
+                            self.tokens.get(i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Colon)
+                        );
+                    }
+                }
+                TokenKind::Newline | TokenKind::Eof => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse optional `throws`/`task` modifiers before a closure `:`.
+    /// Either order is accepted; explicit flags are OR'd with inferred ones after the body is parsed.
+    pub(crate) fn parse_closure_modifiers(&mut self) -> (bool, bool) {
+        let mut throws = self.eat(&TokenKind::Throws);
+        let mut task   = self.eat(&TokenKind::Task);
+        if !throws { throws = self.eat(&TokenKind::Throws); }
+        if !task   { task   = self.eat(&TokenKind::Task);   }
+        (throws, task)
+    }
+
+    /// Infer `throws` and `task` flags from a closure/function body by scanning for
+    /// `throw` statements and `task` expressions respectively.
+    pub(crate) fn infer_throws_task(body: &ClosureBody) -> (bool, bool) {
+        match body {
+            ClosureBody::Expr(e) => {
+                let (t, k) = Self::scan_expr_throws_task(e);
+                (t, k)
+            }
+            ClosureBody::Block(stmts) => Self::scan_stmts_throws_task(stmts),
+        }
+    }
+
+    pub(crate) fn infer_throws_task_stmts(stmts: &[Stmt]) -> (bool, bool) {
+        Self::scan_stmts_throws_task(stmts)
+    }
+
+    pub(crate) fn scan_stmts_throws_task(stmts: &[Stmt]) -> (bool, bool) {
+        let mut throws = false;
+        let mut task = false;
+        for s in stmts {
+            let (t, k) = Self::scan_stmt_throws_task(s);
+            throws |= t;
+            task |= k;
+        }
+        (throws, task)
+    }
+
+    pub(crate) fn scan_stmt_throws_task(s: &Stmt) -> (bool, bool) {
+        match s {
+            Stmt::Throw(_) => (true, false),
+            Stmt::Expr(e) => Self::scan_expr_throws_task(e),
+            Stmt::Let(l) => Self::scan_expr_throws_task(&l.value),
+            Stmt::Return(r) => r.value.as_ref().map(|e| Self::scan_expr_throws_task(e)).unwrap_or((false, false)),
+            Stmt::If(i) => {
+                let mut t = false; let mut k = false;
+                for (cond, body) in &i.branches {
+                    let (ct, ck) = Self::scan_expr_throws_task(cond); t |= ct; k |= ck;
+                    let (bt, bk) = Self::scan_stmts_throws_task(body); t |= bt; k |= bk;
+                }
+                if let Some(e) = &i.else_body { let (bt, bk) = Self::scan_stmts_throws_task(e); t |= bt; k |= bk; }
+                (t, k)
+            }
+            Stmt::While(w) => {
+                let (ct, ck) = Self::scan_expr_throws_task(&w.condition);
+                let (bt, bk) = Self::scan_stmts_throws_task(&w.body);
+                (ct | bt, ck | bk)
+            }
+            Stmt::For(f) => Self::scan_stmts_throws_task(&f.body),
+            Stmt::Try(_) => (true, false),  // try block may catch throws, but the body throws
+            _ => (false, false),
+        }
+    }
+
+    pub(crate) fn scan_expr_throws_task(e: &Expr) -> (bool, bool) {
+        match &e.kind {
+            ExprKind::Task(_) => (false, true),
+            ExprKind::Call(callee, args) => {
+                let (mut t, mut k) = Self::scan_expr_throws_task(callee);
+                for a in args { let (at, ak) = Self::scan_expr_throws_task(&a.value); t |= at; k |= ak; }
+                (t, k)
+            }
+            ExprKind::MethodCall(obj, _, args) => {
+                let (mut t, mut k) = Self::scan_expr_throws_task(obj);
+                for a in args { let (at, ak) = Self::scan_expr_throws_task(&a.value); t |= at; k |= ak; }
+                (t, k)
+            }
+            ExprKind::BinOp(_, l, r) => {
+                let (lt, lk) = Self::scan_expr_throws_task(l);
+                let (rt, rk) = Self::scan_expr_throws_task(r);
+                (lt | rt, lk | rk)
+            }
+            ExprKind::Block(stmts) | ExprKind::Do(stmts) => Self::scan_stmts_throws_task(stmts),
+            ExprKind::MacroCall { args, .. } => {
+                let (mut t, mut k) = (false, false);
+                for a in args { let (at, ak) = Self::scan_expr_throws_task(a); t |= at; k |= ak; }
+                (t, k)
+            }
+            ExprKind::If(i) => {
+                let mut t = false; let mut k = false;
+                for (cond, body) in &i.branches {
+                    let (ct, ck) = Self::scan_expr_throws_task(cond); t |= ct; k |= ck;
+                    let (bt, bk) = Self::scan_stmts_throws_task(body); t |= bt; k |= bk;
+                }
+                (t, k)
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// Parse a trailing closure `(params): body`, append the resulting Closure arg to
+    /// `existing_args`, and return the updated arg list.
+    /// After parsing a multiline closure body, checks that `.` (chaining) does not follow.
+    pub(crate) fn parse_trailing_closure(&mut self, mut existing_args: Vec<Arg>) -> Result<Vec<Arg>, ParseError> {
+        let line = self.line();
+        // Parse the closure parameter list: `(param, param, ...)`
+        let params = self.parse_closure_params()?;
+        let (ex_throws, ex_task) = self.parse_closure_modifiers();
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_closure_body()?;
+
+        // After a multiline trailing closure, chaining with `.` is forbidden
+        if matches!(body, ClosureBody::Block(_)) {
+            // Skip newlines and dedents to find what comes next
+            let mut i = self.pos;
+            while i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Newline | TokenKind::Dedent) {
+                i += 1;
+            }
+            if i < self.tokens.len() && self.tokens[i].kind == TokenKind::Dot {
+                return Err(ParseError::Generic {
+                    line,
+                    msg: "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()".into(),
+                });
+            }
+        }
+
+        let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+        let closure_expr = Expr {
+            kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task),
+            line,
+        };
+        existing_args.push(Arg { label: None, value: closure_expr , spread: false});
+        Ok(existing_args)
+    }
+
+    /// Parse a trailing closure `x: body` (no-paren single-param form), append the resulting
+    /// Closure arg to `existing_args`, and return the updated arg list.
+    pub(crate) fn parse_trailing_closure_no_paren(&mut self, mut existing_args: Vec<Arg>) -> Result<Vec<Arg>, ParseError> {
+        let line = self.line();
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::Colon)?;
+        let param = Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line };
+        let body = self.parse_closure_body()?;
+        // Check: multiline trailing closure cannot be chained
+        if matches!(body, ClosureBody::Block(_)) && matches!(self.peek(), TokenKind::Dot) {
+            return Err(ParseError::Generic {
+                line: self.line(),
+                msg: "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()".into(),
+            });
+        }
+        let (throws, task) = Self::infer_throws_task(&body);
+        let closure_expr = Expr {
+            kind: ExprKind::Closure(vec![param], None, body, throws, task),
+            line,
+        };
+        existing_args.push(Arg { label: None, value: closure_expr , spread: false});
+        Ok(existing_args)
+    }
+
+    /// Parse closure parameter list `(param, param, ...)` — the parens are consumed here.
+    pub(crate) fn parse_closure_params(&mut self) -> Result<Vec<Param>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        self.skip_newlines_and_indent(); // allow `(\n    param,` multi-line form
+        let mut params = Vec::new();
+
+        if self.check(&TokenKind::RParen) {
+            self.advance();
+            return Ok(params);
+        }
+
+        // Detect typed closure params (same logic as peek_is_typed_closure but consuming)
+        // We try to parse params; they may be typed or untyped.
+        // Strategy: parse as param (which handles both `name` and `Type name` forms),
+        // collecting until `)`.
+        // For untyped params like `(x, y)`, parse_param handles `x` → name only.
+        // For typed params like `(Int x)`, parse_param handles the type-before-name form.
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            // Check if this looks like a typed param or untyped
+            if self.is_type_start_before_ident() {
+                params.push(self.parse_param()?);
+            } else {
+                // Untyped param: just an identifier
+                let line = self.line();
+                let name = self.expect_ident()?;
+                params.push(Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line });
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines_and_indent(); // allow newline + indent between params
+        }
+        self.skip_newlines_and_indent(); // allow newline before `)`
+        self.expect(&TokenKind::RParen)?;
+        Ok(params)
+    }
+
+    pub(crate) fn parse_call_args(&mut self) -> Result<Vec<Arg>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        self.skip_newlines_and_indent(); // allow `(\n    arg,` multi-line form
+        let mut args = Vec::new();
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            args.push(self.parse_arg()?);
+            if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines_and_indent(); // allow newline + indent between args
+        }
+        self.skip_newlines_and_indent(); // allow newline before `)`
+        self.expect(&TokenKind::RParen)?;
+        Ok(args)
+    }
+
+    pub(crate) fn parse_arg(&mut self) -> Result<Arg, ParseError> {
+        // Spread arg: `..expr` — copy all fields from the given struct value.
+        if self.eat(&TokenKind::DotDot) {
+            let value = self.parse_or()?;
+            return Ok(Arg { label: None, value, spread: true });
+        }
+        // Labeled arg: `ident= expr` or `ident: expr`
+        // Detected by `Ident` followed immediately by `Eq` or `Colon`.
+        if matches!(self.peek(), TokenKind::Ident(_)) {
+            if self.check2(&TokenKind::Eq) {
+                // Make sure it is not `ident ==` (equality check)
+                let after_eq_pos = self.pos + 2;
+                let is_double_eq = after_eq_pos < self.tokens.len()
+                    && self.tokens[after_eq_pos].kind == TokenKind::Eq;
+                if !is_double_eq {
+                    let label = self.expect_ident()?;
+                    self.advance(); // consume `=`
+                    let value = self.parse_or()?; // stop before comma
+                    return Ok(Arg { label: Some(label), value, spread: false });
+                }
+            }
+            // Note: `ident: expr` is NOT parsed as a labeled arg here because it is
+            // indistinguishable from a no-paren closure `x: body`. Use `ident= expr`
+            // for labeled arguments instead. The `ident:` form is parsed as a
+            // no-paren closure in parse_primary when allow_noparen_closure is true.
+        }
+        let value = self.parse_expr()?;
+        Ok(Arg { label: None, value, spread: false })
+    }
+
+    pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        let line = self.line();
+        match self.peek().clone() {
+            TokenKind::Int(n) => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Int(n), line })
+            }
+            TokenKind::Float(f) => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Float(f), line })
+            }
+            TokenKind::Str(s) => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Str(s), line })
+            }
+            TokenKind::StringInterp(parts) => {
+                let parts = parts.clone();
+                self.advance();
+                let segments = self.resolve_interp(parts, line)?;
+                Ok(Expr { kind: ExprKind::StringInterp(segments), line })
+            }
+            TokenKind::Bool(b) => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Bool(b), line })
+            }
+            TokenKind::Nil => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Nil, line })
+            }
+            TokenKind::Void => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Void, line })
+            }
+            TokenKind::SelfKw => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("self".to_string()), line })
+            }
+            TokenKind::Ident(s) => {
+                let name = s.clone();
+                // Macro call: `name!(...)`, `name![...]`, `name!{...}`
+                // Lookahead: tokens[pos+1] == Bang AND tokens[pos+2] is a delimiter.
+                {
+                    let is_bang  = matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Bang));
+                    let is_delim = matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                                           Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace));
+                    if is_bang && is_delim {
+                        self.advance(); // consume Ident
+                        self.advance(); // consume Bang
+                        let args = self.parse_macro_args()?;
+                        return Ok(Expr { kind: ExprKind::MacroCall { name, args }, line });
+                    }
+                }
+                // Generic call: `name<T1, T2>(args)`
+                // Lookahead: check for `< Type, ... > (` without ambiguity with `<` operator.
+                if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Lt))
+                    && self.is_generic_call_ahead(self.pos + 1)
+                {
+                    self.advance(); // consume Ident
+                    self.advance(); // consume '<'
+                    let mut type_args: Vec<Type> = Vec::new();
+                    type_args.push(self.parse_type()?);
+                    while self.eat(&TokenKind::Comma) {
+                        if self.check(&TokenKind::Gt) { break; }
+                        type_args.push(self.parse_type()?);
+                    }
+                    self.expect(&TokenKind::Gt)?;
+                    let callee = Expr { kind: ExprKind::Var(name), line };
+                    let args = if self.check(&TokenKind::LParen) {
+                        self.parse_call_args()?
+                    } else {
+                        vec![]
+                    };
+                    return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line });
+                }
+                // Single-param closure without parens: `x: body`
+                // Only when allow_noparen_closure is set — disabled in condition contexts
+                // where `:` is a body separator (if, while, for, match, if let, guard)
+                if self.allow_noparen_closure
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Colon))
+                {
+                    self.advance(); // consume ident
+                    self.advance(); // consume ':'
+                    let param = Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line };
+                    let body = self.parse_closure_body()?;
+                    let (throws, task) = Self::infer_throws_task(&body);
+                    return Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line });
+                }
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var(name), line })
+            }
+            TokenKind::Colon => {
+                // Closure shorthand: `:expr` → `(__x): __x.expr`
+                //   `:name`        → `(__x): __x.name`           (field access)
+                //   `:method()`    → `(__x): __x.method()`       (method call)
+                //   `:a.b`         → `(__x): __x.a.b`            (chained field)
+                //   `:a.b()`       → `(__x): __x.a.b()`          (chained method)
+                //   `:length > 3`  → `(__x): __x.length > 3`     (binary op continuation)
+                //   `:name == "x"` → `(__x): __x.name == "x"`
+                self.advance(); // consume ':'
+                let param = Param {
+                    name: "__x".to_string(),
+                    ty: None, mutable: false, owned: false, variadic: false,
+                    default: None, line,
+                };
+                let base = Expr { kind: ExprKind::Var("__x".to_string()), line };
+                // First member: ident [ ( args ) ]
+                let member = self.expect_ident()?;
+                let mut acc = if self.check(&TokenKind::LParen) {
+                    let args = self.parse_call_args()?;
+                    Expr { kind: ExprKind::MethodCall(Box::new(base), member, args), line }
+                } else {
+                    Expr { kind: ExprKind::Field(Box::new(base), member), line }
+                };
+                // Optional trailing .field / .method() chain
+                while self.check(&TokenKind::Dot) {
+                    self.advance(); // consume '.'
+                    let next = self.expect_ident()?;
+                    acc = if self.check(&TokenKind::LParen) {
+                        let args = self.parse_call_args()?;
+                        Expr { kind: ExprKind::MethodCall(Box::new(acc), next, args), line }
+                    } else {
+                        Expr { kind: ExprKind::Field(Box::new(acc), next), line }
+                    };
+                }
+                // Optional binary-operator continuation: `:length > 3`, `:count != 0`, etc.
+                let body_expr = {
+                    let op = match self.peek() {
+                        TokenKind::EqEqEq => Some(BinOp::RefEq),
+                        TokenKind::EqEq   => Some(BinOp::Eq),
+                        TokenKind::BangEq => Some(BinOp::NotEq),
+                        TokenKind::LtEq   => Some(BinOp::LtEq),
+                        TokenKind::GtEq   => Some(BinOp::GtEq),
+                        TokenKind::Lt if !self.check2(&TokenKind::Lt) => Some(BinOp::Lt),
+                        TokenKind::Gt if !self.check2(&TokenKind::Gt) => Some(BinOp::Gt),
+                        TokenKind::Plus    => Some(BinOp::Add),
+                        TokenKind::Minus   => Some(BinOp::Sub),
+                        TokenKind::Star    => Some(BinOp::Mul),
+                        TokenKind::Slash   => Some(BinOp::Div),
+                        TokenKind::Percent => Some(BinOp::Rem),
+                        _ => None,
+                    };
+                    if let Some(op) = op {
+                        self.advance(); // consume operator
+                        let rhs = self.parse_or()?;
+                        Expr { kind: ExprKind::BinOp(op, Box::new(acc), Box::new(rhs)), line }
+                    } else {
+                        acc
+                    }
+                };
+                let body = ClosureBody::Expr(Box::new(body_expr));
+                let (throws, task) = Self::infer_throws_task(&body);
+                Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line })
+            }
+            TokenKind::Dot => {
+                // Dot-prefix enum shorthand: `.Red`
+                self.advance();
+                let name = self.expect_ident()?;
+                Ok(Expr { kind: ExprKind::DotIdent(name), line })
+            }
+            TokenKind::LParen => {
+                self.advance();
+                self.skip_newlines_and_indent(); // allow `(\n    param,` multi-line form
+                if self.check(&TokenKind::RParen) {
+                    // Empty tuple OR empty-param closure `(): expr`
+                    self.advance();
+                    let (ex_throws, ex_task) = self.parse_closure_modifiers();
+                    if self.check(&TokenKind::Colon) {
+                        self.advance();
+                        let body = self.parse_closure_body()?;
+                        let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+                        return Ok(Expr { kind: ExprKind::Closure(vec![], None, body, ex_throws | inf_throws, ex_task | inf_task), line });
+                    }
+                    return Ok(Expr { kind: ExprKind::Tuple(vec![]), line });
+                }
+                // Detect typed closure params: `(Type name, ...)` or `(var Type name, ...)`
+                // Heuristic: if first token is type-start AND second is an ident → typed params
+                if self.peek_is_typed_closure() {
+                    let mut params = vec![self.parse_param()?];
+                    while self.eat(&TokenKind::Comma) {
+                        self.skip_newlines_and_indent(); // allow newline between params
+                        if self.check(&TokenKind::RParen) { break; }
+                        params.push(self.parse_param()?);
+                    }
+                    self.skip_newlines_and_indent(); // allow newline before `)`
+                    self.expect(&TokenKind::RParen)?;
+                    let (ex_throws, ex_task) = self.parse_closure_modifiers();
+                    self.expect(&TokenKind::Colon)?;
+                    let body = self.parse_closure_body()?;
+                    let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+                    return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line });
+                }
+                // Untyped: parse as expression(s), then decide closure vs tuple vs grouping
+                let expr = self.parse_expr()?;
+                if self.check(&TokenKind::Comma) {
+                    let mut elems = vec![expr];
+                    while self.eat(&TokenKind::Comma) {
+                        self.skip_newlines_and_indent(); // allow newline between params
+                        if self.check(&TokenKind::RParen) { break; }
+                        elems.push(self.parse_expr()?);
+                    }
+                    self.skip_newlines_and_indent(); // allow newline before `)`
+                    self.expect(&TokenKind::RParen)?;
+                    let (ex_throws, ex_task) = self.parse_closure_modifiers();
+                    if self.check(&TokenKind::Colon) {
+                        self.advance();
+                        let params = elems.iter().map(|e| expr_to_param(e, line)).collect::<Vec<_>>();
+                        let body = self.parse_closure_body()?;
+                        let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line });
+                    }
+                    Ok(Expr { kind: ExprKind::Tuple(elems), line })
+                } else {
+                    self.skip_newlines_and_indent(); // allow newline before `)`
+                    self.expect(&TokenKind::RParen)?;
+                    let (ex_throws, ex_task) = self.parse_closure_modifiers();
+                    if self.check(&TokenKind::Colon) {
+                        self.advance();
+                        let params = vec![expr_to_param(&expr, line)];
+                        let body = self.parse_closure_body()?;
+                        let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+                        return Ok(Expr { kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task), line });
+                    }
+                    Ok(expr)
+                }
+            }
+            TokenKind::LBracket => {
+                self.advance();
+                let mut elems = Vec::new();
+                while !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
+                    elems.push(self.parse_expr()?);
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                self.expect(&TokenKind::RBracket)?;
+                Ok(Expr { kind: ExprKind::Array(elems), line })
+            }
+            TokenKind::LBrace => {
+                self.parse_brace_expr(line)
+            }
+            TokenKind::If => {
+                let if_stmt = self.parse_if_stmt()?;
+                Ok(Expr { kind: ExprKind::If(Box::new(if_stmt)), line })
+            }
+            TokenKind::Match => {
+                let match_stmt = self.parse_match_stmt()?;
+                Ok(Expr { kind: ExprKind::Match(Box::new(match_stmt)), line })
+            }
+            TokenKind::Do => {
+                // `do:` in expression context — always a scoped block, never do-while
+                self.advance(); // consume 'do'
+                self.expect(&TokenKind::Colon)?;
+                self.expect_newline()?;
+                let stmts = self.parse_block()?;
+                Ok(Expr { kind: ExprKind::Do(stmts), line })
+            }
+            TokenKind::Loop => {
+                // `loop:` as an expression — evaluates to the `break value`
+                let s = self.parse_loop_stmt()?;
+                Ok(Expr { kind: ExprKind::Loop(s), line })
+            }
+            TokenKind::Task => {
+                self.parse_task_expr()
+            }
+            TokenKind::Join => {
+                let line = self.line();
+                self.advance(); // consume `join`
+                self.expect(&TokenKind::LParen)?;
+                let mut exprs = Vec::new();
+                while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                    exprs.push(self.parse_expr()?);
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr { kind: ExprKind::JoinAll(exprs), line })
+            }
+            // `get` and `set` are soft keywords — treat as variable references in expressions
+            TokenKind::Get => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("get".to_string()), line })
+            }
+            TokenKind::Set => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("set".to_string()), line })
+            }
+            _ => Err(ParseError::Generic {
+                line,
+                msg: format!("unexpected token in expression: {:?}", self.peek()),
+            }),
+        }
+    }
+
+    /// Parse the argument list of a macro call.
+    /// Accepts any of `(...)`, `[...]`, `{...}` as delimiter.
+    /// Content: comma-separated expressions (trailing comma allowed).
+    pub(crate) fn parse_macro_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let (open, close) = match self.peek().clone() {
+            TokenKind::LParen   => (TokenKind::LParen,   TokenKind::RParen),
+            TokenKind::LBracket => (TokenKind::LBracket, TokenKind::RBracket),
+            TokenKind::LBrace   => (TokenKind::LBrace,   TokenKind::RBrace),
+            other => return Err(ParseError::Generic {
+                line: self.line(),
+                msg: format!("expected '(', '[', or '{{' after '!' in macro call, got {:?}", other),
+            }),
+        };
+        self.expect(&open)?;
+        let mut args = Vec::new();
+        while !self.check(&close) && !self.check(&TokenKind::Eof) {
+            args.push(self.parse_expr()?);
+            if !self.eat(&TokenKind::Comma) { break; }
+        }
+        self.expect(&close)?;
+        Ok(args)
+    }
+
+    /// Parse `{...}` — could be dict `{k: v, ...}` or set `{v, ...}`
+    pub(crate) fn parse_brace_expr(&mut self, line: usize) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        if self.check(&TokenKind::RBrace) {
+            self.advance();
+            // {} = empty set (HashSet::new())
+            return Ok(Expr { kind: ExprKind::Set(vec![]), line });
+        }
+
+        // {=} = empty dict (HashMap::new())
+        if self.check(&TokenKind::Eq) {
+            self.advance();
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr { kind: ExprKind::Dict(vec![]), line });
+        }
+
+        // Distinguish dict from set: dict uses `=` as key-value separator
+        // Dict: {key = value, ...}   Set: {elem, ...}
+        let first_expr = self.parse_expr()?;
+        if self.eat(&TokenKind::Eq) {
+            // Dict
+            let first_val = self.parse_expr()?;
+            let mut pairs = vec![(first_expr, first_val)];
+            while self.eat(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) { break; }
+                let k = self.parse_expr()?;
+                self.expect(&TokenKind::Eq)?;
+                let v = self.parse_expr()?;
+                pairs.push((k, v));
+            }
+            self.expect(&TokenKind::RBrace)?;
+            Ok(Expr { kind: ExprKind::Dict(pairs), line })
+        } else {
+            // Set
+            let mut elems = vec![first_expr];
+            while self.eat(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) { break; }
+                elems.push(self.parse_expr()?);
+            }
+            self.expect(&TokenKind::RBrace)?;
+            Ok(Expr { kind: ExprKind::Set(elems), line })
+        }
+    }
+
+    pub(crate) fn resolve_interp(&mut self, parts: Vec<RawInterpPart>, line: usize) -> Result<Vec<StringSegment>, ParseError> {
+        let mut segments = Vec::new();
+        for part in parts {
+            match part {
+                RawInterpPart::Lit(s) => segments.push(StringSegment::Lit(s)),
+                RawInterpPart::Hole(code) => {
+                    if code.trim().is_empty() {
+                        segments.push(StringSegment::Lit("{}".to_string()));
+                    } else {
+                        let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
+                        let mut sub_parser = Parser::new(hole_tokens);
+                        sub_parser.skip_newlines();
+                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic {
+                            line,
+                            msg: format!("in string interpolation: {}", e),
+                        })?;
+                        segments.push(StringSegment::Expr(Box::new(expr)));
+                    }
+                }
+                RawInterpPart::HoleFormatted(code, fmt) => {
+                    if code.trim().is_empty() {
+                        segments.push(StringSegment::Lit(format!("{{:{}}}", fmt)));
+                    } else {
+                        let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
+                        let mut sub_parser = Parser::new(hole_tokens);
+                        sub_parser.skip_newlines();
+                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic {
+                            line,
+                            msg: format!("in string interpolation: {}", e),
+                        })?;
+                        segments.push(StringSegment::FormattedExpr(Box::new(expr), fmt));
+                    }
+                }
+            }
+        }
+        Ok(segments)
+    }
+
+    // Returns true if the current position looks like typed closure params:
+    // `(Type name` or `(var Type name` — detect without consuming tokens.
+    pub(crate) fn peek_is_typed_closure(&self) -> bool {
+        // pos is just after the opening `(` was consumed
+        let t0 = self.tokens.get(self.pos).map(|t| &t.kind);
+        let t1 = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+        // `var` prefix
+        let (type_tok, name_tok) = if matches!(t0, Some(TokenKind::Var)) {
+            (self.tokens.get(self.pos + 1).map(|t| &t.kind),
+             self.tokens.get(self.pos + 2).map(|t| &t.kind))
+        } else {
+            (t0, t1)
+        };
+        // type must be an uppercase-starting ident, a known alias, or a primitive keyword
+        let type_is_named = match type_tok {
+            Some(TokenKind::Ident(s)) => Self::is_type_name(s),
+            Some(TokenKind::LBracket | TokenKind::LBrace) => true,
+            _ => false,
+        };
+        let name_is_ident = matches!(name_tok, Some(TokenKind::Ident(_)));
+        type_is_named && name_is_ident
+    }
+
+    /// Parse the body of a closure after the `:` has been consumed.
+    pub(crate) fn parse_closure_body(&mut self) -> Result<ClosureBody, ParseError> {
+        if self.check(&TokenKind::Newline) {
+            self.expect_newline()?;
+            let stmts = self.parse_block()?;
+            check_no_return(&stmts, "closure")?;
+            Ok(ClosureBody::Block(stmts))
+        } else {
+            // Inline expression — forbid `return`
+            if self.check(&TokenKind::Return) {
+                return Err(ParseError::Generic {
+                    line: self.line(),
+                    msg: "last expression (no 'return' allowed in closure)".to_string(),
+                });
+            }
+            let expr = self.parse_or()?;
+            Ok(ClosureBody::Expr(Box::new(expr)))
+        }
+    }
+
+    pub(crate) fn parse_task_expr(&mut self) -> Result<Expr, ParseError> {
+        let line = self.line();
+        self.expect(&TokenKind::Task)?;
+        // Optionally consume ':'
+        self.eat(&TokenKind::Colon);
+        // If next token is Newline => parse block form
+        let inner = if self.check(&TokenKind::Newline) {
+            self.expect_newline()?;
+            let stmts = self.parse_block()?;
+            check_no_return(&stmts, "task block")?;
+            Expr { kind: ExprKind::Block(stmts), line }
+        } else {
+            let expr = self.parse_or()?;
+            // Command-style: `task print "..."` → Task(Call(print, ["..."]))
+            if let ExprKind::Var(_) = &expr.kind {
+                if self.peek_starts_expr() {
+                    let arg_line = expr.line;
+                    let arg = self.parse_expr()?;
+                    Expr {
+                        kind: ExprKind::Call(Box::new(expr), vec![Arg { label: None, value: arg , spread: false}]),
+                        line: arg_line,
+                    }
+                } else {
+                    expr
+                }
+            } else {
+                expr
+            }
+        };
+        Ok(Expr { kind: ExprKind::Task(Box::new(inner)), line })
+    }
+}

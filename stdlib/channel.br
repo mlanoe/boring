@@ -1,0 +1,58 @@
+# Copyright (C) 2026 Mickaël LANOË
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Boring.
+# Boring is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# See the LICENSE file at the project root for the full text.
+
+# Boring standard library — channel built-in types and methods.
+#
+# A channel carries values from one or more senders to a single receiver.
+# Both endpoints are obtained from one call; the channel is bounded (buffered).
+# All send/receive operations are async and must be used inside a task function.
+#
+#   let tx, rx = channel<int>(32)     # generic form (preferred)
+#   let int tx, rx = channel(32)      # type-annotated binding form
+#
+# Import if your editor or toolchain requires explicit scope:
+#   use stdlib.channel
+
+# ── Types ──────────────────────────────────────────────────────────────────────
+
+struct Sender<T>: native   # mpsc sender — cloneable; wraps tokio::sync::mpsc::Sender<T>
+struct Receiver<T>: native # mpsc receiver — async iterable; wraps tokio::sync::mpsc::Receiver<T>
+
+# ── Sender methods ─────────────────────────────────────────────────────────────
+
+ext Sender<T>:
+    # Send a value into the channel.
+    # Suspends until there is room in the buffer.
+    # Panics if all receivers have been dropped.
+    task send(T value): native
+
+    # Clone the sender so it can be shared across multiple tasks.
+    # The channel stays open as long as at least one sender is alive.
+    req Sender<T> clone(): native
+
+# ── Receiver methods ───────────────────────────────────────────────────────────
+
+ext Receiver<T>:
+    # Wait for the next value.
+    # Returns nil when all senders have been dropped (channel closed).
+    # Prefer `for x in rx:` which loops until nil automatically.
+    task req T? recv(): native
+
+# ── channel() constructor ──────────────────────────────────────────────────────
+#
+# Built-in function — no declaration needed; always in scope.
+#
+#   def (Sender<T>, Receiver<T>) channel<T>(int capacity): native
+#
+# capacity  — maximum number of values buffered before send() suspends.
+# Returns a (sender, receiver) tuple, typically destructured immediately:
+#
+#   let tx, rx = channel<int>(16)

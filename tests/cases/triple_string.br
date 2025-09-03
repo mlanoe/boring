@@ -1,0 +1,46 @@
+# Basic multi-line string — dedents by closing """ indent
+let sql = """
+    SELECT *
+    FROM users
+    WHERE age > 18
+    """
+print sql
+
+# Interpolation inside triple-quoted string
+let table = "orders"
+let limit = 100
+let query = """
+    SELECT *
+    FROM {table}
+    LIMIT {limit}
+    """
+print query
+
+# {{ }} for literal braces (same rule as regular strings)
+let json = """
+    {{"key": "value"}}
+    """
+print json
+
+# Single-line triple string (no indentation to strip)
+let greeting = """Hello, World!"""
+print greeting
+
+# Double-quotes inside content are fine
+let html = """
+    <a href="https://boring.dev">Boring</a>
+    """
+print html
+
+# Trailing empty line preserved
+let lines = """
+    first
+    second
+
+    fourth
+    """
+print lines
+
+# Line number of statement after triple string is correct
+let after = 42
+print after

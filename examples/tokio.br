@@ -1,0 +1,90 @@
+@derive Debug, Clone
+struct User:
+    uint id
+    string name
+    string email
+
+enum AppError:
+    @error "Timeout lors de la récupération des données"
+    TimeoutError
+    @error "Erreur réseau: {0}"
+    NetworkError(string)
+    @error "Données invalides"
+    InvalidData
+
+task def [User] read_users_from_file_blocking(string path) throws:
+    sleep(Duration.from_millis(500))
+    let users = [User(id = 1, name = "Alice", email = "alice@example.com"), User(id = 2, name = "Bob", email = "bob@example.com")]
+    users
+
+task def [User] fetch_users_from_api(string url) throws AppError:
+    sleep(Duration.from_millis(300))
+    let users = [User(id = 3, name = "Charlie", email = "charlie@example.com"), User(id = 4, name = "Diana", email = "diana@example.com")]
+    users
+
+task def User process_user(User user):
+    info "Traitement de l'utilisateur: {user.name}"
+    sleep(Duration.from_millis(200))
+    User(id = user.id, name = user.name.upper(), email = user.email)
+
+task def void main():
+    info "🚀 Démarrage de l'application Tokio"
+
+    let url = "https://jsonplaceholder.typicode.com/users"
+
+    var [User]'actor shared_users = []
+    var [User]'actor shared_processed_users = []
+
+    let user_sender, user_receiver = channel<User>(10)
+
+    task:
+        debug "Lecture des utilisateurs depuis un fichier..."
+        try:
+            let users = read_users_from_file_blocking("users.json")
+            shared_users.append(users)
+            info "Fichier lu: {len(shared_users)} utilisateurs chargés"
+        catch:
+            error "Erreur lors de la lecture du fichier: {error}"
+
+    task:
+        debug "Récupération des utilisateurs depuis l'API..."
+        try:
+            let users = fetch_users_from_api(url)
+            shared_users.append(users)
+            info "API: {len(shared_users)} utilisateurs récupérés"
+        catch:
+            error "Erreur API: {error}"
+
+    task:
+        sleep(Duration.from_millis(100))
+        for user in shared_users:
+            try:
+                user_sender.send(user)
+            catch:
+                warn "Échec de l'envoi d'un utilisateur dans le canal"
+
+    task:
+        for user in user_receiver:
+            try:
+                let processed_user = timeout(Duration.from_secs(1), task process_user(user))
+                shared_processed_users.append(processed_user)
+                info "Utilisateur traité avec succès"
+            catch:
+                warn "Timeout ou erreur lors du traitement: {error}"
+
+    task:
+        loop:
+            sleep(Duration.from_millis(500))
+            info "📊 Utilisateurs traités: {len(shared_processed_users)}"
+
+    let shutdown_sender, shutdown_receiver = channel<void>(1)
+
+    task:
+        sleep(Duration.from_secs(5))
+        info "🛑 Arrêt du programme..."
+        shutdown_sender.send(void)
+
+    for _ in shutdown_receiver:
+        break
+
+    info "✅ Programme terminé"

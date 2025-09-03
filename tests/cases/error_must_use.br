@@ -1,0 +1,4 @@
+def int answer():
+    42
+
+answer()
