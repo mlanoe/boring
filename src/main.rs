@@ -109,6 +109,19 @@ fn load_project_toml() -> (BoringToml, PathBuf) {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 fn main() {
+    // Windows default stack is 1 MB — too small for the interpreter's recursive
+    // descent (expression evaluation, type resolution, pattern matching).
+    // Spawn a new thread with an 8 MB stack so the same code runs everywhere.
+    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+    let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
+    let handler = builder.spawn(run).expect("failed to spawn main thread");
+    match handler.join() {
+        Ok(()) => {}
+        Err(_) => std::process::exit(1),
+    }
+}
+
+fn run() {
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
