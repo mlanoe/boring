@@ -1337,6 +1337,10 @@ impl Interpreter {
                 Self::collect_vars_expr(start, out); Self::collect_vars_expr(end, out);
             }
             ExprKind::Task(e) => Self::collect_vars_expr(e, out),
+            ExprKind::TaskWithTimeout(dur, body) => {
+                Self::collect_vars_expr(dur, out);
+                Self::collect_vars_expr(body, out);
+            }
             ExprKind::MacroCall { args, .. } => {
                 for a in args { Self::collect_vars_expr(a, out); }
             }

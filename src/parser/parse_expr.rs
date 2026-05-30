@@ -1367,6 +1367,38 @@ impl Parser {
     pub(crate) fn parse_task_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         self.expect(&TokenKind::Task)?;
+
+        // ── task(duration): body  OR  task(timeout = duration): body ─────────
+        // Detected when task is immediately followed by `(` without a `:` first.
+        if self.check(&TokenKind::LParen) {
+            self.advance(); // consume `(`
+            // Accept both labeled `timeout = expr` and bare `expr`
+            let dur_expr = if self.check(&TokenKind::Ident("timeout".to_string()))
+                && self.check2(&TokenKind::Eq)
+            {
+                self.advance(); // consume `timeout`
+                self.advance(); // consume `=`
+                self.parse_expr()?
+            } else {
+                self.parse_expr()?
+            };
+            self.expect(&TokenKind::RParen)?;
+            // Now parse the body — same `:` + block/inline logic as plain task
+            self.eat(&TokenKind::Colon);
+            let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+                self.expect_newline()?;
+                let stmts = self.parse_block()?;
+                check_no_return(&stmts, "task block")?;
+                Expr { kind: ExprKind::Block(stmts), line }
+            } else {
+                self.parse_or()?
+            };
+            return Ok(Expr {
+                kind: ExprKind::TaskWithTimeout(Box::new(dur_expr), Box::new(body)),
+                line,
+            });
+        }
+
         // Optionally consume ':'
         self.eat(&TokenKind::Colon);
         // If next token is Newline => parse block form

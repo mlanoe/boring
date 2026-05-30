@@ -404,7 +404,37 @@ impl Parser {
             // keyword types that can appear as return types
             Some(TokenKind::Void) | Some(TokenKind::Any) => true,
             Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => true, // [T] / {T} return type
-            Some(TokenKind::LParen) => true, // (T, V) tuple return type
+            Some(TokenKind::LParen) => {
+                // `task (T, U) f():` — tuple return type → function declaration.
+                // `task(dur):` — timeout expression → NOT a function declaration.
+                //
+                // Disambiguate by scanning past the closing `)`:
+                //   • followed by an identifier  → tuple return type + function name → fn decl
+                //   • followed by `:` or newline → task-with-timeout expression
+                let mut depth = 0usize;
+                let mut i = self.pos + 1;
+                while i < self.tokens.len() {
+                    match &self.tokens[i].kind {
+                        TokenKind::LParen => { depth += 1; i += 1; }
+                        TokenKind::RParen => {
+                            if depth == 1 {
+                                // Peek at what follows the closing paren
+                                let after = self.tokens.get(i + 1).map(|t| &t.kind);
+                                return matches!(after,
+                                    Some(TokenKind::Ident(_))
+                                    | Some(TokenKind::Set)
+                                    | Some(TokenKind::Wait)
+                                    | Some(TokenKind::Join)
+                                );
+                            }
+                            depth -= 1; i += 1;
+                        }
+                        TokenKind::Newline | TokenKind::Eof => break,
+                        _ => { i += 1; }
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }

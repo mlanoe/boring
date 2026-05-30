@@ -1197,6 +1197,60 @@ impl Transpiler {
                 sub.emit_loop(s);
                 sub.out.trim_end().to_string()
             }
+            ExprKind::TaskWithTimeout(dur_expr, body_expr) => {
+                // task(duration): body
+                //
+                // Emits tokio::time::timeout(dur, async move { body }) in a spawn or inline.
+                // The Elapsed error propagates as a Box<dyn Error> catchable by:
+                //   • try task(dur): body  else: …   (always works)
+                //   • catch:                          (untyped catch-all)
+                //
+                // Body is built identically to plain Task — Arc vars are cloned into the closure.
+                let dur_s = self.emit_expr(dur_expr);
+                let captured = collect_var_names(body_expr);
+                let arc_captures: Vec<&str> = captured.iter()
+                    .filter(|v| self.arc_vars.contains(*v))
+                    .map(String::as_str)
+                    .collect();
+
+                let inner_s = if let ExprKind::Block(stmts) = &body_expr.kind {
+                    let mut sub = self.make_sub();
+                    sub.in_async = true;
+                    sub.in_throws = false;
+                    sub.emit_body(stmts);
+                    format!("{{\n{}}}", sub.out)
+                } else {
+                    let mut sub = self.make_sub();
+                    sub.in_async = true;
+                    sub.in_throws = false;
+                    format!("{{ {} }}", sub.emit_expr(body_expr))
+                };
+
+                let clone_prefix = if arc_captures.is_empty() {
+                    String::new()
+                } else {
+                    arc_captures.iter()
+                        .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                        .collect::<Vec<_>>()
+                        .join(" ") + " "
+                };
+
+                // tokio::time::timeout wraps the body future; Elapsed propagates via ?
+                let timeout_future = format!(
+                    "{}async move {{ tokio::time::timeout({}, async move {}).await? }}",
+                    clone_prefix, dur_s, inner_s
+                );
+
+                // Spawn if inside an async context (produces a JoinHandle),
+                // otherwise emit as an inline future expression.
+                if self.in_async {
+                    // Mark the spawn as a throws JoinHandle so .value uses the ? unwrap
+                    format!("tokio::spawn({})", timeout_future)
+                } else {
+                    timeout_future
+                }
+            }
+
             ExprKind::Task(e) => {
                 // Arc<T> variables captured by the task body must be cloned so the outer
                 // binding remains valid after the spawn (tokio::spawn moves its captures).

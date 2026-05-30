@@ -390,6 +390,10 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         ExprKind::JoinAll(exprs) => {
             for e in exprs { collect_vars_in(e, out); }
         }
+        ExprKind::TaskWithTimeout(dur, body) => {
+            collect_vars_in(dur, out);
+            collect_vars_in(body, out);
+        }
         _ => {}
     }
 }
@@ -607,7 +611,7 @@ pub(crate) fn expr_has_channel_or_task(expr: &Expr) -> bool {
         ExprKind::GenericCall(callee, _, _) => {
             matches!(&callee.kind, ExprKind::Var(n) if n == "channel")
         }
-        ExprKind::Task(_) => true,
+        ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
         ExprKind::Block(stmts) => body_has_channel_or_task(stmts),
         _ => false,
     }
@@ -657,7 +661,7 @@ pub(crate) fn stmt_has_task(stmt: &Stmt) -> bool {
 
 pub(crate) fn expr_has_task(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Task(_) => true,
+        ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
         ExprKind::GenericCall(callee, _, _) =>
             matches!(&callee.kind, ExprKind::Var(n) if matches!(n.as_str(), "channel" | "oneshot" | "broadcast" | "watch")),
         ExprKind::Call(callee, _) =>
@@ -1006,6 +1010,9 @@ pub(crate) fn expr_uses_task_cancelled(expr: &Expr) -> bool {
         }
         ExprKind::Block(stmts) | ExprKind::Do(stmts) => stmts_use_task_cancelled(stmts),
         ExprKind::Task(e) => expr_uses_task_cancelled(e),
+        ExprKind::TaskWithTimeout(dur, body) => {
+            expr_uses_task_cancelled(dur) || expr_uses_task_cancelled(body)
+        }
         ExprKind::Else(e, d) | ExprKind::TryElse(e, d) => {
             expr_uses_task_cancelled(e) || expr_uses_task_cancelled(d)
         }

@@ -759,21 +759,15 @@ impl Transpiler {
                     if field == "value" && self.watch_receivers.contains(type_name.as_str()) {
                         return format!("{}.borrow().clone()", type_name);
                     }
-                    // future.value → future.await.unwrap()  (returns the result)
-                    // future.wait  → { let _ = future.await; }  (discards the result, void)
-                    // Only applies to variables known to hold a future (task_vars).
-                    // Exclude `self` (plain struct field) and actor/mutex vars (need .lock().await).
+                    // future.value / future.wait — delegate to emit_expr so throws JoinHandle
+                    // vars get the correct .await.unwrap()? treatment (not just .await.unwrap()).
                     if (field == "value" || field == "wait")
                         && type_name != "self"
                         && !self.var_mutex_types.contains(type_name.as_str())
                         && !self.var_rwlock_types.contains(type_name.as_str())
                         && self.task_vars.contains(type_name.as_str())
                     {
-                        return if field == "wait" {
-                            format!("{{ let _ = {}.await; }}", type_name)
-                        } else {
-                            format!("{}.await.unwrap()", type_name)
-                        };
+                        return self.emit_expr(expr);
                     }
                 }
                 let obj_s = self.emit_expr(obj);

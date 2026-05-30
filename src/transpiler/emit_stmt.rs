@@ -252,6 +252,12 @@ impl Transpiler {
         {
             self.index_vars.insert(s.name.clone());
         }
+        // task(dur): body — always a throws JoinHandle (timeout fires → Elapsed error via ?)
+        if let ExprKind::TaskWithTimeout(..) = &s.value.kind {
+            self.task_vars.insert(s.name.clone());
+            self.join_handle_vars.insert(s.name.clone());
+            self.throws_join_handle_vars.insert(s.name.clone());
+        }
         // Track variables that hold a spawned future (task expr) — .value → .await.unwrap()
         if let ExprKind::Task(inner) = &s.value.kind {
             self.task_vars.insert(s.name.clone());

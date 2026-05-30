@@ -571,6 +571,19 @@ impl Interpreter {
                 Ok(Value::Future(Box::new(val)))
             }
 
+            ExprKind::TaskWithTimeout(_dur, inner) => {
+                // In the interpreter there is no real async runtime, so the timeout
+                // is silently ignored — same as the existing `timeout()` stub.
+                // The body is evaluated eagerly and wrapped in a Future.
+                let owned_captures = Self::collect_owned_task_captures(inner, &env);
+                Self::check_task_captures(inner, &env, line)?;
+                let val = self.eval_expr(inner, Rc::clone(&env))?;
+                for name in &owned_captures {
+                    env.borrow_mut().invalidate(name);
+                }
+                Ok(Value::Future(Box::new(val)))
+            }
+
             ExprKind::MacroCall { name, args } => {
                 // Evaluate all arguments eagerly
                 let mut arg_vals = Vec::new();

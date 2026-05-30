@@ -675,6 +675,10 @@ pub enum ExprKind {
     // task [:]? expr  OR  task: block — creates a Future / JoinHandle
     Task(Box<Expr>),
 
+    // task(duration): body  OR  task(timeout = duration): body
+    // Spawns a task with a built-in timeout; throws Error.Expired if it elapses.
+    TaskWithTimeout(Box<Expr>, Box<Expr>),
+
     /// `join [f1, f2, ...]` — wait for multiple JoinHandles in parallel.
     JoinAll(Vec<Expr>),
 

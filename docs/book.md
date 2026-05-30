@@ -458,7 +458,7 @@ Rc::ptr_eq(&a, &b)    // T'auto objects
 When a return type is explicitly written, `def` can be omitted — the declaration reads like Java or C++:
 
 ```boring
-int add(int a, int b):    # implicit def — return type present
+int add(int a, int b):      # def omitted — return type present
     a + b
 
 def int add(int a, int b):  # equivalent — explicit def
@@ -474,7 +474,23 @@ fn add(a: i64, b: i64) -> i64 {
 }
 ```
 
-> **Style note** — Inside struct bodies the explicit `def` / `req` distinction is meaningful (`&mut self` vs `&self`). Prefer writing `def` and `req` explicitly there. The implicit form is most natural for top-level functions.
+### The `def` keyword is optional
+
+When a return type is present, `def` can be omitted entirely:
+
+```boring
+int f(int n): n * 2       # no keyword — return type implies def
+def int f(int n): n * 2   # identical — explicit def
+```
+
+`def` is **required** when there is no return type (void functions):
+
+```boring
+def log(string msg):      # def required — no return type
+    print "[LOG] {msg}"
+```
+
+> `req` (introduced in section 8 — Structs) is also available for top-level functions to signal that a function is pure. Both produce the same Rust `fn` at the top level.
 
 Functions can return any collection type — arrays, sets, and dicts are all supported return types:
 
@@ -1454,7 +1470,7 @@ struct Counter:
     req int get():        # read-only — &self
         self.value
 
-    def inc():       # mutating — &mut self
+    def inc():            # mutating — &mut self
         self.value += 1
 
 let c = Counter()
@@ -1465,6 +1481,25 @@ var mc = Counter()
 mc.inc()   # ok — def on var binding
 mc.get()   # ok — req works on var too
 ```
+
+**`req` and `def` for top-level functions**
+
+Both keywords are also valid for top-level free functions (outside any struct). At the top level there is no `self`, so both produce the same `fn` in Rust — the distinction is **documentation intent**:
+
+```boring
+req bool positive(int n): n > 0        # pure, no side effects — use req
+req string upper(string s): s.upper()  # pure — use req
+
+def log(string msg):                   # has side effects — use def
+    print "[LOG] {msg}"
+```
+
+> **Summary** — all three forms are equivalent when a return type is present:
+> ```boring
+> int f(int n): n * 2       # shortest — def implied
+> def int f(int n): n * 2   # explicit def
+> req int f(int n): n * 2   # pure — signals no side effects
+> ```
 
 ### Implicit `self`
 
