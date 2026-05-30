@@ -30,7 +30,7 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 16. [Ownership Qualifiers](#19-ownership-qualifiers) — incl. [`'weak` — weak references (secondary qualifier)](#weak-references--wauto-wtask-wactor)
 17. [Defer](#20-defer)
 17. [Channels](#18-channels-channel) — incl. [`oneshot`](#oneshot--single-shot-response), [`broadcast`](#broadcast--fan-out), [`watch`](#watch--observable-value)
-18. [Tasks (Async)](#21-tasks-async) — incl. [`.wait` — void await](#awaiting-a-future--value-and-wait), [`'guard` — RwLock shared state](#read-heavy-shared-state--tguard), [cancellation — `f.cancel()` / `cancelled:`](#task-cancellation--fcancel-and-cancelled), [`wait` — pause async](#wait--pause-asynchrone), [`timeout` — future with deadline](#timeout--future-with-deadline)
+18. [Tasks (Async)](#21-tasks-async) — incl. [`.wait` — void await](#awaiting-a-future--value-and-wait), [`'guard` — RwLock shared state](#read-heavy-shared-state--tguard), [cancellation — `f.cancel()` / `cancelled:`](#task-cancellation--fcancel-and-cancelled), [`wait` — pause async](#wait--pause-asynchrone), [`task(Duration)` — built-in timeout](#task-with-built-in-timeout--taskduration-body), [`timeout` — future with deadline](#timeout--future-with-deadline)
 19. [Macros](#22-macros)
 20. [Attributes](#23-attributes)
 21. [Format Specifiers](#24-format-specifiers)
@@ -187,7 +187,7 @@ let mut flag: bool = true;
 | `uint`         | `Uint'copy`      | `u64`           | 64-bit unsigned integer, copy      |
 | `float`        | `Float'copy`     | `f64`           | 64-bit floating-point, copy        |
 | `bool`         | `Bool'copy`      | `bool`          | `true` / `false`, copy             |
-| `string`   | —         | `Arc<str>`        | String — **recommended default** for all string values; representation is inferred automatically |
+| `string`   | `String'const` or `String'task` | `&str` / `Arc<str>` | String — **recommended default**; the compiler picks the representation from context (literal → `&str`, heap → `Arc<str>`) |
 
 ### Integer literals
 
@@ -658,7 +658,7 @@ fn countdown(mut n: i64) -> i64 {
 struct Counter:
     var int value = 0
 
-def void show(var Counter'task c):
+def show(var Counter'task c):
     print c.value          # OK — reading is always allowed
     c = Counter()          # OK — var lets you rebind the Arc pointer
     # c.value = c.value + 1  # ERROR — cannot mutate through T'task; use T'actor
@@ -669,7 +669,7 @@ To make this intent explicit, prefer `var T&` (mutable borrow) when you need to 
 For mutable borrow parameters, combine `var` with `&`:
 
 ```boring
-def void add_one(var int& x):
+def add_one(var int& x):
     x += 1
 ```
 
@@ -1434,7 +1434,7 @@ Fields are immutable by default. Use `var` to make a field mutable:
 struct Counter:
     var int value = 0
 
-    def void inc():
+    def inc():
         self.value += 1
 ```
 
@@ -1454,7 +1454,7 @@ struct Counter:
     req int get():        # read-only — &self
         self.value
 
-    def void inc():       # mutating — &mut self
+    def inc():       # mutating — &mut self
         self.value += 1
 
 let c = Counter()
@@ -1490,10 +1490,10 @@ Writes work the same way — assigning to a bare name that matches a field updat
 struct Counter:
     var int value = 0
 
-    def void inc():
+    def inc():
         value = value + 1       # reads and writes self.value
 
-    def void add(int n):
+    def add(int n):
         value = value + n
 ```
 
@@ -2260,7 +2260,7 @@ enum AppError:
     Timeout
     InvalidInput(string)
 
-def void risky(int n) throws AppError:
+def risky(int n) throws AppError:
     if n == 1: throw AppError.NotFound
     if n == 2: throw AppError.InvalidInput("bad value")
 
@@ -2337,7 +2337,7 @@ String interpolation `{error}` always works regardless of the thrown type.
 For enum errors, catch individual variants with dot notation:
 
 ```boring
-task def string fetch(string url) throws:
+task string fetch(string url) throws:
     if url == "":
         throw Error.InvalidInput
     if url == "notfound":
@@ -2633,7 +2633,7 @@ When *calling* a generic function or annotating a variable, you can supply type 
 
 ```boring
 # Definition — constraint is declared here
-def void copy_items<T as Clone>(Container<T> src, Container<T> dst):
+def copy_items<T as Clone>(Container<T> src, Container<T> dst):
     for item in src.items:
         print "copying: {item}"
 
@@ -3286,7 +3286,7 @@ Boring provides three additional channel types for specialised patterns:
 #### `oneshot<T>()` — single-shot response
 
 ```boring
-task def void run():
+task run():
     let tx, rx = oneshot<int>()
     task: tx.send(42)        # sender consumed on send
     let result = rx.value    # waits for the single value
@@ -3309,7 +3309,7 @@ let result = rx.await.unwrap();
 #### `broadcast<T>(cap)` — fan-out
 
 ```boring
-task def void run():
+task run():
     let tx, rx = broadcast<string>(16)
     let rx2 = tx.subscribe()        # second independent consumer
 
@@ -3344,7 +3344,7 @@ while let Ok(msg) = rx2.recv().await { println!("rx2: {}", msg); }
 #### `watch<T>(initial)` — observable value
 
 ```boring
-task def void run():
+task run():
     let tx, rx = watch<int>(0)      # initial value = 0
 
     task:
@@ -3425,15 +3425,15 @@ let result, _ = join (f_data, f_log)
 ### Full example
 
 ```boring
-task def int fetch_users():
+task int fetch_users():
     sleep(Duration.from_millis(10))
     return 42
 
-task def int fetch_products():
+task int fetch_products():
     sleep(Duration.from_millis(10))
     return 99
 
-task def void run():
+task run():
     # Sequential await
     let f1 = task: fetch_users()
     let f2 = task: fetch_products()
@@ -3494,7 +3494,7 @@ Each arm is indented under `select:`. The three arm forms are:
 ### Channel recv example
 
 ```boring
-task def void run():
+task run():
     let tx, rx = channel<string>(4)
 
     task:
@@ -3515,7 +3515,7 @@ task def void run():
 ### Timeout example
 
 ```boring
-task def void run():
+task run():
     select:
         result = some_async_op():
             print result
@@ -3553,7 +3553,7 @@ wait Duration.from_secs(1)
 Utilisé librement dans `loop:` pour créer des boucles périodiques avec position explicite :
 
 ```boring
-task def void monitor():
+task monitor():
     var int ticks = 0
     loop:
         wait Duration.from_secs(1)   # pause d'abord, puis body
@@ -3563,7 +3563,7 @@ task def void monitor():
 ```
 
 ```boring
-task def void process():
+task process():
     loop:
         let item = queue.recv()      # body d'abord
         handle(item)
@@ -3591,11 +3591,62 @@ async fn monitor() {
 
 ---
 
+### Task with built-in timeout — `task(Duration): body`
+
+Pass a `Duration` directly to `task` to spawn a task that automatically expires:
+
+```boring
+# Positional — duration is the first argument
+let f = task(Duration.from_secs(5)): fetch(url)
+
+# Labeled — same thing, more explicit
+let f = task(timeout = Duration.from_millis(500)):
+    let data = download(url)
+    parse(data)
+```
+
+When the deadline elapses before the body completes, awaiting the handle throws `Error.Expired`. Handle it with `try … else` or `catch`:
+
+```boring
+# Inline else — concise fallback
+let result = try f.value else "timed out"
+
+# Block else — full error dispatch
+let result = try:
+    let f = task(Duration.from_secs(3)): fetch(url)
+    f.value
+else:
+    match error:
+        Error.Expired: "request timed out"
+        _:             "other error: {error}"
+```
+
+**vs `timeout(dur, fut)`**
+
+| Syntax | When to prefer |
+|--------|---------------|
+| `task(dur): body` | Spawning a new task that should expire; result is a JoinHandle |
+| `timeout(dur, fut)` | Applying a deadline to an existing future expression |
+
+`task(dur): body` is equivalent to spawning `tokio::spawn(async move { tokio::time::timeout(dur, body).await? })`.
+
+**Rust equivalent**
+```rust
+let f = tokio::spawn(async move {
+    tokio::time::timeout(Duration::from_secs(5), async move {
+        fetch(url).await
+    }).await?
+});
+// f.await.unwrap()?  →  T or Error::Expired
+```
+
+---
+
 ## `timeout` — future with deadline
 
 `timeout(dur, fut)` races a future against a timer. The behaviour depends on context:
 
-Inside a **cancellable** `task def` function (one that can receive `.cancel()`), `timeout` races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (`"Expired"` / `"Cancelled"`).
+Inside a **cancellable** `task` function (one that can receive `.cancel()`), `timeout` races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (`"Expired"` / `"Cancelled"`).
 
 Outside a cancellable function the simpler `tokio::time::timeout` is used.
 
@@ -3713,7 +3764,7 @@ All ownership qualifiers:
 ```boring
 struct Counter:
     var int value = 0
-    def void inc(): self.value += 1
+    def inc(): self.value += 1
     req int get():  self.value
 
 var c'task  = Counter()
@@ -3774,10 +3825,10 @@ The postfix forms (`T'heap&`, `T'auto&`, `T'task&`) are useful with `use` aliase
 ```boring
 use NodeRef as Node'task  # Arc<Node>
 
-def void process(NodeRef& n):   # &Arc<Node>
+def process(NodeRef& n):   # &Arc<Node>
     print "{n}"
 
-def void update(var Node& n):   # &mut Node
+def update(var Node& n):   # &mut Node
     n.value = 42
 ```
 
@@ -3945,7 +3996,7 @@ task int fetch(int a, int b):
 async fn fetch(a: i64, b: i64) -> i64 { a + b }
 ```
 
-> The `task` prefix accepts all the usual function qualifiers: `task def`, `task req`, and `task set` are all valid. When the return type is present, the qualifier can be omitted: `task int fetch(...)` is identical to `task def int fetch(...)`. For void functions write `task void f()` or the full `task def void f()`.
+> The `task` prefix works with all function qualifiers: `task req` (non-mutating async), `task set` (async setter), and `task def` (explicit mutating async — `def` is always optional when a return type is present). Write `task int fetch(...)` or `task f()` for the common cases.
 
 ### Spawning a task — `task expr` / `task: expr`
 
@@ -3974,10 +4025,10 @@ Omit the `let` binding to spawn a task without keeping a future.
 The task runs in the background; its result is discarded.
 
 ```boring
-task void log(string msg):
+task log(string msg):
     print "bg: {msg}"
 
-task void main():
+task main():
     task log("hello")   # detached — no future returned
     task log("world")   # detached
     print "main done"
@@ -3996,7 +4047,7 @@ println!("main done");
 > to an async entry-point automatically.
 
 ```boring
-task void log(string msg):
+task log(string msg):
     print "bg: {msg}"
 
 # main is NOT marked task — the compiler handles it
@@ -4017,10 +4068,10 @@ without capturing the return value (void).
 task int compute(int n):
     n * n
 
-task void notify(string msg):
+task notify(string msg):
     print "done: {msg}"
 
-task void main():
+task main():
     let f = task compute(7)
     let result = f.value        # waits and captures the result: 49
     print result
@@ -4062,7 +4113,7 @@ task int fetch(int a, int b):
 task string greet(string name):
     "hello, {name}"
 
-task void main():
+task main():
     let f1 = task fetch(10, 20)
     let f2 = task greet("world")
     print f1.value             # 30
@@ -4088,7 +4139,7 @@ async fn main() {
 `main` can carry both qualifiers in any order:
 
 ```boring
-task void main() throws:
+task main() throws:
     let f = task fetch(1, 2)
     print f.value
 ```
@@ -4124,7 +4175,7 @@ strategy automatically — no `move` keyword or explicit `.clone()` required.
 task string transform(string s):
     "done: {s}"
 
-task void main():
+task main():
     let string label = "hello"      # literal string — copied cheaply into the task
     let f = task transform(label)   # &'static str is Copy, no allocation
     print label                    # hello  (outer binding intact)
@@ -4156,10 +4207,10 @@ struct Worker:
     string name
     int jobs
 
-task void Worker.run():
+task Worker.run():
     print "worker {self.name} processing {self.jobs} jobs"
 
-task void main():
+task main():
     let w'task = Worker(name = "alice", jobs = 5)
     let f = task w.run()      # Arc::clone(&w) is inserted automatically
     print w.name             # alice — w is still accessible
@@ -4196,12 +4247,12 @@ explicit locking is ever written in Boring source.
 ```boring
 struct SharedCount:
     var int value = 0
-    def void inc():
+    def inc():
         self.value += 1
     req int get():
         self.value
 
-task void main():
+task main():
     let c'actor = SharedCount()
     c.inc()             # → c.lock().await.inc()
     c.inc()
@@ -4223,7 +4274,7 @@ The same pattern works for struct fields:
 struct App:
     SharedCount'actor counter    # field is Arc<Mutex<SharedCount>>
 
-    task void bump():
+    task bump():
         self.counter.inc()               # → self.counter.lock().await.inc()
         print "now = {self.counter.value}"
 ```
@@ -4249,10 +4300,10 @@ struct Counter:
     var int value = 0
     req int get():
         self.value
-    def void inc():
+    def inc():
         self.value += 1
 
-task def void run():
+task run():
     let c'guard = Counter()
     c.inc()                   # → c.write().await.inc()
     c.inc()
@@ -4299,14 +4350,14 @@ Boring supports **graceful cancellation** of spawned tasks. The pattern has two 
 #### Simple cancellation
 
 ```boring
-task def void worker():
+task worker():
     select:
         cancelled:
             print "cancelled, exiting"
         result = do_work():
             print "done: {result}"
 
-task def void run():
+task run():
     let f = task worker()
     f.cancel()        # signal the worker to stop
     f.wait            # wait for it to finish
@@ -4340,14 +4391,14 @@ The `__task_cancel` parameter is injected automatically by the transpiler — it
 When a task is declared `throws`, it can propagate an error back to the caller through `f.value` or `f.wait`. Use `throw` inside the `cancelled:` arm to signal failure on cancellation:
 
 ```boring
-task def void process() throws:
+task process() throws:
     select:
         cancelled:
             throw Error("cancelled")
         _ = do_work():
             print "work done"
 
-task def void run() throws:
+task run() throws:
     let f = task process()
     f.cancel()
     f.wait            # re-throws the "cancelled" error here
@@ -4381,14 +4432,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 If the caller uses `.value` instead of `.wait`, the thrown error is returned as the value:
 
 ```boring
-task def string process() throws:
+task string process() throws:
     select:
         cancelled:
             throw Error("cancelled")
         result = fetch():
             result
 
-task def void run() throws:
+task run() throws:
     let f = task process()
     f.cancel()
     let v = f.value   # throws here if process threw
@@ -4564,10 +4615,10 @@ log::trace!("entering parse_expr");
 File system operations are available as methods on the built-in `fs` namespace.
 No import is required.  All operations are `throws` — call them inside a `throws` function or wrap with `try … else`.
 
-In **async** functions (`task def`) the calls use `tokio::fs` with `.await`; in synchronous functions they use `std::fs` (blocking).
+In **async** functions (`task`) the calls use `tokio::fs` with `.await`; in synchronous functions they use `std::fs` (blocking).
 
 ```boring
-task def void main() throws:
+task main() throws:
     fs.write("out.txt", "hello\nworld")
     let content = fs.read("out.txt")        # string
     let lines   = fs.readLines("out.txt")   # [string]
@@ -4759,7 +4810,7 @@ if let user:
 | `def R f(T a) throws:  body`        | `fn f(&mut self, a: T) -> Result<R, Box<dyn Error>>` |
 | `def R f(T a) throws E.T: body`     | `fn f(&mut self, a: T) -> Result<R, E::T>`           |
 | `task R f(T a):  body`              | `async fn f(a: T) -> R`                       |
-| `task def R f(T a):  body`          | same as `task R f(T a): body` — `def` always optional when return type is present |
+| `task R f(T a):  body`          | same as `task R f(T a): body` — `def` always optional when return type is present |
 | `task req R f(T a):  body`          | `async fn f(&self, a: T) -> R`                |
 | `task set prop(T v):  body`         | `async fn set_prop(&mut self, v: T)`          |
 | `def R f(T vals...):  body`         | `fn f(&mut self, vals: Vec<T>) -> R`          |
@@ -4992,7 +5043,7 @@ When a string is captured by a task:
 task string transform(string s):
     "done: {s}"
 
-task void main():
+task main():
     let string label = "hello"      # literal — copied cheaply
     let f = task transform(label)   # &'static str is Copy, no allocation
     print label                     # hello
@@ -5145,10 +5196,10 @@ enum AppError:
     @error "io error: {0}"
     Io(string)
 
-def void riskyOp() throws AppError:
+def riskyOp() throws AppError:
     throw AppError.Denied
 
-def void main():
+def main():
     try:
         riskyOp()
     catch AppError:

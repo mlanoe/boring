@@ -20,10 +20,16 @@ impl Parser {
         // Shorthand: `task RetType f():` or `stream RetType f():` — `def` is implicit.
         let prefix_task   = self.eat(&TokenKind::Task);
         let prefix_stream = if !prefix_task { self.eat(&TokenKind::Stream) } else { false };
-        // Consume `def` or `req` — skipped in the shorthand form.
-        let shorthand = (prefix_task || prefix_stream)
+        // Consume `def` or `req` — skipped in the shorthand forms:
+        //   • `task RetType f():` / `stream RetType f():` — task/stream prefix present
+        //   • `RetType f():` — bare return type without any keyword (top-level shorthand)
+        let bare_shorthand = !prefix_task && !prefix_stream
             && !self.check(&TokenKind::Def)
             && !self.check(&TokenKind::Req);
+        let shorthand = bare_shorthand
+            || ((prefix_task || prefix_stream)
+                && !self.check(&TokenKind::Def)
+                && !self.check(&TokenKind::Req));
         if !shorthand {
             if mutating {
                 self.expect(&TokenKind::Def)?;

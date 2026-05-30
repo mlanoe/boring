@@ -32,21 +32,21 @@ It borrows its look and feel from **Python** and **Swift** — two languages cel
 The result is code that is fast to write, easy to read, and that produces real, auditable Rust output.
 
 ```boring
-def string greet(string? name, int visits) throws:
+string greet(string? name, int visits) throws:
     guard visits > 0 else throw "no visits recorded"
     let who = name else "stranger"
     "Welcome back, {who}! Visit number {visits}."
 ```
 
 ```rust
-fn greet(name: Option<Arc<String>>, visits: i64)
-    -> Result<Arc<String>, Box<dyn std::error::Error>>
+fn greet(name: Option<Arc<str>>, visits: i64)
+    -> Result<Arc<str>, Box<dyn std::error::Error>>
 {
     if visits <= 0 {
         return Err(Box::new(BoringError::Str("no visits recorded")));
     }
-    let who = name.unwrap_or_else(|| Arc::new("stranger".to_string()));
-    Ok(Arc::new(format!("Welcome back, {}! Visit number {}.", who, visits)))
+    let who = name.unwrap_or_else(|| Arc::from("stranger"));
+    Ok(Arc::from(format!("Welcome back, {}! Visit number {}.", who, visits).as_str()))
 }
 ```
 
@@ -65,7 +65,7 @@ Boring replaces all of that with a single `throws` keyword — just like Swift.
 
 | | Boring | Rust |
 |---|---|---|
-| Declaration | `def int divide(int a, int b) throws:` | `fn divide(a: i64, b: i64) -> Result<i64, Box<dyn Error>>` |
+| Declaration | `int divide(int a, int b) throws:` | `fn divide(a: i64, b: i64) -> Result<i64, Box<dyn Error>>` |
 | Early exit | `guard b != 0 else throw "division by zero"` | `if b == 0 { return Err("division by zero".into()); }` |
 | Call + fallback | `let r = try divide(10, 0) else -1` | `let r = divide(10, 0).unwrap_or(-1)` |
 
@@ -96,23 +96,23 @@ Boring provides a concise qualifier syntax inspired by Swift's value/reference t
 |---|---|---|
 | `int` | `i64` | copy integer |
 | `float` | `f64` | copy float |
-| `string` | *(optimised internally)* | string — the default for most uses |
+| `string` | `Arc<str>` | thread-safe shared string — the default |
 | `T?` | `Option<T>` | optional value |
 | `T'` | `Box<T>` | heap-allocated exclusive |
 | `T'task` | `Arc<T>` | thread-safe shared reference |
 
 ```boring
-def string greet(string? name):
+string greet(string? name):
     guard let n = name else return "Hello, stranger!"
     "Hello, {n}!"
 ```
 
 ```rust
-fn greet(name: Option<Arc<String>>) -> Arc<String> {
+fn greet(name: Option<Arc<str>>) -> Arc<str> {
     let Some(n) = name else {
-        return Arc::new("Hello, stranger!".to_string());
+        return Arc::from("Hello, stranger!");
     };
-    Arc::new(format!("Hello, {}!", n))
+    Arc::from(format!("Hello, {}!", n).as_str())
 }
 ```
 
@@ -162,9 +162,9 @@ for w in result:
 ```rust
 let words: Vec<&str> = "the quick brown fox jumps over the lazy dog".split(' ').collect();
 
-let mut result: Vec<Arc<String>> = words.iter()
+let mut result: Vec<Arc<str>> = words.iter()
     .filter(|__x| __x.len() as i64 > 3)
-    .map(|__x| Arc::new(__x.to_uppercase()))
+    .map(|__x| Arc::from(__x.to_uppercase().as_str()))
     .collect();
 result.sort();
 
@@ -188,13 +188,13 @@ task main():
 ```
 
 ```rust
-async fn transform(s: Arc<String>) -> Arc<String> {
-    Arc::new(format!("done: {}", s))
+async fn transform(s: Arc<str>) -> Arc<str> {
+    Arc::from(format!("done: {}", s).as_str())
 }
 
 #[tokio::main]
 async fn main() {
-    let label: Arc<String> = Arc::new("shared".into());
+    let label: Arc<str> = Arc::from("shared");
     let f = tokio::spawn({
         let label = Arc::clone(&label);
         async move { transform(label).await }

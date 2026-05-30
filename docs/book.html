@@ -131,7 +131,7 @@ li { margin-bottom: 0.3rem; }
 <p>Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust&#x27;s type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled via <code>--emit-rust</code>.</p>
 <hr>
 <h2 id="table-of-contents">Table of Contents</h2>
-<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a> — incl. <a href="#multi-line-strings">multi-line strings</a> — <code>string</code> only; <a href="#advanced--strings-string-stringconst-and-stringtask">string internals → Advanced</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a> — incl. <a href="#while-let">`while let`</a>, <a href="#if-let-shorthand">`if let` shorthand</a>, <a href="#loop-as-expression">`loop` as expression</a>, <a href="#struct-destructuring-in-match">struct destructuring in `match`</a>, <a href="#for-with-index--auto-enumerate">for with index</a>, <a href="#for-over-a-dict--key-value-destructuring">for over dict</a></li><li><a href="#7-collections">Collections</a> — incl. <a href="#index--opaque-collection-cursor">Index — opaque cursor</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a> — incl. <a href="#enum-variant-shorthand">variant shorthand</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a> — incl. <a href="#default-method-implementations">default methods</a>, <a href="#associated-types">associated types</a>, <a href="#generic-associated-types-gat">GAT</a></li><li><a href="#11-error-handling">Error Handling</a> — incl. <a href="#standard-error-enum--error">standard error enum `Error`</a>, <a href="#qualified-error-type-paths">qualified throws paths</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a> — incl. <a href="#lifetime-and-bound-arguments-at-use-sites">lifetime and bound args at use sites</a>, <a href="#const-generics----uint-n">const generics — `&lt;uint N&gt;`</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a> — incl. <a href="#trailing-closures">trailing closures</a>, <a href="#closure-shorthand">closure shorthand</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#19-ownership-qualifiers">Ownership Qualifiers</a> — incl. <a href="#weak-references--wauto-wtask-wactor">`&#x27;weak` — weak references (secondary qualifier)</a></li><li><a href="#20-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a> — incl. <a href="#oneshot--single-shot-response">`oneshot`</a>, <a href="#broadcast--fan-out">`broadcast`</a>, <a href="#watch--observable-value">`watch`</a></li><li><a href="#21-tasks-async">Tasks (Async)</a> — incl. <a href="#awaiting-a-future--value-and-wait">`.wait` — void await</a>, <a href="#read-heavy-shared-state--tguard">`&#x27;guard` — RwLock shared state</a>, <a href="#task-cancellation--fcancel-and-cancelled">cancellation — `f.cancel()` / `cancelled:`</a>, <a href="#wait--pause-asynchrone">`wait` — pause async</a>, <a href="#timeout--future-with-deadline">`timeout` — future with deadline</a></li><li><a href="#22-macros">Macros</a></li><li><a href="#23-attributes">Attributes</a></li><li><a href="#24-format-specifiers">Format Specifiers</a></li><li><a href="#25-built-in-functions">Built-in Functions</a> — incl. <a href="#log-level-builtins">log-level builtins</a>, <a href="#ownership">`drop`</a>, <a href="#json-serialization--json--fromJson">JSON serialization — `json` / `fromJson`</a>, <a href="#file-system--fs">`fs` — file system</a></li><li><a href="#26-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#24-diagnostics">Diagnostics</a></li><li><a href="#27-advanced">Advanced</a> — <a href="#advanced--strings-string-stringconst-and-stringtask">strings — `string`, `String&#x27;const`, `String&#x27;task`</a>, <a href="#advanced--variable-shadowing">variable shadowing</a>, <a href="#advanced--transient-fields-and--nil-coalescing-assignment"><code>transient</code> + <code>?=</code></a>, <a href="#advanced--struct-spread--other">struct spread `..other`</a>, <a href="#advanced--thiserror-integration"><code>thiserror</code> integration</a>, <a href="#advanced--compatibility-with-rust-result-types">Rust `Result` compatibility</a>, <a href="#advanced--variadic-parameters">variadic parameters</a>, <a href="#advanced--error-handling-internals">error handling internals</a></li></ol>
+<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a> — incl. <a href="#multi-line-strings">multi-line strings</a> — <code>string</code> only; <a href="#advanced--strings-string-stringconst-and-stringtask">string internals → Advanced</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a> — incl. <a href="#while-let">`while let`</a>, <a href="#if-let-shorthand">`if let` shorthand</a>, <a href="#loop-as-expression">`loop` as expression</a>, <a href="#struct-destructuring-in-match">struct destructuring in `match`</a>, <a href="#for-with-index--auto-enumerate">for with index</a>, <a href="#for-over-a-dict--key-value-destructuring">for over dict</a></li><li><a href="#7-collections">Collections</a> — incl. <a href="#index--opaque-collection-cursor">Index — opaque cursor</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a> — incl. <a href="#enum-variant-shorthand">variant shorthand</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a> — incl. <a href="#default-method-implementations">default methods</a>, <a href="#associated-types">associated types</a>, <a href="#generic-associated-types-gat">GAT</a></li><li><a href="#11-error-handling">Error Handling</a> — incl. <a href="#standard-error-enum--error">standard error enum `Error`</a>, <a href="#qualified-error-type-paths">qualified throws paths</a>, <a href="#thiserror-integration">`thiserror` integration</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a> — incl. <a href="#lifetime-and-bound-arguments-at-use-sites">lifetime and bound args at use sites</a>, <a href="#const-generics----uint-n">const generics — `&lt;uint N&gt;`</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a> — incl. <a href="#trailing-closures">trailing closures</a>, <a href="#closure-shorthand">closure shorthand</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#19-ownership-qualifiers">Ownership Qualifiers</a> — incl. <a href="#weak-references--wauto-wtask-wactor">`&#x27;weak` — weak references (secondary qualifier)</a></li><li><a href="#20-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a> — incl. <a href="#oneshot--single-shot-response">`oneshot`</a>, <a href="#broadcast--fan-out">`broadcast`</a>, <a href="#watch--observable-value">`watch`</a></li><li><a href="#21-tasks-async">Tasks (Async)</a> — incl. <a href="#awaiting-a-future--value-and-wait">`.wait` — void await</a>, <a href="#read-heavy-shared-state--tguard">`&#x27;guard` — RwLock shared state</a>, <a href="#task-cancellation--fcancel-and-cancelled">cancellation — `f.cancel()` / `cancelled:`</a>, <a href="#wait--pause-asynchrone">`wait` — pause async</a>, <a href="#task-with-built-in-timeout--taskduration-body">`task(Duration)` — built-in timeout</a>, <a href="#timeout--future-with-deadline">`timeout` — future with deadline</a></li><li><a href="#22-macros">Macros</a></li><li><a href="#23-attributes">Attributes</a></li><li><a href="#24-format-specifiers">Format Specifiers</a></li><li><a href="#25-built-in-functions">Built-in Functions</a> — incl. <a href="#log-level-builtins">log-level builtins</a>, <a href="#ownership">`drop`</a>, <a href="#json-serialization--json--fromJson">JSON serialization — `json` / `fromJson`</a>, <a href="#file-system--fs">`fs` — file system</a></li><li><a href="#26-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#24-diagnostics">Diagnostics</a></li><li><a href="#27-advanced">Advanced</a> — <a href="#advanced--strings-string-stringconst-and-stringtask">strings — `string`, `String&#x27;const`, `String&#x27;task`</a>, <a href="#advanced--variable-shadowing">variable shadowing</a>, <a href="#advanced--transient-fields-and--nil-coalescing-assignment">`transient` + `?=`</a>, <a href="#advanced--struct-spread--other">struct spread `..other`</a>, <a href="#advanced--thiserror-integration">`thiserror` integration</a>, <a href="#advanced--compatibility-with-rust-result-types">Rust `Result` compatibility</a>, <a href="#advanced--variadic-parameters">variadic parameters</a>, <a href="#advanced--error-handling-internals">error handling internals</a></li></ol>
 <hr>
 <h2 id="1-getting-started">1. Getting Started</h2>
 <h3 id="creating-a-project">Creating a project</h3>
@@ -206,7 +206,7 @@ x %= <span class="nb">4</span>;   <span class="co">// 2</span></code></pre></div
 <hr>
 <h2 id="3-data-types">3. Data Types</h2>
 <h3 id="scalar-types">Scalar types</h3>
-<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;copy</code></td><td><code>i64</code></td><td>64-bit signed integer, copy</td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;copy</code></td><td><code>u64</code></td><td>64-bit unsigned integer, copy</td></tr><tr><td><code>float</code></td><td><code>Float&#x27;copy</code></td><td><code>f64</code></td><td>64-bit floating-point, copy</td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;copy</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code>, copy</td></tr><tr><td><code>string</code></td><td>—</td><td><code>Arc&lt;str&gt;</code></td><td>String — <strong>recommended default</strong> for all string values; representation is inferred automatically</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;copy</code></td><td><code>i64</code></td><td>64-bit signed integer, copy</td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;copy</code></td><td><code>u64</code></td><td>64-bit unsigned integer, copy</td></tr><tr><td><code>float</code></td><td><code>Float&#x27;copy</code></td><td><code>f64</code></td><td>64-bit floating-point, copy</td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;copy</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code>, copy</td></tr><tr><td><code>string</code></td><td><code>String&#x27;const</code> or <code>String&#x27;task</code></td><td><code>&amp;str</code> / <code>Arc&lt;str&gt;</code></td><td>String — <strong>recommended default</strong>; the compiler picks the representation from context (literal → <code>&amp;str</code>, heap → <code>Arc&lt;str&gt;</code>)</td></tr></tbody></table>
 <h3 id="integer-literals">Integer literals</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="nb">42</span>
 <span class="kw">let</span> b = <span class="nb">-7</span></code></pre></div>
@@ -474,13 +474,13 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">show</span>(<span class="kw">var</span> Counter<span class="lf">&#x27;task</span> c):
+<span class="kw">def</span> <span class="fn">show</span>(<span class="kw">var</span> Counter<span class="lf">&#x27;task</span> c):
     print c.value          <span class="co"># OK — reading is always allowed</span>
     c = <span class="fn">Counter</span>()          <span class="co"># OK — var lets you rebind the Arc pointer</span>
     <span class="co"># c.value = c.value + 1  # ERROR — cannot mutate through T&#x27;task; use T&#x27;actor</span></code></pre></div>
 <p>To make this intent explicit, prefer <code>var T&amp;</code> (mutable borrow) when you need to mutate a stack object without sharing it:</p>
 <p>For mutable borrow parameters, combine <code>var</code> with <code>&amp;</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kw">void</span> <span class="fn">add_one</span>(<span class="kw">var</span> <span class="kt">int</span>&amp; x):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">add_one</span>(<span class="kw">var</span> <span class="kt">int</span>&amp; x):
     x += <span class="nb">1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add_one</span>(x: &amp;<span class="kw">mut</span> i64) { *x += <span class="nb">1</span>; }</code></pre></div>
@@ -909,7 +909,7 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>():
+    <span class="kw">def</span> <span class="fn">inc</span>():
         <span class="kw">self</span>.value += <span class="nb">1</span></code></pre></div>
 <h3 id="req-vs-def"><code>req</code> vs <code>def</code></h3>
 <p><code>req</code> (&quot;request&quot;) declares a <strong>read-only</strong> method — it does not mutate the object and can be called on both <code>let</code> and <code>var</code> bindings. <code>def</code> declares a <strong>mutating</strong> method — it may modify the object and can only be called on a <code>var</code> binding.</p>
@@ -920,7 +920,7 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">get</span>():        <span class="co"># read-only — &amp;self</span>
         <span class="kw">self</span>.value
 
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>():       <span class="co"># mutating — &amp;mut self</span>
+    <span class="kw">def</span> <span class="fn">inc</span>():       <span class="co"># mutating — &amp;mut self</span>
         <span class="kw">self</span>.value += <span class="nb">1</span>
 
 <span class="kw">let</span> c = <span class="fn">Counter</span>()
@@ -947,10 +947,10 @@ mc.<span class="fn">get</span>()   <span class="co"># ok — req works on var to
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>():
+    <span class="kw">def</span> <span class="fn">inc</span>():
         value = value + <span class="nb">1</span>       <span class="co"># reads and writes self.value</span>
 
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">add</span>(<span class="kt">int</span> n):
+    <span class="kw">def</span> <span class="fn">add</span>(<span class="kt">int</span> n):
         value = value + n</code></pre></div>
 <p><strong>Local variables shadow fields.</strong> If a local is declared with the same name as a field, the local takes precedence — <code>self.field</code> is still available with the explicit prefix:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Box:
@@ -1356,9 +1356,9 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">scale</span>(&amp;<span class="kw">self</span>, factor: f64, shape: <span class="kw">impl</span> <span class="kt">Drawable</span>) { … }
 <span class="kw">fn</span> <span class="fn">clone_shape</span>(&amp;<span class="kw">self</span>) -&gt; <span class="kw">impl</span> <span class="kt">Drawable</span> { … }</code></pre></div>
 <p>Use <code>any Trait</code> when you need <strong>dynamic dispatch</strong> — different concrete types behind the same pointer, at the cost of a heap allocation and a vtable lookup:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>[<span class="kw">any</span> Drawable] shapes           <span class="co"># field: Vec&lt;Box&lt;dyn Drawable&gt;&gt;</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>[any Drawable] shapes           <span class="co"># field: Vec&lt;Box&lt;dyn Drawable&gt;&gt;</span>
 
-<span class="kw">req</span> <span class="kw">any</span> Drawable <span class="fn">pick_random</span>()  <span class="co"># return: Box&lt;dyn Drawable&gt;</span></code></pre></div>
+<span class="kw">req</span> any Drawable <span class="fn">pick_random</span>()  <span class="co"># return: Box&lt;dyn Drawable&gt;</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>shapes: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">Drawable</span>&gt;&gt;,
 
@@ -1416,17 +1416,13 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
 <h3 id="try--else--expression-with-fallback"><code>try … else</code> — expression with fallback</h3>
 <p><code>try … else</code> is an <strong>expression</strong> that calls a throwing function (or runs a block of statements) and returns a fallback value if an exception is raised. Unlike <code>try … catch:</code> (which is a statement), it always produces a value.</p>
 <p>The variable <strong><code>error</code></strong> is automatically bound in the <code>else</code> branch to the <strong>original thrown value</strong> — the same value that was passed to <code>throw</code>. Its type is preserved:</p>
-<ul>
-<li><code>throw "msg"</code> → <code>error</code> is a <code>string</code></li>
-<li><code>throw MyEnum.Variant</code> → <code>error</code> is <code>MyEnum.Variant</code> (matchable with <code>match</code>)</li>
-<li><code>throw 42</code> → <code>error</code> is an <code>int</code></li>
-</ul>
-<p>String interpolation <strong><code>{error}</code></strong> always works regardless of the thrown type.</p>
+<ul><li><code>throw &quot;msg&quot;</code> → <code>error</code> is a <code>string</code></li><li><code>throw MyEnum.Variant</code> → <code>error</code> is <code>MyEnum.Variant</code> (matchable with <code>match</code>)</li><li><code>throw 42</code> → <code>error</code> is an <code>int</code></li></ul>
+<p>String interpolation <strong><code>{error}</code></strong> always works regardless of the thrown type, because every Boring value has a Display representation.</p>
 <p>All four combinations of inline / block bodies are valid:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># 1. inline try, inline else</span>
 <span class="kw">let</span> r1 = <span class="kw">try</span> <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">0</span>) <span class="kw">else</span> <span class="nb">-1</span>
 
-<span class="co"># 2. inline try, block else</span>
+<span class="co"># 2. inline try, block else  (error available)</span>
 <span class="kw">let</span> r2 = <span class="kw">try</span> <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">0</span>) <span class="kw">else</span>:
     print <span class="s">"failed: "</span> + error
     <span class="nb">-1</span>
@@ -1438,35 +1434,24 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
 <span class="kw">else</span> <span class="nb">-1</span>
 
 <span class="co"># 4. block try, block else — match on typed error</span>
-<span class="kw">enum</span> <span class="kt">AppError</span>:
+<span class="kw">enum</span> AppError:
     NotFound
-    InvalidInput(<span class="kt">string</span>)
+    Timeout
+    <span class="fn">InvalidInput</span>(<span class="kt">string</span>)
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">risky</span>(<span class="kt">int</span> n) <span class="kw">throws</span> <span class="kt">AppError</span>:
+<span class="kw">def</span> <span class="fn">risky</span>(<span class="kt">int</span> n) <span class="kw">throws</span> AppError:
     <span class="kw">if</span> n == <span class="nb">1</span>: <span class="kw">throw</span> AppError.NotFound
-    <span class="kw">if</span> n == <span class="nb">2</span>: <span class="kw">throw</span> AppError.InvalidInput(<span class="s">"bad value"</span>)
+    <span class="kw">if</span> n == <span class="nb">2</span>: <span class="kw">throw</span> AppError.<span class="fn">InvalidInput</span>(<span class="s">"bad value"</span>)
 
 <span class="kw">let</span> r4 = <span class="kw">try</span> <span class="fn">risky</span>(<span class="nb">1</span>) <span class="kw">else</span>:
     <span class="kw">match</span> error:
         AppError.NotFound:          <span class="s">"not found"</span>
-        AppError.InvalidInput(msg): <span class="s">"invalid: <span class="si">{msg}</span>"</span>
+        AppError.<span class="fn">InvalidInput</span>(msg): <span class="s">"invalid: <span class="si">{msg}</span>"</span>
         _:                          <span class="s">"other: <span class="si">{error}</span>"</span>
 print r4   <span class="co"># not found</span></code></pre></div>
-<table>
-<thead><tr><th>Form</th><th>Try body</th><th>Else body</th><th><code>error</code> bound</th></tr></thead>
-<tbody>
-<tr><td><code>try expr else expr</code></td><td>expression</td><td>expression</td><td>✓ original thrown value</td></tr>
-<tr><td><code>try expr else: block</code></td><td>expression</td><td>block</td><td>✓ original thrown value</td></tr>
-<tr><td><code>try: block else expr</code></td><td>block</td><td>expression</td><td>✓ original thrown value</td></tr>
-<tr><td><code>try: block else: block</code></td><td>block</td><td>block</td><td>✓ original thrown value</td></tr>
-</tbody>
-</table>
+<table><thead><tr><th>Form</th><th>Try body</th><th>Else body</th><th><code>error</code> bound</th></tr></thead><tbody><tr><td><code>try expr else expr</code></td><td>expression</td><td>expression</td><td>✓ original thrown value</td></tr><tr><td><code>try expr else: block</code></td><td>expression</td><td>block</td><td>✓ original thrown value</td></tr><tr><td><code>try: block else expr</code></td><td>block</td><td>expression</td><td>✓ original thrown value</td></tr><tr><td><code>try: block else: block</code></td><td>block</td><td>block</td><td>✓ original thrown value</td></tr></tbody></table>
 <p>The last expression in each branch is the value of the whole expression. Intermediate statements in a block try body propagate exceptions automatically — any throwing call that fails triggers the else branch.</p>
-<blockquote><strong><code>error</code> binding summary</strong> — consistent across all error-handling forms:
-<ul><li><code>try … else</code> → <code>error</code> is the <strong>original thrown value</strong> (any type, matchable)</li>
-<li><code>catch:</code> → <code>error</code> is the <strong>original thrown value</strong> (same — <code>match error:</code> works)</li>
-<li><code>catch String:</code> / <code>catch Int:</code> → <code>error: Arc&lt;str&gt;</code> — string representation</li>
-<li><code>catch MyEnum:</code> → <code>error: &amp;MyEnum</code> — typed value, for dispatch</li></ul></blockquote>
+<blockquote><strong><code>error</code> binding summary</strong> — consistent across all error-handling forms: - <code>try … else</code> → <code>error</code> is the <strong>original thrown value</strong> (any type, matchable) - <code>catch:</code> → <code>error</code> is the <strong>original thrown value</strong> (same — <code>match error:</code> works) - <code>catch String:</code> / <code>catch Int:</code> → <code>error: Arc&lt;str&gt;</code> — string representation - <code>catch MyEnum:</code> → <code>error: &amp;MyEnum</code> — typed value, for dispatch</blockquote>
 <h3 id="try--catch--block-form"><code>try: … catch:</code> — block form</h3>
 <p><code>catch:</code> is a <strong>statement</strong> (does not produce a value) and binds <code>error</code> to the <strong>original thrown value</strong>, exactly like <code>try … else</code>. <code>match error:</code> with typed patterns works the same way:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
@@ -1474,14 +1459,14 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <span class="kw">catch</span>:
     <span class="kw">match</span> error:
         AppError.NotFound:          print <span class="s">"not found"</span>
-        AppError.InvalidInput(msg): print <span class="s">"invalid: <span class="si">{msg}</span>"</span>
+        AppError.<span class="fn">InvalidInput</span>(msg): print <span class="s">"invalid: <span class="si">{msg}</span>"</span>
         _:                          print <span class="s">"other: <span class="si">{error}</span>"</span></code></pre></div>
 <p>Bare <code>throw</code> (re-throw) inside a <code>catch:</code> body forwards the original error unchanged:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
     <span class="fn">fetch</span>(url)
 <span class="kw">catch</span>:
     <span class="fn">log_error</span>(error)
-    <span class="kw">throw</span>   <span class="co"># re-throw the original error</span></code></pre></div>
+    <span class="kw">throw</span>   <span class="co"># re-throw the original error to the caller</span></code></pre></div>
 <h3 id="typed-catch">Typed <code>catch</code></h3>
 <p>Catch only errors of a specific type:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
@@ -1490,15 +1475,12 @@ print r4   <span class="co"># not found</span></code></pre></div>
     print <span class="s">"string error: <span class="si">{error}</span>"</span>
 <span class="kw">catch</span>:
     print <span class="s">"other error"</span></code></pre></div>
-<p>The <code>error</code> variable is automatically bound in each catch block to the <strong>original thrown value</strong>:</p>
-<ul>
-<li><code>catch:</code> → <code>error</code> is the original thrown value — matchable with <code>match error:</code></li>
-<li><code>catch String:</code> / <code>catch Int:</code> → <code>error: Arc&lt;str&gt;</code> — string representation (primitive type catches)</li>
-<li><code>catch MyEnum:</code> (typed enum) → <code>error: &amp;MyEnum</code> — the typed value, usable directly in <code>match error:</code></li>
-</ul>
+<p>The <code>error</code> variable is automatically bound in each catch block to the <strong>original thrown value</strong> (same as <code>try … else</code>):</p>
+<ul><li><code>catch:</code> → <code>error</code> is the original thrown value — matchable with <code>match error:</code></li><li><code>catch String:</code> / <code>catch Int:</code> → <code>error: Arc&lt;str&gt;</code> — string representation (for primitive type catches)</li><li><code>catch MyEnum:</code> (typed enum) → <code>error: &amp;MyEnum</code> — the typed value</li></ul>
+<p>String interpolation <code>{error}</code> always works regardless of the thrown type.</p>
 <h3 id="variant-level-catch">Variant-level <code>catch</code></h3>
 <p>For enum errors, catch individual variants with dot notation:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kt">string</span> <span class="fn">fetch</span>(<span class="kt">string</span> url) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">fetch</span>(<span class="kt">string</span> url) <span class="kw">throws</span>:
     <span class="kw">if</span> url == <span class="s">""</span>:
         <span class="kw">throw</span> Error.InvalidInput
     <span class="kw">if</span> url == <span class="s">"notfound"</span>:
@@ -1675,7 +1657,7 @@ print <span class="s">"<span class="si">{t.tag}</span> = <span class="si">{t.val
 <h3 id="lifetime-and-bound-arguments-at-use-sites">Lifetime and bound arguments at use sites</h3>
 <p>When <em>calling</em> a generic function or annotating a variable, you can supply type arguments that include bare lifetimes and trait bounds for documentation purposes:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Definition — constraint is declared here</span>
-<span class="kw">def</span> <span class="kw">void</span> copy_items&lt;T <span class="kw">as</span> Clone&gt;(Container&lt;T&gt; src, Container&lt;T&gt; dst):
+<span class="kw">def</span> copy_items&lt;T <span class="kw">as</span> Clone&gt;(Container&lt;T&gt; src, Container&lt;T&gt; dst):
     <span class="kw">for</span> item <span class="kw">in</span> src.items:
         print <span class="s">"copying: <span class="si">{item}</span>"</span>
 
@@ -2044,7 +2026,7 @@ tx.<span class="fn">send</span>(v).<span class="kw">await</span>.<span class="fn
 <p>Boring provides three additional channel types for specialised patterns:</p>
 <table><thead><tr><th>Boring</th><th>Tokio</th><th>Use case</th></tr></thead><tbody><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot</code></td><td>Single response — request/reply</td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast</code></td><td>Fan-out to N independent consumers</td></tr><tr><td><code>watch&lt;T&gt;(initial)</code></td><td><code>tokio::sync::watch</code></td><td>Observable current value</td></tr></tbody></table>
 <h4 id="oneshott--single-shot-response"><code>oneshot&lt;T&gt;()</code> — single-shot response</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> tx, rx = oneshot&lt;<span class="kt">int</span>&gt;()
     <span class="kw">task</span>: tx.<span class="fn">send</span>(<span class="nb">42</span>)        <span class="co"># sender consumed on send</span>
     <span class="kw">let</span> result = rx.value    <span class="co"># waits for the single value</span>
@@ -2055,7 +2037,7 @@ tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="
 <span class="kw">let</span> result = rx.<span class="kw">await</span>.<span class="fn">unwrap</span>();</code></pre></div>
 <table><thead><tr><th>Operation</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Create</td><td><code>let tx, rx = oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td>Send</td><td><code>tx.send(v)</code></td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td>Receive</td><td><code>rx.value</code> or <code>rx.recv()</code></td><td><code>rx.await.unwrap()</code> — consumes rx</td></tr></tbody></table>
 <h4 id="broadcasttcap--fan-out"><code>broadcast&lt;T&gt;(cap)</code> — fan-out</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> tx, rx = broadcast&lt;<span class="kt">string</span>&gt;(<span class="nb">16</span>)
     <span class="kw">let</span> rx2 = tx.<span class="fn">subscribe</span>()        <span class="co"># second independent consumer</span>
 
@@ -2075,7 +2057,7 @@ tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="
 <span class="kw">while</span> <span class="kw">let</span> <span class="kw">Ok</span>(msg) = rx2.<span class="fn">recv</span>().<span class="kw">await</span> { <span class="fm">println!</span>(<span class="s">&quot;rx2: {}&quot;</span>, msg); }</code></pre></div>
 <table><thead><tr><th>Operation</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Create</td><td><code>let tx, rx = broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td>Add consumer</td><td><code>let rx2 = tx.subscribe()</code></td><td><code>tx.subscribe()</code></td></tr><tr><td>Send</td><td><code>tx.send(v)</code></td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td>Receive</td><td><code>rx.recv()</code></td><td><code>rx.recv().await.unwrap()</code></td></tr><tr><td>Iterate</td><td><code>for msg in rx:</code></td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td>Select arm</td><td><code>msg = rx.recv():</code></td><td><code>Ok(msg) = rx.recv() =&gt;</code></td></tr></tbody></table>
 <h4 id="watchtinitial--observable-value"><code>watch&lt;T&gt;(initial)</code> — observable value</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> tx, rx = watch&lt;<span class="kt">int</span>&gt;(<span class="nb">0</span>)      <span class="co"># initial value = 0</span>
 
     <span class="kw">task</span>:
@@ -2119,15 +2101,15 @@ print b</code></pre></div>
 <p>Use <code>var a, b = join (...)</code> for mutable bindings. Use <code>_</code> to discard a result:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> result, _ = join (f_data, f_log)</code></pre></div>
 <h3 id="full-example-1">Full example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kt">int</span> <span class="fn">fetch_users</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_users</span>():
     <span class="fn">sleep</span>(Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>))
     <span class="kw">return</span> <span class="nb">42</span>
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kt">int</span> <span class="fn">fetch_products</span>():
+<span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_products</span>():
     <span class="fn">sleep</span>(Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>))
     <span class="kw">return</span> <span class="nb">99</span>
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<span class="kw">task</span> <span class="fn">run</span>():
     <span class="co"># Sequential await</span>
     <span class="kw">let</span> f1 = <span class="kw">task</span>: <span class="fn">fetch_users</span>()
     <span class="kw">let</span> f2 = <span class="kw">task</span>: <span class="fn">fetch_products</span>()
@@ -2167,7 +2149,7 @@ print b</code></pre></div>
 <p>Each arm is indented under <code>select:</code>. The three arm forms are:</p>
 <table><thead><tr><th>Form</th><th>Meaning</th></tr></thead><tbody><tr><td><code>var = expr:</code></td><td>Bind the result of <code>expr</code> to <code>var</code></td></tr><tr><td><code>_ = expr:</code></td><td>Run <code>expr</code>; discard the result</td></tr><tr><td><code>after dur:</code></td><td>Execute the body after <code>dur</code> if no other arm has fired</td></tr></tbody></table>
 <h3 id="channel-recv-example">Channel recv example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">4</span>)
 
     <span class="kw">task</span>:
@@ -2184,7 +2166,7 @@ print b</code></pre></div>
                 print <span class="s">"timeout"</span>
                 <span class="kw">break</span></code></pre></div>
 <h3 id="timeout-example">Timeout example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     select:
         result = <span class="fn">some_async_op</span>():
             print result
@@ -2208,14 +2190,14 @@ tokio::<span class="fm">select!</span> {
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>wait Duration.<span class="fn">from_millis</span>(<span class="nb">500</span>)
 wait Duration.<span class="fn">from_secs</span>(<span class="nb">1</span>)</code></pre></div>
 <p>Utilisé librement dans <code>loop:</code> pour créer des boucles périodiques avec position explicite :</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">monitor</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">monitor</span>():
     <span class="kw">var</span> <span class="kt">int</span> ticks = <span class="nb">0</span>
     <span class="kw">loop</span>:
         wait Duration.<span class="fn">from_secs</span>(<span class="nb">1</span>)   <span class="co"># pause d&#x27;abord, puis body</span>
         ticks += <span class="nb">1</span>
         info <span class="s">"heartbeat #<span class="si">{ticks}</span>"</span>
         <span class="kw">if</span> ticks &gt;= <span class="nb">5</span>: <span class="kw">break</span></code></pre></div>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">process</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">process</span>():
     <span class="kw">loop</span>:
         <span class="kw">let</span> item = queue.<span class="fn">recv</span>()      <span class="co"># body d&#x27;abord</span>
         <span class="fn">handle</span>(item)
@@ -2232,9 +2214,41 @@ wait Duration.<span class="fn">from_secs</span>(<span class="nb">1</span>)</code
 }</code></pre></div>
 <table><thead><tr><th>Forme</th><th>Sémantique</th></tr></thead><tbody><tr><td><code>wait dur</code></td><td>pause de <code>dur</code> au point courant</td></tr><tr><td><code>loop: wait dur; body</code></td><td>pause <strong>avant</strong> chaque itération</td></tr><tr><td><code>loop: body; wait dur</code></td><td>exécute <strong>immédiatement</strong>, puis pause</td></tr></tbody></table>
 <hr>
+<h3 id="task-with-built-in-timeout--taskduration-body">Task with built-in timeout — <code>task(Duration): body</code></h3>
+<p>Pass a <code>Duration</code> directly to <code>task</code> to spawn a task that automatically expires:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Positional — duration is the first argument</span>
+<span class="kw">let</span> f = <span class="kw">task</span>(Duration.<span class="fn">from_secs</span>(<span class="nb">5</span>)): <span class="fn">fetch</span>(url)
+
+<span class="co"># Labeled — same thing, more explicit</span>
+<span class="kw">let</span> f = <span class="kw">task</span>(timeout = Duration.<span class="fn">from_millis</span>(<span class="nb">500</span>)):
+    <span class="kw">let</span> data = <span class="fn">download</span>(url)
+    <span class="fn">parse</span>(data)</code></pre></div>
+<p>When the deadline elapses before the body completes, awaiting the handle throws <code>Error.Expired</code>. Handle it with <code>try … else</code> or <code>catch</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Inline else — concise fallback</span>
+<span class="kw">let</span> result = <span class="kw">try</span> f.value <span class="kw">else</span> <span class="s">"timed out"</span>
+
+<span class="co"># Block else — full error dispatch</span>
+<span class="kw">let</span> result = <span class="kw">try</span>:
+    <span class="kw">let</span> f = <span class="kw">task</span>(Duration.<span class="fn">from_secs</span>(<span class="nb">3</span>)): <span class="fn">fetch</span>(url)
+    f.value
+<span class="kw">else</span>:
+    <span class="kw">match</span> error:
+        Error.Expired: <span class="s">"request timed out"</span>
+        _:             <span class="s">"other error: <span class="si">{error}</span>"</span></code></pre></div>
+<p><strong>vs <code>timeout(dur, fut)</code></strong></p>
+<table><thead><tr><th>Syntax</th><th>When to prefer</th></tr></thead><tbody><tr><td><code>task(dur): body</code></td><td>Spawning a new task that should expire; result is a JoinHandle</td></tr><tr><td><code>timeout(dur, fut)</code></td><td>Applying a deadline to an existing future expression</td></tr></tbody></table>
+<p><code>task(dur): body</code> is equivalent to spawning <code>tokio::spawn(async move { tokio::time::timeout(dur, body).await? })</code>.</p>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> f = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> {
+    tokio::time::<span class="fn">timeout</span>(<span class="kt">Duration</span>::<span class="fn">from_secs</span>(<span class="nb">5</span>), <span class="kw">async</span> <span class="kw">move</span> {
+        <span class="fn">fetch</span>(url).<span class="kw">await</span>
+    }).<span class="kw">await</span>?
+});
+<span class="co">// f.await.unwrap()?  →  T or Error::Expired</span></code></pre></div>
+<hr>
 <h2 id="timeout--future-with-deadline"><code>timeout</code> — future with deadline</h2>
 <p><code>timeout(dur, fut)</code> races a future against a timer. The behaviour depends on context:</p>
-<p>Inside a <strong>cancellable</strong> <code>task def</code> function (one that can receive <code>.cancel()</code>), <code>timeout</code> races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (<code>&quot;Expired&quot;</code> / <code>&quot;Cancelled&quot;</code>).</p>
+<p>Inside a <strong>cancellable</strong> <code>task</code> function (one that can receive <code>.cancel()</code>), <code>timeout</code> races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (<code>&quot;Expired&quot;</code> / <code>&quot;Cancelled&quot;</code>).</p>
 <p>Outside a cancellable function the simpler <code>tokio::time::timeout</code> is used.</p>
 <table><thead><tr><th>Context</th><th>Cancellable fn?</th><th>Result type</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Plain</td><td>no</td><td><code>T?</code> — <code>nil</code> on expiry</td><td><code>tokio::time::timeout(dur, fut).await.ok()</code></td></tr><tr><td><code>throws</code> / <code>try</code> body</td><td>no</td><td><code>T</code> — <code>Expired</code> propagated</td><td><code>tokio::time::timeout(dur, fut).await?</code></td></tr><tr><td>Plain</td><td>yes</td><td><code>T?</code> — <code>nil</code> on expiry or cancel</td><td><code>select!</code> returning <code>Some</code>/<code>None</code></td></tr><tr><td><code>throws</code> / <code>try</code> body</td><td>yes</td><td><code>T</code> — <code>Expired</code> or <code>Cancelled</code> thrown</td><td><code>select!</code> returning <code>Ok</code>/<code>Err</code> + <code>?</code></td></tr><tr><td><code>try? timeout(…)</code></td><td>any</td><td><code>T?</code> explicit</td><td><code>.ok()</code> form</td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Plain — returns nil on timeout</span>
@@ -2277,7 +2291,7 @@ wait Duration.<span class="fn">from_secs</span>(<span class="nb">1</span>)</code
 <table><thead><tr><th>Declaration</th><th>Reassign</th><th><code>req</code> methods</th><th><code>def</code> methods</th></tr></thead><tbody><tr><td><code>let T&#x27;auto x</code> / <code>let x&#x27;auto</code></td><td>✗</td><td>✓</td><td>✗ — use <code>var</code> + plain ownership</td></tr><tr><td><code>var T&#x27;auto x</code> / <code>var x&#x27;auto</code></td><td>✓</td><td>✓</td><td>✗ — use <code>var</code> + plain ownership</td></tr><tr><td><code>let T&#x27;task x</code> / <code>let x&#x27;task</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>var T&#x27;task x</code> / <code>var x&#x27;task</code></td><td>✓</td><td>✓</td><td>✗ — use <code>&#x27;actor</code> or <code>&#x27;guard</code></td></tr><tr><td><code>let T&#x27;actor x</code> / <code>let x&#x27;actor</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>var T&#x27;actor x</code> / <code>var x&#x27;actor</code></td><td>✓</td><td>✓</td><td>✓</td></tr><tr><td><code>let T&#x27;guard x</code> / <code>let x&#x27;guard</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>var T&#x27;guard x</code> / <code>var x&#x27;guard</code></td><td>✓</td><td>✓</td><td>✓</td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>(): <span class="kw">self</span>.value += <span class="nb">1</span>
+    <span class="kw">def</span> <span class="fn">inc</span>(): <span class="kw">self</span>.value += <span class="nb">1</span>
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">get</span>():  <span class="kw">self</span>.value
 
 <span class="kw">var</span> c<span class="lf">&#x27;task</span>  = <span class="fn">Counter</span>()
@@ -2304,10 +2318,10 @@ c.<span class="fn">get</span>()       <span class="co"># OK — req (non-mutatin
 <p>The postfix forms (<code>T&#x27;heap&amp;</code>, <code>T&#x27;auto&amp;</code>, <code>T&#x27;task&amp;</code>) are useful with <code>use</code> aliases — define the alias once, then borrow with <code>&amp;</code>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> NodeRef <span class="kw">as</span> Node<span class="lf">&#x27;task</span>  <span class="co"># Arc&lt;Node&gt;</span>
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">process</span>(NodeRef&amp; n):   <span class="co"># &amp;Arc&lt;Node&gt;</span>
+<span class="kw">def</span> <span class="fn">process</span>(NodeRef&amp; n):   <span class="co"># &amp;Arc&lt;Node&gt;</span>
     print <span class="s">"<span class="si">{n}</span>"</span>
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">update</span>(<span class="kw">var</span> Node&amp; n):   <span class="co"># &amp;mut Node</span>
+<span class="kw">def</span> <span class="fn">update</span>(<span class="kw">var</span> Node&amp; n):   <span class="co"># &amp;mut Node</span>
     n.value = <span class="nb">42</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">type</span> <span class="kt">NodeRef</span> = <span class="kw">Arc</span>&lt;<span class="kt">Node</span>&gt;;
@@ -2402,7 +2416,7 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
     a + b</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">fetch</span>(a: i64, b: i64) -&gt; i64 { a + b }</code></pre></div>
-<blockquote>The <code>task</code> prefix accepts all the usual function qualifiers: <code>task def</code>, <code>task req</code>, and <code>task set</code> are all valid. When the return type is present, the qualifier can be omitted: <code>task int fetch(...)</code> is identical to <code>task def int fetch(...)</code>. For void functions write <code>task void f()</code> or the full <code>task def void f()</code>.</blockquote>
+<blockquote>The <code>task</code> prefix works with all function qualifiers: <code>task req</code> (non-mutating async), <code>task set</code> (async setter), and <code>task def</code> (explicit mutating async — <code>def</code> is always optional when a return type is present). Write <code>task int fetch(...)</code> or <code>task f()</code> for the common cases.</blockquote>
 <h3 id="spawning-a-task--task-expr--task-expr">Spawning a task — <code>task expr</code> / <code>task: expr</code></h3>
 <p>Use <code>task</code> as a keyword-expression to spawn an async computation and obtain a future. Both inline and block forms are available:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">fetch</span>(<span class="nb">10</span>, <span class="nb">20</span>)     <span class="co"># inline — no colon needed</span>
@@ -2417,10 +2431,10 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
 <span class="kw">let</span> f3 = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">fetch</span>(<span class="nb">1</span>, <span class="nb">2</span>).<span class="kw">await</span> });</code></pre></div>
 <h3 id="detached-task--fire-and-forget">Detached task — fire and forget</h3>
 <p>Omit the <code>let</code> binding to spawn a task without keeping a future. The task runs in the background; its result is discarded.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">log</span>(<span class="kt">string</span> msg):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">log</span>(<span class="kt">string</span> msg):
     print <span class="s">"bg: <span class="si">{msg}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">task</span> <span class="fn">log</span>(<span class="s">"hello"</span>)   <span class="co"># detached — no future returned</span>
     <span class="kw">task</span> <span class="fn">log</span>(<span class="s">"world"</span>)   <span class="co"># detached</span>
     print <span class="s">"main done"</span></code></pre></div>
@@ -2429,7 +2443,7 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
 tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">log</span>(<span class="s">&quot;world&quot;</span>).<span class="kw">await</span> });
 <span class="fm">println!</span>(<span class="s">&quot;main done&quot;</span>);</code></pre></div>
 <blockquote><strong>Note — <code>main</code> without <code>task</code></strong> If <code>main</code> spawns only detached tasks (no <code>.value</code> await), it does <strong>not</strong> need to be marked <code>task</code>.  The transpiler detects the <code>task</code> expressions and auto-promotes <code>main</code> to an async entry-point automatically.</blockquote>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">log</span>(<span class="kt">string</span> msg):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">log</span>(<span class="kt">string</span> msg):
     print <span class="s">"bg: <span class="si">{msg}</span>"</span>
 
 <span class="co"># main is NOT marked task — the compiler handles it</span>
@@ -2442,10 +2456,10 @@ print <span class="s">"main done"</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">compute</span>(<span class="kt">int</span> n):
     n * n
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">notify</span>(<span class="kt">string</span> msg):
+<span class="kw">task</span> <span class="fn">notify</span>(<span class="kt">string</span> msg):
     print <span class="s">"done: <span class="si">{msg}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">compute</span>(<span class="nb">7</span>)
     <span class="kw">let</span> result = f.value        <span class="co"># waits and captures the result: 49</span>
     print result
@@ -2475,7 +2489,7 @@ print <span class="s">"main done"</span></code></pre></div>
 <span class="kw">task</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span> name):
     <span class="s">"hello, <span class="si">{name}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">fetch</span>(<span class="nb">10</span>, <span class="nb">20</span>)
     <span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">greet</span>(<span class="s">"world"</span>)
     print f1.value             <span class="co"># 30</span>
@@ -2493,7 +2507,7 @@ print <span class="s">"main done"</span></code></pre></div>
 }</code></pre></div>
 <h3 id="main-as-task-andor-throws"><code>main</code> as <code>task</code> and/or <code>throws</code></h3>
 <p><code>main</code> can carry both qualifiers in any order:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">main</span>() <span class="kw">throws</span>:
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">fetch</span>(<span class="nb">1</span>, <span class="nb">2</span>)
     print f.value</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
@@ -2510,7 +2524,7 @@ print <span class="s">"main done"</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">transform</span>(<span class="kt">string</span> s):
     <span class="s">"done: <span class="si">{s}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> <span class="kt">string</span> label = <span class="s">"hello"</span>      <span class="co"># literal string — copied cheaply into the task</span>
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">transform</span>(label)   <span class="co"># &amp;&#x27;static str is Copy, no allocation</span>
     print label                    <span class="co"># hello  (outer binding intact)</span>
@@ -2532,10 +2546,10 @@ print <span class="s">"main done"</span></code></pre></div>
     <span class="kt">string</span> name
     <span class="kt">int</span> jobs
 
-<span class="kw">task</span> <span class="kw">void</span> Worker.<span class="fn">run</span>():
+<span class="kw">task</span> Worker.<span class="fn">run</span>():
     print <span class="s">"worker <span class="si">{self.name}</span> processing <span class="si">{self.jobs}</span> jobs"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> w<span class="lf">&#x27;task</span> = <span class="fn">Worker</span>(name = <span class="s">"alice"</span>, jobs = <span class="nb">5</span>)
     <span class="kw">let</span> f = <span class="kw">task</span> w.<span class="fn">run</span>()      <span class="co"># Arc::clone(&amp;w) is inserted automatically</span>
     print w.name             <span class="co"># alice — w is still accessible</span>
@@ -2557,12 +2571,12 @@ print <span class="s">"main done"</span></code></pre></div>
 <p><code>T&#x27;task</code> gives read-only shared access (<code>Arc&lt;T&gt;</code>). When multiple tasks need to <strong>read and write</strong> the same struct, use <strong><code>T&#x27;actor</code></strong> — this wraps the value in <code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> and <strong>inserts <code>.lock().await</code> automatically</strong> at every field access and method call. The qualifier works with both <code>let</code> and <code>var</code>; no explicit locking is ever written in Boring source.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> SharedCount:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>():
+    <span class="kw">def</span> <span class="fn">inc</span>():
         <span class="kw">self</span>.value += <span class="nb">1</span>
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">get</span>():
         <span class="kw">self</span>.value
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> c<span class="lf">&#x27;actor</span> = <span class="fn">SharedCount</span>()
     c.<span class="fn">inc</span>()             <span class="co"># → c.lock().await.inc()</span>
     c.<span class="fn">inc</span>()
@@ -2577,7 +2591,7 @@ c.<span class="fn">lock</span>().<span class="kw">await</span>.<span class="fn">
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> App:
     SharedCount<span class="lf">&#x27;actor</span> counter    <span class="co"># field is Arc&lt;Mutex&lt;SharedCount&gt;&gt;</span>
 
-    <span class="kw">task</span> <span class="kw">void</span> <span class="fn">bump</span>():
+    <span class="kw">task</span> <span class="fn">bump</span>():
         <span class="kw">self</span>.counter.<span class="fn">inc</span>()               <span class="co"># → self.counter.lock().await.inc()</span>
         print <span class="s">"now = <span class="si">{self.counter.value}</span>"</span></code></pre></div>
 <table><thead><tr><th>Qualifier</th><th>Rust type</th><th>Semantics</th></tr></thead><tbody><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td>read-only shared; task methods use <code>self: Arc&lt;Self&gt;</code></td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td>shared mutable; all accesses auto-locked</td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td>shared mutable; concurrent reads, exclusive writes</td></tr></tbody></table>
@@ -2589,10 +2603,10 @@ c.<span class="fn">lock</span>().<span class="kw">await</span>.<span class="fn">
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">get</span>():
         <span class="kw">self</span>.value
-    <span class="kw">def</span> <span class="kw">void</span> <span class="fn">inc</span>():
+    <span class="kw">def</span> <span class="fn">inc</span>():
         <span class="kw">self</span>.value += <span class="nb">1</span>
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> c<span class="lf">&#x27;guard</span> = <span class="fn">Counter</span>()
     c.<span class="fn">inc</span>()                   <span class="co"># → c.write().await.inc()</span>
     c.<span class="fn">inc</span>()
@@ -2616,14 +2630,14 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
 <ul><li><strong><code>f.cancel()</code></strong> — signal the task bound to <code>f</code> that it should stop.</li><li><strong><code>cancelled:</code></strong> — a special <code>select:</code> arm that fires when the current task has been cancelled.</li></ul>
 <p><code>cancelled:</code> is only valid inside a <code>select:</code> block. It is the idiomatic way to react to a cancellation signal — clean up resources, throw an error, or simply return.</p>
 <h4 id="simple-cancellation">Simple cancellation</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">worker</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">worker</span>():
     select:
         cancelled:
             print <span class="s">"cancelled, exiting"</span>
         result = <span class="fn">do_work</span>():
             print <span class="s">"done: <span class="si">{result}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>():
+<span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">worker</span>()
     f.<span class="fn">cancel</span>()        <span class="co"># signal the worker to stop</span>
     f.wait            <span class="co"># wait for it to finish</span></code></pre></div>
@@ -2648,14 +2662,14 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
 <p>The <code>__task_cancel</code> parameter is injected automatically by the transpiler — it never appears in Boring source.</p>
 <h4 id="cancel--throw-pattern">Cancel + throw pattern</h4>
 <p>When a task is declared <code>throws</code>, it can propagate an error back to the caller through <code>f.value</code> or <code>f.wait</code>. Use <code>throw</code> inside the <code>cancelled:</code> arm to signal failure on cancellation:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">process</span>() <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">process</span>() <span class="kw">throws</span>:
     select:
         cancelled:
             <span class="kw">throw</span> <span class="fn">Error</span>(<span class="s">"cancelled"</span>)
         _ = <span class="fn">do_work</span>():
             print <span class="s">"work done"</span>
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
+<span class="kw">task</span> <span class="fn">run</span>() <span class="kw">throws</span>:
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">process</span>()
     f.<span class="fn">cancel</span>()
     f.wait            <span class="co"># re-throws the &quot;cancelled&quot; error here</span></code></pre></div>
@@ -2682,14 +2696,14 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
     <span class="kw">Ok</span>(())
 }</code></pre></div>
 <p>If the caller uses <code>.value</code> instead of <code>.wait</code>, the thrown error is returned as the value:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kt">string</span> <span class="fn">process</span>() <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">process</span>() <span class="kw">throws</span>:
     select:
         cancelled:
             <span class="kw">throw</span> <span class="fn">Error</span>(<span class="s">"cancelled"</span>)
         result = <span class="fn">fetch</span>():
             result
 
-<span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
+<span class="kw">task</span> <span class="fn">run</span>() <span class="kw">throws</span>:
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">process</span>()
     f.<span class="fn">cancel</span>()
     <span class="kw">let</span> v = f.value   <span class="co"># throws here if process threw</span>
@@ -2770,8 +2784,8 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <table><thead><tr><th>Builtin</th><th>Interpreter (stderr)</th><th>Transpiled</th></tr></thead><tbody><tr><td><code>error …</code></td><td><code>[ERROR] …</code></td><td><code>log::error!(…)</code></td></tr><tr><td><code>warn …</code></td><td><code>[WARN] …</code></td><td><code>log::warn!(…)</code></td></tr><tr><td><code>info …</code></td><td><code>[INFO] …</code></td><td><code>log::info!(…)</code></td></tr><tr><td><code>debug …</code></td><td><code>[DEBUG] …</code></td><td><code>log::debug!(…)</code></td></tr><tr><td><code>trace …</code></td><td><code>[TRACE] …</code></td><td><code>log::trace!(…)</code></td></tr></tbody></table>
 <h3 id="file-system--fs">File system — <code>fs</code></h3>
 <p>File system operations are available as methods on the built-in <code>fs</code> namespace. No import is required.  All operations are <code>throws</code> — call them inside a <code>throws</code> function or wrap with <code>try … else</code>.</p>
-<p>In <strong>async</strong> functions (<code>task def</code>) the calls use <code>tokio::fs</code> with <code>.await</code>; in synchronous functions they use <code>std::fs</code> (blocking).</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">main</span>() <span class="kw">throws</span>:
+<p>In <strong>async</strong> functions (<code>task</code>) the calls use <code>tokio::fs</code> with <code>.await</code>; in synchronous functions they use <code>std::fs</code> (blocking).</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">main</span>() <span class="kw">throws</span>:
     fs.<span class="fn">write</span>(<span class="s">"out.txt"</span>, <span class="s">"hello\nworld"</span>)
     <span class="kw">let</span> content = fs.<span class="fn">read</span>(<span class="s">"out.txt"</span>)        <span class="co"># string</span>
     <span class="kw">let</span> lines   = fs.<span class="fn">readLines</span>(<span class="s">"out.txt"</span>)   <span class="co"># [string]</span>
@@ -2846,13 +2860,13 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <hr>
 <h2 id="28-appendix-boring--rust-mapping">28. Appendix: Boring → Rust Mapping</h2>
 <h3 id="declarations">Declarations</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>let x = v</code></td><td><code>let x = v;</code></td></tr><tr><td><code>var x = v</code></td><td><code>let mut x = v;</code></td></tr><tr><td><code>let T x = v</code></td><td><code>let x: T = v;</code></td></tr><tr><td><code>let x&#x27;q = v</code></td><td><code>let x: Q&lt;T&gt; = Q::new(v);</code> — qualifier on name, type inferred</td></tr><tr><td><code>req R f(T a):  body</code></td><td><code>fn f(&amp;self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>def R f(T a):  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>R f(T a):  body</code></td><td>same as <code>def R f(T a): body</code> — <code>def</code> implicit when return type is present</td></tr><tr><td><code>set prop(T v): body</code></td><td><code>fn set_prop(&amp;mut self, v: T) { body }</code></td></tr><tr><td><code>def R f(T a) throws:  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td><code>def R f(T a) throws E.T: body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, E::T&gt;</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td><code>async fn f(a: T) -&gt; R</code></td></tr><tr><td><code>task def R f(T a):  body</code></td><td>same as <code>task R f(T a): body</code> — <code>def</code> always optional when return type is present</td></tr><tr><td><code>task req R f(T a):  body</code></td><td><code>async fn f(&amp;self, a: T) -&gt; R</code></td></tr><tr><td><code>task set prop(T v):  body</code></td><td><code>async fn set_prop(&amp;mut self, v: T)</code></td></tr><tr><td><code>def R f(T vals...):  body</code></td><td><code>fn f(&amp;mut self, vals: Vec&lt;T&gt;) -&gt; R</code></td></tr><tr><td><code>type N as T</code></td><td><code>struct N(T)</code> + <code>From&lt;T&gt;</code>, <code>From&lt;N&gt;</code>, <code>Display</code> impls</td></tr><tr><td><code>struct S:  fields</code></td><td><code>struct S { fields }</code> + <code>impl S { ... }</code></td></tr><tr><td><code>S(..base, field = v)</code></td><td><code>S { field: v, ..base }</code> — struct update syntax</td></tr><tr><td><code>field</code> (bare name in method body)</td><td><code>self.field</code> — implicit self; local variables shadow fields</td></tr><tr><td><code>as T:  expr</code> (in struct body)</td><td><code>fn into_t(&amp;self) -&gt; T { expr }</code> inside <code>impl S</code>; if body is <code>self.field</code>, also <code>fn into_t_mut(&amp;mut self) -&gt; &amp;mut T</code></td></tr><tr><td><code>enum E:  variants</code></td><td><code>enum E { variants }</code> (always <code>#[derive(Clone)]</code>)</td></tr><tr><td><code>trait T:  req methods</code></td><td><code>trait T { fn methods; }</code></td></tr><tr><td><code>ext S:  methods</code></td><td><code>impl S { methods }</code></td></tr><tr><td><code>ext S as T:  methods</code></td><td><code>impl T for S { methods }</code></td></tr><tr><td><code>def S.f(T a):  body</code></td><td><code>impl S { fn f(&amp;mut self, a: T) { body } }</code></td></tr><tr><td><code>mod m:  items</code></td><td><code>mod m { items }</code></td></tr><tr><td><code>pub def …</code></td><td><code>pub fn …</code></td></tr><tr><td><code>@attr(…)</code></td><td><code>#[attr(…)]</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>let x = v</code></td><td><code>let x = v;</code></td></tr><tr><td><code>var x = v</code></td><td><code>let mut x = v;</code></td></tr><tr><td><code>let T x = v</code></td><td><code>let x: T = v;</code></td></tr><tr><td><code>let x&#x27;q = v</code></td><td><code>let x: Q&lt;T&gt; = Q::new(v);</code> — qualifier on name, type inferred</td></tr><tr><td><code>req R f(T a):  body</code></td><td><code>fn f(&amp;self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>def R f(T a):  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>R f(T a):  body</code></td><td>same as <code>def R f(T a): body</code> — <code>def</code> implicit when return type is present</td></tr><tr><td><code>set prop(T v): body</code></td><td><code>fn set_prop(&amp;mut self, v: T) { body }</code></td></tr><tr><td><code>def R f(T a) throws:  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td><code>def R f(T a) throws E.T: body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, E::T&gt;</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td><code>async fn f(a: T) -&gt; R</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td>same as <code>task R f(T a): body</code> — <code>def</code> always optional when return type is present</td></tr><tr><td><code>task req R f(T a):  body</code></td><td><code>async fn f(&amp;self, a: T) -&gt; R</code></td></tr><tr><td><code>task set prop(T v):  body</code></td><td><code>async fn set_prop(&amp;mut self, v: T)</code></td></tr><tr><td><code>def R f(T vals...):  body</code></td><td><code>fn f(&amp;mut self, vals: Vec&lt;T&gt;) -&gt; R</code></td></tr><tr><td><code>type N as T</code></td><td><code>struct N(T)</code> + <code>From&lt;T&gt;</code>, <code>From&lt;N&gt;</code>, <code>Display</code> impls</td></tr><tr><td><code>struct S:  fields</code></td><td><code>struct S { fields }</code> + <code>impl S { ... }</code></td></tr><tr><td><code>S(..base, field = v)</code></td><td><code>S { field: v, ..base }</code> — struct update syntax</td></tr><tr><td><code>field</code> (bare name in method body)</td><td><code>self.field</code> — implicit self; local variables shadow fields</td></tr><tr><td><code>as T:  expr</code> (in struct body)</td><td><code>fn into_t(&amp;self) -&gt; T { expr }</code> inside <code>impl S</code>; if body is <code>self.field</code>, also <code>fn into_t_mut(&amp;mut self) -&gt; &amp;mut T</code></td></tr><tr><td><code>enum E:  variants</code></td><td><code>enum E { variants }</code> (always <code>#[derive(Clone)]</code>)</td></tr><tr><td><code>trait T:  req methods</code></td><td><code>trait T { fn methods; }</code></td></tr><tr><td><code>ext S:  methods</code></td><td><code>impl S { methods }</code></td></tr><tr><td><code>ext S as T:  methods</code></td><td><code>impl T for S { methods }</code></td></tr><tr><td><code>def S.f(T a):  body</code></td><td><code>impl S { fn f(&amp;mut self, a: T) { body } }</code></td></tr><tr><td><code>mod m:  items</code></td><td><code>mod m { items }</code></td></tr><tr><td><code>pub def …</code></td><td><code>pub fn …</code></td></tr><tr><td><code>@attr(…)</code></td><td><code>#[attr(…)]</code></td></tr></tbody></table>
 <h3 id="types">Types</h3>
 <table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;copy</code></td><td><code>i64</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;copy</code></td><td><code>u64</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;copy</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;copy</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (param)</td><td>—</td><td><code>&amp;str</code> — accepts both literals and heap strings</td></tr><tr><td><code>string</code> (literal)</td><td><code>String&#x27;const</code></td><td><code>&amp;&#x27;static str</code> — zero allocation, <code>Copy</code></td></tr><tr><td><code>string</code> (heap / stored)</td><td><code>String&#x27;task</code></td><td><code>Arc&lt;str&gt;</code> — reference-counted, thread-safe, single allocation</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td><code>T&#x27;option</code></td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code></td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;copy</code></td><td>—</td><td><code>T</code> (requires <code>Copy</code>)</td></tr><tr><td><code>T&#x27;auto</code></td><td>—</td><td><code>Rc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;task</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> — thread-safe shared (read-only)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, all accesses auto-locked</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes</td></tr><tr><td><code>T&#x27;wauto</code></td><td><code>T&#x27;auto&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code> — weak Rc, single-thread</td></tr><tr><td><code>T&#x27;wtask</code></td><td><code>T&#x27;task&#x27;weak</code></td><td><code>std::sync::Weak&lt;T&gt;</code> — weak Arc</td></tr><tr><td><code>T&#x27;wactor</code></td><td><code>T&#x27;actor&#x27;weak</code></td><td><code>std::sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;wguard</code></td><td><code>T&#x27;guard&#x27;weak</code></td><td><code>std::sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;const</code></td><td>—</td><td><code>&amp;&#x27;static T</code></td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (param / return)</td><td>—</td><td><code>impl Trait</code> — static dispatch, zero-cost</td></tr><tr><td><code>any Trait</code></td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: i64</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
 <h3 id="expressions">Expressions</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure (last arg outside parens)</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> (enum variant shorthand, type inferred from context)</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>let a, b = join (f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>select: var = expr: body</code></td><td><code>tokio::select! { var = expr =&gt; { body } }</code></td></tr><tr><td><code>select: after dur: body</code></td><td><code>tokio::select! { _ = tokio::time::sleep(dur) =&gt; { body } }</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>every dur: body</code></td><td><code>loop { tokio::time::sleep(dur).await; body }</code> <em>(déprécié, préférer <code>loop: wait dur; body</code>)</em></td></tr><tr><td><code>cancelled:</code> (select arm)</td><td><code>_ = __task_cancel.cancelled() =&gt;</code> — implicit <code>CancellationToken</code> param injected into the enclosing function</td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>timeout(dur, fut)</code></td><td><code>tokio::time::timeout(dur, fut).await.ok()</code> (plain) / <code>.await?</code> in <code>throws</code> context</td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block with <code>error</code> bound in else</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>
 <h2 id="29-diagnostics">29. Diagnostics</h2>
 <p>Boring prints errors in the same format as <code>rustc</code> — file path, line number, and the source line that caused the problem.</p>
@@ -2899,7 +2913,7 @@ N | source line text
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">transform</span>(<span class="kt">string</span> s):
     <span class="s">"done: <span class="si">{s}</span>"</span>
 
-<span class="kw">task</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">task</span> <span class="fn">main</span>():
     <span class="kw">let</span> <span class="kt">string</span> label = <span class="s">"hello"</span>      <span class="co"># literal — copied cheaply</span>
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">transform</span>(label)   <span class="co"># &amp;&#x27;static str is Copy, no allocation</span>
     print label                     <span class="co"># hello</span>
@@ -2937,10 +2951,10 @@ print x              <span class="co"># 7 — outer binding unchanged</span></co
 <h3 id="advanced--transient-fields-and--nil-coalescing-assignment">Advanced — <code>transient</code> fields and <code>?=</code> nil-coalescing assignment</h3>
 <p>These two features are designed to work together for the <strong>lazy-initialisation / cache pattern</strong>: a <code>transient</code> field can be written from a <code>req</code> (non-mutating) method, and <code>?=</code> initialises it only on the first access.</p>
 <h4 id="transient--mutable-field-from-a-req-method"><code>transient</code> — mutable field from a <code>req</code> method</h4>
-<p>A <code>transient</code> field may be written <strong>from a <code>req</code> (non-mutating) method</strong>, enabling a lazy cache without making the whole method <code>def</code>. Boring compiles <code>transient</code> fields to Rust's <code>std::cell::Cell&lt;T&gt;</code> (for <code>Copy</code> types) or <code>std::cell::RefCell&lt;T&gt;</code> (for non-<code>Copy</code> types).</p>
+<p>A <code>transient</code> field may be written <strong>from a <code>req</code> (non-mutating) method</strong>, enabling a lazy cache without making the whole method <code>def</code>. Boring compiles <code>transient</code> fields to Rust&#x27;s <code>std::cell::Cell&lt;T&gt;</code> (for <code>Copy</code> types) or <code>std::cell::RefCell&lt;T&gt;</code> (for non-<code>Copy</code> types).</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> TextStats:
     <span class="kt">string</span> text
-    <span class="kw">transient</span> <span class="kt">int</span>? _length = <span class="kw">nil</span>     <span class="co"># cache for expensive computation</span>
+    transient <span class="kt">int</span>? _length = <span class="kw">nil</span>     <span class="co"># cache for expensive computation</span>
 
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">length</span>():
         _length ?= text.length       <span class="co"># compute once, cache; no-op if already set</span>
@@ -2988,33 +3002,33 @@ print host             <span class="co"># localhost</span></code></pre></div>
 <p><strong>Rust equivalent</strong> — translates to Rust&#x27;s struct update syntax:</p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> prod = <span class="kt">Config</span> { host: <span class="s">&quot;prod.example.com&quot;</span>.<span class="fn">to_string</span>(), tls: <span class="kw">true</span>, ..defaults.<span class="fn">clone</span>() };</code></pre></div>
 <h3 id="advanced--thiserror-integration">Advanced — <code>thiserror</code> integration</h3>
-<p>When any enum variant carries an <code>@error</code> attribute, the transpiler automatically adds <code>#[derive(Debug, thiserror::Error)]</code> to the enum and <code>thiserror = "1"</code> to the generated <code>Cargo.toml</code>. No <code>@derive(thiserror::Error)</code> is needed on the enum itself.</p>
-<p>The <code>@error</code> message supports thiserror's <code>{0}</code>, <code>{1}</code> field references and named field syntax.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> <span class="kt">AppError</span>:
-    <span class="at">@error</span> <span class="s">"file not found: {0}"</span>
-    NotFound(<span class="kt">string</span>)
+<p>When any enum variant carries an <code>@error</code> attribute, the transpiler automatically adds <code>#[derive(Debug, thiserror::Error)]</code> to the enum and <code>thiserror = &quot;1&quot;</code> to the generated <code>Cargo.toml</code>. No <code>@derive(thiserror::Error)</code> is needed on the enum itself.</p>
+<p>The <code>@error</code> message supports thiserror&#x27;s <code>{0}</code>, <code>{1}</code> field references and named field syntax.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> AppError:
+    <span class="at">@error</span> <span class="s">"file not found: <span class="si">{0}</span>"</span>
+    <span class="fn">NotFound</span>(<span class="kt">string</span>)
     <span class="at">@error</span> <span class="s">"permission denied"</span>
     Denied
-    <span class="at">@error</span> <span class="s">"io error: {0}"</span>
-    Io(<span class="kt">string</span>)
+    <span class="at">@error</span> <span class="s">"io error: <span class="si">{0}</span>"</span>
+    <span class="fn">Io</span>(<span class="kt">string</span>)
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">riskyOp</span>() <span class="kw">throws</span> <span class="kt">AppError</span>:
+<span class="kw">def</span> <span class="fn">riskyOp</span>() <span class="kw">throws</span> AppError:
     <span class="kw">throw</span> AppError.Denied
 
-<span class="kw">def</span> <span class="kw">void</span> <span class="fn">main</span>():
+<span class="kw">def</span> <span class="fn">main</span>():
     <span class="kw">try</span>:
         <span class="fn">riskyOp</span>()
     <span class="kw">catch</span> AppError:
-        print <span class="s">"caught: <span class="si">{error}</span>"</span>   <span class="co"># error = thiserror's Display output</span></code></pre></div>
+        print <span class="s">"caught: <span class="si">{error}</span>"</span>   <span class="co"># error = thiserror&#x27;s Display output</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Debug, thiserror::Error)]</span>
 <span class="kw">enum</span> <span class="kt">AppError</span> {
     <span class="at">#[error(&quot;file not found: {0}&quot;)]</span>
-    NotFound(<span class="kt">String</span>),
+    <span class="fn">NotFound</span>(<span class="kt">String</span>),
     <span class="at">#[error(&quot;permission denied&quot;)]</span>
-    Denied,
+    <span class="kt">Denied</span>,
     <span class="at">#[error(&quot;io error: {0}&quot;)]</span>
-    Io(<span class="kt">String</span>),
+    <span class="fn">Io</span>(<span class="kt">String</span>),
 }</code></pre></div>
 <blockquote><strong>Catching errors from native Rust functions</strong> — <code>catch TheirErrorType:</code> also works for errors propagated via <code>?</code> from native Rust functions called in a <code>throws</code> context. This lets you integrate with any third-party Rust library that returns <code>Result&lt;T, E&gt;</code> where <code>E: std::error::Error</code>.</blockquote>
 <h3 id="advanced--compatibility-with-rust-result-types">Advanced — Compatibility with Rust <code>Result</code> types</h3>

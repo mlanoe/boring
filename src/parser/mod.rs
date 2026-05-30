@@ -258,7 +258,93 @@ impl Parser {
                     Ok(Item::Let(self.parse_let_stmt_pub(is_pub)?))
                 }
             }
+            // Shorthand function declaration without `def`/`req`:
+            //   `RetType name(params):` at the top level.
+            //
+            // Detects: [type-start-token] [ident] `(` … `)` … `:`
+            // `req` is still explicit — bare `RetType name()` defaults to `def`.
+            _ if self.is_fn_decl_shorthand() => Ok(Item::Fn(self.parse_fn_decl(is_pub, true)?)),
             _ => Ok(Item::Stmt(self.parse_stmt()?)),
+        }
+    }
+
+    /// Returns true when the token stream looks like a shorthand function declaration:
+    ///   `RetType funcName(` — a return type followed by a lowercase identifier and `(`
+    ///
+    /// This covers top-level bare functions without `def`/`req`:
+    ///   `string greet(string name):`
+    ///   `int add(int a, int b):`
+    ///   `[string] words():`
+    ///
+    /// The heuristic: try to parse a type at the current position (speculatively),
+    /// then check that what follows is an identifier (function name) and then `(`.
+    /// On failure the position is reset — purely look-ahead, no side effects.
+    fn is_fn_decl_shorthand(&self) -> bool {
+        // Quick guard: the current token must look like the start of a type.
+        let starts_type = match self.peek() {
+            TokenKind::Ident(s) => Self::is_type_name(s),
+            TokenKind::Void | TokenKind::Any => true,
+            TokenKind::LBracket | TokenKind::LBrace | TokenKind::LParen => true,
+            _ => false,
+        };
+        if !starts_type { return false; }
+
+        // Speculatively scan past the type to see what follows.
+        // We mirror what try_parse_return_type_prefix does: scan forward over
+        // a type expression (brackets, angle brackets, qualifiers, optionals).
+        let mut i = self.pos;
+        // Skip the type tokens by counting nesting depth.
+        let n = self.tokens.len();
+        let mut depth = 0i32;
+        loop {
+            if i >= n { return false; }
+            match &self.tokens[i].kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace | TokenKind::Lt => {
+                    depth += 1; i += 1;
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace | TokenKind::Gt => {
+                    depth -= 1; i += 1;
+                    if depth < 0 { return false; }
+                }
+                TokenKind::Tick => {
+                    // ownership qualifier 'xxx
+                    i += 1;
+                    if i < n && matches!(&self.tokens[i].kind, TokenKind::Ident(_)) {
+                        i += 1;
+                    }
+                }
+                TokenKind::Question => { i += 1; } // optional T?
+                TokenKind::Ident(_) if depth > 0 => { i += 1; } // inside brackets
+                TokenKind::Ident(s) if depth == 0 => {
+                    if Self::is_type_name(s) {
+                        i += 1; // part of the type
+                    } else {
+                        // Lowercase non-type ident at depth 0 → this is the function name
+                        // Check: function name followed by `(`
+                        let next = self.tokens.get(i + 1).map(|t| &t.kind);
+                        return matches!(next,
+                            Some(TokenKind::LParen)
+                            | Some(TokenKind::Lt)      // generic: name<T>(
+                        );
+                    }
+                }
+                TokenKind::Comma if depth > 0 => { i += 1; }
+                _ if depth > 0 => { i += 1; }
+                _ => {
+                    // End of type at depth 0 — what follows?
+                    let next = self.tokens.get(i).map(|t| &t.kind);
+                    // If next is a lowercase ident followed by `(`, it's a fn name
+                    if let Some(TokenKind::Ident(name)) = next {
+                        if !Self::is_type_name(name) {
+                            let after = self.tokens.get(i + 1).map(|t| &t.kind);
+                            return matches!(after,
+                                Some(TokenKind::LParen) | Some(TokenKind::Lt)
+                            );
+                        }
+                    }
+                    return false;
+                }
+            }
         }
     }
 

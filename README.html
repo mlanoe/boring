@@ -140,18 +140,18 @@ li { margin-bottom: 0.3rem; }
 <hr>
 <h2 id="what-is-boring">What is Boring?</h2>
 <p>Boring is a language that compiles to Rust. It borrows its look and feel from <strong>Python</strong> and <strong>Swift</strong> — two languages celebrated for their readability — and maps every concept directly onto idiomatic Rust. The result is code that is fast to write, easy to read, and that produces real, auditable Rust output.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name, <span class="kt">int</span> visits) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name, <span class="kt">int</span> visits) <span class="kw">throws</span>:
     <span class="kw">guard</span> visits &gt; <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"no visits recorded"</span>
     <span class="kw">let</span> who = name <span class="kw">else</span> <span class="s">"stranger"</span>
     <span class="s">"Welcome back, <span class="si">{who}</span>! Visit number <span class="si">{visits}</span>."</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt;, visits: i64)
-    -&gt; <span class="kw">Result</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;str&gt;&gt;, visits: i64)
+    -&gt; <span class="kw">Result</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt;
 {
     <span class="kw">if</span> visits &lt;= <span class="nb">0</span> {
         <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">Str</span>(<span class="s">&quot;no visits recorded&quot;</span>)));
     }
-    <span class="kw">let</span> who = name.<span class="fn">unwrap_or_else</span>(|| <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;stranger&quot;</span>.<span class="fn">to_string</span>()));
-    <span class="kw">Ok</span>(<span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;Welcome back, {}! Visit number {}.&quot;</span>, who, visits)))
+    <span class="kw">let</span> who = name.<span class="fn">unwrap_or_else</span>(|| <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;stranger&quot;</span>));
+    <span class="kw">Ok</span>(<span class="kw">Arc</span>::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;Welcome back, {}! Visit number {}.&quot;</span>, who, visits).<span class="fn">as_str</span>()))
 }</code></pre></div>
 <p>Same semantics. A fraction of the noise.</p>
 <p>Boring is not a toy. It has a full interpreter for rapid prototyping and a <code>--emit-rust</code> transpiler that outputs clean, readable Rust source you can inspect, modify, and ship.</p>
@@ -159,7 +159,7 @@ li { margin-bottom: 0.3rem; }
 <h2 id="a-taste-of-the-simplifications">A taste of the simplifications</h2>
 <h3 id="functions-and-error-handling">Functions and error handling</h3>
 <p>Rust requires explicit <code>Result</code> types, <code>?</code> operators, and trait objects for errors. Boring replaces all of that with a single <code>throws</code> keyword — just like Swift.</p>
-<table><thead><tr><th></th><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td>Declaration</td><td><code>def int divide(int a, int b) throws:</code></td><td><code>fn divide(a: i64, b: i64) -&gt; Result&lt;i64, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td>Early exit</td><td><code>guard b != 0 else throw &quot;division by zero&quot;</code></td><td><code>if b == 0 { return Err(&quot;division by zero&quot;.into()); }</code></td></tr><tr><td>Call + fallback</td><td><code>let r = try divide(10, 0) else -1</code></td><td><code>let r = divide(10, 0).unwrap_or(-1)</code></td></tr></tbody></table>
+<table><thead><tr><th></th><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td>Declaration</td><td><code>int divide(int a, int b) throws:</code></td><td><code>fn divide(a: i64, b: i64) -&gt; Result&lt;i64, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td>Early exit</td><td><code>guard b != 0 else throw &quot;division by zero&quot;</code></td><td><code>if b == 0 { return Err(&quot;division by zero&quot;.into()); }</code></td></tr><tr><td>Call + fallback</td><td><code>let r = try divide(10, 0) else -1</code></td><td><code>let r = divide(10, 0).unwrap_or(-1)</code></td></tr></tbody></table>
 <h3 id="strings-and-interpolation">Strings and interpolation</h3>
 <p>Rust has no built-in string interpolation; every formatted value goes through <code>format!</code>. Boring supports Swift-style <code>{expression}</code> inside any string literal.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> name = <span class="s">"World"</span>
@@ -171,15 +171,15 @@ print <span class="s">"pi ≈ <span class="si">{3.14159:.3}</span>, hex = <span 
 <span class="fm">println!</span>(<span class="s">&quot;pi ≈ {:.3}, hex = {:x}&quot;</span>, <span class="nb">3.14159_f64</span>, <span class="nb">255_i64</span>);</code></pre></div>
 <h3 id="types-and-ownership">Types and ownership</h3>
 <p>Rust&#x27;s ownership system is powerful but verbose. Boring provides a concise qualifier syntax inspired by Swift&#x27;s value/reference types — the right ownership is inferred from context, and common cases have short aliases.</p>
-<table><thead><tr><th>Boring</th><th>Rust</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>copy integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>copy float</td></tr><tr><td><code>string</code></td><td><em>(optimised internally)</em></td><td>string — the default for most uses</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td>optional value</td></tr><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td>heap-allocated exclusive</td></tr><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared reference</td></tr></tbody></table>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name):
+<table><thead><tr><th>Boring</th><th>Rust</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>copy integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>copy float</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td>thread-safe shared string — the default</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td>optional value</td></tr><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td>heap-allocated exclusive</td></tr><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared reference</td></tr></tbody></table>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name):
     <span class="kw">guard</span> <span class="kw">let</span> n = name <span class="kw">else</span> <span class="kw">return</span> <span class="s">"Hello, stranger!"</span>
     <span class="s">"Hello, <span class="si">{n}</span>!"</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt;) -&gt; <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">greet</span>(name: <span class="kw">Option</span>&lt;<span class="kw">Arc</span>&lt;str&gt;&gt;) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
     <span class="kw">let</span> <span class="kw">Some</span>(n) = name <span class="kw">else</span> {
-        <span class="kw">return</span> <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;Hello, stranger!&quot;</span>.<span class="fn">to_string</span>());
+        <span class="kw">return</span> <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;Hello, stranger!&quot;</span>);
     };
-    <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;Hello, {}!&quot;</span>, n))
+    <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;Hello, {}!&quot;</span>, n).<span class="fn">as_str</span>())
 }</code></pre></div>
 <h3 id="structs-and-methods">Structs and methods</h3>
 <p>Rust separates struct definitions from their <code>impl</code> blocks. Boring puts methods directly inside the struct, like Swift and Python classes. <code>req</code> (read-only, <code>&amp;self</code>) and <code>def</code> (mutating, <code>&amp;mut self</code>) replace the Rust receiver distinction.</p>
@@ -211,9 +211,9 @@ print <span class="s">"pi ≈ <span class="si">{3.14159:.3}</span>, hex = <span 
     print w</code></pre></div>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> words: <span class="kw">Vec</span>&lt;&amp;str&gt; = <span class="s">&quot;the quick brown fox jumps over the lazy dog&quot;</span>.<span class="fn">split</span>(&#x27; &#x27;).<span class="fn">collect</span>();
 
-<span class="kw">let</span> <span class="kw">mut</span> result: <span class="kw">Vec</span>&lt;<span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;&gt; = words.<span class="fn">iter</span>()
+<span class="kw">let</span> <span class="kw">mut</span> result: <span class="kw">Vec</span>&lt;<span class="kw">Arc</span>&lt;str&gt;&gt; = words.<span class="fn">iter</span>()
     .<span class="fn">filter</span>(|__x| __x.<span class="fn">len</span>() <span class="kw">as</span> i64 &gt; <span class="nb">3</span>)
-    .<span class="fn">map</span>(|__x| <span class="kw">Arc</span>::<span class="fn">new</span>(__x.<span class="fn">to_uppercase</span>()))
+    .<span class="fn">map</span>(|__x| <span class="kw">Arc</span>::<span class="fn">from</span>(__x.<span class="fn">to_uppercase</span>().<span class="fn">as_str</span>()))
     .<span class="fn">collect</span>();
 result.<span class="fn">sort</span>();
 
@@ -228,13 +228,13 @@ result.<span class="fn">sort</span>();
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">transform</span>(label)   <span class="co"># Arc::clone inserted automatically</span>
     print label                    <span class="co"># still accessible</span>
     print f.value                  <span class="co"># awaits the result</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">transform</span>(s: <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt;) -&gt; <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; {
-    <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="fm">format!</span>(<span class="s">&quot;done: {}&quot;</span>, s))
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">transform</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
+    <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;done: {}&quot;</span>, s).<span class="fn">as_str</span>())
 }
 
 <span class="at">#[tokio::main]</span>
 <span class="kw">async</span> <span class="kw">fn</span> <span class="fn">main</span>() {
-    <span class="kw">let</span> label: <span class="kw">Arc</span>&lt;<span class="kt">String</span>&gt; = <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="s">&quot;shared&quot;</span>.<span class="fn">into</span>());
+    <span class="kw">let</span> label: <span class="kw">Arc</span>&lt;str&gt; = <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;shared&quot;</span>);
     <span class="kw">let</span> f = tokio::<span class="fn">spawn</span>({
         <span class="kw">let</span> label = <span class="kw">Arc</span>::<span class="fn">clone</span>(&amp;label);
         <span class="kw">async</span> <span class="kw">move</span> { <span class="fn">transform</span>(label).<span class="kw">await</span> }
