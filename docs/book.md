@@ -30,7 +30,7 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 16. [Ownership Qualifiers](#19-ownership-qualifiers) — incl. [`'weak` — weak references (secondary qualifier)](#weak-references--wauto-wtask-wactor)
 17. [Defer](#20-defer)
 17. [Channels](#18-channels-channel) — incl. [`oneshot`](#oneshot--single-shot-response), [`broadcast`](#broadcast--fan-out), [`watch`](#watch--observable-value)
-18. [Tasks (Async)](#21-tasks-async) — incl. [`.wait` — void await](#awaiting-a-future--value-and-wait), [`'guard` — RwLock shared state](#read-heavy-shared-state--tguard), [cancellation — `f.cancel()` / `cancelled:`](#task-cancellation--fcancel-and-cancelled), [`wait` — pause async](#wait--pause-asynchrone), [`task(Duration)` — built-in timeout](#task-with-built-in-timeout--taskduration-body), [`timeout` — future with deadline](#timeout--future-with-deadline)
+18. [Tasks (Async)](#21-tasks-async) — incl. [`.wait` — void await](#awaiting-a-future--value-and-wait), [`'guard` — RwLock shared state](#read-heavy-shared-state--tguard), [cancellation — `f.cancel()` / `cancelled:`](#task-cancellation--fcancel-and-cancelled), [`wait` — pause async](#wait--pause-asynchrone), [`task(Duration)` — built-in timeout](#task-with-built-in-timeout--taskduration-body)
 19. [Macros](#22-macros)
 20. [Attributes](#23-attributes)
 21. [Format Specifiers](#24-format-specifiers)
@@ -395,7 +395,7 @@ let (a, b) = t;   // types inferred from tuple
 #### Tuple return type
 
 ```boring
-def (int, int) minmax([int] nums):
+(int, int) minmax([int] nums):
     (nums[0], nums[1])
 ```
 
@@ -495,15 +495,15 @@ def log(string msg):      # def required — no return type
 Functions can return any collection type — arrays, sets, and dicts are all supported return types:
 
 ```boring
-def [int] first_n(int n):
+[int] first_n(int n):
     var result = []
     for i in 1..=n: result.push(i)
     result
 
-def {int} unique_squares():
+{int} unique_squares():
     {1, 4, 9, 4, 1}                # deduplicates automatically
 
-def {string=int} char_count(string s):
+{string=int} char_count(string s):
     var counts = {=}
     for ch in s.chars():
         counts[ch] = (counts[ch] else 0) + 1
@@ -522,7 +522,7 @@ fn char_count(s: &'static str) -> std::collections::HashMap<Arc<str>, i64> { ...
 Both definitions and call sites accept newlines inside `(...)`. A trailing comma is optional.
 
 ```boring
-def int add(
+int add(
     int a,
     int b,
 ):
@@ -582,7 +582,7 @@ fn greet(name: &str) {
 ### Explicit `return`
 
 ```boring
-def int abs_val(int n):
+int abs_val(int n):
     if n < 0: return -n
     n
 ```
@@ -590,7 +590,7 @@ def int abs_val(int n):
 ### Default parameters
 
 ```boring
-def string say(string msg = "hi"):
+string say(string msg = "hi"):
     msg
 ```
 
@@ -609,7 +609,7 @@ fn say(msg: &str) -> Arc<str> { Arc::<str>::from(msg.to_string()) }
 Any argument can be passed by name using `name= value` syntax. Labels allow calling out of declaration order and make call sites self-documenting.
 
 ```boring
-def string greet(string name, string greeting):
+string greet(string name, string greeting):
     "{greeting}, {name}!"
 
 # Positional
@@ -625,7 +625,7 @@ greet("Carol", greeting = "Hey")                # Hey, Carol!
 Labels also combine naturally with default parameters:
 
 ```boring
-def string format_num(int n, int base = 10, bool pad = false):
+string format_num(int n, int base = 10, bool pad = false):
     ...
 
 format_num(255)                    # base=10, pad=false
@@ -648,7 +648,7 @@ Prefix a parameter with `var` to make the local binding mutable inside the funct
 **For copy types** (`int`, `float`, `bool`, `T'copy`), the value is copied — reassigning or modifying `n` has no effect on the caller:
 
 ```boring
-def int countdown(var int n):
+int countdown(var int n):
     var total = 0
     while n > 0:
         total += n
@@ -701,7 +701,7 @@ fn add_one(x: &mut i64) { *x += 1; }
 A function that may fail is annotated with `throws`. It returns `Result<T, Box<dyn Error>>` in Rust.
 
 ```boring
-def int divide(int a, int b) throws:
+int divide(int a, int b) throws:
     guard b != 0 else throw "division by zero"
     a / b
 ```
@@ -717,7 +717,7 @@ fn divide(a: i64, b: i64) -> Result<i64, Box<dyn std::error::Error>> {
 ### Function-typed parameters (higher-order)
 
 ```boring
-def int apply(int f(int), int x):
+int apply(int f(int), int x):
     f(x)
 ```
 
@@ -754,7 +754,7 @@ Only full-line comments are preserved in the transpiled output. Inline comments 
 `if` is an **expression** — it returns a value.
 
 ```boring
-def string sign(int n):
+string sign(int n):
     if n > 0: "+" elif n < 0: "-" else "0"
 ```
 
@@ -824,7 +824,7 @@ if let name, let age:
 Early exit if a condition fails:
 
 ```boring
-def string check(int n):
+string check(int n):
     guard n >= 0 else return "negative"
     "ok ({n})"
 ```
@@ -842,7 +842,7 @@ fn check(n: i64) -> Arc<str> {
 Unwrap an optional, or exit early:
 
 ```boring
-def string connect(string? host):
+string connect(string? host):
     guard let h = host else return "no host"
     "Connecting to {h}"
 ```
@@ -850,7 +850,7 @@ def string connect(string? host):
 The shorthand form works here too — omit `= var` when names match:
 
 ```boring
-def string connect(string? host):
+string connect(string? host):
     guard let host else return "no host"   # ≡  guard let host = host else …
     "Connecting to {host}"
 ```
@@ -866,7 +866,7 @@ fn connect(host: Option<Arc<str>>) -> Arc<str> {
 ### `match`
 
 ```boring
-def string describe(int n):
+string describe(int n):
     match n:
         0:           "zero"
         1 | 2 | 3:   "small"
@@ -906,7 +906,7 @@ Loop while an expression returns a non-`nil` value, binding it each iteration.
 The loop stops as soon as the expression returns `nil`.
 
 ```boring
-def int? next_item(int i):
+int? next_item(int i):
     if i < 3: i else nil   # returns nil when exhausted
 
 var idx = 0
@@ -1662,7 +1662,7 @@ struct Dog:
 var d = Dog(base = Animal(name = "Rex"), breed = "Labrador")
 let a = d as Animal                 # explicit cast — calls the as Animal: body
 let Animal b = d                    # implicit — type annotation triggers conversion
-def string greet(Animal a): "Hello " + a.name
+string greet(Animal a): "Hello " + a.name
 print greet(d)                      # implicit — argument coerced at call site
 ```
 
@@ -1731,7 +1731,7 @@ let a = Expr::Add(3, 4);
 ### Matching on enums
 
 ```boring
-def int eval(Expr e):
+int eval(Expr e):
     match e:
         Num(v):      v
         Add(l, r):   l + r
@@ -1767,7 +1767,7 @@ match e:
 struct Point:
     init(pub float x, pub float y)
 
-def string describe_point(Point p):
+string describe_point(Point p):
     match p:
         Point(0.0, 0.0): "origin"
         Point(x, 0.0):   "on x-axis at {x}"
@@ -1806,7 +1806,7 @@ enum Direction:
     East
     West
 
-def string label(Direction d):
+string label(Direction d):
     match d:
         North: "north"
         South: "south"
@@ -2255,7 +2255,7 @@ impl std::error::Error for Error {}
 Annotate a function with `throws` to indicate it can fail:
 
 ```boring
-def int divide(int a, int b) throws:
+int divide(int a, int b) throws:
     guard b != 0 else throw "division by zero"
     a / b
 ```
@@ -2437,7 +2437,7 @@ catch String:
 ### `guard … else throw`
 
 ```boring
-def string read_file(string path) throws:
+string read_file(string path) throws:
     guard path.length > 0 else throw "empty path"
     "contents of {path}"
 ```
@@ -2447,15 +2447,15 @@ def string read_file(string path) throws:
 A `throw` automatically propagates through every `throws` function in the call stack until it is caught by a `try:` block. No explicit forwarding is required.
 
 ```boring
-def int parse_int(string s) throws:
+int parse_int(string s) throws:
     guard s.length > 0 else throw "empty string"
     guard let n = (s as int) else throw "not a number: {s}"
     n
 
-def int double_parse(string s) throws:
+int double_parse(string s) throws:
     parse_int(s) * 2          # error from parse_int propagates up automatically
 
-def string process(string s) throws:
+string process(string s) throws:
     let n = double_parse(s)   # error from double_parse propagates up automatically
     "result: {n}"
 
@@ -2481,7 +2481,7 @@ enum CalcError:
     DivByZero
     Overflow
 
-def int checked_divide(int a, int b) throws CalcError:
+int checked_divide(int a, int b) throws CalcError:
     guard b != 0 else throw CalcError.DivByZero
     guard (a / b) < 1000000 else throw CalcError.Overflow
     a / b
@@ -2499,7 +2499,7 @@ The error type can also be a **module-qualified path**: `throws io.Error`, `thro
 `try? expr` is shorthand for `try expr else nil`. It converts a `Result<T, E>` (or a `throws` function call) into an optional value: `Ok(v)` becomes `v`, any error becomes `nil`.
 
 ```boring
-def Result<int, string> divide(int a, int b):
+Result<int, string> divide(int a, int b):
     if b == 0: return Err("division by zero")
     return Ok(a / b)
 
@@ -2568,7 +2568,7 @@ if let host = cfg.host:
 ### `guard let` — unwrap or early return
 
 ```boring
-def string connect(Config c):
+string connect(Config c):
     guard let host = c.host else return "no host"
     guard let port = c.port else return "no port"
     "Connecting to {host}:{port}"
@@ -2592,10 +2592,10 @@ let name = user.and_then(|u| u.profile).map(|p| p.name);
 ### Generic functions
 
 ```boring
-def T identity(T x):
+T identity(T x):
     x
 
-def T first([T] items):
+T first([T] items):
     items[0]
 ```
 
@@ -2637,7 +2637,7 @@ Use `as` inside `<…>` to require a trait on a type parameter.
 struct Wrapper<T as Display>:
     T item
 
-def string describe<T as Display>(T x):
+string describe<T as Display>(T x):
     "value: {x}"
 
 let w = Wrapper(3.14)
@@ -2668,7 +2668,7 @@ When *calling* a generic function or annotating a variable, you can supply type 
 
 ```boring
 # Definition — constraint is declared here
-def copy_items<T as Clone>(Container<T> src, Container<T> dst):
+copy_items<T as Clone>(Container<T> src, Container<T> dst):
     for item in src.items:
         print "copying: {item}"
 
@@ -2721,11 +2721,11 @@ Const generics work on functions too. The implicit type-param collection picks u
 
 ```boring
 # N is inferred from the param type `Stack<T, uint N>` — no explicit <T, uint N> needed
-def T get(Stack<T, uint N> s, int i):
+T get(Stack<T, uint N> s, int i):
     guard i < N as int else throw Error.OutOfBounds
     s.data[i]
 
-def uint capacity_of(Stack<T, uint N> s):
+uint capacity_of(Stack<T, uint N> s):
     N
 ```
 
@@ -2741,7 +2741,7 @@ fn capacity_of<T: Clone + std::fmt::Debug, const N: usize>(s: &Stack<T, N>) -> u
 Or declare them explicitly and use `N` directly as a value in the body:
 
 ```boring
-def string describe<T, uint N>(Stack<T, uint N> s):
+string describe<T, uint N>(Stack<T, uint N> s):
     "capacity={N}, used={s.len}"
 ```
 
@@ -2939,10 +2939,10 @@ words.iter().filter(|__x| __x.len() as i64 > 3).cloned().collect::<Vec<_>>();
 
 ```boring
 mod math_utils:
-    pub def float hypot(float a, float b):
+    pub float hypot(float a, float b):
         sqrt(a * a + b * b)
 
-    pub def float clamp_f(float v, float lo, float hi):
+    pub float clamp_f(float v, float lo, float hi):
         max(lo, min(v, hi))
 ```
 
@@ -3099,8 +3099,8 @@ let result = value |> f(extra_args)
 ### Examples
 
 ```boring
-def int double(int n): n * 2
-def int inc(int n):    n + 1
+int double(int n): n * 2
+int inc(int n):    n + 1
 
 # Single-line
 let x = 5 |> double() |> inc() |> inc()   # 12
@@ -3124,7 +3124,7 @@ let shout = "  hello  "
 Mixed function and method dispatch:
 
 ```boring
-def [int] keep_positive([int] arr):
+[int] keep_positive([int] arr):
     arr.filter(n: n > 0)
 
 let nums = [-1, 2, -3, 4]
@@ -3461,11 +3461,11 @@ let result, _ = join (f_data, f_log)
 
 ```boring
 task int fetch_users():
-    sleep(Duration.from_millis(10))
+    wait Duration.from_millis(10)
     return 42
 
 task int fetch_products():
-    sleep(Duration.from_millis(10))
+    wait Duration.from_millis(10)
     return 99
 
 task run():
@@ -3677,54 +3677,27 @@ let f = tokio::spawn(async move {
 
 ---
 
-## `timeout` — future with deadline
+## `timeout` — inside a cancellable task
 
-`timeout(dur, fut)` races a future against a timer. The behaviour depends on context:
-
-Inside a **cancellable** `task` function (one that can receive `.cancel()`), `timeout` races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (`"Expired"` / `"Cancelled"`).
-
-Outside a cancellable function the simpler `tokio::time::timeout` is used.
-
-| Context | Cancellable fn? | Result type | Rust emitted |
-|---------|----------------|-------------|--------------|
-| Plain | no | `T?` — `nil` on expiry | `tokio::time::timeout(dur, fut).await.ok()` |
-| `throws` / `try` body | no | `T` — `Expired` propagated | `tokio::time::timeout(dur, fut).await?` |
-| Plain | yes | `T?` — `nil` on expiry or cancel | `select!` returning `Some`/`None` |
-| `throws` / `try` body | yes | `T` — `Expired` or `Cancelled` thrown | `select!` returning `Ok`/`Err` + `?` |
-| `try? timeout(…)` | any | `T?` explicit | `.ok()` form |
+Inside a **cancellable** `task` function (one that can receive `.cancel()`), `timeout` races three branches simultaneously using `select!`: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct typed errors (`Error.Expired` / `Error.Cancelled`).
 
 ```boring
-# Plain — returns nil on timeout
-let result? = timeout(Duration.from_secs(5), fetch_data())
-if let result:
-    print "got {result}"
-else:
-    print "timed out"
-```
-
-```boring
-# In a throws function — expiry propagates as an error
 task string fetch_user(string url) throws:
+    # timeout races fetch against a 10-second timer AND the cancel token
     let body = timeout(Duration.from_secs(10), download(url))
-    return parse(body)
+    parse(body)
 ```
 
 ```boring
-# try? — explicit Option, no throws needed
-let data? = try? timeout(Duration.from_secs(3), fetch())
+try:
+    fetch_user(url)
+catch Error.Expired:
+    print "request timed out"
+catch Error.Cancelled:
+    print "task was cancelled"
 ```
 
-**Rust equivalent (plain)**
-```rust
-let result: Option<_> = tokio::time::timeout(Duration::from_secs(5), fetch_data()).await.ok();
-```
-
-**Rust equivalent (throws)**
-```rust
-let body: String = tokio::time::timeout(Duration::from_secs(10), download(url)).await?;
-```
-
-> **Note:** `select: after dur:` is the right tool when you want to race *multiple* concurrent branches. `timeout(dur, fut)` is simpler when you have a single future and just need a deadline.
+> **Prefer `task(Duration): body`** for the common case of spawning a task with a deadline — it is simpler and does not require a cancellable function context. Use `timeout(dur, fut)` only when you need the three-way `select!` race inside a cancellable task.
 
 ---
 
@@ -3836,7 +3809,7 @@ Lifetimes are only valid in borrow position (`&`), never on owned qualifiers (`'
 ```boring
 # both params and return tied to the same lifetime 'a
 # no need to declare <'a> — lifetimes are inferred from usage
-def string&a longest(string&a x, string&a y):
+string&a longest(string&a x, string&a y):
     if x.len() > y.len(): x else y
 ```
 
@@ -3965,7 +3938,7 @@ Weak refs are useful for **breaking reference cycles** — for example, a parent
 Weak refs can be passed to and returned from functions:
 
 ```boring
-def string describe(Resource'wauto w):
+string describe(Resource'wauto w):
     let r = w.upgrade()
     "resource: {r.label}"
 
@@ -3981,7 +3954,7 @@ print describe(w1)   # resource: config.toml
 `defer` registers a block of code to run when the enclosing function exits, regardless of how it exits. Multiple defers execute in **LIFO** order (last registered, first executed).
 
 ```boring
-def string with_cleanup():
+string with_cleanup():
     var log = ""
     defer: log = "{log}+closed"
     log = "open+work"
@@ -3990,7 +3963,7 @@ def string with_cleanup():
 ```
 
 ```boring
-def string lifo():
+string lifo():
     var log = ""
     defer: log = "{log}A"
     defer: log = "{log}B"
@@ -4952,7 +4925,8 @@ if let user:
 | `every dur: body` | `loop { tokio::time::sleep(dur).await; body }` *(déprécié, préférer `loop: wait dur; body`)* |
 | `cancelled:` (select arm) | `_ = __task_cancel.cancelled() =>` — implicit `CancellationToken` param injected into the enclosing function |
 | `f.cancel()` | `__cancel_f.cancel()` — signals the spawned task via its token |
-| `timeout(dur, fut)` | `tokio::time::timeout(dur, fut).await.ok()` (plain) / `.await?` in `throws` context |
+| `task(dur): body` | `tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })` |
+| `timeout(dur, fut)` | `select!` with 3 branches — only in cancellable task functions |
 
 ### Control flow
 
@@ -5280,7 +5254,7 @@ Boring's `throw`/`catch` system wraps errors in `BoringError` at runtime. Rust f
 The last parameter can collect remaining arguments with `...`:
 
 ```boring
-def int sum(int values...):
+int sum(int values...):
     var total = 0
     for v in values:
         total = total + v
@@ -5367,7 +5341,7 @@ The `TypeId` uniquely identifies `CalcError` at the catch site regardless of mod
 The error type in a `throws` clause can be a **module-qualified path** using dot notation — the dot separator is translated to `::` in Rust:
 
 ```boring
-def string read_file(string path) throws io.Error:
+string read_file(string path) throws io.Error:
     guard path != "" else throw io.Error.NotFound
     "content of {path}"
 ```

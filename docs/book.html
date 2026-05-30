@@ -131,7 +131,7 @@ li { margin-bottom: 0.3rem; }
 <p>Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust&#x27;s type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled via <code>--emit-rust</code>.</p>
 <hr>
 <h2 id="table-of-contents">Table of Contents</h2>
-<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a> — incl. <a href="#multi-line-strings">multi-line strings</a> — <code>string</code> only; <a href="#advanced--strings-string-stringconst-and-stringtask">string internals → Advanced</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a> — incl. <a href="#while-let">`while let`</a>, <a href="#if-let-shorthand">`if let` shorthand</a>, <a href="#loop-as-expression">`loop` as expression</a>, <a href="#struct-destructuring-in-match">struct destructuring in `match`</a>, <a href="#for-with-index--auto-enumerate">for with index</a>, <a href="#for-over-a-dict--key-value-destructuring">for over dict</a></li><li><a href="#7-collections">Collections</a> — incl. <a href="#index--opaque-collection-cursor">Index — opaque cursor</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a> — incl. <a href="#enum-variant-shorthand">variant shorthand</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a> — incl. <a href="#default-method-implementations">default methods</a>, <a href="#associated-types">associated types</a>, <a href="#generic-associated-types-gat">GAT</a></li><li><a href="#11-error-handling">Error Handling</a> — incl. <a href="#standard-error-enum--error">standard error enum `Error`</a>, <a href="#qualified-error-type-paths">qualified throws paths</a>, <a href="#thiserror-integration">`thiserror` integration</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a> — incl. <a href="#lifetime-and-bound-arguments-at-use-sites">lifetime and bound args at use sites</a>, <a href="#const-generics----uint-n">const generics — `&lt;uint N&gt;`</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a> — incl. <a href="#trailing-closures">trailing closures</a>, <a href="#closure-shorthand">closure shorthand</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#19-ownership-qualifiers">Ownership Qualifiers</a> — incl. <a href="#weak-references--wauto-wtask-wactor">`&#x27;weak` — weak references (secondary qualifier)</a></li><li><a href="#20-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a> — incl. <a href="#oneshot--single-shot-response">`oneshot`</a>, <a href="#broadcast--fan-out">`broadcast`</a>, <a href="#watch--observable-value">`watch`</a></li><li><a href="#21-tasks-async">Tasks (Async)</a> — incl. <a href="#awaiting-a-future--value-and-wait">`.wait` — void await</a>, <a href="#read-heavy-shared-state--tguard">`&#x27;guard` — RwLock shared state</a>, <a href="#task-cancellation--fcancel-and-cancelled">cancellation — `f.cancel()` / `cancelled:`</a>, <a href="#wait--pause-asynchrone">`wait` — pause async</a>, <a href="#task-with-built-in-timeout--taskduration-body">`task(Duration)` — built-in timeout</a>, <a href="#timeout--future-with-deadline">`timeout` — future with deadline</a></li><li><a href="#22-macros">Macros</a></li><li><a href="#23-attributes">Attributes</a></li><li><a href="#24-format-specifiers">Format Specifiers</a></li><li><a href="#25-built-in-functions">Built-in Functions</a> — incl. <a href="#log-level-builtins">log-level builtins</a>, <a href="#ownership">`drop`</a>, <a href="#json-serialization--json--fromJson">JSON serialization — `json` / `fromJson`</a>, <a href="#file-system--fs">`fs` — file system</a></li><li><a href="#26-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#24-diagnostics">Diagnostics</a></li><li><a href="#27-advanced">Advanced</a> — <a href="#advanced--strings-string-stringconst-and-stringtask">strings — `string`, `String&#x27;const`, `String&#x27;task`</a>, <a href="#advanced--variable-shadowing">variable shadowing</a>, <a href="#advanced--transient-fields-and--nil-coalescing-assignment">`transient` + `?=`</a>, <a href="#advanced--struct-spread--other">struct spread `..other`</a>, <a href="#advanced--thiserror-integration">`thiserror` integration</a>, <a href="#advanced--compatibility-with-rust-result-types">Rust `Result` compatibility</a>, <a href="#advanced--variadic-parameters">variadic parameters</a>, <a href="#advanced--error-handling-internals">error handling internals</a></li></ol>
+<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a> — incl. <a href="#multi-line-strings">multi-line strings</a> — <code>string</code> only; <a href="#advanced--strings-string-stringconst-and-stringtask">string internals → Advanced</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a> — incl. <a href="#while-let">`while let`</a>, <a href="#if-let-shorthand">`if let` shorthand</a>, <a href="#loop-as-expression">`loop` as expression</a>, <a href="#struct-destructuring-in-match">struct destructuring in `match`</a>, <a href="#for-with-index--auto-enumerate">for with index</a>, <a href="#for-over-a-dict--key-value-destructuring">for over dict</a></li><li><a href="#7-collections">Collections</a> — incl. <a href="#index--opaque-collection-cursor">Index — opaque cursor</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a> — incl. <a href="#enum-variant-shorthand">variant shorthand</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a> — incl. <a href="#default-method-implementations">default methods</a>, <a href="#associated-types">associated types</a>, <a href="#generic-associated-types-gat">GAT</a></li><li><a href="#11-error-handling">Error Handling</a> — incl. <a href="#standard-error-enum--error">standard error enum `Error`</a>, <a href="#qualified-error-type-paths">qualified throws paths</a>, <a href="#thiserror-integration">`thiserror` integration</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a> — incl. <a href="#lifetime-and-bound-arguments-at-use-sites">lifetime and bound args at use sites</a>, <a href="#const-generics----uint-n">const generics — `&lt;uint N&gt;`</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a> — incl. <a href="#trailing-closures">trailing closures</a>, <a href="#closure-shorthand">closure shorthand</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#19-ownership-qualifiers">Ownership Qualifiers</a> — incl. <a href="#weak-references--wauto-wtask-wactor">`&#x27;weak` — weak references (secondary qualifier)</a></li><li><a href="#20-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a> — incl. <a href="#oneshot--single-shot-response">`oneshot`</a>, <a href="#broadcast--fan-out">`broadcast`</a>, <a href="#watch--observable-value">`watch`</a></li><li><a href="#21-tasks-async">Tasks (Async)</a> — incl. <a href="#awaiting-a-future--value-and-wait">`.wait` — void await</a>, <a href="#read-heavy-shared-state--tguard">`&#x27;guard` — RwLock shared state</a>, <a href="#task-cancellation--fcancel-and-cancelled">cancellation — `f.cancel()` / `cancelled:`</a>, <a href="#wait--pause-asynchrone">`wait` — pause async</a>, <a href="#task-with-built-in-timeout--taskduration-body">`task(Duration)` — built-in timeout</a></li><li><a href="#22-macros">Macros</a></li><li><a href="#23-attributes">Attributes</a></li><li><a href="#24-format-specifiers">Format Specifiers</a></li><li><a href="#25-built-in-functions">Built-in Functions</a> — incl. <a href="#log-level-builtins">log-level builtins</a>, <a href="#ownership">`drop`</a>, <a href="#json-serialization--json--fromJson">JSON serialization — `json` / `fromJson`</a>, <a href="#file-system--fs">`fs` — file system</a></li><li><a href="#26-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#24-diagnostics">Diagnostics</a></li><li><a href="#27-advanced">Advanced</a> — <a href="#advanced--strings-string-stringconst-and-stringtask">strings — `string`, `String&#x27;const`, `String&#x27;task`</a>, <a href="#advanced--variable-shadowing">variable shadowing</a>, <a href="#advanced--transient-fields-and--nil-coalescing-assignment">`transient` + `?=`</a>, <a href="#advanced--struct-spread--other">struct spread `..other`</a>, <a href="#advanced--thiserror-integration">`thiserror` integration</a>, <a href="#advanced--compatibility-with-rust-result-types">Rust `Result` compatibility</a>, <a href="#advanced--variadic-parameters">variadic parameters</a>, <a href="#advanced--error-handling-internals">error handling internals</a></li></ol>
 <hr>
 <h2 id="1-getting-started">1. Getting Started</h2>
 <h3 id="creating-a-project">Creating a project</h3>
@@ -315,7 +315,7 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (a, b) = t;   <span class="co">// types inferred from tuple</span></code></pre></div>
 <h4 id="tuple-return-type">Tuple return type</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> (<span class="kt">int</span>, <span class="kt">int</span>) <span class="fn">minmax</span>([<span class="kt">int</span>] nums):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>(<span class="kt">int</span>, <span class="kt">int</span>) <span class="fn">minmax</span>([<span class="kt">int</span>] nums):
     (nums[<span class="nb">0</span>], nums[<span class="nb">1</span>])</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">minmax</span>(nums: <span class="kw">Vec</span>&lt;i64&gt;) -&gt; (i64, i64) {
@@ -370,15 +370,15 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     print <span class="s">"[LOG] <span class="si">{msg}</span>"</span></code></pre></div>
 <blockquote><code>req</code> (introduced in section 8 — Structs) is also available for top-level functions to signal that a function is pure. Both produce the same Rust <code>fn</code> at the top level.</blockquote>
 <p>Functions can return any collection type — arrays, sets, and dicts are all supported return types:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> [<span class="kt">int</span>] <span class="fn">first_n</span>(<span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>[<span class="kt">int</span>] <span class="fn">first_n</span>(<span class="kt">int</span> n):
     <span class="kw">var</span> result = []
     <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">1..</span>=n: result.<span class="fn">push</span>(i)
     result
 
-<span class="kw">def</span> {<span class="kt">int</span>} <span class="fn">unique_squares</span>():
+{<span class="kt">int</span>} <span class="fn">unique_squares</span>():
     {<span class="nb">1</span>, <span class="nb">4</span>, <span class="nb">9</span>, <span class="nb">4</span>, <span class="nb">1</span>}                <span class="co"># deduplicates automatically</span>
 
-<span class="kw">def</span> {<span class="kt">string</span>=<span class="kt">int</span>} <span class="fn">char_count</span>(<span class="kt">string</span> s):
+{<span class="kt">string</span>=<span class="kt">int</span>} <span class="fn">char_count</span>(<span class="kt">string</span> s):
     <span class="kw">var</span> counts = {=}
     <span class="kw">for</span> ch <span class="kw">in</span> s.<span class="fn">chars</span>():
         counts[ch] = (counts[ch] <span class="kw">else</span> <span class="nb">0</span>) + <span class="nb">1</span>
@@ -389,7 +389,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <span class="kw">fn</span> <span class="fn">char_count</span>(s: &amp;<span class="lf">&#x27;static</span> str) -&gt; std::collections::<span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, i64&gt; { ... }</code></pre></div>
 <h3 id="multi-line-parameter-lists">Multi-line parameter lists</h3>
 <p>Both definitions and call sites accept newlines inside <code>(...)</code>. A trailing comma is optional.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">add</span>(
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">add</span>(
     <span class="kt">int</span> a,
     <span class="kt">int</span> b,
 ):
@@ -426,11 +426,11 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     <span class="fm">println!</span>(<span class="s">&quot;Hello, {}!&quot;</span>, name);
 }</code></pre></div>
 <h3 id="explicit-return">Explicit <code>return</code></h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">abs_val</span>(<span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">abs_val</span>(<span class="kt">int</span> n):
     <span class="kw">if</span> n &lt; <span class="nb">0</span>: <span class="kw">return</span> -n
     n</code></pre></div>
 <h3 id="default-parameters">Default parameters</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">say</span>(<span class="kt">string</span> msg = <span class="s">"hi"</span>):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">say</span>(<span class="kt">string</span> msg = <span class="s">"hi"</span>):
     msg</code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">say</span>()        <span class="co"># &quot;hi&quot;</span>
 <span class="fn">say</span>(<span class="s">"hello"</span>) <span class="co"># &quot;hello&quot;</span></code></pre></div>
@@ -438,7 +438,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">say</span>(msg: &amp;str) -&gt; <span class="kw">Arc</span>&lt;str&gt; { <span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(msg.<span class="fn">to_string</span>()) }</code></pre></div>
 <h3 id="labeled-arguments">Labeled arguments</h3>
 <p>Any argument can be passed by name using <code>name= value</code> syntax. Labels allow calling out of declaration order and make call sites self-documenting.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span> name, <span class="kt">string</span> greeting):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span> name, <span class="kt">string</span> greeting):
     <span class="s">"<span class="si">{greeting}</span>, <span class="si">{name}</span>!"</span>
 
 <span class="co"># Positional</span>
@@ -450,7 +450,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <span class="co"># Mix: positional first, then labeled</span>
 <span class="fn">greet</span>(<span class="s">"Carol"</span>, greeting = <span class="s">"Hey"</span>)                <span class="co"># Hey, Carol!</span></code></pre></div>
 <p>Labels also combine naturally with default parameters:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">format_num</span>(<span class="kt">int</span> n, <span class="kt">int</span> base = <span class="nb">10</span>, <span class="kt">bool</span> pad = <span class="kw">false</span>):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">format_num</span>(<span class="kt">int</span> n, <span class="kt">int</span> base = <span class="nb">10</span>, <span class="kt">bool</span> pad = <span class="kw">false</span>):
     ...
 
 <span class="fn">format_num</span>(<span class="nb">255</span>)                    <span class="co"># base=10, pad=false</span>
@@ -464,7 +464,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <h3 id="mutable-parameters--var">Mutable parameters — <code>var</code></h3>
 <p>Prefix a parameter with <code>var</code> to make the local binding mutable inside the function body.</p>
 <p><strong>For copy types</strong> (<code>int</code>, <code>float</code>, <code>bool</code>, <code>T&#x27;copy</code>), the value is copied — reassigning or modifying <code>n</code> has no effect on the caller:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">countdown</span>(<span class="kw">var</span> <span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">countdown</span>(<span class="kw">var</span> <span class="kt">int</span> n):
     <span class="kw">var</span> total = <span class="nb">0</span>
     <span class="kw">while</span> n &gt; <span class="nb">0</span>:
         total += n
@@ -494,7 +494,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <blockquote>For variadic parameters (<code>values...</code>), see <a href="#advanced--variadic-parameters">Advanced — Variadic parameters</a>.</blockquote>
 <h3 id="throwing-functions--throws">Throwing functions — <code>throws</code></h3>
 <p>A function that may fail is annotated with <code>throws</code>. It returns <code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code> in Rust.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span>:
     <span class="kw">guard</span> b != <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"division by zero"</span>
     a / b</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
@@ -503,7 +503,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     <span class="kw">Ok</span>(a / b)
 }</code></pre></div>
 <h3 id="function-typed-parameters-higher-order">Function-typed parameters (higher-order)</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">apply</span>(<span class="kt">int</span> <span class="fn">f</span>(<span class="kt">int</span>), <span class="kt">int</span> x):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">apply</span>(<span class="kt">int</span> <span class="fn">f</span>(<span class="kt">int</span>), <span class="kt">int</span> x):
     <span class="fn">f</span>(x)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">apply</span>(f: <span class="kw">impl</span> <span class="fn">Fn</span>(i64) -&gt; i64, x: i64) -&gt; i64 {
@@ -521,7 +521,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <h2 id="6-control-flow">6. Control Flow</h2>
 <h3 id="if--elif--else"><code>if</code> / <code>elif</code> / <code>else</code></h3>
 <p><code>if</code> is an <strong>expression</strong> — it returns a value.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">sign</span>(<span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">sign</span>(<span class="kt">int</span> n):
     <span class="kw">if</span> n &gt; <span class="nb">0</span>: <span class="s">"+"</span> <span class="kw">elif</span> n &lt; <span class="nb">0</span>: <span class="s">"-"</span> <span class="kw">else</span> <span class="s">"0"</span></code></pre></div>
 <p>Block form:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">if</span> score &gt;= <span class="nb">90</span>:
@@ -562,7 +562,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     print <span class="s">"<span class="si">{name}</span> is <span class="si">{age}</span>"</span></code></pre></div>
 <h3 id="guard"><code>guard</code></h3>
 <p>Early exit if a condition fails:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">check</span>(<span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">check</span>(<span class="kt">int</span> n):
     <span class="kw">guard</span> n &gt;= <span class="nb">0</span> <span class="kw">else</span> <span class="kw">return</span> <span class="s">"negative"</span>
     <span class="s">"ok (<span class="si">{n}</span>)"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
@@ -572,11 +572,11 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 }</code></pre></div>
 <h3 id="guard-let"><code>guard let</code></h3>
 <p>Unwrap an optional, or exit early:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">connect</span>(<span class="kt">string</span>? host):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">connect</span>(<span class="kt">string</span>? host):
     <span class="kw">guard</span> <span class="kw">let</span> h = host <span class="kw">else</span> <span class="kw">return</span> <span class="s">"no host"</span>
     <span class="s">"Connecting to <span class="si">{h}</span>"</span></code></pre></div>
 <p>The shorthand form works here too — omit <code>= var</code> when names match:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">connect</span>(<span class="kt">string</span>? host):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">connect</span>(<span class="kt">string</span>? host):
     <span class="kw">guard</span> <span class="kw">let</span> host <span class="kw">else</span> <span class="kw">return</span> <span class="s">"no host"</span>   <span class="co"># ≡  guard let host = host else …</span>
     <span class="s">"Connecting to <span class="si">{host}</span>"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
@@ -585,7 +585,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     <span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;Connecting to {}&quot;</span>, host))
 }</code></pre></div>
 <h3 id="match"><code>match</code></h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">describe</span>(<span class="kt">int</span> n):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">describe</span>(<span class="kt">int</span> n):
     <span class="kw">match</span> n:
         <span class="nb">0</span>:           <span class="s">"zero"</span>
         <span class="nb">1</span> | <span class="nb">2</span> | <span class="nb">3</span>:   <span class="s">"small"</span>
@@ -609,7 +609,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <span class="kw">while</span> i &lt; <span class="nb">5</span> { i += <span class="nb">1</span>; }</code></pre></div>
 <h3 id="while-let"><code>while let</code></h3>
 <p>Loop while an expression returns a non-<code>nil</code> value, binding it each iteration. The loop stops as soon as the expression returns <code>nil</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span>? <span class="fn">next_item</span>(<span class="kt">int</span> i):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span>? <span class="fn">next_item</span>(<span class="kt">int</span> i):
     <span class="kw">if</span> i &lt; <span class="nb">3</span>: i <span class="kw">else</span> <span class="kw">nil</span>   <span class="co"># returns nil when exhausted</span>
 
 <span class="kw">var</span> idx = <span class="nb">0</span>
@@ -1052,7 +1052,7 @@ Counter.<span class="fn">max_val</span>()        <span class="co"># 100</span></
 <span class="kw">var</span> d = <span class="fn">Dog</span>(base = <span class="fn">Animal</span>(name = <span class="s">"Rex"</span>), breed = <span class="s">"Labrador"</span>)
 <span class="kw">let</span> a = d <span class="kw">as</span> Animal                 <span class="co"># explicit cast — calls the as Animal: body</span>
 <span class="kw">let</span> Animal b = d                    <span class="co"># implicit — type annotation triggers conversion</span>
-<span class="kw">def</span> <span class="kt">string</span> <span class="fn">greet</span>(Animal a): <span class="s">"Hello "</span> + a.name
+<span class="kt">string</span> <span class="fn">greet</span>(Animal a): <span class="s">"Hello "</span> + a.name
 print <span class="fn">greet</span>(d)                      <span class="co"># implicit — argument coerced at call site</span></code></pre></div>
 <p>The conversion is applied automatically whenever the expected type is known:</p>
 <ul><li>explicit cast: <code>d as Animal</code></li><li>typed let: <code>let Animal b = d</code></li><li>function argument: <code>greet(d)</code> where <code>greet</code> expects <code>Animal</code></li></ul>
@@ -1089,7 +1089,7 @@ print <span class="fn">greet</span>(d)                      <span class="co"># i
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> e = <span class="kt">Expr</span>::<span class="fn">Num</span>(<span class="nb">7</span>);
 <span class="kw">let</span> a = <span class="kt">Expr</span>::<span class="fn">Add</span>(<span class="nb">3</span>, <span class="nb">4</span>);</code></pre></div>
 <h3 id="matching-on-enums">Matching on enums</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">eval</span>(Expr e):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">eval</span>(Expr e):
     <span class="kw">match</span> e:
         <span class="fn">Num</span>(v):      v
         <span class="fn">Add</span>(l, r):   l + r
@@ -1113,7 +1113,7 @@ print <span class="fn">greet</span>(d)                      <span class="co"># i
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point:
     <span class="kw">init</span>(<span class="kw">pub</span> <span class="kt">float</span> x, <span class="kw">pub</span> <span class="kt">float</span> y)
 
-<span class="kw">def</span> <span class="kt">string</span> <span class="fn">describe_point</span>(Point p):
+<span class="kt">string</span> <span class="fn">describe_point</span>(Point p):
     <span class="kw">match</span> p:
         <span class="fn">Point</span>(<span class="nb">0.0</span>, <span class="nb">0.0</span>): <span class="s">"origin"</span>
         <span class="fn">Point</span>(x, <span class="nb">0.0</span>):   <span class="s">"on x-axis at <span class="si">{x}</span>"</span>
@@ -1140,7 +1140,7 @@ print <span class="fn">describe_point</span>(<span class="fn">Point</span>(<span
     East
     West
 
-<span class="kw">def</span> <span class="kt">string</span> <span class="fn">label</span>(Direction d):
+<span class="kt">string</span> <span class="fn">label</span>(Direction d):
     <span class="kw">match</span> d:
         North: <span class="s">"north"</span>
         South: <span class="s">"south"</span>
@@ -1425,7 +1425,7 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
 <hr>
 <h3 id="throwing-functions">Throwing functions</h3>
 <p>Annotate a function with <code>throws</code> to indicate it can fail:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span>:
     <span class="kw">guard</span> b != <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"division by zero"</span>
     a / b</code></pre></div>
 <h3 id="try--else--expression-with-fallback"><code>try … else</code> — expression with fallback</h3>
@@ -1538,20 +1538,20 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <span class="kw">catch</span> String:
     print <span class="s">"string"</span>      <span class="co"># ← runs</span></code></pre></div>
 <h3 id="guard--else-throw"><code>guard … else throw</code></h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">read_file</span>(<span class="kt">string</span> path) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">read_file</span>(<span class="kt">string</span> path) <span class="kw">throws</span>:
     <span class="kw">guard</span> path.length &gt; <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"empty path"</span>
     <span class="s">"contents of <span class="si">{path}</span>"</span></code></pre></div>
 <h3 id="propagation-across-nested-throws-functions">Propagation across nested <code>throws</code> functions</h3>
 <p>A <code>throw</code> automatically propagates through every <code>throws</code> function in the call stack until it is caught by a <code>try:</code> block. No explicit forwarding is required.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">parse_int</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">parse_int</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
     <span class="kw">guard</span> s.length &gt; <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"empty string"</span>
     <span class="kw">guard</span> <span class="kw">let</span> n = (s <span class="kw">as</span> <span class="kt">int</span>) <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"not a number: <span class="si">{s}</span>"</span>
     n
 
-<span class="kw">def</span> <span class="kt">int</span> <span class="fn">double_parse</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
+<span class="kt">int</span> <span class="fn">double_parse</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
     <span class="fn">parse_int</span>(s) * <span class="nb">2</span>          <span class="co"># error from parse_int propagates up automatically</span>
 
-<span class="kw">def</span> <span class="kt">string</span> <span class="fn">process</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
+<span class="kt">string</span> <span class="fn">process</span>(<span class="kt">string</span> s) <span class="kw">throws</span>:
     <span class="kw">let</span> n = <span class="fn">double_parse</span>(s)   <span class="co"># error from double_parse propagates up automatically</span>
     <span class="s">"result: <span class="si">{n}</span>"</span>
 
@@ -1568,7 +1568,7 @@ print r4   <span class="co"># not found</span></code></pre></div>
     DivByZero
     Overflow
 
-<span class="kw">def</span> <span class="kt">int</span> <span class="fn">checked_divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span> CalcError:
+<span class="kt">int</span> <span class="fn">checked_divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span> CalcError:
     <span class="kw">guard</span> b != <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> CalcError.DivByZero
     <span class="kw">guard</span> (a / b) &lt; <span class="nb">1000000</span> <span class="kw">else</span> <span class="kw">throw</span> CalcError.Overflow
     a / b
@@ -1579,7 +1579,7 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <blockquote>For the internal Rust representation (<code>BoringError::Other</code>, <code>TypeId</code>, <code>BoringError::Str</code>/<code>String</code>) and the full untyped/typed comparison table, see <a href="#advanced--error-handling-internals">Advanced — Error handling internals</a>.</blockquote>
 <h3 id="try--result-to-option"><code>try?</code> — Result to Option</h3>
 <p><code>try? expr</code> is shorthand for <code>try expr else nil</code>. It converts a <code>Result&lt;T, E&gt;</code> (or a <code>throws</code> function call) into an optional value: <code>Ok(v)</code> becomes <code>v</code>, any error becomes <code>nil</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> Result&lt;<span class="kt">int</span>, <span class="kt">string</span>&gt; <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Result&lt;<span class="kt">int</span>, <span class="kt">string</span>&gt; <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b):
     <span class="kw">if</span> b == <span class="nb">0</span>: <span class="kw">return</span> <span class="fn">Err</span>(<span class="s">"division by zero"</span>)
     <span class="kw">return</span> <span class="fn">Ok</span>(a / b)
 
@@ -1616,7 +1616,7 @@ print <span class="s">"<span class="si">{no_val   else 0}</span>"</span>   <span
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">if</span> <span class="kw">let</span> host = cfg.host:
     print <span class="s">"host = <span class="si">{host}</span>"</span></code></pre></div>
 <h3 id="guard-let--unwrap-or-early-return"><code>guard let</code> — unwrap or early return</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">connect</span>(Config c):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">connect</span>(Config c):
     <span class="kw">guard</span> <span class="kw">let</span> host = c.host <span class="kw">else</span> <span class="kw">return</span> <span class="s">"no host"</span>
     <span class="kw">guard</span> <span class="kw">let</span> port = c.port <span class="kw">else</span> <span class="kw">return</span> <span class="s">"no port"</span>
     <span class="s">"Connecting to <span class="si">{host}</span>:<span class="si">{port}</span>"</span></code></pre></div>
@@ -1627,10 +1627,10 @@ print <span class="s">"<span class="si">{no_val   else 0}</span>"</span>   <span
 <hr>
 <h2 id="13-generics">13. Generics</h2>
 <h3 id="generic-functions">Generic functions</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> T <span class="fn">identity</span>(T x):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>T <span class="fn">identity</span>(T x):
     x
 
-<span class="kw">def</span> T <span class="fn">first</span>([T] items):
+T <span class="fn">first</span>([T] items):
     items[<span class="nb">0</span>]</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> identity&lt;<span class="kt">T</span>&gt;(x: <span class="kt">T</span>) -&gt; <span class="kt">T</span> { x }
@@ -1653,7 +1653,7 @@ print <span class="s">"<span class="si">{p.first}</span> / <span class="si">{p.s
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Wrapper&lt;T <span class="kw">as</span> Display&gt;:
     T item
 
-<span class="kw">def</span> <span class="kt">string</span> describe&lt;T <span class="kw">as</span> Display&gt;(T x):
+<span class="kt">string</span> describe&lt;T <span class="kw">as</span> Display&gt;(T x):
     <span class="s">"value: <span class="si">{x}</span>"</span>
 
 <span class="kw">let</span> w = <span class="fn">Wrapper</span>(<span class="nb">3.14</span>)
@@ -1672,7 +1672,7 @@ print <span class="s">"<span class="si">{t.tag}</span> = <span class="si">{t.val
 <h3 id="lifetime-and-bound-arguments-at-use-sites">Lifetime and bound arguments at use sites</h3>
 <p>When <em>calling</em> a generic function or annotating a variable, you can supply type arguments that include bare lifetimes and trait bounds for documentation purposes:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Definition — constraint is declared here</span>
-<span class="kw">def</span> copy_items&lt;T <span class="kw">as</span> Clone&gt;(Container&lt;T&gt; src, Container&lt;T&gt; dst):
+copy_items&lt;T <span class="kw">as</span> Clone&gt;(Container&lt;T&gt; src, Container&lt;T&gt; dst):
     <span class="kw">for</span> item <span class="kw">in</span> src.items:
         print <span class="s">"copying: <span class="si">{item}</span>"</span>
 
@@ -1708,11 +1708,11 @@ copy_items&lt;<span class="kt">int</span>&gt;(src, dst)
 }</code></pre></div>
 <p>Const generics work on functions too. The implicit type-param collection picks up <code>&lt;uint N&gt;</code> from parameter types automatically:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># N is inferred from the param type `Stack&lt;T, uint N&gt;` — no explicit &lt;T, uint N&gt; needed</span>
-<span class="kw">def</span> T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, <span class="kt">int</span> i):
+T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, <span class="kt">int</span> i):
     <span class="kw">guard</span> i &lt; N <span class="kw">as</span> <span class="kt">int</span> <span class="kw">else</span> <span class="kw">throw</span> Error.OutOfBounds
     s.data[i]
 
-<span class="kw">def</span> <span class="kt">uint</span> <span class="fn">capacity_of</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
+<span class="kt">uint</span> <span class="fn">capacity_of</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
     N</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> get&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt;(s: &amp;<span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt;, i: i64) -&gt; <span class="kt">T</span> {
@@ -1721,7 +1721,7 @@ copy_items&lt;<span class="kt">int</span>&gt;(src, dst)
 }
 <span class="kw">fn</span> capacity_of&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt;(s: &amp;<span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt;) -&gt; usize { <span class="kt">N</span> }</code></pre></div>
 <p>Or declare them explicitly and use <code>N</code> directly as a value in the body:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> describe&lt;T, <span class="kt">uint</span> N&gt;(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> describe&lt;T, <span class="kt">uint</span> N&gt;(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
     <span class="s">"capacity=<span class="si">{N}</span>, used=<span class="si">{s.len}</span>"</span></code></pre></div>
 <table><thead><tr><th>Boring syntax</th><th>Rust equivalent</th><th>Notes</th></tr></thead><tbody><tr><td><code>&lt;uint N&gt;</code></td><td><code>const N: usize</code></td><td>Most common — array lengths, capacities</td></tr><tr><td><code>&lt;int N&gt;</code></td><td><code>const N: i64</code></td><td>Signed integer constant</td></tr><tr><td><code>&lt;bool B&gt;</code></td><td><code>const B: bool</code></td><td>Feature flag at compile time</td></tr></tbody></table>
 <blockquote><code>uint</code> maps to <code>usize</code> (not <code>u64</code>) for const generics — <code>usize</code> is the standard Rust type for sizes and indices.</blockquote>
@@ -1826,10 +1826,10 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
 <h2 id="15-modules">15. Modules</h2>
 <h3 id="defining-a-module">Defining a module</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mod</span> math_utils:
-    <span class="kw">pub</span> <span class="kw">def</span> <span class="kt">float</span> <span class="fn">hypot</span>(<span class="kt">float</span> a, <span class="kt">float</span> b):
+    <span class="kw">pub</span> <span class="kt">float</span> <span class="fn">hypot</span>(<span class="kt">float</span> a, <span class="kt">float</span> b):
         <span class="fn">sqrt</span>(a * a + b * b)
 
-    <span class="kw">pub</span> <span class="kw">def</span> <span class="kt">float</span> <span class="fn">clamp_f</span>(<span class="kt">float</span> v, <span class="kt">float</span> lo, <span class="kt">float</span> hi):
+    <span class="kw">pub</span> <span class="kt">float</span> <span class="fn">clamp_f</span>(<span class="kt">float</span> v, <span class="kt">float</span> lo, <span class="kt">float</span> hi):
         <span class="fn">max</span>(lo, <span class="fn">min</span>(v, hi))</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">mod</span> math_utils {
@@ -1904,8 +1904,8 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
 <p><strong>Dispatch rules</strong> (resolved at compile time):</p>
 <table><thead><tr><th>Right-hand side</th><th>Boring desugaring</th><th>Rust output</th></tr></thead><tbody><tr><td>Known function</td><td><code>f(value, args)</code></td><td><code>f(value, args)</code></td></tr><tr><td>Method name</td><td><code>value.f(args)</code></td><td><code>value.f(args)</code></td></tr></tbody></table>
 <h3 id="examples">Examples</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">double</span>(<span class="kt">int</span> n): n * <span class="nb">2</span>
-<span class="kw">def</span> <span class="kt">int</span> <span class="fn">inc</span>(<span class="kt">int</span> n):    n + <span class="nb">1</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">double</span>(<span class="kt">int</span> n): n * <span class="nb">2</span>
+<span class="kt">int</span> <span class="fn">inc</span>(<span class="kt">int</span> n):    n + <span class="nb">1</span>
 
 <span class="co"># Single-line</span>
 <span class="kw">let</span> x = <span class="nb">5</span> |&gt; <span class="fn">double</span>() |&gt; <span class="fn">inc</span>() |&gt; <span class="fn">inc</span>()   <span class="co"># 12</span>
@@ -1921,7 +1921,7 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
     |&gt; <span class="fn">upper</span>()
 <span class="co"># shout == &quot;HELLO&quot;</span></code></pre></div>
 <p>Mixed function and method dispatch:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> [<span class="kt">int</span>] <span class="fn">keep_positive</span>([<span class="kt">int</span>] arr):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>[<span class="kt">int</span>] <span class="fn">keep_positive</span>([<span class="kt">int</span>] arr):
     arr.<span class="fn">filter</span>(n: n &gt; <span class="nb">0</span>)
 
 <span class="kw">let</span> nums = [<span class="nb">-1</span>, <span class="nb">2</span>, <span class="nb">-3</span>, <span class="nb">4</span>]
@@ -2117,11 +2117,11 @@ print b</code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> result, _ = join (f_data, f_log)</code></pre></div>
 <h3 id="full-example-1">Full example</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_users</span>():
-    <span class="fn">sleep</span>(Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>))
+    wait Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>)
     <span class="kw">return</span> <span class="nb">42</span>
 
 <span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_products</span>():
-    <span class="fn">sleep</span>(Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>))
+    wait Duration.<span class="fn">from_millis</span>(<span class="nb">10</span>)
     <span class="kw">return</span> <span class="nb">99</span>
 
 <span class="kw">task</span> <span class="fn">run</span>():
@@ -2261,28 +2261,19 @@ wait Duration.<span class="fn">from_secs</span>(<span class="nb">1</span>)</code
 });
 <span class="co">// f.await.unwrap()?  →  T or Error::Expired</span></code></pre></div>
 <hr>
-<h2 id="timeout--future-with-deadline"><code>timeout</code> — future with deadline</h2>
-<p><code>timeout(dur, fut)</code> races a future against a timer. The behaviour depends on context:</p>
-<p>Inside a <strong>cancellable</strong> <code>task</code> function (one that can receive <code>.cancel()</code>), <code>timeout</code> races three branches: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct errors (<code>&quot;Expired&quot;</code> / <code>&quot;Cancelled&quot;</code>).</p>
-<p>Outside a cancellable function the simpler <code>tokio::time::timeout</code> is used.</p>
-<table><thead><tr><th>Context</th><th>Cancellable fn?</th><th>Result type</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Plain</td><td>no</td><td><code>T?</code> — <code>nil</code> on expiry</td><td><code>tokio::time::timeout(dur, fut).await.ok()</code></td></tr><tr><td><code>throws</code> / <code>try</code> body</td><td>no</td><td><code>T</code> — <code>Expired</code> propagated</td><td><code>tokio::time::timeout(dur, fut).await?</code></td></tr><tr><td>Plain</td><td>yes</td><td><code>T?</code> — <code>nil</code> on expiry or cancel</td><td><code>select!</code> returning <code>Some</code>/<code>None</code></td></tr><tr><td><code>throws</code> / <code>try</code> body</td><td>yes</td><td><code>T</code> — <code>Expired</code> or <code>Cancelled</code> thrown</td><td><code>select!</code> returning <code>Ok</code>/<code>Err</code> + <code>?</code></td></tr><tr><td><code>try? timeout(…)</code></td><td>any</td><td><code>T?</code> explicit</td><td><code>.ok()</code> form</td></tr></tbody></table>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Plain — returns nil on timeout</span>
-<span class="kw">let</span> result? = <span class="fn">timeout</span>(Duration.<span class="fn">from_secs</span>(<span class="nb">5</span>), <span class="fn">fetch_data</span>())
-<span class="kw">if</span> <span class="kw">let</span> result:
-    print <span class="s">"got <span class="si">{result}</span>"</span>
-<span class="kw">else</span>:
-    print <span class="s">"timed out"</span></code></pre></div>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># In a throws function — expiry propagates as an error</span>
-<span class="kw">task</span> <span class="kt">string</span> <span class="fn">fetch_user</span>(<span class="kt">string</span> url) <span class="kw">throws</span>:
+<h2 id="timeout--inside-a-cancellable-task"><code>timeout</code> — inside a cancellable task</h2>
+<p>Inside a <strong>cancellable</strong> <code>task</code> function (one that can receive <code>.cancel()</code>), <code>timeout</code> races three branches simultaneously using <code>select!</code>: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct typed errors (<code>Error.Expired</code> / <code>Error.Cancelled</code>).</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">fetch_user</span>(<span class="kt">string</span> url) <span class="kw">throws</span>:
+    <span class="co"># timeout races fetch against a 10-second timer AND the cancel token</span>
     <span class="kw">let</span> body = <span class="fn">timeout</span>(Duration.<span class="fn">from_secs</span>(<span class="nb">10</span>), <span class="fn">download</span>(url))
-    <span class="kw">return</span> <span class="fn">parse</span>(body)</code></pre></div>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># try? — explicit Option, no throws needed</span>
-<span class="kw">let</span> data? = <span class="kw">try</span>? <span class="fn">timeout</span>(Duration.<span class="fn">from_secs</span>(<span class="nb">3</span>), <span class="fn">fetch</span>())</code></pre></div>
-<p><strong>Rust equivalent (plain)</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> result: <span class="kw">Option</span>&lt;_&gt; = tokio::time::<span class="fn">timeout</span>(<span class="kt">Duration</span>::<span class="fn">from_secs</span>(<span class="nb">5</span>), <span class="fn">fetch_data</span>()).<span class="kw">await</span>.<span class="fn">ok</span>();</code></pre></div>
-<p><strong>Rust equivalent (throws)</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> body: <span class="kt">String</span> = tokio::time::<span class="fn">timeout</span>(<span class="kt">Duration</span>::<span class="fn">from_secs</span>(<span class="nb">10</span>), <span class="fn">download</span>(url)).<span class="kw">await</span>?;</code></pre></div>
-<blockquote><strong>Note:</strong> <code>select: after dur:</code> is the right tool when you want to race <em>multiple</em> concurrent branches. <code>timeout(dur, fut)</code> is simpler when you have a single future and just need a deadline.</blockquote>
+    <span class="fn">parse</span>(body)</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
+    <span class="fn">fetch_user</span>(url)
+<span class="kw">catch</span> Error.Expired:
+    print <span class="s">"request timed out"</span>
+<span class="kw">catch</span> Error.Cancelled:
+    print <span class="s">"task was cancelled"</span></code></pre></div>
+<blockquote><strong>Prefer <code>task(Duration): body</code></strong> for the common case of spawning a task with a deadline — it is simpler and does not require a cancellable function context. Use <code>timeout(dur, fut)</code> only when you need the three-way <code>select!</code> race inside a cancellable task.</blockquote>
 <hr>
 <h2 id="21-ownership-qualifiers">21. Ownership Qualifiers</h2>
 <p>Boring exposes Rust&#x27;s ownership model through <strong>type qualifiers</strong> written after a <code>&#x27;</code> tick.</p>
@@ -2322,7 +2313,7 @@ c.<span class="fn">get</span>()       <span class="co"># OK — req (non-mutatin
 <p>Lifetimes are only valid in borrow position (<code>&amp;</code>), never on owned qualifiers (<code>&#x27;</code>). The lifetime letter is declared as a type parameter with <code>&lt;&#x27;a&gt;</code> and can appear anywhere a borrow is written:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># both params and return tied to the same lifetime &#x27;a</span>
 <span class="co"># no need to declare &lt;&#x27;a&gt; — lifetimes are inferred from usage</span>
-<span class="kw">def</span> <span class="kt">string</span>&amp;a <span class="fn">longest</span>(<span class="kt">string</span>&amp;a x, <span class="kt">string</span>&amp;a y):
+<span class="kt">string</span>&amp;a <span class="fn">longest</span>(<span class="kt">string</span>&amp;a x, <span class="kt">string</span>&amp;a y):
     <span class="kw">if</span> x.<span class="fn">len</span>() &gt; y.<span class="fn">len</span>(): x <span class="kw">else</span> y</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> longest&lt;<span class="lf">&#x27;a</span>&gt;(x: &amp;<span class="lf">&#x27;a</span> str, y: &amp;<span class="lf">&#x27;a</span> str) -&gt; &amp;<span class="lf">&#x27;a</span> str {
@@ -2391,7 +2382,7 @@ print r.label                         <span class="co"># config.toml</span></cod
 <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, r.label);</code></pre></div>
 <p>Weak refs are useful for <strong>breaking reference cycles</strong> — for example, a parent holds a strong ref to its children, and each child holds a weak back-ref to its parent.</p>
 <p>Weak refs can be passed to and returned from functions:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">describe</span>(Resource<span class="lf">&#x27;wauto</span> w):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">describe</span>(Resource<span class="lf">&#x27;wauto</span> w):
     <span class="kw">let</span> r = w.<span class="fn">upgrade</span>()
     <span class="s">"resource: <span class="si">{r.label}</span>"</span>
 
@@ -2400,13 +2391,13 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
 <hr>
 <h2 id="22-defer">22. Defer</h2>
 <p><code>defer</code> registers a block of code to run when the enclosing function exits, regardless of how it exits. Multiple defers execute in <strong>LIFO</strong> order (last registered, first executed).</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">with_cleanup</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">with_cleanup</span>():
     <span class="kw">var</span> log = <span class="s">""</span>
     <span class="kw">defer</span>: log = <span class="s">"<span class="si">{log}</span>+closed"</span>
     log = <span class="s">"open+work"</span>
     log
 <span class="co"># result: &quot;open+work+closed&quot;</span></code></pre></div>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">lifo</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">lifo</span>():
     <span class="kw">var</span> log = <span class="s">""</span>
     <span class="kw">defer</span>: log = <span class="s">"<span class="si">{log}</span>A"</span>
     <span class="kw">defer</span>: log = <span class="s">"<span class="si">{log}</span>B"</span>
@@ -2879,7 +2870,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="types">Types</h3>
 <table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;copy</code></td><td><code>i64</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;copy</code></td><td><code>u64</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;copy</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;copy</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (param)</td><td>—</td><td><code>&amp;str</code> — accepts both literals and heap strings</td></tr><tr><td><code>string</code> (literal)</td><td><code>String&#x27;const</code></td><td><code>&amp;&#x27;static str</code> — zero allocation, <code>Copy</code></td></tr><tr><td><code>string</code> (heap / stored)</td><td><code>String&#x27;task</code></td><td><code>Arc&lt;str&gt;</code> — reference-counted, thread-safe, single allocation</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td><code>T&#x27;option</code></td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code></td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;copy</code></td><td>—</td><td><code>T</code> (requires <code>Copy</code>)</td></tr><tr><td><code>T&#x27;auto</code></td><td>—</td><td><code>Rc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;task</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> — thread-safe shared (read-only)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, all accesses auto-locked</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes</td></tr><tr><td><code>T&#x27;wauto</code></td><td><code>T&#x27;auto&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code> — weak Rc, single-thread</td></tr><tr><td><code>T&#x27;wtask</code></td><td><code>T&#x27;task&#x27;weak</code></td><td><code>std::sync::Weak&lt;T&gt;</code> — weak Arc</td></tr><tr><td><code>T&#x27;wactor</code></td><td><code>T&#x27;actor&#x27;weak</code></td><td><code>std::sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;wguard</code></td><td><code>T&#x27;guard&#x27;weak</code></td><td><code>std::sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;const</code></td><td>—</td><td><code>&amp;&#x27;static T</code></td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (param / return)</td><td>—</td><td><code>impl Trait</code> — static dispatch, zero-cost</td></tr><tr><td><code>any Trait</code></td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: i64</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
 <h3 id="expressions">Expressions</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure (last arg outside parens)</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> (enum variant shorthand, type inferred from context)</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>let a, b = join (f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>select: var = expr: body</code></td><td><code>tokio::select! { var = expr =&gt; { body } }</code></td></tr><tr><td><code>select: after dur: body</code></td><td><code>tokio::select! { _ = tokio::time::sleep(dur) =&gt; { body } }</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>every dur: body</code></td><td><code>loop { tokio::time::sleep(dur).await; body }</code> <em>(déprécié, préférer <code>loop: wait dur; body</code>)</em></td></tr><tr><td><code>cancelled:</code> (select arm)</td><td><code>_ = __task_cancel.cancelled() =&gt;</code> — implicit <code>CancellationToken</code> param injected into the enclosing function</td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>timeout(dur, fut)</code></td><td><code>tokio::time::timeout(dur, fut).await.ok()</code> (plain) / <code>.await?</code> in <code>throws</code> context</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure (last arg outside parens)</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> (enum variant shorthand, type inferred from context)</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>let a, b = join (f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>select: var = expr: body</code></td><td><code>tokio::select! { var = expr =&gt; { body } }</code></td></tr><tr><td><code>select: after dur: body</code></td><td><code>tokio::select! { _ = tokio::time::sleep(dur) =&gt; { body } }</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>every dur: body</code></td><td><code>loop { tokio::time::sleep(dur).await; body }</code> <em>(déprécié, préférer <code>loop: wait dur; body</code>)</em></td></tr><tr><td><code>cancelled:</code> (select arm)</td><td><code>_ = __task_cancel.cancelled() =&gt;</code> — implicit <code>CancellationToken</code> param injected into the enclosing function</td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr><tr><td><code>timeout(dur, fut)</code></td><td><code>select!</code> with 3 branches — only in cancellable task functions</td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>
@@ -3052,7 +3043,7 @@ print host             <span class="co"># localhost</span></code></pre></div>
 <p><strong>Rule of thumb:</strong> use <code>throw</code>/<code>catch</code> for Boring-defined error logic; use <code>if let Ok</code>/<code>Err</code> or <code>try?</code> for functions that return <code>Result&lt;T, E&gt;</code> directly.</p>
 <h3 id="advanced--variadic-parameters">Advanced — Variadic parameters</h3>
 <p>The last parameter can collect remaining arguments with <code>...</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">int</span> <span class="fn">sum</span>(<span class="kt">int</span> values...):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">sum</span>(<span class="kt">int</span> values...):
     <span class="kw">var</span> total = <span class="nb">0</span>
     <span class="kw">for</span> v <span class="kw">in</span> values:
         total = total + v
@@ -3110,7 +3101,7 @@ print host             <span class="co"># localhost</span></code></pre></div>
 <table><thead><tr><th></th><th>Untyped <code>throws</code></th><th>Typed <code>throws CalcError</code></th></tr></thead><tbody><tr><td>Return type</td><td><code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code></td><td><code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td>Throw wrapping</td><td><code>BoringError::Str</code> / <code>BoringError::String</code></td><td><code>BoringError::Other(TypeId::of::&lt;CalcError&gt;(), …)</code></td></tr><tr><td><code>catch:</code> (untyped)</td><td>✓ catches everything</td><td>✓ catches unmatched errors</td></tr><tr><td><code>catch CalcError:</code></td><td>✗</td><td>✓ dispatches via <code>TypeId</code></td></tr><tr><td><code>try … else</code></td><td>✓</td><td>✓</td></tr><tr><td>Propagate with <code>?</code></td><td>✓</td><td>✓ (unwrapped at the catching <code>try:</code> block)</td></tr></tbody></table>
 <h4 id="qualified-error-type-paths">Qualified error type paths</h4>
 <p>The error type in a <code>throws</code> clause can be a <strong>module-qualified path</strong> using dot notation — the dot separator is translated to <code>::</code> in Rust:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">string</span> <span class="fn">read_file</span>(<span class="kt">string</span> path) <span class="kw">throws</span> io.Error:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">read_file</span>(<span class="kt">string</span> path) <span class="kw">throws</span> io.Error:
     <span class="kw">guard</span> path != <span class="s">""</span> <span class="kw">else</span> <span class="kw">throw</span> io.Error.NotFound
     <span class="s">"content of <span class="si">{path}</span>"</span></code></pre></div>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">read_file</span>(path: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Result</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, io::<span class="kt">Error</span>&gt; { ... }</code></pre></div>
