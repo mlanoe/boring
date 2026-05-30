@@ -1,0 +1,102 @@
+# Boring language sample — async tasks, channels, ownership
+
+# ── Task functions ────────────────────────────────────────────────────────────
+
+task int compute(int n):
+    n * n
+
+task string fetch(string url):
+    "data from {url}"
+
+task void main():
+    # Spawn and await
+    let f = task compute(7)
+    print "compute(7) = {f.value}"
+
+    # Parallel tasks
+    let f1 = task compute(10)
+    let f2 = task fetch("https://example.com")
+    print "f1={f1.value}, f2={f2.value}"
+
+    # Fire and forget
+    task fetch("https://other.com")
+    print "spawned"
+
+# ── Ownership qualifiers ──────────────────────────────────────────────────────
+
+struct Worker:
+    string name
+    int    jobs
+
+    task void run():
+        print "worker {self.name} processing {self.jobs} jobs"
+
+# T'task = Arc<T>  — shared read-only across tasks
+let Worker'task w = Worker(name = "alice", jobs = 5)
+let fw = task w.run()
+fw.value
+
+# T'actor = Arc<Mutex<T>>  — shared mutable state
+struct Counter:
+    pub var int value = 0
+    def void inc(): self.value = self.value + 1
+    req int get(): self.value
+
+task void run_tasks():
+    var Counter'actor c = Counter()
+    c.inc()
+    c.inc()
+    print "counter = {c.value}"
+
+# ── Channels ──────────────────────────────────────────────────────────────────
+
+task void channel_demo():
+    let tx, rx = channel<int>(4)
+
+    let producer = task:
+        tx.send(10)
+        tx.send(20)
+        tx.send(30)
+        drop(tx)
+
+    for n in rx:
+        print "received: {n}"
+
+    producer.wait
+
+# ── Streams ───────────────────────────────────────────────────────────────────
+
+stream int count_up(int n):
+    var i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+for x in count_up(5):
+    print x
+
+# ── Type aliases and newtypes ─────────────────────────────────────────────────
+
+use Score as int
+type UserId as uint
+type Email  as string
+
+let Score top   = 100
+let uid         = UserId(1)
+let email       = Email("alice@example.com")
+
+print "top={top}, uid={uid}, email={email}"
+
+# ── Modules ───────────────────────────────────────────────────────────────────
+
+mod math:
+    pub float hypot(float a, float b):
+        sqrt(a * a + b * b)
+
+    pub float circle_area(float r):
+        3.14159 * r * r
+
+use math.*
+
+print "hypot(3,4) = {hypot(3.0, 4.0)}"
+print "circle r=5 = {circle_area(5.0)}"

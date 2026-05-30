@@ -1,0 +1,95 @@
+# Boring language sample — traits, generics, closures
+
+# ── Traits ────────────────────────────────────────────────────────────────────
+
+trait Named:
+    req string name()
+
+trait Describable as Named:
+    req string describe():          # default implementation
+        "{self.name()} (no description)"
+
+struct Animal as Describable:
+    string species
+    string sound
+
+    req string name(): self.species
+
+    req string describe():
+        "{self.species} says {self.sound}"
+
+let cat = Animal(species = "Cat", sound = "meow")
+print cat.describe()
+
+# ── Generics ──────────────────────────────────────────────────────────────────
+
+def T first<T>([T] items): items[0]
+def T identity<T>(T x): x
+
+print first([10, 20, 30])
+print identity("hello")
+
+struct Pair<T, U>:
+    T first
+    U second
+
+let p = Pair(10, "hello")
+print "{p.first} / {p.second}"
+
+# ── Closures and higher-order functions ───────────────────────────────────────
+
+let double  = (n): n * 2
+let add_one = (n): n + 1
+
+def int apply(int f(int), int x): f(x)
+
+print apply(double, 21)
+
+let pipeline = [double, add_one, double]
+var val = 3
+for fn in pipeline:
+    val = fn(val)
+print "pipeline(3) = {val}"
+
+# ── Pipe operator |> ──────────────────────────────────────────────────────────
+
+def int inc(int n): n + 1
+
+let result = 5
+    |> double()
+    |> inc()
+    |> inc()
+print result    # 13
+
+# ── Error handling ────────────────────────────────────────────────────────────
+
+enum AppError:
+    NotFound
+    InvalidInput(string)
+
+void risky(int n) throws AppError:
+    if n == 1: throw AppError.NotFound
+    if n == 2: throw AppError.InvalidInput("bad value")
+
+let msg = try risky(1) else:
+    match error:
+        AppError.NotFound:          "not found"
+        AppError.InvalidInput(m):   "invalid: {m}"
+        _:                          "other: {error}"
+print msg
+
+# ── Optionals ─────────────────────────────────────────────────────────────────
+
+let int? some = 42
+let int? none = nil
+print "{some else 0}, {none else 0}"
+
+# ── Defer ─────────────────────────────────────────────────────────────────────
+
+string with_cleanup():
+    var log = ""
+    defer: log = log + "+closed"
+    log = log + "open"
+    log
+
+print with_cleanup()    # open+closed

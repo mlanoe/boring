@@ -1,0 +1,19 @@
+# Entry to add to github-linguist/linguist's lib/linguist/languages.yml
+#
+# Instructions:
+#   1. Fork https://github.com/github-linguist/linguist
+#   2. Add this block to lib/linguist/languages.yml (alphabetical order, under 'B')
+#   3. Copy grammars/Boring.tmLanguage.json → linguist repo
+#   4. Copy samples/Boring/ directory → linguist/samples/Boring/
+#   5. Open a PR with title: "Add Boring language"
+
+Boring:
+  type: programming
+  color: "#e94560"
+  extensions:
+    - .br
+  tm_scope: source.boring
+  ace_mode: text
+  language_id: 1000000   # will be assigned by maintainers
+  interpreters:
+    - boring

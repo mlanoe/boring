@@ -1,0 +1,80 @@
+# Boring language sample — basics
+# Run with: boring hello.br
+
+# ── Bindings ──────────────────────────────────────────────────────────────────
+
+let name = "World"
+let int x = 42
+var counter = 0
+
+counter = counter + 1
+print "Hello, {name}! counter={counter}, x={x}"
+
+# ── Functions ─────────────────────────────────────────────────────────────────
+
+string greet(string? who):
+    guard let n = who else return "Hello, stranger!"
+    "Hello, {n}!"
+
+int divide(int a, int b) throws:
+    guard b != 0 else throw "division by zero"
+    a / b
+
+let r1 = try divide(10, 2) else -1
+let r2 = try divide(10, 0) else -1
+print "{greet("Alice")}, r1={r1}, r2={r2}"
+
+# ── Control flow ──────────────────────────────────────────────────────────────
+
+def string sign(int n):
+    if n > 0: "+" elif n < 0: "-" else "0"
+
+print "{sign(5)}, {sign(-3)}, {sign(0)}"
+
+for w in ["boring", "is", "fun"]:
+    print "  {w}"
+
+var i = 0
+while i < 3:
+    i = i + 1
+print "i={i}"
+
+# ── Structs ───────────────────────────────────────────────────────────────────
+
+struct Point:
+    float x
+    float y
+
+    req float dist():
+        sqrt(self.x * self.x + self.y * self.y)
+
+    as string:
+        "({self.x}, {self.y})"
+
+let p = Point(x = 3.0, y = 4.0)
+print "point={p as string}, dist={p.dist()}"
+
+# ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum Color:
+    Red
+    Green
+    Blue(int brightness)
+
+def string describe(Color c):
+    match c:
+        Color.Red:         "red"
+        Color.Green:       "green"
+        Color.Blue(b):     "blue ({b})"
+
+print describe(Color.Blue(128))
+
+# ── Collections ───────────────────────────────────────────────────────────────
+
+let numbers = [1, 2, 3, 4, 5]
+let doubled = numbers.map((n): n * 2)
+let evens   = numbers.filter((n): n % 2 == 0)
+print "doubled={doubled}, evens={evens}"
+
+let {string=int} scores = {"Alice" = 90, "Bob" = 85}
+print "Alice={scores["Alice"]}"
