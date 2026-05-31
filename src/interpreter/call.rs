@@ -140,8 +140,9 @@ impl Interpreter {
         // Execute every statement EXCEPT the last (defers are only registered here,
         // not yet executed).  Any early Return / error propagates immediately.
         let pre_result = self.exec_all_but_last(&decl.body, Rc::clone(&fn_env));
-        self.task_context = prev_task_ctx;
-        self.current_method_mutating = prev_mutating;
+        // NOTE: task_context and current_method_mutating are restored AFTER the
+        // tail expression and deferred blocks execute — they must remain set to
+        // the callee's values for the entire duration of the call.
 
         // Run deferred blocks in LIFO order.
         let run_defers = |interp: &mut Self, env: EnvRef| {
@@ -204,6 +205,11 @@ impl Interpreter {
                 Err(other)
             }
         };
+
+        // Restore caller's context flags now that the tail expression and all
+        // deferred blocks have finished executing.
+        self.task_context = prev_task_ctx;
+        self.current_method_mutating = prev_mutating;
 
         // Pop type-parameter bindings
         if has_type_params {

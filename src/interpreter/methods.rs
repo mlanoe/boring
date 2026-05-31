@@ -166,10 +166,13 @@ impl Interpreter {
             }
             Value::EnumVariant { ref type_name, .. } => {
                 let ns = self.global.borrow().get(type_name);
-                if let Some(Value::EnumNamespace { methods, .. }) = ns {
+                if let Some(Value::EnumNamespace { methods, captured, .. }) = ns {
                     let fn_decl = methods.iter().find(|m| m.name == method).cloned();
                     if let Some(fn_decl) = fn_decl {
-                        let fn_env = Env::child(Rc::clone(&self.global));
+                        // Use the captured env from the enum's definition site, not self.global.
+                        // This mirrors how struct methods work (Struct::captured) and allows
+                        // enum methods to see module-level variables defined after the enum.
+                        let fn_env = Env::child(captured);
                         fn_env.borrow_mut().define_mut("self", obj.clone());
                         let result = self.call_fn(&fn_decl, Rc::clone(&fn_env), args, line, false)?;
                         *out_self = fn_env.borrow().get("self");
@@ -274,11 +277,6 @@ impl Interpreter {
                 let mut new_arr = arr;
                 new_arr.push(args.into_iter().next().unwrap_or(Value::Nil));
                 Ok(Some(Value::Array(new_arr)))
-            }
-            "pop" => {
-                let mut new_arr = arr;
-                let last = new_arr.pop().unwrap_or(Value::Nil);
-                Ok(Some(last))
             }
             "contains" => {
                 let target = args.into_iter().next().unwrap_or(Value::Nil);
@@ -855,7 +853,15 @@ impl Interpreter {
                         }
                         let fn_env = Env::child(Rc::clone(&captured));
                         fn_env.borrow_mut().define_mut("self", obj.clone());
-                        let result = self.eval_block_as_expr(&method.body, fn_env);
+                        // Push a fresh defer frame so that any `defer:` inside the getter
+                        // runs when the getter returns, not when the enclosing function exits.
+                        self.defer_stack.push(Vec::new());
+                        let result = self.eval_block_as_expr(&method.body, Rc::clone(&fn_env));
+                        if let Some(frame) = self.defer_stack.pop() {
+                            for deferred in frame.into_iter().rev() {
+                                let _ = self.exec_block(&deferred, Rc::clone(&fn_env));
+                            }
+                        }
                         if pushed { self.type_param_stack.pop(); }
                         return result;
                     }
@@ -903,7 +909,15 @@ impl Interpreter {
                         }
                         let fn_env = Env::child(Rc::clone(&self.global));
                         fn_env.borrow_mut().define_mut("self", obj.clone());
-                        return self.eval_block_as_expr(&method.body, fn_env);
+                        // Same defer-frame isolation as the struct getter above.
+                        self.defer_stack.push(Vec::new());
+                        let result = self.eval_block_as_expr(&method.body, Rc::clone(&fn_env));
+                        if let Some(frame) = self.defer_stack.pop() {
+                            for deferred in frame.into_iter().rev() {
+                                let _ = self.exec_block(&deferred, Rc::clone(&fn_env));
+                            }
+                        }
+                        return result;
                     }
                 }
                 Err(err(format!("enum variant has no field '{}'", field), line))
@@ -1335,12 +1349,12 @@ impl Interpreter {
         // Check for an as_decl on the enum variant's namespace.
         if let Value::EnumVariant { ref type_name, .. } = val {
             let ns = self.global.borrow().get(type_name);
-            if let Some(Value::EnumNamespace { conversions, .. }) = ns {
+            if let Some(Value::EnumNamespace { conversions, captured, .. }) = ns {
                 if let Some(as_decl) = conversions.iter().find(|a| {
                     type_matches(&strip_qualifiers(&self.resolve_type(&a.ty)), strip_qualifiers(ty))
                 }) {
                     let body = as_decl.body.clone();
-                    let fn_env = Env::child(Rc::clone(&self.global));
+                    let fn_env = Env::child(captured);
                     fn_env.borrow_mut().define_mut("self", val);
                     return self.eval_block_as_expr(&body, fn_env);
                 }
@@ -1392,7 +1406,8 @@ impl Interpreter {
             }
             Pattern::Lit(lit) => match (lit, value) {
                 (LitPattern::Int(n), Value::Int(v)) => n == v,
-                (LitPattern::Float(f), Value::Float(v)) => f == v,
+                // For NaN: treat NaN == NaN as true (pattern matching, not arithmetic).
+                (LitPattern::Float(f), Value::Float(v)) => (f.is_nan() && v.is_nan()) || f == v,
                 (LitPattern::Str(s), Value::Str(v)) => s == v,
                 (LitPattern::Bool(b), Value::Bool(v)) => b == v,
                 (LitPattern::Nil, Value::Nil) => true,
@@ -1450,7 +1465,11 @@ impl Interpreter {
                             variant == name
                         };
                         if !name_matches { return false; }
-                        if sub_pats.len() != fields.len() && !sub_pats.is_empty() { return false; }
+                        // Arity check: bare `Variant` (no sub-pats) must match a no-field variant.
+                        // `Variant(a, b)` must match the exact field count.
+                        // Without this, `Color.Red` would match `Red(1, 2)` — wrong.
+                        if sub_pats.is_empty() && !fields.is_empty() { return false; }
+                        if !sub_pats.is_empty() && sub_pats.len() != fields.len() { return false; }
                         for (pat, field_val) in sub_pats.iter().zip(fields.iter()) {
                             if !self.match_pattern(pat, field_val, bindings) {
                                 return false;

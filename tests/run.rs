@@ -131,6 +131,12 @@ interp_test!(string_len_chars);
 interp_test!(mixed_modulo);
 interp_test!(range_unary);
 interp_test!(closure_colon);
+interp_test!(for_destructure);
+interp_test!(numeric_separators);
+interp_test!(task_timeout);
+interp_test!(try_else_block);
+interp_test!(error_match);
+interp_test!(fn_shorthand);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

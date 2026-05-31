@@ -181,8 +181,22 @@ impl Parser {
                     line,
                 });
             }
-            // bare `try expr` without else — just wrap it
-            return Ok(inner);
+            // bare `try expr` without else — the `try` keyword has no effect here, which
+            // is almost certainly a mistake. Return a parse error rather than silently
+            // discarding the `try` wrapper. Guide the user toward a valid form:
+            //   try f() else default    — expression with fallback
+            //   try f() else: block     — expression with block fallback
+            //   try? f()                — convert Result to Option (nil on error)
+            //   try: … catch: …         — statement with typed catch
+            return Err(ParseError::Generic {
+                line,
+                msg: format!(
+                    "'try expr' requires an else clause or '?' — use:\n  \
+                     try f() else default     (expression with fallback)\n  \
+                     try? f()                 (nil on error)\n  \
+                     try: … catch: …          (statement with catch)"
+                ),
+            });
         }
         let expr = self.parse_pipe()?;
         if self.check(&TokenKind::Else) {
@@ -289,8 +303,20 @@ impl Parser {
         if self.check(&TokenKind::Not) {
             let line = self.line();
             self.advance();
-            let expr = self.parse_not()?;
-            return Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(expr)), line });
+            // Guard: `not not not …` chains recurse directly, one frame per `not`.
+            // Each `not` contributes ~15 Rust frames; at MAX_EXPR_DEPTH the stack is
+            // MAX * 15 frames deep which is safe within the 8 MB thread stack.
+            self.depth += 1;
+            if self.depth > crate::parser::MAX_EXPR_DEPTH {
+                self.depth -= 1;
+                return Err(ParseError::Generic {
+                    line,
+                    msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
+                });
+            }
+            let result = self.parse_not();
+            self.depth -= 1;
+            return Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(result?)), line });
         }
         self.parse_comparison()
     }

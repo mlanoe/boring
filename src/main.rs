@@ -117,7 +117,18 @@ fn main() {
     let handler = builder.spawn(run).expect("failed to spawn main thread");
     match handler.join() {
         Ok(()) => {}
-        Err(_) => std::process::exit(1),
+        Err(e) => {
+            // The worker thread panicked — print the payload for diagnosis.
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                format!("internal error: {}", s)
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                format!("internal error: {}", s)
+            } else {
+                "internal error: unexpected panic in worker thread".to_string()
+            };
+            eprintln!("{}", msg);
+            std::process::exit(101);
+        }
     }
 }
 
@@ -233,7 +244,7 @@ fn run_project() {
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
 fn build_project() {
     let (toml, _) = load_project_toml();
-    emit_rust(&toml.main);
+    emit_rust_with_version(&toml.main, &toml.version);
 }
 
 // ─── Core: interpret ──────────────────────────────────────────────────────────
@@ -288,6 +299,10 @@ fn run_file(path: &str) {
 // ─── Core: transpile ──────────────────────────────────────────────────────────
 
 fn emit_rust(path: &str) {
+    emit_rust_with_version(path, "0.1.0");
+}
+
+fn emit_rust_with_version(path: &str, version: &str) {
     let path = PathBuf::from(path);
 
     let source = match std::fs::read_to_string(&path) {
@@ -381,7 +396,7 @@ fn emit_rust(path: &str) {
     let cargo_toml = format!(
         r#"[package]
 name = "{stem}"
-version = "0.1.0"
+version = "{version}"
 edition = "2024"
 
 [[bin]]

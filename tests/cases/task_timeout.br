@@ -1,0 +1,31 @@
+# task(Duration): body — spawned task with built-in timeout
+# Interpreter: timeout silently ignored, body executes normally.
+
+task int fetch(int n):
+    n * 10
+
+task run():
+    # Positional form
+    let f1 = task(Duration.from_secs(5)): fetch(7)
+    print f1.value
+
+    # Labeled form
+    let f2 = task(timeout = Duration.from_millis(200)): fetch(3)
+    print f2.value
+
+    # Block form
+    let f3 = task(Duration.from_secs(1)):
+        let x = fetch(4)
+        x + 1
+    print f3.value
+
+    # try/else — Elapsed catchable (in interpreter: no actual timeout)
+    let r = try:
+        let f = task(Duration.from_millis(50)): fetch(5)
+        f.value
+    else:
+        -1
+    print r
+
+let t = task run()
+t.value

@@ -37,7 +37,27 @@ impl Interpreter {
                     if !self.value_matches_type(&coerced, &resolved) {
                         match self.cast_value(coerced.clone(), &resolved, s.line) {
                             Ok(converted) if self.value_matches_type(&converted, &resolved) => converted,
-                            _ => coerced,
+                            // Coercion and cast both failed — if we have a concrete type
+                            // annotation (not a type param), raise a type error rather than
+                            // silently binding the wrong-typed value.
+                            _ => {
+                                // Placeholder `Named("_")` is used for qualifier-on-name bindings
+                                // like `let b'weak = a` — not a concrete type annotation.
+                                let is_inferred = Self::is_inferred_type(&resolved);
+                                let is_concrete = !is_inferred;
+                                if is_concrete {
+                                    return Err(err(
+                                        format!(
+                                            "cannot assign {} to '{}': expected {}",
+                                            coerced.type_name(),
+                                            s.name,
+                                            Self::display_type(&resolved),
+                                        ),
+                                        s.line,
+                                    ));
+                                }
+                                coerced
+                            }
                         }
                     } else { coerced }
                 } else { val };
@@ -151,44 +171,67 @@ impl Interpreter {
             Stmt::For(s) => self.exec_for(s, env),
             Stmt::Try(s) => self.exec_try(s, env),
             Stmt::Expr(e) => {
-                // Mutating method calls on a variable auto-assign the result back
+                // Mutating method calls on a variable auto-assign the result back.
+                // The receiver expression is evaluated exactly ONCE here; calling
+                // `eval_expr(e)` a second time would re-evaluate it (bug for
+                // non-idempotent receivers like `getArray().push(x)`).
                 const MUTATING: &[&str] = &["push", "append", "insert", "remove", "sort", "reverse", "add", "removeAt", "pop"];
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
-                // (struct methods use the out_self write-back mechanism instead)
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {
-                    let obj_val_check = self.eval_expr(obj_expr, Rc::clone(&env));
-                    let is_collection = matches!(obj_val_check, Ok(Value::Array(_) | Value::Dict(_) | Value::Set(_)));
-                    let is_coll_mutating = MUTATING_COLL_ONLY.contains(&method.as_str()) && {
-                        matches!(obj_val_check, Ok(Value::Dict(_) | Value::Set(_)))
-                    };
-                    if (MUTATING.contains(&method.as_str()) && is_collection) || is_coll_mutating {
-                        // For push/append on owned-element collections, invalidate the arg source
-                        if matches!(method.as_str(), "push" | "append") {
-                            if let ExprKind::Var(coll_name) = &obj_expr.kind {
-                                if env.borrow().is_owned_collection(coll_name) {
-                                    if let Some(arg) = args.first() {
-                                        if let ExprKind::Var(elem_name) = &arg.value.kind {
-                                            // Invalidate after the call succeeds
-                                            let line = e.line;
-                                            let result = self.eval_expr(e, Rc::clone(&env))?;
-                                            self.assign(obj_expr, result, Rc::clone(&env), line)?;
-                                            env.borrow_mut().invalidate(elem_name);
-                                            return Ok(());
-                                        }
-                                    }
+                    let might_mutate = MUTATING.contains(&method.as_str())
+                        || MUTATING_COLL_ONLY.contains(&method.as_str());
+                    if might_mutate {
+                        // Evaluate the receiver once — never again.
+                        let obj_val = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                        let is_collection = matches!(&obj_val, Value::Array(_) | Value::Dict(_) | Value::Set(_));
+                        let is_coll_mutating = MUTATING_COLL_ONLY.contains(&method.as_str())
+                            && matches!(&obj_val, Value::Dict(_) | Value::Set(_));
+
+                        if (MUTATING.contains(&method.as_str()) && is_collection) || is_coll_mutating {
+                            let line = e.line;
+
+                            // Determine if we need to invalidate an owned arg after the call
+                            let invalidate_name: Option<String> =
+                                if matches!(method.as_str(), "push" | "append") {
+                                    if let ExprKind::Var(coll_name) = &obj_expr.kind {
+                                        if env.borrow().is_owned_collection(coll_name) {
+                                            args.first().and_then(|arg| {
+                                                if let ExprKind::Var(n) = &arg.value.kind {
+                                                    Some(n.clone())
+                                                } else { None }
+                                            })
+                                        } else { None }
+                                    } else { None }
+                                } else { None };
+
+                            // Evaluate args, then call the method with the already-evaluated receiver
+                            let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                            let mut out_self: Option<Value> = None;
+                            let result = self.call_method(obj_val, method, arg_vals, line, &mut out_self)?;
+
+                            // Write back the mutated collection.
+                            // Two cases:
+                            //  (a) push/append/insert/sort/… → result IS the new collection
+                            //  (b) pop/remove/removeAt → result is the extracted element;
+                            //      call_method sets out_self to the shortened collection
+                            if matches!(result, Value::Array(_) | Value::Dict(_) | Value::Set(_)) {
+                                self.assign(obj_expr, result, Rc::clone(&env), line)?;
+                            } else if let Some(new_coll) = out_self {
+                                if matches!(new_coll, Value::Array(_) | Value::Dict(_) | Value::Set(_)) {
+                                    self.assign(obj_expr, new_coll, Rc::clone(&env), line)?;
                                 }
                             }
+
+                            if let Some(name) = invalidate_name {
+                                env.borrow_mut().invalidate(&name);
+                            }
+                            return Ok(());
                         }
-                        let line = e.line;
-                        let result = self.eval_expr(e, Rc::clone(&env))?;
-                        // pop/remove return the extracted element, not the new collection.
-                        // The collection write-back is handled via out_self in call_method.
-                        // Only write back when result is itself a collection (push/sort/etc.).
-                        if matches!(result, Value::Array(_) | Value::Dict(_) | Value::Set(_)) {
-                            self.assign(obj_expr, result, env, line)?;
-                        }
-                        return Ok(());
+                        // Method name matched but receiver is not a collection
+                        // (e.g. a struct with a user-defined `push` method).
+                        // Fall through — the struct's call_method / out_self write-back
+                        // path handles write-back correctly.
                     }
                 }
                 let val = self.eval_expr(e, Rc::clone(&env))?;
@@ -675,8 +718,29 @@ impl Interpreter {
 
     // ─── Type coercion ───────────────────────────────────────────────────────
 
+    /// Returns true for types that represent an inferred/placeholder annotation rather than
+    /// a concrete type specified by the programmer. Used to decide whether a type mismatch
+    /// should be silently accepted (inferred) or rejected with an error (concrete).
+    ///
+    /// Inferred types arise from qualifier-on-name syntax: `let b'weak = a` generates
+    /// `ty = Qualified(Named("_"), Weak)` where `"_"` is a placeholder filled at runtime.
+    pub(crate) fn is_inferred_type(ty: &Type) -> bool {
+        match ty {
+            Type::TypeParam(_) => true,
+            Type::Any(_) => true,
+            Type::Named(s) if s == "_" => true,
+            Type::Qualified(inner, _) => Self::is_inferred_type(inner),
+            Type::Optional(inner) => Self::is_inferred_type(inner),
+            _ => false,
+        }
+    }
+
     /// Coerce a value to match a resolved type annotation when necessary.
     /// Currently handles Int → Uint coercion when the annotation is Uint (or Uint'copy).
+    ///
+    /// Negative integers are intentionally NOT coerced: `Int(-1)` remains `Int(-1)` so
+    /// that the subsequent `value_matches_type` check fails and the caller emits a proper
+    /// type error rather than silently wrapping -1 to 18446744073709551615.
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
         let target = match ty {
             Type::Uint => Some(Type::Uint),
@@ -688,8 +752,8 @@ impl Interpreter {
         };
         match target {
             Some(Type::Uint) => match val {
-                Value::Int(n) => Value::Uint(n as u64),
-                other => other,
+                Value::Int(n) if n >= 0 => Value::Uint(n as u64),
+                other => other, // negative Int: leave unchanged → type-check will reject it
             },
             _ => val,
         }
@@ -796,7 +860,10 @@ impl Interpreter {
     pub(crate) fn value_matches_type(&self, val: &Value, ty: &Type) -> bool {
         match ty {
             Type::Int    => matches!(val, Value::Int(_)),
-            Type::Uint   => matches!(val, Value::Uint(_) | Value::Int(_)),
+            // Int is compatible with Uint only when non-negative (coerce_to_type handles the cast).
+            // Negative Int values are rejected here so that `var uint x = -1` errors rather
+            // than silently wrapping to 18446744073709551615.
+            Type::Uint   => matches!(val, Value::Uint(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -1377,6 +1444,20 @@ impl Interpreter {
                         StringSegment::Lit(_) => {}
                     }
                 }
+            }
+            // `f<T>(args)` — type args carry no variable refs, recurse callee + args
+            ExprKind::GenericCall(callee, _type_args, args) => {
+                Self::collect_vars_expr(callee, out);
+                for a in args { Self::collect_vars_expr(&a.value, out); }
+            }
+            // `lhs |> f(args)` — recurse lhs + args
+            ExprKind::Pipe(lhs, _, args) => {
+                Self::collect_vars_expr(lhs, out);
+                for a in args { Self::collect_vars_expr(&a.value, out); }
+            }
+            // `join [f1, f2, …]` — recurse all handles
+            ExprKind::JoinAll(exprs) => {
+                for e in exprs { Self::collect_vars_expr(e, out); }
             }
             _ => {}
         }

@@ -364,9 +364,11 @@ impl Transpiler {
                 "slice" if args.len() >= 2 => {
                     let start_s = self.emit_expr(&args[0].value);
                     let end_s   = self.emit_expr(&args[1].value);
+                    // Bind start to a local so it is not double-evaluated (fix #23).
+                    // Wrap in Arc<str> so the result type is `string`, not `String`.
                     return format!(
-                        "{}.chars().skip(({}) as usize).take(({} - {}) as usize).collect::<String>()",
-                        obj_s, start_s, end_s, start_s
+                        "{{ let __start = ({}) as usize; Arc::<str>::from({}.chars().skip(__start).take(({}) as usize - __start).collect::<String>().as_str()) }}",
+                        start_s, obj_s, end_s
                     );
                 }
                 _ => {}
@@ -450,6 +452,17 @@ impl Transpiler {
         }
 
         // ── Array methods that need special emit (closures / block exprs) ─────
+        // `joined(sep)` — join a Vec<Arc<str>> with a separator.
+        // `Vec<Arc<str>>::join()` needs &str as separator (Arc<str> is emitted by the
+        // standard arg-coercion path). We deref with &* to obtain &str.
+        if method == "joined" || method == "join" {
+            let obj_s = self.emit_expr(obj);
+            let sep_s = args.first()
+                .map(|a| self.emit_expr_owned(&a.value))
+                .unwrap_or_else(|| "Arc::<str>::from(\"\")".to_string());
+            return format!("{}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{})", obj_s, sep_s);
+        }
+
         // `any(closure)` → iter().cloned().any(|x| { let x = x.clone(); body })
         if method == "any" {
             if let Some(first_arg) = args.first() {
@@ -1224,15 +1237,18 @@ impl Transpiler {
             struct_ext_method_overrides: self.struct_ext_method_overrides.clone(),
             rc_identity_vars: self.rc_identity_vars.clone(),
             boring_mod_names: self.boring_mod_names.clone(),
-            uses_log: std::cell::Cell::new(self.uses_log.get()),
-            uses_thiserror: std::cell::Cell::new(self.uses_thiserror.get()),
+            // Share Rc so any set(true) in a sub is immediately visible in the parent —
+            // fixes silent loss of feature flags when code using log/serde/etc. appears
+            // inside try: blocks or other sub-transpiled contexts.
+            uses_log: std::rc::Rc::clone(&self.uses_log),
+            uses_thiserror: std::rc::Rc::clone(&self.uses_thiserror),
             uses_reqwest: self.uses_reqwest,
             current_trait_assoc_names: self.current_trait_assoc_names.clone(),
             cancellable_task_fns: self.cancellable_task_fns.clone(),
             cancel_token_vars: self.cancel_token_vars.clone(),
             in_cancellable_fn: self.in_cancellable_fn,
-            uses_tokio_util: std::cell::Cell::new(self.uses_tokio_util.get()),
-            uses_serde: std::cell::Cell::new(self.uses_serde.get()),
+            uses_tokio_util: std::rc::Rc::clone(&self.uses_tokio_util),
+            uses_serde: std::rc::Rc::clone(&self.uses_serde),
         }
     }
 

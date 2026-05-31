@@ -275,7 +275,7 @@ def int divide(int a, int b) throws:
     if b == 0: throw "division by zero"
     a / b
 
-let _result = try divide(10, 2)
+let _result = try divide(10, 2) else -1
 "#;
     assert_eq!(run_src(src), Value::Int(5));
 }
@@ -1815,7 +1815,7 @@ def int divide(int a, int b) throws MyError:
     if b == 0: throw MyError("division by zero")
     return a / b
 
-let _result = try divide(10, 2)
+let _result = try divide(10, 2) else -1
 "#;
     assert_eq!(run_src(src), Value::Int(5));
 }
@@ -1867,7 +1867,7 @@ def int safe(int x) throws:
     if x < 0: throw "negative"
     return x
 
-let _result = try safe(7)
+let _result = try safe(7) else -1
 "#;
     assert_eq!(run_src(src), Value::Int(7));
 }

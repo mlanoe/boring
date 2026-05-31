@@ -855,6 +855,7 @@ impl Interpreter {
                     else if (b as u64) > a { Err(err("uint subtraction underflow", line)) }
                     else { Ok(Value::Uint(a - b as u64)) }
                 }
+                (Value::Int(a), Value::Uint(b)) => Ok(Value::Int(a - b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
@@ -900,6 +901,10 @@ impl Interpreter {
                     else if b < 0 { Err(err("cannot divide Uint by negative Int", line)) }
                     else { Ok(Value::Uint(a / b as u64)) }
                 }
+                (Value::Int(a), Value::Uint(b)) => {
+                    if b == 0 { Err(err("division by zero", line)) }
+                    else { Ok(Value::Int(a / b as i64)) }
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
@@ -917,6 +922,15 @@ impl Interpreter {
                 }
                 (Value::Uint(a), Value::Uint(b)) => {
                     if b == 0 { Err(err("remainder by zero", line)) } else { Ok(Value::Uint(a % b)) }
+                }
+                (Value::Uint(a), Value::Int(b)) => {
+                    if b == 0 { Err(err("remainder by zero", line)) }
+                    else if b < 0 { Err(err("cannot take remainder of Uint by negative Int", line)) }
+                    else { Ok(Value::Uint(a % b as u64)) }
+                }
+                (Value::Int(a), Value::Uint(b)) => {
+                    if b == 0 { Err(err("remainder by zero", line)) }
+                    else { Ok(Value::Int(a % b as i64)) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
                 (Value::Int(a),   Value::Float(b)) => Ok(Value::Float((a as f64) % b)),

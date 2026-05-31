@@ -770,6 +770,13 @@ impl Transpiler {
                         return self.emit_expr(expr);
                     }
                 }
+                // Inline TaskWithTimeout: `.value` / `.wait` — delegate to emit_expr which
+                // has the full throws-aware .await.unwrap()? logic for this case.
+                if (field == "value" || field == "wait")
+                    && matches!(&obj.kind, ExprKind::TaskWithTimeout(..))
+                {
+                    return self.emit_expr(expr);
+                }
                 let obj_s = self.emit_expr(obj);
                 // Mutex var access (owned context): w.field → w.lock().await.field
                 if let ExprKind::Var(v) = &obj.kind {

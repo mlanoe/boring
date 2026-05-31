@@ -1,0 +1,48 @@
+# match error: with typed enum variants in try...else
+
+enum AppError:
+    NotFound
+    Timeout
+    InvalidInput(string)
+
+def void risky(int n) throws AppError:
+    if n == 1: throw AppError.NotFound
+    if n == 2: throw AppError.Timeout
+    if n == 3: throw AppError.InvalidInput("bad input")
+
+# match error: in else block with qualified enum patterns
+var r1 = "none"
+try:
+    risky(1)
+catch:
+    match error:
+        AppError.NotFound:          r1 = "not found"
+        AppError.Timeout:           r1 = "timeout"
+        AppError.InvalidInput(msg): r1 = "invalid: {msg}"
+        _:                          r1 = "other"
+print r1
+
+var r2 = "none"
+try:
+    risky(3)
+catch:
+    match error:
+        AppError.NotFound:          r2 = "not found"
+        AppError.InvalidInput(msg): r2 = "invalid: {msg}"
+        _:                          r2 = "other"
+print r2
+
+# success path — catch not triggered
+var r3 = "ok"
+try:
+    risky(0)
+catch:
+    r3 = "error"
+print r3
+
+# match error: in try/else
+let r4 = try risky(2) else:
+    match error:
+        AppError.Timeout: "timed out"
+        _: "other"
+print r4

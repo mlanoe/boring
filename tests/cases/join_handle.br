@@ -1,15 +1,15 @@
 # let f = task: expr — capture the JoinHandle
 # f.value — await the result
 
-task def int fetch_users():
-    sleep(Duration.from_millis(10))
+task int fetch_users():
+    wait Duration.from_millis(10)
     return 42
 
-task def int fetch_products():
-    sleep(Duration.from_millis(10))
+task int fetch_products():
+    wait Duration.from_millis(10)
     return 99
 
-task def void run():
+task run():
     # Capture JoinHandles
     let f1 = task: fetch_users()
     let f2 = task: fetch_products()
@@ -26,3 +26,6 @@ task def void run():
     let a, b = join (f3, f4)
     print a
     print b
+
+let t = task run()
+t.value

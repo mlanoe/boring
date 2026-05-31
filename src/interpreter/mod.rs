@@ -153,6 +153,9 @@ pub enum Value {
         setters: Vec<SetDecl>,
         conversions: Vec<AsDecl>,
         protocols: Vec<String>,
+        /// The environment at enum definition time, used as the parent scope
+        /// when calling enum methods — mirrors `Struct::captured`.
+        captured: EnvRef,
     },
     Struct {
         decl: StructDecl,
@@ -1618,6 +1621,7 @@ impl Interpreter {
                     setters: decl.setters.clone(),
                     conversions: decl.conversions.clone(),
                     protocols: decl.protocols.clone(),
+                    captured: Rc::clone(&env),
                 };
                 self.enums.insert(decl.name.clone(), decl.clone());
                 env.borrow_mut().define(&decl.name, ns);
@@ -1643,7 +1647,22 @@ impl Interpreter {
                     if !self.value_matches_type(&coerced, &resolved) {
                         match self.cast_value(coerced.clone(), &resolved, stmt.line) {
                             Ok(converted) if self.value_matches_type(&converted, &resolved) => converted,
-                            _ => coerced,
+                            _ => {
+                                let is_inferred = Self::is_inferred_type(&resolved);
+                                let is_concrete = !is_inferred;
+                                if is_concrete {
+                                    return Err(err(
+                                        format!(
+                                            "cannot assign {} to '{}': expected {}",
+                                            coerced.type_name(),
+                                            stmt.name,
+                                            Self::display_type(&resolved),
+                                        ),
+                                        stmt.line,
+                                    ).into());
+                                }
+                                coerced
+                            }
                         }
                     } else { coerced }
                 } else { val };
@@ -1704,7 +1723,7 @@ impl Interpreter {
                 };
 
                 // Handle enum ext
-                if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols } = existing {
+                if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols, captured: enum_captured } = existing {
                     for m in &decl.methods {
                         methods.retain(|existing_m| existing_m.name != m.name);
                         methods.push(m.clone());
@@ -1739,7 +1758,7 @@ impl Interpreter {
                             ));
                         }
                     }
-                    let updated = Value::EnumNamespace { name, variants, methods, setters: enum_setters, conversions, protocols };
+                    let updated = Value::EnumNamespace { name, variants, methods, setters: enum_setters, conversions, protocols, captured: enum_captured };
                     env.borrow_mut().define(&decl.type_name, updated);
                     return Ok(());
                 }

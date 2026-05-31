@@ -182,8 +182,8 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "contains"         => ("contains".into(), None),
         "map"              => ("iter().cloned().map".into(), Some(".collect::<Vec<_>>()")),
         "filter"           => ("iter().cloned().filter".into(), Some(".collect::<Vec<_>>()")),
-        // Collection search: find returns Option<&mut T>, indexOf returns Option<usize>
-        "find"             => ("iter_mut().find".into(), None),
+        // Collection search: find(closure) returns Option<T> (owned value, not a reference).
+        "find"             => ("iter().cloned().find".into(), None),
         "indexOf"          => ("iter().position".into(), None),
         // position() on an iterator — use .cloned() so the closure receives owned T
         // values (not &T refs), keeping comparisons type-correct (kk == k).
@@ -206,8 +206,10 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "last"             => ("last".into(), None),
         "append"           => ("push".into(), None),
         "extend"           => ("extend".into(), None),
-        // T'weak — .upgrade() returns Option<Rc<T>>; unwrap to match interpreter semantics.
-        "upgrade"          => ("upgrade".into(), Some(".unwrap()")),
+        // T'weak — .upgrade() returns Option<Rc/Arc<T>>; unwrap so the result is
+        // the strong ref directly, matching the interpreter's semantics (upgrade returns
+        // the object or nil). The panic message makes stale-ref bugs easier to diagnose.
+        "upgrade"          => ("upgrade".into(), Some(".expect(\"attempted to use a stale weak reference\")")),
         // Collection index API — implemented by BoringArrayIndex / BoringDictIndex / BoringSetIndex
         // traits emitted in the file preamble.
         "firstIndex"       => ("first_index".into(), None),
@@ -394,7 +396,75 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
             collect_vars_in(dur, out);
             collect_vars_in(body, out);
         }
-        _ => {}
+
+        // ── Previously missing — produced silent use-after-move in task bodies ──
+
+        // `f<T>(args)` — generic call; type args carry no var refs
+        ExprKind::GenericCall(callee, _type_args, args) => {
+            collect_vars_in(callee, out);
+            for a in args { collect_vars_in(&a.value, out); }
+        }
+
+        // Range literal `a..b` / `a..=b`
+        ExprKind::Range { start, end, .. } => {
+            collect_vars_in(start, out);
+            collect_vars_in(end, out);
+        }
+
+        // Closure: walk param defaults and body.
+        // We intentionally do NOT recurse into the params' names — those introduce new
+        // bindings rather than referencing outer variables. Defaults *are* evaluated in
+        // the outer scope, so they can reference Arc vars that need cloning.
+        ExprKind::Closure(params, _ret, body, _, _) => {
+            for p in params {
+                if let Some(default) = &p.default {
+                    collect_vars_in(default, out);
+                }
+            }
+            match body {
+                ClosureBody::Expr(e) => collect_vars_in(e, out),
+                ClosureBody::Block(stmts) => {
+                    for s in stmts { collect_vars_in_stmt(s, out); }
+                }
+            }
+        }
+
+        // if/elif/else expression — walk all branch conditions and bodies
+        ExprKind::If(if_stmt) => {
+            for (cond, body) in &if_stmt.branches {
+                collect_vars_in(cond, out);
+                for s in body { collect_vars_in_stmt(s, out); }
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for s in else_body { collect_vars_in_stmt(s, out); }
+            }
+        }
+
+        // match expression — walk subject and each arm (guard + body)
+        ExprKind::Match(match_stmt) => {
+            collect_vars_in(&match_stmt.subject, out);
+            for arm in &match_stmt.arms {
+                if let Some(guard) = &arm.guard { collect_vars_in(guard, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_vars_in(e, out),
+                    MatchBody::Block(stmts) => {
+                        for s in stmts { collect_vars_in_stmt(s, out); }
+                    }
+                }
+            }
+        }
+
+        // task expression — walk the spawned body
+        ExprKind::Task(inner) => collect_vars_in(inner, out),
+
+        // Rust macro call — walk all argument expressions
+        ExprKind::MacroCall { args, .. } => {
+            for e in args { collect_vars_in(e, out); }
+        }
+
+        // Leaf nodes (no sub-expressions containing variable references)
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
     }
 }
 
@@ -449,6 +519,18 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
             for arm in &sel.arms {
                 collect_vars_in(&arm.expr, out);
                 for s in &arm.body { collect_vars_in_stmt(s, out); }
+            }
+        }
+        Stmt::Match(m) => {
+            collect_vars_in(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(guard) = &arm.guard { collect_vars_in(guard, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_vars_in(e, out),
+                    MatchBody::Block(stmts) => {
+                        for s in stmts { collect_vars_in_stmt(s, out); }
+                    }
+                }
             }
         }
         _ => {}

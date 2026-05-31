@@ -34,7 +34,7 @@ def int divide(int a, int b) throws:
     if b == 0: throw "division by zero"
     a / b
 
-let dres = try divide(10, 2)
+let dres = try divide(10, 2) else -1
 print dres
 
 var sa = []

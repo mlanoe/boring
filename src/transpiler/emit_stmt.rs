@@ -69,7 +69,9 @@ impl Transpiler {
             Stmt::Mod(m)            => { self.emit_mod(m); self.blank(); }
             Stmt::Alias(a)          => self.emit_alias(a),
             Stmt::Yield(expr, _)    => {
-                let s = format!("yield {};", self.emit_expr(expr));
+                // Use emit_expr_owned so string literals are Arc<str>, not &str,
+                // matching the stream's Item type.
+                let s = format!("yield {};", self.emit_expr_owned(expr));
                 self.line(&s);
             }
             Stmt::Select(s)         => self.emit_select(s),
@@ -1387,6 +1389,117 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_match(&mut self, s: &MatchStmt, is_last: bool) {
+        // ── Special case: `match error:` with qualified enum-variant patterns ────────
+        //
+        // In the interpreter, `error` is the original thrown value (e.g. MyError::NotFound).
+        // In the transpiler, `error` is Box<dyn Error> — direct match arms don't compile.
+        //
+        // When subject is `error` and the first non-wildcard arm pattern is a qualified
+        // `Enum::Variant`, downcast error via BoringError before matching:
+        //
+        //   let __boring_error_typed = error.downcast_ref::<BoringError>()
+        //     .and_then(|be| if let BoringError::Other(tid, inner) = be {
+        //         if *tid == TypeId::of::<AppError>() { inner.as_any().downcast_ref::<AppError>() }
+        //         else { None }
+        //     } else { None });
+        //   match __boring_error_typed {
+        //     Some(AppError::NotFound) => body,    ← variant arms
+        //     None => fallback,                    ← wildcard arm
+        //   }
+        if let ExprKind::Var(vname) = &s.subject.kind {
+            if vname == "error" {
+                // Find enum type from first qualified variant pattern (name contains "::")
+                let enum_type: Option<String> = s.arms.iter().find_map(|arm| {
+                    arm.patterns.iter().find_map(|p| {
+                        if let Pattern::Variant(name, _) = p {
+                            name.split_once("::").map(|(et, _)| et.to_string())
+                        } else { None }
+                    })
+                });
+
+                if let Some(ref enum_ty) = enum_type {
+                    // Emit the BoringError downcast to get Option<&EnumType>
+                    self.line(&format!(
+                        "let __boring_error_typed = error.downcast_ref::<BoringError>()\
+                         .and_then(|__be| if let BoringError::Other(__tid, __boring_inner) = __be \
+                         {{ if *__tid == std::any::TypeId::of::<{}>() \
+                         {{ (**__boring_inner).as_any().downcast_ref::<{}>() }} \
+                         else {{ None }} }} else {{ None }});",
+                        enum_ty, enum_ty
+                    ));
+
+                    // Build a modified MatchStmt replacing the subject with __boring_error_typed
+                    // and wrapping variant patterns in Some(…), wildcard → None.
+                    let arms_transformed: Vec<MatchArm> = s.arms.iter().map(|arm| {
+                        let new_pats: Vec<Pattern> = arm.patterns.iter().map(|p| match p {
+                            Pattern::Wildcard => Pattern::Variant("None".into(), vec![]),
+                            Pattern::Bind(_) => Pattern::Variant("None".into(), vec![]),
+                            Pattern::Variant(name, subs) => {
+                                // Rewrite qualified pattern: "AppError::NotFound" → Some(AppError::NotFound)
+                                let inner = if subs.is_empty() {
+                                    format!("Some({})", name)
+                                } else {
+                                    let sub_s: Vec<String> = subs.iter().map(|sp| match sp {
+                                        Pattern::Bind(b) => b.clone(),
+                                        Pattern::Wildcard => "_".into(),
+                                        _ => "_".into(),
+                                    }).collect();
+                                    format!("Some({}({}))", name, sub_s.join(", "))
+                                };
+                                Pattern::Lit(LitPattern::Str(inner)) // use Str as a passthrough literal
+                            }
+                            other => other.clone(),
+                        }).collect();
+                        MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line }
+                    }).collect();
+
+                    // Emit the transformed match against __boring_error_typed
+                    let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;
+                    self.line("match __boring_error_typed {");
+                    self.indent += 1;
+                    for arm in &arms_transformed {
+                        for pat in &arm.patterns {
+                            let pat_s = match pat {
+                                Pattern::Lit(LitPattern::Str(s)) => s.clone(), // passthrough literal
+                                Pattern::Variant(n, _) => n.clone(),
+                                Pattern::Wildcard => "_".into(),
+                                _ => "_".into(),
+                            };
+                            if let Some(guard) = &arm.guard {
+                                self.line(&format!("{} if {} => {{", pat_s, self.emit_expr(guard)));
+                            } else {
+                                self.line(&format!("{} => {{", pat_s));
+                            }
+                        }
+                        self.indent += 1;
+                        match &arm.body {
+                            MatchBody::Expr(e) => {
+                                if use_value_body {
+                                    let val = self.emit_expr_owned(e);
+                                    self.line(&val);
+                                } else {
+                                    let val = self.emit_expr_owned(e);
+                                    self.line(&format!("{};", val));
+                                }
+                            }
+                            MatchBody::Block(stmts) => {
+                                if use_value_body {
+                                    self.emit_body(stmts);
+                                } else {
+                                    self.emit_loop_body(stmts);
+                                }
+                            }
+                        }
+                        self.indent -= 1;
+                        self.line("}");
+                    }
+                    self.indent -= 1;
+                    self.line("}");
+                    return;
+                }
+            }
+        }
+
         // When the whole match is the last stmt in a value-returning function,
         // each arm body also returns its value — use emit_body instead of emit_loop_body.
         let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;

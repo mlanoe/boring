@@ -1,0 +1,38 @@
+# TryElseBlock — multi-line try: ... else: ... expression
+
+int divide(int a, int b) throws:
+    guard b != 0 else throw "division by zero"
+    a / b
+
+# 1. block try, block else
+let r1 = try:
+    divide(10, 2)
+else:
+    -1
+print r1
+
+# 2. block try, inline else
+let r2 = try:
+    divide(10, 0)
+else -1
+print r2
+
+# 3. inline try, block else
+let r3 = try divide(10, 0) else:
+    -99
+print r3
+
+# 4. error bound in else
+let r4 = try:
+    divide(10, 0)
+else:
+    error + "!"
+print r4
+
+# 5. success path — else not executed
+let r5 = try:
+    let x = divide(10, 2)
+    x * 3
+else:
+    0
+print r5

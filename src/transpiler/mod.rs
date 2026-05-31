@@ -300,11 +300,12 @@ struct Transpiler {
     pub(crate) boring_mod_names: std::collections::HashSet<String>,
     /// True when the program calls any of the log-level builtins (error/warn/info/debug/trace).
     /// The CLI uses this to warn that `log = "0.4"` is needed in Cargo.toml.
-    /// Uses Cell<bool> so it can be set from &self emit methods.
-    pub(crate) uses_log: std::cell::Cell<bool>,
+    /// Uses Rc<Cell<bool>> so sub-transpilers share the same instance — any set(true) in a
+    /// sub (e.g. inside a try: block) is immediately visible in the parent.
+    pub(crate) uses_log: std::rc::Rc<std::cell::Cell<bool>>,
     /// True when an enum with @error("...") variants is emitted (thiserror auto-derive).
     /// The CLI uses this to add `thiserror = "1"` to Cargo.toml.
-    pub(crate) uses_thiserror: std::cell::Cell<bool>,
+    pub(crate) uses_thiserror: std::rc::Rc<std::cell::Cell<bool>>,
     /// True when the program imports from `reqwest`.
     /// The CLI uses this to add `reqwest` to Cargo.toml.
     pub(crate) uses_reqwest: bool,
@@ -315,9 +316,9 @@ struct Transpiler {
     /// True while emitting the body of a task def that uses Task.cancelled().
     pub(crate) in_cancellable_fn: bool,
     /// True when tokio-util is needed (for CancellationToken).
-    pub(crate) uses_tokio_util: std::cell::Cell<bool>,
+    pub(crate) uses_tokio_util: std::rc::Rc<std::cell::Cell<bool>>,
     /// Set when `json()` or `fromJson()` is used — triggers serde/serde_json deps.
-    pub(crate) uses_serde: std::cell::Cell<bool>,
+    pub(crate) uses_serde: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl Transpiler {
@@ -418,14 +419,14 @@ impl Transpiler {
             struct_ext_method_overrides: std::collections::HashSet::new(),
             rc_identity_vars: std::collections::HashSet::new(),
             boring_mod_names: std::collections::HashSet::new(),
-            uses_log: std::cell::Cell::new(false),
-            uses_thiserror: std::cell::Cell::new(false),
+            uses_log: std::rc::Rc::new(std::cell::Cell::new(false)),
+            uses_thiserror: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_reqwest: false,
             cancellable_task_fns: std::collections::HashSet::new(),
             cancel_token_vars: std::collections::HashMap::new(),
             in_cancellable_fn: false,
-            uses_tokio_util: std::cell::Cell::new(false),
-            uses_serde: std::cell::Cell::new(false),
+            uses_tokio_util: std::rc::Rc::new(std::cell::Cell::new(false)),
+            uses_serde: std::rc::Rc::new(std::cell::Cell::new(false)),
         }
     }
 

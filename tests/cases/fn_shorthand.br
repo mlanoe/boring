@@ -1,0 +1,24 @@
+# def-optional shorthand at top level
+# All forms are equivalent: bare RetType, def RetType, req RetType
+
+int add(int a, int b): a + b
+string greet(string name): "Hello, {name}!"
+bool positive(int n): n > 0
+[int] doubled([int] xs): xs.map((x): x * 2)
+
+# req at top level — pure function signal
+req int square(int n): n * n
+req string shout(string s): s.upper()
+
+# def without return type — still requires def keyword
+def log(string msg):
+    print "[LOG] {msg}"
+
+print add(3, 4)
+print greet("World")
+print positive(-1)
+print positive(5)
+print doubled([1, 2, 3])
+print square(7)
+print shout("hello")
+log("test")

@@ -126,5 +126,7 @@ transpile_test!(mixed_modulo);
 transpile_test!(range_unary);
 transpile_test!(closure_colon);
 transpile_test!(collections2);
+transpile_test!(join_handle);
+transpile_test!(select);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

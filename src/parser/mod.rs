@@ -58,9 +58,17 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     p.parse_program()
 }
 
+/// Maximum `not` chain depth. Each `not` creates ~15 Rust stack frames in the
+/// recursive-descent parser; at 200 that's ~3000 frames (~6 MB in debug mode),
+/// safely within the 8 MB thread stack set in main.rs.
+const MAX_EXPR_DEPTH: usize = 200;
+
 struct Parser {
     pub(crate) tokens: Vec<Token>,
     pub(crate) pos: usize,
+    /// Recursion depth counter — incremented on every `parse_expr` entry,
+    /// decremented on exit.  Prevents stack overflow from crafted inputs.
+    pub(crate) depth: usize,
     /// When false, `Ident ":"` is NOT parsed as a no-paren closure.
     /// Must be disabled in condition/value positions (if, while, for, if let, guard, match)
     /// where `:` is a body separator rather than a closure intro.
@@ -72,7 +80,7 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, allow_noparen_closure: true, allow_trailing_closure: true }
+        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true }
     }
 
     fn peek(&self) -> &TokenKind {

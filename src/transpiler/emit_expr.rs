@@ -504,6 +504,24 @@ impl Transpiler {
                 // Covers inline task expressions `(task ...).value` and loop vars `future.wait`
                 // that aren't tracked in task_vars.
                 if field == "value" || field == "wait" {
+                    // TaskWithTimeout: always a throws JoinHandle (wraps Result<T, Elapsed>).
+                    // Needs .await.unwrap()? in throws context to propagate Error.Expired,
+                    // or .await.unwrap().unwrap() otherwise (panics on Elapsed).
+                    if matches!(&obj.kind, ExprKind::TaskWithTimeout(..)) {
+                        let in_throws_ctx = self.in_throws || self.in_try_body;
+                        return if field == "wait" {
+                            if in_throws_ctx {
+                                format!("{{ let _ = {}.await.unwrap()?; }}", obj_s)
+                            } else {
+                                format!("{{ let _ = {}.await.unwrap().unwrap(); }}", obj_s)
+                            }
+                        } else if in_throws_ctx {
+                            format!("{}.await.unwrap()?", obj_s)
+                        } else {
+                            format!("{}.await.unwrap().unwrap()", obj_s)
+                        };
+                    }
+
                     let is_future = matches!(&obj.kind, ExprKind::Task(_))
                         || obj_s.contains("tokio::spawn")
                         || obj_s.contains("async move");
@@ -1005,7 +1023,9 @@ impl Transpiler {
                 format!("{}.as_ref().map(|__v| __v.{}.clone())", self.emit_expr(obj), field)
             }
             ExprKind::OptionalMethodCall(obj, method, args) => {
-                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+                // Use emit_expr_owned so string literals are coerced to Arc<str> (not &str).
+                // Without this, opt?.push("hello") would pass &str where Arc<str> is expected.
+                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
                 // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
                 format!("{}.clone().map(|mut __v| __v.{}({}))", self.emit_expr(obj), method, args_s.join(", "))
@@ -1982,7 +2002,8 @@ impl Transpiler {
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
             "readLine"   => {
-                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).unwrap(); __line.trim().to_string() }".into()
+                // Emit Arc<str> so the result is directly usable as a `string` value.
+                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).unwrap(); Arc::<str>::from(__line.trim()) }".into()
             }
             // drop(x) — explicitly releases ownership, maps directly to Rust's drop()
             "drop" => {
