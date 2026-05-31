@@ -209,10 +209,28 @@ impl Parser {
                 }
             }
             TokenKind::Use => {
-                // `use Ident as Type` → type alias
-                // `use Ident.path`    → module import
-                let after_ident = self.tokens.get(self.pos + 2).map(|t| &t.kind);
-                if matches!(after_ident, Some(TokenKind::As)) {
+                // `use Ident as Type`         → type alias
+                // `use Ident<T> as Type`       → generic type alias
+                // `use Ident.path`             → module import
+                // Detect alias form: `use Ident [< ... >] as …`
+                // Scan past optional `<…>` to find `As`.
+                let is_alias = {
+                    let mut i = self.pos + 2; // skip `use` and the identifier
+                    // skip optional `<…>` type params
+                    if matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Lt)) {
+                        i += 1;
+                        let mut depth = 1usize;
+                        while i < self.tokens.len() && depth > 0 {
+                            match &self.tokens[i].kind {
+                                TokenKind::Lt => { depth += 1; i += 1; }
+                                TokenKind::Gt => { depth -= 1; i += 1; }
+                                _ => { i += 1; }
+                            }
+                        }
+                    }
+                    matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::As))
+                };
+                if is_alias {
                     Ok(Item::Alias(self.parse_alias_decl()?))
                 } else {
                     Ok(Item::Use(self.parse_use_decl()?))

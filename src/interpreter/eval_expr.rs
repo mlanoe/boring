@@ -149,10 +149,26 @@ impl Interpreter {
                         let receiver = Value::Channel { buf, closed, is_sender: false };
                         return Ok(Value::Tuple(vec![sender, receiver]));
                     }
-                    // timeout(dur, fut) — interpreter: skip duration, just evaluate the future
+                    // timeout(dur, fut_or_callable) — interpreter: skip duration, evaluate the future.
+                    // Two forms:
+                    //   timeout(dur, task f(args))  — second arg is already a Future expression
+                    //   timeout(dur, f)             — second arg is a Callable<T>: call it to get Future
                     if name.as_str() == "timeout" {
                         if let Some(fut_arg) = args.get(1) {
-                            return self.eval_expr(&fut_arg.value, Rc::clone(&env));
+                            let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
+                            // If the second arg is a Fn/Closure (Callable<T>), call it with no args.
+                            return match val {
+                                v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
+                                    let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
+                                    // Unwrap Future if the callable returned one
+                                    match result {
+                                        Value::Future(inner) => Ok(*inner),
+                                        other => Ok(other),
+                                    }
+                                }
+                                Value::Future(inner) => Ok(*inner),
+                                other => Ok(other),
+                            };
                         }
                         return Ok(Value::Nil);
                     }
@@ -634,7 +650,18 @@ impl Interpreter {
                     }
                     if name.as_str() == "timeout" {
                         if let Some(fut_arg) = args.get(1) {
-                            return self.eval_expr(&fut_arg.value, Rc::clone(&env));
+                            let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
+                            return match val {
+                                v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
+                                    let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
+                                    match result {
+                                        Value::Future(inner) => Ok(*inner),
+                                        other => Ok(other),
+                                    }
+                                }
+                                Value::Future(inner) => Ok(*inner),
+                                other => Ok(other),
+                            };
                         }
                         return Ok(Value::Nil);
                     }
@@ -837,11 +864,18 @@ impl Interpreter {
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
                 (Value::Array(mut a), Value::Array(b)) => { a.extend(b); Ok(Value::Array(a)) }
                 (a, b) => {
+                    // Try user-defined operator overload first (e.g. `Vec2 + Vec2`)
                     if let Some(result) = self.try_operator_method(&a, "add", b.clone(), line)? {
-                        Ok(result)
-                    } else {
-                        Err(err(format!("cannot add {} and {}", a.type_name(), b.type_name()), line))
+                        return Ok(result);
                     }
+                    // RustType / opaque Object arithmetic: Instant + Duration, etc.
+                    // These are stubs in the interpreter (no real time); return the left
+                    // operand so `let deadline = Instant.now() + dur` yields an opaque value
+                    // that timeout/wait stubs can ignore.
+                    if matches!(&a, Value::RustType { .. } | Value::Object { .. }) {
+                        return Ok(a);
+                    }
+                    Err(err(format!("cannot add {} and {}", a.type_name(), b.type_name()), line))
                 }
             },
             BinOp::Sub => match (l, r) {
@@ -1130,6 +1164,29 @@ impl Interpreter {
             }
             Value::Fn { decl, captured } => {
                 self.call_fn(&decl, captured, args, line, in_throws_context)
+            }
+            Value::OverloadedFn { name, variants } => {
+                // Find the first variant whose parameter types match the given args.
+                let chosen = variants.iter().find(|(decl, _)| {
+                    if decl.params.len() != args.len() { return false; }
+                    decl.params.iter().zip(args.iter()).all(|(param, arg)| {
+                        match &param.ty {
+                            None => true,
+                            Some(ty) => {
+                                let resolved = self.resolve_type(ty);
+                                self.value_matches_type_simple(arg, &resolved)
+                            }
+                        }
+                    })
+                });
+                match chosen {
+                    Some((decl, captured)) => {
+                        let decl = decl.clone();
+                        let captured = Rc::clone(captured);
+                        self.call_fn(&decl, captured, args, line, in_throws_context)
+                    }
+                    None => Err(err(format!("no matching overload for '{}'", name), line)),
+                }
             }
             Value::Closure { params, body, captured } => {
                 self.call_closure(params, body, captured, args, line)

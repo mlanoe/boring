@@ -531,12 +531,18 @@ impl Parser {
         let line = self.line();
         self.expect(&TokenKind::Use)?;
         let name = self.expect_ident()?;
+        // Optional generic type params: `use Callable<T> as …`
+        let type_params = if self.check(&TokenKind::Lt) {
+            let (tp, _) = self.parse_type_params();
+            tp
+        } else {
+            vec![]
+        };
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
-        // Apply qualifier to the entire type if a tick follows
         let ty = self.parse_type_qualifier(ty);
         self.expect_newline()?;
-        Ok(AliasDecl { name, ty, newtype: false, line })
+        Ok(AliasDecl { name, type_params, ty, newtype: false, line })
     }
 
     /// `type Name as InnerType` — newtype wrapper (distinct Rust struct around InnerType)
@@ -547,7 +553,7 @@ impl Parser {
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
         self.expect_newline()?;
-        Ok(AliasDecl { name, ty, newtype: true, line })
+        Ok(AliasDecl { name, type_params: vec![], ty, newtype: true, line })
     }
 
     // ─── Attribute parsing ───────────────────────────────────────────────────

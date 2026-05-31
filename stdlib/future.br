@@ -1,0 +1,29 @@
+# Boring standard library — Future<T>
+#
+# A Future<T> is a handle to a value being computed concurrently by a `task`.
+# It is created by any `task` expression:
+#
+#   let f: Future<int> = task compute(n)
+#   let g: Future<string> = task:
+#       fetch(url)
+#
+# No import is needed — `Future` is a built-in type.
+
+# Future<T> — handle to a concurrently-running task.
+#
+# Methods require a `task` context (the calling function must be `task`).
+#   f.value — await and return the result (property syntax, no parens)
+#   f.wait  — await and discard the result (property syntax, no parens)
+#   f.value() — same, method syntax
+#   f.wait()  — same, method syntax
+
+struct Future<T>: native
+
+ext Future<T>:
+    # Await the task and return its result. Throws if the task threw.
+    # Equivalent to the property form `f.value` (no parens).
+    task req T value() throws: native
+
+    # Await the task and discard its result (fire-and-wait).
+    # Equivalent to the property form `f.wait` (no parens).
+    task req wait() throws: native

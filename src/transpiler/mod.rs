@@ -76,6 +76,9 @@ struct Transpiler {
     pub(crate) set_vars: std::collections::HashSet<String>,
     /// Variables known to hold a HashMap/dict — subscript reads use `.get()`, writes use `.insert()`.
     pub(crate) dict_vars: std::collections::HashSet<String>,
+    /// Variables known to hold a `std::time::Instant` (for `wait(deadline)` →
+    /// `sleep_until` and `timeout(deadline)` → `timeout_at` dispatch).
+    pub(crate) instant_vars: std::collections::HashSet<String>,
     /// For-loop variables iterating over `.chars()` — need `.to_string()` when used as dict keys.
     pub(crate) chars_vars: std::collections::HashSet<String>,
     /// Top-level function return types: fn_name → return Type (for {:?} formatting in print).
@@ -319,6 +322,14 @@ struct Transpiler {
     pub(crate) uses_tokio_util: std::rc::Rc<std::cell::Cell<bool>>,
     /// Set when `json()` or `fromJson()` is used — triggers serde/serde_json deps.
     pub(crate) uses_serde: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Functions that have multiple overloads — maps name to all FnDecl variants.
+    pub(crate) fn_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
+    /// Names of overloaded functions (quick lookup).
+    pub(crate) overloaded_fn_names: std::collections::HashSet<String>,
+    /// Per-struct overloaded method declarations: "TypeName::method" → Vec<FnDecl>
+    pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
+    /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
+    pub(crate) overloaded_method_keys: std::collections::HashSet<String>,
 }
 
 impl Transpiler {
@@ -333,6 +344,7 @@ impl Transpiler {
             vec_vars: std::collections::HashSet::new(),
             set_vars: std::collections::HashSet::new(),
             dict_vars: std::collections::HashSet::new(),
+            instant_vars: std::collections::HashSet::new(),
             chars_vars: std::collections::HashSet::new(),
             fn_return_types: std::collections::HashMap::new(),
             index_vars: std::collections::HashSet::new(),
@@ -427,6 +439,10 @@ impl Transpiler {
             in_cancellable_fn: false,
             uses_tokio_util: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_serde: std::rc::Rc::new(std::cell::Cell::new(false)),
+            fn_overload_decls: std::collections::HashMap::new(),
+            overloaded_fn_names: std::collections::HashSet::new(),
+            struct_method_overload_decls: std::collections::HashMap::new(),
+            overloaded_method_keys: std::collections::HashSet::new(),
         }
     }
 
@@ -650,13 +666,22 @@ impl Transpiler {
 
         // Separate top-level declarations from statements
         let mut stmts: Vec<&Item> = Vec::new();
-        let mut emitted_fn_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Track emitted function signatures (name + param type key) to avoid duplicates
+        // while allowing legitimate overloads (same name, different param types).
+        let mut emitted_fn_sigs: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &program.items {
             match item {
                 Item::Stmt(_) | Item::Let(_) => stmts.push(item),
                 Item::Fn(f) if f.qualifier.is_none() => {
-                    // Skip duplicate top-level function definitions (same name = same impl).
-                    if !emitted_fn_names.insert(f.name.clone()) {
+                    // Build a unique signature key: name + param types.
+                    // For non-overloaded functions the key is just the name (same as before).
+                    // For overloaded functions each variant has a distinct key.
+                    let sig_key = if self.overloaded_fn_names.contains(&f.name) {
+                        mangle_overload_name(&f.name, &f.params)
+                    } else {
+                        f.name.clone()
+                    };
+                    if !emitted_fn_sigs.insert(sig_key) {
                         continue;
                     }
                     self.emit_item(item);
@@ -869,6 +894,32 @@ impl Transpiler {
                     for m in &s.methods {
                         if m.task { self.instance_task_methods.insert(m.name.clone()); }
                     }
+                    // Detect overloaded inline methods — same logic as ext blocks.
+                    for m in &s.methods {
+                        let method_key = format!("{}::{}", s.name, m.name);
+                        let method_variants = self.struct_method_overload_decls
+                            .entry(method_key.clone())
+                            .or_default();
+                        let this_mangled = mangle_overload_name(&m.name, &m.params);
+                        let already_registered = method_variants.iter()
+                            .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                        if !already_registered {
+                            for existing in method_variants.iter() {
+                                if let Some(n) = overloads_conflict(existing, m) {
+                                    eprintln!(
+                                        "error: ambiguous overload for method '{}::{}' — \
+                                         both match a call with {} argument(s)",
+                                        s.name, m.name, n
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                            method_variants.push(m.clone());
+                        }
+                        if method_variants.len() > 1 {
+                            self.overloaded_method_keys.insert(method_key);
+                        }
+                    }
                     // Track var T'task struct fields → Arc<Mutex<T>>.
                     for f in &s.fields {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
@@ -941,6 +992,27 @@ impl Transpiler {
                         // Register `req` (getter) methods from ext blocks in struct_getters.
                         if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
                             self.struct_getters.insert(format!("{}::{}", tname, m.name));
+                        }
+                        // Track overloaded struct methods (same name, different params).
+                        let method_key = format!("{}::{}", tname, m.name);
+                        let method_variants = self.struct_method_overload_decls.entry(method_key.clone()).or_default();
+                        let this_mangled = mangle_overload_name(&m.name, &m.params);
+                        let already_registered = method_variants.iter()
+                            .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                        if !already_registered {
+                            for existing in method_variants.iter() {
+                                if let Some(n) = overloads_conflict(existing, m) {
+                                    eprintln!(
+                                        "error: ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
+                                        tname, m.name, n
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                            method_variants.push(m.clone());
+                        }
+                        if method_variants.len() > 1 {
+                            self.overloaded_method_keys.insert(method_key);
                         }
                     }
                     // Register setters from ext blocks.
@@ -1043,12 +1115,58 @@ impl Transpiler {
     }
 
     fn pre_register_fn(&mut self, f: &FnDecl) {
+        // Track overloads: if this name was already registered with a DIFFERENT mangled
+        // signature, it's a genuine overload. Same mangled name = redefinition (ignore).
+        let this_mangled = mangle_overload_name(&f.name, &f.params);
+        let variants = self.fn_overload_decls.entry(f.name.clone()).or_default();
+        let already_has_this_sig = variants.iter().any(|v| {
+            mangle_overload_name(&v.name, &v.params) == this_mangled
+        });
+        if !already_has_this_sig {
+            // Before accepting the new variant, check for ambiguous conflicts with existing ones.
+            // A conflict exists when a call arity N can match both this overload AND an existing
+            // one — most commonly when a longer overload has default parameters that make it
+            // callable with fewer arguments than its full signature.
+            for existing in variants.iter() {
+                if let Some(conflict_arity) = overloads_conflict(existing, f) {
+                    let a_sig = existing.params.iter()
+                        .map(|p| {
+                            let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                                .unwrap_or_else(|| "_".into());
+                            if p.default.is_some() { format!("{}=?", ty) } else { ty }
+                        })
+                        .collect::<Vec<_>>().join(", ");
+                    let b_sig = f.params.iter()
+                        .map(|p| {
+                            let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                                .unwrap_or_else(|| "_".into());
+                            if p.default.is_some() { format!("{}=?", ty) } else { ty }
+                        })
+                        .collect::<Vec<_>>().join(", ");
+                    eprintln!(
+                        "error: ambiguous overload for '{}' — \
+                         '{}({})' and '{}({})' both match a call with {} argument(s)",
+                        f.name, f.name, b_sig, existing.name, a_sig, conflict_arity
+                    );
+                    std::process::exit(1);
+                }
+            }
+            variants.push(f.clone());
+        }
+        if variants.len() > 1 {
+            self.overloaded_fn_names.insert(f.name.clone());
+        }
+
         let param_types: Vec<Type> = f.params.iter().filter_map(|p| p.ty.clone()).collect();
         let defaults: Vec<Option<String>> = f.params.iter().map(|p| {
             p.default.as_ref().map(|d| self.emit_expr_owned(d))
         }).collect();
-        self.fn_sigs.insert(f.name.clone(), param_types);
-        self.fn_defaults.insert(f.name.clone(), defaults);
+        // Register under both the plain name (for non-overloaded path) and the mangled name
+        // (for overloaded dispatch, so emit_args_coerced can find the correct param types).
+        self.fn_sigs.insert(f.name.clone(), param_types.clone());
+        self.fn_sigs.insert(this_mangled.clone(), param_types);
+        self.fn_defaults.insert(f.name.clone(), defaults.clone());
+        self.fn_defaults.insert(this_mangled, defaults);
         if let Some(ret_ty) = &f.return_ty {
             self.fn_return_types.insert(f.name.clone(), ret_ty.clone());
         }

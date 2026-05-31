@@ -1,0 +1,21 @@
+# Tests for automatic camelCase → snake_case conversion in the transpiler.
+#
+# In Boring you write camelCase (consistent style).
+# The transpiler emits the idiomatic snake_case Rust equivalent.
+#
+# These interpreter tests use stdlib methods that the interpreter already
+# supports under their camelCase names, so they produce real output.
+
+let name = "hello boring"
+
+# isEmpty / startsWith / endsWith — camelCase in Boring, snake_case in Rust
+print name.isEmpty()         # false
+print name.startsWith("hel") # true
+print name.endsWith("ing")   # true
+
+let words = ["one", "two", "three"]
+print words.isEmpty()        # false
+
+# indexOf (camelCase Boring) → iter().position (snake_case Rust)
+let idx = words.indexOf("two")
+print idx                    # 1

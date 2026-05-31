@@ -47,8 +47,8 @@ struct TodoList as AsyncTaskManager:
     task uint add_task(string description):
         # fake long computing
         try timeout(
-            Duration.from_millis(100),
-            task tokio.time.sleep(Duration.from_millis(100))
+            Duration.fromMillis(100),
+            task tokio.time.sleep(Duration.fromMillis(100))
         ) else:
             print "Timeout lors de l'ajout de la tâche"
 
@@ -67,8 +67,8 @@ struct TodoList as AsyncTaskManager:
     task complete_task(uint id) throws string:
         # fake long computing
         try timeout(
-            Duration.from_millis(200),
-            task tokio.time.sleep(Duration.from_millis(150))
+            Duration.fromMillis(200),
+            task tokio.time.sleep(Duration.fromMillis(150))
         ) else:
             throw "Timeout lors de la complétion de la tâche"
             
@@ -193,7 +193,7 @@ task void add_tasks_with_timeout_and_cancellation(
         let future = task:
             try:
                 let id = timeout(
-                    Duration.from_millis(50),
+                    Duration.fromMillis(50),
                     todo_list.add_task("Task with timeout {i}")
                 )
                 metrics.increment_added()
@@ -204,7 +204,7 @@ task void add_tasks_with_timeout_and_cancellation(
 
         futures.push(future)
 
-    tokio.time.sleep(Duration.from_millis(10))
+    tokio.time.sleep(Duration.fromMillis(10))
     if let last_handle = futures.last():
         last_handle.abort()
         print "Last task was cancelled"

@@ -1226,7 +1226,11 @@ impl Transpiler {
                 //   • catch:                          (untyped catch-all)
                 //
                 // Body is built identically to plain Task — Arc vars are cloned into the closure.
-                let dur_s = self.emit_expr(dur_expr);
+                // Resolve leading-dot: `.fromSecs(5)` → `Duration::from_secs(5)`.
+                let is_instant_dur = expr_is_instant(dur_expr, &self.instant_vars);
+                let dur_type_prefix = if is_instant_dur { "Instant" } else { "Duration" };
+                let dur_s = self.resolve_dot_with_type(dur_expr, dur_type_prefix)
+                    .unwrap_or_else(|| self.emit_expr(dur_expr));
                 let captured = collect_var_names(body_expr);
                 let arc_captures: Vec<&str> = captured.iter()
                     .filter(|v| self.arc_vars.contains(*v))
@@ -1256,9 +1260,14 @@ impl Transpiler {
                 };
 
                 // tokio::time::timeout wraps the body future; Elapsed propagates via ?
+                let timeout_fn = if expr_is_instant(dur_expr, &self.instant_vars) {
+                    "timeout_at"
+                } else {
+                    "timeout"
+                };
                 let timeout_future = format!(
-                    "{}async move {{ tokio::time::timeout({}, async move {}).await? }}",
-                    clone_prefix, dur_s, inner_s
+                    "{}async move {{ tokio::time::{}({}, async move {}).await? }}",
+                    clone_prefix, timeout_fn, dur_s, inner_s
                 );
 
                 // Spawn if inside an async context (produces a JoinHandle),
@@ -1272,6 +1281,14 @@ impl Transpiler {
             }
 
             ExprKind::Task(e) => {
+                // Auto-detect whether to use tokio::spawn (async) or
+                // tokio::task::spawn_blocking (sync/CPU-bound):
+                //   task asyncFn(args)  — asyncFn ∈ task_fns  → tokio::spawn
+                //   task syncFn(args)   — syncFn ∉ task_fns   → spawn_blocking
+                //   task: { async body }                       → tokio::spawn
+                //   task: { sync body }  (no await/task)       → spawn_blocking
+                let blocking = is_blocking_spawn(e, &self.task_fns);
+
                 // Arc<T> variables captured by the task body must be cloned so the outer
                 // binding remains valid after the spawn (tokio::spawn moves its captures).
                 let captured = collect_var_names(e);
@@ -1280,46 +1297,53 @@ impl Transpiler {
                     .map(String::as_str)
                     .collect();
 
-                // Emit the task body. Block bodies use a sub-emitter for proper statement
-                // formatting (semicolons, indentation). Single-expression bodies get braces.
+                // Build the inner body string.
+                // For blocking tasks: no `async`, no `.await` on calls (in_async = false).
+                // For async tasks:    standard async sub-emitter (in_async = true).
                 let inner_s = if let ExprKind::Block(stmts) = &e.kind {
                     let mut sub = self.make_sub();
-                    sub.in_async = true;
-                    // Spawned tasks are independent closures — they don't inherit the outer
-                    // function's `throws` context, so the last expression must NOT be wrapped
-                    // in Ok(...).
+                    sub.in_async = !blocking;
                     sub.in_throws = false;
                     sub.emit_body(stmts);
                     format!("{{\n{}}}", sub.out)
                 } else {
-                    // Single expression: wrap in braces so `async move { expr }` is valid Rust.
-                    // Use a sub-emitter with in_throws=false for the same reason as block bodies:
-                    // the spawn closure is independent — it must NOT inherit the outer throws ctx.
-                    // A throws fn call inside gets `.await` (no `?`), so the block's return type
-                    // is Result<T, BoringError> — the JoinHandle wraps the Result directly,
-                    // and .value / .wait unwrap it correctly outside.
                     let mut sub = self.make_sub();
-                    sub.in_async = true;
+                    sub.in_async = !blocking;
                     sub.in_throws = false;
                     format!("{{ {} }}", sub.emit_expr(e))
                 };
 
-                if arc_captures.is_empty() {
-                    if self.in_async {
-                        format!("tokio::spawn(async move {})", inner_s)
+                let clones: String = arc_captures.iter()
+                    .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                if blocking {
+                    // Synchronous closure — tokio::task::spawn_blocking(move || { body })
+                    let closure = if arc_captures.is_empty() {
+                        format!("move || {}", inner_s)
                     } else {
-                        format!("async move {}", inner_s)
+                        format!("{{ {} move || {} }}", clones, inner_s)
+                    };
+                    if self.in_async {
+                        format!("tokio::task::spawn_blocking({})", closure)
+                    } else {
+                        format!("tokio::task::spawn_blocking({})", closure)
                     }
                 } else {
-                    // Shadow each Arc variable with a clone before moving it into the block.
-                    let clones: String = arc_captures.iter()
-                        .map(|v| format!("let {} = Arc::clone(&{});", v, v))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if self.in_async {
-                        format!("tokio::spawn({{ {} async move {} }})", clones, inner_s)
+                    // Asynchronous closure — tokio::spawn(async move { body })
+                    if arc_captures.is_empty() {
+                        if self.in_async {
+                            format!("tokio::spawn(async move {})", inner_s)
+                        } else {
+                            format!("async move {}", inner_s)
+                        }
                     } else {
-                        format!("{{ {} async move {} }}", clones, inner_s)
+                        if self.in_async {
+                            format!("tokio::spawn({{ {} async move {} }})", clones, inner_s)
+                        } else {
+                            format!("{{ {} async move {} }}", clones, inner_s)
+                        }
                     }
                 }
             }
@@ -1339,7 +1363,64 @@ impl Transpiler {
             if is_type {
                 return self.emit_constructor(name, args);
             }
-            // User-defined functions take priority over built-in name mappings.
+            // Built-in async primitives take priority over fn_sigs dispatch.
+            // `wait` / `sleep` — emit as tokio::time::sleep (or sleep_until for Instant).
+            // Must come before fn_sigs check because wait/timeout are now in fn_sigs
+            // (so that DotIdent hints work), but they need to emit tokio:: paths, not
+            // a plain `wait(...)` call.
+            if (name == "sleep" || name == "wait") && args.len() == 1 && self.in_async {
+                let is_instant = expr_is_instant(&args[0].value, &self.instant_vars);
+                let type_prefix = if is_instant { "Instant" } else { "Duration" };
+                // Resolve leading-dot static call: `.fromSecs(n)` → `Duration::from_secs(n)`
+                let arg = self.resolve_dot_with_type(&args[0].value, type_prefix)
+                    .unwrap_or_else(|| self.emit_expr(&args[0].value));
+                return if is_instant {
+                    format!("tokio::time::sleep_until({}).await", arg)
+                } else {
+                    format!("tokio::time::sleep({}).await", arg)
+                };
+            }
+            // Overloaded function call — select the right mangled name based on arg types.
+            if self.overloaded_fn_names.contains(name.as_str()) {
+                let overloads = self.fn_overload_decls.get(name.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                // Try to find a matching overload by type inference.
+                let chosen = overloads.iter().find(|decl| {
+                    if decl.params.len() != args.len() { return false; }
+                    decl.params.iter().zip(args.iter()).all(|(param, arg)| {
+                        match &param.ty {
+                            None => true,
+                            Some(expected_ty) => {
+                                let inferred = infer_overload_expr_type(
+                                    &arg.value,
+                                    &self.var_types,
+                                    &self.fn_return_types,
+                                );
+                                match inferred {
+                                    Some(inferred_ty) => types_compatible(expected_ty, &inferred_ty),
+                                    None => true, // can't determine — optimistically match
+                                }
+                            }
+                        }
+                    })
+                }).or_else(|| overloads.first());
+
+                if let Some(decl) = chosen {
+                    let mangled = mangle_overload_name(name, &decl.params);
+                    let args_s = self.emit_args_coerced(&mangled, args);
+                    let base = format!("{}({})", mangled, args_s);
+                    let is_task = self.in_async && self.task_fns.contains(name.as_str());
+                    let propagates = (self.in_try_body || self.in_throws) && self.fn_throws.contains(name.as_str());
+                    return match (is_task, propagates) {
+                        (true,  true)  => format!("{}.await?", base),
+                        (true,  false) => format!("{}.await",  base),
+                        (false, true)  => format!("{}?",       base),
+                        (false, false) => base,
+                    };
+                }
+            }
+            // User-defined functions (and stdlib functions registered in fn_sigs).
             if self.fn_sigs.contains_key(name.as_str()) {
                 let args_s = self.emit_args_coerced(name, args);
                 let base = format!("{}({})", escape_rust_keyword(name), args_s);
@@ -1355,28 +1436,57 @@ impl Transpiler {
                     (false, false) => base,
                 };
             }
-            // Special case: `sleep(dur)` → `tokio::time::sleep(dur).await` in async context.
-            if name == "sleep" && args.len() == 1 && self.in_async {
-                let dur = self.emit_expr(&args[0].value);
-                return format!("tokio::time::sleep({}).await", dur);
-            }
             // Special case: `timeout(dur, future_expr)` — the second arg must be a future.
             // `tokio::time::timeout` takes `F: Future`, so the second arg should be the future
             // expression directly (e.g. `tokio::time::sleep(dur)` or a closure async block).
             // When the second arg is a `task expr` (Task node), emit the inner expression
             // directly as a future rather than spawning. This avoids the JoinHandle type mismatch.
             if name == "timeout" && args.len() == 2 && self.in_async {
-                let dur = self.emit_expr(&args[0].value);
+                // Resolve leading-dot syntax for the duration/deadline argument:
+                //   timeout(.fromSecs(5), …)  →  timeout(Duration::from_secs(5), …)
+                let is_instant = expr_is_instant(&args[0].value, &self.instant_vars);
+                let type_prefix = if is_instant { "Instant" } else { "Duration" };
+                let dur = self.resolve_dot_with_type(&args[0].value, type_prefix)
+                    .unwrap_or_else(|| self.emit_expr(&args[0].value));
                 // For `task inner` args: emit the inner expression directly (already a Future).
                 // For async method calls that end with `.await`, wrap in `async move { }` so
                 // timeout receives a `Future<Output=T>` rather than the already-awaited value.
                 // For plain futures (e.g. tokio::time::sleep): pass through as-is.
                 let future_expr = {
                     // `timeout` needs a Future<Output=T>, not an already-awaited value.
-                    // Strip any trailing `.await` added by the expression emitter so the
-                    // future is passed un-polled to tokio::time::timeout.
+                    // Three forms for the second argument:
+                    //   task f(args)       — TaskExpr: emit inner expression directly as future
+                    //   f                  — Callable<T> (task fn ref): call it as f() to get future
+                    //   <already a future> — strip any trailing .await added by the expression emitter
                     let raw = match &args[1].value.kind {
                         ExprKind::Task(inner_e) => self.emit_expr(inner_e),
+                        // Bare variable: check if it's a task function — call it to get the future
+                        ExprKind::Var(fn_name)
+                            if self.task_fns.contains(fn_name.as_str())
+                               || self.fn_sigs.contains_key(fn_name.as_str()) =>
+                        {
+                            // If it's a known task_fn with no args: call it to produce the future
+                            if self.task_fns.contains(fn_name.as_str()) {
+                                format!("{}()", fn_name)
+                            } else {
+                                self.emit_expr(&args[1].value)
+                            }
+                        }
+                        // Zero-arg trailing closure `(): body` or `(): fetch()` —
+                        // unwrap the body and emit it directly as the future expression.
+                        // This handles `timeout(dur): fetch()` → future is `fetch()`, not `|| fetch()`.
+                        ExprKind::Closure(params, _, body, _, _) if params.is_empty() => {
+                            match body {
+                                ClosureBody::Expr(e) => self.emit_expr(e),
+                                ClosureBody::Block(stmts) => {
+                                    let mut sub = self.make_sub();
+                                    sub.in_async = true;
+                                    sub.in_throws = false;
+                                    sub.emit_body(stmts);
+                                    format!("async move {{{}}}", sub.out)
+                                }
+                            }
+                        }
                         _ => self.emit_expr(&args[1].value),
                     };
                     if let Some(stripped) = raw.strip_suffix(".await") {
@@ -1389,20 +1499,29 @@ impl Transpiler {
                 };
                 // In a cancellable function: use select! to race future vs timer vs cancel.
                 if self.in_cancellable_fn {
+                    let timer_fn = if expr_is_instant(&args[0].value, &self.instant_vars) {
+                        format!("tokio::time::sleep_until({})", dur)
+                    } else {
+                        format!("tokio::time::sleep({})", dur)
+                    };
                     return if self.in_throws || self.in_try_body {
                         format!(
-                            "{{ tokio::select! {{ __boring_r = ({}) => Ok(__boring_r), _ = tokio::time::sleep({}) => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Expired) as Box<dyn BoringVal + Send + Sync>))), _ = __task_cancel.cancelled() => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Cancelled) as Box<dyn BoringVal + Send + Sync>))), }} }}?",
-                            future_expr, dur
+                            "{{ tokio::select! {{ __boring_r = ({}) => Ok(__boring_r), _ = {} => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Expired) as Box<dyn BoringVal + Send + Sync>))), _ = __task_cancel.cancelled() => Err(Box::new(BoringError::Other(std::any::TypeId::of::<Error>(), Box::new(Error::Cancelled) as Box<dyn BoringVal + Send + Sync>))), }} }}?",
+                            future_expr, timer_fn
                         )
                     } else {
                         format!(
-                            "{{ tokio::select! {{ __boring_r = ({}) => Some(__boring_r), _ = tokio::time::sleep({}) => None, _ = __task_cancel.cancelled() => None, }} }}",
-                            future_expr, dur
+                            "{{ tokio::select! {{ __boring_r = ({}) => Some(__boring_r), _ = {} => None, _ = __task_cancel.cancelled() => None, }} }}",
+                            future_expr, timer_fn
                         )
                     };
                 }
                 // Always add .await — TryElse clears in_throws/in_try_body to avoid adding `?`.
-                let base = format!("tokio::time::timeout({}, {}).await", dur, future_expr);
+                let base = if expr_is_instant(&args[0].value, &self.instant_vars) {
+                    format!("tokio::time::timeout_at({}, {}).await", dur, future_expr)
+                } else {
+                    format!("tokio::time::timeout({}, {}).await", dur, future_expr)
+                };
                 // In throws/try context, propagate Elapsed errors with `?`.
                 return if self.in_throws || self.in_try_body {
                     format!("{}?", base)

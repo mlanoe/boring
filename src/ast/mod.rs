@@ -55,9 +55,10 @@ pub struct ModDecl {
 
 #[derive(Debug, Clone)]
 pub struct AliasDecl {
-    pub name: String,   // lowercase alias name, e.g. "int"
-    pub ty: Type,       // the expanded type, e.g. Int'copy
-    pub newtype: bool,  // true for `type Name as InnerType` (newtype wrapper), false for `use Name as Type` (alias)
+    pub name: String,       // alias name, e.g. "Callable"
+    pub type_params: Vec<String>, // generic type params, e.g. ["T"] for `use Callable<T> as …`
+    pub ty: Type,           // the expanded type
+    pub newtype: bool,      // true for `type Name as InnerType`, false for `use Name as Type`
     pub line: usize,
 }
 

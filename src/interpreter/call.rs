@@ -132,7 +132,9 @@ impl Interpreter {
         let resolved_ret = decl.return_ty.as_ref().map(|t| self.resolve_type(t));
 
         let prev_task_ctx = self.task_context;
-        self.task_context = decl.task;
+        // `main` is always treated as a task context — there is no caller that
+        // needs to know, so `def main():` works the same as `task main():`.
+        self.task_context = decl.task || decl.name == "main";
         let prev_mutating = self.current_method_mutating;
         self.current_method_mutating = decl.mutating;
         // Push a defer frame for this call

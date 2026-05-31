@@ -1,0 +1,157 @@
+# Boring standard library — task spawning, wait, timeout
+#
+# `task` is a built-in keyword that spawns a concurrent computation and
+# returns a Future<T> handle.
+#
+# No `use` is needed — all forms below are always in scope.
+#
+# ── Callable<T> — a zero-argument task-function returning T ──────────────────
+#
+# Declare the generic type alias.  `T` is a type parameter bound at call site.
+#
+#   use Callable<T> as task T ()   ≡   () → Future<T>
+#
+# Concrete aliases for use as typed parameters:
+#
+#   use IntCallable    as task int ()
+#   use StringCallable as task string ()
+#
+#   task int compute(): 42
+#   def Future<int> spawn(IntCallable c): task c()
+#
+#   def main():
+#       let f = spawn(compute)
+#       print f.value              # 42
+
+use Callable<T> as task T ()   # conceptual: Callable<T> ≡ () → Future<T>
+
+# ── wait — async pause ───────────────────────────────────────────────────────
+#
+# Pause the current task. Accepts either a Duration (relative delay) or an
+# Instant (absolute deadline). The transpiler selects the correct tokio
+# primitive automatically.
+#
+# Statement form (keyword, no parens):
+#   wait Duration.fromSecs(1)
+#   wait Duration.fromMillis(500)
+#   wait Instant.now() + Duration.fromSecs(5)
+#
+# Function-call form (usable in closures and expressions):
+#   wait(Duration.fromMillis(500))
+#   wait(Instant.now() + Duration.fromSecs(5))
+#
+#   let deadline = Instant.now() + Duration.fromSecs(10)
+#   wait(deadline)
+#
+# Transpilation:
+#   wait(Duration.fromSecs(n))   → tokio::time::sleep(dur).await
+#   wait(Instant.now() + dur)    → tokio::time::sleep_until(instant).await
+#   wait(deadline)               → tokio::time::sleep_until(deadline).await
+#
+# In the interpreter: instant return (no async runtime).
+
+task wait(Duration duration)  throws Error.Cancelled: native
+task wait(Instant  deadline)  throws Error.Cancelled: native
+
+# Note: Duration and Instant are external Rust types — use Boring camelCase.
+# The transpiler converts automatically:
+#   Duration.fromSecs(5)     → Duration::from_secs(5)
+#   Duration.fromMillis(100) → Duration::from_millis(100)
+#   Instant.now()            → Instant::now()
+
+# ── timeout — race a computation against a timer ─────────────────────────────
+#
+# Run a zero-argument callable with a time limit.
+# - Completes in time → returns T
+# - Deadline elapses  → throws Error.Expired
+#
+# Accepts either a Duration or an Instant as first argument.
+# The transpiler selects timeout / timeout_at automatically.
+#
+# ── Syntax forms (all equivalent) ────────────────────────────────────────────
+#
+# ① Explicit two-arg form:
+#   timeout(Duration.fromSecs(5), fetch)           # Callable<T> reference
+#   timeout(Duration.fromSecs(5), (): fetch(url))  # zero-arg closure
+#
+# ② Trailing body with colon separator:
+#   timeout(Duration.fromSecs(5)): fetch(url)
+#
+# ③ Command style — no separator (same line):
+#   timeout(Duration.fromSecs(5)) fetch(url)
+#
+# ④ Multi-line body:
+#   timeout(Duration.fromSecs(10)):
+#       let data = download(url)
+#       parse(data)
+#
+# ── Duration vs Instant dispatch ─────────────────────────────────────────────
+#
+# Duration (relative delay) — inline or variable:
+#   timeout(Duration.fromSecs(5)): fetch(url)
+#   let dur = Duration.fromSecs(5)
+#   timeout(dur, (): fetch(url))
+#
+# Instant (absolute deadline) — inline expression:
+#   timeout(Instant.now() + Duration.fromSecs(5)): fetch(url)
+#
+# Instant — variable deadline (use explicit two-arg form to avoid ambiguity):
+#   let deadline = Instant.now() + Duration.fromSecs(10)
+#   timeout(deadline, (): fetchData(url))
+#   timeout(deadline, (): parse(data))
+#   timeout(deadline, (): save(result))
+#
+# ── Syntax note — single-identifier argument ambiguity ───────────────────────
+#
+# `timeout(name): body` is ambiguous: `(name):` could be either a call arg
+# (variable) or a closure parameter.  The parser resolves it as a closure
+# parameter.  Use the explicit two-arg form for variable deadlines:
+#
+#   timeout(deadline): fetch()       # ← parsed as closure param, NOT call arg
+#   timeout(deadline, (): fetch())   # ← correct for variable deadlines
+#
+# This only applies when the sole argument is a bare identifier.
+# Expressions with `.`, operators, or multiple arguments are never ambiguous:
+#   timeout(Instant.now() + dur): fetch()   # ← unambiguous (contains .)
+#
+# ── Transpilation ─────────────────────────────────────────────────────────────
+#
+#   timeout(dur):  f()   → tokio::time::timeout(dur, f()).await?
+#   timeout(inst): f()   → tokio::time::timeout_at(inst, f()).await?
+#   (in cancellable fn)  → tokio::select! { r=f() =>, _=sleep(dur) =>, _=cancel => }?
+#
+# In the interpreter: callable is evaluated immediately (no real timeout).
+
+task T timeout(Duration d, Callable<T> c) throws: native
+task T timeout(Instant  d, Callable<T> c) throws: native
+
+# ── task() — built-in spawn forms ────────────────────────────────────────────
+#
+# `task` is a keyword — use the keyword forms directly, not as a function call.
+#
+# ① Plain spawn — returns Future<T>:
+#   let f = task compute(args)     # spawn and capture handle
+#   task log("msg")                # fire-and-forget (handle discarded)
+#   let f = task: expr             # inline body
+#
+# ② Spawn with Duration timeout — throws Error.Expired on expiry:
+#   let f = task(Duration.fromSecs(5)): fetch(url)
+#   let f = task(Duration.fromMillis(500)) fetch(url)   # no-colon form
+#   let f = task(timeout = Duration.fromSecs(5)):
+#               process(data)
+#
+# ③ Spawn with Instant deadline — same syntax, auto-dispatch:
+#   let f = task(Instant.now() + Duration.fromSecs(5)): fetch(url)
+#   let f = task(Instant.now() + Duration.fromSecs(5)) fetch(url)
+#
+#   let deadline = Instant.now() + Duration.fromSecs(10)
+#   let f = task(deadline): fetch(url)
+#
+# Awaiting the handle:
+#   f.value   → T          (blocks until done, propagates Error.Expired)
+#   f.wait()  → discards result
+#
+# Transpilation:
+#   task expr             → tokio::spawn(async move { expr.await })
+#   task(dur): body       → tokio::spawn(async move { tokio::time::timeout(dur, body).await? })
+#   task(instant): body   → tokio::spawn(async move { tokio::time::timeout_at(instant, body).await? })

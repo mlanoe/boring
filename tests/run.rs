@@ -137,6 +137,7 @@ interp_test!(task_timeout);
 interp_test!(try_else_block);
 interp_test!(error_match);
 interp_test!(fn_shorthand);
+interp_test!(camel_to_snake);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

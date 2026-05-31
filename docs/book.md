@@ -696,6 +696,87 @@ fn add_one(x: &mut i64) { *x += 1; }
 
 > For variadic parameters (`values...`), see [Advanced — Variadic parameters](#advanced--variadic-parameters).
 
+### Function overloading
+
+Multiple functions can share the same name as long as their parameter types differ. The compiler selects the right variant at the call site based on the argument types:
+
+```boring
+def string describe(int n):    "number: {n}"
+def string describe(float f):  "float: {f}"
+def string describe(string s): "text: {s}"
+def string describe(bool b):   "flag: {b}"
+
+describe(42)       # → "number: 42"
+describe(3.14)     # → "float: 3.14"
+describe("hello")  # → "text: hello"
+describe(true)     # → "flag: true"
+```
+
+Multi-parameter overloads work the same way — the full signature (all parameter types) must be unique:
+
+```boring
+def string fn(int a, string b): "{a}/{b}"
+def string fn(int a, bool c):   "{a}/{c}"
+def string fn(int a):           "{a}"
+```
+
+**Rust equivalent** — the transpiler mangles names with the parameter types:
+```rust
+fn describe__int(n: i64) -> Arc<str> { ... }
+fn describe__float(f: f64) -> Arc<str> { ... }
+fn describe__string(s: Arc<str>) -> Arc<str> { ... }
+fn describe__bool(b: bool) -> Arc<str> { ... }
+```
+Call sites are resolved statically: `describe(42)` → `describe__int(42)`.
+
+**Struct methods** can also be overloaded within `ext` blocks:
+
+```boring
+struct Animal:
+    string name
+
+ext Animal:
+    req string speak(int times):    "{self.name} x{times}"
+    req string speak(string sound): "{self.name}: {sound}!"
+
+let a = Animal(name = "Dog")
+print a.speak(3)       # → Dog x3
+print a.speak("woof")  # → Dog: woof!
+```
+
+**Rust equivalent** — method names are also mangled:
+```rust
+fn speak__int(&self, times: i64) -> Arc<str> { ... }
+fn speak__string(&self, sound: Arc<str>) -> Arc<str> { ... }
+```
+
+---
+
+**Conflict detection** — the compiler rejects overloads that create ambiguity. A function with default parameters can be called with fewer arguments; if that reduced call matches another overload, it is an error:
+
+```boring
+def string fn(int n, string s = "x"):  # callable as fn(int) OR fn(int, string)
+def string fn(int n):                   # ERROR — conflicts at arity 1
+```
+
+```
+error: ambiguous overload for 'fn' — 'fn(int, string=default)' and 'fn(int)'
+       both match a call with 1 argument(s)
+```
+
+**Limitations**
+
+| Context | Status |
+|---|---|
+| Free functions in the same file | ✅ fully supported |
+| Struct methods declared inline in `struct` | ✅ fully supported |
+| Struct methods in `ext` blocks (same file) | ✅ fully supported |
+| Functions / methods across separate files or modules | ❌ not supported |
+
+For cross-file scenarios, declare all overloads in the same file. If the overloads must live in separate files, use different function names.
+
+---
+
 ### Throwing functions — `throws`
 
 A function that may fail is annotated with `throws`. It returns `Result<T, Box<dyn Error>>` in Rust.
@@ -1833,6 +1914,47 @@ let Direction dir = .East     # same as Direction.East
 // The transpiler resolves .North to Direction::North using the type context.
 ```
 
+### Leading-dot static method calls
+
+The same shorthand works for **static method calls** on external types when the expected
+type is known. Instead of writing the full `TypeName.method(args)`, use `.method(args)`:
+
+```boring
+# Full form
+wait(Duration.fromSecs(5))
+wait(Duration.fromMillis(500))
+timeout(Duration.fromSecs(10)): fetch(url)
+
+# Shorthand — type inferred from the parameter annotation
+wait(.fromSecs(5))
+wait(.fromMillis(500))
+timeout(.fromSecs(10)): fetch(url)
+```
+
+Works wherever the expected type is unambiguous:
+
+```boring
+def void schedule(Duration delay): ...
+
+schedule(.fromSecs(1))           # Duration inferred from parameter type
+schedule(.fromMillis(100))
+
+task(.fromSecs(5)): heavy()      # Duration inferred from task(Duration)
+```
+
+The transpiler applies `camelCase → snake_case` conversion automatically:
+
+| Boring | Rust |
+|---|---|
+| `.fromSecs(5)` | `Duration::from_secs(5)` |
+| `.fromMillis(100)` | `Duration::from_millis(100)` |
+| `.fromMicros(500)` | `Duration::from_micros(500)` |
+| `.North` | `Direction::North` |
+| `.Expired` | `Error::Expired` |
+
+> **Limitation** — the shorthand requires a single unambiguous type at the call site.
+> When the type cannot be inferred (no annotation, overloaded parameter), use the full form.
+
 ---
 
 ## 10. Traits and Extensions
@@ -2193,7 +2315,7 @@ Les deux styles suivants sont équivalents — choisissez selon votre préféren
 
 ```boring
 try:
-    let data = timeout(Duration.from_secs(5), fetch())
+    let data = timeout(Duration.fromSecs(5), fetch())
 catch Error.Expired:
     print "délai dépassé"
 catch Error.Cancelled:
@@ -2207,7 +2329,7 @@ Les variants non listés sont **re-jetés** automatiquement vers l'appelant.
 
 ```boring
 try:
-    let data = timeout(Duration.from_secs(5), fetch())
+    let data = timeout(Duration.fromSecs(5), fetch())
 catch Error:
     match error:
         Error.Expired:    print "délai dépassé"
@@ -2853,6 +2975,50 @@ numbers.iter().filter(|n| n % 2 == 0).cloned().collect::<Vec<_>>()
 >     n > 0).map((n): n * 2)
 > ```
 
+**Zero-arg trailing body** — when the trailing closure takes no parameters, three forms are available:
+
+```boring
+# Inside the argument list — explicit zero-arg closure
+timeout(Duration.fromSecs(5), (): fetch(url))
+
+# After the argument list — bare colon separator
+timeout(Duration.fromSecs(5)): fetch(url)
+
+# Without any separator — command style (same-line only)
+timeout(Duration.fromSecs(5)) fetch(url)
+```
+
+The three forms are equivalent. Choose the one that reads most naturally:
+- `():` inside parens — always unambiguous, works anywhere
+- `f(args): body` — clean for single-expression bodies
+- `f(args) body` — closest to `task(dur) expr` style; same-line only
+
+Multi-line zero-arg body uses the colon form:
+
+```boring
+timeout(Duration.fromSecs(10)):
+    let data = download(url)
+    parse(data)
+```
+
+**Limitation — single-identifier argument ambiguity**
+
+When the only argument is a simple variable name, `f(name): body` is syntactically ambiguous: `(name):` could be either call args + trailing body, or a closure with parameter `name`. The parser resolves it as a **closure parameter**, not a call argument:
+
+```boring
+# Ambiguous — `deadline` is parsed as a closure param, NOT a call arg
+timeout(deadline): fetch(url)    # ← behaves as timeout((deadline): fetch(url))
+
+# Unambiguous — use the two-arg form for variable deadlines
+timeout(deadline, (): fetch(url))   # ← correct
+```
+
+This ambiguity only arises with a single bare identifier. Expressions with operators, dots, or multiple arguments are never ambiguous:
+```boring
+timeout(Instant.now() + dur): fetch(url)   # ← unambiguous (contains .)
+timeout(dur1, dur2): fetch(url)            # ← unambiguous (two args)
+```
+
 ### Closures in collections
 
 ```boring
@@ -2869,6 +3035,8 @@ When a closure works on a single argument, three compact forms are available:
 | Form | Meaning | Example |
 |---|---|---|
 | `(p): expr` | standard closure | `(p): p.name` |
+| `(p, q): expr` | two-param closure | `(acc, n): acc + n` |
+| `(): expr` | zero-arg closure | `(): fetch()` |
 | `p: expr` | no-paren single param | `p: p.length > 3` |
 | `:member` | implicit param, field/method | `:name`, `:upper()` |
 | `:member op value` | implicit param + operator | `:length > 3`, `:age == 18` |
@@ -3461,11 +3629,11 @@ let result, _ = join (f_data, f_log)
 
 ```boring
 task int fetch_users():
-    wait Duration.from_millis(10)
+    wait Duration.fromMillis(10)
     return 42
 
 task int fetch_products():
-    wait Duration.from_millis(10)
+    wait Duration.fromMillis(10)
     return 99
 
 task run():
@@ -3542,7 +3710,7 @@ task run():
             msg = rx.recv():
                 print msg
                 if msg == "world": break
-            after Duration.from_millis(100):
+            after Duration.fromMillis(100):
                 print "timeout"
                 break
 ```
@@ -3554,7 +3722,7 @@ task run():
     select:
         result = some_async_op():
             print result
-        after Duration.from_secs(5):
+        after Duration.fromSecs(5):
             print "timed out"
 ```
 
@@ -3581,8 +3749,8 @@ Channel receiver variables are automatically wrapped in `Some(var)` since `recv(
 `wait dur` met en pause la tâche courante pour la durée spécifiée. Équivalent à `tokio::time::sleep(dur).await`.
 
 ```boring
-wait Duration.from_millis(500)
-wait Duration.from_secs(1)
+wait Duration.fromMillis(500)
+wait Duration.fromSecs(1)
 ```
 
 Utilisé librement dans `loop:` pour créer des boucles périodiques avec position explicite :
@@ -3591,7 +3759,7 @@ Utilisé librement dans `loop:` pour créer des boucles périodiques avec positi
 task monitor():
     var int ticks = 0
     loop:
-        wait Duration.from_secs(1)   # pause d'abord, puis body
+        wait Duration.fromSecs(1)   # pause d'abord, puis body
         ticks += 1
         info "heartbeat #{ticks}"
         if ticks >= 5: break
@@ -3602,7 +3770,7 @@ task process():
     loop:
         let item = queue.recv()      # body d'abord
         handle(item)
-        wait Duration.from_millis(10)  # puis pause
+        wait Duration.fromMillis(10)  # puis pause
 ```
 
 **Rust equivalent**
@@ -3624,6 +3792,28 @@ async fn monitor() {
 | `loop: wait dur; body` | pause **avant** chaque itération |
 | `loop: body; wait dur` | exécute **immédiatement**, puis pause |
 
+### `wait` avec deadline absolue — `Instant`
+
+Au lieu d'une durée relative, `wait` accepte également un `Instant` (point absolu dans le temps). Le transpileur choisit automatiquement la primitive correcte selon le type de l'argument :
+
+```boring
+# Durée relative → tokio::time::sleep(dur).await
+wait Duration.fromSecs(5)
+wait(Duration.fromMillis(500))
+
+# Deadline absolue → tokio::time::sleep_until(instant).await
+wait(Instant.now() + Duration.fromSecs(5))
+
+let deadline = Instant.now() + Duration.fromSecs(10)
+wait(deadline)   # forme explicite recommandée pour les variables Instant
+```
+
+| Boring | Rust généré |
+|---|---|
+| `wait(Duration.fromSecs(n))` | `tokio::time::sleep(Duration::from_secs(n)).await` |
+| `wait(Instant.now() + dur)` | `tokio::time::sleep_until(instant).await` |
+| `wait(deadline)` *(variable Instant)* | `tokio::time::sleep_until(deadline).await` |
+
 ---
 
 ### Task with built-in timeout — `task(Duration): body`
@@ -3632,10 +3822,10 @@ Pass a `Duration` directly to `task` to spawn a task that automatically expires:
 
 ```boring
 # Positional — duration is the first argument
-let f = task(Duration.from_secs(5)): fetch(url)
+let f = task(Duration.fromSecs(5)): fetch(url)
 
 # Labeled — same thing, more explicit
-let f = task(timeout = Duration.from_millis(500)):
+let f = task(timeout = Duration.fromMillis(500)):
     let data = download(url)
     parse(data)
 ```
@@ -3648,7 +3838,7 @@ let result = try f.value else "timed out"
 
 # Block else — full error dispatch
 let result = try:
-    let f = task(Duration.from_secs(3)): fetch(url)
+    let f = task(Duration.fromSecs(3)): fetch(url)
     f.value
 else:
     match error:
@@ -3677,14 +3867,81 @@ let f = tokio::spawn(async move {
 
 ---
 
-## `timeout` — inside a cancellable task
+## `timeout` — race une future contre un minuteur
+
+`timeout` applique une limite de temps à une computation asynchrone. Si la computation se termine dans les temps, son résultat est retourné. Sinon, `Error.Expired` est lancé.
+
+### Syntaxes supportées
+
+```boring
+# ① Forme explicite — deux arguments
+timeout(Duration.fromSecs(5), fetch)           # Callable<T> (référence de fonction)
+timeout(Duration.fromSecs(5), (): fetch(url))  # zero-arg closure explicite
+
+# ② Trailing body avec `:`
+timeout(Duration.fromSecs(5)): fetch(url)
+
+# ③ Command style — sans séparateur (même ligne)
+timeout(Duration.fromSecs(5)) fetch(url)
+
+# ④ Multi-ligne
+timeout(Duration.fromSecs(10)):
+    let data = download(url)
+    parse(data)
+```
+
+Les formes ②③④ sont du sucre syntaxique pour la forme ①. Elles sont interchangeables.
+
+### Dispatch automatique Duration / Instant
+
+Le même nom `timeout` fonctionne avec une `Duration` (délai relatif) **ou** un `Instant` (deadline absolue). Le transpileur choisit automatiquement `timeout` ou `timeout_at` selon le type du premier argument :
+
+```boring
+# Duration → tokio::time::timeout(dur, …).await?
+timeout(Duration.fromSecs(5)): fetch(url)
+
+# Instant inline → tokio::time::timeout_at(instant, …).await?
+timeout(Instant.now() + Duration.fromSecs(5)): fetch(url)
+
+# Variable Instant — utiliser la forme deux-args (évite l'ambiguïté syntaxique)
+let deadline = Instant.now() + Duration.fromSecs(10)
+timeout(deadline, (): fetch(url))
+```
+
+L'usage principal des deadlines absolues est de **partager une limite de temps** entre plusieurs opérations :
+
+```boring
+let deadline = Instant.now() + Duration.fromSecs(10)
+
+let data   = timeout(deadline, (): fetchData(url))
+let parsed = timeout(deadline, (): parse(data))
+let saved  = timeout(deadline, (): save(parsed))
+```
+
+### Gestion des erreurs
+
+`timeout` lance `Error.Expired` si le délai est dépassé. Utilisez `try … else` ou `catch` :
+
+```boring
+# Inline fallback
+let result = try timeout(Duration.fromSecs(5)) fetch(url)
+             else "timed out"
+
+# Block try/catch
+try:
+    let body = timeout(Duration.fromSecs(10)): download(url)
+    process(body)
+catch Error.Expired:
+    print "request timed out"
+```
+
+### Dans une fonction cancellable
 
 Inside a **cancellable** `task` function (one that can receive `.cancel()`), `timeout` races three branches simultaneously using `select!`: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct typed errors (`Error.Expired` / `Error.Cancelled`).
 
 ```boring
 task string fetch_user(string url) throws:
-    # timeout races fetch against a 10-second timer AND the cancel token
-    let body = timeout(Duration.from_secs(10), download(url))
+    let body = timeout(Duration.fromSecs(10)) download(url)
     parse(body)
 ```
 
@@ -3697,7 +3954,16 @@ catch Error.Cancelled:
     print "task was cancelled"
 ```
 
-> **Prefer `task(Duration): body`** for the common case of spawning a task with a deadline — it is simpler and does not require a cancellable function context. Use `timeout(dur, fut)` only when you need the three-way `select!` race inside a cancellable task.
+> **Prefer `task(Duration): body`** for the common case of spawning a task with a deadline — it is simpler and does not require a cancellable function context. Use `timeout(dur): body` when you need a deadline on an expression without spawning.
+
+### Transpilation
+
+| Boring | Rust généré |
+|---|---|
+| `timeout(dur): f()` | `tokio::time::timeout(dur, f()).await?` |
+| `timeout(Instant.now() + d): f()` | `tokio::time::timeout_at(instant, f()).await?` |
+| `timeout(deadline, (): f())` *(var Instant)* | `tokio::time::timeout_at(deadline, f()).await?` |
+| *(dans cancellable)* `timeout(dur): f()` | `tokio::select! { r = f() => Ok(r), _ = sleep(dur) => Err(Expired), _ = cancel => Err(Cancelled) }?` |
 
 ---
 
@@ -4036,7 +4302,7 @@ The task runs in the background; its result is discarded.
 task log(string msg):
     print "bg: {msg}"
 
-task main():
+def main():
     task log("hello")   # detached — no future returned
     task log("world")   # detached
     print "main done"
@@ -4049,10 +4315,11 @@ tokio::spawn(async move { log("world").await });
 println!("main done");
 ```
 
-> **Note — `main` without `task`**
-> If `main` spawns only detached tasks (no `.value` await), it does **not** need to be
-> marked `task`.  The transpiler detects the `task` expressions and auto-promotes `main`
-> to an async entry-point automatically.
+> **`main` never needs `task`**
+> The compiler always treats `main` as an async entry-point when its body uses any async
+> construct (`task`, `wait`, `timeout`, calls to task functions, etc.).
+> Writing `def main():` is equivalent to `task main():` — the `task` qualifier is accepted
+> but redundant.
 
 ```boring
 task log(string msg):
@@ -4065,6 +4332,66 @@ print "main done"
 ```
 >
 > Transpiles to the same `#[tokio::main] async fn main()` shown above.
+
+### CPU-bound tasks — automatic `spawn_blocking`
+
+When `task` is applied to a **synchronous** function (declared with `def`, not `task`),
+the compiler automatically uses `tokio::task::spawn_blocking` instead of `tokio::spawn`.
+No annotation needed — the function's declaration tells the compiler everything.
+
+```boring
+# Async function — runs on the tokio runtime
+task string fetch(string url):
+    download(url)
+
+# Sync function — CPU-intensive, will block if not offloaded
+def Data compress(Data d):
+    heavy_computation(d)
+
+def main():
+    # task fn → tokio::spawn (async, non-blocking)
+    let f1 = task fetch(url)
+
+    # def fn → tokio::task::spawn_blocking (blocking thread pool)
+    let f2 = task compress(data)
+
+    print f1.value   # awaits the async task
+    print f2.value   # awaits the blocking task
+```
+
+**Rust equivalent**
+```rust
+let f1 = tokio::spawn(async move { fetch(url).await });
+let f2 = tokio::task::spawn_blocking(move || compress(data));
+
+println!("{}", f1.await.unwrap());
+println!("{}", f2.await.unwrap());
+```
+
+The rule is simple:
+
+| Function declared as | `task f(args)` emits |
+|---|---|
+| `task f(…):` (async) | `tokio::spawn(async move { f(args).await })` |
+| `def f(…):` (sync) | `tokio::task::spawn_blocking(move \|\| f(args))` |
+
+> **Note** — block-form `task: { ... }` always uses `tokio::spawn`. Blocks may contain
+> channel sends, actor method calls, or other async operations that look synchronous
+> but require the async runtime.
+>
+> If the block is purely synchronous (no `task` calls, no channel operations) and you
+> want `spawn_blocking`, extract it into a named `def` function — `def` functions cannot
+> call `task` functions, so extracting truly synchronous work is always valid:
+>
+> ```boring
+> def int heavy(): crunch_numbers(1_000_000)   # purely sync — valid def
+>
+> let f = task heavy()   # → spawn_blocking, auto-detected
+> ```
+>
+> If the block contains async calls (`task`, `wait`, `timeout`, channel sends…),
+> `spawn_blocking` is not appropriate — those operations require the async runtime.
+> In that case, `tokio::spawn` is the correct primitive and the block form is correct as-is.
 
 ### Awaiting a future — `.value` and `.wait`
 
@@ -4079,7 +4406,7 @@ task int compute(int n):
 task notify(string msg):
     print "done: {msg}"
 
-task main():
+def main():
     let f = task compute(7)
     let result = f.value        # waits and captures the result: 49
     print result
@@ -4121,7 +4448,7 @@ task int fetch(int a, int b):
 task string greet(string name):
     "hello, {name}"
 
-task main():
+def main():
     let f1 = task fetch(10, 20)
     let f2 = task greet("world")
     print f1.value             # 30
@@ -4142,12 +4469,20 @@ async fn main() {
 }
 ```
 
-### `main` as `task` and/or `throws`
+### `main` — entry point
 
-`main` can carry both qualifiers in any order:
+`main` is always the program entry point. It never needs the `task` qualifier — the compiler
+detects async usage automatically and wraps it in `#[tokio::main]` when needed:
 
 ```boring
-task main() throws:
+def main():                  # plain — sync if body has no async constructs
+    print "hello"
+
+def main():                  # auto-promoted to async — uses task, wait, timeout, etc.
+    let f = task fetch(1, 2)
+    print f.value
+
+def main() throws:           # can also throw
     let f = task fetch(1, 2)
     print f.value
 ```
@@ -4183,7 +4518,7 @@ strategy automatically — no `move` keyword or explicit `.clone()` required.
 task string transform(string s):
     "done: {s}"
 
-task main():
+def main():
     let string label = "hello"      # literal string — copied cheaply into the task
     let f = task transform(label)   # &'static str is Copy, no allocation
     print label                    # hello  (outer binding intact)
@@ -4218,7 +4553,7 @@ struct Worker:
 task Worker.run():
     print "worker {self.name} processing {self.jobs} jobs"
 
-task main():
+def main():
     let w'task = Worker(name = "alice", jobs = 5)
     let f = task w.run()      # Arc::clone(&w) is inserted automatically
     print w.name             # alice — w is still accessible
@@ -4260,7 +4595,7 @@ struct SharedCount:
     req int get():
         self.value
 
-task main():
+def main():
     let c'actor = SharedCount()
     c.inc()             # → c.lock().await.inc()
     c.inc()
@@ -4626,7 +4961,7 @@ No import is required.  All operations are `throws` — call them inside a `thro
 In **async** functions (`task`) the calls use `tokio::fs` with `.await`; in synchronous functions they use `std::fs` (blocking).
 
 ```boring
-task main() throws:
+def main() throws:
     fs.write("out.txt", "hello\nworld")
     let content = fs.read("out.txt")        # string
     let lines   = fs.readLines("out.txt")   # [string]
@@ -4897,8 +5232,15 @@ if let user:
 | `name!(args)`              | `name!(args)` (pass-through)                |
 | `f(args) (p): body`        | `f(args, \|p\| body)` — trailing closure (last arg outside parens) |
 | `f(args) p: body`          | `f(args, \|p\| body)` — trailing closure, no-paren single param |
+| `f(args): body`            | `f(args, \|\| body)` — zero-arg trailing body (colon separator) |
+| `f(args) expr`             | `f(args, \|\| expr)` — zero-arg trailing body (no separator, same line) |
+| `wait(dur)`                | `tokio::time::sleep(dur).await` |
+| `wait(instant)`            | `tokio::time::sleep_until(instant).await` |
+| `timeout(dur): f()`        | `tokio::time::timeout(dur, f()).await?` |
+| `timeout(instant): f()`    | `tokio::time::timeout_at(instant, f()).await?` |
 | `:field` / `:method()`     | `\|x\| x.field` / `\|x\| x.method()`  (closure shorthand) |
-| `.Variant`                 | `Enum::Variant` (enum variant shorthand, type inferred from context) |
+| `.Variant`                 | `Enum::Variant` — enum variant shorthand, type inferred from context |
+| `.method(args)`            | `Type::method(args)` — static method shorthand, type inferred from context |
 | `val \|> f(args)`          | `f(val, args)` (known function) or `val.f(args)` (method) |
 | `for x in stream_fn():` | `while let Some(x) = stream.next().await {` (pinned) |
 | `channel<T>(n)` / `let T tx, rx = channel(n)` | `tokio::sync::mpsc::channel::<T>(n)` |
@@ -5052,7 +5394,7 @@ When a string is captured by a task:
 task string transform(string s):
     "done: {s}"
 
-task main():
+def main():
     let string label = "hello"      # literal — copied cheaply
     let f = task transform(label)   # &'static str is Copy, no allocation
     print label                     # hello

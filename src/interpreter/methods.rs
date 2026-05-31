@@ -7,6 +7,26 @@ use std::fmt;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        // Future<T> method dispatch — .value() and .wait() as method-call syntax.
+        // These mirror the field-access forms `future.value` / `future.wait`.
+        if let Value::Future(inner) = &obj {
+            match method {
+                "value" => {
+                    if !self.task_context {
+                        return Err(err("'value()' requires a task context: the calling function must be marked 'task'", line));
+                    }
+                    return Ok(*inner.clone());
+                }
+                "wait" => {
+                    if !self.task_context {
+                        return Err(err("'wait()' requires a task context: the calling function must be marked 'task'", line));
+                    }
+                    return Ok(Value::Nil);
+                }
+                _ => {}
+            }
+        }
+
         // RustType method dispatch — `HashMap.new()`, `Vec.with_capacity(n)`, etc.
         if let Value::RustType { ref name } = obj {
             // `new` → same as calling the constructor
@@ -130,8 +150,8 @@ impl Interpreter {
 
                     let obj_clone = obj.clone();
                     let result = (|| -> Eval {
-                        // Look in methods
-                        if let Some(fn_decl) = decl.methods.iter().find(|m| m.name == method).cloned() {
+                        // Look in methods — use best-match overload resolution
+                        if let Some(fn_decl) = Self::find_best_method(&decl.methods, method, &args).cloned() {
                             let fn_env = Env::child(Rc::clone(&captured));
                             fn_env.borrow_mut().define_mut("self", obj_clone.clone());
                             let result = self.call_fn(&fn_decl, Rc::clone(&fn_env), args, line, false)?;
@@ -167,7 +187,7 @@ impl Interpreter {
             Value::EnumVariant { ref type_name, .. } => {
                 let ns = self.global.borrow().get(type_name);
                 if let Some(Value::EnumNamespace { methods, captured, .. }) = ns {
-                    let fn_decl = methods.iter().find(|m| m.name == method).cloned();
+                    let fn_decl = Self::find_best_method(&methods, method, &args).cloned();
                     if let Some(fn_decl) = fn_decl {
                         // Use the captured env from the enum's definition site, not self.global.
                         // This mirrors how struct methods work (Struct::captured) and allows
@@ -184,6 +204,61 @@ impl Interpreter {
             other => {
                 Err(err(format!("no method '{}' on {}", method, other.type_name()), line))
             }
+        }
+    }
+
+    /// Find the best-matching overload in `methods` for the given `method_name` and `args`.
+    /// When there is only one candidate with that name, return it directly.
+    /// With multiple candidates, pick the one whose parameter types all match the runtime args.
+    fn find_best_method<'a>(methods: &'a [FnDecl], method_name: &str, args: &[Value]) -> Option<&'a FnDecl> {
+        let candidates: Vec<&FnDecl> = methods.iter().filter(|m| m.name == method_name).collect();
+        if candidates.len() <= 1 {
+            return candidates.into_iter().next();
+        }
+        // Multiple overloads — find best arity + type match
+        for decl in &candidates {
+            let min_args = decl.params.iter().filter(|p| p.default.is_none()).count();
+            let max_args = decl.params.len();
+            if args.len() < min_args || args.len() > max_args {
+                continue;
+            }
+            let all_match = decl.params.iter().zip(args.iter()).all(|(p, v)| {
+                match &p.ty {
+                    None => true,
+                    Some(ty) => Self::value_matches_type_static(v, ty),
+                }
+            });
+            if all_match {
+                return Some(decl);
+            }
+        }
+        // Fallback: return first candidate
+        candidates.into_iter().next()
+    }
+
+    /// Simplified static type check for overload resolution (no self reference needed).
+    fn value_matches_type_static(val: &Value, ty: &crate::ast::Type) -> bool {
+        use crate::ast::Type;
+        match ty {
+            Type::Int    => matches!(val, Value::Int(_)),
+            Type::Uint   => matches!(val, Value::Uint(_)),
+            Type::Float  => matches!(val, Value::Float(_)),
+            Type::Str    => matches!(val, Value::Str(_)),
+            Type::Bool   => matches!(val, Value::Bool(_)),
+            Type::Qualified(inner, _) => Self::value_matches_type_static(val, inner),
+            Type::Named(name) => match name.as_str() {
+                "int"    => matches!(val, Value::Int(_)),
+                "uint"   => matches!(val, Value::Uint(_)),
+                "float"  => matches!(val, Value::Float(_)),
+                "bool"   => matches!(val, Value::Bool(_)),
+                "string" => matches!(val, Value::Str(_)),
+                _ => true, // Unknown named type — don't reject
+            },
+            Type::Optional(_) => true, // Accept any value for optional params
+            Type::Array(_)    => matches!(val, Value::Array(_)),
+            Type::Dict(_, _)  => matches!(val, Value::Dict(_)),
+            Type::Set(_)      => matches!(val, Value::Set(_)),
+            _ => true,
         }
     }
 

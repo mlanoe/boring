@@ -27,12 +27,24 @@ impl Transpiler {
             Stmt::DoWhile(s)        => self.emit_do_while(s),
             Stmt::Loop(s)           => self.emit_loop(s),
             Stmt::Wait(dur, _)      => {
-                let raw = self.emit_expr(dur);
-                // Strip .await suffix — wait takes a Duration, not a future.
-                let d = if let Some(s) = raw.strip_suffix(".await?") { s.to_string() }
+                // Resolve leading-dot syntax: `.fromSecs(1)` → `Duration::from_secs(1)`
+                // Also detect Instant vs Duration for sleep_until vs sleep dispatch.
+                let is_instant = expr_is_instant(dur, &self.instant_vars);
+                let type_prefix = if is_instant { "Instant" } else { "Duration" };
+                let d = if let Some(resolved) = self.resolve_dot_with_type(dur, type_prefix) {
+                    resolved
+                } else {
+                    let raw = self.emit_expr(dur);
+                    // Strip .await suffix — wait takes a Duration, not a future.
+                    if let Some(s) = raw.strip_suffix(".await?") { s.to_string() }
                     else if let Some(s) = raw.strip_suffix(".await") { s.to_string() }
-                    else { raw };
-                self.line(&format!("tokio::time::sleep({}).await;", d));
+                    else { raw }
+                };
+                if is_instant {
+                    self.line(&format!("tokio::time::sleep_until({}).await;", d));
+                } else {
+                    self.line(&format!("tokio::time::sleep({}).await;", d));
+                }
             }
             Stmt::For(s)            => self.emit_for(s),
             Stmt::Guard(s)          => self.emit_guard(s),
@@ -253,6 +265,10 @@ impl Transpiler {
             ExprKind::MethodCall(_, m, _) if m == "firstIndex" || m == "nextIndex")
         {
             self.index_vars.insert(s.name.clone());
+        }
+        // Track variables that hold a std::time::Instant (for sleep_until/timeout_at dispatch).
+        if expr_is_instant(&s.value, &self.instant_vars.clone()) {
+            self.instant_vars.insert(s.name.clone());
         }
         // task(dur): body — always a throws JoinHandle (timeout fires → Elapsed error via ?)
         if let ExprKind::TaskWithTimeout(..) = &s.value.kind {
@@ -683,6 +699,22 @@ impl Transpiler {
                 if let Type::Named(enum_type) = inner.as_ref() {
                     let enum_rust = normalize_type_name(enum_type);
                     return format!("Box::new({}::{})", enum_rust, variant);
+                }
+            }
+        }
+        // Context-aware static method call: `.fromSecs(1)` with type hint `Duration`
+        //   → `Duration::from_secs(1)`.
+        // Pattern: Call(DotIdent(method), args) + declared_ty = Named(TypeName).
+        // camel_to_snake applied so Boring `.fromSecs` → Rust `from_secs`.
+        if let ExprKind::Call(callee, dot_args) = &value.kind {
+            if let ExprKind::DotIdent(method) = &callee.kind {
+                if let Some(Type::Named(type_name)) = declared_ty {
+                    let rust_type = normalize_type_name(type_name);
+                    let rust_method = camel_to_snake(method);
+                    let vals: Vec<String> = dot_args.iter()
+                        .map(|a| self.emit_expr(&a.value))
+                        .collect();
+                    return format!("{}::{}({})", rust_type, rust_method, vals.join(", "));
                 }
             }
         }

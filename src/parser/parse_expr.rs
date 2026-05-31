@@ -533,6 +533,16 @@ impl Parser {
                         } else if self.peek_is_trailing_closure_no_paren() {
                             args = self.parse_trailing_closure_no_paren(args)?;
                             seen_trailing_closure = true;
+                        } else if self.allow_trailing_closure && self.check(&TokenKind::Colon) {
+                            // Bare `:` after call args = zero-arg trailing body.
+                            // e.g. `timeout(Duration.fromSecs(5)): fetch(url)`
+                            args = self.parse_trailing_body(args)?;
+                            seen_trailing_closure = true;
+                        } else if self.peek_is_trailing_body_no_colon() {
+                            // No-colon trailing body: `f(args) expr` — same-line, no separator.
+                            // e.g. `timeout(Duration.fromSecs(5)) fetch(url)`
+                            args = self.parse_trailing_body_no_colon(args)?;
+                            seen_trailing_closure = true;
                         }
                         expr = Expr { kind: ExprKind::MethodCall(Box::new(expr), field, args), line };
                     } else if self.peek_is_trailing_closure_no_paren() {
@@ -580,6 +590,16 @@ impl Parser {
                         // Check for trailing closure after the argument list
                         if self.peek_is_trailing_closure() {
                             args = self.parse_trailing_closure(args)?;
+                            seen_trailing_closure = true;
+                        } else if self.allow_trailing_closure && self.check(&TokenKind::Colon) {
+                            // Bare `:` after call args = zero-arg trailing body.
+                            // e.g. `timeout(Duration.fromSecs(5)): fetch(url)`
+                            args = self.parse_trailing_body(args)?;
+                            seen_trailing_closure = true;
+                        } else if self.peek_is_trailing_body_no_colon() {
+                            // No-colon trailing body: `f(args) expr` — same-line, no separator.
+                            // e.g. `timeout(Duration.fromSecs(5)) fetch(url)`
+                            args = self.parse_trailing_body_no_colon(args)?;
                             seen_trailing_closure = true;
                         }
                         expr = Expr { kind: ExprKind::Call(Box::new(expr), args), line };
@@ -682,7 +702,16 @@ impl Parser {
     }
 
     /// Returns true if the current token position starts a trailing closure: `(params):`.
+    ///
     /// Scans ahead to find the matching `)` and checks if the next token is `:`.
+    /// Crucially, also verifies that the content between `()` looks like a closure
+    /// *parameter list* (identifiers, commas, type annotations) and NOT like function
+    /// *call arguments* (expressions with `.`, `=`, operators, literals, nested calls).
+    ///
+    /// This prevents false positives such as:
+    ///   `timeout(Duration.fromSecs(5)):` — call arg, not closure params  (contains `.`)
+    ///   `timeout(duration = dur):` — labeled call arg, not closure params (contains `=`)
+    ///   `filter(x > 0):` — expression arg, not closure params            (contains `>`)
     pub(crate) fn peek_is_trailing_closure(&self) -> bool {
         if !self.allow_trailing_closure {
             return false;
@@ -694,17 +723,47 @@ impl Parser {
         let mut i = self.pos;
         while i < self.tokens.len() {
             match &self.tokens[i].kind {
-                TokenKind::LParen => depth += 1,
+                TokenKind::LParen => {
+                    if depth > 0 {
+                        // Nested `(` inside the outer `()` means a function call argument
+                        // like `f(getTimer())` — this is call args, not closure params.
+                        return false;
+                    }
+                    depth += 1;
+                }
                 TokenKind::RParen => {
                     depth -= 1;
                     if depth == 0 {
-                        // check next token is Colon
+                        // Verify next token is `:`
                         return matches!(
                             self.tokens.get(i + 1).map(|t| &t.kind),
                             Some(TokenKind::Colon)
                         );
                     }
                 }
+                // ── Tokens that mean "this is a call argument, not a closure param" ──
+                //
+                // Field/method access and labeled arguments:
+                TokenKind::Dot | TokenKind::Eq => return false,
+                // Arithmetic / comparison / logical operators:
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash
+                | TokenKind::Percent | TokenKind::PlusEq | TokenKind::MinusEq
+                | TokenKind::StarEq | TokenKind::SlashEq | TokenKind::PercentEq
+                | TokenKind::EqEq | TokenKind::BangEq | TokenKind::EqEqEq
+                | TokenKind::Lt | TokenKind::Gt | TokenKind::LtEq | TokenKind::GtEq
+                | TokenKind::And | TokenKind::Or
+                | TokenKind::Ampersand | TokenKind::AmpersandEq
+                | TokenKind::Pipe | TokenKind::PipeEq
+                | TokenKind::Caret | TokenKind::CaretEq => return false,
+                // Range operators:
+                TokenKind::DotDot | TokenKind::DotDotEq | TokenKind::DotDotDot => return false,
+                // Literal values (can never be a param name):
+                TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::Bool(_)
+                | TokenKind::Nil => return false,
+                // String / interpolated string literal:
+                TokenKind::Str(_) | TokenKind::StringInterp(_) => return false,
+                // Collection / dict literals:
+                TokenKind::LBracket | TokenKind::LBrace => return false,
                 TokenKind::Newline | TokenKind::Eof => break,
                 _ => {}
             }
@@ -845,6 +904,74 @@ impl Parser {
         };
         existing_args.push(Arg { label: None, value: closure_expr , spread: false});
         Ok(existing_args)
+    }
+
+    /// Parse a bare trailing body `: body` (zero-arg, no param list at all).
+    ///
+    /// Used when a function call is followed directly by `:` without `(params)`,
+    /// e.g. `timeout(Duration.fromSecs(5)): fetch(url)`.
+    /// The body is wrapped in a zero-argument closure and appended to `existing_args`.
+    pub(crate) fn parse_trailing_body(&mut self, mut existing_args: Vec<Arg>) -> Result<Vec<Arg>, ParseError> {
+        let line = self.line();
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_closure_body()?;
+        // Multiline body cannot be chained
+        if matches!(body, ClosureBody::Block(_)) {
+            let mut i = self.pos;
+            while i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Newline | TokenKind::Dedent) {
+                i += 1;
+            }
+            if i < self.tokens.len() && self.tokens[i].kind == TokenKind::Dot {
+                return Err(ParseError::Generic {
+                    line,
+                    msg: "multiline trailing body cannot be chained — use parentheses: f(args, ():\n    body).next()".into(),
+                });
+            }
+        }
+        let (inf_throws, inf_task) = Self::infer_throws_task(&body);
+        let closure_expr = Expr {
+            kind: ExprKind::Closure(vec![], None, body, inf_throws, inf_task),
+            line,
+        };
+        existing_args.push(Arg { label: None, value: closure_expr, spread: false });
+        Ok(existing_args)
+    }
+
+    /// Parse a no-colon trailing body `expr` (zero-arg, no separator at all).
+    ///
+    /// Handles the command-style form `f(args) expr` where `expr` is on the same
+    /// line — analogous to how `task(dur) body` works without a `:`.
+    /// e.g. `timeout(Duration.fromSecs(5)) fetch(url)`
+    ///   → equivalent to `timeout(Duration.fromSecs(5), (): fetch(url))`
+    pub(crate) fn parse_trailing_body_no_colon(&mut self, mut existing_args: Vec<Arg>) -> Result<Vec<Arg>, ParseError> {
+        let line = self.line();
+        let body_expr = self.parse_or()?;
+        let (inf_throws, inf_task) = Self::infer_throws_task(&ClosureBody::Expr(Box::new(body_expr.clone())));
+        let closure_expr = Expr {
+            kind: ExprKind::Closure(vec![], None, ClosureBody::Expr(Box::new(body_expr)), inf_throws, inf_task),
+            line,
+        };
+        existing_args.push(Arg { label: None, value: closure_expr, spread: false });
+        Ok(existing_args)
+    }
+
+    /// Returns true if the current position starts a no-colon trailing body:
+    /// an identifier on the same line (typically a function call), not followed by `:`
+    /// (which would be the no-paren closure param form `ident: body`).
+    ///
+    /// Restricted to `Ident` only to avoid false positives with postfix operators:
+    /// - `LBracket` is subscript access (`arr[0]`), not a trailing body
+    /// - `LParen`   is a chained call or grouping, not a trailing body
+    /// - Literals   are not meaningful trailing bodies
+    pub(crate) fn peek_is_trailing_body_no_colon(&self) -> bool {
+        if !self.allow_trailing_closure { return false; }
+        // Must be an Ident (variable or function call start) — not LBracket, LParen, literals
+        if !matches!(self.tokens.get(self.pos).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+            return false;
+        }
+        // If Ident is followed by `:`, that's the no-paren closure param form — let it win
+        if self.peek_is_trailing_closure_no_paren() { return false; }
+        true
     }
 
     /// Parse a trailing closure `x: body` (no-paren single-param form), append the resulting
@@ -1226,7 +1353,7 @@ impl Parser {
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr { kind: ExprKind::JoinAll(exprs), line })
             }
-            // `get` and `set` are soft keywords — treat as variable references in expressions
+            // Soft keywords — also usable as function names / variable references in expressions.
             TokenKind::Get => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Var("get".to_string()), line })
@@ -1234,6 +1361,12 @@ impl Parser {
             TokenKind::Set => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Var("set".to_string()), line })
+            }
+            // `wait(dur)` — function-call form of the `wait dur` statement.
+            // Allows passing `wait` as a callable and using it in closures.
+            TokenKind::Wait => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("wait".to_string()), line })
             }
             _ => Err(ParseError::Generic {
                 line,

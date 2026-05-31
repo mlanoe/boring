@@ -42,6 +42,90 @@ fn err(msg: impl Into<String>, line: usize) -> Signal {
     Signal::Error(RuntimeError { message: msg.into(), line })
 }
 
+/// Check whether two overload FnDecls conflict and exit with an error if they do.
+/// A conflict exists when there is a call-arity N at which both can be invoked and
+/// all N parameter types are compatible — most commonly triggered by default params:
+///   def fn(int n, string s = "x"):   # also callable as fn(int)
+///   def fn(int n):                    # CONFLICT at arity 1
+fn check_overload_conflict_or_exit(a: &FnDecl, b: &FnDecl, _line: usize) {
+    let a_min = a.params.iter().filter(|p| p.default.is_none()).count();
+    let b_min = b.params.iter().filter(|p| p.default.is_none()).count();
+    let a_max = a.params.len();
+    let b_max = b.params.len();
+    let lo = a_min.max(b_min);
+    let hi = a_max.min(b_max);
+    for n in lo..=hi {
+        let conflict = a.params[..n].iter()
+            .zip(b.params[..n].iter())
+            .all(|(pa, pb)| match (&pa.ty, &pb.ty) {
+                (Some(ta), Some(tb)) => types_match_for_overload(ta, tb),
+                _ => true,
+            });
+        if conflict {
+            let fmt_params = |params: &[crate::ast::Param]| {
+                params.iter().map(|p| {
+                    let ty = p.ty.as_ref().map(fmt_type).unwrap_or_else(|| "_".into());
+                    if p.default.is_some() { format!("{}=default", ty) } else { ty }
+                }).collect::<Vec<_>>().join(", ")
+            };
+            eprintln!(
+                "error: ambiguous overload for '{}' — \
+                 '{}({})' and '{}({})' both match a call with {} argument(s)",
+                a.name, a.name, fmt_params(&a.params),
+                b.name, fmt_params(&b.params), n
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn fmt_type(ty: &Type) -> String {
+    match ty {
+        Type::Int    => "int".into(),
+        Type::Uint   => "uint".into(),
+        Type::Float  => "float".into(),
+        Type::Bool   => "bool".into(),
+        Type::Str    => "string".into(),
+        Type::Void   => "void".into(),
+        Type::Named(n) => n.clone(),
+        Type::Array(inner) => format!("[{}]", fmt_type(inner)),
+        Type::Optional(inner) => format!("{}?", fmt_type(inner)),
+        Type::Qualified(inner, _) => fmt_type(inner),
+        _ => "?".into(),
+    }
+}
+
+fn types_match_for_overload(a: &Type, b: &Type) -> bool {
+    use Type::*;
+    match (a, b) {
+        (Int, Int) | (Uint, Uint) | (Float, Float) | (Bool, Bool) | (Str, Str) => true,
+        (Named(x), Named(y)) => x == y,
+        (Named(n), t) | (t, Named(n)) => match n.as_str() {
+            "int"    => matches!(t, Int),
+            "uint"   => matches!(t, Uint),
+            "float"  => matches!(t, Float),
+            "bool"   => matches!(t, Bool),
+            "string" => matches!(t, Str),
+            _ => false,
+        },
+        (Array(_), Array(_)) | (Dict(..), Dict(..)) | (Set(_), Set(_)) => true,
+        _ => false,
+    }
+}
+
+/// Returns true when two FnDecl have the same parameter signature (same count + same types).
+/// Used by ext block merging to distinguish "override same overload" from "add new overload".
+fn params_same_signature(a: &FnDecl, b: &FnDecl) -> bool {
+    if a.params.len() != b.params.len() { return false; }
+    a.params.iter().zip(b.params.iter()).all(|(pa, pb)| {
+        match (&pa.ty, &pb.ty) {
+            (None, None) => true,
+            (Some(ta), Some(tb)) => types_match_for_overload(ta, tb),
+            _ => false,
+        }
+    })
+}
+
 // ─── "Did you mean?" helpers ─────────────────────────────────────────────────
 
 fn levenshtein(a: &str, b: &str) -> usize {
@@ -166,6 +250,10 @@ pub enum Value {
         decl: FnDecl,
         captured: EnvRef,
     },
+    OverloadedFn {
+        name: String,
+        variants: Vec<(FnDecl, EnvRef)>,
+    },
     Closure {
         params: Vec<Param>,
         body: ClosureBody,
@@ -233,6 +321,7 @@ impl PartialEq for Value {
             (Value::Channel { buf: a, is_sender: s1, .. }, Value::Channel { buf: b, is_sender: s2, .. }) => {
                 Rc::ptr_eq(a, b) && s1 == s2
             }
+            (Value::OverloadedFn { name: a, .. }, Value::OverloadedFn { name: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -265,6 +354,7 @@ impl fmt::Debug for Value {
             Value::RustType { name } => write!(f, "RustType({})", name),
             Value::Index(idx) => write!(f, "Index({:?})", idx),
             Value::Channel { is_sender, .. } => write!(f, "Channel({})", if *is_sender { "sender" } else { "receiver" }),
+            Value::OverloadedFn { name, .. } => write!(f, "OverloadedFn({})", name),
         }
     }
 }
@@ -296,6 +386,7 @@ impl Value {
             Value::RustType { name } => name.clone(),
             Value::Index(idx) => idx.type_name().into(),
             Value::Channel { is_sender, .. } => if *is_sender { "Sender".into() } else { "Receiver".into() },
+            Value::OverloadedFn { name, .. } => name.clone(),
         }
     }
 }
@@ -380,6 +471,7 @@ impl fmt::Display for Value {
             Value::Labeled { label, value } => write!(f, "{}={}", label, value),
             Value::Index(idx) => write!(f, "{}", idx),
             Value::Channel { is_sender, .. } => write!(f, "<{}>", if *is_sender { "sender" } else { "receiver" }),
+            Value::OverloadedFn { name, .. } => write!(f, "<overloaded fn {}>", name),
         }
     }
 }
@@ -1121,6 +1213,17 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+    // wait(Duration) — async pause; no-op in the synchronous interpreter.
+    // In transpiled Rust: tokio::time::sleep(dur).await
+    // Signature: task wait(Duration duration) throws Error.Cancelled
+    e.define("wait", Value::NativeFn {
+        name: "wait".into(),
+        func: |_args, _line| {
+            // Interpreter has no async runtime — treat as instant return.
+            Ok(Value::Nil)
+        },
+    });
+
     // channel(cap) — type-erased form; returns the same (Sender, Receiver) pair as
     // the generic channel<T>(cap) form handled in GenericCall.
     // NativeFn cannot construct Rc values, so channel is handled as a special-case
@@ -1201,6 +1304,12 @@ fn register_stdlib(env: &EnvRef) {
     //   Option                  →  boring uses T? — available for Rust-fluent compat
     //   Result                  →  boring uses throws — available for Rust-fluent compat
     for name in &["Box", "Rc", "Arc", "Option", "Result"] {
+        e.define(name, Value::RustType { name: name.to_string() });
+    }
+    // Time types — opaque in the interpreter (no real async runtime).
+    //   Duration.fromSecs(5)    →  RustType (ignored by wait/timeout stubs)
+    //   Instant.now()           →  RustType (opaque deadline; ignored by timeout stubs)
+    for name in &["Duration", "Instant"] {
         e.define(name, Value::RustType { name: name.to_string() });
     }
 }
@@ -1315,9 +1424,10 @@ impl Interpreter {
         let main_val = self.global.borrow().get("main");
         if let Some(Value::Fn { decl, captured }) = main_val {
             if decl.name == "main" {
-                // Set task context if main is a task function so it can call other task functions.
+                // main() is always treated as a task context — there is no caller that
+                // needs to know, so `def main():` works the same as `task main():`.
                 let prev_task = self.task_context;
-                self.task_context = decl.task;
+                self.task_context = true;
 
                 let result = self.call_fn(&decl, captured, vec![], 0, decl.throws);
 
@@ -1521,8 +1631,34 @@ impl Interpreter {
                             }
                         }
                     } else {
-                        let val = Value::Fn { decl: decl.clone(), captured: Rc::clone(&env) };
-                        env.borrow_mut().define(&decl.name, val);
+                        let new_fn = Value::Fn { decl: decl.clone(), captured: Rc::clone(&env) };
+                        // Check if this name is already defined as a function — if so, upgrade to OverloadedFn.
+                        let existing = env.borrow().vars.get(&decl.name).cloned();
+                        match existing {
+                            Some(Value::Fn { decl: existing_decl, captured: existing_cap }) => {
+                                // Conflict check: default params must not create ambiguous overloads.
+                                check_overload_conflict_or_exit(&existing_decl, decl, 0);
+                                let overloaded = Value::OverloadedFn {
+                                    name: decl.name.clone(),
+                                    variants: vec![
+                                        (existing_decl, existing_cap),
+                                        (decl.clone(), Rc::clone(&env)),
+                                    ],
+                                };
+                                env.borrow_mut().define(&decl.name, overloaded);
+                            }
+                            Some(Value::OverloadedFn { name, mut variants }) => {
+                                // Check the new variant against every existing one.
+                                for (existing_decl, _) in &variants {
+                                    check_overload_conflict_or_exit(existing_decl, decl, 0);
+                                }
+                                variants.push((decl.clone(), Rc::clone(&env)));
+                                env.borrow_mut().define(&decl.name, Value::OverloadedFn { name, variants });
+                            }
+                            _ => {
+                                env.borrow_mut().define(&decl.name, new_fn);
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -1725,7 +1861,9 @@ impl Interpreter {
                 // Handle enum ext
                 if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols, captured: enum_captured } = existing {
                     for m in &decl.methods {
-                        methods.retain(|existing_m| existing_m.name != m.name);
+                        methods.retain(|existing_m| {
+                            existing_m.name != m.name || !params_same_signature(existing_m, m)
+                        });
                         methods.push(m.clone());
                     }
                     for s in &decl.setters {
@@ -1770,9 +1908,13 @@ impl Interpreter {
                     ));
                 };
 
-                // Merge methods (ext overrides existing ones with the same name)
+                // Merge methods: ext overrides an existing method with the SAME signature
+                // (same name + same param types), but preserves methods with the same
+                // name but different param types (overloads).
                 for m in &decl.methods {
-                    struct_decl.methods.retain(|existing_m| existing_m.name != m.name);
+                    struct_decl.methods.retain(|existing_m| {
+                        existing_m.name != m.name || !params_same_signature(existing_m, m)
+                    });
                     struct_decl.methods.push(m.clone());
                 }
                 // Merge setters

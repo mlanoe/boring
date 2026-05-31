@@ -218,7 +218,11 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         // get_at(i) — explicit positional read via opaque index (useful for sets where
         // `set[i]` is not valid Rust syntax for HashSet).
         "getAt"            => ("get_at".into(), None),
-        other              => (other.to_string(), None),
+        // Fallback: convert any unrecognised camelCase method to snake_case so that
+        // Boring callers can write e.g. `path.fileName()` and get `path.file_name()` in Rust.
+        // (User-defined Boring struct methods are guarded before map_method is reached, so
+        // they are unaffected by this conversion.)
+        other              => (camel_to_snake(other), None),
     }
 }
 
@@ -320,6 +324,72 @@ pub(crate) fn escape_str_macro(s: &str) -> String {
     out
 }
 
+
+/// Returns true if `expr` evaluates to a `std::time::Instant`.
+///
+/// Used to choose between `tokio::time::sleep` / `tokio::time::timeout`
+/// (Duration-based) and `tokio::time::sleep_until` / `tokio::time::timeout_at`
+/// (Instant-based).
+///
+/// Detects:
+///   • `Instant.now()`                      — static call on the Instant type
+///   • `Instant.now() + Duration.fromSecs(n)` — BinOp with an Instant on either side
+///   • `deadline` where deadline ∈ instant_vars
+pub(crate) fn expr_is_instant(expr: &Expr, instant_vars: &std::collections::HashSet<String>) -> bool {
+    match &expr.kind {
+        ExprKind::Var(name) => instant_vars.contains(name.as_str()),
+        ExprKind::MethodCall(obj, _, _) | ExprKind::Call(obj, _) => {
+            if let ExprKind::Var(type_name) = &obj.kind {
+                if type_name.as_str() == "Instant" { return true; }
+            }
+            expr_is_instant(obj, instant_vars)
+        }
+        ExprKind::BinOp(_, lhs, rhs) => {
+            expr_is_instant(lhs, instant_vars) || expr_is_instant(rhs, instant_vars)
+        }
+        _ => false,
+    }
+}
+
+/// Convert a camelCase identifier to snake_case.
+///
+/// Used to let Boring callers write `Duration.fromSecs(5)` while the
+/// generated Rust gets the idiomatic `Duration::from_secs(5)`.
+///
+/// Rules:
+///   - An uppercase letter that follows a lowercase letter gets `_` prepended.
+///   - Consecutive uppercase letters (acronyms like "URL", "HTTP") are kept
+///     together with only one `_` before the run.
+///
+/// Examples:
+///   fromSecs      → from_secs
+///   fromMillis    → from_millis
+///   fileName      → file_name
+///   getHTTPClient → get_http_client  (run of uppercase treated as one word)
+pub(crate) fn camel_to_snake(s: &str) -> String {
+    if !s.chars().any(|c| c.is_uppercase()) {
+        return s.to_string(); // already snake_case — fast path
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev_lower = i > 0 && chars[i - 1].is_lowercase();
+            let next_lower = i + 1 < n && chars[i + 1].is_lowercase();
+            // Insert `_` before an uppercase letter when:
+            //   • it follows a lowercase letter (camelCase boundary), OR
+            //   • it's the start of a word within an all-caps run (e.g. "HTTPClient" → "http_client")
+            if prev_lower || (i > 0 && next_lower && !out.ends_with('_')) {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Wrap a boring identifier in `r#` if it's a Rust keyword.
 pub(crate) fn escape_rust_keyword(name: &str) -> String {
@@ -695,6 +765,84 @@ pub(crate) fn expr_has_channel_or_task(expr: &Expr) -> bool {
         }
         ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
         ExprKind::Block(stmts) => body_has_channel_or_task(stmts),
+        _ => false,
+    }
+}
+
+/// Returns true when a `task expr` expression should be spawned with
+/// `tokio::task::spawn_blocking` instead of `tokio::spawn`.
+///
+/// Rules:
+///   • `task syncFn(args)`    — syncFn is NOT in task_fns  → blocking
+///   • `task: { sync block }` — block has no async content  → blocking
+///   • Everything else is treated as async (conservative).
+pub(crate) fn is_blocking_spawn(e: &Expr, task_fns: &std::collections::HashSet<String>) -> bool {
+    match &e.kind {
+        // Function call: blocking iff the callee is a known plain (non-task) function.
+        // `task syncFn(args)` → spawn_blocking
+        // `task asyncFn(args)` → tokio::spawn (asyncFn ∈ task_fns)
+        ExprKind::Call(callee, _) => {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                !task_fns.contains(fn_name.as_str())
+            } else {
+                false // complex callee → conservative: async
+            }
+        }
+        // Blocks: always async — blocks may contain channel sends, actor method calls,
+        // or other async operations that are not visible without the transpiler's full
+        // type-tracking state.  A future refinement could make this smarter by passing
+        // the channel/actor variable sets; for now we default to safe (async).
+        _ => false,
+    }
+}
+
+/// Returns true when any statement in `stmts` calls a function from `task_fns`
+/// (async functions like `wait`, `timeout`, or user-defined `task` functions).
+/// Used to auto-promote `def main():` to async without requiring `task main():`.
+pub(crate) fn body_calls_task_fn(stmts: &[Stmt], task_fns: &std::collections::HashSet<String>) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
+                if expr_calls_task_fn(e, task_fns) { return true; }
+            }
+            Stmt::Let(l) => {
+                if expr_calls_task_fn(&l.value, task_fns) { return true; }
+            }
+            Stmt::If(i) => {
+                if i.branches.iter().any(|(_, b)| body_calls_task_fn(b, task_fns))
+                    || i.else_body.as_deref().map_or(false, |b| body_calls_task_fn(b, task_fns))
+                { return true; }
+            }
+            Stmt::While(w) => { if body_calls_task_fn(&w.body, task_fns) { return true; } }
+            Stmt::For(f)   => { if body_calls_task_fn(&f.body, task_fns) { return true; } }
+            Stmt::Try(t)   => {
+                if body_calls_task_fn(&t.body, task_fns) { return true; }
+                if t.catch_clauses.iter().any(|c| body_calls_task_fn(&c.body, task_fns)) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_calls_task_fn(expr: &Expr, task_fns: &std::collections::HashSet<String>) -> bool {
+    match &expr.kind {
+        ExprKind::Call(callee, args) | ExprKind::MethodCall(callee, _, args) => {
+            if let ExprKind::Var(name) = &callee.kind {
+                if task_fns.contains(name.as_str()) { return true; }
+            }
+            args.iter().any(|a| expr_calls_task_fn(&a.value, task_fns))
+                || expr_calls_task_fn(callee, task_fns)
+        }
+        ExprKind::Task(_) | ExprKind::TaskWithTimeout(..) => true,
+        ExprKind::Block(stmts) => body_calls_task_fn(stmts, task_fns),
+        ExprKind::BinOp(_, l, r) => {
+            expr_calls_task_fn(l, task_fns) || expr_calls_task_fn(r, task_fns)
+        }
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(e) => expr_calls_task_fn(e, task_fns),
+            ClosureBody::Block(stmts) => body_calls_task_fn(stmts, task_fns),
+        },
         _ => false,
     }
 }
@@ -1169,5 +1317,133 @@ pub(crate) fn collect_is_identity_stmts(
             for s in &f.body { collect_is_identity_stmts(s, type_names, out); }
         }
         _ => {}
+    }
+}
+
+// ─── Overload mangling helpers ────────────────────────────────────────────────
+
+/// Convert a Boring type to a short string for name mangling.
+pub(crate) fn mangle_type_name(ty: &Type) -> String {
+    match ty {
+        Type::Int                  => "int".into(),
+        Type::Uint                 => "uint".into(),
+        Type::Float                => "float".into(),
+        Type::Bool                 => "bool".into(),
+        Type::Str                  => "string".into(),
+        Type::Void                 => "void".into(),
+        Type::Array(inner)         => format!("arr_{}", mangle_type_name(inner)),
+        Type::Optional(inner)      => format!("opt_{}", mangle_type_name(inner)),
+        Type::Named(n)             => n.to_lowercase(),
+        Type::Qualified(inner, _)  => mangle_type_name(inner),
+        _                          => "t".into(),
+    }
+}
+
+/// Build the mangled Rust function name for an overloaded function.
+/// `describe(int n)` → `describe__int`
+/// `process(int n, string s)` → `process__int__string`
+pub(crate) fn mangle_overload_name(name: &str, params: &[crate::ast::Param]) -> String {
+    let typed_params: Vec<&Type> = params.iter()
+        .filter_map(|p| p.ty.as_ref())
+        .collect();
+    if typed_params.is_empty() {
+        return name.to_string();
+    }
+    let suffix = typed_params.iter()
+        .map(|t| mangle_type_name(t))
+        .collect::<Vec<_>>()
+        .join("__");
+    format!("{}__{}", name, suffix)
+}
+
+/// Try to infer the Boring type of an expression for overload resolution.
+/// Returns None when the type cannot be determined statically.
+pub(crate) fn infer_overload_expr_type(
+    expr: &Expr,
+    var_types: &std::collections::HashMap<String, crate::ast::Type>,
+    fn_return_types: &std::collections::HashMap<String, crate::ast::Type>,
+) -> Option<Type> {
+    match &expr.kind {
+        ExprKind::Int(_)                              => Some(Type::Int),
+        ExprKind::Float(_)                            => Some(Type::Float),
+        ExprKind::Bool(_)                             => Some(Type::Bool),
+        ExprKind::Nil                                 => Some(Type::Optional(Box::new(Type::Void))),
+        ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Type::Str),
+        ExprKind::Array(_)                            => Some(Type::Array(Box::new(Type::Int))),
+        ExprKind::Var(name) => var_types.get(name.as_str()).cloned(),
+        ExprKind::Call(callee, _) => {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                fn_return_types.get(fn_name.as_str()).cloned()
+            } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Check whether two boring types are compatible (for overload resolution).
+pub(crate) fn types_compatible(expected: &Type, actual: &Type) -> bool {
+    let expected = strip_qual_helper(expected);
+    let actual = strip_qual_helper(actual);
+    match (expected, actual) {
+        (Type::Int,   Type::Int)   => true,
+        (Type::Uint,  Type::Uint)  => true,
+        (Type::Float, Type::Float) => true,
+        (Type::Bool,  Type::Bool)  => true,
+        (Type::Str,   Type::Str)   => true,
+        (Type::Void,  Type::Void)  => true,
+        (Type::Named(a), Type::Named(b)) => a == b,
+        (Type::Named(n), t) | (t, Type::Named(n)) => match n.as_str() {
+            "int"    => matches!(t, Type::Int),
+            "uint"   => matches!(t, Type::Uint),
+            "float"  => matches!(t, Type::Float),
+            "bool"   => matches!(t, Type::Bool),
+            "string" => matches!(t, Type::Str),
+            _ => false,
+        },
+        (Type::Array(a), Type::Array(b)) => types_compatible(a, b),
+        (Type::Optional(a), Type::Optional(b)) => types_compatible(a, b),
+        _ => false,
+    }
+}
+
+/// Check whether two overload declarations conflict — i.e. there exists a call-arity N
+/// such that both can be invoked with N arguments and all N parameter types match.
+///
+/// A function with default parameters can be called with fewer arguments than it declares,
+/// which can create an ambiguous overlap with a shorter overload:
+///
+///   def fn(int n, string s = "x"):  # callable as fn(int) OR fn(int, string)
+///   def fn(int n):                   # callable as fn(int)   ← CONFLICT at arity 1
+///
+/// Returns `Some(arity)` — the conflicting call-arity — or `None` if no conflict.
+pub(crate) fn overloads_conflict(a: &crate::ast::FnDecl, b: &crate::ast::FnDecl) -> Option<usize> {
+    // Minimum and maximum number of arguments each function accepts.
+    let a_min = a.params.iter().filter(|p| p.default.is_none()).count();
+    let b_min = b.params.iter().filter(|p| p.default.is_none()).count();
+    let a_max = a.params.len();
+    let b_max = b.params.len();
+
+    // Iterate every arity that both functions can accept.
+    let lo = a_min.max(b_min);
+    let hi = a_max.min(b_max);
+    for n in lo..=hi {
+        // Check if types at every position are compatible.
+        let conflict = a.params[..n].iter()
+            .zip(b.params[..n].iter())
+            .all(|(pa, pb)| match (&pa.ty, &pb.ty) {
+                (Some(ta), Some(tb)) => types_compatible(ta, tb),
+                _ => true, // untyped param matches anything
+            });
+        if conflict {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn strip_qual_helper(ty: &Type) -> &Type {
+    match ty {
+        Type::Qualified(inner, _) => strip_qual_helper(inner),
+        other => other,
     }
 }

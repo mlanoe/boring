@@ -975,6 +975,32 @@ impl Interpreter {
         }
     }
 
+    /// Simplified type matching for overload resolution — only checks the outermost type.
+    /// Strips qualifiers, handles Named aliases for primitive types.
+    pub(crate) fn value_matches_type_simple(&self, val: &Value, ty: &Type) -> bool {
+        match ty {
+            Type::Int    => matches!(val, Value::Int(_)),
+            Type::Uint   => matches!(val, Value::Uint(_)),
+            Type::Float  => matches!(val, Value::Float(_)),
+            Type::Str    => matches!(val, Value::Str(_)),
+            Type::Bool   => matches!(val, Value::Bool(_)),
+            Type::Optional(_) => matches!(val, Value::Nil) || self.value_matches_type(val, ty),
+            Type::Qualified(inner, _) => self.value_matches_type_simple(val, inner),
+            Type::Named(name) => match name.as_str() {
+                "int"    => matches!(val, Value::Int(_)),
+                "uint"   => matches!(val, Value::Uint(_)),
+                "float"  => matches!(val, Value::Float(_)),
+                "bool"   => matches!(val, Value::Bool(_)),
+                "string" => matches!(val, Value::Str(_)),
+                _ => self.value_matches_type(val, ty),
+            },
+            Type::Array(_) => matches!(val, Value::Array(_)),
+            Type::Dict(_, _) => matches!(val, Value::Dict(_)),
+            Type::Set(_)   => matches!(val, Value::Set(_)),
+            _ => self.value_matches_type(val, ty),
+        }
+    }
+
     /// Returns true if the type named `type_name` conforms to `trait_name`.
     /// Checks (in order): explicit protocols list, conformance blocks,
     /// qualified methods, and structural (all methods present).

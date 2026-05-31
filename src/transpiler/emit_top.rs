@@ -172,20 +172,28 @@ impl Transpiler {
     // ── Functions ─────────────────────────────────────────────────────────────
 
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
-        if f.is_native { return; }
-
-        // Register param types only for top-level functions; methods are called as obj.method()
-        // and must not shadow top-level functions with the same name in fn_sigs.
+        // Register param types for ALL top-level functions — including native stdlib ones
+        // (wait, timeout, …) — so that DotIdent type hints can be resolved at call sites:
+        //   wait(.fromSecs(1))  →  wait(Duration::from_secs(1))
+        // Use `entry().or_insert` so user-defined overloads win over native declarations.
         if self_ty.is_none() {
             let param_types: Vec<Type> = f.params.iter()
                 .filter_map(|p| p.ty.clone())
                 .collect();
-            self.fn_sigs.insert(f.name.clone(), param_types);
-            // Also store param names for reordering named/labeled call arguments.
+            self.fn_sigs.entry(f.name.clone()).or_insert(param_types);
             let param_names: Vec<String> = f.params.iter()
                 .map(|p| p.name.clone())
                 .collect();
-            self.fn_param_names.insert(f.name.clone(), param_names);
+            self.fn_param_names.entry(f.name.clone()).or_insert(param_names);
+        }
+
+        if f.is_native {
+            // Native task functions (wait, timeout, …) must still be in task_fns so that
+            // body_calls_task_fn() detects them and auto-promotes callers to async.
+            if f.task && self_ty.is_none() {
+                self.task_fns.insert(f.name.clone());
+            }
+            return;
         }
 
         // Attributes → #[...]
@@ -212,13 +220,21 @@ impl Transpiler {
                 || body_has_stream_for(&f.body, &self.stream_fns)
                 || body_has_channel_or_task(&f.body)
                 || has_task_fn_param);
-        let is_async = f.task || implicit_async;
+        // For `main` specifically: also promote to async when the body calls any
+        // task function (wait, timeout, user-defined task fns, etc.).
+        // This lets `def main():` work without the `task` qualifier — the compiler
+        // infers async automatically, so there is no caller that needs to know.
+        let main_needs_async = !f.task
+            && f.name == "main"
+            && self_ty.is_none()
+            && body_calls_task_fn(&f.body, &self.task_fns);
+        let is_async = f.task || implicit_async || main_needs_async;
         // Register implicitly-async functions in task_fns so callers can add .await.
-        if implicit_async && self_ty.is_none() {
+        if (implicit_async || main_needs_async) && self_ty.is_none() {
             self.task_fns.insert(f.name.clone());
         }
 
-        // `main() task` (or implicitly async main) needs the tokio runtime entry point.
+        // `main` with any async content needs the tokio runtime entry point.
         if is_async && f.name == "main" && self_ty.is_none() {
             self.line("#[tokio::main]");
         }
@@ -474,9 +490,20 @@ impl Transpiler {
             base_ret
         };
 
+        // Use mangled name for overloaded functions/methods so each variant compiles as a distinct Rust fn.
+        let is_free_overload = self_ty.is_none() && self.overloaded_fn_names.contains(&f.name);
+        let is_method_overload = self_ty.is_some() && {
+            let key = format!("{}::{}", self_ty.unwrap(), f.name);
+            self.overloaded_method_keys.contains(&key)
+        };
+        let rust_fn_name = if is_free_overload || is_method_overload {
+            mangle_overload_name(&f.name, &f.params)
+        } else {
+            f.name.clone()
+        };
         let sig = format!(
             "{}{}fn {}{}({}) -> {}",
-            vis, async_kw, f.name, type_params, all_params, ret_ty
+            vis, async_kw, rust_fn_name, type_params, all_params, ret_ty
         );
 
         // Body

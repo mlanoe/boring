@@ -123,12 +123,13 @@ impl Transpiler {
                 }
                 // Fallback for any uppercase type not registered in the transpiler
                 // (external types like Duration, File, Path, BufReader, etc.):
-                // `Duration.from_millis(100)` → `Duration::from_millis(100)`
+                // `Duration.fromMillis(100)` (Boring camelCase) → `Duration::from_millis(100)` (Rust)
+                let rust_method = camel_to_snake(method);
                 let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                let call = format!("{}::{}({})", type_name, method, vals.join(", "));
+                let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
                 // Known async static methods need .await (+ ? in throws context) in async context
                 const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
-                if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == method) {
+                if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
                     let awaited = format!("{}.await", call);
                     // In throws/try context, propagate the Result error with `?`
                     return if self.in_throws || self.in_try_body {
@@ -452,6 +453,26 @@ impl Transpiler {
         }
 
         // ── Array methods that need special emit (closures / block exprs) ─────
+        // `future.value()` and `future.wait()` — method-call syntax for task results.
+        // Equivalent to the field-access forms `future.value` / `future.wait`.
+        // Delegate to emit_expr for the Field variant, which has the full
+        // throws-aware .await.unwrap()? logic.
+        if (method == "value" || method == "wait") && args.is_empty() {
+            if let ExprKind::Var(v) = &obj.kind {
+                if self.task_vars.contains(v.as_str())
+                    || self.join_handle_vars.contains(v.as_str())
+                {
+                    // Delegate to emit_expr(Field(obj, method)) which has the full
+                    // throws-aware .await.unwrap()? / .await.unwrap() logic.
+                    let field_expr = crate::ast::Expr {
+                        kind: crate::ast::ExprKind::Field(Box::new(obj.clone()), method.to_string()),
+                        line: obj.line,
+                    };
+                    return self.emit_expr(&field_expr);
+                }
+            }
+        }
+
         // `joined(sep)` — join a Vec<Arc<str>> with a separator.
         // `Vec<Arc<str>>::join()` needs &str as separator (Arc<str> is emitted by the
         // standard arg-coercion path). We deref with &* to obtain &str.
@@ -658,12 +679,13 @@ impl Transpiler {
                 "fs" => "std::fs".to_string(),
                 other => other.to_string(),
             };
+            let rust_method_name = camel_to_snake(method);
             let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-            let call = format!("{}::{}({})", obj_qualified, method, vals.join(", "));
+            let call = format!("{}::{}({})", obj_qualified, rust_method_name, vals.join(", "));
             // Known tokio async static methods (File::open, File::create, etc.) need .await
             const TOKIO_ASYNC_STATIC: &[&str] = &["open", "create", "connect", "bind"];
 
-            if self.in_async && TOKIO_ASYNC_STATIC.iter().any(|&m| m == method) {
+            if self.in_async && TOKIO_ASYNC_STATIC.iter().any(|&m| m == rust_method_name) {
                 return format!("{}.await", call);
             }
             return call;
@@ -683,7 +705,35 @@ impl Transpiler {
         let receiver_is_dict_var = matches!(&obj.kind, ExprKind::Var(v)
             if self.dict_vars.contains(v.as_str()));
         let (rust_method, extra_wrap) = if is_user_struct_receiver {
-            (method.to_string(), None)
+            // Check for overloaded struct methods — pick the best-matching overload.
+            let struct_type_opt = match &obj.kind {
+                ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+                _ => None,
+            };
+            let overloaded_name = struct_type_opt.and_then(|type_name| {
+                let key = format!("{}::{}", type_name, method);
+                if !self.overloaded_method_keys.contains(&key) { return None; }
+                let overloads = self.struct_method_overload_decls.get(&key)?;
+                // Find best matching overload by arity and inferred arg types
+                let chosen = overloads.iter().find(|decl| {
+                    let min_a = decl.params.iter().filter(|p| p.default.is_none()).count();
+                    let max_a = decl.params.len();
+                    if args.len() < min_a || args.len() > max_a { return false; }
+                    decl.params.iter().zip(args.iter()).all(|(p, a)| {
+                        match &p.ty {
+                            None => true,
+                            Some(expected) => {
+                                match infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types) {
+                                    Some(actual) => types_compatible(expected, &actual),
+                                    None => true,
+                                }
+                            }
+                        }
+                    })
+                }).or_else(|| overloads.first());
+                chosen.map(|decl| mangle_overload_name(method, &decl.params))
+            });
+            (overloaded_name.unwrap_or_else(|| method.to_string()), None)
         } else if receiver_is_set_var && method == "add" {
             ("insert".to_string(), None)
         } else if receiver_is_dict_var && (method == "contains" || method == "containsKey" || method == "has") {
@@ -808,6 +858,69 @@ impl Transpiler {
         } else {
             call
         }
+    }
+
+    /// Resolve a leading-dot expression with a known type name.
+    ///
+    /// Returns `Some(String)` when `expr` is a dot-call or dot-ident:
+    ///   `.fromSecs(5)` + `"Duration"` → `Some("Duration::from_secs(5)")`
+    ///   `.Expired`     + `"Error"`    → `Some("Error::Expired")`
+    ///
+    /// Returns `None` for all other expressions — callers fall back to `emit_expr`.
+    pub(crate) fn resolve_dot_with_type(&self, expr: &Expr, type_name: &str) -> Option<String> {
+        match &expr.kind {
+            // `.method(args)` → `TypeName::method(args)`
+            ExprKind::Call(callee, dot_args) => {
+                if let ExprKind::DotIdent(method) = &callee.kind {
+                    let rust_method = camel_to_snake(method);
+                    let vals: Vec<String> = dot_args.iter()
+                        .map(|a| self.resolve_dot_with_type(&a.value, type_name)
+                            .unwrap_or_else(|| self.emit_expr(&a.value)))
+                        .collect();
+                    return Some(format!("{}::{}({})", type_name, rust_method, vals.join(", ")));
+                }
+                None
+            }
+            // `.Variant` → `TypeName::Variant`
+            ExprKind::DotIdent(variant) => {
+                Some(format!("{}::{}", type_name, variant))
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit an expression with an optional type hint.
+    ///
+    /// When the hint is a `Named` type and the expression is a leading-dot call
+    /// or ident (`.fromSecs(5)`, `.Expired`), the type prefix is prepended:
+    ///   `.fromSecs(5)`  + `Duration`  →  `Duration::from_secs(5)`
+    ///   `.Expired`      + `Error`     →  `Error::Expired`
+    /// Falls back to `emit_expr` when no hint applies.
+    pub(crate) fn emit_with_type_hint(&self, expr: &Expr, hint: Option<&Type>) -> String {
+        if let Some(ty) = hint {
+            // Resolve the named type (including aliases)
+            let type_name = match ty {
+                Type::Named(n) => Some(normalize_type_name(n)),
+                _ => None,
+            };
+            if let Some(rust_type) = type_name {
+                // .method(args) → TypeName::method(args)
+                if let ExprKind::Call(callee, call_args) = &expr.kind {
+                    if let ExprKind::DotIdent(method) = &callee.kind {
+                        let rust_method = camel_to_snake(method);
+                        let vals: Vec<String> = call_args.iter()
+                            .map(|a| self.emit_expr(&a.value))
+                            .collect();
+                        return format!("{}::{}({})", rust_type, rust_method, vals.join(", "));
+                    }
+                }
+                // .Variant → TypeName::Variant
+                if let ExprKind::DotIdent(variant) = &expr.kind {
+                    return format!("{}::{}", rust_type, variant);
+                }
+            }
+        }
+        self.emit_expr(expr)
     }
 
     pub(crate) fn emit_args(&self, args: &[Arg]) -> String {
@@ -1152,6 +1265,7 @@ impl Transpiler {
             vec_vars: self.vec_vars.clone(),
             set_vars: self.set_vars.clone(),
             dict_vars: self.dict_vars.clone(),
+            instant_vars: self.instant_vars.clone(),
             chars_vars: self.chars_vars.clone(),
             fn_return_types: self.fn_return_types.clone(),
             index_vars: self.index_vars.clone(),
@@ -1249,6 +1363,10 @@ impl Transpiler {
             in_cancellable_fn: self.in_cancellable_fn,
             uses_tokio_util: std::rc::Rc::clone(&self.uses_tokio_util),
             uses_serde: std::rc::Rc::clone(&self.uses_serde),
+            fn_overload_decls: self.fn_overload_decls.clone(),
+            overloaded_fn_names: self.overloaded_fn_names.clone(),
+            struct_method_overload_decls: self.struct_method_overload_decls.clone(),
+            overloaded_method_keys: self.overloaded_method_keys.clone(),
         }
     }
 
