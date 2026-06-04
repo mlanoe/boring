@@ -26,8 +26,16 @@ impl Interpreter {
                 if let Some(ty) = &s.ty {
                     self.check_type_has_qualifier(ty, s.line)?;
                 }
-                Self::check_no_owned_extract(&s.value, &env, s.line)?;
-                let val = self.eval_expr(&s.value, Rc::clone(&env))?;
+                // Deferred initialisation (`let v` / `var v` without `= expr`).
+                // Always define as mutable so the first assignment in a branch is allowed.
+                // The transpiler emits `let v;` / `let mut v;` and Rust enforces single-assignment.
+                if s.value.is_none() {
+                    target_env.borrow_mut().define_mut(&s.name, Value::Uninitialized);
+                    return Ok(());
+                }
+                let s_val = s.value.as_ref().unwrap();
+                Self::check_no_owned_extract(s_val, &env, s.line)?;
+                let val = self.eval_expr(s_val, Rc::clone(&env))?;
                 // Apply type coercion if annotation is present (e.g. Int literal → Uint).
                 // Also try implicit user-defined `as T:` conversion when the value doesn't
                 // directly match the annotation (e.g. `let Animal a = dog`).
@@ -82,7 +90,7 @@ impl Interpreter {
                     // Owned-element collection: track + invalidate sources
                     if Self::type_has_owned_elems(&resolved) {
                         target_env.borrow_mut().mark_owned_collection(&s.name);
-                        Self::invalidate_owned_collection_sources(&resolved, &s.value, &target_env);
+                        Self::invalidate_owned_collection_sources(&resolved, s_val, &target_env);
                     }
                     // Task-safe qualifier: mark var so task captures are allowed
                     if Self::type_annotation_is_task_safe(&resolved) {
@@ -98,7 +106,7 @@ impl Interpreter {
                 // the right semantics; the `'` is a no-op and the source is NOT invalidated.
                 if s.is_move && !val_is_copy {
                     target_env.borrow_mut().mark_owned_var(&s.name);
-                    if let ExprKind::Var(src) = &s.value.kind {
+                    if let ExprKind::Var(src) = &s_val.kind {
                         env.borrow_mut().invalidate(src);
                     }
                 }
@@ -727,7 +735,7 @@ impl Interpreter {
     pub(crate) fn is_inferred_type(ty: &Type) -> bool {
         match ty {
             Type::TypeParam(_) => true,
-            Type::Any(_) => true,
+            Type::Dyn(_) | Type::Impl(_) => true,
             Type::Named(s) if s == "_" => true,
             Type::Qualified(inner, _) => Self::is_inferred_type(inner),
             Type::Optional(inner) => Self::is_inferred_type(inner),
@@ -833,7 +841,8 @@ impl Interpreter {
                     format!("{}<{}>", name, args_str)
                 }
             }
-            Type::Any(inner) => format!("any {}", Self::display_type(inner)),
+            Type::Dyn(inner) => format!("dyn {}", Self::display_type(inner)),
+            Type::Impl(inner) => format!("impl {}", Self::display_type(inner)),
             Type::SelfAssoc(name) => name.clone(),
             Type::AssocOf(base, assoc) => {
                 let base_str = match base.as_ref() {
@@ -915,7 +924,7 @@ impl Interpreter {
             },
             Type::Fn(..) => matches!(val, Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }),
             // impl Trait — transparent at runtime, match against the inner trait type
-            Type::Any(inner) => self.value_matches_type(val, inner),
+            Type::Dyn(inner) | Type::Impl(inner) => self.value_matches_type(val, inner),
             Type::Generic(name, args) => match name.as_str() {
                 // Result<T, E> — accept any Ok(v) / Err(e) EnumVariant; the inner
                 // types are not checked at runtime (erasure), only the wrapper name.
@@ -1493,7 +1502,7 @@ impl Interpreter {
         for s in stmts {
             match s {
                 Stmt::Expr(e) => Self::collect_vars_expr(e, out),
-                Stmt::Let(l) => Self::collect_vars_expr(&l.value, out),
+                Stmt::Let(l) => { if let Some(v) = &l.value { Self::collect_vars_expr(v, out); } }
                 Stmt::Return(r) => { if let Some(e) = &r.value { Self::collect_vars_expr(e, out); } }
                 Stmt::Throw(t) => { if let Some(e) = &t.value { Self::collect_vars_expr(e, out); } }
                 Stmt::If(i) => {

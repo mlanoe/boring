@@ -135,6 +135,18 @@ impl Transpiler {
         // different type (e.g. `let d = Doubler()` then `let d'weak = c`) doesn't inherit
         // the old struct type and incorrectly suppress `.await.unwrap()` on `.value`.
         self.var_struct_types.remove(&s.name);
+        // `let v` / `var v` — deferred initialisation: emit `let v;` and let Rust
+        // enforce definite assignment via its own control-flow analysis.
+        if s.value.is_none() {
+            let kw = if s.mutable { "let mut" } else { "let" };
+            if let Some(ty) = &s.ty {
+                self.line(&format!("{} {}: {};", kw, s.name, self.emit_type(ty)));
+            } else {
+                self.line(&format!("{} {};", kw, s.name));
+            }
+            return;
+        }
+        let s_value = s.value.as_ref().unwrap();
         // T'actor → Arc<tokio::sync::Mutex<T>>.
         // All field reads/writes and method calls on this variable will go through .lock().await.
         // Works with both `let` and `var` — the actor qualifier alone triggers mutex semantics.
@@ -142,12 +154,12 @@ impl Transpiler {
             if Self::is_mutex_binding(s.mutable, ty) {
                 if let Some(inner) = Self::mutex_inner(ty) {
                     let mutex_ty = self.emit_mutex_type(inner);
-                    let raw_val = self.emit_let_value(Some(inner), &s.value);
+                    let raw_val = self.emit_let_value(Some(inner), s_value);
                     let init = format!("Arc::new(tokio::sync::Mutex::new({}))", raw_val);
                     self.var_mutex_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     // Track struct type for getter dispatch, same as the general path below.
-                    if let ExprKind::Call(callee, _) = &s.value.kind {
+                    if let ExprKind::Call(callee, _) = &s_value.kind {
                         if let ExprKind::Var(type_name) = &callee.kind {
                             if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                                 && self.struct_fields.contains_key(type_name.as_str())
@@ -164,12 +176,12 @@ impl Transpiler {
             if Self::is_rwlock_binding(s.mutable, ty) {
                 if let Some(inner) = Self::rwlock_inner(ty) {
                     let rwlock_ty = self.emit_rwlock_type(inner);
-                    let raw_val = self.emit_let_value(Some(inner), &s.value);
+                    let raw_val = self.emit_let_value(Some(inner), s_value);
                     let init = format!("Arc::new(tokio::sync::RwLock::new({}))", raw_val);
                     self.var_rwlock_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     // Track struct type for getter dispatch.
-                    if let ExprKind::Call(callee, _) = &s.value.kind {
+                    if let ExprKind::Call(callee, _) = &s_value.kind {
                         if let ExprKind::Var(type_name) = &callee.kind {
                             if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                                 && self.struct_fields.contains_key(type_name.as_str())
@@ -188,17 +200,17 @@ impl Transpiler {
         let vis = if s.is_pub { "pub " } else { "" };
         // Mutable string bindings must be Arc<str> (not &str) so they can be reassigned
         let is_mutable_string_lit = s.mutable && s.ty.is_none()
-            && matches!(&s.value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
+            && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
         let is_mutable_string_ty = s.mutable
             && matches!(&s.ty, Some(Type::Named(n)) if n == "string" || n == "str")
-            && matches!(&s.value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
+            && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
         let (ty, val) = if is_mutable_string_lit || is_mutable_string_ty {
             (
                 ": Arc<str>".to_string(),
-                self.emit_expr_owned(&s.value),
+                self.emit_expr_owned(s_value),
             )
         } else {
-            let val = self.emit_let_value(s.ty.as_ref(), &s.value);
+            let val = self.emit_let_value(s.ty.as_ref(), s_value);
             // Inferred T'weak binding (bare `d'weak`, no compound qualifier): if the value
             // is Arc::downgrade(...), the annotation must be std::sync::Weak (not rc::Weak).
             // Compound forms like `Resource'task'weak` are handled correctly by emit_type.
@@ -211,7 +223,7 @@ impl Transpiler {
                 } else {
                     format!(": {}", self.emit_type(ty))
                 }
-            } else if matches!(&s.value.kind, ExprKind::Nil) {
+            } else if matches!(&s_value.kind, ExprKind::Nil) {
                 // `let x = nil` — Rust can't infer the type of `None`; add `Option<()>`.
                 ": Option<()>".to_string()
             } else if val == "None" {
@@ -230,7 +242,7 @@ impl Transpiler {
         // Also track immutable string literal vars so string methods (parseInt, indexOf, slice…)
         // can dispatch correctly even without an explicit type annotation.
         let is_immutable_string_lit = !s.mutable && s.ty.is_none()
-            && matches!(&s.value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
+            && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
         if is_immutable_string_lit {
             self.string_vars.insert(s.name.clone());
         }
@@ -261,23 +273,23 @@ impl Transpiler {
             self.dict_vars.insert(s.name.clone());
         }
         // Track variables that hold an opaque collection index (from firstIndex/nextIndex).
-        if matches!(&s.value.kind,
+        if matches!(&s_value.kind,
             ExprKind::MethodCall(_, m, _) if m == "firstIndex" || m == "nextIndex")
         {
             self.index_vars.insert(s.name.clone());
         }
         // Track variables that hold a std::time::Instant (for sleep_until/timeout_at dispatch).
-        if expr_is_instant(&s.value, &self.instant_vars.clone()) {
+        if expr_is_instant(s_value, &self.instant_vars.clone()) {
             self.instant_vars.insert(s.name.clone());
         }
         // task(dur): body — always a throws JoinHandle (timeout fires → Elapsed error via ?)
-        if let ExprKind::TaskWithTimeout(..) = &s.value.kind {
+        if let ExprKind::TaskWithTimeout(..) = &s_value.kind {
             self.task_vars.insert(s.name.clone());
             self.join_handle_vars.insert(s.name.clone());
             self.throws_join_handle_vars.insert(s.name.clone());
         }
         // Track variables that hold a spawned future (task expr) — .value → .await.unwrap()
-        if let ExprKind::Task(inner) = &s.value.kind {
+        if let ExprKind::Task(inner) = &s_value.kind {
             self.task_vars.insert(s.name.clone());
             self.join_handle_vars.insert(s.name.clone());
             // If the spawned function is `throws`, the JoinHandle wraps Result<T, BoringError>.
@@ -338,7 +350,7 @@ impl Transpiler {
         }
         // Track variables bound to user struct constructors for getter dispatch on non-self receivers.
         // Also handle type method calls: `let c2 = Counter2.zero()` → c2 is Counter2.
-        if let ExprKind::MethodCall(callee_obj, _, _) = &s.value.kind {
+        if let ExprKind::MethodCall(callee_obj, _, _) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee_obj.kind {
                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     if self.struct_fields.contains_key(type_name.as_str()) {
@@ -347,7 +359,7 @@ impl Transpiler {
                 }
             }
         }
-        if let ExprKind::Call(callee, _) = &s.value.kind {
+        if let ExprKind::Call(callee, _) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee.kind {
                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     if self.struct_fields.contains_key(type_name.as_str()) {
@@ -369,11 +381,11 @@ impl Transpiler {
             }
         }
         // When value is nil (None), the var is always optional.
-        if matches!(&s.value.kind, ExprKind::Nil) {
+        if matches!(&s_value.kind, ExprKind::Nil) {
             self.optional_vars.insert(s.name.clone());
         }
         // Optional chaining produces Option<T> — mark the variable as optional.
-        if s.ty.is_none() && matches!(&s.value.kind,
+        if s.ty.is_none() && matches!(&s_value.kind,
             ExprKind::OptionalField(..) | ExprKind::OptionalMethodCall(..))
         {
             self.optional_vars.insert(s.name.clone());
@@ -381,7 +393,7 @@ impl Transpiler {
         // When value is a string-to-numeric cast (returns Option<T> with .ok()), mark as optional.
         // Also mark int/float-to-bool as optional (always returns None in Boring).
         if s.ty.is_none() {
-            if let ExprKind::Cast(src_expr, dst_ty) = &s.value.kind {
+            if let ExprKind::Cast(src_expr, dst_ty) = &s_value.kind {
                 let src_is_str = matches!(&src_expr.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                     || matches!(&src_expr.kind, ExprKind::Var(v) if self.string_vars.contains(v.as_str()));
                 let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Float)
@@ -407,7 +419,7 @@ impl Transpiler {
         // `let c = Color.Green` or `let c = Color::Green(...)` → var_types["c"] = Named("Color")
         // This is used for match subject enum inference.
         if s.ty.is_none() {
-            let inferred_enum = match &s.value.kind {
+            let inferred_enum = match &s_value.kind {
                 ExprKind::Field(obj, variant) => {
                     if let ExprKind::Var(type_name) = &obj.kind {
                         let key = format!("{}::{}", type_name, variant);
@@ -477,13 +489,13 @@ impl Transpiler {
         // Then `Rc::ptr_eq(&cdb, &cda)` correctly returns true/false.
         if self.rc_identity_vars.contains(&s.name) && !s.is_static {
             // If value is a struct constructor call, wrap in Rc::new.
-            let is_struct_ctor = if let ExprKind::Call(callee, _) = &s.value.kind {
+            let is_struct_ctor = if let ExprKind::Call(callee, _) = &s_value.kind {
                 if let ExprKind::Var(type_name) = &callee.kind {
                     self.struct_fields.contains_key(type_name.as_str())
                 } else { false }
             } else { false };
             // If value is a simple variable reference to another rc_identity var, clone as Rc.
-            let is_rc_var_ref = if let ExprKind::Var(vname) = &s.value.kind {
+            let is_rc_var_ref = if let ExprKind::Var(vname) = &s_value.kind {
                 self.rc_identity_vars.contains(vname.as_str())
             } else { false };
 
@@ -494,7 +506,7 @@ impl Transpiler {
                 return;
             } else if is_rc_var_ref {
                 // Clone the Rc (shares pointer), not a deep clone.
-                let src_var = if let ExprKind::Var(v) = &s.value.kind { v.clone() } else { val.clone() };
+                let src_var = if let ExprKind::Var(v) = &s_value.kind { v.clone() } else { val.clone() };
                 let rc_val = format!("{}.clone()", src_var);
                 self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, rc_val));
                 self.var_types.insert(s.name.clone(), Type::Named(format!("Rc<ref>")));

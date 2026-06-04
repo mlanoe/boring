@@ -43,3 +43,8 @@ let origin = Point(x = 0.0, y = 0.0)
 let shifted = Point(..origin, x = 5.0)
 print shifted.x
 print shifted.y
+
+# Explicit override after spread wins (left-to-right, last value wins)
+let c = Config(..defaults, host = "override")
+print c.host   # "override" — explicit after spread takes precedence
+print c.port   # 8080 — from defaults

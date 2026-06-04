@@ -441,7 +441,7 @@ impl Transpiler {
         let base_ret = f.return_ty.as_ref()
             .map(|t| {
                 // If the return type is a known trait name, use `impl TraitName` (static dispatch).
-                // Dynamic dispatch is expressed explicitly with `any Trait` → Box<dyn Trait>.
+                // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
                 if let Type::Named(n) = t {
                     if self.trait_method_names.contains_key(n.as_str()) {
                         return format!("impl {}", normalize_type_name(n));
@@ -1171,7 +1171,8 @@ impl Transpiler {
                 // Fallback: emit `StructName::AssocName` (valid when defined in a trait impl).
                 format!("{}::{}", normalize_type_name(&base_name), assoc)
             }
-            Type::Any(inner) => format!("Box<dyn {}>", self.emit_type(inner)),
+            Type::Impl(inner) => format!("impl {}", self.emit_type(inner)),
+            Type::Dyn(inner) => format!("Box<dyn {}>", self.emit_type(inner)),
             Type::Fn(ret, params, throws, task, req) => {
                 let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");
                 let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or_else(|| "()".into());

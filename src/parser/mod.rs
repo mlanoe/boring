@@ -76,11 +76,15 @@ struct Parser {
     /// Must be disabled in condition/iterable positions where `):`  would be
     /// misread as a trailing-closure intro instead of call + body separator.
     pub(crate) allow_trailing_closure: bool,
+    /// Depth of open parentheses in the current expression context.
+    /// When > 0, newlines inside binary operations are skipped — Python-style
+    /// implicit line continuation inside `(...)`.
+    pub(crate) paren_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true }
+        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true, paren_depth: 0 }
     }
 
     fn peek(&self) -> &TokenKind {
@@ -174,11 +178,11 @@ impl Parser {
 
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut items = Vec::new();
-        self.skip_newlines();
+        self.skip_newlines_and_indent(); // also skip Dedent at top level (from multi-line parens)
         while !self.check(&TokenKind::Eof) {
             let item = self.parse_item(false)?;
             items.push(item);
-            self.skip_newlines();
+            self.skip_newlines_and_indent();
         }
         Ok(Program { items })
     }
@@ -309,8 +313,13 @@ impl Parser {
         // Quick guard: the current token must look like the start of a type.
         let starts_type = match self.peek() {
             TokenKind::Ident(s) => Self::is_type_name(s),
-            TokenKind::Void | TokenKind::Any => true,
+            TokenKind::Void => true,
             TokenKind::LBracket | TokenKind::LBrace | TokenKind::LParen => true,
+            // `<Trait>` impl shorthand: `<` Ident `>` followed by function name
+            TokenKind::Lt => {
+                matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Gt))
+            }
             _ => false,
         };
         if !starts_type { return false; }
@@ -428,7 +437,7 @@ impl Parser {
             Some(TokenKind::Def) | Some(TokenKind::Req) => false,
             Some(TokenKind::Ident(s)) => Self::is_type_name(s),
             // keyword types that can appear as return types
-            Some(TokenKind::Void) | Some(TokenKind::Any) => true,
+            Some(TokenKind::Void) => true,
             Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => true, // [T] / {T} return type
             Some(TokenKind::LParen) => {
                 // `task (T, U) f():` — tuple return type → function declaration.
@@ -519,7 +528,7 @@ impl Parser {
         match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
             Some(TokenKind::Def) | Some(TokenKind::Req) => false,
             Some(TokenKind::Ident(s)) => Self::is_type_name(s),
-            Some(TokenKind::Void) | Some(TokenKind::Any) => true,
+            Some(TokenKind::Void) => true,
             Some(TokenKind::LBracket) | Some(TokenKind::LBrace) => true,
             Some(TokenKind::LParen) => true,
             _ => false,
@@ -655,10 +664,14 @@ impl Parser {
                 next_pos < self.tokens.len()
                     && matches!(&self.tokens[next_pos].kind, TokenKind::Ident(_) | TokenKind::Set)
             }
-            TokenKind::Any => true,
             TokenKind::LParen => true,
             TokenKind::LBracket => true,
             TokenKind::LBrace => true,
+            // `<Trait>` impl-shorthand: `<` Ident `>` followed by a param name
+            TokenKind::Lt => {
+                matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Gt))
+            }
             _ => false,
         };
 
@@ -876,26 +889,6 @@ impl Parser {
                 if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::DotDotDot) { i += 1; }
                 i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
             }
-            // `any Trait name`
-            TokenKind::Any => {
-                let mut i = self.pos + 1;
-                if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_)) {
-                    i += 1;
-                    if i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Lt) {
-                        i += 1;
-                        let mut depth = 1usize;
-                        while i < self.tokens.len() && depth > 0 {
-                            match &self.tokens[i].kind {
-                                TokenKind::Lt => depth += 1,
-                                TokenKind::Gt => depth -= 1,
-                                _ => {}
-                            }
-                            i += 1;
-                        }
-                    }
-                }
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
-            }
             // Array type `[...]` or Set/Dict type `{...}` before a param name
             TokenKind::LBracket | TokenKind::LBrace => {
                 let open = &self.peek().clone();
@@ -984,6 +977,13 @@ impl Parser {
                     }
                 }
                 matches!(self.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+            }
+            // `<Trait>` impl-shorthand: `< Ident >` where Ident is a PascalCase type name.
+            // Must verify Gt follows, then an Ident (param name).
+            TokenKind::Lt => {
+                matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Gt))
+                && matches!(self.tokens.get(self.pos + 3).map(|t| &t.kind), Some(TokenKind::Ident(_)))
             }
             _ => false,
         }
@@ -1494,7 +1494,14 @@ impl Parser {
         let name = self.expect_ident()?;
         let (type_params, _) = self.parse_type_params();
         let mut parents = Vec::new();
-        if matches!(self.peek(), TokenKind::Colon) {
+        // `trait B as A:` or `trait B as A, C:` — supertrait(s) via `as`
+        if self.eat(&TokenKind::As) {
+            parents.push(self.expect_ident()?);
+            while self.eat(&TokenKind::Comma) {
+                parents.push(self.expect_ident()?);
+            }
+            self.expect(&TokenKind::Colon)?;
+        } else if matches!(self.peek(), TokenKind::Colon) {
             let after_colon = self.tokens.get(self.pos + 1).map(|t| &t.kind);
             if matches!(after_colon, Some(TokenKind::Ident(_))) {
                 self.advance(); // eat ':'
@@ -1643,7 +1650,6 @@ impl Parser {
             TokenKind::Loop      => Some("loop".into()),
             TokenKind::Do        => Some("do".into()),
             TokenKind::Mod       => Some("mod".into()),
-            TokenKind::Any       => Some("any".into()),
             TokenKind::Static    => Some("static".into()),
             TokenKind::Native    => Some("native".into()),
             TokenKind::Transient => Some("transient".into()),
@@ -1678,7 +1684,7 @@ pub(crate) fn collect_const_params_from_type(ty: &crate::ast::Type, type_params:
             for arg in args { collect_const_params_from_type(arg, type_params); }
         }
         Type::Array(inner) | Type::Set(inner) | Type::Optional(inner)
-        | Type::Any(inner) | Type::Qualified(inner, _) => {
+        | Type::Dyn(inner) | Type::Impl(inner) | Type::Qualified(inner, _) => {
             collect_const_params_from_type(inner, type_params);
         }
         Type::Dict(k, v) => {

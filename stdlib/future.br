@@ -12,10 +12,25 @@
 # Future<T> — handle to a concurrently-running task.
 #
 # Methods require a `task` context (the calling function must be `task`).
-#   f.value — await and return the result (property syntax, no parens)
-#   f.wait  — await and discard the result (property syntax, no parens)
-#   f.value() — same, method syntax
-#   f.wait()  — same, method syntax
+#
+# No-timeout forms (property or method syntax):
+#   f.value    — await and return the result
+#   f.wait     — await and discard the result
+#   f.value()  — same, method syntax
+#   f.wait()   — same, method syntax
+#
+# Timeout forms — throws Error.Expired if the deadline elapses.
+# The underlying task keeps running; only the caller unblocks with an error.
+#   f.value(Duration.fromSecs(5))        — await with relative timeout → T
+#   f.value(Instant.now() + dur)         — await until absolute deadline → T
+#   f.wait(Duration.fromSecs(5))         — await/discard with relative timeout
+#   f.wait(Instant.now() + dur)          — await/discard until absolute deadline
+#
+# Transpilation:
+#   f.value(dur)   → tokio::time::timeout(dur, handle).await??
+#   f.value(inst)  → tokio::time::timeout_at(inst, handle).await??
+#   f.wait(dur)    → tokio::time::timeout(dur, handle).await??; (result dropped)
+#   f.wait(inst)   → tokio::time::timeout_at(inst, handle).await??; (result dropped)
 
 struct Future<T>: native
 
@@ -27,3 +42,19 @@ ext Future<T>:
     # Await the task and discard its result (fire-and-wait).
     # Equivalent to the property form `f.wait` (no parens).
     task req wait() throws: native
+
+    # Await with a relative timeout. Throws Error.Expired if the duration
+    # elapses, or any error the task itself threw. The task keeps running.
+    task req T value(Duration timeout) throws: native
+
+    # Await until an absolute deadline. Throws Error.Expired if the instant
+    # passes, or any error the task itself threw. The task keeps running.
+    task req T value(Instant deadline) throws: native
+
+    # Await and discard with a relative timeout. Throws Error.Expired if the
+    # duration elapses, or any error the task itself threw. The task keeps running.
+    task req wait(Duration timeout) throws: native
+
+    # Await and discard until an absolute deadline. Throws Error.Expired if the
+    # instant passes, or any error the task itself threw. The task keeps running.
+    task req wait(Instant deadline) throws: native

@@ -212,6 +212,9 @@ impl fmt::Display for IndexValue {
 
 #[derive(Clone)]
 pub enum Value {
+    /// Declared but not yet assigned: `let v` / `var v` without `= expr`.
+    /// Any read of this value before assignment is a runtime error.
+    Uninitialized,
     Nil,
     /// Unit value returned by void functions — distinct from Nil.
     Void,
@@ -330,6 +333,7 @@ impl PartialEq for Value {
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Uninitialized => write!(f, "Uninitialized"),
             Value::Nil => write!(f, "Nil"),
             Value::Void => write!(f, "Void"),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
@@ -362,6 +366,7 @@ impl fmt::Debug for Value {
 impl Value {
     pub fn type_name(&self) -> String {
         match self {
+            Value::Uninitialized => "Uninitialized".into(),
             Value::Nil => "Nil".into(),
             Value::Void => "Void".into(),
             Value::Bool(_) => "Bool".into(),
@@ -394,6 +399,7 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Uninitialized => write!(f, "<uninitialized>"),
             Value::Nil => write!(f, "nil"),
             Value::Void => write!(f, "void"),
             Value::Bool(b) => write!(f, "{}", b),
@@ -1773,8 +1779,14 @@ impl Interpreter {
                 if let Some(ty) = &stmt.ty {
                     self.check_type_has_qualifier(ty, stmt.line)?;
                 }
-                Self::check_no_owned_extract(&stmt.value, &env, stmt.line)?;
-                let val = self.eval_expr(&stmt.value, Rc::clone(&env))?;
+                // Deferred initialisation (`let v` / `var v` without `= expr`).
+                // Always mutable so the first branch assignment is allowed.
+                let Some(stmt_value) = &stmt.value else {
+                    env.borrow_mut().define_mut(&stmt.name, Value::Uninitialized);
+                    return Ok(());
+                };
+                Self::check_no_owned_extract(stmt_value, &env, stmt.line)?;
+                let val = self.eval_expr(stmt_value, Rc::clone(&env))?;
                 // Apply type coercion if annotation is present (e.g. Int literal → Uint).
                 // Also try implicit user-defined `as T:` conversion when needed.
                 let val = if let Some(ty) = &stmt.ty {
@@ -1818,7 +1830,7 @@ impl Interpreter {
                     let resolved = self.resolve_type(ty);
                     if Self::type_has_owned_elems(&resolved) {
                         env.borrow_mut().mark_owned_collection(&stmt.name);
-                        Self::invalidate_owned_collection_sources(&resolved, &stmt.value, &env);
+                        Self::invalidate_owned_collection_sources(&resolved, stmt_value, &env);
                     }
                     if Self::type_annotation_is_task_safe(&resolved) {
                         env.borrow_mut().mark_task_safe(&stmt.name);
@@ -1831,8 +1843,10 @@ impl Interpreter {
                 // For T'copy / T'const / T'shared / T'local, the source is NOT invalidated.
                 if stmt.is_move && !val_is_copy {
                     env.borrow_mut().mark_owned_var(&stmt.name);
-                    if let ExprKind::Var(src) = &stmt.value.kind {
-                        env.borrow_mut().invalidate(src);
+                    if let Some(v) = &stmt.value {
+                        if let ExprKind::Var(src) = &v.kind {
+                            env.borrow_mut().invalidate(src.as_str());
+                        }
                     }
                 }
                 Ok(())

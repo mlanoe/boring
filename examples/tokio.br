@@ -13,18 +13,18 @@ enum AppError:
     InvalidData
 
 task def [User] read_users_from_file_blocking(string path) throws:
-    sleep(Duration.fromMillis(500))
+    wait(Duration.fromMillis(500))
     let users = [User(id = 1, name = "Alice", email = "alice@example.com"), User(id = 2, name = "Bob", email = "bob@example.com")]
     users
 
 task def [User] fetch_users_from_api(string url) throws AppError:
-    sleep(Duration.fromMillis(300))
+    wait(Duration.fromMillis(300))
     let users = [User(id = 3, name = "Charlie", email = "charlie@example.com"), User(id = 4, name = "Diana", email = "diana@example.com")]
     users
 
 task def User process_user(User user):
     info "Traitement de l'utilisateur: {user.name}"
-    sleep(Duration.fromMillis(200))
+    wait(Duration.fromMillis(200))
     User(id = user.id, name = user.name.upper(), email = user.email)
 
 task def void main():
@@ -56,7 +56,7 @@ task def void main():
             error "Erreur API: {error}"
 
     task:
-        sleep(Duration.fromMillis(100))
+        wait(Duration.fromMillis(100))
         for user in shared_users:
             try:
                 user_sender.send(user)
@@ -66,7 +66,7 @@ task def void main():
     task:
         for user in user_receiver:
             try:
-                let processed_user = timeout(Duration.fromSecs(1), task process_user(user))
+                let processed_user = timeout(Duration.fromSecs(1)): process_user(user)
                 shared_processed_users.append(processed_user)
                 info "Utilisateur traité avec succès"
             catch:
@@ -74,13 +74,13 @@ task def void main():
 
     task:
         loop:
-            sleep(Duration.fromMillis(500))
+            wait(Duration.fromMillis(500))
             info "📊 Utilisateurs traités: {len(shared_processed_users)}"
 
     let shutdown_sender, shutdown_receiver = channel<void>(1)
 
     task:
-        sleep(Duration.fromSecs(5))
+        wait(Duration.fromSecs(5))
         info "🛑 Arrêt du programme..."
         shutdown_sender.send(void)
 

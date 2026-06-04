@@ -813,7 +813,7 @@ impl Parser {
         match s {
             Stmt::Throw(_) => (true, false),
             Stmt::Expr(e) => Self::scan_expr_throws_task(e),
-            Stmt::Let(l) => Self::scan_expr_throws_task(&l.value),
+            Stmt::Let(l) => l.value.as_ref().map(|e| Self::scan_expr_throws_task(e)).unwrap_or((false, false)),
             Stmt::Return(r) => r.value.as_ref().map(|e| Self::scan_expr_throws_task(e)).unwrap_or((false, false)),
             Stmt::If(i) => {
                 let mut t = false; let mut k = false;

@@ -1382,7 +1382,7 @@ impl Transpiler {
             Stmt::Let(s) => {
                 let kw = if s.mutable { "let mut" } else { "let" };
                 let ty = s.ty.as_ref().map(|t| format!(": {}", self.emit_type(t))).unwrap_or_default();
-                format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(&s.value))
+                format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(s.value.as_ref().unwrap()))
             }
             Stmt::If(s) => {
                 // Emit if-expression inline using a sub-transpiler

@@ -3,6 +3,7 @@
 # Notation: `?` = optional, `*` = zero or more, `+` = one or more, `ε` = empty
 # Layout tokens (INDENT / DEDENT / NEWLINE) are produced by the lexer.
 # Blank lines and `#`-comments are discarded before parsing.
+# Inside `(…)`, newlines between tokens are ignored (implicit line continuation).
 
 # ─── Top-level ───────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ attr_arg        ::= IDENT ("=" (IDENT | STRING | INT))?
 use_decl        ::= "use" mod_path ".*" NEWLINE                          # glob — all pub items
                   | "use" mod_path "." IDENT ("," IDENT)* NEWLINE        # selective import
                   | "use" IDENT "as" type NEWLINE                         # type alias
+                  | "use" IDENT "<" IDENT ("," IDENT)* ">" "as" type NEWLINE  # generic type alias
 
 mod_path        ::= IDENT ("." IDENT)*
 # The last dot-segment is always an item name, never a module name.
@@ -83,6 +85,7 @@ mod_path        ::= IDENT ("." IDENT)*
 #   Vec / VecDeque      →  [T]    (Array)
 #   string              →  Arc<String>
 #   Box, Rc, Arc, Option, Result  →  opaque
+#   Duration, Instant   →  opaque time types (see wait / timeout)
 #
 # ── Rust stdlib ───────────────────────────────────────────────────────────────
 #   use std.fs.File                  — single Rust type
@@ -97,8 +100,9 @@ mod_path        ::= IDENT ("." IDENT)*
 # Omitting the return type means void (inferred from body).
 # Qualified name `Type.name` marks struct/trait method implementations.
 # Modifiers `throws` and `task` may appear in either order after `)`.
+# `def` is ALWAYS optional when a return type is explicitly present.
 
-fn_decl         ::= def_decl | req_decl | stream_decl
+fn_decl         ::= def_decl | req_decl | stream_decl | shorthand_fn_decl
 
 # `def` — mutating method (`&mut self`); callable on `var` bindings only.
 def_decl        ::= attr* "def" type? (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
@@ -111,6 +115,11 @@ req_decl        ::= attr* "req" type? (IDENT ".")? IDENT type_params? "(" param_
 stream_decl     ::= attr* ("stream" "def" | "stream" "req") type? (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
                   | attr* "stream" type (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body  # shorthand: stream int next():
 
+# Shorthand — `def` omitted when a return type is present.
+#   string greet(string name):   ≡   def string greet(string name):
+#   <Drawable> scale(float n):   ≡   def <Drawable> scale(float n):
+shorthand_fn_decl ::= attr* type (IDENT ".")? IDENT type_params? "(" param_list? ")" modifier* ":" fn_body
+
 modifier        ::= "throws" IDENT?  # may raise; optional concrete error type: `throws MyError`
                   | "task"            # async; may block / runs concurrently
 
@@ -119,19 +128,28 @@ fn_body         ::= expr NEWLINE                     # inline — implicit retur
                   | "pass" NEWLINE                   # empty body placeholder
                   | "native" NEWLINE                 # implemented by the runtime
 
-# param_list supports both single-line and multi-line forms:
-#   single-line:  def int add(int a, int b) throws:
-#   multi-line:   def void process(
-#                     TotoList'actor todo_list,
-#                     Metrics'shared metrics,
-#                     uint count,
-#                 ) task:
+# ── Function overloading ─────────────────────────────────────────────────────
+#
+# Multiple functions with the same name but different parameter types are allowed.
+# The compiler selects the right variant by matching argument types at the call site.
+#
+#   string describe(int n):    "int: {n}"
+#   string describe(string s): "str: {s}"
+#   describe(42)               → "int: 42"
+#
+# Overloads also work for struct methods (inline or in `ext` blocks, same file).
+# Cross-file overloads are NOT supported.
+# Conflict: a function with default params creating an ambiguous arity overlap
+# with another overload is a compile-time error.
+#
+# Name mangling in transpiled Rust: describe__int, describe__string, etc.
+
+# param_list supports both single-line and multi-line forms.
 # Newlines and indentation inside `(…)` are ignored.
 param_list      ::= param ("," param)* ","?   # trailing comma allowed
 
 # Type comes before the parameter name.
 # A function-typed parameter has param types after the name: `int f(int, int)`.
-# `any Trait` parameters accept any type implementing Trait.
 param           ::= "var"? type IDENT "(" type_list? ")"   # function-typed parameter
                   | "var"? type IDENT ("=" expr)?           # typed parameter, optional default
                   | "var"? IDENT                            # untyped, inferred
@@ -188,6 +206,12 @@ field_decl      ::= "pub"? "transient"? ("let" | "var")? type IDENT ("=" expr)? 
 #
 # Either form may delegate to another `init` via `init(…)` as a statement.
 #
+# Newlines and indentation inside `(…)` are ignored — multi-line param lists are supported:
+#   init(
+#       string host = "localhost",
+#       int port = 8080,
+#   )
+#
 # Pattern 1 — no `init`: struct built with named-field syntax `Point(x=1, y=2)`.
 # Pattern 2 — `init` without body: constructor with no computation needed.
 # Pattern 3 — `init` with body: computed construction (validation, derived fields, etc.).
@@ -195,7 +219,7 @@ field_decl      ::= "pub"? "transient"? ("let" | "var")? type IDENT ("=" expr)? 
 init_decl       ::= "init" "(" init_param_list? ")" NEWLINE          # no body — params = fields
                   | "init" "(" init_param_list? ")" ":" fn_body       # with body — params = locals
 
-init_param_list ::= init_param ("," init_param)*
+init_param_list ::= init_param ("," init_param)* ","?    # trailing comma allowed
 
 init_param      ::= "pub" "var"? type IDENT ("=" expr)?   # pub [mutable] field / pub local
                   | "var"? type IDENT ("=" expr)?          # [mutable] private field / local
@@ -229,13 +253,21 @@ enum_member     ::= "pub"? fn_decl
                   | as_decl
                   | conformance_decl
 
-trait_decl      ::= "trait" IDENT ("as" type_list)? ":" NEWLINE INDENT
-                      fn_signature+
+# Supertraits: `trait B as A:` means any type implementing B must also implement A.
+# Multiple supertraits: `trait C as A, B:`
+# Default method bodies are allowed inside trait declarations.
+trait_decl      ::= "trait" IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
+                      trait_member+
                     DEDENT
+
+trait_member    ::= fn_signature           # abstract method (no body)
+                  | fn_decl               # default method (with body)
+                  | type_method_sig        # type-level method
+                  | assoc_type_decl        # associated type
 
 fn_signature    ::= ("def" | "req") type? IDENT "(" param_list? ")" modifier* NEWLINE
 
-ext_decl        ::= "ext" IDENT ("as" type_list)? ":" NEWLINE INDENT
+ext_decl        ::= "ext" IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
                       ext_member+
                     DEDENT
 
@@ -265,6 +297,7 @@ stmt            ::= let_stmt
                   | for_stmt
                   | try_stmt
                   | guard_stmt
+                  | wait_stmt
                   | fn_decl
                   | struct_decl    # local struct — invisible outside the enclosing function
                   | enum_decl      # local enum  — invisible outside the enclosing function
@@ -274,6 +307,15 @@ stmt            ::= let_stmt
 
 # Local type alias — `use` inside a function/method body.
 alias_stmt      ::= "use" IDENT "as" type NEWLINE
+
+# `wait` — pause the current async task.
+# Accepts Duration (relative delay) or Instant (absolute deadline).
+# The transpiler auto-selects sleep vs sleep_until based on the argument type.
+#
+#   wait .fromSecs(5)             → tokio::time::sleep(Duration::from_secs(5)).await
+#   wait(Instant.now() + dur)     → tokio::time::sleep_until(instant).await
+#
+wait_stmt       ::= "wait" expr NEWLINE
 
 # Type annotation comes BEFORE the name (consistent with params and fields).
 # `pub` makes the binding visible outside its module.
@@ -341,8 +383,16 @@ for_stmt        ::= "for" IDENT ("," IDENT)* "in" expr ":" block   # with bindin
 try_stmt        ::= "try" ":" block
                     catch_clause*
 
-catch_clause    ::= "catch" (IDENT ("," IDENT)*)? ":" block
-                  # empty type list = catch-all; `error` is bound automatically
+# catch_type_list absent = catch-all; `error` is bound to the original thrown value.
+# Single type: `error` has the native type of the thrown value:
+#   catch String: → error: string    catch Int: → error: int
+#   catch Float:  → error: float     catch Bool: → error: bool
+# Multi-type: body is duplicated per type arm, each with its native error type:
+#   catch String, Int: …  → one arm per matched type, error is string/int respectively
+# Named enum: `error: &MyEnum` — typed value for variant dispatch.
+catch_clause    ::= "catch" catch_type_list? ":" block
+
+catch_type_list ::= IDENT ("," IDENT)*    # one or more type names
 
 guard_stmt      ::= "guard" guard_cond "else" ":"? (stmt | block)
 guard_cond      ::= cond_clause ("," cond_clause)*   # let-bindings bind in ENCLOSING scope
@@ -357,11 +407,28 @@ guard_cond      ::= cond_clause ("," cond_clause)*   # let-bindings bind in ENCL
 #   and
 #   not
 #   == != < > <= >= is is not
+#   | ^ &  (bitwise)
+#   << >>  (shift)
 #   + -
 #   * / %
-#   unary: - not
-#   postfix: call, field, index, as, ?.
+#   unary: - not ~
+#   postfix: call, trailing-closure, field, index, as, ?.
 #   primary
+#
+# ── Multi-line expressions ────────────────────────────────────────────────────
+#
+# Inside parentheses `(…)`, newlines between binary operators are ignored,
+# enabling Python-style implicit line continuation:
+#
+#   let total = (revenue        # operator at start of continuation (PEP 8 preferred)
+#       + costs
+#       - adjustments)
+#
+#   let valid = (a > 0          # boolean expressions
+#       and b > 0
+#       and result != nil)
+#
+# Outside parentheses, newlines always terminate an expression.
 
 expr            ::= try_else_expr
                   | else_expr
@@ -387,25 +454,62 @@ cmp_op          ::= "==" | "!=" | "<" | ">" | "<=" | ">="
 
 add_expr        ::= mul_expr (("+" | "-") mul_expr)*
 mul_expr        ::= unary_expr (("*" | "/" | "%") unary_expr)*
-unary_expr      ::= "-" unary_expr | postfix_expr
+unary_expr      ::= "-" unary_expr | "~" unary_expr | postfix_expr
 postfix_expr    ::= primary_expr postfix*
 
-postfix         ::= "(" arg_list? ")"             # call
-                  | "." IDENT                     # field access
-                  | "?." IDENT                    # optional chaining — field
-                  | "." IDENT "(" arg_list? ")"   # method call
-                  | "?." IDENT "(" arg_list? ")"  # optional chaining — method
-                  | "[" expr "]"                  # index
-                  | "as" type                     # cast
+# ── Trailing closures ─────────────────────────────────────────────────────────
+#
+# When the last argument is a closure, it may be written OUTSIDE the call parens.
+# All forms append the closure as the final argument.
+#
+# Standard (params in parens):
+#   f(args) (p, q): body       → f(args, |p, q| body)
+#
+# No-paren single param:
+#   f(args) p: body            → f(args, |p| body)
+#
+# Zero-arg forms (three equivalent styles):
+#   f(args, (): body)          → explicit inside parens
+#   f(args): body              → colon after call args (unambiguous when args contain . or operators)
+#   f(args) expr               → no separator, same line only
+#
+# `do` keyword — always unambiguous, resolves identifier ambiguity:
+#   f(args) do (p, q): body    → f(args, |p, q| body)   multi-param with parens
+#   f(args) do p, q: body      → f(args, |p, q| body)   multi-param without parens
+#   f(args) do p: body         → f(args, |p| body)       single param
+#   f(args) do: body           → f(args, || body)         zero-arg with colon
+#   f(args) do expr            → f(args, || expr)          zero-arg without colon
+#
+# Ambiguity: `f(name): body` — when ALL args are bare identifiers, `(name):` is
+# parsed as a closure parameter list, not call args. Use `do` to disambiguate:
+#   timeout(deadline) do: fetch()    ← deadline is a call arg, not a closure param
 
-arg_list        ::= arg ("," arg)*
-arg             ::= (IDENT "=")? expr             # labeled or positional
+trailing_closure ::= "(" param_list? ")" modifier* ":" fn_body   # (p, q): body
+                   | IDENT ":" fn_body                            # p: body
+                   | ":" fn_body                                  # : body  (zero-arg)
+                   | "do" "(" param_list? ")" modifier* ":" fn_body   # do (p, q): body
+                   | "do" IDENT ("," IDENT)* ":" fn_body              # do p, q: body
+                   | "do" ":" fn_body                                  # do: body
+                   | "do" expr                                         # do expr (same-line)
+
+postfix         ::= "(" arg_list? ")" trailing_closure?  # call with optional trailing closure
+                  | trailing_closure                      # trailing closure, no regular args
+                  | "." IDENT                            # field access
+                  | "?." IDENT                           # optional chaining — field
+                  | "." IDENT "(" arg_list? ")"          # method call
+                  | "?." IDENT "(" arg_list? ")"         # optional chaining — method
+                  | "[" expr "]"                         # index
+                  | "as" type                            # cast
+
+arg_list        ::= arg ("," arg)* ","?    # trailing comma allowed
+arg             ::= (IDENT "=")? expr      # labeled or positional
 
 primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | IDENT
-                  | "." IDENT               # dot-prefix enum shorthand: `.Red`
+                  | "." IDENT "(" arg_list? ")"   # leading-dot static method: .fromSecs(5) — type inferred
+                  | "." IDENT                     # leading-dot enum/field shorthand: .Red, .North
                   | "self"
-                  | "(" expr ")"            # grouping or tuple
+                  | "(" expr ")"            # grouping — newlines inside ignored
                   | "(" expr "," expr ("," expr)* ")"   # tuple
                   | "[" (expr ("," expr)*)? "]"          # array
                   | "{" "}"                              # empty set  `{}`  → HashSet::new()
@@ -433,9 +537,18 @@ closure_expr    ::= "(" param_list? ")" modifier* ":" fn_body  # standard: (x, y
 if_expr         ::= if_stmt                 # if used as expression — all branches must yield a value
 match_expr      ::= match_stmt              # match used as expression
 
-# task as expression — creates a Future
-task_expr       ::= "task" ":"? expr        # inline: `task fetch()` or `task: fetch()`
-                  | "task" ":" block        # block: last expression is the Future value
+# task as expression — creates a Future.
+# Auto-detects spawn_blocking: `task syncFn(args)` where syncFn is not declared `task`
+# emits tokio::task::spawn_blocking; `task asyncFn(args)` emits tokio::spawn.
+#
+# Timeout forms: first arg may be Duration (relative) or Instant (absolute deadline).
+# The transpiler auto-selects timeout vs timeout_at based on the argument type.
+#
+#   task .fromSecs(5)): body    → tokio::time::timeout(Duration::from_secs(5), …)
+#   task(deadline): body        → tokio::time::timeout_at(instant, …)  [if deadline is Instant]
+task_expr       ::= "task" ":"? expr                     # inline: task fetch() or task: fetch()
+                  | "task" ":" block                     # block: last expression is the Future value
+                  | "task" "(" expr ")" trailing_closure # with timeout; trailing closure is the body
                   # `return` is NOT allowed inside task blocks.
 
 # `do:` scoped block — executes once; own scope + own defer frame.
@@ -491,17 +604,29 @@ fmt_spec        ::= [+]? [0]? [0-9]* ("." [0-9]+)? ("f" | "d" | "e" | "%" | "x" 
 pattern         ::= "_"                                          # wildcard
                   | IDENT                                        # bind
                   | IDENT "(" pattern ("," pattern)* ")"        # enum variant with fields
+                  | "." IDENT                                    # leading-dot enum shorthand: .North
+                  | "Some" "(" pattern ")"                       # optional unwrap
                   | lit_pattern
                   | "nil"
 
 lit_pattern     ::= INT | FLOAT | STRING | BOOL
 
 # ─── Types ───────────────────────────────────────────────────────────────────
+#
+# <Trait> vs bare Trait:
+#   <Drawable>   — impl Trait (static dispatch, function determines the concrete type)
+#                  → emits `impl Drawable` in Rust
+#   Drawable     — Box<dyn Trait> (dynamic dispatch, heap allocated)
+#                  → emits `Box<dyn Drawable>` in Rust
+#
+# Use <Trait> for the common single-use case.
+# Use bare Trait only when different concrete types must be stored/returned at runtime.
+# Use explicit `T fn<T as Trait>(T x)` when the same type must appear in multiple positions.
 
 type            ::= primitive_type
                   | numeric_type
-                  | "any" type                         # existential type → dyn Trait in Rust
-                  | IDENT                              # named: struct, enum, trait
+                  | "<" IDENT ">"                      # impl Trait shorthand: <Drawable>
+                  | IDENT                              # named type; if a trait → Box<dyn Trait>
                   | IDENT "<" type_list ">"            # generic: Stack<Int>
                   | type "?"                           # optional: T?  →  Option<T>
                   | "[" type "]"                       # array: [T]  →  Vec<T>
@@ -511,6 +636,8 @@ type            ::= primitive_type
                   | type "(" type_list? ")"            # function type: ReturnType (ParamTypes)
                   | type "'" owner_qual                # heap / smart-pointer ownership qualifier
                   | type "&" borrow_qual               # borrow / reference qualifier
+
+# Note: `any Trait` (old syntax) is deprecated. Use bare `Trait` for Box<dyn> and `<Trait>` for impl.
 
 # ─── Ownership qualifiers ─────────────────────────────────────────────────────
 #
@@ -524,19 +651,20 @@ type            ::= primitive_type
 #   T'copy          →  T (Copy)            copied on every use: int, float, bool, …
 #   T'const         →  &'static T          compile-time constant / string literal
 #   T'auto          →  Rc<T>              ref-counted, single-thread
-#   T'shared        →  Arc<T>             ref-counted, thread-safe (read-only sharing)
+#   T'task          →  Arc<T>             ref-counted, thread-safe (read-only sharing)
 #   T'actor         →  Arc<Mutex<T>>      shared mutable; all accesses auto-locked
+#   T'guard         →  Arc<RwLock<T>>     concurrent reads, exclusive writes
 #   T'weak          →  Weak<T>            non-owning; .upgrade() → T'auto?
 #
 # Built-in type aliases (use these instead of explicit qualifiers):
 #   str    →  String'const  →  &str
-#   string →  String'shared →  Arc<String>
+#   string →  String'task   →  Arc<str>
 #   int    →  Int'copy      →  i64
 #   uint   →  Uint'copy     →  u64
 #   float  →  Float'copy    →  f64
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "heap" | "copy" | "const" | "auto" | "shared" | "actor" | "weak" | "stack"
+owner_qual      ::= "heap" | "copy" | "const" | "auto" | "task" | "actor" | "guard" | "weak" | "stack"
                   | ε          # bare tick → same as 'heap (Box<T>)
 
 # ─── Borrow qualifiers ────────────────────────────────────────────────────────
@@ -549,36 +677,21 @@ owner_qual      ::= "heap" | "copy" | "const" | "auto" | "shared" | "actor" | "w
 #   var T&          →  &mut T         mutable borrow (`var` prefix absorbed into type)
 #   T&heap          →  &Box<T>        borrow a heap value
 #   T&auto          →  &Rc<T>         borrow an Rc (use sparingly)
-#   T&shared        →  &Arc<T>        borrow an Arc (use sparingly)
+#   T&task          →  &Arc<T>        borrow an Arc (use sparingly)
 #   T&option        →  &Option<T>     borrow an optional
 #   T&weak          →  &Weak<T>       borrow a weak pointer
 #   T&a             →  &'a T          borrow with explicit lifetime 'a
 #
-# Postfix forms (T'qual& or T'qual&a) — natural with type aliases:
-#   T'heap&         →  &Box<T>        same as T&heap
-#   T'auto&         →  &Rc<T>         same as T&auto
-#   T'shared&       →  &Arc<T>        same as T&shared
-#   T'heap&a        →  &'a Box<T>     heap borrow with lifetime
-#   T'shared&a      →  &'a Arc<T>     shared borrow with lifetime
-#
-# Alias pattern: `use NodeRef as Node'shared;  def walk(NodeRef& n):`
+# Alias pattern: `use NodeRef as Node'task;  def walk(NodeRef& n):`
 # → the `&` after an alias resolves to the smart-pointer borrow of the aliased type.
 #
 # Lifetime letter is a single ASCII lowercase letter: a, b, c, …
 # Declared automatically from usage — no explicit `<&a>` needed in function signatures.
 # `<&a>` is only written explicitly in struct/enum type params.
 #
-borrow_qual     ::= "heap" | "auto" | "shared" | "actor" | "option" | "weak"
+borrow_qual     ::= "heap" | "auto" | "task" | "actor" | "guard" | "option" | "weak"
                   | LOWERCASE_IDENT    # single lowercase letter → lifetime: &a, &b, …
                   | ε                  # plain borrow &T
-
-# Coercion rules (implicit conversions at call sites):
-#   T'const  →  anywhere              (literals feed anywhere)
-#   T'shared →  T                     (&*arc — deref coercion)
-#   T'auto   →  T                     (&*rc  — deref coercion)
-#   T'       →  T                     (&*box — deref coercion)
-#   T'auto and T'shared are parallel branches — not interconvertible once aliased.
-#   T'weak must be upgraded: .upgrade() → T'auto?
 
 primitive_type  ::= "Int" | "Float" | "String" | "Bool" | "Nil" | "Never"
 
@@ -626,35 +739,11 @@ type_list       ::= type ("," type)*
 #   try: block  else expr           # block  / inline
 #   try: block  else: block         # block  / block
 #
-# In every case `error` is bound in the else scope to the **original thrown value**
-# (not a string conversion).  This means `match error:` works with typed enum variants:
-#
-#   try risky() else:
-#       match error:
-#           AppError.NotFound:          "not found"
-#           AppError.InvalidInput(msg): "invalid: {msg}"
-#           _:                          "other: {error}"
-#
-# String interpolation `{error}` still works for any thrown value because every
-# Boring value has a Display representation.
-# The only exception is `try? expr` which has no else body (no `error` binding).
-#
-#   let value = try:
-#       let x = compute()
-#       transform(x)
-#   else:
-#       print "failed: " + error
-#       0
-#
-# Inline try with block else (error still available):
-#   let value = try risky() else:
-#       log("failed: " + error)
-#       -1
-#
-# Block try with inline else:
-#   let value = try:
-#       risky()
-#   else -1
+# `error` is bound with its NATIVE TYPE in typed catch clauses:
+#   catch String: → error: string    catch Int:   → error: int
+#   catch Float:  → error: float     catch Bool:  → error: bool
+#   catch MyEnum: → error: &MyEnum   (typed enum, for variant dispatch)
+# Multi-type catch: body is duplicated per type arm, each with its native error type.
 #
 # `error` is automatically bound in each catch clause body and in `try:…else:` else blocks.
 # Typed catch: `catch NetworkError, TimeoutError:` matches by type name.
@@ -666,15 +755,26 @@ type_list       ::= type ("," type)*
 # `task expr` creates a Future — the expression is scheduled for evaluation.
 # `future.value` blocks until the Future resolves and returns its value.
 #
+# Auto-detection of spawn vs spawn_blocking:
+#   task asyncFn(args)  — asyncFn declared `task` → tokio::spawn
+#   task syncFn(args)   — syncFn declared `def`   → tokio::task::spawn_blocking
+#
+# `wait` and `timeout` — built-in async primitives:
+#   wait(dur)                     → tokio::time::sleep(dur).await
+#   wait(instant)                 → tokio::time::sleep_until(instant).await
+#   timeout(dur): body            → tokio::time::timeout(dur, body).await?
+#   timeout(instant): body        → tokio::time::timeout_at(instant, body).await?
+#   timeout(deadline) do: body    → (same, using do for unambiguous call arg)
+#
+# Leading-dot shorthand for Duration/Instant arguments:
+#   wait(.fromSecs(5))            → Duration::from_secs(5) inferred from parameter type
+#   timeout(.fromSecs(10)): body  → Duration::from_secs(10) inferred
+#
 # Two ownership patterns for shared data across tasks:
 #
-#   T'shared  →  Arc<T>               read-only sharing across tasks
-#               task methods: `def void T.run() task:` — receiver is Arc<Self>
-#               binding must be declared with `let T'shared name`
-#
+#   T'task    →  Arc<T>               read-only sharing across tasks
 #   T'actor   →  Arc<Mutex<T>>        shared MUTABLE state across tasks
-#               all field reads/writes/method calls auto-locked via .lock().await
-#               binding can be `let` or `var` — mutation goes through the lock
+#   T'guard   →  Arc<RwLock<T>>       concurrent reads, exclusive writes
 #
 # Capture analysis is automatic — no explicit `Arc::clone` or `move` keyword needed.
 #
@@ -703,6 +803,20 @@ type_list       ::= type ("," type)*
 #       def Vec2' neg():          Vec2(-self.x, -self.y)
 #       req bool  eq(Vec2' rhs):  self.x == rhs.x and self.y == rhs.y
 
+# ─── camelCase convention ─────────────────────────────────────────────────────
+#
+# Boring uses camelCase for method names. The transpiler automatically converts
+# camelCase to snake_case in Rust output:
+#   .fromSecs(5)    → Duration::from_secs(5)
+#   .fromMillis(n)  → Duration::from_millis(n)
+#   .isEmpty()      → .is_empty()
+#   .startsWith(s)  → .starts_with(s)
+#
+# For external Rust types (Duration, Instant, Path, etc.), leading-dot syntax
+# infers the type from context:
+#   wait(.fromSecs(5))       — type Duration inferred from wait's parameter
+#   schedule(.fromMillis(n)) — type Duration inferred from schedule's parameter
+
 # ─── Lexical conventions ─────────────────────────────────────────────────────
 
 INT             ::= [0-9]+ ("_" [0-9]+)*    # underscores allowed: 1_000_000
@@ -724,12 +838,14 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # struct, enum, trait, ext, use, as, and, or, not, guard,
 # break, continue, self, init,
 # try, catch, throw, throws, defer,
-# task, set,
+# task, set, wait, join, select, channel,
 # true, false, nil, is,
-# native, stream, yield, static, void, any, pass, mod
+# native, stream, yield, static, void, pass, mod,
+# any  # deprecated — use bare Trait or <Trait> instead
 
 # ─── Naming conventions ──────────────────────────────────────────────────────
 #
 # Types (struct, enum, trait): uppercase first letter, ≥ 2 characters. Examples: Dog, Animal.
-# Variables and functions: lowercase first letter or underscore.
+# Variables and functions: lowercase first letter or underscore. camelCase for multi-word.
+# Methods: camelCase — the transpiler converts to snake_case in Rust output.
 # Modules: lowercase, snake_case.

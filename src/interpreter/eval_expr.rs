@@ -38,6 +38,9 @@ impl Interpreter {
 
             ExprKind::Var(name) => {
                 if let Some(val) = env.borrow().get(name) {
+                    if matches!(val, Value::Uninitialized) {
+                        return Err(err(format!("variable '{}' used before being assigned", name), line));
+                    }
                     return Ok(val);
                 }
                 // If the name is a type alias pointing to a struct or enum, return

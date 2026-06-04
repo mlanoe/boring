@@ -8,7 +8,7 @@ task int compute(int n):
 task string fetch(string url):
     "data from {url}"
 
-task void main():
+def main():
     # Spawn and await
     let f = task compute(7)
     print "compute(7) = {f.value}"
@@ -77,13 +77,13 @@ for x in count_up(5):
 
 # ── Type aliases and newtypes ─────────────────────────────────────────────────
 
-use Score as int
+type Score  as int
 type UserId as uint
 type Email  as string
 
-let Score top   = 100
-let uid         = UserId(1)
-let email       = Email("alice@example.com")
+let top   = Score(100)
+let uid   = UserId(1)
+let email = Email("alice@example.com")
 
 print "top={top}, uid={uid}, email={email}"
 

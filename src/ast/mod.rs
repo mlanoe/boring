@@ -433,7 +433,8 @@ pub struct LetStmt {
     pub is_static: bool,
     pub name: String,
     pub ty: Option<Type>,
-    pub value: Expr,
+    /// `None` for deferred initialisation: `let v` / `var v` without `= expr`.
+    pub value: Option<Expr>,
     /// `let b' = a`  — move ownership from `a` into `b`; `a` becomes invalid after this.
     /// Without `'`, the default is a borrow: `let b = a` gives `b: T` (reference).
     pub is_move: bool,
@@ -824,10 +825,10 @@ pub enum Type {
     Fn(Option<Box<Type>>, Vec<Type>, bool, bool, bool),  // (return_ty?, param_types, throws, task, req)
     // Qualified type: `Dog'`, `Dog'copy`, `Dog'const`, `Dog'local`, `Dog'shared`
     Qualified(Box<Type>, OwnerQual),
-    /// `any Trait` — existential type (Swift-style).
-    /// Maps to `dyn Trait` / `Box<dyn Trait>` in Rust for the transpiler.
-    /// Interpreter treats this identically to the inner trait type.
-    Any(Box<Type>),
+    /// Bare trait name used as type → `Box<dyn Trait>` (dynamic dispatch, heap).
+    Dyn(Box<Type>),
+    /// `<Trait>` angle-bracket shorthand → `impl Trait` (static dispatch).
+    Impl(Box<Type>),
     // Single type parameter reference: T, K, V (single uppercase letter)
     TypeParam(String),
     // Generic type application: Future<int>, Dict<string, int>
@@ -855,7 +856,7 @@ impl Type {
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased
             Type::Generic(_, _) => false, // heap type
-            Type::Any(inner)    => inner.is_copy(),
+            Type::Dyn(inner) | Type::Impl(inner) => inner.is_copy(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
         }
@@ -890,7 +891,7 @@ impl Type {
             Type::Qualified(_, OwnerQual::BorrowMut)   => false, // &mut T — conservative (target unknown)
             Type::TypeParam(_) => true,
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
-            Type::Any(inner)    => inner.is_task_safe(),
+            Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
         }

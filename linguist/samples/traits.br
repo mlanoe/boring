@@ -5,6 +5,7 @@
 trait Named:
     req string name()
 
+# Supertrait: Describable requires Named
 trait Describable as Named:
     req string describe():          # default implementation
         "{self.name()} (no description)"
@@ -21,10 +22,40 @@ struct Animal as Describable:
 let cat = Animal(species = "Cat", sound = "meow")
 print cat.describe()
 
+# ── <Trait> impl-shorthand — `impl Trait` return type ─────────────────────────
+
+# <Trait> as return type means "impl Trait" (static dispatch, no allocation)
+<Describable> make_animal(string species, string sound):
+    Animal(species = species, sound = sound)
+
+let dog = make_animal("Dog", "woof")
+print dog.describe()
+
+# Bare `Trait` as return type means `Box<dyn Trait>` (dynamic dispatch, heap)
+# Describable clone_animal(Animal a): a
+
+# ── Leading-dot shorthand ─────────────────────────────────────────────────────
+
+enum Direction:
+    North
+    South
+    East
+    West
+
+string dir_name(Direction d):
+    match d:
+        Direction.North: "north"
+        Direction.South: "south"
+        _:               "other"
+
+# Leading-dot: compiler infers type from context (Direction known from param)
+print dir_name(.North)
+print dir_name(.South)
+
 # ── Generics ──────────────────────────────────────────────────────────────────
 
-def T first<T>([T] items): items[0]
-def T identity<T>(T x): x
+T first<T>([T] items): items[0]
+T identity<T>(T x): x
 
 print first([10, 20, 30])
 print identity("hello")
@@ -41,7 +72,7 @@ print "{p.first} / {p.second}"
 let double  = (n): n * 2
 let add_one = (n): n + 1
 
-def int apply(int f(int), int x): f(x)
+int apply(int f(int), int x): f(x)
 
 print apply(double, 21)
 
@@ -53,7 +84,7 @@ print "pipeline(3) = {val}"
 
 # ── Pipe operator |> ──────────────────────────────────────────────────────────
 
-def int inc(int n): n + 1
+int inc(int n): n + 1
 
 let result = 5
     |> double()
@@ -67,7 +98,7 @@ enum AppError:
     NotFound
     InvalidInput(string)
 
-void risky(int n) throws AppError:
+def void risky(int n) throws AppError:
     if n == 1: throw AppError.NotFound
     if n == 2: throw AppError.InvalidInput("bad value")
 

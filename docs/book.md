@@ -14,30 +14,29 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 
 1. [Getting Started](#1-getting-started)
 2. [Variables and Mutability](#2-variables-and-mutability)
-3. [Data Types](#3-data-types) — incl. [multi-line strings](#multi-line-strings) — `string` only; [string internals → Advanced](#advanced--strings-string-stringconst-and-stringtask)
+3. [Data Types](#3-data-types)
 4. [Functions](#4-functions)
 5. [Comments](#5-comments)
-6. [Control Flow](#6-control-flow) — incl. [`while let`](#while-let), [`if let` shorthand](#if-let-shorthand), [`loop` as expression](#loop-as-expression), [struct destructuring in `match`](#struct-destructuring-in-match), [for with index](#for-with-index--auto-enumerate), [for over dict](#for-over-a-dict--key-value-destructuring)
-7. [Collections](#7-collections) — incl. [Index — opaque cursor](#index--opaque-collection-cursor)
+6. [Control Flow](#6-control-flow)
+7. [Collections](#7-collections)
 8. [Structs](#8-structs)
-9. [Enums and Pattern Matching](#9-enums-and-pattern-matching) — incl. [variant shorthand](#enum-variant-shorthand)
-10. [Traits and Extensions](#10-traits-and-extensions) — incl. [default methods](#default-method-implementations), [associated types](#associated-types), [GAT](#generic-associated-types-gat)
-11. [Error Handling](#11-error-handling) — incl. [standard error enum `Error`](#standard-error-enum--error), [qualified throws paths](#qualified-error-type-paths), [`thiserror` integration](#thiserror-integration)
+9. [Enums and Pattern Matching](#9-enums-and-pattern-matching)
+10. [Traits and Extensions](#10-traits-and-extensions)
+11. [Error Handling](#11-error-handling)
 12. [Optionals](#12-optionals)
-13. [Generics](#13-generics) — incl. [lifetime and bound args at use sites](#lifetime-and-bound-arguments-at-use-sites), [const generics — `<uint N>`](#const-generics----uint-n)
-14. [Closures and Higher-Order Functions](#14-closures-and-higher-order-functions) — incl. [trailing closures](#trailing-closures), [closure shorthand](#closure-shorthand)
+13. [Generics](#13-generics)
+14. [Closures and Higher-Order Functions](#14-closures-and-higher-order-functions)
 15. [Modules](#15-modules)
-16. [Ownership Qualifiers](#19-ownership-qualifiers) — incl. [`'weak` — weak references (secondary qualifier)](#weak-references--wauto-wtask-wactor)
-17. [Defer](#20-defer)
-17. [Channels](#18-channels-channel) — incl. [`oneshot`](#oneshot--single-shot-response), [`broadcast`](#broadcast--fan-out), [`watch`](#watch--observable-value)
-18. [Tasks (Async)](#21-tasks-async) — incl. [`.wait` — void await](#awaiting-a-future--value-and-wait), [`'guard` — RwLock shared state](#read-heavy-shared-state--tguard), [cancellation — `f.cancel()` / `cancelled:`](#task-cancellation--fcancel-and-cancelled), [`wait` — pause async](#wait--pause-asynchrone), [`task(Duration)` — built-in timeout](#task-with-built-in-timeout--taskduration-body)
-19. [Macros](#22-macros)
-20. [Attributes](#23-attributes)
-21. [Format Specifiers](#24-format-specifiers)
-22. [Built-in Functions](#25-built-in-functions) — incl. [log-level builtins](#log-level-builtins), [`drop`](#ownership), [JSON serialization — `json` / `fromJson`](#json-serialization--json--fromJson), [`fs` — file system](#file-system--fs)
-23. [Appendix: Boring → Rust Mapping](#26-appendix-boring--rust-mapping)
-24. [Diagnostics](#24-diagnostics)
-25. [Advanced](#27-advanced) — [strings — `string`, `String'const`, `String'task`](#advanced--strings-string-stringconst-and-stringtask), [variable shadowing](#advanced--variable-shadowing), [`transient` + `?=`](#advanced--transient-fields-and--nil-coalescing-assignment), [struct spread `..other`](#advanced--struct-spread--other), [`thiserror` integration](#advanced--thiserror-integration), [Rust `Result` compatibility](#advanced--compatibility-with-rust-result-types), [variadic parameters](#advanced--variadic-parameters), [error handling internals](#advanced--error-handling-internals)
+16. [Ownership Qualifiers](#21-ownership-qualifiers)
+17. [Defer](#22-defer)
+18. [Channels](#18-channels-channel)
+19. [Tasks (Async)](#23-tasks-async)
+20. [Attributes](#24-attributes)
+21. [Format Specifiers](#25-format-specifiers)
+22. [Built-in Functions](#26-built-in-functions)
+23. [Appendix: Boring → Rust Mapping](#27-appendix-boring--rust-mapping)
+24. [Diagnostics](#28-diagnostics)
+25. [Advanced](#29-advanced)
 
 ---
 
@@ -174,6 +173,45 @@ let pi: f64 = 3.14159;
 let label: &'static str = "ok";
 let mut flag: bool = true;
 ```
+
+### Deferred initialisation
+
+Declare a variable without an initial value and assign it in each branch of an `if`/`else` or `match`. Useful when the computation is too imperative for the expression form `let v = if ...:`.
+
+```boring
+# if/else
+let v
+if condition:
+    v = "big"
+else:
+    v = "small"
+print v
+
+# match
+var n
+match status:
+    200: n = "ok"
+    404: n = "not found"
+    _:   n = "error"
+```
+
+**Rules:**
+- Works with both `let` and `var`.
+- Reading the variable before any assignment is a **runtime error**: `variable 'v' used before being assigned`.
+- The transpiler emits `let v;` / `let mut v;` and Rust's own control-flow analysis ensures every path assigns the variable before use.
+
+**Rust equivalent**
+```rust
+let v;
+if condition {
+    v = "big";
+} else {
+    v = "small";
+}
+```
+
+> **Prefer the expression form** when branches are simple:
+> `let v = if condition: "big" else: "small"`
 
 ---
 
@@ -701,10 +739,10 @@ fn add_one(x: &mut i64) { *x += 1; }
 Multiple functions can share the same name as long as their parameter types differ. The compiler selects the right variant at the call site based on the argument types:
 
 ```boring
-def string describe(int n):    "number: {n}"
-def string describe(float f):  "float: {f}"
-def string describe(string s): "text: {s}"
-def string describe(bool b):   "flag: {b}"
+string describe(int n):    "number: {n}"
+string describe(float f):  "float: {f}"
+string describe(string s): "text: {s}"
+string describe(bool b):   "flag: {b}"
 
 describe(42)       # → "number: 42"
 describe(3.14)     # → "float: 3.14"
@@ -715,9 +753,9 @@ describe(true)     # → "flag: true"
 Multi-parameter overloads work the same way — the full signature (all parameter types) must be unique:
 
 ```boring
-def string fn(int a, string b): "{a}/{b}"
-def string fn(int a, bool c):   "{a}/{c}"
-def string fn(int a):           "{a}"
+string fn(int a, string b): "{a}/{b}"
+string fn(int a, bool c):   "{a}/{c}"
+string fn(int a):           "{a}"
 ```
 
 **Rust equivalent** — the transpiler mangles names with the parameter types:
@@ -755,8 +793,8 @@ fn speak__string(&self, sound: Arc<str>) -> Arc<str> { ... }
 **Conflict detection** — the compiler rejects overloads that create ambiguity. A function with default parameters can be called with fewer arguments; if that reduced call matches another overload, it is an error:
 
 ```boring
-def string fn(int n, string s = "x"):  # callable as fn(int) OR fn(int, string)
-def string fn(int n):                   # ERROR — conflicts at arity 1
+string fn(int n, string s = "x"):  # callable as fn(int) OR fn(int, string)
+string fn(int n):                   # ERROR — conflicts at arity 1
 ```
 
 ```
@@ -1934,7 +1972,7 @@ timeout(.fromSecs(10)): fetch(url)
 Works wherever the expected type is unambiguous:
 
 ```boring
-def void schedule(Duration delay): ...
+void schedule(Duration delay): ...
 
 schedule(.fromSecs(1))           # Duration inferred from parameter type
 schedule(.fromMillis(100))
@@ -2111,6 +2149,40 @@ impl Greetable for Animal {
 }
 ```
 
+### Supertraits — `trait B as A:`
+
+A trait can require another trait using `as`. Any type implementing `B` must also implement `A`:
+
+```boring
+trait Named:
+    req string name()
+
+# Describable requires Named — implementing types must satisfy both
+trait Describable as Named:
+    req string describe():           # default implementation can call name()
+        "{self.name()} (no description)"
+
+struct Animal as Describable:        # satisfies both Named and Describable
+    string species
+    req string name(): self.species
+    req string describe(): "{self.species} says meow"
+```
+
+**Rust equivalent**
+```rust
+trait Named { fn name(&self) -> Arc<str>; }
+
+trait Describable: Named {           // supertrait
+    fn describe(&self) -> Arc<str> {
+        Arc::<str>::from(format!("{} (no description)", self.name()))
+    }
+}
+```
+
+Multiple supertraits: `trait C as A, B:`.
+
+---
+
 ### Default method implementations
 
 A trait can provide a default body for any method. Implementing types inherit it automatically when they don't override it.
@@ -2253,45 +2325,25 @@ impl Producer for Counter {
 }
 ```
 
-### Trait types in parameters and return positions
+### Traits as types
 
-A bare trait name in a parameter or return type is always **static dispatch** (`impl Trait`) — the compiler monomorphizes the call, zero overhead.
+A trait name used as a return or parameter type means **dynamic dispatch** — the concrete type is selected at runtime via a vtable. The value is heap-allocated (`Box<dyn Trait>`):
 
 ```boring
 trait Drawable:
     req void draw()
 
-req Drawable scale(float factor)    # parameter  → impl Drawable
-req Drawable clone_shape()          # return type → impl Drawable
+req Drawable clone_shape()         # → Box<dyn Drawable>  (heap, dynamic dispatch)
+[Drawable] shapes                  # → Vec<Box<dyn Drawable>>
 ```
 
 **Rust equivalent**
 ```rust
-fn scale(&self, factor: f64, shape: impl Drawable) { … }
-fn clone_shape(&self) -> impl Drawable { … }
-```
-
-Use `any Trait` when you need **dynamic dispatch** — different concrete types behind the same pointer, at the cost of a heap allocation and a vtable lookup:
-
-```boring
-[any Drawable] shapes           # field: Vec<Box<dyn Drawable>>
-
-req any Drawable pick_random()  # return: Box<dyn Drawable>
-```
-
-**Rust equivalent**
-```rust
+fn clone_shape(&self) -> Box<dyn Drawable> { … }
 shapes: Vec<Box<dyn Drawable>>,
-
-fn pick_random(&self) -> Box<dyn Drawable> { … }
 ```
 
-| Syntax | Rust | Dispatch | Allocation |
-|--------|------|----------|------------|
-| `Trait` (bare name) | `impl Trait` | static — monomorphized | none |
-| `any Trait` | `Box<dyn Trait>` | dynamic — vtable | heap |
-
-> **Rule of thumb:** start with a bare trait name. Switch to `any Trait` only when you need to store or return values of *different* concrete types through the same variable.
+For **static dispatch** (no heap allocation, function determines the concrete type), use the `<Trait>` shorthand — see [Generics — trait shorthand](#trait-shorthand----trait).
 
 ---
 
@@ -2309,49 +2361,49 @@ throw Error.InvalidInput  # bad argument
 throw Error.OutOfBounds   # index out of range
 ```
 
-Les deux styles suivants sont équivalents — choisissez selon votre préférence :
+Both styles below are equivalent — choose whichever you prefer:
 
-**Style 1 — `catch` par variant (concis) :**
+**Style 1 — `catch` per variant (concise):**
 
 ```boring
 try:
-    let data = timeout(Duration.fromSecs(5), fetch())
+    let data = timeout(.fromSecs(5), fetch())
 catch Error.Expired:
-    print "délai dépassé"
+    print "timed out"
 catch Error.Cancelled:
-    print "tâche annulée"
+    print "task cancelled"
 ```
 
-Chaque clause `catch Error.Variant:` gère exactement un variant.
-Les variants non listés sont **re-jetés** automatiquement vers l'appelant.
+Each `catch Error.Variant:` clause handles exactly one variant.
+Unlisted variants are **re-thrown** automatically to the caller.
 
-**Style 2 — `catch` global + `match error:` (flexible) :**
+**Style 2 — global `catch` + `match error:` (flexible):**
 
 ```boring
 try:
-    let data = timeout(Duration.fromSecs(5), fetch())
+    let data = timeout(.fromSecs(5), fetch())
 catch Error:
     match error:
-        Error.Expired:    print "délai dépassé"
-        Error.Cancelled:  print "tâche annulée"
-        _:                print "autre erreur: {error}"
+        Error.Expired:    print "timed out"
+        Error.Cancelled:  print "task cancelled"
+        _:                print "other error: {error}"
 ```
 
-`catch Error:` lie `error` comme valeur typée `Error`.  
-`{error}` en interpolation appelle `Display` (ex. `"timeout expired"`).  
-`match error: Error.Variant:` dispatche sur les variants — `_:` attrape le reste.
+`catch Error:` binds `error` as a typed `Error` value.  
+`{error}` in interpolation calls `Display` (e.g. `"timeout expired"`).  
+`match error: Error.Variant:` dispatches on variants — `_:` catches the rest.
 
-**Avec `catch:` final pour les autres types d'erreurs :**
+**With a final `catch:` for other error types:**
 
 ```boring
 try:
     process()
 catch Error.InvalidInput:
-    print "entrée invalide"
+    print "invalid input"
 catch Error.NotFound:
-    print "ressource introuvable"
+    print "resource not found"
 catch:
-    print "erreur inattendue: {error}"   # attrape tout le reste
+    print "unexpected error: {error}"   # catches everything else
 ```
 
 **Rust equivalent**
@@ -2417,7 +2469,7 @@ enum AppError:
     Timeout
     InvalidInput(string)
 
-def risky(int n) throws AppError:
+risky(int n) throws AppError:
     if n == 1: throw AppError.NotFound
     if n == 2: throw AppError.InvalidInput("bad value")
 
@@ -2442,7 +2494,11 @@ Intermediate statements in a block try body propagate exceptions automatically �
 > **`error` binding summary** — consistent across all error-handling forms:
 > - `try … else` → `error` is the **original thrown value** (any type, matchable)
 > - `catch:` → `error` is the **original thrown value** (same — `match error:` works)
-> - `catch String:` / `catch Int:` → `error: Arc<str>` — string representation
+> - `catch String:` → `error: string` — the original string value
+> - `catch Int:` → `error: int` — the original integer value
+> - `catch Float:` → `error: float` — the original float value
+> - `catch Bool:` → `error: bool` — the original boolean value
+> - `catch String, Int:` → desugared to one arm per type — `error: string` in the String arm, `error: int` in the Int arm
 > - `catch MyEnum:` → `error: &MyEnum` — typed value, for dispatch
 
 ### `try: … catch:` — block form
@@ -2482,10 +2538,11 @@ catch:
     print "other error"
 ```
 
-The `error` variable is automatically bound in each catch block to the **original thrown value** (same as `try … else`):
+The `error` variable is automatically bound in each catch block to the **original thrown value** with its native type:
 - `catch:` → `error` is the original thrown value — matchable with `match error:`
-- `catch String:` / `catch Int:` → `error: Arc<str>` — string representation (for primitive type catches)
-- `catch MyEnum:` (typed enum) → `error: &MyEnum` — the typed value
+- `catch String:` → `error: string`  •  `catch Int:` → `error: int`  •  `catch Float:` → `error: float`
+- `catch MyEnum:` → `error: &MyEnum` — typed value for variant dispatch
+- `catch String, Int:` → desugared to one arm per type — body duplicated with native error type per arm
 
 String interpolation `{error}` always works regardless of the thrown type.
 
@@ -2532,6 +2589,19 @@ try:
     throw 42
 catch String, Int:
     print "string or int: {error}"    # same handler, different type
+```
+
+`catch String, Int:` desugars to one arm per type — the body is duplicated, and `error` keeps its native type in each arm (`string` in the String arm, `int` in the Int arm). Rust type-checking validates the body against each arm independently:
+
+```boring
+# OK — {error} works for all types (Display)
+catch String, Int: print "error: {error}"
+
+# OK — each arm handles its type correctly
+catch String, Int:
+    match error:
+        string s: print "string: {s}"
+        int n:    print "int: {n}"
 ```
 
 Any number of types can be combined:
@@ -2784,6 +2854,55 @@ fn describe<T: Display>(x: T) -> String { format!("value: {}", x) }
 struct Tagged<T: Display + Eq> { value: T, tag: String }
 ```
 
+### Trait shorthand — `<Trait>`
+
+When a type parameter is constrained by a trait and used **only once**, you can omit the explicit type parameter name and write `<Trait>` directly. This is a specialized generic — the compiler generates a fresh anonymous type parameter.
+
+```boring
+# <Drawable> in return position → impl Drawable (static dispatch, no heap allocation)
+<Drawable> scale(float factor):
+    Circle(radius = self.radius * factor)
+
+# <Drawable> in parameter position → impl Drawable parameter
+string describe(<Drawable> shape):
+    shape.draw()
+
+# Multiple <Drawable> — each is INDEPENDENT (different concrete types allowed)
+<Drawable> transform(<Drawable> other):
+    Circle(radius = 1.0)
+```
+
+**Rust equivalent**
+```rust
+fn scale(&self, factor: f64) -> impl Drawable { … }
+fn describe(&self, shape: impl Drawable) -> Arc<str> { … }
+fn transform(&self, other: impl Drawable) -> impl Drawable { … }
+```
+
+When you need the **same concrete type** in multiple positions — or you need to name the type parameter — use the explicit form:
+
+```boring
+# T must be the SAME type for parameter and return value
+T echo<T as Drawable>(T shape):
+    shape
+
+# Two uses of the same type T
+bool same_size<T as Drawable>(T a, T b):
+    a.width() == b.width()
+```
+
+**Full comparison table**
+
+| Boring | Rust | When |
+|---|---|---|
+| `Drawable f()` | `Box<dyn Drawable>` | Different concrete types at runtime |
+| `<Drawable> f()` | `impl Drawable` | Single use, function picks type |
+| `<Drawable> f(<Drawable> x)` | `(impl Drawable) -> impl Drawable` | Independent impl params |
+| `T f<T as Drawable>(T x)` | `fn<T: Drawable>(T) -> T` | Same type in multiple positions |
+| `struct S<T as Drawable>` | `struct S<T: Drawable>` | Generic struct with bound |
+
+> **Rule of thumb:** use `<Trait>` for the common single-use case. Switch to `Trait` (bare) only when you need to collect or store values of *different* concrete types at runtime. Use explicit `T<T as Trait>` when the same type must appear in multiple positions.
+
 ### Lifetime and bound arguments at use sites
 
 When *calling* a generic function or annotating a variable, you can supply type arguments that include bare lifetimes and trait bounds for documentation purposes:
@@ -2979,13 +3098,13 @@ numbers.iter().filter(|n| n % 2 == 0).cloned().collect::<Vec<_>>()
 
 ```boring
 # Inside the argument list — explicit zero-arg closure
-timeout(Duration.fromSecs(5), (): fetch(url))
+timeout(.fromSecs(5), (): fetch(url))
 
 # After the argument list — bare colon separator
-timeout(Duration.fromSecs(5)): fetch(url)
+timeout(.fromSecs(5)): fetch(url)
 
 # Without any separator — command style (same-line only)
-timeout(Duration.fromSecs(5)) fetch(url)
+timeout(.fromSecs(5)) fetch(url)
 ```
 
 The three forms are equivalent. Choose the one that reads most naturally:
@@ -2996,28 +3115,52 @@ The three forms are equivalent. Choose the one that reads most naturally:
 Multi-line zero-arg body uses the colon form:
 
 ```boring
-timeout(Duration.fromSecs(10)):
+timeout(.fromSecs(10)):
     let data = download(url)
     parse(data)
 ```
 
 **Limitation — single-identifier argument ambiguity**
 
-When the only argument is a simple variable name, `f(name): body` is syntactically ambiguous: `(name):` could be either call args + trailing body, or a closure with parameter `name`. The parser resolves it as a **closure parameter**, not a call argument:
+When the content between `()` consists **only of bare identifiers**, the parser cannot tell whether they are call arguments or closure parameters, and resolves them as **closure parameters**:
 
 ```boring
-# Ambiguous — `deadline` is parsed as a closure param, NOT a call arg
-timeout(deadline): fetch(url)    # ← behaves as timeout((deadline): fetch(url))
-
-# Unambiguous — use the two-arg form for variable deadlines
-timeout(deadline, (): fetch(url))   # ← correct
+timeout(deadline): fetch(url)    # (deadline): is a 1-param closure, NOT a call arg
+timeout(dur1, dur2): fetch(url)  # (dur1, dur2): is a 2-param closure
 ```
 
-This ambiguity only arises with a single bare identifier. Expressions with operators, dots, or multiple arguments are never ambiguous:
+The truly unambiguous forms are those where at least one argument contains something that cannot be a closure parameter — an operator, a dot, a literal, or a function call:
+
 ```boring
-timeout(Instant.now() + dur): fetch(url)   # ← unambiguous (contains .)
-timeout(dur1, dur2): fetch(url)            # ← unambiguous (two args)
+timeout(Instant.now() + dur): fetch(url)   # unambiguous (contains .)
+timeout(.fromSecs(5)): fetch(url)          # unambiguous (contains .)
+timeout(5): fetch(url)                     # unambiguous (literal)
 ```
+
+**`do` — unambiguous trailing closure marker**
+
+Use `do` after a call to introduce a trailing closure when the arguments are plain identifiers. `do` is optional — it is only needed when other forms would be ambiguous. It supports all closure shapes:
+
+```boring
+# Zero-arg
+timeout(deadline) do: fetch(url)       # ← deadline is a call arg, not a closure param
+timeout(deadline) do fetch(url)        # same, no separator
+
+# Single param
+nums.map do (n): n * 2                 # explicit parens
+nums.map do n: n * 2                   # no-paren shorthand
+
+# Multi-param
+nums.reduce(0) do (acc, n): acc + n    # explicit parens
+nums.reduce(0) do acc, n: acc + n      # no-paren shorthand
+
+# Multiline
+timeout(deadline) do:
+    let data = download(url)
+    parse(data)
+```
+
+All existing trailing closure forms remain valid and are preferred when unambiguous. `do` is a deliberate escape hatch for the identifier-only argument case.
 
 ### Closures in collections
 
@@ -3629,11 +3772,11 @@ let result, _ = join (f_data, f_log)
 
 ```boring
 task int fetch_users():
-    wait Duration.fromMillis(10)
+    wait .fromMillis(10)
     return 42
 
 task int fetch_products():
-    wait Duration.fromMillis(10)
+    wait .fromMillis(10)
     return 99
 
 task run():
@@ -3710,7 +3853,7 @@ task run():
             msg = rx.recv():
                 print msg
                 if msg == "world": break
-            after Duration.fromMillis(100):
+            after .fromMillis(100):
                 print "timeout"
                 break
 ```
@@ -3722,7 +3865,7 @@ task run():
     select:
         result = some_async_op():
             print result
-        after Duration.fromSecs(5):
+        after .fromSecs(5):
             print "timed out"
 ```
 
@@ -3744,22 +3887,22 @@ tokio::select! {
 
 Channel receiver variables are automatically wrapped in `Some(var)` since `recv()` returns `Option<T>`. `after dur:` desugars to `_ = tokio::time::sleep(dur)`.
 
-## `wait` — pause asynchrone
+## `wait` — pause async
 
-`wait dur` met en pause la tâche courante pour la durée spécifiée. Équivalent à `tokio::time::sleep(dur).await`.
+`wait dur` suspends the current task for the specified duration. Equivalent to `tokio::time::sleep(dur).await`.
 
 ```boring
-wait Duration.fromMillis(500)
-wait Duration.fromSecs(1)
+wait .fromMillis(500)
+wait .fromSecs(1)
 ```
 
-Utilisé librement dans `loop:` pour créer des boucles périodiques avec position explicite :
+Used freely inside `loop:` to create periodic loops with explicit placement:
 
 ```boring
 task monitor():
     var int ticks = 0
     loop:
-        wait Duration.fromSecs(1)   # pause d'abord, puis body
+        wait .fromSecs(1)   # pause first, then body
         ticks += 1
         info "heartbeat #{ticks}"
         if ticks >= 5: break
@@ -3768,9 +3911,9 @@ task monitor():
 ```boring
 task process():
     loop:
-        let item = queue.recv()      # body d'abord
+        let item = queue.recv()      # body first
         handle(item)
-        wait Duration.fromMillis(10)  # puis pause
+        wait .fromMillis(10)  # then pause
 ```
 
 **Rust equivalent**
@@ -3786,33 +3929,33 @@ async fn monitor() {
 }
 ```
 
-| Forme | Sémantique |
+| Form | Semantics |
 |---|---|
-| `wait dur` | pause de `dur` au point courant |
-| `loop: wait dur; body` | pause **avant** chaque itération |
-| `loop: body; wait dur` | exécute **immédiatement**, puis pause |
+| `wait dur` | pause for `dur` at the current point |
+| `loop: wait dur; body` | pause **before** each iteration |
+| `loop: body; wait dur` | run **immediately**, then pause |
 
-### `wait` avec deadline absolue — `Instant`
+### `wait` with absolute deadline — `Instant`
 
-Au lieu d'une durée relative, `wait` accepte également un `Instant` (point absolu dans le temps). Le transpileur choisit automatiquement la primitive correcte selon le type de l'argument :
+Instead of a relative duration, `wait` also accepts an `Instant` (an absolute point in time). The transpiler automatically picks the right primitive based on the argument type:
 
 ```boring
-# Durée relative → tokio::time::sleep(dur).await
+# Relative duration → tokio::time::sleep(dur).await
 wait Duration.fromSecs(5)
 wait(Duration.fromMillis(500))
 
-# Deadline absolue → tokio::time::sleep_until(instant).await
+# Absolute deadline → tokio::time::sleep_until(instant).await
 wait(Instant.now() + Duration.fromSecs(5))
 
 let deadline = Instant.now() + Duration.fromSecs(10)
-wait(deadline)   # forme explicite recommandée pour les variables Instant
+wait(deadline)   # explicit form recommended for Instant variables
 ```
 
-| Boring | Rust généré |
+| Boring | Generated Rust |
 |---|---|
 | `wait(Duration.fromSecs(n))` | `tokio::time::sleep(Duration::from_secs(n)).await` |
 | `wait(Instant.now() + dur)` | `tokio::time::sleep_until(instant).await` |
-| `wait(deadline)` *(variable Instant)* | `tokio::time::sleep_until(deadline).await` |
+| `wait(deadline)` *(Instant variable)* | `tokio::time::sleep_until(deadline).await` |
 
 ---
 
@@ -3846,12 +3989,13 @@ else:
         _:             "other error: {error}"
 ```
 
-**vs `timeout(dur, fut)`**
+**vs `timeout(dur, fut)` and `f.value(dur)`**
 
 | Syntax | When to prefer |
 |--------|---------------|
 | `task(dur): body` | Spawning a new task that should expire; result is a JoinHandle |
 | `timeout(dur, fut)` | Applying a deadline to an existing future expression |
+| `f.value(dur)` / `f.wait(dur)` | Deadline on the **await** only — task keeps running on expiry |
 
 `task(dur): body` is equivalent to spawning `tokio::spawn(async move { tokio::time::timeout(dur, body).await? })`.
 
@@ -3867,48 +4011,48 @@ let f = tokio::spawn(async move {
 
 ---
 
-## `timeout` — race une future contre un minuteur
+## `timeout` — race a future against a timer
 
-`timeout` applique une limite de temps à une computation asynchrone. Si la computation se termine dans les temps, son résultat est retourné. Sinon, `Error.Expired` est lancé.
+`timeout` applies a time limit to an asynchronous computation. If the computation completes in time, its result is returned. Otherwise, `Error.Expired` is thrown.
 
-### Syntaxes supportées
+### Supported syntaxes
 
 ```boring
-# ① Forme explicite — deux arguments
-timeout(Duration.fromSecs(5), fetch)           # Callable<T> (référence de fonction)
-timeout(Duration.fromSecs(5), (): fetch(url))  # zero-arg closure explicite
+# ① Explicit form — two arguments
+timeout(Duration.fromSecs(5), fetch)           # Callable<T> (function reference)
+timeout(Duration.fromSecs(5), (): fetch(url))  # explicit zero-arg closure
 
-# ② Trailing body avec `:`
+# ② Trailing body with `:`
 timeout(Duration.fromSecs(5)): fetch(url)
 
-# ③ Command style — sans séparateur (même ligne)
+# ③ Command style — no separator (same line)
 timeout(Duration.fromSecs(5)) fetch(url)
 
-# ④ Multi-ligne
+# ④ Multi-line
 timeout(Duration.fromSecs(10)):
     let data = download(url)
     parse(data)
 ```
 
-Les formes ②③④ sont du sucre syntaxique pour la forme ①. Elles sont interchangeables.
+Forms ②③④ are syntactic sugar for form ①. They are interchangeable.
 
-### Dispatch automatique Duration / Instant
+### Automatic Duration / Instant dispatch
 
-Le même nom `timeout` fonctionne avec une `Duration` (délai relatif) **ou** un `Instant` (deadline absolue). Le transpileur choisit automatiquement `timeout` ou `timeout_at` selon le type du premier argument :
+The same `timeout` name works with a `Duration` (relative delay) **or** an `Instant` (absolute deadline). The transpiler automatically picks `timeout` or `timeout_at` based on the type of the first argument:
 
 ```boring
 # Duration → tokio::time::timeout(dur, …).await?
 timeout(Duration.fromSecs(5)): fetch(url)
 
-# Instant inline → tokio::time::timeout_at(instant, …).await?
+# Inline Instant → tokio::time::timeout_at(instant, …).await?
 timeout(Instant.now() + Duration.fromSecs(5)): fetch(url)
 
-# Variable Instant — utiliser la forme deux-args (évite l'ambiguïté syntaxique)
+# Instant variable — use the two-arg form (avoids syntactic ambiguity)
 let deadline = Instant.now() + Duration.fromSecs(10)
 timeout(deadline, (): fetch(url))
 ```
 
-L'usage principal des deadlines absolues est de **partager une limite de temps** entre plusieurs opérations :
+The main use of absolute deadlines is to **share a time limit** across multiple operations:
 
 ```boring
 let deadline = Instant.now() + Duration.fromSecs(10)
@@ -3918,9 +4062,9 @@ let parsed = timeout(deadline, (): parse(data))
 let saved  = timeout(deadline, (): save(parsed))
 ```
 
-### Gestion des erreurs
+### Error handling
 
-`timeout` lance `Error.Expired` si le délai est dépassé. Utilisez `try … else` ou `catch` :
+`timeout` throws `Error.Expired` if the deadline is exceeded. Use `try … else` or `catch`:
 
 ```boring
 # Inline fallback
@@ -3935,7 +4079,7 @@ catch Error.Expired:
     print "request timed out"
 ```
 
-### Dans une fonction cancellable
+### Inside a cancellable function
 
 Inside a **cancellable** `task` function (one that can receive `.cancel()`), `timeout` races three branches simultaneously using `select!`: the future itself, the timer, and the cancellation token. Both expiry and cancellation throw distinct typed errors (`Error.Expired` / `Error.Cancelled`).
 
@@ -3958,12 +4102,12 @@ catch Error.Cancelled:
 
 ### Transpilation
 
-| Boring | Rust généré |
+| Boring | Generated Rust |
 |---|---|
 | `timeout(dur): f()` | `tokio::time::timeout(dur, f()).await?` |
 | `timeout(Instant.now() + d): f()` | `tokio::time::timeout_at(instant, f()).await?` |
-| `timeout(deadline, (): f())` *(var Instant)* | `tokio::time::timeout_at(deadline, f()).await?` |
-| *(dans cancellable)* `timeout(dur): f()` | `tokio::select! { r = f() => Ok(r), _ = sleep(dur) => Err(Expired), _ = cancel => Err(Cancelled) }?` |
+| `timeout(deadline, (): f())` *(Instant variable)* | `tokio::time::timeout_at(deadline, f()).await?` |
+| *(in cancellable)* `timeout(dur): f()` | `tokio::select! { r = f() => Ok(r), _ = sleep(dur) => Err(Expired), _ = cancel => Err(Cancelled) }?` |
 
 ---
 
@@ -4345,7 +4489,7 @@ task string fetch(string url):
     download(url)
 
 # Sync function — CPU-intensive, will block if not offloaded
-def Data compress(Data d):
+Data compress(Data d):
     heavy_computation(d)
 
 def main():
@@ -4396,7 +4540,7 @@ The rule is simple:
 ### Awaiting a future — `.value` and `.wait`
 
 Assign the task to a variable and call `.value` to wait for its result, or `.wait` to wait
-without capturing the return value (void).
+without capturing the return value (void). If the task threw, the error is re-thrown in the caller.
 **The calling function must also be marked `task`** — you cannot await outside an async context.
 
 ```boring
@@ -4432,10 +4576,64 @@ async fn main() {
 }
 ```
 
-| Form | Returns | Use when |
-|------|---------|----------|
-| `f.value` | the task's result | you need the return value |
-| `f.wait`  | nothing (void)    | you only need synchronisation |
+| Form | Returns | Throws | Use when |
+|------|---------|--------|----------|
+| `f.value` | the task's result | any error from the task | you need the return value |
+| `f.wait`  | nothing (void)    | any error from the task | you only need synchronisation |
+
+### Awaiting with a timeout — `.value(dur)` and `.wait(dur)`
+
+Pass a `Duration` or an `Instant` to set a deadline on the await call.
+If the deadline elapses before the task finishes, `Error.Expired` is thrown in
+**the caller** — the task itself keeps running unaffected.
+
+```boring
+task int fetch(string url):
+    # ... slow network call ...
+    42
+
+def main():
+    let f = task fetch("https://example.com")
+
+    # Relative timeout — throw Error.Expired after 5 s
+    let result = try f.value(Duration.fromSecs(5)) else -1
+    print result                       # -1 if timed out, 42 otherwise
+
+    # Absolute deadline shared across several awaits
+    let deadline = Instant.now() + Duration.fromSecs(10)
+    let a = task fetch("https://a.com")
+    let b = task fetch("https://b.com")
+    print a.value(deadline)            # throws Error.Expired if past deadline
+    print b.value(deadline)            # same shared deadline
+
+    # Discard the result but still enforce a cap
+    let g = task fetch("https://bg.com")
+    g.wait(Duration.fromMillis(500))   # throws Error.Expired if too slow
+```
+
+**Rust equivalent**
+```rust
+let handle = tokio::spawn(async move { fetch(url).await });
+
+// f.value(dur)
+let result = tokio::time::timeout(dur, handle).await??;
+
+// f.value(inst)
+let result = tokio::time::timeout_at(inst, handle).await??;
+```
+
+| Form | Returns | Timeout arg | Throws on expiry |
+|------|---------|-------------|-----------------|
+| `f.value` / `f.value()` | `T` | — | — |
+| `f.wait`  / `f.wait()`  | void | — | — |
+| `f.value(Duration)` | `T` | relative | `throws` (Error.Expired or task error) |
+| `f.value(Instant)`  | `T` | absolute | `throws` (Error.Expired or task error) |
+| `f.wait(Duration)`  | void | relative | `throws` (Error.Expired or task error) |
+| `f.wait(Instant)`   | void | absolute | `throws` (Error.Expired or task error) |
+
+> **Note:** `Error.Expired` is thrown in the **caller** only. The spawned task
+> continues running in the background. To also stop it, call `f.cancel()` after
+> catching the error.
 
 ### Parallel tasks
 
@@ -4803,36 +5001,7 @@ The `tokio-util` crate (`tokio-util = { version = "0.7", features = ["sync"] }`)
 
 ---
 
-## 24. Macros
-
-Boring supports calling Rust macros directly with `!`:
-
-```boring
-eprintln!("debug: value = {}", 42)   # stderr — no Boring built-in for this
-assert!(2 + 2 == 4)
-assert_eq!(add(2, 3), 5)
-let msg = format!("{} + {} = {}", 1, 2, add(1, 2))
-```
-
-All three call forms are supported:
-
-```boring
-name!(args)    # parentheses
-name![args]    # brackets
-name!{args}    # braces
-```
-
-**Rust equivalent** — passed through verbatim:
-```rust
-println!("value = {}", 42);
-assert!(2 + 2 == 4);
-assert_eq!(add(2, 3), 5);
-let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
-```
-
----
-
-## 25. Attributes
+## 24. Attributes
 
 Attributes are written with `@` and apply to the next declaration.
 **Parentheses are optional** — both forms are accepted and produce identical output.
@@ -4872,7 +5041,7 @@ enum Shape:
 
 ---
 
-## 26. Format Specifiers
+## 25. Format Specifiers
 
 Format specifiers in Boring are **identical to Rust's** `std::fmt` specifiers. They follow the colon inside an interpolation `{expr:spec}`.
 
@@ -4903,7 +5072,7 @@ print "padded: '{n:8}', zero: '{n:08}'"
 
 ---
 
-## 27. Built-in Functions
+## 26. Built-in Functions
 
 These functions are available without any import.
 
@@ -5136,7 +5305,7 @@ if let user:
 
 ---
 
-## 28. Appendix: Boring → Rust Mapping
+## 27. Appendix: Boring → Rust Mapping
 
 ### Declarations
 
@@ -5200,8 +5369,8 @@ if let user:
 | `T'wguard`         | `T'guard'weak` | `std::sync::Weak<RwLock<T>>`          |
 | `T'const`          | —              | `&'static T`                          |
 | `Index<T>`         | —           | `Option<usize>` (array/set) or `Option<K>` (dict) |
-| `Trait` (param / return) | — | `impl Trait` — static dispatch, zero-cost |
-| `any Trait`        | —           | `Box<dyn Trait>` — dynamic dispatch, heap |
+| `Trait` (bare)     | —           | `Box<dyn Trait>` — dynamic dispatch, heap |
+| `<Trait>`          | —           | `impl Trait` — static dispatch, no allocation |
 | `<uint N>` in generic list | — | `const N: usize` — const generic parameter |
 | `<int N>` in generic list  | — | `const N: i64` |
 | `<bool B>` in generic list | — | `const B: bool` |
@@ -5230,10 +5399,14 @@ if let user:
 | `future.wait`              | `future.await.unwrap()` (result discarded)  |
 | `drop(x)`                  | `drop(x)`                                   |
 | `name!(args)`              | `name!(args)` (pass-through)                |
-| `f(args) (p): body`        | `f(args, \|p\| body)` — trailing closure (last arg outside parens) |
+| `f(args) (p): body`        | `f(args, \|p\| body)` — trailing closure, explicit params |
 | `f(args) p: body`          | `f(args, \|p\| body)` — trailing closure, no-paren single param |
-| `f(args): body`            | `f(args, \|\| body)` — zero-arg trailing body (colon separator) |
-| `f(args) expr`             | `f(args, \|\| expr)` — zero-arg trailing body (no separator, same line) |
+| `f(args): body`            | `f(args, \|\| body)` — zero-arg trailing body |
+| `f(args) expr`             | `f(args, \|\| expr)` — zero-arg trailing body (no separator) |
+| `f(args) do (p, q): body`  | `f(args, \|p, q\| body)` — unambiguous `do` trailing, multi-param |
+| `f(args) do p: body`       | `f(args, \|p\| body)` — unambiguous `do` trailing, no-paren |
+| `f(args) do: body`         | `f(args, \|\| body)` — unambiguous `do` trailing, zero-arg |
+| `f(args) do expr`          | `f(args, \|\| expr)` — unambiguous `do` trailing, zero-arg no separator |
 | `wait(dur)`                | `tokio::time::sleep(dur).await` |
 | `wait(instant)`            | `tokio::time::sleep_until(instant).await` |
 | `timeout(dur): f()`        | `tokio::time::timeout(dur, f()).await?` |
@@ -5264,7 +5437,7 @@ if let user:
 | `select: var = expr: body` | `tokio::select! { var = expr => { body } }` |
 | `select: after dur: body` | `tokio::select! { _ = tokio::time::sleep(dur) => { body } }` |
 | `wait dur` | `tokio::time::sleep(dur).await` |
-| `every dur: body` | `loop { tokio::time::sleep(dur).await; body }` *(déprécié, préférer `loop: wait dur; body`)* |
+| `every dur: body` | `loop { tokio::time::sleep(dur).await; body }` *(deprecated, prefer `loop: wait dur; body`)* |
 | `cancelled:` (select arm) | `_ = __task_cancel.cancelled() =>` — implicit `CancellationToken` param injected into the enclosing function |
 | `f.cancel()` | `__cancel_f.cancel()` — signals the spawned task via its token |
 | `task(dur): body` | `tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })` |
@@ -5302,7 +5475,7 @@ if let user:
 
 ---
 
-## 29. Diagnostics
+## 28. Diagnostics
 
 Boring prints errors in the same format as `rustc` — file path, line number, and the source line that caused the problem.
 
@@ -5344,7 +5517,7 @@ Parse errors (unexpected token, unterminated string, bad indentation) and runtim
 
 ---
 
-## 30. Advanced
+## 29. Advanced
 
 This chapter covers features you will rarely need in everyday code. They exist for performance tuning, low-level Rust interop, or unusual architectural patterns. Feel free to skip it until a specific need arises.
 
@@ -5547,7 +5720,7 @@ enum AppError:
     @error "io error: {0}"
     Io(string)
 
-def riskyOp() throws AppError:
+riskyOp() throws AppError:
     throw AppError.Denied
 
 def main():
@@ -5693,4 +5866,32 @@ fn read_file(path: Arc<str>) -> Result<Arc<str>, io::Error> { ... }
 ```
 
 Any depth of qualification is supported: `throws a.b.c.Error` → `a::b::c::Error`.
+
+---
+
+### Advanced — Macros
+
+Boring supports calling Rust macros directly with `!`:
+
+```boring
+eprintln!("debug: value = {}", 42)   # stderr — no Boring built-in for this
+assert!(2 + 2 == 4)
+assert_eq!(add(2, 3), 5)
+let msg = format!("{} + {} = {}", 1, 2, add(1, 2))
+```
+
+All three call forms are supported:
+
+```boring
+name!(args)    # parentheses
+name![args]    # brackets
+name!{args}    # braces
+```
+
+**Rust equivalent** — passed through verbatim:
+```rust
+println!("value = {}", 42);
+assert!(2 + 2 == 4);
+assert_eq!(add(2, 3), 5);
+let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 ```

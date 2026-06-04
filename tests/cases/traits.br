@@ -97,7 +97,7 @@ struct Hello: pass
 ext Hello as Greet:
     req string greet(): "hello"
 
-def Greet make_greeter():
+<Greet> make_greeter():
     return Hello()
 
 let gh = make_greeter()

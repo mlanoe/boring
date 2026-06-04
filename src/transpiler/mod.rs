@@ -1046,7 +1046,7 @@ impl Transpiler {
                 }
                 Item::Let(s) if s.mutable => {
                     // Top-level mutable var declarations — collect type and initial value.
-                    let init_val = self.emit_expr_owned(&s.value);
+                    let init_val = self.emit_expr_owned(s.value.as_ref().unwrap());
                     self.global_var_types.insert(s.name.clone(), s.ty.clone());
                     self.global_var_inits.insert(s.name.clone(), init_val);
                 }
@@ -1101,7 +1101,7 @@ impl Transpiler {
         let mut identity_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &program.items {
             match item {
-                Item::Let(l) => collect_is_identity_vars(&l.value, &type_names, &mut identity_vars),
+                Item::Let(l) => { if let Some(v) = &l.value { collect_is_identity_vars(v, &type_names, &mut identity_vars); } }
                 Item::Stmt(s) => collect_is_identity_stmts(s, &type_names, &mut identity_vars),
                 Item::Fn(f) => {
                     for stmt in &f.body {

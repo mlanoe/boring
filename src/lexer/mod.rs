@@ -311,7 +311,6 @@ pub enum TokenKind {
     Pass,
     Native,
     Mod,
-    Any,
 
     // Operators
     Plus, Minus, Star, Slash, Percent,
@@ -846,7 +845,6 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "pass"     => TokenKind::Pass,
         "native"   => TokenKind::Native,
         "mod"      => TokenKind::Mod,
-        "any"      => TokenKind::Any,
         "true"     => TokenKind::Bool(true),
         "false"    => TokenKind::Bool(false),
         "nil"      => TokenKind::Nil,

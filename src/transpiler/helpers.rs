@@ -86,7 +86,7 @@ pub(crate) fn collect_lifetimes(ty: &Type, out: &mut Vec<String>) {
             collect_lifetimes(inner, out);
         }
         Type::Qualified(inner, _) => collect_lifetimes(inner, out),
-        Type::Optional(inner) | Type::Array(inner) | Type::Set(inner) | Type::Any(inner) => {
+        Type::Optional(inner) | Type::Array(inner) | Type::Set(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
             collect_lifetimes(inner, out);
         }
         Type::Dict(k, v) => { collect_lifetimes(k, out); collect_lifetimes(v, out); }
@@ -542,7 +542,7 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
     match stmt {
         Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. })
             | Stmt::Throw(ThrowStmt { value: Some(e), .. }) => collect_vars_in(e, out),
-        Stmt::Let(l) => collect_vars_in(&l.value, out),
+        Stmt::Let(l) => { if let Some(v) = &l.value { collect_vars_in(v, out); } }
         Stmt::If(i) => {
             for (cond, body) in &i.branches {
                 collect_vars_in(cond, out);
@@ -682,7 +682,7 @@ pub(crate) fn body_has_actor_binding(stmts: &[Stmt]) -> bool {
                     }
                 }
                 // Recurse into nested blocks
-                if expr_has_actor_binding(&l.value) { return true; }
+                if l.value.as_ref().map_or(false, |v| expr_has_actor_binding(v)) { return true; }
             }
             Stmt::If(i) => {
                 if i.branches.iter().any(|(_, body)| body_has_actor_binding(body))
@@ -739,7 +739,7 @@ pub(crate) fn body_has_channel_or_task(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::Let(l) => {
-                if expr_has_channel_or_task(&l.value) { return true; }
+                if l.value.as_ref().map_or(false, |v| expr_has_channel_or_task(v)) { return true; }
             }
             Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
                 if expr_has_channel_or_task(e) { return true; }
@@ -806,7 +806,7 @@ pub(crate) fn body_calls_task_fn(stmts: &[Stmt], task_fns: &std::collections::Ha
                 if expr_calls_task_fn(e, task_fns) { return true; }
             }
             Stmt::Let(l) => {
-                if expr_calls_task_fn(&l.value, task_fns) { return true; }
+                if l.value.as_ref().map_or(false, |v| expr_calls_task_fn(v, task_fns)) { return true; }
             }
             Stmt::If(i) => {
                 if i.branches.iter().any(|(_, b)| body_calls_task_fn(b, task_fns))
@@ -851,7 +851,7 @@ pub(crate) fn items_have_task(items: &[&Item]) -> bool {
     for item in items {
         match item {
             Item::Stmt(s) => { if stmt_has_task(s) { return true; } }
-            Item::Let(l)  => { if expr_has_task(&l.value) { return true; } }
+            Item::Let(l)  => { if l.value.as_ref().map_or(false, |v| expr_has_task(v)) { return true; } }
             _ => {}
         }
     }
@@ -866,7 +866,7 @@ pub(crate) fn items_have_task_call(items: &[&Item], task_fns: &std::collections:
                     if expr_has_task_call(e, task_fns) { return true; }
                 }
             }
-            Item::Let(l) => { if expr_has_task_call(&l.value, task_fns) { return true; } }
+            Item::Let(l) => { if l.value.as_ref().map_or(false, |v| expr_has_task_call(v, task_fns)) { return true; } }
             _ => {}
         }
     }
@@ -876,7 +876,7 @@ pub(crate) fn items_have_task_call(items: &[&Item], task_fns: &std::collections:
 pub(crate) fn stmt_has_task(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_has_task(e),
-        Stmt::Let(l)  => expr_has_task(&l.value),
+        Stmt::Let(l)  => l.value.as_ref().map_or(false, |v| expr_has_task(v)),
         Stmt::If(i) => {
             i.branches.iter().any(|(cond, body)| {
                 expr_has_task(cond) || body.iter().any(stmt_has_task)
@@ -1261,7 +1261,7 @@ pub(crate) fn stmts_use_task_cancelled(stmts: &[Stmt]) -> bool {
 fn stmt_uses_task_cancelled(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_uses_task_cancelled(e),
-        Stmt::Let(l) => expr_uses_task_cancelled(&l.value),
+        Stmt::Let(l) => l.value.as_ref().map_or(false, |v| expr_uses_task_cancelled(v)),
         Stmt::Return(ReturnStmt { value: Some(e), .. })
         | Stmt::Throw(ThrowStmt { value: Some(e), .. }) => expr_uses_task_cancelled(e),
         Stmt::If(i) => {
@@ -1302,7 +1302,7 @@ pub(crate) fn collect_is_identity_stmts(
             collect_is_identity_vars(e, type_names, out);
         }
         Stmt::Let(l) => {
-            collect_is_identity_vars(&l.value, type_names, out);
+            if let Some(v) = &l.value { collect_is_identity_vars(v, type_names, out); }
         }
         Stmt::If(i) => {
             for (cond, body) in &i.branches {

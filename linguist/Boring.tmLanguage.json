@@ -18,7 +18,9 @@
     { "include": "#operator-keywords" },
     { "include": "#builtin-types" },
     { "include": "#ownership-qualifier" },
+    { "include": "#impl-shorthand" },
     { "include": "#type-name" },
+    { "include": "#leading-dot" },
     { "include": "#function-call" },
     { "include": "#operators" }
   ],
@@ -123,8 +125,8 @@
           }
         },
         {
-          "comment": "shorthand: return type directly, no def/req keyword",
-          "match": "\\b(?:int|uint|float|bool|string|str|void|[A-Z][A-Za-z0-9_]*)(?:\\?)?(?:'[a-z]+)?\\s+([a-z_][A-Za-z0-9_]*)\\s*(?:<[^>]*>)?\\s*\\(",
+          "comment": "shorthand: return type directly, no def/req keyword; also handles <Trait> return type",
+          "match": "(?:\\b(?:int|uint|float|bool|string|str|void|[A-Z][A-Za-z0-9_]*)(?:\\?)?(?:'[a-z]+)?|<[A-Z][A-Za-z0-9_]*>)\\s+([a-z_][A-Za-z0-9_]*)\\s*(?:<[^>]*>)?\\s*\\(",
           "captures": {
             "1": { "name": "entity.name.function.boring" }
           }
@@ -199,6 +201,22 @@
           "match": "'(?=[A-Za-z(])"
         }
       ]
+    },
+
+    "leading-dot": {
+      "comment": "Leading-dot shorthand for type-inferred calls: .fromSecs(5), .Variant, .North",
+      "match": "(?<![.A-Za-z0-9_])\\.([A-Z][A-Za-z0-9_]*|[a-z][A-Za-z0-9_]*(?=\\())",
+      "captures": {
+        "1": { "name": "entity.name.boring" }
+      }
+    },
+
+    "impl-shorthand": {
+      "comment": "<Trait> shorthand for impl Trait",
+      "match": "<([A-Z][A-Za-z0-9_]*)>",
+      "captures": {
+        "1": { "name": "entity.name.type.boring" }
+      }
     },
 
     "type-name": {

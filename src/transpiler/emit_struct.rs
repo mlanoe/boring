@@ -982,7 +982,7 @@ impl Transpiler {
         };
         let base = sig.return_ty.as_ref().map(|t| {
             // Bare trait name in return position → `impl TraitName` (RPITIT, Rust 1.75+).
-            // Dynamic dispatch is expressed explicitly with `any Trait` → Box<dyn Trait>.
+            // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
             if let Type::Named(n) = t {
                 if self.trait_method_names.contains_key(n.as_str()) {
                     return format!("impl {}", normalize_type_name(n));

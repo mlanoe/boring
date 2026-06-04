@@ -466,6 +466,7 @@ impl Parser {
         let line = self.line();
         self.expect(&TokenKind::Init)?;
         self.expect(&TokenKind::LParen)?;
+        self.skip_newlines_and_indent(); // allow `(\n    param,` multi-line form
 
         let mut params = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
@@ -504,7 +505,9 @@ impl Parser {
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
+            self.skip_newlines_and_indent(); // allow newline between params
         }
+        self.skip_newlines_and_indent(); // allow newline before `)`
         self.expect(&TokenKind::RParen)?;
 
         // No body — all params declare fields

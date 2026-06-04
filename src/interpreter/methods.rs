@@ -1667,7 +1667,7 @@ impl Interpreter {
             }
 
             // impl Trait — transparent, delegate to inner type
-            Type::Any(inner) => self.check_resolved_qualifier(inner, line),
+            Type::Dyn(inner) | Type::Impl(inner) => self.check_resolved_qualifier(inner, line),
 
             // Associated type reference — no ownership qualifier needed (resolved later)
             Type::SelfAssoc(_) | Type::AssocOf(_, _) => Ok(()),

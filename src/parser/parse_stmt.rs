@@ -303,7 +303,7 @@ impl Parser {
                         self.expect(&TokenKind::Eq)?;
                         let value = self.parse_expr()?;
                         self.expect_newline_soft();
-                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty: None, value, is_move: true, line });
+                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, line });
                     }
                     // `name'qualifier = Ctor(...)` → qualifier on variable, type inferred from RHS
                     Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) => {
@@ -323,17 +323,22 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty, value, is_move: false, line });
+                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: Some(value), is_move: false, line });
                     }
                     _ => {}
                 }
             }
             (name, None, false)
         };
+        // `let v` / `var v` — deferred initialisation (no `= expr`).
+        if !self.check(&TokenKind::Eq) {
+            self.expect_newline_soft();
+            return Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: None, is_move: false, line });
+        }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { mutable, is_pub, is_static, name, ty, value, is_move: false, line })
+        Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: Some(value), is_move: false, line })
     }
 
     /// Parse the binding list of a destructuring `let`.

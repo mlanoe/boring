@@ -1083,7 +1083,7 @@ while let idx = j:
     j = s.nextIndex(idx)
 
 # Optional type annotation
-var Index<[int]> cursor = tab.firstIndex()
+var cursor = tab.firstIndex()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Q. throws io.Error  (qualified error type path)

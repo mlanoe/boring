@@ -94,10 +94,18 @@ impl Parser {
     }
 
     pub(crate) fn parse_type_base(&mut self, line: usize) -> Result<Type, ParseError> {
-        // `any Trait` — existential type (Swift-style).
-        if self.eat(&TokenKind::Any) {
-            let inner = self.parse_type()?;
-            return Ok(Type::Any(Box::new(inner)));
+        // `<Trait>` — impl Trait shorthand (static dispatch).
+        if self.check(&TokenKind::Lt) {
+            let is_impl_shorthand = matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Ident(_)))
+                && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                    Some(TokenKind::Gt));
+            if is_impl_shorthand {
+                self.advance(); // consume `<`
+                let inner = self.parse_type()?;
+                self.expect(&TokenKind::Gt)?;
+                return Ok(Type::Impl(Box::new(inner)));
+            }
         }
         match self.peek().clone() {
             TokenKind::Ident(s) => {
@@ -435,7 +443,8 @@ pub(crate) fn resolve_assoc_in_type(ty: Type, names: &[String]) -> Type {
             throws, task, req,
         ),
         Type::Generic(name, args) => Type::Generic(name, args.into_iter().map(|t| resolve_assoc_in_type(t, names)).collect()),
-        Type::Any(inner) => Type::Any(Box::new(resolve_assoc_in_type(*inner, names))),
+        Type::Dyn(inner) => Type::Dyn(Box::new(resolve_assoc_in_type(*inner, names))),
+        Type::Impl(inner) => Type::Impl(Box::new(resolve_assoc_in_type(*inner, names))),
         other => other,
     }
 }
