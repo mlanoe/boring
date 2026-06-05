@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
 use super::Transpiler;
 use super::helpers::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl Transpiler {
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
@@ -43,7 +40,11 @@ impl Transpiler {
             if let ExprKind::Var(var_name) = &obj.kind {
                 if self.channel_senders.contains(var_name.as_str()) {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
-                    return format!("{}.send({}).await.unwrap()", var_name, val);
+                    return if self.in_throws || self.in_try_body {
+                        format!("{}.send({}).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name, val)
+                    } else {
+                        format!("{}.send({}).await.expect(\"channel receiver dropped\")", var_name, val)
+                    };
                 }
                 // oneshot/broadcast/watch senders: non-async, swallow error with .ok()
                 if self.oneshot_senders.contains(var_name.as_str())
@@ -70,12 +71,16 @@ impl Transpiler {
                     return if self.in_throws || self.in_try_body {
                         format!("{}.await?", var_name)
                     } else {
-                        format!("{}.await.unwrap()", var_name)
+                        format!("{}.await.expect(\"oneshot channel sender dropped\")", var_name)
                     };
                 }
-                // broadcast receiver: rx.recv() → rx.recv().await.unwrap()
+                // broadcast receiver: rx.recv() → rx.recv().await
                 if self.broadcast_receivers.contains(var_name.as_str()) {
-                    return format!("{}.recv().await.unwrap()", var_name);
+                    return if self.in_throws || self.in_try_body {
+                        format!("{}.recv().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name)
+                    } else {
+                        format!("{}.recv().await.expect(\"broadcast channel error: sender dropped or lagged\")", var_name)
+                    };
                 }
                 // watch receiver: rx.recv() → { rx.changed().await.ok(); rx.borrow().clone() }
                 if self.watch_receivers.contains(var_name.as_str()) {
@@ -896,33 +901,6 @@ impl Transpiler {
     ///   `.fromSecs(5)`  + `Duration`  →  `Duration::from_secs(5)`
     ///   `.Expired`      + `Error`     →  `Error::Expired`
     /// Falls back to `emit_expr` when no hint applies.
-    pub(crate) fn emit_with_type_hint(&self, expr: &Expr, hint: Option<&Type>) -> String {
-        if let Some(ty) = hint {
-            // Resolve the named type (including aliases)
-            let type_name = match ty {
-                Type::Named(n) => Some(normalize_type_name(n)),
-                _ => None,
-            };
-            if let Some(rust_type) = type_name {
-                // .method(args) → TypeName::method(args)
-                if let ExprKind::Call(callee, call_args) = &expr.kind {
-                    if let ExprKind::DotIdent(method) = &callee.kind {
-                        let rust_method = camel_to_snake(method);
-                        let vals: Vec<String> = call_args.iter()
-                            .map(|a| self.emit_expr(&a.value))
-                            .collect();
-                        return format!("{}::{}({})", rust_type, rust_method, vals.join(", "));
-                    }
-                }
-                // .Variant → TypeName::Variant
-                if let ExprKind::DotIdent(variant) = &expr.kind {
-                    return format!("{}::{}", rust_type, variant);
-                }
-            }
-        }
-        self.emit_expr(expr)
-    }
-
     pub(crate) fn emit_args(&self, args: &[Arg]) -> String {
         args.iter().map(|a| self.emit_expr_owned(&a.value)).collect::<Vec<_>>().join(", ")
     }
@@ -1294,6 +1272,7 @@ impl Transpiler {
             struct_type_mut_var_names: self.struct_type_mut_var_names.clone(),
             struct_type_method_sigs: self.struct_type_method_sigs.clone(),
             struct_getters: self.struct_getters.clone(),
+            enum_field_getters: self.enum_field_getters.clone(),
             struct_setters: self.struct_setters.clone(),
             transient_fields: self.transient_fields.clone(),
             var_struct_types: self.var_struct_types.clone(),
@@ -1382,7 +1361,7 @@ impl Transpiler {
             Stmt::Let(s) => {
                 let kw = if s.mutable { "let mut" } else { "let" };
                 let ty = s.ty.as_ref().map(|t| format!(": {}", self.emit_type(t))).unwrap_or_default();
-                format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(s.value.as_ref().unwrap()))
+                format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(s.value.as_ref().expect("invariant: Let statement in expression context must have an initializer value")))
             }
             Stmt::If(s) => {
                 // Emit if-expression inline using a sub-transpiler
@@ -1578,7 +1557,7 @@ impl Transpiler {
                 // emit as `NAME.lock().unwrap().clone()`.
                 if self.global_vars_used_in_fns.contains(n) {
                     let static_name = n.to_uppercase();
-                    return format!("{}.lock().unwrap().clone()", static_name);
+                    return format!("{}.lock().unwrap_or_else(|e| e.into_inner()).clone()", static_name);
                 }
                 escape_rust_keyword(n)
             }

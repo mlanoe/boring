@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::ast::*;
-use crate::lexer::{lex, Token, TokenKind, RawInterpPart};
+use crate::lexer::{lex, TokenKind, RawInterpPart};
 
 impl Parser {
     // ─── Expressions ────────────────────────────────────────────────────────
@@ -468,10 +468,6 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
-        self.parse_postfix_inner(false)
-    }
-
     /// Like parse_postfix but allows chaining across Newline+Indent for trailing closures.
     /// Call this from statement-level parsing where chain continuation is valid.
     pub(crate) fn parse_postfix_top_level(&mut self) -> Result<Expr, ParseError> {
@@ -792,10 +788,6 @@ impl Parser {
             }
             ClosureBody::Block(stmts) => Self::scan_stmts_throws_task(stmts),
         }
-    }
-
-    pub(crate) fn infer_throws_task_stmts(stmts: &[Stmt]) -> (bool, bool) {
-        Self::scan_stmts_throws_task(stmts)
     }
 
     pub(crate) fn scan_stmts_throws_task(stmts: &[Stmt]) -> (bool, bool) {

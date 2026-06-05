@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
 use super::Transpiler;
 use super::helpers::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl Transpiler {
     pub(crate) fn emit_struct(&mut self, s: &StructDecl) {
@@ -147,7 +144,7 @@ impl Transpiler {
                 if let Some(def) = &f.default {
                     if is_mutex {
                         // var T'task → Arc::new(Mutex::new(raw_value))
-                        let inner = Self::mutex_inner(&f.ty).unwrap();
+                        let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                         let raw = self.emit_let_value(Some(inner), def);
                         self.line(&format!("{}: Arc::new(tokio::sync::Mutex::new({})),", f.name, raw));
                     } else {
@@ -455,7 +452,7 @@ impl Transpiler {
                 if !init.params.iter().any(|p| p.name == f.name) {
                     if let Some(def) = &f.default {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
-                            let inner = Self::mutex_inner(&f.ty).unwrap();
+                            let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                             let raw = self.emit_let_value(Some(inner), def);
                             self.line(&format!("{}: Arc::new(tokio::sync::Mutex::new({})),", f.name, raw));
                         } else {
@@ -827,7 +824,7 @@ impl Transpiler {
                     other => other.clone(),
                 };
                 let ret_ty = self.emit_type(&unwrapped_field_ty);
-                self.line(&format!("fn {}(&self) -> {} {{", fname, ret_ty));
+                self.line(&format!("fn {}(&self) -> Option<{}> {{", fname, ret_ty));
                 self.indent += 1;
                 // Generate one if-let arm per variant that has this field.
                 for (idx, _field, variant_name) in cases {
@@ -838,16 +835,16 @@ impl Transpiler {
                     let pats: Vec<String> = (0..n_fields).map(|i| {
                         if i == *idx { "__fv".to_string() } else { "_".to_string() }
                     }).collect();
-                    self.line(&format!("if let {}::{}({}) = self {{ return __fv.clone(); }}",
+                    self.line(&format!("if let {}::{}({}) = self {{ return Some(__fv.clone()); }}",
                         e.name, variant_name, pats.join(", ")));
                 }
-                self.line(&format!("panic!(\"field {} not available\");", fname));
+                self.line("None");
                 self.indent -= 1;
                 self.line("}");
                 self.blank();
-                // Register as a getter so `var.field` → `var.field()`.
+                // Register as an enum field getter so `var.field` → `var.field().expect(...)`.
                 let getter_key = format!("{}::{}", e.name, fname);
-                self.struct_getters.insert(getter_key);
+                self.enum_field_getters.insert(getter_key);
             }
             self.indent -= 1;
             self.line("}");

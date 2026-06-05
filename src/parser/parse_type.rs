@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::ast::*;
-use crate::lexer::{Token, TokenKind, RawInterpPart};
+use crate::lexer::TokenKind;
 
 impl Parser {
     // ─── Types ──────────────────────────────────────────────────────────────

@@ -12,7 +12,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::io::BufRead;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -353,7 +352,7 @@ impl fmt::Debug for Value {
             Value::Fn { decl, .. } => write!(f, "Fn({})", decl.name),
             Value::Closure { .. } => write!(f, "Closure"),
             Value::NativeFn { name, .. } => write!(f, "NativeFn({})", name),
-            Value::Range { start, end, inclusive } => write!(f, "Range({}..{})", start, end),
+            Value::Range { start, end, inclusive: _ } => write!(f, "Range({}..{})", start, end),
             Value::Labeled { label, value } => write!(f, "Labeled({}={:?})", label, value),
             Value::RustType { name } => write!(f, "RustType({})", name),
             Value::Index(idx) => write!(f, "Index({:?})", idx),
@@ -495,11 +494,6 @@ pub enum Signal {
     Yield(Value, usize),
 }
 
-impl Signal {
-    fn is_error(&self) -> bool {
-        matches!(self, Signal::Error(_))
-    }
-}
 
 type Eval = Result<Value, Signal>;
 

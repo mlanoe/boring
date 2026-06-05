@@ -142,6 +142,8 @@ struct Transpiler {
     /// "StructName::getter_name" → present for `req` (property getter) methods.
     /// These are accessed without parens in boring (`t.fahrenheit`) but emit as `t.fahrenheit()` in Rust.
     pub(crate) struct_getters: std::collections::HashSet<String>,
+    /// "EnumName::field_name" → present for enum variant field accessors that return `Option<T>`.
+    pub(crate) enum_field_getters: std::collections::HashSet<String>,
     /// "StructName::setter_name" → present for `set` methods.
     /// Assignment `t.prop = v` should emit `t.set_prop(v)`.
     pub(crate) struct_setters: std::collections::HashSet<String>,
@@ -373,6 +375,7 @@ impl Transpiler {
             struct_type_mut_var_names: std::collections::HashSet::new(),
             struct_type_method_sigs: std::collections::HashMap::new(),
             struct_getters: std::collections::HashSet::new(),
+            enum_field_getters: std::collections::HashSet::new(),
             struct_setters: std::collections::HashSet::new(),
             transient_fields: std::collections::HashMap::new(),
             var_struct_types: std::collections::HashMap::new(),

@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::fmt;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {

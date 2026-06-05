@@ -1,5 +1,4 @@
 use super::*;
-use crate::ast::*;
 
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
     // Subscript access on a collection yields an element, not a collection.

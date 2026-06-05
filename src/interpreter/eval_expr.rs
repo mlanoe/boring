@@ -1,9 +1,7 @@
 use super::*;
-use crate::ast::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::fmt;
 
 impl Interpreter {
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
@@ -800,33 +798,6 @@ impl Interpreter {
     /// Like `eval_block_as_expr` but transparent to control-flow signals.
     /// Used for `do:` blocks: `return`/`break`/`continue` propagate to the
     /// enclosing function/loop rather than being captured by the block itself.
-    pub(crate) fn eval_do_block(&mut self, stmts: &[Stmt], env: EnvRef) -> Eval {
-        let mut last = Value::Nil;
-        for (i, stmt) in stmts.iter().enumerate() {
-            if i == stmts.len() - 1 {
-                match stmt {
-                    Stmt::Expr(e) => {
-                        let v = self.eval_expr(e, Rc::clone(&env))?;
-                        if !matches!(e.kind, ExprKind::Assign(..)) {
-                            last = v;
-                        }
-                        continue;
-                    }
-                    Stmt::If(s) => {
-                        return self.eval_if_expr(s, Rc::clone(&env));
-                    }
-                    Stmt::Match(s) => {
-                        return self.eval_match_expr(s, env);
-                    }
-                    _ => {}
-                }
-            }
-            // All signals (Return, Break, Continue, RuntimeError) propagate outward.
-            self.exec_stmt(stmt, Rc::clone(&env))?;
-        }
-        Ok(last)
-    }
-
     pub(crate) fn eval_binop(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, env: EnvRef, line: usize) -> Eval {
         // Short-circuit for And/Or
         if *op == BinOp::And {
@@ -1199,7 +1170,7 @@ impl Interpreter {
                 let obj = self.instantiate_struct_labeled(&decl, &captured, args, line)?;
                 Ok(obj)
             }
-            Value::EnumNamespace { name, variants, .. } => {
+            Value::EnumNamespace { name, variants: _, .. } => {
                 // Calling enum namespace means accessing a variant constructor
                 Err(err(format!("cannot call enum namespace '{}' directly; use .VariantName", name), line))
             }

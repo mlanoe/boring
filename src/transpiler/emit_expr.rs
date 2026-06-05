@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
 use super::Transpiler;
 use super::helpers::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
@@ -243,7 +240,7 @@ impl Transpiler {
                     if self.global_vars_used_in_fns.contains(var_name.as_str()) {
                         let static_name = var_name.to_uppercase();
                         let val_s = self.emit_expr_owned(value);
-                        return format!("*{}.lock().unwrap() = {}", static_name, val_s);
+                        return format!("*{}.lock().unwrap_or_else(|e| e.into_inner()) = {}", static_name, val_s);
                     }
                 }
                 if let ExprKind::Field(obj, field) = &target.kind {
@@ -430,8 +427,8 @@ impl Transpiler {
                             return format!("{}::{}", type_name, field.to_uppercase());
                         }
                         if self.struct_type_mut_var_names.contains(&key) {
-                            // type var → module-level static Mutex: read via lock().unwrap()
-                            return format!("*{}.lock().unwrap()", field.to_uppercase());
+                            // type var → module-level static Mutex: read via lock(), recover from poisoning
+                            return format!("*{}.lock().unwrap_or_else(|e| e.into_inner())", field.to_uppercase());
                         }
                         // Fieldless enum variant (no args): CalcError.DivByZero → CalcError::DivByZero
                         if self.enum_variant_fields.contains_key(&key) {
@@ -472,10 +469,9 @@ impl Transpiler {
                         let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
                         return if field == "wait" {
                             if is_throws_handle && in_throws_ctx {
-                                // Propagate inner BoringError even on void await
-                                format!("{{ let _ = {}.await.unwrap()?; }}", type_name)
+                                format!("{{ let _ = {}.await.expect(\"task panicked\")?; }}", type_name)
                             } else if is_throws_handle {
-                                format!("{{ let _ = {}.await.unwrap().unwrap(); }}", type_name)
+                                format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", type_name)
                             } else {
                                 format!("{{ let _ = {}.await; }}", type_name)
                             }
@@ -483,18 +479,16 @@ impl Transpiler {
                             // .value
                             if is_throws_handle {
                                 if in_throws_ctx {
-                                    format!("{}.await.unwrap()?", type_name)
+                                    format!("{}.await.expect(\"task panicked\")?", type_name)
                                 } else {
-                                    format!("{}.await.unwrap().unwrap()", type_name)
+                                    format!("{}.await.expect(\"task panicked\").expect(\"unhandled task error\")", type_name)
                                 }
                             } else if is_join_handle {
-                                // Plain JoinHandle<T> — no inner Result to unwrap
-                                format!("{}.await.unwrap()", type_name)
+                                format!("{}.await.expect(\"task panicked\")", type_name)
                             } else if in_throws_ctx {
-                                // Async fn parameter: Future<Output=Result<T,_>>
                                 format!("{}.await?", type_name)
                             } else {
-                                format!("{}.await.unwrap()", type_name)
+                                format!("{}.await.expect(\"task panicked\")", type_name)
                             }
                         };
                     }
@@ -511,14 +505,14 @@ impl Transpiler {
                         let in_throws_ctx = self.in_throws || self.in_try_body;
                         return if field == "wait" {
                             if in_throws_ctx {
-                                format!("{{ let _ = {}.await.unwrap()?; }}", obj_s)
+                                format!("{{ let _ = {}.await.expect(\"task panicked\")?; }}", obj_s)
                             } else {
-                                format!("{{ let _ = {}.await.unwrap().unwrap(); }}", obj_s)
+                                format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", obj_s)
                             }
                         } else if in_throws_ctx {
-                            format!("{}.await.unwrap()?", obj_s)
+                            format!("{}.await.expect(\"task panicked\")?", obj_s)
                         } else {
-                            format!("{}.await.unwrap().unwrap()", obj_s)
+                            format!("{}.await.expect(\"task panicked\").expect(\"unhandled task error\")", obj_s)
                         };
                     }
 
@@ -529,7 +523,7 @@ impl Transpiler {
                         return if field == "wait" {
                             format!("{{ let _ = {}.await; }}", obj_s)
                         } else {
-                            format!("{}.await.unwrap()", obj_s)
+                            format!("{}.await.expect(\"task panicked\")", obj_s)
                         };
                     }
                     // Loop variable holding a JoinHandle: only treat as future if the var is
@@ -546,7 +540,7 @@ impl Transpiler {
                             return if field == "wait" {
                                 format!("{{ let _ = {}.await; }}", obj_s)
                             } else {
-                                format!("{}.await.unwrap()", obj_s)
+                                format!("{}.await.expect(\"task panicked\")", obj_s)
                             };
                         }
                     }
@@ -559,19 +553,14 @@ impl Transpiler {
                 // to avoid incorrectly treating built-in properties (`.length` on strings/arrays).
                 let is_getter = if let ExprKind::Var(v) = &obj.kind {
                     if v == "self" {
-                        // Case (a): receiver is `self` — check the current struct's getters.
                         self.self_type.as_deref()
                             .map(|t| self.struct_getters.contains(&format!("{}::{}", t, field)))
                             .unwrap_or(false)
                     } else {
-                        // Case (b): other variable — look up its struct or enum type and check for a getter.
-                        // This handles `t.fahrenheit` where `t` is a Temperature instance,
-                        // and `ed.label` where `ed` is an EDirection enum value.
                         let from_struct = self.var_struct_types.get(v.as_str())
                             .map(|type_name| self.struct_getters.contains(&format!("{}::{}", type_name, field)))
                             .unwrap_or(false);
                         let from_enum = if !from_struct {
-                            // Also check var_types for Named types (enums registered in struct_getters).
                             if let Some(Type::Named(type_name)) = self.var_types.get(v.as_str()) {
                                 self.struct_getters.contains(&format!("{}::{}", type_name, field))
                             } else { false }
@@ -581,6 +570,23 @@ impl Transpiler {
                 } else {
                     false
                 };
+                // Enum field accessors return Option<T> — unwrap at callsite with a clear message.
+                let is_enum_field_getter = if let ExprKind::Var(v) = &obj.kind {
+                    let type_name = if v == "self" {
+                        self.self_type.clone()
+                    } else {
+                        self.var_types.get(v.as_str()).and_then(|t| {
+                            if let Type::Named(n) = t { Some(n.clone()) } else { None }
+                        })
+                    };
+                    type_name.map(|t| self.enum_field_getters.contains(&format!("{}::{}", t, field)))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if is_enum_field_getter {
+                    return format!("{}.{}().expect(\"field '{}' not available in this variant\")", obj_s, field, field);
+                }
                 if is_getter {
                     return format!("{}.{}()", obj_s, field);
                 }
@@ -666,7 +672,7 @@ impl Transpiler {
                 if let ExprKind::Var(obj_var) = &obj.kind {
                     if self.dict_vars.contains(obj_var.as_str()) {
                         let key_ref = self.emit_dict_key_borrow(idx);
-                        return format!("{}.get({}).cloned().unwrap()", obj_var, key_ref);
+                        return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_var, key_ref);
                     }
                 }
                 // For string literal keys (HashMap), use the string key directly (Arc<str>: Deref<Target=str>)
@@ -929,7 +935,7 @@ impl Transpiler {
                     };
                 }
                 let src_is_numeric_lit = matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
-                let src_is_bool = matches!(&e.kind, ExprKind::Bool(_))
+                let _src_is_bool = matches!(&e.kind, ExprKind::Bool(_))
                     || matches!(&e.kind, ExprKind::Var(v) if {
                         // bool variable (rough heuristic: not in known numeric vars)
                         let _ = v; false
@@ -2095,7 +2101,7 @@ impl Transpiler {
             }
             "min"        => {
                 if args.len() == 1 {
-                    format!("{}.iter().cloned().reduce(f64::min).unwrap()", self.emit_expr(&args[0].value))
+                    format!("{}.iter().cloned().reduce(f64::min).expect(\"cannot compute min of empty collection\")", self.emit_expr(&args[0].value))
                 } else {
                     let a = self.emit_expr(&args[0].value);
                     let b = self.emit_expr(&args[1].value);
@@ -2104,7 +2110,7 @@ impl Transpiler {
             }
             "max"        => {
                 if args.len() == 1 {
-                    format!("{}.iter().cloned().reduce(f64::max).unwrap()", self.emit_expr(&args[0].value))
+                    format!("{}.iter().cloned().reduce(f64::max).expect(\"cannot compute max of empty collection\")", self.emit_expr(&args[0].value))
                 } else {
                     let a = self.emit_expr(&args[0].value);
                     let b = self.emit_expr(&args[1].value);
@@ -2122,7 +2128,7 @@ impl Transpiler {
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
             "readLine"   => {
                 // Emit Arc<str> so the result is directly usable as a `string` value.
-                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).unwrap(); Arc::<str>::from(__line.trim()) }".into()
+                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect(\"failed to read from stdin\"); Arc::<str>::from(__line.trim()) }".into()
             }
             // drop(x) — explicitly releases ownership, maps directly to Rust's drop()
             "drop" => {

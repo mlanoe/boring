@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::fmt;
 
 impl Interpreter {
     pub(crate) fn exec_stmt(&mut self, stmt: &Stmt, env: EnvRef) -> Result<(), Signal> {

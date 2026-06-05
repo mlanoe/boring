@@ -15,7 +15,7 @@ mod parse_expr;
 mod parse_type;
 
 use crate::ast::*;
-use crate::lexer::{lex, LexError, RawInterpPart, Token, TokenKind};
+use crate::lexer::{LexError, Token, TokenKind};
 use thiserror::Error;
 
 use parse_type::{check_no_return, expr_to_param, resolve_assoc_in_fn, resolve_assoc_in_sig};
@@ -76,23 +76,15 @@ struct Parser {
     /// Must be disabled in condition/iterable positions where `):`  would be
     /// misread as a trailing-closure intro instead of call + body separator.
     pub(crate) allow_trailing_closure: bool,
-    /// Depth of open parentheses in the current expression context.
-    /// When > 0, newlines inside binary operations are skipped — Python-style
-    /// implicit line continuation inside `(...)`.
-    pub(crate) paren_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true, paren_depth: 0 }
+        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true }
     }
 
     fn peek(&self) -> &TokenKind {
         &self.tokens[self.pos].kind
-    }
-
-    fn peek_token(&self) -> &Token {
-        &self.tokens[self.pos]
     }
 
     fn line(&self) -> usize {
@@ -774,6 +766,7 @@ impl Parser {
                         _ => { i += 1; }
                     }
                 }
+                let _ = i;
                 false
             }
             _ => false,

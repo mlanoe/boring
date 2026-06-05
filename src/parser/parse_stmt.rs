@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::ast::*;
-use crate::lexer::{Token, TokenKind, RawInterpPart};
+use crate::lexer::TokenKind;
 
 impl Parser {
     // ─── Statements ─────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ impl Parser {
                     Ok(Stmt::Try(self.parse_try_stmt()?))
                 } else {
                     // Inline: parse as expression statement (handles assignment too)
-                    let line = self.line();
+                    let _line = self.line();
                     let expr = self.parse_expr()?;
                     self.expect_newline_soft();
                     Ok(Stmt::Expr(expr))
@@ -274,7 +274,7 @@ impl Parser {
         // `let name = value`         — no type annotation, borrow by default
         // `let name' = value`        — no type annotation, move (tick without qualifier)
         // `let type name = value`    — explicit type annotation (boring convention)
-        let (name, ty, is_move) = if self.is_type_start_before_ident() {
+        let (name, ty, _is_move) = if self.is_type_start_before_ident() {
             let base = self.parse_type()?;
             let ty = self.parse_type_qualifier(base);
             // `var T&` → absorb mutability into the borrow type
@@ -767,19 +767,6 @@ impl Parser {
         self.expect_newline()?;
         let body = self.parse_block()?;
         Ok(WhileStmt { condition, body, line })
-    }
-
-    pub(crate) fn parse_do_while_stmt(&mut self) -> Result<DoWhileStmt, ParseError> {
-        let line = self.line();
-        self.expect(&TokenKind::Do)?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect_newline()?;
-        let body = self.parse_block()?;
-        self.skip_newlines();
-        self.expect(&TokenKind::While)?;
-        let condition = self.parse_expr()?;
-        self.expect_newline()?;
-        Ok(DoWhileStmt { body, condition, line })
     }
 
     pub(crate) fn parse_loop_stmt(&mut self) -> Result<LoopStmt, ParseError> {

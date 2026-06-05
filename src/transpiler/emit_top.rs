@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
 use super::Transpiler;
 use super::helpers::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl Transpiler {
     pub(crate) fn emit_item(&mut self, item: &Item) {
@@ -493,7 +490,7 @@ impl Transpiler {
         // Use mangled name for overloaded functions/methods so each variant compiles as a distinct Rust fn.
         let is_free_overload = self_ty.is_none() && self.overloaded_fn_names.contains(&f.name);
         let is_method_overload = self_ty.is_some() && {
-            let key = format!("{}::{}", self_ty.unwrap(), f.name);
+            let key = format!("{}::{}", self_ty.expect("invariant: guarded by is_some() check above"), f.name);
             self.overloaded_method_keys.contains(&key)
         };
         let rust_fn_name = if is_free_overload || is_method_overload {
@@ -779,7 +776,7 @@ impl Transpiler {
                         return if self.in_throws || self.in_try_body {
                             format!("{}.await?", type_name)
                         } else {
-                            format!("{}.await.unwrap()", type_name)
+                            format!("{}.await.expect(\"oneshot channel sender dropped\")", type_name)
                         };
                     }
                     // watch rx.value → current value without waiting

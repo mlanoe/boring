@@ -5437,7 +5437,6 @@ if let user:
 | `select: var = expr: body` | `tokio::select! { var = expr => { body } }` |
 | `select: after dur: body` | `tokio::select! { _ = tokio::time::sleep(dur) => { body } }` |
 | `wait dur` | `tokio::time::sleep(dur).await` |
-| `every dur: body` | `loop { tokio::time::sleep(dur).await; body }` *(deprecated, prefer `loop: wait dur; body`)* |
 | `cancelled:` (select arm) | `_ = __task_cancel.cancelled() =>` — implicit `CancellationToken` param injected into the enclosing function |
 | `f.cancel()` | `__cancel_f.cancel()` — signals the spawned task via its token |
 | `task(dur): body` | `tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })` |

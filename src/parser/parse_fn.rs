@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::ast::*;
-use crate::lexer::{Token, TokenKind, RawInterpPart};
+use crate::lexer::{TokenKind, RawInterpPart};
 
 impl Parser {
     pub(crate) fn parse_fn_decl(&mut self, is_pub: bool, mutating: bool) -> Result<FnDecl, ParseError> {
@@ -74,7 +74,7 @@ impl Parser {
         }
         let task   = prefix_task;
         let stream = prefix_stream;
-        let mut throws = self.eat(&TokenKind::Throws);
+        let throws = self.eat(&TokenKind::Throws);
         let mut throws_ty: Option<Type> = None;
         if throws {
             throws_ty = self.parse_throws_type()?;
@@ -424,7 +424,7 @@ impl Parser {
             self.parse_block()?
         } else {
             // Inline: `as String: expr`
-            let expr_line = self.line();
+            let _expr_line = self.line();
             let expr = self.parse_expr()?;
             self.expect_newline_soft();
             vec![Stmt::Expr(expr)]
@@ -627,24 +627,6 @@ impl Parser {
             }
         }
         parts.join("")
-    }
-
-    pub(crate) fn parse_fn_signature(&mut self) -> Result<FnSignature, ParseError> {
-        let line = self.line();
-        let mutating = if self.check(&TokenKind::Req) {
-            self.advance();
-            false
-        } else {
-            self.expect(&TokenKind::Def)?;
-            true
-        };
-        let (return_ty, _qualifier, name) = self.parse_fn_head()?;
-        let (type_params, _) = self.parse_type_params();
-        let params = self.parse_params()?;
-        let throws = self.eat(&TokenKind::Throws);
-        let task   = self.eat(&TokenKind::Task);
-        self.expect_newline()?;
-        Ok(FnSignature { name, params, return_ty, throws, task, stream: false, mutating, type_params, line })
     }
 
     /// Parse a trait member that is either an abstract signature or a default implementation.

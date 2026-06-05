@@ -1,9 +1,6 @@
 use super::*;
-use crate::ast::*;
 use super::Transpiler;
 use super::helpers::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 impl Transpiler {
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
@@ -146,7 +143,7 @@ impl Transpiler {
             }
             return;
         }
-        let s_value = s.value.as_ref().unwrap();
+        let s_value = s.value.as_ref().expect("invariant: Let statement without type annotation must have an initializer value");
         // T'actor → Arc<tokio::sync::Mutex<T>>.
         // All field reads/writes and method calls on this variable will go through .lock().await.
         // Works with both `let` and `var` — the actor qualifier alone triggers mutex semantics.
@@ -687,17 +684,9 @@ impl Transpiler {
         // Resolve named type aliases through non_fn_type_aliases before dispatching.
         // e.g. `use Pt as LPoint'` makes `Pt` an alias for `Box<LPoint>`;
         // when calling `describe(p)` where describe expects `Pt`, we must Box::new() the arg.
-        let resolved_ty_owned: Option<Type>;
         let declared_ty = if let Some(Type::Named(n)) = declared_ty {
-            if let Some(resolved) = self.non_fn_type_aliases.get(n.as_str()) {
-                resolved_ty_owned = Some(resolved.clone());
-                resolved_ty_owned.as_ref()
-            } else {
-                resolved_ty_owned = None;
-                declared_ty
-            }
+            self.non_fn_type_aliases.get(n.as_str()).or(declared_ty)
         } else {
-            resolved_ty_owned = None;
             declared_ty
         };
         // Context-aware DotIdent: `.Variant` with a known Named enum type → `EnumType::Variant`.
@@ -1186,7 +1175,7 @@ impl Transpiler {
             Some(e) => {
                 let is_optional_return = matches!(&self.fn_return_ty, Some(Type::Optional(_)));
                 // Check if the declared return type is a known trait → wrap value in Box::new().
-                let is_trait_return = matches!(&self.fn_return_ty, Some(Type::Named(n))
+                let _is_trait_return = matches!(&self.fn_return_ty, Some(Type::Named(n))
                     if self.trait_method_names.contains_key(n.as_str()));
                 let val = if is_optional_return && !is_option_expr(e) {
                     let inner = self.emit_expr_owned(e);
@@ -2448,8 +2437,8 @@ impl Transpiler {
                             )
                         } else {
                             |ty: &str| format!(
-                                "__unhandled => panic!(\"unhandled {} variant: {{}}\", __unhandled),",
-                                ty
+                                "__unhandled => {{ eprintln!(\"[boring] unhandled {} variant: {{}}\", __unhandled); panic!(\"unhandled {} variant\"); }},",
+                                ty, ty
                             )
                         };
                         for (ty_name, arms) in &variant_groups {
@@ -2556,7 +2545,8 @@ impl Transpiler {
                     if self.in_throws {
                         self.line("return Err(__err);");
                     } else {
-                        self.line("panic!(\"unhandled error: {}\", __err);");
+                        self.line("eprintln!(\"[boring] unhandled error: {}\", __err);");
+                        self.line("panic!(\"unhandled error\");");
                     }
                 }
 

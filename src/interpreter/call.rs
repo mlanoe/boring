@@ -1,12 +1,9 @@
 use super::*;
-use crate::ast::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::fmt;
 
 impl Interpreter {
-    pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
+    pub(crate) fn call_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize, _in_throws_context: bool) -> Eval {
         // Stream functions: run the body collecting `yield` values into a Vec.
         if decl.stream {
             return self.call_stream_fn(decl, captured, args, line);
@@ -256,7 +253,7 @@ impl Interpreter {
     /// Execute a stream function, collecting all `yield`ed values into an Array.
     /// Yields are captured as side effects into `self.stream_yields` (no signal propagation),
     /// so `for` loops and other control flow inside the stream body work normally.
-    pub(crate) fn call_stream_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, line: usize) -> Eval {
+    pub(crate) fn call_stream_fn(&mut self, decl: &FnDecl, captured: EnvRef, args: Vec<Value>, _line: usize) -> Eval {
         let fn_env = Env::child(captured.clone());
         // Bind params positionally
         let mut pos_iter = args.into_iter();
@@ -281,7 +278,7 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn call_closure(&mut self, params: Vec<Param>, body: ClosureBody, captured: EnvRef, args: Vec<Value>, line: usize) -> Eval {
+    pub(crate) fn call_closure(&mut self, params: Vec<Param>, body: ClosureBody, captured: EnvRef, args: Vec<Value>, _line: usize) -> Eval {
         let fn_env = Env::child(captured);
         for (i, param) in params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(Value::Nil);
@@ -309,7 +306,7 @@ impl Interpreter {
         method: &crate::ast::TypeMethod,
         args: Vec<Value>,
         captured: EnvRef,
-        line: usize,
+        _line: usize,
     ) -> Eval {
         self.defer_stack.push(Vec::new());
         let fn_env = Env::child(Rc::clone(&captured));
@@ -378,7 +375,7 @@ impl Interpreter {
     }
 
     /// Execute an `init` declaration and return the constructed object.
-    pub(crate) fn call_init(&mut self, decl: &StructDecl, init_decl: &crate::ast::InitDecl, captured: &EnvRef, args: Vec<Value>, line: usize) -> Eval {
+    pub(crate) fn call_init(&mut self, decl: &StructDecl, init_decl: &crate::ast::InitDecl, captured: &EnvRef, args: Vec<Value>, _line: usize) -> Eval {
         // Resolve positional / labeled args.
         let mut positional: std::collections::VecDeque<Value> = std::collections::VecDeque::new();
         let mut labeled: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -389,7 +386,7 @@ impl Interpreter {
             }
         }
 
-        let resolve_arg = |labeled: &mut std::collections::HashMap<String, Value>,
+        let _resolve_arg = |labeled: &mut std::collections::HashMap<String, Value>,
                            positional: &mut std::collections::VecDeque<Value>,
                            name: &str| -> Value {
             if let Some(v) = labeled.remove(name) { v }
