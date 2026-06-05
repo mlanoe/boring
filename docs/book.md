@@ -2688,26 +2688,45 @@ The error type can also be a **module-qualified path**: `throws io.Error`, `thro
 
 ### `try?` — Result to Option
 
-`try? expr` is shorthand for `try expr else nil`. It converts a `Result<T, E>` (or a `throws` function call) into an optional value: `Ok(v)` becomes `v`, any error becomes `nil`.
+`try? expr` is shorthand for `try expr else nil`. It converts a `throws` function call (or a raw `Result<T, E>`) into an optional value: success becomes the value, any error becomes `nil`.
 
+**With `throw` (idiomatic Boring)**
 ```boring
-Result<int, string> divide(int a, int b):
-    if b == 0: return Err("division by zero")
-    return Ok(a / b)
+int divide(int a, int b) throws:
+    if b == 0: throw "division by zero"
+    return a / b
 
-let r1 = try? divide(10, 2)   # 5  (unwrapped)
-let r2 = try? divide(10, 0)   # nil
+let int? r1 = try? divide(10, 2)   # 5
+let int? r2 = try? divide(10, 0)   # nil
 
 if let v = r1:
-    print "got {v}"            # got 5
+    print "got {v}"                 # got 5
 ```
 
 **Rust equivalent**
 ```rust
-let r1 = divide(10, 2).ok();   // Option<i64>
+fn divide(a: i64, b: i64) -> Result<i64, Box<dyn std::error::Error>> {
+    if b == 0 { return Err("division by zero".into()); }
+    Ok(a / b)
+}
+
+let r1 = divide(10, 2).ok();   // Some(5)
 let r2 = divide(10, 0).ok();   // None
 
 if let Some(v) = r1 { println!("got {}", v); }
+```
+
+**With `Result<T, E>` (Rust interop)**
+
+When calling a function that returns a raw `Result<T, E>` (e.g. from a Rust library), `try?` works the same way:
+
+```boring
+Result<int, string> parse_count(string s):
+    if s == "": return Err("empty input")
+    return Ok(s.len())
+
+let int? n = try? parse_count("hello")   # 5
+let int? m = try? parse_count("")        # nil
 ```
 
 > For a detailed compatibility matrix between Boring's `throw`/`catch` system and Rust's native `Result<T, E>` types, see [Advanced — Compatibility with Rust `Result` types](#advanced--compatibility-with-rust-result-types).

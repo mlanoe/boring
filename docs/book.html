@@ -1694,21 +1694,35 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <p>The error type can also be a <strong>module-qualified path</strong>: <code>throws io.Error</code>, <code>throws db.QueryError</code> — the dot separator maps to <code>::</code> in Rust.</p>
 <blockquote>For the internal Rust representation (<code>BoringError::Other</code>, <code>TypeId</code>, <code>BoringError::Str</code>/<code>String</code>) and the full untyped/typed comparison table, see <a href="#advanced--error-handling-internals">Advanced — Error handling internals</a>.</blockquote>
 <h3 id="try--result-to-option"><code>try?</code> — Result to Option</h3>
-<p><code>try? expr</code> is shorthand for <code>try expr else nil</code>. It converts a <code>Result&lt;T, E&gt;</code> (or a <code>throws</code> function call) into an optional value: <code>Ok(v)</code> becomes <code>v</code>, any error becomes <code>nil</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Result&lt;<span class="kt">int</span>, <span class="kt">string</span>&gt; <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b):
-    <span class="kw">if</span> b == <span class="nb">0</span>: <span class="kw">return</span> <span class="fn">Err</span>(<span class="s">"division by zero"</span>)
-    <span class="kw">return</span> <span class="fn">Ok</span>(a / b)
+<p><code>try? expr</code> is shorthand for <code>try expr else nil</code>. It converts a <code>throws</code> function call (or a raw <code>Result&lt;T, E&gt;</code>) into an optional value: success becomes the value, any error becomes <code>nil</code>.</p>
+<p><strong>With <code>throw</code> (idiomatic Boring)</strong></p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">divide</span>(<span class="kt">int</span> a, <span class="kt">int</span> b) <span class="kw">throws</span>:
+    <span class="kw">if</span> b == <span class="nb">0</span>: <span class="kw">throw</span> <span class="s">"division by zero"</span>
+    <span class="kw">return</span> a / b
 
-<span class="kw">let</span> r1 = <span class="kw">try</span>? <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">2</span>)   <span class="co"># 5  (unwrapped)</span>
-<span class="kw">let</span> r2 = <span class="kw">try</span>? <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">0</span>)   <span class="co"># nil</span>
+<span class="kw">let</span> <span class="kt">int</span>? r1 = <span class="kw">try</span>? <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">2</span>)   <span class="co"># 5</span>
+<span class="kw">let</span> <span class="kt">int</span>? r2 = <span class="kw">try</span>? <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">0</span>)   <span class="co"># nil</span>
 
 <span class="kw">if</span> <span class="kw">let</span> v = r1:
-    print <span class="s">"got <span class="si">{v}</span>"</span>            <span class="co"># got 5</span></code></pre></div>
+    print <span class="s">"got <span class="si">{v}</span>"</span>                 <span class="co"># got 5</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> r1 = <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">2</span>).<span class="fn">ok</span>();   <span class="co">// Option&lt;i64&gt;</span>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">divide</span>(a: i64, b: i64) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+    <span class="kw">if</span> b == <span class="nb">0</span> { <span class="kw">return</span> <span class="kw">Err</span>(<span class="s">&quot;division by zero&quot;</span>.<span class="fn">into</span>()); }
+    <span class="kw">Ok</span>(a / b)
+}
+
+<span class="kw">let</span> r1 = <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">2</span>).<span class="fn">ok</span>();   <span class="co">// Some(5)</span>
 <span class="kw">let</span> r2 = <span class="fn">divide</span>(<span class="nb">10</span>, <span class="nb">0</span>).<span class="fn">ok</span>();   <span class="co">// None</span>
 
 <span class="kw">if</span> <span class="kw">let</span> <span class="kw">Some</span>(v) = r1 { <span class="fm">println!</span>(<span class="s">&quot;got {}&quot;</span>, v); }</code></pre></div>
+<p><strong>With <code>Result&lt;T, E&gt;</code> (Rust interop)</strong></p>
+<p>When calling a function that returns a raw <code>Result&lt;T, E&gt;</code> (e.g. from a Rust library), <code>try?</code> works the same way:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Result&lt;<span class="kt">int</span>, <span class="kt">string</span>&gt; <span class="fn">parse_count</span>(<span class="kt">string</span> s):
+    <span class="kw">if</span> s == <span class="s">""</span>: <span class="kw">return</span> <span class="fn">Err</span>(<span class="s">"empty input"</span>)
+    <span class="kw">return</span> <span class="fn">Ok</span>(s.<span class="fn">len</span>())
+
+<span class="kw">let</span> <span class="kt">int</span>? n = <span class="kw">try</span>? <span class="fn">parse_count</span>(<span class="s">"hello"</span>)   <span class="co"># 5</span>
+<span class="kw">let</span> <span class="kt">int</span>? m = <span class="kw">try</span>? <span class="fn">parse_count</span>(<span class="s">""</span>)        <span class="co"># nil</span></code></pre></div>
 <blockquote>For a detailed compatibility matrix between Boring&#x27;s <code>throw</code>/<code>catch</code> system and Rust&#x27;s native <code>Result&lt;T, E&gt;</code> types, see <a href="#advanced--compatibility-with-rust-result-types">Advanced — Compatibility with Rust `Result` types</a>.</blockquote>
 <hr>
 <h2 id="12-optionals">12. Optionals</h2>
