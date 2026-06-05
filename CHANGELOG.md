@@ -5,6 +5,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.1] — 2026-06-06
+
+### Fixed
+
+- Enum field accessors now return `Option<T>` instead of panicking when the field is absent from the current variant
+- Unhandled `catch` variants and unmatched errors print to stderr before panicking instead of crashing silently
+- Replace bare `unwrap()` in transpiler internals with `expect()` and invariant messages
+- Replace bare `unwrap()` in generated code: mutex locks recover from poisoning, channel send/recv propagate errors in `throws` context, JoinHandle await uses descriptive `expect()`
+- CI: use `macos-13` runner for `x86_64-apple-darwin` build (fixes `E0463` on arm64 `macos-latest`)
+
+### Removed
+
+- Deprecated `every dur: body` syntax removed from documentation (was never implemented)
+- 62 compiler warnings eliminated (unused imports, dead code, unused fields)
+
+---
+
 ## [0.2.0] — 2026-06-05
 
 ### Added
@@ -63,5 +80,6 @@ Initial public release.
 
 ---
 
+[0.2.1]: https://github.com/mlanoe/boring/releases/tag/v0.2.1
 [0.2.0]: https://github.com/mlanoe/boring/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mlanoe/boring/releases/tag/v0.1.0
