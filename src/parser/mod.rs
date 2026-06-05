@@ -987,6 +987,7 @@ impl Parser {
         if !self.eat(&TokenKind::Lt) { return (vec![], vec![]); }
         let mut params = Vec::new();
         let mut where_clause = Vec::new();
+        self.skip_newlines_and_indent();
         loop {
             if self.check(&TokenKind::Ampersand) {
                 let next_is_lifetime = matches!(
@@ -1002,6 +1003,7 @@ impl Parser {
                         params.push(format!("'{}", lt));
                     }
                     if !self.eat(&TokenKind::Comma) { break; }
+                    self.skip_newlines_and_indent();
                     continue;
                 }
             }
@@ -1025,6 +1027,7 @@ impl Parser {
                         let param_name = if let TokenKind::Ident(s) = self.peek().clone() { self.advance(); s } else { unreachable!() };
                         params.push(format!("${}:{}", param_name, rust_ty));
                         if !self.eat(&TokenKind::Comma) { break; }
+                        self.skip_newlines_and_indent();
                         continue;
                     }
                 }
@@ -1053,7 +1056,9 @@ impl Parser {
             }
 
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines_and_indent();
         }
+        self.skip_newlines_and_indent();
         let _ = self.expect(&TokenKind::Gt);
         (params, where_clause)
     }
@@ -1072,6 +1077,7 @@ impl Parser {
             let proto = self.expect_ident()?;
             protocols.push(proto);
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent();
                 protocols.push(self.expect_ident()?);
             }
         }
@@ -1246,6 +1252,7 @@ impl Parser {
         if self.eat(&TokenKind::As) {
             traits.push(self.expect_ident()?);
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent();
                 traits.push(self.expect_ident()?);
             }
         }
@@ -1358,6 +1365,7 @@ impl Parser {
         if self.eat(&TokenKind::As) {
             protocols.push(self.expect_ident()?);
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent();
                 protocols.push(self.expect_ident()?);
             }
         }
@@ -1491,21 +1499,10 @@ impl Parser {
         if self.eat(&TokenKind::As) {
             parents.push(self.expect_ident()?);
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent();
                 parents.push(self.expect_ident()?);
             }
             self.expect(&TokenKind::Colon)?;
-        } else if matches!(self.peek(), TokenKind::Colon) {
-            let after_colon = self.tokens.get(self.pos + 1).map(|t| &t.kind);
-            if matches!(after_colon, Some(TokenKind::Ident(_))) {
-                self.advance(); // eat ':'
-                parents.push(self.expect_ident()?);
-                while self.eat(&TokenKind::Comma) {
-                    parents.push(self.expect_ident()?);
-                }
-                self.expect(&TokenKind::Colon)?; // body colon
-            } else {
-                self.expect(&TokenKind::Colon)?;
-            }
         } else {
             self.expect(&TokenKind::Colon)?;
         }

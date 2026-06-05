@@ -1298,11 +1298,14 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 self.advance();
+                self.skip_newlines_and_indent(); // allow `[\n    elem,` multi-line form
                 let mut elems = Vec::new();
                 while !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
                     elems.push(self.parse_expr()?);
                     if !self.eat(&TokenKind::Comma) { break; }
+                    self.skip_newlines_and_indent(); // allow newline between elements
                 }
+                self.skip_newlines_and_indent(); // allow newline before `]`
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Expr { kind: ExprKind::Array(elems), line })
             }
@@ -1381,11 +1384,14 @@ impl Parser {
             }),
         };
         self.expect(&open)?;
+        self.skip_newlines_and_indent();
         let mut args = Vec::new();
         while !self.check(&close) && !self.check(&TokenKind::Eof) {
             args.push(self.parse_expr()?);
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines_and_indent();
         }
+        self.skip_newlines_and_indent();
         self.expect(&close)?;
         Ok(args)
     }
@@ -1393,6 +1399,7 @@ impl Parser {
     /// Parse `{...}` — could be dict `{k: v, ...}` or set `{v, ...}`
     pub(crate) fn parse_brace_expr(&mut self, line: usize) -> Result<Expr, ParseError> {
         self.expect(&TokenKind::LBrace)?;
+        self.skip_newlines_and_indent(); // allow `{\n    ...` multi-line form
         if self.check(&TokenKind::RBrace) {
             self.advance();
             // {} = empty set (HashSet::new())
@@ -1414,21 +1421,25 @@ impl Parser {
             let first_val = self.parse_expr()?;
             let mut pairs = vec![(first_expr, first_val)];
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent(); // allow newline between pairs
                 if self.check(&TokenKind::RBrace) { break; }
                 let k = self.parse_expr()?;
                 self.expect(&TokenKind::Eq)?;
                 let v = self.parse_expr()?;
                 pairs.push((k, v));
             }
+            self.skip_newlines_and_indent(); // allow newline before `}`
             self.expect(&TokenKind::RBrace)?;
             Ok(Expr { kind: ExprKind::Dict(pairs), line })
         } else {
             // Set
             let mut elems = vec![first_expr];
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent(); // allow newline between elements
                 if self.check(&TokenKind::RBrace) { break; }
                 elems.push(self.parse_expr()?);
             }
+            self.skip_newlines_and_indent(); // allow newline before `}`
             self.expect(&TokenKind::RBrace)?;
             Ok(Expr { kind: ExprKind::Set(elems), line })
         }

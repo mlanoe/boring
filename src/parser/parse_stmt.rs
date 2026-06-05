@@ -43,13 +43,7 @@ impl Parser {
                 Ok(Stmt::Comment(text))
             }
             TokenKind::Let | TokenKind::Var | TokenKind::Static => {
-                if self.is_let_array_destructure() {
-                    let line = self.line();
-                    let _is_static = self.eat(&TokenKind::Static);
-                    let mutable = matches!(self.peek(), TokenKind::Var);
-                    self.advance(); // consume let/var
-                    Ok(Stmt::LetDestructure(self.parse_let_array_destructure(mutable, line)?))
-                } else if self.is_let_destructure() {
+                if self.is_let_destructure() {
                     let line = self.line();
                     let _is_static = self.eat(&TokenKind::Static);
                     let mutable = matches!(self.peek(), TokenKind::Var);
@@ -346,6 +340,7 @@ impl Parser {
     /// Called after the `let`/`var` keyword has already been consumed.
     pub(crate) fn parse_let_destructure(&mut self, mutable: bool, line: usize) -> Result<LetDestructureStmt, ParseError> {
         let parens = self.eat(&TokenKind::LParen);
+        if parens { self.skip_newlines_and_indent(); }
         let mut bindings = Vec::new();
         loop {
             if parens && self.check(&TokenKind::RParen) { break; }
@@ -363,8 +358,9 @@ impl Parser {
             };
             bindings.push(DestructureBinding { name, ty });
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines_and_indent();
         }
-        if parens { self.expect(&TokenKind::RParen)?; }
+        if parens { self.skip_newlines_and_indent(); self.expect(&TokenKind::RParen)?; }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
@@ -611,6 +607,7 @@ impl Parser {
         if self.check(&TokenKind::Comma) {
             let mut elems = vec![first];
             while self.eat(&TokenKind::Comma) {
+                self.skip_newlines_and_indent();
                 elems.push(self.parse_pattern()?);
             }
             Ok(Pattern::Tuple(elems))
@@ -623,11 +620,14 @@ impl Parser {
         // Tuple pattern: `(pat, pat, ...)`
         if self.check(&TokenKind::LParen) {
             self.advance();
+            self.skip_newlines_and_indent();
             let mut elems = Vec::new();
             while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                 elems.push(self.parse_pattern()?);
                 if !self.eat(&TokenKind::Comma) { break; }
+                self.skip_newlines_and_indent();
             }
+            self.skip_newlines_and_indent();
             self.expect(&TokenKind::RParen)?;
             return Ok(Pattern::Tuple(elems));
         }
@@ -658,10 +658,13 @@ impl Parser {
                     // Generic variant with payload fields
                     self.advance();
                     let mut sub_pats = Vec::new();
+                    self.skip_newlines_and_indent();
                     while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                         sub_pats.push(self.parse_pattern()?);
                         if !self.eat(&TokenKind::Comma) { break; }
+                        self.skip_newlines_and_indent();
                     }
+                    self.skip_newlines_and_indent();
                     self.expect(&TokenKind::RParen)?;
                     Ok(Pattern::Variant(s, sub_pats))
                 } else if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
@@ -676,10 +679,13 @@ impl Parser {
                     let sub_pats = if self.check(&TokenKind::LParen) {
                         self.advance();
                         let mut sp = Vec::new();
+                        self.skip_newlines_and_indent();
                         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
                             sp.push(self.parse_pattern()?);
                             if !self.eat(&TokenKind::Comma) { break; }
+                            self.skip_newlines_and_indent();
                         }
+                        self.skip_newlines_and_indent();
                         self.expect(&TokenKind::RParen)?;
                         sp
                     } else { vec![] };
@@ -912,37 +918,6 @@ impl Parser {
         }
 
         Ok(TryStmt { body, catch_clauses, line })
-    }
-
-    // ─── Array destructure: `let [a, b] = join [f1, f2]` ──────────────────
-
-    /// Returns true when `let/var [ident, ...]` follows (array destructure for join).
-    pub(crate) fn is_let_array_destructure(&self) -> bool {
-        let base = self.pos + if matches!(self.peek(), TokenKind::Static) { 1 } else { 0 };
-        let after_kw = base + 1; // skip let/var
-        matches!(self.tokens.get(after_kw).map(|t| &t.kind), Some(TokenKind::LBracket))
-    }
-
-    /// Parse `[a, b] = expr` after the `let`/`var` keyword has been consumed.
-    pub(crate) fn parse_let_array_destructure(&mut self, mutable: bool, line: usize) -> Result<LetDestructureStmt, ParseError> {
-        self.expect(&TokenKind::LBracket)?;
-        let mut bindings = Vec::new();
-        loop {
-            if self.check(&TokenKind::RBracket) { break; }
-            let name = if matches!(self.peek(), TokenKind::Ident(s) if s == "_") {
-                self.advance();
-                "_".to_string()
-            } else {
-                self.expect_ident()?
-            };
-            bindings.push(DestructureBinding { name, ty: None });
-            if !self.eat(&TokenKind::Comma) { break; }
-        }
-        self.expect(&TokenKind::RBracket)?;
-        self.expect(&TokenKind::Eq)?;
-        let value = self.parse_expr()?;
-        self.expect_newline_soft();
-        Ok(LetDestructureStmt { mutable, bindings, value, line })
     }
 
     // ─── select: ────────────────────────────────────────────────────────────

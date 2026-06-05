@@ -632,7 +632,13 @@ impl Interpreter {
                 // In the interpreter, JoinAll evaluates futures sequentially (no real parallelism).
                 let mut results = Vec::new();
                 for e in exprs {
-                    results.push(self.eval_expr(e, Rc::clone(&env))?);
+                    let v = self.eval_expr(e, Rc::clone(&env))?;
+                    // Unwrap Future wrappers produced by `task expr`
+                    let v = match v {
+                        Value::Future(inner) => *inner,
+                        other => other,
+                    };
+                    results.push(v);
                 }
                 Ok(Value::Tuple(results))
             }
