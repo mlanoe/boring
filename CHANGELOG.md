@@ -5,6 +5,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.0] — 2026-06-05
+
+### Added
+
+- **`Future<T>`** — stdlib type with `.value()` (blocking) and `.wait()` (async) method syntax
+- **`task(duration): body`** — built-in timeout syntax for async tasks
+- **tmLanguage grammar** — syntax highlighting for VS Code and GitHub Linguist submission
+
+### Fixed
+
+- `task_context` restoration after task completion
+- Mixed `Int`/`Uint` arithmetic operations
+- Stack overflow on Windows: main thread now spawned with an 8 MB stack
+
+### Tests
+
+- 4 new integration tests covering audit-identified edge cases (39 total)
+
+### Docs
+
+- `sleep` → `wait` in all async examples; `timeout(dur, fut)` form demoted
+- Book: corrected trailing closure ambiguity description
+- README: Rust transpiler examples updated from `Arc<String>` to `Arc<str>`
+
+---
+
 ## [0.1.0] — 2026-05-22
 
 Initial public release.
@@ -37,4 +63,5 @@ Initial public release.
 
 ---
 
+[0.2.0]: https://github.com/mlanoe/boring/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mlanoe/boring/releases/tag/v0.1.0
