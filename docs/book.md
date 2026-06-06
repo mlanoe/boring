@@ -1,9 +1,3 @@
-> **⚠ Preview — Beta**
-> Boring is under active development. Syntax and semantics may change between versions.
-> Not recommended for production use.
-
----
-
 # The new programming language is Boring
 
 Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled via `--emit-rust`.
