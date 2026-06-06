@@ -5,6 +5,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.2] — 2026-06-07
+
+### Added
+
+- **GitHub Pages** — language book published at `https://mlanoe.github.io/boring/` via GitHub Actions
+- **Landing page** — `index.html` with tagline, code snippet and links to the book and repository
+- Multiline syntax for arrays, sets, dicts, tuples, type parameters, trait lists, macro args, destructuring and match patterns
+
+### Fixed
+
+- `try?` section in the book now shows idiomatic `throws` syntax as primary example (`Result<T,E>` moved to interop note)
+- Removed `T'shared` qualifier from kernel mapping draft (superseded by `T'task`)
+- `T'auto` mapped to `kernel::sync::Arc` in kernel transpiler draft (Rc unavailable in kernel context)
+
+### Removed
+
+- Beta warning banner removed from the language book
+- `trait B: A` supertrait form removed (only `trait B as A:` is accepted)
+- `let [a, b] = join [...]` array destructure removed — use `let (a, b) = join(...)` tuple form
+
+### Docs
+
+- `try?` example uses `int f() throws:` syntax (was incorrectly `throws int f():`)
+- Kernel mapping draft updated: `T'shared` removed, `T'auto` remapped
+
+---
+
 ## [0.2.1] — 2026-06-06
 
 ### Fixed
