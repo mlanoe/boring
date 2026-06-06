@@ -108,7 +108,7 @@
     <div class="code-block">
 <span class="kw">void</span> displayDashboard() <span class="kw">throws</span>:
     <span class="cm"># fetch users and posts concurrently</span>
-    <span class="kw">let</span> (users, posts) = <span class="kw">join</span>(
+    <span class="kw">let</span> users, posts = <span class="kw">join</span>(
         <span class="kw">task</span> fetchUsers(),
         <span class="kw">task</span> fetchPosts()
     )
