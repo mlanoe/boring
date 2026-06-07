@@ -438,6 +438,46 @@ fn minmax(nums: Vec<i64>) -> (i64, i64) {
 }
 ```
 
+#### Tuple methods
+
+Tuples expose a small set of methods. Because tuple elements can have different types, methods like `filter` or `sort` that assume a homogeneous element type do not exist on tuples.
+
+| Boring                  | Description                                      |
+|-------------------------|--------------------------------------------------|
+| `t.length()`            | Number of elements (compile-time constant)       |
+| `t.isEmpty()`           | `true` for the unit tuple `()`                   |
+| `t.first()`             | First element (`t.0`)                            |
+| `t.last()`              | Last element (`t.N-1`)                           |
+| `t.map(x: expr)`        | Apply a closure to each slot; returns a new tuple of the same arity |
+| `t.all(x: cond)`        | `true` if the closure returns `true` for every element |
+| `t.any(x: cond)`        | `true` if the closure returns `true` for at least one element |
+
+`map` works correctly for heterogeneous tuples because Rust infers the result type of each slot independently. The primary use case is applying the same operation to every element — for example extracting a field from a pair of structs, or testing a condition across a group of futures:
+
+```boring
+# Extract a field from each element
+struct Point:
+    int x
+    int y
+
+let points = (Point(1, 2), Point(3, 4))
+let (x1, x2) = points.map(:x)      # (1, 3)
+
+# Poll a group of futures
+let f1 = task compute1()
+let f2 = task compute2()
+while !(f1, f2).all(:done): wait fromSecs(1)
+let (r1, r2) = (f1, f2).map(:value)
+```
+
+**Rust equivalent of `map`**
+```rust
+let (x1, x2) = {
+    let __t = points;
+    ({ let __x = __t.0.clone(); __x.x }, { let __x = __t.1.clone(); __x.x },)
+};
+```
+
 ### Type casting — `as`
 
 ```boring
@@ -893,6 +933,27 @@ if score >= 90 {
 }
 ```
 
+The `then` and `else` branches can be independently inline or multiline — all four combinations are valid:
+
+```boring
+# both inline
+if ok: print "yes" else: print "no"
+
+# inline then, multiline else
+if ok: print "yes"
+else:
+    log "no"
+    return
+
+# multiline then, inline else
+if ok:
+    log "yes"
+    proceed()
+else: return
+
+# both multiline (standard block form — shown above)
+```
+
 ### `if let`
 
 Unwrap an optional and bind it in a single step:
@@ -1007,6 +1068,13 @@ while i < 5:
     i += 1
 ```
 
+Inline form:
+
+```boring
+var i = 0
+while i < 5: i += 1
+```
+
 **Rust equivalent**
 ```rust
 let mut i = 0i64;
@@ -1017,6 +1085,14 @@ while i < 5 { i += 1; }
 
 Loop while an expression returns a non-`nil` value, binding it each iteration.
 The loop stops as soon as the expression returns `nil`.
+
+Inline form:
+
+```boring
+while let v = next_item(): process(v)
+```
+
+Block form:
 
 ```boring
 int? next_item(int i):
@@ -1067,6 +1143,12 @@ while let line:           # ≡  while let line = line:
 ```boring
 for word in ["boring", "is", "fun"]:
     print "  {word}"
+```
+
+Inline form — body on the same line as `for`:
+
+```boring
+for word in ["boring", "is", "fun"]: print "  {word}"
 ```
 
 **Rust equivalent**
@@ -1183,6 +1265,12 @@ loop:
     if idx >= 7: break
 ```
 
+Inline form:
+
+```boring
+loop: tick()
+```
+
 **Rust equivalent**
 ```rust
 let mut acc = 0i64;
@@ -1237,6 +1325,13 @@ do:
 while j < 3
 ```
 
+Inline form:
+
+```boring
+var j = 0
+do: j += 1 while j < 3
+```
+
 **Rust equivalent**
 ```rust
 let mut j = 0i64;
@@ -1276,6 +1371,24 @@ let msg = do:
     "hello"
 print "after: {msg}"   # prints "block done" first, then "after: hello"
 ```
+
+### `;` — statement separator
+
+A semicolon separates statements on the same line. It is equivalent to a newline:
+
+```boring
+x = 1; print x
+let a = 10; let b = 20; print a + b
+```
+
+This works inside any block, including loop and condition bodies:
+
+```boring
+for i in 0..<5: print i; total += i
+if ok: log "start"; proceed()
+```
+
+Semicolons are optional everywhere — they exist for cases where grouping related statements on a single line improves readability.
 
 ---
 
@@ -1872,6 +1985,12 @@ match e:
     _:                "other"
 ```
 
+> **Inline form** — for simple cases that fit on one line, use `match expr with Pat: val, ...:
+> ```boring
+> let kind = match e with Num(_): "number", _: "operator"
+> ```
+> See [Inline match — `match … with`](#inline-match--match--with) for details.
+
 ### Struct destructuring in `match`
 
 `match` works on struct values just like on enum variants. List the field bindings positionally inside parentheses:
@@ -1986,6 +2105,47 @@ The transpiler applies `camelCase → snake_case` conversion automatically:
 
 > **Limitation** — the shorthand requires a single unambiguous type at the call site.
 > When the type cannot be inferred (no annotation, overloaded parameter), use the full form.
+
+### Inline match — `match … with`
+
+When a match fits on one line, use the `with` form instead of an indented block:
+
+```boring
+let s = match x with 0: "zero", 1: "one", _: "other"
+```
+
+Arms are separated by `,`. Each arm is `Pattern: expression` — the same syntax as block match arms, just without the newline and indent.
+
+```boring
+# Block form (multi-line)
+match status:
+    200: "ok"
+    404: "not found"
+    _:   "error"
+
+# Inline form (single line)
+let msg = match status with 200: "ok", 404: "not found", _: "error"
+```
+
+Useful inside expressions, closures, and function arguments:
+
+```boring
+scores.map((s): match s with 0: "fail", 100: "perfect", _: "pass")
+```
+
+**Rules:**
+- `with` replaces the `:` + newline + indent of the block form.
+- Arm bodies are expressions (no block statements).
+- Guards (`if cond`) and pattern alternatives (`|`) are not supported in the inline form — use the block form for those.
+
+**Rust equivalent** — the transpiler emits a standard `match` block:
+```rust
+let msg = match status {
+    200 => "ok",
+    404 => "not found",
+    _   => "error",
+};
+```
 
 ---
 
@@ -3698,7 +3858,7 @@ while let Ok(msg) = rx2.recv().await { println!("rx2: {}", msg); }
 | Send | `tx.send(v)` | `tx.send(v).ok()` — non-async |
 | Receive | `rx.recv()` | `rx.recv().await.unwrap()` |
 | Iterate | `for msg in rx:` | `while let Ok(msg) = rx.recv().await {` |
-| Select arm | `msg = rx.recv():` | `Ok(msg) = rx.recv() =>` |
+| Poll ready | `f.done` | `tokio::time::timeout(Duration::ZERO, rx.recv()).await.is_ok()` |
 
 #### `watch<T>(initial)` — observable value
 
@@ -3763,142 +3923,142 @@ let products = f2.value
 
 Inside a `throws` function `.value` becomes `.await?`; elsewhere it becomes `.await.unwrap()`.
 
-### Parallel await — `let a, b = join (f1, f2)`
+### Parallel await — `let a, b = join(task f1(), task f2())`
 
-`join` drives multiple handles to completion simultaneously using `tokio::join!`:
-
-```boring
-let f3 = task: fetch_users()
-let f4 = task: fetch_products()
-let a, b = join (f3, f4)
-print a
-print b
-```
-
-Use `var a, b = join (...)` for mutable bindings. Use `_` to discard a result:
+`join` drives multiple tasks to completion simultaneously using `tokio::join!`.
+Tasks can be inlined directly — no intermediate variable needed:
 
 ```boring
-let result, _ = join (f_data, f_log)
+let users, products = join(task fetch_users(), task fetch_products())
+print users
+print products
 ```
+
+Use `var` for mutable bindings, `_` to discard a result:
+
+```boring
+var users, _ = join(task fetch_users(), task log_access())
+```
+
+The parenthesised form `let (a, b) = join(...)` is also accepted and equivalent.
 
 ### Full example
 
 ```boring
-task int fetch_users():
+int fetch_users() throws:
     wait .fromMillis(10)
     return 42
 
-task int fetch_products():
+int fetch_products() throws:
     wait .fromMillis(10)
     return 99
 
-task run():
+void run() throws:
     # Sequential await
-    let f1 = task: fetch_users()
-    let f2 = task: fetch_products()
+    let f1 = task fetch_users()
+    let f2 = task fetch_products()
     let users    = f1.value
     let products = f2.value
     print users    # 42
     print products # 99
 
-    # Parallel await
-    let f3 = task: fetch_users()
-    let f4 = task: fetch_products()
-    let a, b = join (f3, f4)
-    print a   # 42
-    print b   # 99
+    # Parallel await — inline tasks
+    let users2, products2 = join(task fetch_users(), task fetch_products())
+    print users2    # 42
+    print products2 # 99
 ```
 
 ### Transpilation
 
 ```rust
-// let f1 = task: fetch_users()
+// let f1 = task fetch_users()
 let f1 = tokio::spawn(async move { fetch_users().await });
 
 // let users = f1.value
-let users = f1.await.unwrap();
+let users = f1.await.expect("task panicked");
 
-// let a, b = join (f3, f4)
-let (__jh0, __jh1) = tokio::join!(f3, f4);
-let a = __jh0.unwrap();
-let b = __jh1.unwrap();
+// let users2, products2 = join(task fetch_users(), task fetch_products())
+let (__jh0, __jh1) = tokio::join!(
+    tokio::spawn(async move { fetch_users().await }),
+    tokio::spawn(async move { fetch_products().await }),
+);
+let users2    = __jh0?;
+let products2 = __jh1?;
 ```
 
 ---
 
-## 20. Select (`select:`)
+## 20. `Future<T>` — polling and cancellation
 
-`select:` waits on multiple async expressions concurrently and executes the body of whichever completes first. It transpiles to `tokio::select!`.
+`task f()` returns a `Future<T>` handle immediately. The handle exposes three properties and one method:
 
-### Syntax
+| Member | Form | Description |
+|--------|------|-------------|
+| `f.value` | property / `f.value(dur)` | Await the result. Throws `Error.Expired` on timeout, `Error.Cancelled` on cancel. |
+| `f.done` | property / `f.done()` | Non-blocking poll — `true` if the result is ready. |
+| `f.cancel()` | method | Signal the task to stop. `.value` then throws `Error.Cancelled`. |
+| `f.wait` | property | Await without returning the value (fire-and-forget style). |
+
+### Polling with `f.done`
 
 ```boring
-select:
-    var = expr:
-        # body when expr resolves to var
-    _ = expr:
-        # body when expr resolves (result discarded)
-    after duration_expr:
-        # body executed after the given duration (sleep timeout)
+task int compute(int x):
+    wait .fromMillis(50)
+    x * 2
+
+task void run():
+    let f = task compute(21)
+
+    while !f.done:
+        wait .fromMillis(10)
+
+    print f.value   # 42
 ```
 
-Each arm is indented under `select:`. The three arm forms are:
-
-| Form | Meaning |
-|------|---------|
-| `var = expr:` | Bind the result of `expr` to `var` |
-| `_ = expr:` | Run `expr`; discard the result |
-| `after dur:` | Execute the body after `dur` if no other arm has fired |
-
-### Channel recv example
+### Waiting with a timeout
 
 ```boring
-task run():
-    let tx, rx = channel<string>(4)
+task void run() throws:
+    let f = task slow_op()
 
-    task:
-        tx.send("hello")
-        tx.send("world")
-        drop(tx)
-
-    loop:
-        select:
-            msg = rx.recv():
-                print msg
-                if msg == "world": break
-            after .fromMillis(100):
-                print "timeout"
-                break
+    try:
+        let result = f.value(.fromSecs(5))
+        print "got: {result}"
+    catch Error.Expired:
+        f.cancel()
+        print "timed out — task cancelled"
 ```
 
-### Timeout example
+### Polling two futures (replaces `select:`)
 
 ```boring
-task run():
-    select:
-        result = some_async_op():
-            print result
-        after .fromSecs(5):
-            print "timed out"
+task void run() throws:
+    let f1 = task fetch_users()
+    let f2 = task fetch_posts()
+
+    while !f1.done and !f2.done:
+        wait .fromMillis(10)
+
+    if f1.done: print f1.value
+    if f2.done: print f2.value
 ```
 
 ### Transpilation
 
 ```rust
-// select: with channel recv and after
-tokio::select! {
-    Some(msg) = rx.recv() => {
-        println!("{}", msg);
-        if (msg == "world") { break; }
-    }
-    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-        println!("timeout");
-        break;
-    }
-}
-```
+// let f = task compute(21)
+let f = tokio::spawn(async move { compute(21).await });
 
-Channel receiver variables are automatically wrapped in `Some(var)` since `recv()` returns `Option<T>`. `after dur:` desugars to `_ = tokio::time::sleep(dur)`.
+// f.done
+tokio::time::timeout(std::time::Duration::ZERO, f).await.is_ok()
+
+// f.value(.fromSecs(5))
+tokio::time::timeout(Duration::from_secs(5), f).await
+    .map_err(|_| Error::Expired)??
+
+// f.cancel()
+__cancel_f.cancel()
+```
 
 ## `wait` — pause async
 
@@ -4892,125 +5052,53 @@ if let strong = w.upgrade():
 
 > Use `'actor` as the default. Switch to `'guard` when profiling shows lock contention and reads significantly outnumber writes.
 
-### Task cancellation — `f.cancel()` and `cancelled:`
+### Task cancellation — `f.cancel()`
 
-Boring supports **graceful cancellation** of spawned tasks. The pattern has two sides:
-
-- **`f.cancel()`** — signal the task bound to `f` that it should stop.
-- **`cancelled:`** — a special `select:` arm that fires when the current task has been cancelled.
-
-`cancelled:` is only valid inside a `select:` block. It is the idiomatic way to react to a cancellation signal — clean up resources, throw an error, or simply return.
+Boring supports **graceful cancellation** of spawned tasks via `f.cancel()`. Once signalled, any subsequent `.value` call throws `Error.Cancelled`.
 
 #### Simple cancellation
 
 ```boring
-task worker():
-    select:
-        cancelled:
-            print "cancelled, exiting"
-        result = do_work():
-            print "done: {result}"
-
-task run():
+task void run() throws:
     let f = task worker()
-    f.cancel()        # signal the worker to stop
-    f.wait            # wait for it to finish
+
+    wait .fromMillis(100)
+    f.cancel()
+
+    try:
+        f.wait
+    catch Error.Cancelled:
+        print "worker cancelled"
 ```
-
-**Rust equivalent**
-```rust
-async fn worker(__task_cancel: tokio_util::sync::CancellationToken) {
-    tokio::select! {
-        _ = __task_cancel.cancelled() => {
-            println!("cancelled, exiting");
-        }
-        result = do_work() => {
-            println!("done: {}", result);
-        }
-    }
-}
-
-async fn run() {
-    let __cancel_f = tokio_util::sync::CancellationToken::new();
-    let f = tokio::spawn(async move { worker(__cancel_f.clone()).await });
-    __cancel_f.cancel();
-    { let _ = f.await.unwrap(); }
-}
-```
-
-The `__task_cancel` parameter is injected automatically by the transpiler — it never appears in Boring source.
 
 #### Cancel + throw pattern
 
-When a task is declared `throws`, it can propagate an error back to the caller through `f.value` or `f.wait`. Use `throw` inside the `cancelled:` arm to signal failure on cancellation:
-
-```boring
-task process() throws:
-    select:
-        cancelled:
-            throw Error("cancelled")
-        _ = do_work():
-            print "work done"
-
-task run() throws:
-    let f = task process()
-    f.cancel()
-    f.wait            # re-throws the "cancelled" error here
-```
-
-**Rust equivalent**
-```rust
-async fn process(
-    __task_cancel: tokio_util::sync::CancellationToken,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tokio::select! {
-        _ = __task_cancel.cancelled() => {
-            return Err(Box::new(BoringError::Other("cancelled".into())));
-        }
-        _ = do_work() => {
-            println!("work done");
-        }
-    }
-    Ok(())
-}
-
-async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let __cancel_f = tokio_util::sync::CancellationToken::new();
-    let f = tokio::spawn(async move { process(__cancel_f.clone()).await });
-    __cancel_f.cancel();
-    { let _ = f.await.unwrap()?; }   // .wait re-throws on error
-    Ok(())
-}
-```
-
-If the caller uses `.value` instead of `.wait`, the thrown error is returned as the value:
-
 ```boring
 task string process() throws:
-    select:
-        cancelled:
-            throw Error("cancelled")
-        result = fetch():
-            result
+    wait .fromMillis(500)
+    return "result"
 
-task run() throws:
+task void run() throws:
     let f = task process()
     f.cancel()
-    let v = f.value   # throws here if process threw
-    print v
+
+    try:
+        let v = f.value
+        print v
+    catch Error.Cancelled:
+        print "cancelled before result"
 ```
 
 #### How the transpiler handles cancellation
 
 | Boring concept | Transpiled Rust |
 |----------------|-----------------|
-| `cancelled:` arm in `select:` | Detects cancellable function; adds implicit `__task_cancel: CancellationToken` as first param; emits `_ = __task_cancel.cancelled() =>` |
-| `let f = task fn(args)` where `fn` uses `cancelled:` | Emits `let __cancel_f = tokio_util::sync::CancellationToken::new();` before the spawn; passes `__cancel_f.clone()` as first argument |
-| `f.cancel()` | `__cancel_f.cancel()` (via the per-spawn token) |
+| `f.cancel()` | `__cancel_f.cancel()` (via the per-spawn `CancellationToken`) |
+| `f.done` | `tokio::time::timeout(Duration::ZERO, f).await.is_ok()` |
 | `f.wait` on a `throws` task (in `throws` context) | `{ let _ = f.await.unwrap()?; }` — propagates the task error |
 | `f.value` on a `throws` task (in `throws` context) | `f.await.unwrap()?` — propagates the task error |
 
-The `tokio-util` crate (`tokio-util = { version = "0.7", features = ["sync"] }`) is added to `Cargo.toml` automatically when `cancelled:` is used.
+The `tokio-util` crate (`tokio-util = { version = "0.7", features = ["sync"] }`) is added to `Cargo.toml` automatically when `f.cancel()` is used.
 
 ---
 
@@ -5446,14 +5534,11 @@ if let user:
 | `fromJson<T>(s)` | `serde_json::from_str::<T>(&s).ok()` (plain) / `?` in `throws` context |
 | `let f = task: expr` | `let f = tokio::spawn(async move { expr.await })` |
 | `f.value` | `f.await.unwrap()` (or `f.await?` in `throws` context) |
-| `let a, b = join (f1, f2)` | `let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …` |
-| `select: var = expr: body` | `tokio::select! { var = expr => { body } }` |
-| `select: after dur: body` | `tokio::select! { _ = tokio::time::sleep(dur) => { body } }` |
-| `wait dur` | `tokio::time::sleep(dur).await` |
-| `cancelled:` (select arm) | `_ = __task_cancel.cancelled() =>` — implicit `CancellationToken` param injected into the enclosing function |
+| `f.done` | `tokio::time::timeout(Duration::ZERO, f).await.is_ok()` |
 | `f.cancel()` | `__cancel_f.cancel()` — signals the spawned task via its token |
+| `let a, b = join(f1, f2)` | `let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …` |
+| `wait dur` | `tokio::time::sleep(dur).await` |
 | `task(dur): body` | `tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })` |
-| `timeout(dur, fut)` | `select!` with 3 branches — only in cancellable task functions |
 
 ### Control flow
 

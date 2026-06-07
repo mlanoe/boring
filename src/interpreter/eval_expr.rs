@@ -187,6 +187,30 @@ impl Interpreter {
                         return self.call_display_builtin(name, &arg_vals, line);
                     }
                 }
+                // Implicit self method call: `foo(args)` inside a struct method —
+                // if `foo` isn't in scope but `self` is, try `self.foo(args)`.
+                if let ExprKind::Var(name) = &callee_expr.kind {
+                    let not_in_scope = env.borrow().get(name).is_none();
+                    if not_in_scope {
+                        let self_opt = env.borrow().get("self"); // borrow released after this line
+                        if let Some(self_val) = self_opt {
+                            let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                            let mut modified_self: Option<Value> = None;
+                            match self.call_method(self_val, name, arg_vals, line, &mut modified_self) {
+                                Ok(result) => {
+                                    if let Some(new_self) = modified_self {
+                                        env.borrow_mut().force_set("self", new_self);
+                                    }
+                                    return Ok(result);
+                                }
+                                Err(ref e) if name != "len" => {
+                                    eprintln!("[implicit-self] {name} failed: {:?}", e);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 let callee = self.eval_expr(callee_expr, Rc::clone(&env))?;
                 // Check for double-use of owned args before evaluating
                 if let Value::Fn { ref decl, .. } = callee {
@@ -305,7 +329,21 @@ impl Interpreter {
                 // Write back modified self to source variable (force: mut method on let binding is OK)
                 if let Some(new_obj) = modified_self {
                     match &obj_expr.kind {
-                        ExprKind::Var(name) => { env.borrow_mut().force_set(name, new_obj); }
+                        ExprKind::Var(name) => {
+                            let written = env.borrow_mut().force_set(name, new_obj.clone());
+                            // If not found in scope, try to write to self field (implicit self pattern).
+                            if !written {
+                                if let Some(sv) = env.borrow().get("self") {
+                                    if let Value::Object(ref inner_rc) = sv {
+                                        if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
+                                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line };
+                                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line };
+                                            let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => { let _ = self.assign(obj_expr, new_obj, Rc::clone(&env), line); }
                     }
                 }
@@ -1231,8 +1269,12 @@ impl Interpreter {
 
     pub(crate) fn exec_use_decl(&mut self, decl: &UseDecl, env: EnvRef) -> Result<(), Signal> {
         let path = &decl.path;
-        if path.len() < 2 {
+        if path.is_empty() {
             return Ok(());
+        }
+        // Single-component path (e.g. `use token.*`) — go straight to filesystem loader.
+        if path.len() < 2 {
+            return self.exec_use(decl, env);
         }
         let prefix = path[0].as_str();
         let module = path[1].as_str();

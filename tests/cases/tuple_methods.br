@@ -1,0 +1,17 @@
+let t = (10, "hello", true)
+print t.length()
+print t.isEmpty()
+
+let pair = (42, "world")
+print pair.first()
+print pair.last()
+
+let triple = (1, 2, 3)
+print triple.length()
+print triple.isEmpty()
+print triple.first()
+print triple.last()
+
+let empty = ()
+print empty.length()
+print empty.isEmpty()

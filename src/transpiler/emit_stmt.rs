@@ -269,6 +269,14 @@ impl Transpiler {
         {
             self.dict_vars.insert(s.name.clone());
         }
+        // Track tuple variables for method dispatch (length, isEmpty, first, last).
+        if let ExprKind::Tuple(elems) = &s_value.kind {
+            self.tuple_vars.insert(s.name.clone(), elems.len());
+        } else if matches!(&s.ty, Some(Type::Tuple(elems)) if !elems.is_empty()) {
+            if let Some(Type::Tuple(elems)) = &s.ty {
+                self.tuple_vars.insert(s.name.clone(), elems.len());
+            }
+        }
         // Track variables that hold an opaque collection index (from firstIndex/nextIndex).
         if matches!(&s_value.kind,
             ExprKind::MethodCall(_, m, _) if m == "firstIndex" || m == "nextIndex")

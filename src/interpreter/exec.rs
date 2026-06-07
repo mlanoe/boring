@@ -240,19 +240,17 @@ impl Interpreter {
                     }
                 }
                 let val = self.eval_expr(e, Rc::clone(&env))?;
-                // Must-use: a bare Call or MethodCall that returns a concrete typed value must be
-                // explicitly consumed.  Use `_ = f()` to discard or `let x = f()` to bind.
-                // Void (explicitly void return) and Nil (no declared return) are exempt.
-                match &e.kind {
-                    ExprKind::Call(..) | ExprKind::MethodCall(..) => {
-                        if !matches!(val, Value::Void | Value::Nil) {
-                            return Err(err(
-                                "return value discarded — use `_ = f()` to ignore or `let x = f()` to bind",
-                                e.line,
-                            ));
-                        }
-                    }
-                    _ => {}
+                // Must-use: bare call whose return value is silently discarded is an error.
+                // Only enforced for Call / MethodCall expressions (not operators, blocks, etc.).
+                // Void functions return Value::Void — those are always OK as bare statements.
+                let is_bare_call = matches!(&e.kind,
+                    ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
+                );
+                if is_bare_call && !matches!(val, Value::Void | Value::Nil) {
+                    return Err(err(
+                        "return value discarded — bind it with `let`, discard with `_ = f()`",
+                        e.line,
+                    ));
                 }
                 Ok(())
             }
@@ -270,7 +268,18 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::Struct(decl) => {
-                self.exec_item(&Item::Struct(decl.clone()), env)
+                // Struct declared inside a function body — register in local scope only,
+                // NOT in global, so it is invisible outside the function.
+                self.exec_item(&Item::Struct(decl.clone()), Rc::clone(&env))?;
+                // Undo the global registration that exec_item performed.
+                if self.global.borrow().vars.get(&decl.name).is_some() {
+                    // Only remove it if the global wasn't defining this type before.
+                    // We detect "local" by checking whether env IS the global.
+                    if !Rc::ptr_eq(&env, &self.global) {
+                        self.global.borrow_mut().vars.remove(&decl.name);
+                    }
+                }
+                Ok(())
             }
             Stmt::Enum(decl) => {
                 self.exec_item(&Item::Enum(decl.clone()), env)

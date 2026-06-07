@@ -1,0 +1,24 @@
+# map with explicit closure on homogeneous tuple
+let nums = (3, 7, 2)
+let doubled = nums.map(x: x * 2)
+let x, y, z = doubled
+print x
+print y
+print z
+
+# map to extract a struct field
+struct Wrapper:
+    int value
+
+let boxes = (Wrapper(1), Wrapper(2))
+let contents = boxes.map(:value)
+let p, q = contents
+print p
+print q
+
+# map preserving heterogeneous result
+let mixed = (10, "hello")
+let described = mixed.map(v: v)
+let a, b = described
+print a
+print b

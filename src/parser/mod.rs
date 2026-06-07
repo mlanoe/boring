@@ -1648,6 +1648,12 @@ impl Parser {
             TokenKind::Ext       => Some("ext".into()),
             TokenKind::Task      => Some("task".into()),
             TokenKind::In        => Some("in".into()),
+            TokenKind::Guard     => Some("guard".into()),
+            TokenKind::Return    => Some("return".into()),
+            TokenKind::Throw     => Some("throw".into()),
+            TokenKind::Try       => Some("try".into()),
+            TokenKind::Catch     => Some("catch".into()),
+            TokenKind::Pub       => Some("pub".into()),
             _ => None,
         }
     }

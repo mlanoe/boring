@@ -795,7 +795,7 @@ fn register_stdlib(env: &EnvRef) {
                 return Err(err("len() takes 1 argument", line));
             }
             match &args[0] {
-                Value::Str(s) => Ok(Value::Int(s.len() as i64)),
+                Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                 Value::Array(a) => Ok(Value::Int(a.len() as i64)),
                 Value::Dict(d) => Ok(Value::Int(d.len() as i64)),
                 Value::Set(s) => Ok(Value::Int(s.len() as i64)),
@@ -1280,6 +1280,65 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+    // args() — returns the user-facing CLI arguments for the script.
+    // For `boring run file.br -- arg1 arg2`, returns [arg1, arg2].
+    // For `boring run file.br arg1 arg2`, returns [arg1, arg2] (skips boring + file).
+    e.define("args", Value::NativeFn {
+        name: "args".into(),
+        func: |_args, _line| {
+            let all: Vec<String> = std::env::args().collect();
+            let argv: Vec<Value> = if let Some(sep) = all.iter().position(|s| s == "--") {
+                all.into_iter().skip(sep + 1).map(|s| Value::Str(s.into())).collect()
+            } else {
+                // boring run file.br → user args start at index 3
+                all.into_iter().skip(3).map(|s| Value::Str(s.into())).collect()
+            };
+            Ok(Value::Array(argv))
+        },
+    });
+
+    // ord(c) — Unicode codepoint of the first character of a string
+    e.define("ord", Value::NativeFn {
+        name: "ord".into(),
+        func: |args, line| {
+            let s = match args.into_iter().next() {
+                Some(Value::Str(s)) => s,
+                _ => return Err(err("ord: expected a string argument", line)),
+            };
+            match s.chars().next() {
+                Some(c) => Ok(Value::Int(c as i64)),
+                None => Err(err("ord: empty string", line)),
+            }
+        },
+    });
+
+    // chr(code) — string containing the single character for a Unicode codepoint
+    e.define("chr", Value::NativeFn {
+        name: "chr".into(),
+        func: |args, line| {
+            let n = match args.into_iter().next() {
+                Some(Value::Int(n)) => *n,
+                _ => return Err(err("chr: expected an int argument", line)),
+            };
+            match char::from_u32(n as u32) {
+                Some(c) => Ok(Value::Str(c.to_string().into())),
+                None => Err(err(format!("chr: invalid codepoint {}", n), line)),
+            }
+        },
+    });
+
+    // exit(code) — terminate the process with the given exit code
+    e.define("exit", Value::NativeFn {
+        name: "exit".into(),
+        func: |args, _line| {
+            let code = match args.into_iter().next() {
+                Some(Value::Int(n)) => *n as i32,
+                _ => 0,
+            };
+            std::process::exit(code);
+        },
+    });
+
     e.define("PI",  Value::Float(std::f64::consts::PI));
     e.define("E",   Value::Float(std::f64::consts::E));
     e.define("INF", Value::Float(f64::INFINITY));
@@ -1349,6 +1408,8 @@ pub struct Interpreter {
     pub(crate) in_stream: bool,
     /// Accumulated yielded values for the current stream function call.
     pub(crate) stream_yields: Vec<Value>,
+    /// Arguments forwarded to the user's script (for `args()` built-in).
+    pub user_args: Vec<String>,
 }
 
 impl Interpreter {
@@ -1398,6 +1459,7 @@ impl Interpreter {
             in_type_setter: false,
             in_stream: false,
             stream_yields: Vec::new(),
+            user_args: Vec::new(),
         }
     }
 
@@ -1569,6 +1631,12 @@ impl Interpreter {
             for item in &program.items {
                 if let Some((name, true)) = Self::item_pub_name(item) {
                     if let Some(val) = module_env.borrow().get(name) {
+                        // For enum namespaces, also export each variant as a bare name.
+                        if let Value::EnumNamespace { ref variants, .. } = val {
+                            for (variant_name, variant_val) in variants {
+                                env.borrow_mut().define(variant_name, variant_val.clone());
+                            }
+                        }
                         env.borrow_mut().define(name, val);
                     }
                 }
@@ -1698,7 +1766,11 @@ impl Interpreter {
                 }
                 // Register the merged struct
                 let val = Value::Struct { decl: merged, captured: Rc::clone(&env) };
-                env.borrow_mut().define(&decl.name, val);
+                env.borrow_mut().define(&decl.name, val.clone());
+                // Also register in global so call_method can find it by type_name regardless of nesting depth.
+                if !Rc::ptr_eq(&env, &self.global) {
+                    self.global.borrow_mut().define(&decl.name, val);
+                }
                 // Check that every field type carries a qualifier for heap types
                 for field in &decl.fields {
                     self.check_type_has_qualifier(&field.ty, field.line)?;
@@ -1760,7 +1832,17 @@ impl Interpreter {
                     captured: Rc::clone(&env),
                 };
                 self.enums.insert(decl.name.clone(), decl.clone());
-                env.borrow_mut().define(&decl.name, ns);
+                // Also define each variant as a bare name so they're accessible from
+                // struct methods whose captured env is this module env.
+                if let Value::EnumNamespace { ref variants, .. } = ns {
+                    for (vname, vval) in variants {
+                        env.borrow_mut().define(vname, vval.clone());
+                    }
+                }
+                env.borrow_mut().define(&decl.name, ns.clone());
+                if !Rc::ptr_eq(&env, &self.global) {
+                    self.global.borrow_mut().define(&decl.name, ns);
+                }
                 Ok(())
             }
             Item::Trait(decl) => {

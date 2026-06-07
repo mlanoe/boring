@@ -345,6 +345,28 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">minmax</span>(nums: <span class="kw">Vec</span>&lt;i64&gt;) -&gt; (i64, i64) {
     (nums[<span class="nb">0</span>].<span class="fn">clone</span>(), nums[<span class="nb">1</span>].<span class="fn">clone</span>())
 }</code></pre></div>
+<h4 id="tuple-methods">Tuple methods</h4>
+<p>Tuples expose a small set of methods. Because tuple elements can have different types, methods like <code>filter</code> or <code>sort</code> that assume a homogeneous element type do not exist on tuples.</p>
+<table><thead><tr><th>Boring</th><th>Description</th></tr></thead><tbody><tr><td><code>t.length()</code></td><td>Number of elements (compile-time constant)</td></tr><tr><td><code>t.isEmpty()</code></td><td><code>true</code> for the unit tuple <code>()</code></td></tr><tr><td><code>t.first()</code></td><td>First element (<code>t.0</code>)</td></tr><tr><td><code>t.last()</code></td><td>Last element (<code>t.N-1</code>)</td></tr><tr><td><code>t.map(x: expr)</code></td><td>Apply a closure to each slot; returns a new tuple of the same arity</td></tr><tr><td><code>t.all(x: cond)</code></td><td><code>true</code> if the closure returns <code>true</code> for every element</td></tr><tr><td><code>t.any(x: cond)</code></td><td><code>true</code> if the closure returns <code>true</code> for at least one element</td></tr></tbody></table>
+<p><code>map</code> works correctly for heterogeneous tuples because Rust infers the result type of each slot independently. The primary use case is applying the same operation to every element — for example extracting a field from a pair of structs, or testing a condition across a group of futures:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Extract a field from each element</span>
+<span class="kw">struct</span> Point:
+    <span class="kt">int</span> x
+    <span class="kt">int</span> y
+
+<span class="kw">let</span> points = (<span class="fn">Point</span>(<span class="nb">1</span>, <span class="nb">2</span>), <span class="fn">Point</span>(<span class="nb">3</span>, <span class="nb">4</span>))
+<span class="kw">let</span> (x1, x2) = points.<span class="fn">map</span>(:x)      <span class="co"># (1, 3)</span>
+
+<span class="co"># Poll a group of futures</span>
+<span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">compute1</span>()
+<span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">compute2</span>()
+<span class="kw">while</span> !(f1, f2).<span class="fn">all</span>(:done): wait <span class="fn">fromSecs</span>(<span class="nb">1</span>)
+<span class="kw">let</span> (r1, r2) = (f1, f2).<span class="fn">map</span>(:value)</code></pre></div>
+<p><strong>Rust equivalent of <code>map</code></strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (x1, x2) = {
+    <span class="kw">let</span> __t = points;
+    ({ <span class="kw">let</span> __x = __t.<span class="nb">0.</span><span class="fn">clone</span>(); __x.x }, { <span class="kw">let</span> __x = __t.<span class="nb">1.</span><span class="fn">clone</span>(); __x.x },)
+};</code></pre></div>
 <h3 id="type-casting--as">Type casting — <code>as</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> n    = <span class="s">"42"</span> <span class="kw">as</span> <span class="kt">int</span>          <span class="co"># Option&lt;int&gt;</span>
 <span class="kw">let</span> f    = <span class="nb">42</span> <span class="kw">as</span> <span class="kt">float</span>
@@ -607,6 +629,23 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 } <span class="kw">else</span> {
     <span class="fm">println!</span>(<span class="s">&quot;C&quot;</span>);
 }</code></pre></div>
+<p>The <code>then</code> and <code>else</code> branches can be independently inline or multiline — all four combinations are valid:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># both inline</span>
+<span class="kw">if</span> ok: print <span class="s">"yes"</span> <span class="kw">else</span>: print <span class="s">"no"</span>
+
+<span class="co"># inline then, multiline else</span>
+<span class="kw">if</span> ok: print <span class="s">"yes"</span>
+<span class="kw">else</span>:
+    log <span class="s">"no"</span>
+    <span class="kw">return</span>
+
+<span class="co"># multiline then, inline else</span>
+<span class="kw">if</span> ok:
+    log <span class="s">"yes"</span>
+    <span class="fn">proceed</span>()
+<span class="kw">else</span>: <span class="kw">return</span>
+
+<span class="co"># both multiline (standard block form — shown above)</span></code></pre></div>
 <h3 id="if-let"><code>if let</code></h3>
 <p>Unwrap an optional and bind it in a single step:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">string</span>? maybe = <span class="s">"found"</span>
@@ -673,11 +712,17 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> i = <span class="nb">0</span>
 <span class="kw">while</span> i &lt; <span class="nb">5</span>:
     i += <span class="nb">1</span></code></pre></div>
+<p>Inline form:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> i = <span class="nb">0</span>
+<span class="kw">while</span> i &lt; <span class="nb">5</span>: i += <span class="nb">1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> i = <span class="nb">0i64</span>;
 <span class="kw">while</span> i &lt; <span class="nb">5</span> { i += <span class="nb">1</span>; }</code></pre></div>
 <h3 id="while-let"><code>while let</code></h3>
 <p>Loop while an expression returns a non-<code>nil</code> value, binding it each iteration. The loop stops as soon as the expression returns <code>nil</code>.</p>
+<p>Inline form:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">while</span> <span class="kw">let</span> v = <span class="fn">next_item</span>(): <span class="fn">process</span>(v)</code></pre></div>
+<p>Block form:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span>? <span class="fn">next_item</span>(<span class="kt">int</span> i):
     <span class="kw">if</span> i &lt; <span class="nb">3</span>: i <span class="kw">else</span> <span class="kw">nil</span>   <span class="co"># returns nil when exhausted</span>
 
@@ -707,6 +752,8 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <h3 id="for-over-a-collection"><code>for</code> over a collection</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">for</span> word <span class="kw">in</span> [<span class="s">"boring"</span>, <span class="s">"is"</span>, <span class="s">"fun"</span>]:
     print <span class="s">"  <span class="si">{word}</span>"</span></code></pre></div>
+<p>Inline form — body on the same line as <code>for</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">for</span> word <span class="kw">in</span> [<span class="s">"boring"</span>, <span class="s">"is"</span>, <span class="s">"fun"</span>]: print <span class="s">"  <span class="si">{word}</span>"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">for</span> word <span class="kw">in</span> [<span class="s">&quot;boring&quot;</span>, <span class="s">&quot;is&quot;</span>, <span class="s">&quot;fun&quot;</span>].<span class="fn">iter</span>() {
     <span class="fm">println!</span>(<span class="s">&quot;  {}&quot;</span>, word);
@@ -773,6 +820,8 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
     <span class="kw">if</span> idx % <span class="nb">2</span> == <span class="nb">0</span>: <span class="kw">continue</span>
     acc += idx
     <span class="kw">if</span> idx &gt;= <span class="nb">7</span>: <span class="kw">break</span></code></pre></div>
+<p>Inline form:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">loop</span>: <span class="fn">tick</span>()</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> acc = <span class="nb">0i64</span>;
 <span class="kw">let</span> <span class="kw">mut</span> idx = <span class="nb">0i64</span>;
@@ -807,6 +856,9 @@ print <span class="s">"total: <span class="si">{total}</span>"</span>   <span cl
 <span class="kw">do</span>:
     j += <span class="nb">1</span>
 <span class="kw">while</span> j &lt; <span class="nb">3</span></code></pre></div>
+<p>Inline form:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> j = <span class="nb">0</span>
+<span class="kw">do</span>: j += <span class="nb">1</span> <span class="kw">while</span> j &lt; <span class="nb">3</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> j = <span class="nb">0i64</span>;
 <span class="kw">loop</span> {
@@ -832,6 +884,14 @@ print <span class="s">"total: <span class="si">{total}</span>"</span>   <span cl
     <span class="kw">defer</span>: print <span class="s">"block done"</span>
     <span class="s">"hello"</span>
 print <span class="s">"after: <span class="si">{msg}</span>"</span>   <span class="co"># prints &quot;block done&quot; first, then &quot;after: hello&quot;</span></code></pre></div>
+<h3 id="statement-separator"><code>;</code> — statement separator</h3>
+<p>A semicolon separates statements on the same line. It is equivalent to a newline:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>x = <span class="nb">1</span>; print x
+<span class="kw">let</span> a = <span class="nb">10</span>; <span class="kw">let</span> b = <span class="nb">20</span>; print a + b</code></pre></div>
+<p>This works inside any block, including loop and condition bodies:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>&lt;<span class="nb">5</span>: print i; total += i
+<span class="kw">if</span> ok: log <span class="s">"start"</span>; <span class="fn">proceed</span>()</code></pre></div>
+<p>Semicolons are optional everywhere — they exist for cases where grouping related statements on a single line improves readability.</p>
 <hr>
 <h2 id="7-collections">7. Collections</h2>
 <h3 id="arrays--t">Arrays — <code>[T]</code></h3>
@@ -1177,6 +1237,7 @@ print <span class="fn">greet</span>(d)                      <span class="co"># i
     <span class="fn">Num</span>(_):           <span class="s">"literal"</span>
     <span class="fn">Add</span>(_, _):        <span class="s">"addition"</span>
     _:                <span class="s">"other"</span></code></pre></div>
+<blockquote><strong>Inline form</strong> — for simple cases that fit on one line, use <code>match expr with Pat: val, ...: </code><code></code>boring let kind = match e with Num(_): &quot;number&quot;, _: &quot;operator&quot; <code></code><code> See [Inline match — </code>match … with`](#inline-match--match--with) for details.</blockquote>
 <h3 id="struct-destructuring-in-match">Struct destructuring in <code>match</code></h3>
 <p><code>match</code> works on struct values just like on enum variants. List the field bindings positionally inside parentheses:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point:
@@ -1248,6 +1309,28 @@ print <span class="fn">label</span>(.South)</code></pre></div>
 <p>The transpiler applies <code>camelCase → snake_case</code> conversion automatically:</p>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>.fromSecs(5)</code></td><td><code>Duration::from_secs(5)</code></td></tr><tr><td><code>.fromMillis(100)</code></td><td><code>Duration::from_millis(100)</code></td></tr><tr><td><code>.fromMicros(500)</code></td><td><code>Duration::from_micros(500)</code></td></tr><tr><td><code>.North</code></td><td><code>Direction::North</code></td></tr><tr><td><code>.Expired</code></td><td><code>Error::Expired</code></td></tr></tbody></table>
 <blockquote><strong>Limitation</strong> — the shorthand requires a single unambiguous type at the call site. When the type cannot be inferred (no annotation, overloaded parameter), use the full form.</blockquote>
+<h3 id="inline-match--match--with">Inline match — <code>match … with</code></h3>
+<p>When a match fits on one line, use the <code>with</code> form instead of an indented block:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> s = <span class="kw">match</span> x with <span class="nb">0</span>: <span class="s">"zero"</span>, <span class="nb">1</span>: <span class="s">"one"</span>, _: <span class="s">"other"</span></code></pre></div>
+<p>Arms are separated by <code>,</code>. Each arm is <code>Pattern: expression</code> — the same syntax as block match arms, just without the newline and indent.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Block form (multi-line)</span>
+<span class="kw">match</span> status:
+    <span class="nb">200</span>: <span class="s">"ok"</span>
+    <span class="nb">404</span>: <span class="s">"not found"</span>
+    _:   <span class="s">"error"</span>
+
+<span class="co"># Inline form (single line)</span>
+<span class="kw">let</span> msg = <span class="kw">match</span> status with <span class="nb">200</span>: <span class="s">"ok"</span>, <span class="nb">404</span>: <span class="s">"not found"</span>, _: <span class="s">"error"</span></code></pre></div>
+<p>Useful inside expressions, closures, and function arguments:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>scores.<span class="fn">map</span>((s): <span class="kw">match</span> s with <span class="nb">0</span>: <span class="s">"fail"</span>, <span class="nb">100</span>: <span class="s">"perfect"</span>, _: <span class="s">"pass"</span>)</code></pre></div>
+<p><strong>Rules:</strong></p>
+<ul><li><code>with</code> replaces the <code>:</code> + newline + indent of the block form.</li><li>Arm bodies are expressions (no block statements).</li><li>Guards (<code>if cond</code>) and pattern alternatives (<code>|</code>) are not supported in the inline form — use the block form for those.</li></ul>
+<p><strong>Rust equivalent</strong> — the transpiler emits a standard <code>match</code> block:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> msg = <span class="kw">match</span> status {
+    <span class="nb">200</span> =&gt; <span class="s">&quot;ok&quot;</span>,
+    <span class="nb">404</span> =&gt; <span class="s">&quot;not found&quot;</span>,
+    _   =&gt; <span class="s">&quot;error&quot;</span>,
+};</code></pre></div>
 <hr>
 <h2 id="10-traits-and-extensions">10. Traits and Extensions</h2>
 <h3 id="defining-a-trait">Defining a trait</h3>
@@ -2268,7 +2351,7 @@ tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="
 <span class="co">// ...</span>
 <span class="kw">while</span> <span class="kw">let</span> <span class="kw">Ok</span>(msg) = rx.<span class="fn">recv</span>().<span class="kw">await</span> { <span class="fm">println!</span>(<span class="s">&quot;rx1: {}&quot;</span>, msg); }
 <span class="kw">while</span> <span class="kw">let</span> <span class="kw">Ok</span>(msg) = rx2.<span class="fn">recv</span>().<span class="kw">await</span> { <span class="fm">println!</span>(<span class="s">&quot;rx2: {}&quot;</span>, msg); }</code></pre></div>
-<table><thead><tr><th>Operation</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Create</td><td><code>let tx, rx = broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td>Add consumer</td><td><code>let rx2 = tx.subscribe()</code></td><td><code>tx.subscribe()</code></td></tr><tr><td>Send</td><td><code>tx.send(v)</code></td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td>Receive</td><td><code>rx.recv()</code></td><td><code>rx.recv().await.unwrap()</code></td></tr><tr><td>Iterate</td><td><code>for msg in rx:</code></td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td>Select arm</td><td><code>msg = rx.recv():</code></td><td><code>Ok(msg) = rx.recv() =&gt;</code></td></tr></tbody></table>
+<table><thead><tr><th>Operation</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Create</td><td><code>let tx, rx = broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td>Add consumer</td><td><code>let rx2 = tx.subscribe()</code></td><td><code>tx.subscribe()</code></td></tr><tr><td>Send</td><td><code>tx.send(v)</code></td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td>Receive</td><td><code>rx.recv()</code></td><td><code>rx.recv().await.unwrap()</code></td></tr><tr><td>Iterate</td><td><code>for msg in rx:</code></td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td>Poll ready</td><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, rx.recv()).await.is_ok()</code></td></tr></tbody></table>
 <h4 id="watchtinitial--observable-value"><code>watch&lt;T&gt;(initial)</code> — observable value</h4>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
     <span class="kw">let</span> tx, rx = watch&lt;<span class="kt">int</span>&gt;(<span class="nb">0</span>)      <span class="co"># initial value = 0</span>
@@ -2304,100 +2387,99 @@ tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> users    = f1.value
 <span class="kw">let</span> products = f2.value</code></pre></div>
 <p>Inside a <code>throws</code> function <code>.value</code> becomes <code>.await?</code>; elsewhere it becomes <code>.await.unwrap()</code>.</p>
-<h3 id="parallel-await--let-a-b--join-f1-f2">Parallel await — <code>let a, b = join (f1, f2)</code></h3>
-<p><code>join</code> drives multiple handles to completion simultaneously using <code>tokio::join!</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> f3 = <span class="kw">task</span>: <span class="fn">fetch_users</span>()
-<span class="kw">let</span> f4 = <span class="kw">task</span>: <span class="fn">fetch_products</span>()
-<span class="kw">let</span> a, b = join (f3, f4)
-print a
-print b</code></pre></div>
-<p>Use <code>var a, b = join (...)</code> for mutable bindings. Use <code>_</code> to discard a result:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> result, _ = join (f_data, f_log)</code></pre></div>
+<h3 id="parallel-await--let-a-b--jointask-f1-task-f2">Parallel await — <code>let a, b = join(task f1(), task f2())</code></h3>
+<p><code>join</code> drives multiple tasks to completion simultaneously using <code>tokio::join!</code>. Tasks can be inlined directly — no intermediate variable needed:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> users, products = <span class="fn">join</span>(<span class="kw">task</span> <span class="fn">fetch_users</span>(), <span class="kw">task</span> <span class="fn">fetch_products</span>())
+print users
+print products</code></pre></div>
+<p>Use <code>var</code> for mutable bindings, <code>_</code> to discard a result:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> users, _ = <span class="fn">join</span>(<span class="kw">task</span> <span class="fn">fetch_users</span>(), <span class="kw">task</span> <span class="fn">log_access</span>())</code></pre></div>
+<p>The parenthesised form <code>let (a, b) = join(...)</code> is also accepted and equivalent.</p>
 <h3 id="full-example-1">Full example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_users</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">fetch_users</span>() <span class="kw">throws</span>:
     wait .<span class="fn">fromMillis</span>(<span class="nb">10</span>)
     <span class="kw">return</span> <span class="nb">42</span>
 
-<span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch_products</span>():
+<span class="kt">int</span> <span class="fn">fetch_products</span>() <span class="kw">throws</span>:
     wait .<span class="fn">fromMillis</span>(<span class="nb">10</span>)
     <span class="kw">return</span> <span class="nb">99</span>
 
-<span class="kw">task</span> <span class="fn">run</span>():
+<span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
     <span class="co"># Sequential await</span>
-    <span class="kw">let</span> f1 = <span class="kw">task</span>: <span class="fn">fetch_users</span>()
-    <span class="kw">let</span> f2 = <span class="kw">task</span>: <span class="fn">fetch_products</span>()
+    <span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">fetch_users</span>()
+    <span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">fetch_products</span>()
     <span class="kw">let</span> users    = f1.value
     <span class="kw">let</span> products = f2.value
     print users    <span class="co"># 42</span>
     print products <span class="co"># 99</span>
 
-    <span class="co"># Parallel await</span>
-    <span class="kw">let</span> f3 = <span class="kw">task</span>: <span class="fn">fetch_users</span>()
-    <span class="kw">let</span> f4 = <span class="kw">task</span>: <span class="fn">fetch_products</span>()
-    <span class="kw">let</span> a, b = join (f3, f4)
-    print a   <span class="co"># 42</span>
-    print b   <span class="co"># 99</span></code></pre></div>
+    <span class="co"># Parallel await — inline tasks</span>
+    <span class="kw">let</span> users2, products2 = <span class="fn">join</span>(<span class="kw">task</span> <span class="fn">fetch_users</span>(), <span class="kw">task</span> <span class="fn">fetch_products</span>())
+    print users2    <span class="co"># 42</span>
+    print products2 <span class="co"># 99</span></code></pre></div>
 <h3 id="transpilation-2">Transpilation</h3>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// let f1 = task: fetch_users()</span>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// let f1 = task fetch_users()</span>
 <span class="kw">let</span> f1 = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">fetch_users</span>().<span class="kw">await</span> });
 
 <span class="co">// let users = f1.value</span>
-<span class="kw">let</span> users = f1.<span class="kw">await</span>.<span class="fn">unwrap</span>();
+<span class="kw">let</span> users = f1.<span class="kw">await</span>.<span class="fn">expect</span>(<span class="s">&quot;task panicked&quot;</span>);
 
-<span class="co">// let a, b = join (f3, f4)</span>
-<span class="kw">let</span> (__jh0, __jh1) = tokio::<span class="fm">join!</span>(f3, f4);
-<span class="kw">let</span> a = __jh0.<span class="fn">unwrap</span>();
-<span class="kw">let</span> b = __jh1.<span class="fn">unwrap</span>();</code></pre></div>
+<span class="co">// let users2, products2 = join(task fetch_users(), task fetch_products())</span>
+<span class="kw">let</span> (__jh0, __jh1) = tokio::<span class="fm">join!</span>(
+    tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">fetch_users</span>().<span class="kw">await</span> }),
+    tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">fetch_products</span>().<span class="kw">await</span> }),
+);
+<span class="kw">let</span> users2    = __jh0?;
+<span class="kw">let</span> products2 = __jh1?;</code></pre></div>
 <hr>
-<h2 id="20-select-select">20. Select (<code>select:</code>)</h2>
-<p><code>select:</code> waits on multiple async expressions concurrently and executes the body of whichever completes first. It transpiles to <code>tokio::select!</code>.</p>
-<h3 id="syntax">Syntax</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>select:
-    <span class="kw">var</span> = expr:
-        <span class="co"># body when expr resolves to var</span>
-    _ = expr:
-        <span class="co"># body when expr resolves (result discarded)</span>
-    after duration_expr:
-        <span class="co"># body executed after the given duration (sleep timeout)</span></code></pre></div>
-<p>Each arm is indented under <code>select:</code>. The three arm forms are:</p>
-<table><thead><tr><th>Form</th><th>Meaning</th></tr></thead><tbody><tr><td><code>var = expr:</code></td><td>Bind the result of <code>expr</code> to <code>var</code></td></tr><tr><td><code>_ = expr:</code></td><td>Run <code>expr</code>; discard the result</td></tr><tr><td><code>after dur:</code></td><td>Execute the body after <code>dur</code> if no other arm has fired</td></tr></tbody></table>
-<h3 id="channel-recv-example">Channel recv example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
-    <span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">4</span>)
+<h2 id="20-futuret--polling-and-cancellation">20. <code>Future&lt;T&gt;</code> — polling and cancellation</h2>
+<p><code>task f()</code> returns a <code>Future&lt;T&gt;</code> handle immediately. The handle exposes three properties and one method:</p>
+<table><thead><tr><th>Member</th><th>Form</th><th>Description</th></tr></thead><tbody><tr><td><code>f.value</code></td><td>property / <code>f.value(dur)</code></td><td>Await the result. Throws <code>Error.Expired</code> on timeout, <code>Error.Cancelled</code> on cancel.</td></tr><tr><td><code>f.done</code></td><td>property / <code>f.done()</code></td><td>Non-blocking poll — <code>true</code> if the result is ready.</td></tr><tr><td><code>f.cancel()</code></td><td>method</td><td>Signal the task to stop. <code>.value</code> then throws <code>Error.Cancelled</code>.</td></tr><tr><td><code>f.wait</code></td><td>property</td><td>Await without returning the value (fire-and-forget style).</td></tr></tbody></table>
+<h3 id="polling-with-fdone">Polling with <code>f.done</code></h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">compute</span>(<span class="kt">int</span> x):
+    wait .<span class="fn">fromMillis</span>(<span class="nb">50</span>)
+    x * <span class="nb">2</span>
 
-    <span class="kw">task</span>:
-        tx.<span class="fn">send</span>(<span class="s">"hello"</span>)
-        tx.<span class="fn">send</span>(<span class="s">"world"</span>)
-        <span class="fn">drop</span>(tx)
+<span class="kw">task</span> <span class="kw">void</span> <span class="fn">run</span>():
+    <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">compute</span>(<span class="nb">21</span>)
 
-    <span class="kw">loop</span>:
-        select:
-            msg = rx.<span class="fn">recv</span>():
-                print msg
-                <span class="kw">if</span> msg == <span class="s">"world"</span>: <span class="kw">break</span>
-            after .<span class="fn">fromMillis</span>(<span class="nb">100</span>):
-                print <span class="s">"timeout"</span>
-                <span class="kw">break</span></code></pre></div>
-<h3 id="timeout-example">Timeout example</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">run</span>():
-    select:
-        result = <span class="fn">some_async_op</span>():
-            print result
-        after .<span class="fn">fromSecs</span>(<span class="nb">5</span>):
-            print <span class="s">"timed out"</span></code></pre></div>
+    <span class="kw">while</span> !f.done:
+        wait .<span class="fn">fromMillis</span>(<span class="nb">10</span>)
+
+    print f.value   <span class="co"># 42</span></code></pre></div>
+<h3 id="waiting-with-a-timeout">Waiting with a timeout</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">slow_op</span>()
+
+    <span class="kw">try</span>:
+        <span class="kw">let</span> result = f.<span class="fn">value</span>(.<span class="fn">fromSecs</span>(<span class="nb">5</span>))
+        print <span class="s">"got: <span class="si">{result}</span>"</span>
+    <span class="kw">catch</span> Error.Expired:
+        f.<span class="fn">cancel</span>()
+        print <span class="s">"timed out — task cancelled"</span></code></pre></div>
+<h3 id="polling-two-futures-replaces-select">Polling two futures (replaces <code>select:</code>)</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
+    <span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">fetch_users</span>()
+    <span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">fetch_posts</span>()
+
+    <span class="kw">while</span> !f1.done <span class="kw">and</span> !f2.done:
+        wait .<span class="fn">fromMillis</span>(<span class="nb">10</span>)
+
+    <span class="kw">if</span> f1.done: print f1.value
+    <span class="kw">if</span> f2.done: print f2.value</code></pre></div>
 <h3 id="transpilation-3">Transpilation</h3>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// select: with channel recv and after</span>
-tokio::<span class="fm">select!</span> {
-    <span class="kw">Some</span>(msg) = rx.<span class="fn">recv</span>() =&gt; {
-        <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, msg);
-        <span class="kw">if</span> (msg == <span class="s">&quot;world&quot;</span>) { <span class="kw">break</span>; }
-    }
-    _ = tokio::time::<span class="fn">sleep</span>(<span class="kt">Duration</span>::<span class="fn">from_millis</span>(<span class="nb">100</span>)) =&gt; {
-        <span class="fm">println!</span>(<span class="s">&quot;timeout&quot;</span>);
-        <span class="kw">break</span>;
-    }
-}</code></pre></div>
-<p>Channel receiver variables are automatically wrapped in <code>Some(var)</code> since <code>recv()</code> returns <code>Option&lt;T&gt;</code>. <code>after dur:</code> desugars to <code>_ = tokio::time::sleep(dur)</code>.</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// let f = task compute(21)</span>
+<span class="kw">let</span> f = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">compute</span>(<span class="nb">21</span>).<span class="kw">await</span> });
+
+<span class="co">// f.done</span>
+tokio::time::<span class="fn">timeout</span>(std::time::<span class="kt">Duration</span>::<span class="kt">ZERO</span>, f).<span class="kw">await</span>.<span class="fn">is_ok</span>()
+
+<span class="co">// f.value(.fromSecs(5))</span>
+tokio::time::<span class="fn">timeout</span>(<span class="kt">Duration</span>::<span class="fn">from_secs</span>(<span class="nb">5</span>), f).<span class="kw">await</span>
+    .<span class="fn">map_err</span>(|_| <span class="kt">Error</span>::<span class="kt">Expired</span>)??
+
+<span class="co">// f.cancel()</span>
+__cancel_f.<span class="fn">cancel</span>()</code></pre></div>
 <h2 id="wait--pause-async"><code>wait</code> — pause async</h2>
 <p><code>wait dur</code> suspends the current task for the specified duration. Equivalent to <code>tokio::time::sleep(dur).await</code>.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>wait .<span class="fn">fromMillis</span>(<span class="nb">500</span>)
@@ -2957,92 +3039,36 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
     print strong.<span class="fn">get</span>()    <span class="co"># → strong.read().await.get()</span></code></pre></div>
 <table><thead><tr><th><code>&#x27;actor</code></th><th><code>&#x27;guard</code></th></tr></thead><tbody><tr><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code></td><td><code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td></tr><tr><td><code>.lock().await</code> for everything</td><td><code>.read().await</code> / <code>.write().await</code></td></tr><tr><td>Fair, no starvation risk</td><td>Can starve writers under heavy read load</td></tr><tr><td>Lower overhead for write-heavy workloads</td><td>Better throughput when reads dominate</td></tr></tbody></table>
 <blockquote>Use <code>&#x27;actor</code> as the default. Switch to <code>&#x27;guard</code> when profiling shows lock contention and reads significantly outnumber writes.</blockquote>
-<h3 id="task-cancellation--fcancel-and-cancelled">Task cancellation — <code>f.cancel()</code> and <code>cancelled:</code></h3>
-<p>Boring supports <strong>graceful cancellation</strong> of spawned tasks. The pattern has two sides:</p>
-<ul><li><strong><code>f.cancel()</code></strong> — signal the task bound to <code>f</code> that it should stop.</li><li><strong><code>cancelled:</code></strong> — a special <code>select:</code> arm that fires when the current task has been cancelled.</li></ul>
-<p><code>cancelled:</code> is only valid inside a <code>select:</code> block. It is the idiomatic way to react to a cancellation signal — clean up resources, throw an error, or simply return.</p>
+<h3 id="task-cancellation--fcancel">Task cancellation — <code>f.cancel()</code></h3>
+<p>Boring supports <strong>graceful cancellation</strong> of spawned tasks via <code>f.cancel()</code>. Once signalled, any subsequent <code>.value</code> call throws <code>Error.Cancelled</code>.</p>
 <h4 id="simple-cancellation">Simple cancellation</h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">worker</span>():
-    select:
-        cancelled:
-            print <span class="s">"cancelled, exiting"</span>
-        result = <span class="fn">do_work</span>():
-            print <span class="s">"done: <span class="si">{result}</span>"</span>
-
-<span class="kw">task</span> <span class="fn">run</span>():
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">worker</span>()
-    f.<span class="fn">cancel</span>()        <span class="co"># signal the worker to stop</span>
-    f.wait            <span class="co"># wait for it to finish</span></code></pre></div>
-<p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">worker</span>(__task_cancel: tokio_util::sync::<span class="kt">CancellationToken</span>) {
-    tokio::<span class="fm">select!</span> {
-        _ = __task_cancel.<span class="fn">cancelled</span>() =&gt; {
-            <span class="fm">println!</span>(<span class="s">&quot;cancelled, exiting&quot;</span>);
-        }
-        result = <span class="fn">do_work</span>() =&gt; {
-            <span class="fm">println!</span>(<span class="s">&quot;done: {}&quot;</span>, result);
-        }
-    }
-}
 
-<span class="kw">async</span> <span class="kw">fn</span> <span class="fn">run</span>() {
-    <span class="kw">let</span> __cancel_f = tokio_util::sync::<span class="kt">CancellationToken</span>::<span class="fn">new</span>();
-    <span class="kw">let</span> f = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">worker</span>(__cancel_f.<span class="fn">clone</span>()).<span class="kw">await</span> });
-    __cancel_f.<span class="fn">cancel</span>();
-    { <span class="kw">let</span> _ = f.<span class="kw">await</span>.<span class="fn">unwrap</span>(); }
-}</code></pre></div>
-<p>The <code>__task_cancel</code> parameter is injected automatically by the transpiler — it never appears in Boring source.</p>
+    wait .<span class="fn">fromMillis</span>(<span class="nb">100</span>)
+    f.<span class="fn">cancel</span>()
+
+    <span class="kw">try</span>:
+        f.wait
+    <span class="kw">catch</span> Error.Cancelled:
+        print <span class="s">"worker cancelled"</span></code></pre></div>
 <h4 id="cancel--throw-pattern">Cancel + throw pattern</h4>
-<p>When a task is declared <code>throws</code>, it can propagate an error back to the caller through <code>f.value</code> or <code>f.wait</code>. Use <code>throw</code> inside the <code>cancelled:</code> arm to signal failure on cancellation:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="fn">process</span>() <span class="kw">throws</span>:
-    select:
-        cancelled:
-            <span class="kw">throw</span> <span class="fn">Error</span>(<span class="s">"cancelled"</span>)
-        _ = <span class="fn">do_work</span>():
-            print <span class="s">"work done"</span>
-
-<span class="kw">task</span> <span class="fn">run</span>() <span class="kw">throws</span>:
-    <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">process</span>()
-    f.<span class="fn">cancel</span>()
-    f.wait            <span class="co"># re-throws the &quot;cancelled&quot; error here</span></code></pre></div>
-<p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">process</span>(
-    __task_cancel: tokio_util::sync::<span class="kt">CancellationToken</span>,
-) -&gt; <span class="kw">Result</span>&lt;(), <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span> + <span class="kt">Send</span> + <span class="kt">Sync</span>&gt;&gt; {
-    tokio::<span class="fm">select!</span> {
-        _ = __task_cancel.<span class="fn">cancelled</span>() =&gt; {
-            <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">Other</span>(<span class="s">&quot;cancelled&quot;</span>.<span class="fn">into</span>())));
-        }
-        _ = <span class="fn">do_work</span>() =&gt; {
-            <span class="fm">println!</span>(<span class="s">&quot;work done&quot;</span>);
-        }
-    }
-    <span class="kw">Ok</span>(())
-}
-
-<span class="kw">async</span> <span class="kw">fn</span> <span class="fn">run</span>() -&gt; <span class="kw">Result</span>&lt;(), <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span> + <span class="kt">Send</span> + <span class="kt">Sync</span>&gt;&gt; {
-    <span class="kw">let</span> __cancel_f = tokio_util::sync::<span class="kt">CancellationToken</span>::<span class="fn">new</span>();
-    <span class="kw">let</span> f = tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { <span class="fn">process</span>(__cancel_f.<span class="fn">clone</span>()).<span class="kw">await</span> });
-    __cancel_f.<span class="fn">cancel</span>();
-    { <span class="kw">let</span> _ = f.<span class="kw">await</span>.<span class="fn">unwrap</span>()?; }   <span class="co">// .wait re-throws on error</span>
-    <span class="kw">Ok</span>(())
-}</code></pre></div>
-<p>If the caller uses <code>.value</code> instead of <code>.wait</code>, the thrown error is returned as the value:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">string</span> <span class="fn">process</span>() <span class="kw">throws</span>:
-    select:
-        cancelled:
-            <span class="kw">throw</span> <span class="fn">Error</span>(<span class="s">"cancelled"</span>)
-        result = <span class="fn">fetch</span>():
-            result
+    wait .<span class="fn">fromMillis</span>(<span class="nb">500</span>)
+    <span class="kw">return</span> <span class="s">"result"</span>
 
-<span class="kw">task</span> <span class="fn">run</span>() <span class="kw">throws</span>:
+<span class="kw">task</span> <span class="kw">void</span> <span class="fn">run</span>() <span class="kw">throws</span>:
     <span class="kw">let</span> f = <span class="kw">task</span> <span class="fn">process</span>()
     f.<span class="fn">cancel</span>()
-    <span class="kw">let</span> v = f.value   <span class="co"># throws here if process threw</span>
-    print v</code></pre></div>
+
+    <span class="kw">try</span>:
+        <span class="kw">let</span> v = f.value
+        print v
+    <span class="kw">catch</span> Error.Cancelled:
+        print <span class="s">"cancelled before result"</span></code></pre></div>
 <h4 id="how-the-transpiler-handles-cancellation">How the transpiler handles cancellation</h4>
-<table><thead><tr><th>Boring concept</th><th>Transpiled Rust</th></tr></thead><tbody><tr><td><code>cancelled:</code> arm in <code>select:</code></td><td>Detects cancellable function; adds implicit <code>__task_cancel: CancellationToken</code> as first param; emits <code>_ = __task_cancel.cancelled() =&gt;</code></td></tr><tr><td><code>let f = task fn(args)</code> where <code>fn</code> uses <code>cancelled:</code></td><td>Emits <code>let __cancel_f = tokio_util::sync::CancellationToken::new();</code> before the spawn; passes <code>__cancel_f.clone()</code> as first argument</td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> (via the per-spawn token)</td></tr><tr><td><code>f.wait</code> on a <code>throws</code> task (in <code>throws</code> context)</td><td><code>{ let _ = f.await.unwrap()?; }</code> — propagates the task error</td></tr><tr><td><code>f.value</code> on a <code>throws</code> task (in <code>throws</code> context)</td><td><code>f.await.unwrap()?</code> — propagates the task error</td></tr></tbody></table>
-<p>The <code>tokio-util</code> crate (<code>tokio-util = { version = &quot;0.7&quot;, features = [&quot;sync&quot;] }</code>) is added to <code>Cargo.toml</code> automatically when <code>cancelled:</code> is used.</p>
+<table><thead><tr><th>Boring concept</th><th>Transpiled Rust</th></tr></thead><tbody><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> (via the per-spawn <code>CancellationToken</code>)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.wait</code> on a <code>throws</code> task (in <code>throws</code> context)</td><td><code>{ let _ = f.await.unwrap()?; }</code> — propagates the task error</td></tr><tr><td><code>f.value</code> on a <code>throws</code> task (in <code>throws</code> context)</td><td><code>f.await.unwrap()?</code> — propagates the task error</td></tr></tbody></table>
+<p>The <code>tokio-util</code> crate (<code>tokio-util = { version = &quot;0.7&quot;, features = [&quot;sync&quot;] }</code>) is added to <code>Cargo.toml</code> automatically when <code>f.cancel()</code> is used.</p>
 <hr>
 <h2 id="24-attributes">24. Attributes</h2>
 <p>Attributes are written with <code>@</code> and apply to the next declaration. <strong>Parentheses are optional</strong> — both forms are accepted and produce identical output.</p>
@@ -3180,7 +3206,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="types">Types</h3>
 <table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;copy</code></td><td><code>i64</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;copy</code></td><td><code>u64</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;copy</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;copy</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (param)</td><td>—</td><td><code>&amp;str</code> — accepts both literals and heap strings</td></tr><tr><td><code>string</code> (literal)</td><td><code>String&#x27;const</code></td><td><code>&amp;&#x27;static str</code> — zero allocation, <code>Copy</code></td></tr><tr><td><code>string</code> (heap / stored)</td><td><code>String&#x27;task</code></td><td><code>Arc&lt;str&gt;</code> — reference-counted, thread-safe, single allocation</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td><code>T&#x27;option</code></td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code></td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;copy</code></td><td>—</td><td><code>T</code> (requires <code>Copy</code>)</td></tr><tr><td><code>T&#x27;auto</code></td><td>—</td><td><code>Rc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;task</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> — thread-safe shared (read-only)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, all accesses auto-locked</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes</td></tr><tr><td><code>T&#x27;wauto</code></td><td><code>T&#x27;auto&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code> — weak Rc, single-thread</td></tr><tr><td><code>T&#x27;wtask</code></td><td><code>T&#x27;task&#x27;weak</code></td><td><code>std::sync::Weak&lt;T&gt;</code> — weak Arc</td></tr><tr><td><code>T&#x27;wactor</code></td><td><code>T&#x27;actor&#x27;weak</code></td><td><code>std::sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;wguard</code></td><td><code>T&#x27;guard&#x27;weak</code></td><td><code>std::sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;const</code></td><td>—</td><td><code>&amp;&#x27;static T</code></td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (bare)</td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;Trait&gt;</code></td><td>—</td><td><code>impl Trait</code> — static dispatch, no allocation</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: i64</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
 <h3 id="expressions">Expressions</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>let a, b = join (f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>select: var = expr: body</code></td><td><code>tokio::select! { var = expr =&gt; { body } }</code></td></tr><tr><td><code>select: after dur: body</code></td><td><code>tokio::select! { _ = tokio::time::sleep(dur) =&gt; { body } }</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>cancelled:</code> (select arm)</td><td><code>_ = __task_cancel.cancelled() =&gt;</code> — implicit <code>CancellationToken</code> param injected into the enclosing function</td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr><tr><td><code>timeout(dur, fut)</code></td><td><code>select!</code> with 3 branches — only in cancellable task functions</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>let a, b = join(f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>

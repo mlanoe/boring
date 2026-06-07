@@ -119,6 +119,8 @@ transpile_test!(implicit_self);
 transpile_test!(shadowing);
 transpile_test!(struct_spread);
 transpile_test!(tuple_string);
+transpile_test!(tuple_methods);
+transpile_test!(tuple_map);
 transpile_test!(array_pop_remove);
 transpile_test!(transpiler_coerce);
 transpile_test!(string_len_chars);

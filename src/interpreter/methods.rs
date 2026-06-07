@@ -20,6 +20,10 @@ impl Interpreter {
                     }
                     return Ok(Value::Nil);
                 }
+                "done" => {
+                    // Non-blocking poll — always true in the interpreter (eager evaluation)
+                    return Ok(Value::Bool(true));
+                }
                 _ => {}
             }
         }
@@ -198,6 +202,50 @@ impl Interpreter {
                 }
                 Err(err(format!("method '{}' not found on enum variant", method), line))
             }
+            Value::Tuple(ref elems) => {
+                match method {
+                    "length" | "count" if args.is_empty() => {
+                        Ok(Value::Int(elems.len() as i64))
+                    }
+                    "isEmpty" if args.is_empty() => {
+                        Ok(Value::Bool(elems.is_empty()))
+                    }
+                    "first" if args.is_empty() => {
+                        elems.first().cloned().ok_or_else(|| {
+                            err("'first()' called on empty tuple", line)
+                        })
+                    }
+                    "last" if args.is_empty() => {
+                        elems.last().cloned().ok_or_else(|| {
+                            err("'last()' called on empty tuple", line)
+                        })
+                    }
+                    "all" | "any" if args.len() == 1 => {
+                        let is_all = method == "all";
+                        let closure = args.into_iter().next().unwrap_or(Value::Nil);
+                        let elems = elems.clone();
+                        for item in elems {
+                            let r = self.call_value(closure.clone(), vec![item], line, false)?;
+                            let b = self.expect_bool(r, line)?;
+                            if is_all && !b { return Ok(Value::Bool(false)); }
+                            if !is_all && b  { return Ok(Value::Bool(true)); }
+                        }
+                        Ok(Value::Bool(is_all))
+                    }
+                    "map" if args.len() == 1 => {
+                        // Apply the closure to each slot independently, returning a new tuple.
+                        // Heterogeneous-safe: each element is passed individually.
+                        let closure = args.into_iter().next().unwrap_or(Value::Nil);
+                        let elems = elems.clone();
+                        let mut result = Vec::with_capacity(elems.len());
+                        for item in elems {
+                            result.push(self.call_value(closure.clone(), vec![item], line, false)?);
+                        }
+                        Ok(Value::Tuple(result))
+                    }
+                    _ => Err(err(format!("no method '{}' on Tuple", method), line)),
+                }
+            }
             other => {
                 Err(err(format!("no method '{}' on {}", method, other.type_name()), line))
             }
@@ -265,7 +313,7 @@ impl Interpreter {
             _ => unreachable!(),
         };
         match method {
-            "len" => Ok(Some(Value::Int(s.len() as i64))),
+            "len" => Ok(Some(Value::Int(s.chars().count() as i64))),
             "contains" => {
                 let sub = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.contains(sub.as_str()))))
@@ -890,6 +938,8 @@ impl Interpreter {
 
     pub(crate) fn get_field(&mut self, obj: Value, field: &str, line: usize) -> Eval {
         match obj {
+            // Future.done() — always true in the interpreter (futures are evaluated eagerly)
+            Value::Future(_) if field == "done" => Ok(Value::Bool(true)),
             Value::Future(inner) if field == "value" => {
                 if !self.task_context {
                     return Err(err("'.value' requires a task context: the calling function must be marked 'task'", line));

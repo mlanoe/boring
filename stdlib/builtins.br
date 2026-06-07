@@ -18,9 +18,17 @@
 #   use stdlib.builtins
 
 # ── I/O ────────────────────────────────────────────────────────────────────────
-def void   print(any msg):     native   # println! — also variadic: print("{}", x)
-def void   write(any msg):     native   # print!  without trailing newline
-def string readLine():         native   # one line from stdin, trailing \n stripped
+def void     print(any msg):     native   # println! — also variadic: print("{}", x)
+def void     write(any msg):     native   # print!  without trailing newline
+def string   readLine():         native   # one line from stdin, trailing \n stripped
+def [string] args():             native   # CLI arguments (argv[0] excluded)
+
+# ── Process ─────────────────────────────────────────────────────────────────────
+def void exit(int code): native   # terminate the process with the given exit code
+
+# ── Characters ──────────────────────────────────────────────────────────────────
+def int    ord(string c):    native   # Unicode codepoint of the first char
+def string chr(int code):    native   # single-char string for a Unicode codepoint
 
 # ── Type conversion ────────────────────────────────────────────────────────────
 def int    int(any v):    native   # int / float / bool / string → int

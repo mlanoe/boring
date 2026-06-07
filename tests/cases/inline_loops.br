@@ -1,0 +1,25 @@
+# Inline (monoline) forms for while, for, loop, do…while
+# and ; as a statement separator
+
+# while — inline body
+var i = 0
+while i < 3: i = i + 1
+print i
+
+# for — inline body
+var sum = 0
+for n in [1, 2, 3, 4]: sum = sum + n
+print sum
+
+# do…while — inline body
+var k = 0
+do: k = k + 1 while k < 5
+print k
+
+# ; separator — multiple statements on one line
+let a = 10; let b = 20; print a + b
+
+# inline if in a while body
+var c = 0
+while c < 6: c = c + 1
+print c

@@ -283,6 +283,7 @@ mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
 # ─── Statements ──────────────────────────────────────────────────────────────
 
 block           ::= NEWLINE INDENT stmt+ DEDENT
+                  | stmt             # inline (monoline) form — single statement on the same line
 
 stmt            ::= let_stmt
                   | return_stmt
@@ -367,18 +368,23 @@ match_stmt      ::= "match" expr ":" NEWLINE INDENT
 match_arm       ::= pattern ("|" pattern)* ("if" expr)? ":" (expr NEWLINE | block)
 
 while_stmt      ::= "while" expr ":" block
+                  # inline:  `while cond: stmt` — body is a single statement on the same line
 
 while_let_stmt  ::= "while" "let" pattern "=" expr ":" block   # pattern: while let Some(x) = f():
                   | "while" "let" IDENT "=" expr ":" block      # simple:  while let v = f():
                   | "while" "let" IDENT ":" block               # shorthand: while let v:  ≡  while let v = v:
+                  # all three also admit the inline (monoline) form via the block rule
 
 do_while_stmt   ::= "do" ":" block "while" expr NEWLINE
+                  # inline:  `do: stmt while cond`
                   # Note: `do:` without a trailing `while` is a `do_expr` (see below)
 
 loop_stmt       ::= "loop" ":" block
+                  # inline:  `loop: stmt`
 
 for_stmt        ::= "for" IDENT ("," IDENT)* "in" expr ":" block   # with binding
                   | "for" expr ":"  block                           # no binding (implicit `_`)
+                  # both forms also admit the inline (monoline) form via the block rule
 
 try_stmt        ::= "try" ":" block
                     catch_clause*
@@ -778,6 +784,19 @@ type_list       ::= type ("," type)*
 #
 # Capture analysis is automatic — no explicit `Arc::clone` or `move` keyword needed.
 #
+# Arc-qualified receiver constraint:
+#   A method declared `task` on a struct must use an Arc-qualified receiver type
+#   (`self'task`, `self'actor`, or `self'guard`). Using a plain `self` receiver
+#   is a compile-time error — the method cannot be safely called from a spawned task
+#   without Arc-wrapping the struct instance.
+#
+#   struct Server:
+#       int port
+#   ext Server:
+#       def void run(Server'task self) task:   # OK — Arc<Server> receiver
+#           wait(.fromSecs(1))
+#       def void bad(Server  self) task:       # ERROR — plain receiver in task method
+#
 # fire-and-forget:  task fetch()
 # future:           let f = task fetch()
 #                   let data = f.value
@@ -802,6 +821,24 @@ type_list       ::= type ("," type)*
 #       def Vec2' add(Vec2' rhs): Vec2(self.x + rhs.x, self.y + rhs.y)
 #       def Vec2' neg():          Vec2(-self.x, -self.y)
 #       req bool  eq(Vec2' rhs):  self.x == rhs.x and self.y == rhs.y
+
+# ─── Tuple methods ───────────────────────────────────────────────────────────
+#
+# Tuples support a fixed set of built-in methods.  All methods are checked at
+# parse/type-check time; there is no dynamic dispatch.
+#
+#   t.length()          → int          number of slots (always known at compile time)
+#   t.isEmpty()         → bool         true iff length == 0
+#   t.first()           → T0           first slot value (compile error on empty tuple)
+#   t.last()            → TN           last  slot value (compile error on empty tuple)
+#   t.map(x: f(x))      → (U0, U1, …)  apply closure to each slot; returns same-arity tuple
+#   t.all(x: pred(x))   → bool         true iff predicate holds for every slot
+#   t.any(x: pred(x))   → bool         true iff predicate holds for at least one slot
+#
+# For `.map`: the closure receives each slot value independently — per-slot type
+# inference is preserved in Rust output.
+# For `.all` / `.any`: short-circuit evaluation across slots.
+# Field shorthand also works:  boxes.map(:value)  ≡  boxes.map(b: b.value)
 
 # ─── camelCase convention ─────────────────────────────────────────────────────
 #
@@ -831,6 +868,8 @@ LOWERCASE_IDENT ::= [a-z]    # single ASCII lowercase letter (used for lifetime 
 INDENT          ::= increase in leading whitespace
 DEDENT          ::= decrease in leading whitespace
 NEWLINE         ::= end of logical line
+SEMICOLON       ::= ";"                # treated as NEWLINE by the lexer — separates statements on one line
+                                       # e.g.  let a = 1; let b = 2; print a + b
 COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 
 # Keywords (reserved):

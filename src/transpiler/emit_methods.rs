@@ -33,6 +33,22 @@ impl Transpiler {
                 }
             }
         }
+        // Future.done() — non-blocking poll on a JoinHandle
+        if method == "done" && args.is_empty() {
+            if let ExprKind::Var(v) = &obj.kind {
+                if self.task_vars.contains(v.as_str()) || self.join_handle_vars.contains(v.as_str()) {
+                    return format!(
+                        "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
+                        v
+                    );
+                }
+            }
+            let obj_s = self.emit_expr(obj);
+            return format!(
+                "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
+                obj_s
+            );
+        }
         // Channel sender: `tx.send(value)` → `tx.send(value).await.unwrap()`
         // Use emit_expr_owned so string literals are wrapped in Arc::from(...) to match the
         // channel's Arc<str> item type.
@@ -347,9 +363,92 @@ impl Transpiler {
             _ => false,
         };
 
-        // ── Detect set/dict receivers (used further down too) ─────────────────
+        // ── Detect set/dict/tuple receivers (used further down too) ──────────
         let recv_is_set = self.expr_is_set(obj);
         let recv_is_dict = self.expr_is_dict(obj);
+
+        // ── Tuple-specific methods ────────────────────────────────────────────
+        // Tuples are heterogeneous so only a limited set of methods applies.
+        // We resolve the arity either from a literal receiver or from tuple_vars.
+        let tuple_arity: Option<usize> = match &obj.kind {
+            ExprKind::Tuple(elems) => Some(elems.len()),
+            ExprKind::Var(v) => self.tuple_vars.get(v.as_str()).copied(),
+            _ => None,
+        };
+        if let Some(arity) = tuple_arity {
+            let obj_s = self.emit_expr(obj);
+            match method {
+                "length" | "count" if args.is_empty() => {
+                    return format!("{}", arity);
+                }
+                "isEmpty" if args.is_empty() => {
+                    return format!("{}", arity == 0);
+                }
+                "first" if args.is_empty() && arity > 0 => {
+                    return format!("{}.0", obj_s);
+                }
+                "last" if args.is_empty() && arity > 0 => {
+                    return format!("{}.{}", obj_s, arity - 1);
+                }
+                "map" if args.len() == 1 && arity > 0 => {
+                    // Heterogeneous tuple map: apply the closure to each slot independently.
+                    // Result is a tuple of the same arity with each element transformed.
+                    // Each slot is emitted as `(|pname| body)(__boring_t.i.clone())` — a Rust
+                    // closure applied immediately. This lets Rust infer a distinct result type per
+                    // slot (heterogeneous-safe) and resolves `.value` / struct field accesses
+                    // correctly via Rust's own type inference rather than the sub-transpiler.
+                    if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
+                        let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
+                        let mut sub = self.make_sub();
+                        sub.known_local_vars.insert(pname.to_string());
+                        // Mark the closure param as a non-future local so that field accesses
+                        // like `.value` are emitted as plain field access, not `.await.unwrap()`.
+                        // An empty string as the struct type is enough to satisfy is_known_struct
+                        // without incorrectly dispatching any struct method lookups.
+                        sub.var_struct_types.insert(pname.to_string(), String::new());
+                        if *task_flag { sub.in_async = true; }
+                        let body_s = match body {
+                            ClosureBody::Expr(e) => sub.emit_expr(e),
+                            ClosureBody::Block(stmts) => {
+                                let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
+                                format!("{{ {} }}", inner.join(" "))
+                            }
+                        };
+                        // Emit each slot as a scoped let-bind + body.
+                        // Using `let pname = t.i.clone(); body` rather than an immediately-invoked
+                        // closure so Rust can infer pname's type from the assignment RHS.
+                        let slots: Vec<String> = (0..arity)
+                            .map(|i| format!("{{ let {} = (__boring_t).{}.clone(); {} }}", pname, i, body_s))
+                            .collect();
+                        return format!("{{ let __boring_t = {}; ({},) }}", obj_s, slots.join(", "));
+                    }
+                }
+                "all" | "any" if args.len() == 1 && arity > 0 => {
+                    if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
+                        let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
+                        let mut sub = self.make_sub();
+                        sub.known_local_vars.insert(pname.to_string());
+                        sub.var_struct_types.insert(pname.to_string(), String::new());
+                        if *task_flag { sub.in_async = true; }
+                        let body_s = match body {
+                            ClosureBody::Expr(e) => sub.emit_expr(e),
+                            ClosureBody::Block(stmts) => {
+                                let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
+                                format!("{{ {} }}", inner.join(" "))
+                            }
+                        };
+                        let op = if method == "all" { " && " } else { " || " };
+                        // Wrap each slot in parens: `{ ... } || { ... }` would be parsed by
+                        // Rust as an empty-params closure `|| { ... }` — use `({ ... })` instead.
+                        let slots: Vec<String> = (0..arity)
+                            .map(|i| format!("({{ let {} = (__boring_t).{}.clone(); {} }})", pname, i, body_s))
+                            .collect();
+                        return format!("{{ let __boring_t = {}; {} }}", obj_s, slots.join(op));
+                    }
+                }
+                _ => {}
+            }
+        }
 
         // ── String-specific methods ───────────────────────────────────────────
         if receiver_is_string {
@@ -1242,6 +1341,7 @@ impl Transpiler {
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),
             set_vars: self.set_vars.clone(),
+            tuple_vars: self.tuple_vars.clone(),
             dict_vars: self.dict_vars.clone(),
             instant_vars: self.instant_vars.clone(),
             chars_vars: self.chars_vars.clone(),
@@ -1346,6 +1446,7 @@ impl Transpiler {
             overloaded_fn_names: self.overloaded_fn_names.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
+            arc_qualified_types: self.arc_qualified_types.clone(),
         }
     }
 

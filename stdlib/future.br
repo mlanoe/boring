@@ -58,3 +58,12 @@ ext Future<T>:
     # Await and discard until an absolute deadline. Throws Error.Expired if the
     # instant passes, or any error the task itself threw. The task keeps running.
     task req wait(Instant deadline) throws: native
+
+    # Non-blocking poll — true if the result is already available.
+    # Callable without parentheses: `f.done` or `f.done()`.
+    # Never blocks, never throws.
+    req bool done(): native
+
+    # Signal cancellation. The task will receive Error.Cancelled the next time
+    # it awaits something. Any subsequent call to `f.value` throws Error.Cancelled.
+    void cancel(): native

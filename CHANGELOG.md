@@ -5,6 +5,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.3] — 2026-06-08
+
+### Added
+
+- **Inline (monoline) loop forms** — `while`, `for`, `loop`, `do…while` now accept a single statement on the same line as the colon: `while i < 3: i = i + 1`, `for x in list: print x`, `loop: x = x + 1`, `do: x = x + 1 while x < 10`
+- **`;` statement separator** — semicolons are treated as newlines by the lexer, allowing multiple statements on one line: `let a = 1; let b = 2; print a + b`
+- **Tuple methods** — `length()`, `isEmpty()`, `first()`, `last()`, `map(closure)`, `all(pred)`, `any(pred)` on tuple values; `map` preserves per-slot type inference; `all`/`any` short-circuit across slots; field shorthand works: `boxes.map(:value)`
+- **Arc-qualified receiver validation** — methods declared `task` on a struct must use an Arc-qualified receiver (`T'task`, `T'actor`, `T'guard`); using a plain receiver is now a compile-time error
+
+### Spec
+
+- `grammar.bnf` updated: `block` rule now documents the inline (monoline) form; `while_stmt`, `for_stmt`, `loop_stmt`, `do_while_stmt` annotated; `;` documented as `SEMICOLON`; tuple methods section added; Arc-qualified receiver constraint documented in task/concurrency semantics
+
+---
+
 ## [0.2.2] — 2026-06-07
 
 ### Added

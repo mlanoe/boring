@@ -74,6 +74,9 @@ struct Transpiler {
     pub(crate) vec_vars: std::collections::HashSet<String>,
     /// Variables known to hold a HashSet (for `remove(&v)` and `add`→`insert` dispatch).
     pub(crate) set_vars: std::collections::HashSet<String>,
+    /// Variables known to hold a tuple — maps name → arity.
+    /// Used to dispatch `.length()`, `.isEmpty()`, `.first()`, `.last()` on tuple vars.
+    pub(crate) tuple_vars: std::collections::HashMap<String, usize>,
     /// Variables known to hold a HashMap/dict — subscript reads use `.get()`, writes use `.insert()`.
     pub(crate) dict_vars: std::collections::HashSet<String>,
     /// Variables known to hold a `std::time::Instant` (for `wait(deadline)` →
@@ -332,6 +335,11 @@ struct Transpiler {
     pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
     pub(crate) overloaded_method_keys: std::collections::HashSet<String>,
+    /// Type names (structs/enums) that appear as the inner type of a `'task`, `'actor`, or
+    /// `'guard` qualifier in at least one struct field or function parameter across the program.
+    /// `task fn` methods are only valid on types in this set — they rely on the receiver being
+    /// accessed through `Arc<Self>`, which is only guaranteed when the type is arc-qualified.
+    pub(crate) arc_qualified_types: std::collections::HashSet<String>,
 }
 
 impl Transpiler {
@@ -345,6 +353,7 @@ impl Transpiler {
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
             set_vars: std::collections::HashSet::new(),
+            tuple_vars: std::collections::HashMap::new(),
             dict_vars: std::collections::HashSet::new(),
             instant_vars: std::collections::HashSet::new(),
             chars_vars: std::collections::HashSet::new(),
@@ -446,6 +455,7 @@ impl Transpiler {
             overloaded_fn_names: std::collections::HashSet::new(),
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
+            arc_qualified_types: std::collections::HashSet::new(),
         }
     }
 
@@ -802,7 +812,17 @@ impl Transpiler {
                         self.user_conv_targets.insert(tname.to_lowercase());
                     }
                 }
-                Item::Fn(f) => self.pre_register_fn(f),
+                Item::Fn(f) => {
+                    // Collect arc-qualified types from top-level function params.
+                    for p in &f.params {
+                        if let Some(ty) = &p.ty {
+                            if let Some(n) = Self::arc_inner_type_name(ty) {
+                                self.arc_qualified_types.insert(n.to_string());
+                            }
+                        }
+                    }
+                    self.pre_register_fn(f);
+                }
                 Item::Struct(s) if s.name == "Box" => {
                     self.user_defines_box = true;
                     // Also register struct fields (fall through below).
@@ -931,6 +951,20 @@ impl Transpiler {
                         if Self::is_rwlock_binding(f.mutable, &f.ty) {
                             self.struct_rwlock_fields.insert(format!("{}::{}", s.name, f.name));
                         }
+                        // Collect arc-qualified inner type names for task fn method validation.
+                        if let Some(n) = Self::arc_inner_type_name(&f.ty) {
+                            self.arc_qualified_types.insert(n.to_string());
+                        }
+                    }
+                    // Collect arc-qualified types from method params too.
+                    for m in &s.methods {
+                        for p in &m.params {
+                            if let Some(ty) = &p.ty {
+                                if let Some(n) = Self::arc_inner_type_name(ty) {
+                                    self.arc_qualified_types.insert(n.to_string());
+                                }
+                            }
+                        }
                     }
                     // Track req (non-mutating) methods for 'guard read vs write dispatch.
                     for m in &s.methods {
@@ -972,6 +1006,16 @@ impl Transpiler {
                     }
                 }
                 Item::Ext(e) => {
+                    // Collect arc-qualified types from ext method params.
+                    for m in &e.methods {
+                        for p in &m.params {
+                            if let Some(ty) = &p.ty {
+                                if let Some(n) = Self::arc_inner_type_name(ty) {
+                                    self.arc_qualified_types.insert(n.to_string());
+                                }
+                            }
+                        }
+                    }
                     // Register user-defined `as T:` conversion targets from extensions too.
                     for conv in &e.conversions {
                         let tname = self.emit_type(&conv.ty);
@@ -1047,11 +1091,19 @@ impl Transpiler {
                     // Function type aliases: `use Pure as req int(int)` — store for inline expansion.
                     self.fn_type_aliases.insert(a.name.clone(), a.ty.clone());
                 }
-                Item::Let(s) if s.mutable => {
-                    // Top-level mutable var declarations — collect type and initial value.
-                    let init_val = self.emit_expr_owned(s.value.as_ref().unwrap());
-                    self.global_var_types.insert(s.name.clone(), s.ty.clone());
-                    self.global_var_inits.insert(s.name.clone(), init_val);
+                Item::Let(s) => {
+                    // Collect arc-qualified types from all top-level let/var bindings.
+                    if let Some(ty) = &s.ty {
+                        if let Some(n) = Self::arc_inner_type_name(ty) {
+                            self.arc_qualified_types.insert(n.to_string());
+                        }
+                    }
+                    if s.mutable {
+                        // Top-level mutable var declarations — collect type and initial value.
+                        let init_val = self.emit_expr_owned(s.value.as_ref().unwrap());
+                        self.global_var_types.insert(s.name.clone(), s.ty.clone());
+                        self.global_var_inits.insert(s.name.clone(), init_val);
+                    }
                 }
                 Item::Mod(m) => {
                     // Track Boring module names so `use boring_mod.*` can be suppressed.

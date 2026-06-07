@@ -305,6 +305,7 @@ pub enum TokenKind {
     Type,
     Req,
     Transient,
+    With,
     Get,
     Set,
     Init,
@@ -357,16 +358,27 @@ impl<'a> Lexer<'a> {
         let mut tokens: Vec<Token> = Vec::new();
         let lines: Vec<&str> = self.source.lines().collect();
         let mut i = 0;
+        // Track open paren/bracket/brace depth to suppress indent/dedent inside them.
+        // Exception: colon-blocks inside parens (e.g. lambdas) still need indent/dedent tracking.
+        let mut paren_depth: i32 = 0;
+        // Number of active colon-blocks opened while paren_depth > 0.
+        // When > 0, we still apply indent/dedent logic even though paren_depth > 0.
+        let mut inner_colon_blocks: i32 = 0;
+        // The indent level at the time each inner colon block was opened, so we know when to pop.
+        let mut inner_block_base_indents: Vec<usize> = Vec::new();
         while i < lines.len() {
             self.line = i + 1;
             let raw = lines[i];
             let trimmed = raw.trim_start();
             if trimmed.is_empty() {
-                tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+                if paren_depth == 0 {
+                    tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+                }
                 i += 1;
                 continue;
             }
-            if trimmed.starts_with('#') {
+            let apply_indent = paren_depth == 0 || inner_colon_blocks > 0;
+            if trimmed.starts_with('#') && apply_indent {
                 // Emit any pending DEDENTs based on the comment line's indentation,
                 // so a top-level comment after an indented block closes that block correctly.
                 let comment_indent = measure_indent(raw, self.line)?;
@@ -385,27 +397,66 @@ impl<'a> Lexer<'a> {
                 i += 1;
                 continue;
             }
-            let indent = measure_indent(raw, self.line)?;
-            let cur_indent = *self.indent_stack.last().unwrap();
-            if indent > cur_indent {
-                self.indent_stack.push(indent);
-                tokens.push(Token { kind: TokenKind::Indent, line: self.line });
-            } else if indent < cur_indent {
-                loop {
-                    let top = *self.indent_stack.last().unwrap();
-                    if top == indent { break; }
-                    if top < indent {
-                        return Err(LexError::InvalidDedent { line: self.line });
+            let line_indent = if apply_indent { measure_indent(raw, self.line)? } else { 0 };
+            if apply_indent {
+                // Before emitting this line's tokens, check if we should close inner colon blocks
+                // because indentation dropped back to or below their base level.
+                while inner_colon_blocks > 0 {
+                    let base = *inner_block_base_indents.last().unwrap();
+                    if line_indent <= base {
+                        // We've exited this inner block; pop blocks until we reach the right level.
+                        // The DEDENT tokens will be emitted below in the normal dedent logic.
+                        inner_colon_blocks -= 1;
+                        inner_block_base_indents.pop();
+                    } else {
+                        break;
                     }
-                    self.indent_stack.pop();
-                    tokens.push(Token { kind: TokenKind::Dedent, line: self.line });
+                }
+                let cur_indent = *self.indent_stack.last().unwrap();
+                if line_indent > cur_indent {
+                    self.indent_stack.push(line_indent);
+                    tokens.push(Token { kind: TokenKind::Indent, line: self.line });
+                } else if line_indent < cur_indent {
+                    loop {
+                        let top = *self.indent_stack.last().unwrap();
+                        if top == line_indent { break; }
+                        if top < line_indent {
+                            return Err(LexError::InvalidDedent { line: self.line });
+                        }
+                        self.indent_stack.pop();
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line });
+                    }
                 }
             }
             let content = raw.trim_start();
             let content = &content[..comment_start(content)];
             let line_tokens = lex_line(content.trim_end(), self.line)?;
+            // Update paren depth and track colon-blocks inside parens.
+            let mut last_meaningful_is_colon = false;
+            for t in &line_tokens {
+                match &t.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                        paren_depth += 1;
+                        last_meaningful_is_colon = false;
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        paren_depth -= 1;
+                        last_meaningful_is_colon = false;
+                    }
+                    TokenKind::Colon => { last_meaningful_is_colon = true; }
+                    _ => { last_meaningful_is_colon = false; }
+                }
+            }
+            // If this line ended with ':' while inside parens, the next lines form a block body.
+            if last_meaningful_is_colon && paren_depth > 0 {
+                inner_colon_blocks += 1;
+                inner_block_base_indents.push(line_indent);
+            }
             tokens.extend(line_tokens);
-            tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+            // Emit newline when at top level or when ending a colon-block line inside parens.
+            if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+            }
             i += 1;
         }
         // Close all open indents
@@ -504,6 +555,7 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
         '{' => TokenKind::LBrace,
         '}' => TokenKind::RBrace,
         ',' => TokenKind::Comma,
+        ';' => TokenKind::Newline,
         ':' => TokenKind::Colon,
         '+' => {
             if chars.peek().map(|(_, c)| *c == '=').unwrap_or(false) {
@@ -840,6 +892,7 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "type"     => TokenKind::Type,
         "req"      => TokenKind::Req,
         "transient" => TokenKind::Transient,
+        "with"      => TokenKind::With,
         "set"      => TokenKind::Set,
         "init"     => TokenKind::Init,
         "pass"     => TokenKind::Pass,

@@ -463,6 +463,12 @@ impl Transpiler {
                     //  (c) async fn param     — impl Future<Output=T> (or Result<T,_>)
                     //      throws ctx + value : f.await?
                     //      otherwise          : f.await.unwrap()
+                    if field == "done" && self.task_vars.contains(type_name.as_str()) {
+                        return format!(
+                            "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
+                            type_name
+                        );
+                    }
                     if (field == "value" || field == "wait") && self.task_vars.contains(type_name.as_str()) {
                         let in_throws_ctx = self.in_throws || self.in_try_body;
                         let is_throws_handle = self.throws_join_handle_vars.contains(type_name.as_str());
@@ -497,6 +503,14 @@ impl Transpiler {
                 // `.value` / `.wait` on a JoinHandle → `.await.unwrap()`.
                 // Covers inline task expressions `(task ...).value` and loop vars `future.wait`
                 // that aren't tracked in task_vars.
+                // Future.done() — non-blocking poll: true if the JoinHandle is finished.
+                if field == "done" {
+                    // Use try_join with zero timeout as a non-blocking poll.
+                    return format!(
+                        "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
+                        obj_s
+                    );
+                }
                 if field == "value" || field == "wait" {
                     // TaskWithTimeout: always a throws JoinHandle (wraps Result<T, Elapsed>).
                     // Needs .await.unwrap()? in throws context to propagate Error.Expired,
@@ -2134,6 +2148,21 @@ impl Transpiler {
             "drop" => {
                 let a = self.emit_expr(&args[0].value);
                 format!("drop({})", a)
+            }
+            "args" => {
+                "std::env::args().skip(1).map(|s| Arc::<str>::from(s)).collect::<Vec<_>>()".into()
+            }
+            "ord" => {
+                let s = self.emit_expr(&args[0].value);
+                format!("({}).chars().next().expect(\"ord: empty string\") as i64", s)
+            }
+            "chr" => {
+                let n = self.emit_expr(&args[0].value);
+                format!("Arc::<str>::from(char::from_u32({} as u32).expect(\"chr: invalid codepoint\").to_string())", n)
+            }
+            "exit" => {
+                let code = self.emit_expr(&args[0].value);
+                format!("{{ std::process::exit({} as i32) }}", code)
             }
             // json(v) → serde_json::to_string(&v).unwrap_or_default()
             "json" => {

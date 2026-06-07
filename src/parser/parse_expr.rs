@@ -1030,6 +1030,10 @@ impl Parser {
     pub(crate) fn parse_call_args(&mut self) -> Result<Vec<Arg>, ParseError> {
         self.expect(&TokenKind::LParen)?;
         self.skip_newlines_and_indent(); // allow `(\n    arg,` multi-line form
+        // Inside explicit parentheses, `(params): body` closures are always valid,
+        // regardless of the outer allow_trailing_closure setting.
+        let saved_tc = self.allow_trailing_closure;
+        self.allow_trailing_closure = true;
         let mut args = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             args.push(self.parse_arg()?);
@@ -1038,6 +1042,7 @@ impl Parser {
         }
         self.skip_newlines_and_indent(); // allow newline before `)`
         self.expect(&TokenKind::RParen)?;
+        self.allow_trailing_closure = saved_tc;
         Ok(args)
     }
 
@@ -1274,7 +1279,7 @@ impl Parser {
                     self.skip_newlines_and_indent(); // allow newline before `)`
                     self.expect(&TokenKind::RParen)?;
                     let (ex_throws, ex_task) = self.parse_closure_modifiers();
-                    if self.check(&TokenKind::Colon) {
+                    if self.allow_trailing_closure && self.check(&TokenKind::Colon) {
                         self.advance();
                         let params = elems.iter().map(|e| expr_to_param(e, line)).collect::<Vec<_>>();
                         let body = self.parse_closure_body()?;
@@ -1286,7 +1291,7 @@ impl Parser {
                     self.skip_newlines_and_indent(); // allow newline before `)`
                     self.expect(&TokenKind::RParen)?;
                     let (ex_throws, ex_task) = self.parse_closure_modifiers();
-                    if self.check(&TokenKind::Colon) {
+                    if self.allow_trailing_closure && self.check(&TokenKind::Colon) {
                         self.advance();
                         let params = vec![expr_to_param(&expr, line)];
                         let body = self.parse_closure_body()?;
@@ -1402,11 +1407,11 @@ impl Parser {
         self.skip_newlines_and_indent(); // allow `{\n    ...` multi-line form
         if self.check(&TokenKind::RBrace) {
             self.advance();
-            // {} = empty set (HashSet::new())
+            // {} = empty set; {=} = empty dict
             return Ok(Expr { kind: ExprKind::Set(vec![]), line });
         }
 
-        // {=} = empty dict (HashMap::new())
+        // {=} = also empty dict (alternate syntax)
         if self.check(&TokenKind::Eq) {
             self.advance();
             self.expect(&TokenKind::RBrace)?;

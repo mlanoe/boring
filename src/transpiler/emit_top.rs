@@ -403,6 +403,24 @@ impl Transpiler {
                 let is_enum_self = self_ty.map(|t| {
                     self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", t)))
                 }).unwrap_or(false);
+                // Validate: an external `task fn` declaration (`def T.method()` outside the
+                // struct body) relies on the receiver being accessed through `Arc<Self>`.
+                // That is guaranteed only when `T` is arc-qualified (`'task`, `'actor`, or
+                // `'guard`) somewhere in the program. Inline struct methods (declared inside
+                // the struct body, `f.qualifier = None`) are exempt — they may be async for
+                // other reasons (calling task fns) without requiring Arc semantics.
+                if f.task && f.qualifier.is_some() && !self.inside_trait_impl && !is_enum_self {
+                    let sname = self_ty.unwrap_or("");
+                    if !sname.is_empty() && !self.arc_qualified_types.contains(sname) {
+                        eprintln!(
+                            "error: `task fn` method '{}::{}' requires '{}' to be used with a \
+                             'task, 'actor, or 'guard qualifier at least once in the program \
+                             (no arc-qualified binding found)",
+                            sname, f.name, sname
+                        );
+                        std::process::exit(1);
+                    }
+                }
                 let self_s = if f.mutating && (!f.task || self.inside_trait_impl) && !is_enum_self {
                     "&mut self"
                 } else {
@@ -1085,6 +1103,17 @@ impl Transpiler {
     /// Emit `Arc<tokio::sync::RwLock<T>>` for the inner type.
     pub(crate) fn emit_rwlock_type(&self, inner: &Type) -> String {
         format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner))
+    }
+
+    /// If `ty` is `T'task`, `T'actor`, or `T'guard`, return the name of the inner named type.
+    /// Used by `pre_scan` to populate `arc_qualified_types`.
+    pub(crate) fn arc_inner_type_name(ty: &Type) -> Option<&str> {
+        match ty {
+            Type::Qualified(inner, OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard) => {
+                if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
+            }
+            _ => None,
+        }
     }
 
     /// Returns true if the Boring type maps to a `Copy` Rust type.
