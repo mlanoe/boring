@@ -384,7 +384,7 @@ fn emit_rust_with_version(path: &str, version: &str) {
         ""
     };
     let tokio_util_dep = if uses_tokio_util {
-        "\ntokio-util = { version = \"0.7\", features = [\"sync\"] }\n"
+        "\ntokio-util = \"0.7\"\n"
     } else {
         ""
     };

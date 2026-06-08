@@ -475,9 +475,11 @@ impl Transpiler {
                         let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
                         return if field == "wait" {
                             if is_throws_handle && in_throws_ctx {
-                                format!("{{ let _ = {}.await.expect(\"task panicked\")?; }}", type_name)
+                                format!("{{ let _ = {}.await.map_err(|__e| Box::new(BoringError::String(Arc::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}", type_name)
                             } else if is_throws_handle {
                                 format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", type_name)
+                            } else if in_throws_ctx {
+                                format!("{{ {}.await.map_err(|__e| Box::new(BoringError::String(Arc::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)?; }}", type_name)
                             } else {
                                 format!("{{ let _ = {}.await; }}", type_name)
                             }
