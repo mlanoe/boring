@@ -495,7 +495,7 @@ let _result = greet(nil)
 
 #[test]
 fn test_if_let_inline() {
-    let src = r#"
+    let _src = r#"
 let string? x = "hi"
 let _result = if let s = x: s else "bye"
 "#;

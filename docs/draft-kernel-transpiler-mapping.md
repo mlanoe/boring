@@ -23,8 +23,8 @@
 |--------|----------|-------------|--------|-------|
 | `T?` | `Option<T>` | `Option<T>` | ✅ | available in `core::` |
 | `[T]` | `Vec<T>` | `kernel::prelude::Vec<T>` | ✅ | kernel has its own Vec with kernel allocator |
-| `{K: V}` | `HashMap<K,V>` | — | ❌ | no HashMap, use `kernel::rbtree::RBTree` |
-| `{T}` | `HashSet<T>` | — | ❌ | no direct equivalent |
+| `{K: V}` | `HashMap<K,V>` | `kernel::rbtree::RBTree<K,V>` | ⚠️ | partial mapping — ordered, O(log n) vs O(1); keys must be `Ord` |
+| `{T}` | `HashSet<T>` | `kernel::rbtree::RBTree<T,()>` | ⚠️ | set emulated via RBTree with `()` as value; keys must be `Ord` |
 | `(T, U)` | tuples | `core::` tuples | ✅ | |
 | `Box<T>` | `Box<T>` | `Box<T, KernelAllocator>` | ⚠️ | different allocator |
 
@@ -105,8 +105,9 @@ so developers only need to declare domain-specific errors.
 |--------|----------|-------------|--------|-------|
 | `task def` | `async fn` + tokio | struct `XxxWork: Work` + `KernelFuture<T>` | ⚠️ | see section below |
 | `task expr` | `tokio::spawn` | `system_wq.enqueue(work)` | ✅ | |
-| `stream def` | `futures::Stream` | — | ❌ | no equivalent |
-| `chan` / `tx.send` / `rx.recv` | MPSC tokio | — | ❌ | use `kernel::sync::CondVar` or spinlock |
+| `stream def` | `futures::Stream` | bounded chan + work item | ⚠️ | implemented on top of `chan` — see section below |
+| `chan<T>(n)` / `tx.send` / `rx.recv` | MPSC tokio | ring buffer + `Mutex` + `CondVar` | ⚠️ | bounded capacity set at construction — see section below |
+| `join` / `let a,b = (task f1(), task f2()).map(:value)` | `tokio::join!` | sequential `.wait()` on concurrent work items | ✅ | both items enqueued first, waited sequentially — wall time is max(t1,t2) |
 | `wait Duration` | `tokio::sleep` | `kernel::delay::coarse_sleep` | ⚠️ | available but without await |
 | `Future<T>` | `tokio::JoinHandle` | `KernelFuture<T>` | ⚠️ | blocking — `.wait()` in process context only |
 | `future.done()` | `JoinHandle` + `Arc<Mutex<Option<T>>>` | `try_lock` + `is_some` | ✅ | non-blocking poll |
@@ -194,6 +195,97 @@ both backends are symmetric. The developer can freely compose from these two pri
 
 ---
 
+### Mapping `chan` → bounded ring buffer
+
+No `kfifo` Rust binding exists in the kernel, and `VecDeque` is unavailable in `no_std`.
+The channel is instead implemented as a **bounded ring buffer** backed by a `Vec` pre-allocated
+at construction time, with two rotating indices under a `Mutex`:
+
+```boring
+// Boring source
+let tx, rx = chan<Page>(32)   // ring buffer of capacity 32
+tx.send(page)
+let page = rx.recv()
+```
+
+```rust
+// Generated Rust-kernel
+struct KernelChan<T> {
+    buf:       Vec<Option<T>>,  // pre-allocated to `capacity`
+    capacity:  usize,
+    read_idx:  usize,           // protected by mutex
+    write_idx: usize,           // protected by mutex
+    mutex:     Mutex<()>,
+    not_full:  CondVar,         // wakes blocked send()
+    not_empty: CondVar,         // wakes blocked recv()
+}
+
+// send(): blocks if full
+fn send(&self, value: T) {
+    let mut guard = self.mutex.lock();
+    self.not_full.wait_while(&mut guard, |_| self.is_full());
+    self.buf[self.write_idx] = Some(value);
+    self.write_idx = (self.write_idx + 1) % self.capacity;
+    self.not_empty.notify_one();
+}
+
+// recv(): blocks if empty
+fn recv(&self) -> T {
+    let mut guard = self.mutex.lock();
+    self.not_empty.wait_while(&mut guard, |_| self.is_empty());
+    let value = self.buf[self.read_idx].take().unwrap();
+    self.read_idx = (self.read_idx + 1) % self.capacity;
+    self.not_full.notify_one();
+    value
+}
+```
+
+**Constraints:**
+- Capacity is **mandatory** in kernel context: `chan<T>` without a size is rejected at validation.
+- Both `send()` and `recv()` block — valid in process context only.
+- Bounded capacity is a feature in kernel context: no surprise dynamic allocation at runtime.
+
+---
+
+### Mapping `stream def` → chan + Work item
+
+A `stream def` is implemented on top of `chan`: the stream body runs as a work item on
+`system_wq` and sends each `yield`ed value into an internal channel. The caller receives
+a `Receiver<T>` and consumes values with `.recv()`. End-of-stream is signalled by closing
+the sender side.
+
+```boring
+// Boring source
+stream def lines(file: File) -> string:
+    for line in file.readLines():
+        yield line
+```
+
+```rust
+// Generated Rust-kernel
+fn lines(file: File) -> KernelReceiver<CString> {
+    let (tx, rx) = KernelChan::new(/* default capacity, or annotation-driven */);
+    let work = Arc::new(LinesWork { file, tx });
+    system_wq.enqueue(work);
+    rx
+}
+
+impl Work for LinesWork {
+    fn run(this: Arc<Self>) {
+        for line in this.file.read_lines() {
+            this.tx.send(line);  // blocks if consumer is slow
+        }
+        // tx dropped here → signals end-of-stream to rx
+    }
+}
+```
+
+**Constraint:** the internal channel capacity for a `stream def` must be specifiable via
+an annotation (e.g. `stream(32) def lines(…)`) — otherwise a default capacity is used.
+The validation pass must ensure the capacity is set explicitly or a sensible default is documented.
+
+---
+
 ### Open question — capturing `self` in a `Work` item
 
 > **Note:** the current tokio implementation implicitly assumes `Arc<Self>` for any
@@ -212,8 +304,9 @@ Several options depending on the ownership qualifier of `self`:
 | `T'` (owned) | `Box<T>` | move into the work item | `self` inaccessible after the `task` — must be validated statically |
 | `T&` / `T&mut` | reference | **impossible** — the work item will outlive the reference | must be rejected at validation |
 
-**Decision needed:** should `task def` on `self` be restricted to `'task`, `'actor`, and `'guard`
-(the only qualifiers with a shareable lifetime), with all others rejected at validation?
+**Decision: `task def` on `self` is restricted to `'task`, `'actor`, and `'guard`** — the only
+qualifiers with a shareable lifetime compatible with a work item. `T&`, `T&mut`, and `T'` are
+rejected at validation. This constraint is already enforced in the tokio backend.
 
 ---
 
@@ -226,7 +319,7 @@ Several options depending on the ownership qualifier of `self`:
 | `panic(msg)` | `panic!` | — | ❌ | a panic = kernel oops/crash |
 | Math (`sqrt`, `sin`…) | `std::f64` | — | ❌ | FPU forbidden |
 | `Vec` methods | `std::vec` | `kernel::prelude::Vec` | ⚠️ | slightly different API |
-| `HashMap` | `std::collections` | — → `RBTree` | ❌ | replacement required |
+| `HashMap` | `std::collections` | `kernel::rbtree::RBTree<K,V>` | ⚠️ | ordered, O(log n), keys must be `Ord` |
 
 ---
 
@@ -244,7 +337,7 @@ Several options depending on the ownership qualifier of `self`:
 ### What requires an alternative mapping
 
 - `string` → kernel `CStr` / `CString`
-- `HashMap` / `HashSet` → `RBTree` or absent
+- `HashMap` / `HashSet` → `RBTree<K,V>` / `RBTree<T,()>` — ordered, O(log n), keys must be `Ord`
 - `throws MyError` → `kernel::error::Error` (errno-based)
 - `print!` / assertions → kernel macros
 - `Box<T>` → kernel allocator
@@ -253,20 +346,28 @@ Several options depending on the ownership qualifier of `self`:
 
 - `task def` on `self` with `T&` / `T&mut` — references incompatible with work item lifetime (must be rejected)
 - `task def` on `self` with `Box<T>` — move semantics must be validated statically
-- `stream def`, channels (no tokio — no direct equivalent)
+- `chan<T>` without explicit capacity — forbidden in kernel context (bounded size mandatory)
 - Poll-based `Future<T>` — replaced by blocking `KernelFuture<T>`
 - `float` and all floating-point math
 - `panic`
-- `T'auto` (replaced by `Arc<T>` — not blocking but less optimal than standard Boring)
+- `T'auto` (replaced by `Arc<T>` — validation emits a warning, not an error)
 
 ---
 
 ## Planned transpiler architecture
 
-- **Shared**: parser, AST, typing passes
-- **New**: validation pass (blacklist of incompatible constructs) + `emit_kernel_*.rs` emitter
-- The emitter duplicates and adapts `emit_top.rs`, `emit_stmt.rs`, `emit_expr.rs`, `helpers.rs`
-- The `--emit-rust-kernel` flag selects the emitter at compile time
+A second emission backend within the same binary — no duplication of parser, AST, or typing passes.
+
+- **Shared (untouched)**: parser, AST, typing passes, existing `emit_*.rs` files
+- **New: `src/validator/kernel.rs`** — validation pass that runs before emission when `--target kernel`;
+  rejects incompatible constructs with explicit error messages
+- **New: `src/transpiler/kernel/`** — kernel emission backend:
+  - `emit_kernel_top.rs` — struct/impl/fn declarations, `Work` item generation
+  - `emit_kernel_stmt.rs` — statements, `task` expr, `chan`, `yield`
+  - `emit_kernel_expr.rs` — expressions, string literal → `c_str!`, method calls
+  - `emit_kernel_helpers.rs` — `KernelFuture<T>`, `KernelChan<T>` runtime types
+- The `--target kernel` flag selects the kernel validator + emitter at compile time
+- Zero regression risk on the standard backend — existing files are not modified
 
 ---
 

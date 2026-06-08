@@ -11,8 +11,6 @@
 
 use super::{run, run_src, get_var};
 use super::*;
-use crate::lexer::lex;
-use crate::parser::parse;
 
 #[test]
 fn test_stack_qualifier_return() {

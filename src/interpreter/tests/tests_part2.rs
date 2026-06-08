@@ -11,8 +11,6 @@
 
 use super::{run, run_src, get_var};
 use super::*;
-use crate::lexer::lex;
-use crate::parser::parse;
 
 #[test]
 fn test_enum_as_conversion() {
@@ -1511,7 +1509,7 @@ for i in 1..4:
 #[test]
 fn test_pass_fn() {
     // `def foo(): pass` — empty body, calling it returns nil
-    let src = r#"
+    let _src = r#"
 def void foo():
     pass
 let _result = foo()

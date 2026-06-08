@@ -356,30 +356,6 @@ pub enum Stmt {
     Yield(Expr, usize),
     /// Full-line comment `# text` — preserved for the transpiler, ignored by interpreter.
     Comment(String),
-    /// `select:` — tokio::select! wrapper
-    Select(SelectStmt),
-}
-
-/// `select:` — concurrent branch selector.
-/// Each arm waits on a future; the first to complete runs its body.
-#[derive(Debug, Clone)]
-pub struct SelectStmt {
-    pub arms: Vec<SelectArm>,
-    pub line: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct SelectArm {
-    /// Bound variable name, or None for `_`
-    pub var: Option<String>,
-    /// The future expression (receiver call, timeout expr, etc.)
-    pub expr: Expr,
-    pub body: Vec<Stmt>,
-    /// true for `after dur:` sugar
-    pub is_after: bool,
-    /// true for `cancelled:` sugar — desugars to `_ = __task_cancel.cancelled()`
-    pub is_cancelled: bool,
-    pub line: usize,
 }
 
 /// `let (a, b, c) = expr`  — destructures a tuple into named bindings.

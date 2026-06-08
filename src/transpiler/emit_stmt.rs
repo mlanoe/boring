@@ -83,7 +83,6 @@ impl Transpiler {
                 let s = format!("yield {};", self.emit_expr_owned(expr));
                 self.line(&s);
             }
-            Stmt::Select(s)         => self.emit_select(s),
             Stmt::Comment(text)     => self.line(&format!("// {}", text)),
             Stmt::Expr(e)           => {
                 if is_last && self.in_throws {
@@ -1084,92 +1083,6 @@ impl Transpiler {
             bindings.join(", ")
         };
         self.line(&format!("let ({}) = {};", bindings_s, val));
-    }
-
-    // ─── select: ──────────────────────────────────────────────────────────────
-
-    /// Emit `tokio::select! { arm1 => { ... } arm2 => { ... } }`.
-    pub(crate) fn emit_select(&mut self, s: &SelectStmt) {
-        self.line("tokio::select! {");
-        self.indent += 1;
-        for arm in &s.arms {
-            self.emit_select_arm(arm);
-        }
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    pub(crate) fn emit_select_arm(&mut self, arm: &SelectArm) {
-        // Strip `.await` / `.await?` from expression strings so the future is passed
-        // un-polled to tokio::select! (same technique as for `timeout` args).
-        let strip_await = |s: String| -> String {
-            if let Some(s) = s.strip_suffix(".await?") { s.to_string() }
-            else if let Some(s) = s.strip_suffix(".await") { s.to_string() }
-            else { s }
-        };
-
-        if arm.is_cancelled {
-            // `cancelled:` → `_ = __task_cancel.cancelled() => { body }`
-            self.line("_ = __task_cancel.cancelled() => {");
-        } else if arm.is_after {
-            // `after dur:` → `_ = tokio::time::sleep(dur) => { body }`
-            let raw = self.emit_expr(&arm.expr);
-            let dur = strip_await(raw);
-            self.line(&format!("_ = tokio::time::sleep({}) => {{", dur));
-        } else {
-            // `var = expr:` or `_ = expr:`
-            // For channel receivers, wrap the pattern in `Some(var)` to match `recv()` return type.
-            let raw_expr = match &arm.expr.kind {
-                ExprKind::Task(inner) => self.emit_expr(inner),
-                _ => {
-                    let s = self.emit_expr(&arm.expr);
-                    strip_await(s)
-                }
-            };
-            let (pattern, lhs) = match &arm.var {
-                None => ("_".to_string(), "_".to_string()),
-                Some(var_name) => {
-                    // If the expression receiver is a channel_receiver, wrap in Some(var)
-                    let is_recv = matches!(&arm.expr.kind,
-                        ExprKind::MethodCall(obj, m, _)
-                        if m == "recv" && matches!(&obj.kind, ExprKind::Var(v) if self.channel_receivers.contains(v.as_str()))
-                    );
-                    // broadcast receiver: wrap in Ok(var)
-                    let is_broadcast_recv = matches!(&arm.expr.kind,
-                        ExprKind::MethodCall(obj, m, _)
-                        if m == "recv" && matches!(&obj.kind, ExprKind::Var(v) if self.broadcast_receivers.contains(v.as_str()))
-                    );
-                    if is_broadcast_recv {
-                        (format!("Ok({})", var_name), var_name.clone())
-                    } else if is_recv {
-                        // If the channel carries strings, track the bound var as Arc<str>
-                        // so that `msg == "literal"` comparisons emit correctly.
-                        let is_str_chan = matches!(&arm.expr.kind,
-                            ExprKind::MethodCall(obj, _, _)
-                            if matches!(&obj.kind, ExprKind::Var(v) if self.string_channel_receivers.contains(v.as_str()))
-                        );
-                        if is_str_chan {
-                            self.string_arc_vars.insert(var_name.clone());
-                            self.string_vars.insert(var_name.clone());
-                        }
-                        (format!("Some({})", var_name), var_name.clone())
-                    } else {
-                        (var_name.clone(), var_name.clone())
-                    }
-                }
-            };
-            let _ = lhs; // suppress unused warning; lhs is the bound name in body
-            self.line(&format!("{} = {} => {{", pattern, raw_expr));
-        }
-
-        // Emit body indented inside the arm
-        self.indent += 1;
-        let body_len = arm.body.len();
-        for (i, stmt) in arm.body.iter().enumerate() {
-            self.emit_stmt(stmt, i + 1 == body_len);
-        }
-        self.indent -= 1;
-        self.line("}");
     }
 
     pub(crate) fn emit_return(&mut self, s: &ReturnStmt) {

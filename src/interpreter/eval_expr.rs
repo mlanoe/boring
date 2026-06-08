@@ -255,6 +255,11 @@ impl Interpreter {
 
                 // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
                 if let ExprKind::Var(type_name) = &obj_expr.kind {
+                    // Task.cancelled() — not supported in the interpreter (no cancellation
+                    // token), so always return false to keep code that uses it runnable.
+                    if type_name == "Task" && method == "cancelled" && args.is_empty() {
+                        return Ok(Value::Bool(false));
+                    }
                     if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                         let struct_val = self.global.borrow().get(type_name);
                         if let Some(Value::Struct { decl, captured }) = struct_val {

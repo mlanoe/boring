@@ -584,12 +584,6 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
             }
             for s in &g.else_body { collect_vars_in_stmt(s, out); }
         }
-        Stmt::Select(sel) => {
-            for arm in &sel.arms {
-                collect_vars_in(&arm.expr, out);
-                for s in &arm.body { collect_vars_in_stmt(s, out); }
-            }
-        }
         Stmt::Match(m) => {
             collect_vars_in(&m.subject, out);
             for arm in &m.arms {
@@ -1278,11 +1272,6 @@ fn stmt_uses_task_cancelled(stmt: &Stmt) -> bool {
             stmts_use_task_cancelled(&t.body)
                 || t.catch_clauses.iter().any(|c| stmts_use_task_cancelled(&c.body))
         }
-        Stmt::Select(sel) => sel.arms.iter().any(|arm| {
-            arm.is_cancelled
-                || expr_uses_task_cancelled(&arm.expr)
-                || stmts_use_task_cancelled(&arm.body)
-        }),
         Stmt::Defer(body) => stmts_use_task_cancelled(body),
         _ => false,
     }

@@ -304,8 +304,6 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::Comment(_) => Ok(()),
-            // `select:` is async-only — not supported in the interpreter.
-            Stmt::Select(_) => Ok(()),
         }
     }
 

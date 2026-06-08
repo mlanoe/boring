@@ -24,6 +24,10 @@ impl Interpreter {
                     // Non-blocking poll — always true in the interpreter (eager evaluation)
                     return Ok(Value::Bool(true));
                 }
+                "cancel" => {
+                    // Cancellation is not supported in the interpreter — no-op.
+                    return Ok(Value::Nil);
+                }
                 _ => {}
             }
         }

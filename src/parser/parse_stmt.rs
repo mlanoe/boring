@@ -197,7 +197,6 @@ impl Parser {
                     Ok(Stmt::Fn(self.parse_fn_decl(true, true)?))
                 }
             }
-            TokenKind::Select => Err(ParseError::Generic { line: self.line(), msg: "'select:' has been removed — use Future.done() to poll futures and Future.cancel() to cancel them".into() }),
             TokenKind::Task => {
                 // `task def …` / `task req …` / `task RetType …` — function declaration
                 match self.tokens.get(self.pos + 1).map(|t| &t.kind) {

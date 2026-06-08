@@ -1649,7 +1649,6 @@ impl Parser {
             TokenKind::Pass      => Some("pass".into()),
             TokenKind::Stream    => Some("stream".into()),
             TokenKind::Yield     => Some("yield".into()),
-            TokenKind::Select    => Some("select".into()),
             TokenKind::Loop      => Some("loop".into()),
             TokenKind::Do        => Some("do".into()),
             TokenKind::Mod       => Some("mod".into()),
