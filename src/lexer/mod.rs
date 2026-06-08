@@ -337,7 +337,7 @@ pub enum TokenKind {
     At,
 
     // Layout
-    Newline, Indent, Dedent, Eof,
+    Newline, Semicolon, Indent, Dedent, Eof,
 
     // Comment (full-line `# text`) — preserved for the transpiler
     Comment(String),
@@ -555,7 +555,7 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
         '{' => TokenKind::LBrace,
         '}' => TokenKind::RBrace,
         ',' => TokenKind::Comma,
-        ';' => TokenKind::Newline,
+        ';' => TokenKind::Semicolon,
         ':' => TokenKind::Colon,
         '+' => {
             if chars.peek().map(|(_, c)| *c == '=').unwrap_or(false) {

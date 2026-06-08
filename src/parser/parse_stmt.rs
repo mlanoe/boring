@@ -18,7 +18,7 @@ impl Parser {
 
     pub(crate) fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
         // Skip comment tokens (and newlines) that may appear before the indent
-        while matches!(self.peek(), TokenKind::Comment(_) | TokenKind::Newline) {
+        while matches!(self.peek(), TokenKind::Comment(_) | TokenKind::Newline | TokenKind::Semicolon) {
             self.advance();
         }
         self.expect(&TokenKind::Indent)?;
@@ -47,7 +47,7 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Comment(text) => {
                 self.advance();
-                self.eat(&TokenKind::Newline);
+                while self.is_newline() { self.advance(); }
                 Ok(Stmt::Comment(text))
             }
             TokenKind::Let | TokenKind::Var | TokenKind::Static => {
@@ -73,7 +73,7 @@ impl Parser {
                 let line = self.line();
                 self.advance();
                 // `break expr` — optional value; newline/dedent/eof = no value
-                let value = if self.check(&TokenKind::Newline)
+                let value = if self.is_newline()
                     || self.check(&TokenKind::Dedent)
                     || self.check(&TokenKind::Eof)
                 {
@@ -112,17 +112,16 @@ impl Parser {
                 let line = self.line();
                 self.advance(); // consume 'do'
                 self.expect(&TokenKind::Colon)?;
-                if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
+                if !self.is_newline() && !self.check(&TokenKind::Eof) {
                     // Inline form: `do: stmt [while cond]`
-                    let stmt = self.parse_inline_stmt()?;
-                    let body = vec![stmt];
+                    let body = self.parse_inline_stmts()?;
                     if self.check(&TokenKind::While) {
                         self.advance(); // consume 'while'
                         let condition = self.parse_expr()?;
-                        self.expect_newline()?;
+                        self.expect_newline_soft();
                         Ok(Stmt::DoWhile(DoWhileStmt { body, condition, line }))
                     } else {
-                        self.expect_newline()?;
+                        self.expect_newline_soft();
                         Ok(Stmt::Expr(Expr { kind: ExprKind::Do(body), line }))
                     }
                 } else {
@@ -209,7 +208,7 @@ impl Parser {
                 }
                 // Otherwise: `task expr` — spawn expression
                 let task_expr = self.parse_task_expr()?;
-                if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+                if self.is_newline() || self.check(&TokenKind::Eof) {
                     self.skip_newlines();
                 }
                 Ok(Stmt::Expr(task_expr))
@@ -393,7 +392,7 @@ impl Parser {
     pub(crate) fn parse_return_stmt(&mut self) -> Result<ReturnStmt, ParseError> {
         let line = self.line();
         self.expect(&TokenKind::Return)?;
-        let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        let value = if self.is_newline() || self.check(&TokenKind::Eof) {
             None
         } else {
             Some(self.parse_expr()?)
@@ -405,7 +404,7 @@ impl Parser {
     pub(crate) fn parse_throw_stmt(&mut self) -> Result<ThrowStmt, ParseError> {
         let line = self.line();
         self.expect(&TokenKind::Throw)?;
-        let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        let value = if self.is_newline() || self.check(&TokenKind::Eof) {
             None
         } else {
             Some(self.parse_expr()?)
@@ -424,12 +423,10 @@ impl Parser {
         self.expect(&TokenKind::Colon)?;
 
         // Check if the body is inline (no newline) or a block
-        if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-            // Inline then-statement: `if c: stmt [elif c: stmt]* [else [:] stmt]`
-            // Use parse_inline_if_body (stops at `else`) so the `else` keyword isn't
-            // greedily consumed as a nil-coalescing operator in the body.
-            let then_stmt = self.parse_inline_if_body()?;
-            let mut branches = vec![(cond, vec![then_stmt])];
+        if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            // Inline then-statement: `if c: stmt [; stmt]* [elif c: stmt]* [else [:] stmt]`
+            let then_stmts = self.parse_inline_stmts_if_body()?;
+            let mut branches = vec![(cond, then_stmts)];
             let mut else_body = None;
             // Same-line elif/else
             loop {
@@ -440,8 +437,8 @@ impl Parser {
                     let elif_cond = self.parse_expr()?;
                     self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
                     self.expect(&TokenKind::Colon)?;
-                    let elif_stmt = self.parse_inline_if_body()?;
-                    branches.push((elif_cond, vec![elif_stmt]));
+                    let elif_stmts = self.parse_inline_stmts_if_body()?;
+                    branches.push((elif_cond, elif_stmts));
                 } else if self.check(&TokenKind::Else) {
                     self.advance();
                     else_body = Some(self.parse_else_body_stmts()?);
@@ -462,9 +459,8 @@ impl Parser {
                         let elif_cond = self.parse_expr()?;
                         self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
                         self.expect(&TokenKind::Colon)?;
-                        let elif_body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-                            let s = self.parse_inline_if_body()?;
-                            vec![s]
+                        let elif_body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+                            self.parse_inline_stmts_if_body()?
                         } else {
                             self.expect_newline()?;
                             self.parse_block()?
@@ -478,7 +474,7 @@ impl Parser {
                         break;
                     }
                 }
-            } else if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            } else if self.is_newline() || self.check(&TokenKind::Eof) {
                 self.expect_newline_soft();
             }
             return Ok(IfStmt { branches, else_body, line });
@@ -498,9 +494,8 @@ impl Parser {
                 let elif_cond = self.parse_expr()?;
                 self.allow_noparen_closure = saved_elif; self.allow_trailing_closure = true;
                 self.expect(&TokenKind::Colon)?;
-                let elif_body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-                    let s = self.parse_inline_if_body()?;
-                    vec![s]
+                let elif_body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+                    self.parse_inline_stmts_if_body()?
                 } else {
                     self.expect_newline()?;
                     self.parse_block()?
@@ -577,18 +572,16 @@ impl Parser {
         let clauses = self.parse_cond_clauses(&TokenKind::Colon)?;
         self.expect(&TokenKind::Colon)?;
 
-        if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
+        if !self.is_newline() && !self.check(&TokenKind::Eof) {
             // Inline: `if let n = expr: body [else body]`
-            let then_stmt = self.parse_inline_stmt()?;
-            let then_body = vec![then_stmt];
+            let then_body = self.parse_inline_stmts()?;
             let mut else_body = None;
             if self.check(&TokenKind::Else) {
                 self.advance();
                 self.eat(&TokenKind::Colon);
-                let else_stmt = self.parse_inline_stmt()?;
-                else_body = Some(vec![else_stmt]);
+                else_body = Some(self.parse_inline_stmts()?);
             }
-            self.expect_newline()?;
+            self.expect_newline_soft();
             return Ok(IfLetStmt { clauses, then_body, else_body, line });
         }
 
@@ -674,7 +667,7 @@ impl Parser {
         self.expect(&TokenKind::Colon)?;
 
         // Body: either inline stmt (on same line) or a block
-        let body = if self.check(&TokenKind::Newline) {
+        let body = if self.is_newline() {
             self.advance();
             let stmts = self.parse_block()?;
             MatchBody::Block(stmts)
@@ -684,10 +677,10 @@ impl Parser {
             // trailing closure appended to the expression.
             let saved_npc = self.allow_noparen_closure;
             self.allow_noparen_closure = false;
-            let stmt = self.parse_inline_stmt()?;
+            let stmts = self.parse_inline_stmts()?;
             self.allow_noparen_closure = saved_npc;
             self.expect_newline_soft();
-            MatchBody::Block(vec![stmt])
+            MatchBody::Block(stmts)
         };
 
         Ok(MatchArm { patterns, guard, body, line })
@@ -850,10 +843,10 @@ impl Parser {
             v
         };
         self.expect(&TokenKind::Colon)?;
-        let body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-            let stmt = self.parse_inline_stmt()?;
-            self.expect_newline()?;
-            vec![stmt]
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            stmts
         } else {
             self.expect_newline()?;
             self.parse_block()?
@@ -869,10 +862,10 @@ impl Parser {
         let condition = self.parse_expr()?;
         self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
         self.expect(&TokenKind::Colon)?;
-        let body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-            let stmt = self.parse_inline_stmt()?;
-            self.expect_newline()?;
-            vec![stmt]
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            stmts
         } else {
             self.expect_newline()?;
             self.parse_block()?
@@ -884,10 +877,10 @@ impl Parser {
         let line = self.line();
         self.expect(&TokenKind::Loop)?;
         self.expect(&TokenKind::Colon)?;
-        let body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-            let stmt = self.parse_inline_stmt()?;
-            self.expect_newline()?;
-            vec![stmt]
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            stmts
         } else {
             self.expect_newline()?;
             self.parse_block()?
@@ -934,10 +927,10 @@ impl Parser {
 
         self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
         self.expect(&TokenKind::Colon)?;
-        let body = if !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Eof) {
-            let stmt = self.parse_inline_stmt()?;
-            self.expect_newline()?;
-            vec![stmt]
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            stmts
         } else {
             self.expect_newline()?;
             self.parse_block()?
@@ -971,13 +964,13 @@ impl Parser {
     /// or a single statement inline.
     pub(crate) fn parse_else_body_stmts(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.eat(&TokenKind::Colon);
-        if self.check(&TokenKind::Newline) {
+        if self.is_newline() {
             self.expect_newline()?;
             self.parse_block()
         } else {
-            // inline single statement
-            let stmt = self.parse_stmt()?;
-            Ok(vec![stmt])
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            Ok(stmts)
         }
     }
 
@@ -986,7 +979,7 @@ impl Parser {
     pub(crate) fn parse_else_body_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         self.eat(&TokenKind::Colon);
-        if self.check(&TokenKind::Newline) {
+        if self.is_newline() {
             self.expect_newline()?;
             let stmts = self.parse_block()?;
             Ok(Expr { kind: ExprKind::Block(stmts), line })
@@ -1046,15 +1039,15 @@ impl Parser {
         //   defer expr      — no colon, single expression (command-style)
         if self.check(&TokenKind::Colon) {
             self.advance(); // consume `:`
-            if self.check(&TokenKind::Newline) {
+            if self.is_newline() {
                 // Multiline block
                 self.advance();
                 Ok(self.parse_block()?)
             } else {
-                // Inline: `defer: stmt`
-                let stmt = self.parse_inline_stmt()?;
+                // Inline: `defer: stmt [; stmt]*`
+                let stmts = self.parse_inline_stmts()?;
                 self.expect_newline_soft();
-                Ok(vec![stmt])
+                Ok(stmts)
             }
         } else {
             // No colon: `defer stmt` — parse as inline statement (may be assignment)

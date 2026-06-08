@@ -89,7 +89,7 @@ impl Parser {
             self.advance();
             self.expect_newline_soft();
             (vec![], true)
-        } else if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        } else if self.is_newline() || self.check(&TokenKind::Eof) {
             self.expect_newline()?;
             (self.parse_block()?, false)
         } else {
@@ -317,26 +317,26 @@ impl Parser {
         if !throws { throws = self.eat(&TokenKind::Throws); }
         if !task   { task   = self.eat(&TokenKind::Task);   }
         self.expect(&TokenKind::Colon)?;
-        let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        let body = if self.is_newline() || self.check(&TokenKind::Eof) {
             self.expect_newline()?;
             self.parse_block()?
         } else {
-            let stmt = self.parse_inline_stmt()?;
+            let stmts = self.parse_inline_stmts()?;
             self.expect_newline_soft();
-            vec![stmt]
+            stmts
         };
         Ok(SetDecl { name, param_name, param_ty, is_pub, throws, task, body, line })
     }
 
     /// Parse a method/variable body block or inline statement.
     pub(crate) fn parse_method_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
-        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        if self.is_newline() || self.check(&TokenKind::Eof) {
             self.expect_newline()?;
             self.parse_block()
         } else {
-            let stmt = self.parse_inline_stmt()?;
+            let stmts = self.parse_inline_stmts()?;
             self.expect_newline_soft();
-            Ok(vec![stmt])
+            Ok(stmts)
         }
     }
 
@@ -419,7 +419,7 @@ impl Parser {
         let throws = self.eat(&TokenKind::Throws);
         let task   = self.eat(&TokenKind::Task);
         self.expect(&TokenKind::Colon)?;
-        let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        let body = if self.is_newline() || self.check(&TokenKind::Eof) {
             self.expect_newline()?;
             self.parse_block()?
         } else {
@@ -511,20 +511,20 @@ impl Parser {
         self.expect(&TokenKind::RParen)?;
 
         // No body — all params declare fields
-        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
-            self.eat(&TokenKind::Newline);
+        if self.is_newline() || self.check(&TokenKind::Eof) {
+            self.skip_newlines();
             return Ok(InitDecl { params, body: vec![], line });
         }
 
         // With body — all params are local
         self.expect(&TokenKind::Colon)?;
-        let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        let body = if self.is_newline() || self.check(&TokenKind::Eof) {
             self.expect_newline()?;
             self.parse_block()?
         } else {
-            let stmt = self.parse_inline_stmt()?;
+            let stmts = self.parse_inline_stmts()?;
             self.expect_newline_soft();
-            vec![stmt]
+            stmts
         };
         Ok(InitDecl { params, body, line })
     }
@@ -579,17 +579,17 @@ impl Parser {
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
                 let _ = self.expect(&TokenKind::RParen);
-            } else if !matches!(self.peek(), TokenKind::Newline | TokenKind::Eof | TokenKind::At | TokenKind::Indent | TokenKind::Dedent) {
+            } else if !matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof | TokenKind::At | TokenKind::Indent | TokenKind::Dedent) {
                 // Paren-free form: @error "msg"  or  @derive thiserror::Error, Debug
                 loop {
                     let arg = self.collect_attr_arg();
                     if !arg.is_empty() { args.push(arg); }
                     if !self.eat(&TokenKind::Comma) { break; }
-                    if matches!(self.peek(), TokenKind::Newline | TokenKind::Eof) { break; }
+                    if matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof) { break; }
                 }
             }
             // Skip optional newline between attributes
-            self.eat(&TokenKind::Newline);
+            while self.is_newline() { self.advance(); }
             attrs.push(Attr { name, args, line });
         }
         attrs
@@ -599,7 +599,7 @@ impl Parser {
         let mut parts = Vec::new();
         loop {
             match self.peek().clone() {
-                TokenKind::Comma | TokenKind::RParen | TokenKind::Eof | TokenKind::Newline => break,
+                TokenKind::Comma | TokenKind::RParen | TokenKind::Eof | TokenKind::Newline | TokenKind::Semicolon => break,
                 TokenKind::Ident(s) => { parts.push(s.clone()); self.advance(); }
                 TokenKind::Eq => { parts.push("=".to_string()); self.advance(); }
                 TokenKind::Str(s) => { parts.push(format!("\"{}\"", s)); self.advance(); }
@@ -658,7 +658,7 @@ impl Parser {
         if !throws { throws = self.eat(&TokenKind::Throws); }
         // Colon → default body; newline only → abstract signature
         if self.eat(&TokenKind::Colon) {
-            let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            let body = if self.is_newline() || self.check(&TokenKind::Eof) {
                 self.expect_newline()?;
                 self.parse_block()?
             } else {

@@ -35,12 +35,36 @@ impl Parser {
         self.parse_inline_stmt_impl(true)
     }
 
+    /// Parse one or more statements separated by `;` on the same line.
+    /// Stops at a real Newline or EOF.
+    pub(crate) fn parse_inline_stmts(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut stmts = vec![self.parse_inline_stmt()?];
+        while self.check(&TokenKind::Semicolon) {
+            self.advance();
+            if self.is_newline() || self.check(&TokenKind::Eof) { break; }
+            stmts.push(self.parse_inline_stmt()?);
+        }
+        Ok(stmts)
+    }
+
+    /// Like `parse_inline_stmts` but stops before `else`/`elif` (for if-body parsing).
+    pub(crate) fn parse_inline_stmts_if_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut stmts = vec![self.parse_inline_if_body()?];
+        while self.check(&TokenKind::Semicolon) {
+            self.advance();
+            if self.is_newline() || self.check(&TokenKind::Eof)
+                || self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) { break; }
+            stmts.push(self.parse_inline_if_body()?);
+        }
+        Ok(stmts)
+    }
+
     pub(crate) fn parse_inline_stmt_impl(&mut self, stop_at_else: bool) -> Result<Stmt, ParseError> {
         let line = self.line();
         // Allow control-flow keywords in inline positions
         if self.check(&TokenKind::Return) {
             self.advance();
-            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            let value = if self.is_newline() || self.check(&TokenKind::Eof) {
                 None
             } else {
                 Some(self.parse_or()?)
@@ -50,7 +74,7 @@ impl Parser {
         if self.check(&TokenKind::Throw) {
             let line = self.line();
             self.advance();
-            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            let value = if self.is_newline() || self.check(&TokenKind::Eof) {
                 None
             } else {
                 Some(self.parse_or()?)
@@ -59,7 +83,7 @@ impl Parser {
         }
         if self.check(&TokenKind::Break) {
             self.advance();
-            let value = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            let value = if self.is_newline() || self.check(&TokenKind::Eof) {
                 None
             } else {
                 Some(self.parse_or()?)
@@ -130,7 +154,7 @@ impl Parser {
 
             // `try: block else ...` — multi-line try body.
             // Detected when the token after `try` is `:` followed by a newline.
-            if self.check(&TokenKind::Colon) && (self.check2(&TokenKind::Newline) || self.check2(&TokenKind::Eof)) {
+            if self.check(&TokenKind::Colon) && (self.is_newline2() || self.check2(&TokenKind::Eof)) {
                 self.advance(); // consume `:`
                 self.expect_newline()?;
                 let try_stmts = self.parse_block()?;
@@ -498,7 +522,7 @@ impl Parser {
                 } else {
                     break;
                 }
-            } else if self.check(&TokenKind::Newline) {
+            } else if self.is_newline() {
                 break;
             }
             let line = self.line();
@@ -760,7 +784,7 @@ impl Parser {
                 TokenKind::Str(_) | TokenKind::StringInterp(_) => return false,
                 // Collection / dict literals:
                 TokenKind::LBracket | TokenKind::LBrace => return false,
-                TokenKind::Newline | TokenKind::Eof => break,
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof => break,
                 _ => {}
             }
             i += 1;
@@ -1513,7 +1537,7 @@ impl Parser {
 
     /// Parse the body of a closure after the `:` has been consumed.
     pub(crate) fn parse_closure_body(&mut self) -> Result<ClosureBody, ParseError> {
-        if self.check(&TokenKind::Newline) {
+        if self.is_newline() {
             self.expect_newline()?;
             let stmts = self.parse_block()?;
             check_no_return(&stmts, "closure")?;
@@ -1552,7 +1576,7 @@ impl Parser {
             self.expect(&TokenKind::RParen)?;
             // Now parse the body — same `:` + block/inline logic as plain task
             self.eat(&TokenKind::Colon);
-            let body = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+            let body = if self.is_newline() || self.check(&TokenKind::Eof) {
                 self.expect_newline()?;
                 let stmts = self.parse_block()?;
                 check_no_return(&stmts, "task block")?;
@@ -1569,7 +1593,7 @@ impl Parser {
         // Optionally consume ':'
         self.eat(&TokenKind::Colon);
         // If next token is Newline => parse block form
-        let inner = if self.check(&TokenKind::Newline) {
+        let inner = if self.is_newline() {
             self.expect_newline()?;
             let stmts = self.parse_block()?;
             check_no_return(&stmts, "task block")?;

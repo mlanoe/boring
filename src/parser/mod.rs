@@ -113,6 +113,15 @@ impl Parser {
         }
     }
 
+    fn is_newline2(&self) -> bool {
+        let next_pos = self.pos + 1;
+        if next_pos < self.tokens.len() {
+            matches!(self.tokens[next_pos].kind, TokenKind::Newline | TokenKind::Semicolon)
+        } else {
+            false
+        }
+    }
+
     fn eat(&mut self, kind: &TokenKind) -> bool {
         if self.peek() == kind {
             self.advance();
@@ -133,8 +142,12 @@ impl Parser {
         }
     }
 
+    fn is_newline(&self) -> bool {
+        matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon)
+    }
+
     fn skip_newlines(&mut self) {
-        while matches!(self.peek(), TokenKind::Newline | TokenKind::Comment(_)) {
+        while matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Comment(_)) {
             self.advance();
         }
     }
@@ -142,13 +155,13 @@ impl Parser {
     /// Like `skip_newlines` but also skips INDENT/DEDENT tokens.
     /// Used inside `(…)` parameter lists to allow multi-line declarations.
     fn skip_newlines_and_indent(&mut self) {
-        while matches!(self.peek(), TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+        while matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::Indent | TokenKind::Dedent) {
             self.advance();
         }
     }
 
     fn expect_newline(&mut self) -> Result<(), ParseError> {
-        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        if self.is_newline() || self.check(&TokenKind::Eof) {
             self.skip_newlines();
             Ok(())
         } else {
@@ -162,7 +175,7 @@ impl Parser {
     /// Like expect_newline, but also succeeds when already past the newline
     /// (e.g. after parsing a block-form expression that consumed trailing whitespace).
     fn expect_newline_soft(&mut self) {
-        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Eof) {
+        if self.is_newline() || self.check(&TokenKind::Eof) {
             self.skip_newlines();
         }
         // else: newline was already consumed (e.g. by a block form) — just proceed
@@ -183,7 +196,7 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Comment(text) => {
                 self.advance();
-                self.eat(&TokenKind::Newline);
+                while self.is_newline() { self.advance(); }
                 Ok(Item::Stmt(Stmt::Comment(text)))
             }
             TokenKind::Pub => {
@@ -456,7 +469,7 @@ impl Parser {
                             }
                             depth -= 1; i += 1;
                         }
-                        TokenKind::Newline | TokenKind::Eof => break,
+                        TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof => break,
                         _ => { i += 1; }
                     }
                 }
@@ -544,7 +557,7 @@ impl Parser {
                     i += 1;
                 }
                 // Tokens that cannot appear inside a type argument list: bail out
-                TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::Indent | TokenKind::Dedent
                 | TokenKind::Eq | TokenKind::EqEq | TokenKind::BangEq
                 | TokenKind::LtEq | TokenKind::GtEq | TokenKind::PipeArrow => return false,
                 _ => { i += 1; }
