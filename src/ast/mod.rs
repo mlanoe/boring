@@ -101,6 +101,7 @@ pub struct FnDecl {
     pub throws: bool,
     pub task: bool,
     pub stream: bool,
+    pub stream_capacity: Option<usize>,  // Some(N) if stream<N>, None for default capacity
     pub mutating: bool,   // true for `def`, false for `req`
     pub is_native: bool,  // body is `native` — implemented by the runtime
     /// Optional error type: `def foo() throws MyError:` → `Result<_, MyError>` in Rust.

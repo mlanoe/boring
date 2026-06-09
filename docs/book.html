@@ -129,7 +129,7 @@ li { margin-bottom: 0.3rem; }
 <p>Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust&#x27;s type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled via <code>--emit-rust</code>.</p>
 <hr>
 <h2 id="table-of-contents">Table of Contents</h2>
-<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a></li><li><a href="#7-collections">Collections</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a></li><li><a href="#11-error-handling">Error Handling</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#21-ownership-qualifiers">Ownership Qualifiers</a></li><li><a href="#22-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a></li><li><a href="#23-tasks-async">Tasks (Async)</a></li><li><a href="#24-attributes">Attributes</a></li><li><a href="#25-format-specifiers">Format Specifiers</a></li><li><a href="#26-built-in-functions">Built-in Functions</a></li><li><a href="#27-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#28-diagnostics">Diagnostics</a></li><li><a href="#29-advanced">Advanced</a></li></ol>
+<ol><li><a href="#1-getting-started">Getting Started</a></li><li><a href="#2-variables-and-mutability">Variables and Mutability</a></li><li><a href="#3-data-types">Data Types</a></li><li><a href="#4-functions">Functions</a></li><li><a href="#5-comments">Comments</a></li><li><a href="#6-control-flow">Control Flow</a></li><li><a href="#7-collections">Collections</a></li><li><a href="#8-structs">Structs</a></li><li><a href="#9-enums-and-pattern-matching">Enums and Pattern Matching</a></li><li><a href="#10-traits-and-extensions">Traits and Extensions</a></li><li><a href="#11-error-handling">Error Handling</a></li><li><a href="#12-optionals">Optionals</a></li><li><a href="#13-generics">Generics</a></li><li><a href="#14-closures-and-higher-order-functions">Closures and Higher-Order Functions</a></li><li><a href="#15-modules">Modules</a></li><li><a href="#21-ownership-qualifiers">Ownership Qualifiers</a></li><li><a href="#22-defer">Defer</a></li><li><a href="#18-channels-channel">Channels</a></li><li><a href="#23-tasks-async">Tasks (Async)</a></li><li><a href="#24-attributes">Attributes</a></li><li><a href="#25-format-specifiers">Format Specifiers</a></li><li><a href="#26-built-in-functions">Built-in Functions</a></li><li><a href="#27-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#28-diagnostics">Diagnostics</a></li><li><a href="#29-advanced">Advanced</a></li><li><a href="#30-rust-for-linux-target">Rust-for-Linux target</a></li></ol>
 <hr>
 <h2 id="1-getting-started">1. Getting Started</h2>
 <h3 id="creating-a-project">Creating a project</h3>
@@ -3458,6 +3458,121 @@ print host             <span class="co"># localhost</span></code></pre></div>
 <span class="fm">assert!</span>(<span class="nb">2</span> + <span class="nb">2</span> == <span class="nb">4</span>);
 <span class="fm">assert_eq!</span>(<span class="fn">add</span>(<span class="nb">2</span>, <span class="nb">3</span>), <span class="nb">5</span>);
 <span class="kw">let</span> msg = <span class="fm">format!</span>(<span class="s">&quot;{} + {} = {}&quot;</span>, <span class="nb">1</span>, <span class="nb">2</span>, <span class="fn">add</span>(<span class="nb">1</span>, <span class="nb">2</span>));</code></pre></div>
+<h2 id="30-rust-for-linux-target">30. Rust-for-Linux target</h2>
+<p><code>boring build --target kernel</code> compiles Boring source to <strong>Rust-for-Linux</strong> — the <code>no_std</code> Rust dialect used to write Linux kernel modules, drivers, and subsystems.</p>
+<p>The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath. This chapter describes those differences relative to the standard (tokio) backend.</p>
+<hr>
+<h3 id="why-a-kernel-target">Why a kernel target?</h3>
+<p>The Linux kernel imposes constraints that make the standard Rust backend unusable:</p>
+<ul><li><strong>No <code>std</code></strong> — only <code>core</code> and the <code>kernel</code> crate are available.</li><li><strong>No FPU</strong> — floating-point is disabled unless explicitly guarded.</li><li><strong>No tokio</strong> — no async executor, no <code>JoinHandle</code>, no <code>select!</code>.</li><li><strong>No <code>panic</code></strong> — a panic is a kernel oops/crash.</li><li><strong>Fixed error type</strong> — errors are errno-based (<code>kernel::error::Error</code>), not <code>Box&lt;dyn Error&gt;</code>.</li><li><strong>Bounded allocations</strong> — all channels and streams must have a fixed compile-time capacity.</li></ul>
+<h3 id="activating-the-kernel-target">Activating the kernel target</h3>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target kernel main.br
+<span class="co"># → generates main_kernel/ with src/lib.rs + Cargo.toml</span>
+<span class="co"># Build with: make -C /path/to/linux M=$PWD</span></code></pre></div>
+<p>The kernel backend runs a <strong>validation pass</strong> before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.</p>
+<hr>
+<h3 id="what-changes-vs-the-standard-backend">What changes vs the standard backend</h3>
+<h4 id="primitives">Primitives</h4>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td><code>i64</code> — identical</td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u64</code> — identical</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td><strong>forbidden</strong> — FPU disabled</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>bool</code> — identical</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td><code>kernel::str::CString</code> / <code>&amp;kernel::str::CStr</code></td></tr><tr><td><code>void</code></td><td><code>()</code></td><td><code>()</code> — identical</td></tr></tbody></table>
+<p>String literals are emitted as <code>c_str!(&quot;…&quot;)</code>.</p>
+<h4 id="ownership-qualifiers">Ownership qualifiers</h4>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T, KVmalloc&gt;</code> — kernel allocator</td></tr><tr><td><code>T&#x27;auto</code></td><td><code>Rc&lt;T&gt;</code></td><td><code>Arc&lt;T&gt;</code> ⚠ warning — <code>Rc</code> unavailable</td></tr><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td><code>kernel::sync::Arc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::RwLock&lt;T&gt;&gt;</code></td></tr></tbody></table>
+<h4 id="compound-types">Compound types</h4>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>kernel::prelude::Vec&lt;T&gt;</code></td></tr><tr><td><code>{K: V}</code></td><td><code>HashMap&lt;K,V&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code> — ordered, O(log n), keys must be <code>Ord</code></td></tr><tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;T,()&gt;</code> — same constraints</td></tr></tbody></table>
+<h4 id="error-handling-1">Error handling</h4>
+<p>All errors collapse to <code>kernel::error::Error</code> (errno-based <code>i32</code>). To preserve typed <code>catch</code> branches, declare each custom error type as a distinct nominal type bound to an errno:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">type</span> NetworkError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ENETDOWN)
+<span class="kw">type</span> TimeoutError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ETIMEDOUT)</code></pre></div>
+<p><code>type</code> is required — not <code>use</code>. <code>use</code> creates an alias; <code>type</code> declares a distinct type so the compiler can route <code>catch</code> branches correctly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
+    page = <span class="fn">fetch_page</span>(url)
+<span class="kw">catch</span> NetworkError e:
+    <span class="fn">log</span>(<span class="s">"network down"</span>)
+<span class="kw">catch</span> TimeoutError e:
+    <span class="fn">log</span>(<span class="s">"timed out"</span>)</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
+<span class="kw">match</span> <span class="fn">fetch_page</span>(url) {
+    <span class="kw">Ok</span>(page)  =&gt; { … }
+    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ENETDOWN</span>  =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;network down&quot;</span>); }
+    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ETIMEDOUT</span> =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;timed out&quot;</span>); }
+    <span class="kw">Err</span>(e)    =&gt; { … }
+}</code></pre></div>
+<h4 id="print">Print</h4>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>print &quot;…&quot;</code></td><td><code>println!(&quot;…&quot;)</code></td><td><code>kernel::pr_info!(&quot;…\n&quot;)</code></td></tr></tbody></table>
+<hr>
+<h3 id="task-def--work-items"><code>task def</code> — work items</h3>
+<p>In the standard backend, <code>task def</code> compiles to <code>async fn</code> + <code>tokio::spawn</code>. In the kernel backend, it generates a <strong>work item</strong> dispatched on <code>system_wq</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> Page <span class="fn">fetch_page</span>(<span class="kt">string</span> url):
+    <span class="co"># … fetch logic</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
+<span class="kw">struct</span> <span class="kt">FetchPageWork</span> {
+    url: kernel::str::<span class="kt">CString</span>,
+    result: <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">Mutex</span>&lt;<span class="kw">Option</span>&lt;<span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt;&gt;&gt;&gt;,
+    done_cond: <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">CondVar</span>&gt;,
+    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt;,
+}
+
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt; <span class="kw">for</span> <span class="kt">FetchPageWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
+        <span class="kw">let</span> r = <span class="fn">fetch_page_body</span>(this.url);
+        *this.result.<span class="fn">lock</span>() = <span class="kw">Some</span>(r);
+        this.done_cond.<span class="fn">notify_all</span>();
+    }
+}
+
+<span class="kw">fn</span> <span class="fn">fetch_page</span>(url: kernel::str::<span class="kt">CString</span>) -&gt; <span class="kt">KernelFuture</span>&lt;<span class="kt">Page</span>&gt; { … }
+<span class="kw">fn</span> <span class="fn">fetch_page_body</span>(url: kernel::str::<span class="kt">CString</span>)
+    -&gt; <span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt; { … }</code></pre></div>
+<p><strong>Constraint on <code>self</code>:</strong> <code>task def</code> as an instance method is only allowed on <code>&#x27;task</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> receivers — the only qualifiers with a lifetime compatible with a work item. <code>T&amp;</code>, <code>T&amp;mut</code>, and <code>T&#x27;</code> are rejected.</p>
+<h4 id="kernelfuturet"><code>KernelFuture&lt;T&gt;</code></h4>
+<p>Every <code>task def</code> returns a <code>KernelFuture&lt;T&gt;</code> instead of a <code>JoinHandle</code>:</p>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>f.wait()</code></td><td><code>f.await</code></td><td><code>f.wait()</code> — blocks the current thread (process context only)</td></tr><tr><td><code>f.done()</code></td><td>—</td><td><code>f.done()</code> — non-blocking poll, returns <code>bool</code></td></tr></tbody></table>
+<p><code>wait()</code> blocks — it must not be called from an IRQ handler or atomic context.</p>
+<h4 id="join"><code>join</code></h4>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = join [<span class="kw">task</span> <span class="fn">f1</span>(), <span class="kw">task</span> <span class="fn">f2</span>()]</code></pre></div>
+<p>Both work items are enqueued concurrently; <code>.wait()</code> is called on each in turn. Wall time is <code>max(t1, t2)</code>.</p>
+<hr>
+<h3 id="channelt-n--bounded-ring-buffer"><code>channel&lt;T, N&gt;</code> — bounded ring buffer</h3>
+<p>In the standard backend, <code>channel&lt;T&gt;(N)</code> maps to <code>tokio::sync::mpsc::channel(N)</code>. In the kernel backend, it generates a <strong>ring buffer</strong> backed by a fixed-size array:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>, <span class="nb">32</span>&gt;   <span class="co"># explicit capacity</span>
+<span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;       <span class="co"># default capacity: 2</span>
+tx.<span class="fn">send</span>(<span class="s">"hello"</span>)                   <span class="co"># blocks if full</span>
+<span class="kw">let</span> msg = rx.<span class="fn">recv</span>()                <span class="co"># blocks if empty</span></code></pre></div>
+<p>Both <code>send()</code> and <code>recv()</code> are blocking — valid in process context only. The capacity <code>N</code> is a compile-time constant. Omitting it defaults to <strong>2</strong> and emits a warning suggesting you specify it explicitly.</p>
+<hr>
+<h3 id="streamn-def--streaming-work-items"><code>stream&lt;N&gt; def</code> — streaming work items</h3>
+<p><code>stream def</code> runs its body as a work item and sends each <code>yield</code>ed value into an internal <code>channel&lt;T, N&gt;</code>. The caller receives a <code>KernelReceiver&lt;T, N&gt;</code> and consumes values with <code>.recv()</code>.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span>&lt;<span class="nb">16</span>&gt; <span class="kw">def</span> <span class="kt">string</span> <span class="fn">lines</span>(File file):
+    <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">readLines</span>():
+        <span class="kw">yield</span> line             <span class="co"># → this.tx.send(line)</span>
+
+<span class="kw">stream</span> <span class="kw">def</span> <span class="kt">string</span> <span class="fn">words</span>():    <span class="co"># capacity defaults to 2</span>
+    <span class="kw">yield</span> <span class="s">"hello"</span>
+    <span class="kw">yield</span> <span class="s">"world"</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
+<span class="kw">struct</span> <span class="kt">LinesWork</span> {
+    file: <span class="kt">File</span>,
+    tx: <span class="kt">KernelSender</span>&lt;kernel::str::<span class="kt">CString</span>, <span class="nb">16</span>&gt;,
+    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">LinesWork</span>&gt;,
+}
+
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">LinesWork</span>&gt; <span class="kw">for</span> <span class="kt">LinesWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
+        <span class="kw">for</span> line <span class="kw">in</span> this.file.<span class="fn">read_lines</span>() {
+            this.tx.<span class="fn">send</span>(line);
+        }
+        <span class="co">// tx dropped → signals end-of-stream</span>
+    }
+}
+
+<span class="kw">fn</span> <span class="fn">lines</span>(file: <span class="kt">File</span>) -&gt; <span class="kt">KernelReceiver</span>&lt;kernel::str::<span class="kt">CString</span>, <span class="nb">16</span>&gt; { … }</code></pre></div>
+<hr>
+<h3 id="forbidden-constructs-and-warnings">Forbidden constructs and warnings</h3>
+<p><strong>Errors</strong> — rejected before emission:</p>
+<table><thead><tr><th>Construct</th><th>Reason</th></tr></thead><tbody><tr><td><code>float</code>, floating-point math</td><td>FPU disabled in kernel context</td></tr><tr><td><code>panic(…)</code></td><td>kernel oops/crash — use <code>throws</code> / <code>Result</code></td></tr><tr><td><code>task def</code> on <code>self</code> with <code>T&amp;</code>, <code>T&amp;mut</code>, <code>T&#x27;</code></td><td>lifetime incompatible with a work item</td></tr></tbody></table>
+<p><strong>Warnings</strong> — emitted with a default, but explicit specification is recommended:</p>
+<table><thead><tr><th>Construct</th><th>Behaviour</th></tr></thead><tbody><tr><td><code>channel&lt;T&gt;</code> without capacity</td><td>defaults to 2 — specify <code>channel&lt;T, N&gt;</code> explicitly</td></tr><tr><td><code>stream def</code> without <code>&lt;N&gt;</code></td><td>defaults to 2 — specify <code>stream&lt;N&gt; def</code> explicitly</td></tr><tr><td><code>T&#x27;auto</code></td><td>replaced by <code>Arc&lt;T&gt;</code> — <code>Rc</code> is unavailable in <code>no_std</code></td></tr></tbody></table>
+<hr>
 </main>
 <script>
 // Build TOC from headings

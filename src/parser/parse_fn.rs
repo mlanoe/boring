@@ -19,7 +19,28 @@ impl Parser {
         // `task`/`stream` may come BEFORE the keyword: `task def f():`, `stream def f():`
         // Shorthand: `task RetType f():` or `stream RetType f():` — `def` is implicit.
         let prefix_task   = self.eat(&TokenKind::Task);
-        let prefix_stream = if !prefix_task { self.eat(&TokenKind::Stream) } else { false };
+        let (prefix_stream, stream_capacity) = if !prefix_task && self.eat(&TokenKind::Stream) {
+            // Check for optional capacity: `stream<N>`
+            let cap = if self.check(&TokenKind::Lt) {
+                // Peek ahead: is it `<integer>`?
+                let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                if matches!(next, Some(TokenKind::Int(_))) {
+                    let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+                    if matches!(next2, Some(TokenKind::Gt)) {
+                        self.advance(); // consume `<`
+                        let n = if let TokenKind::Int(n) = self.peek().clone() {
+                            self.advance(); // consume integer
+                            n as usize
+                        } else { 2 };
+                        self.advance(); // consume `>`
+                        Some(n)
+                    } else { None }
+                } else { None }
+            } else { None };
+            (true, cap)
+        } else {
+            (false, None)
+        };
         // Consume `def` or `req` — skipped in the shorthand forms:
         //   • `task RetType f():` / `stream RetType f():` — task/stream prefix present
         //   • `RetType f():` — bare return type without any keyword (top-level shorthand)
@@ -133,6 +154,7 @@ impl Parser {
             throws_ty,
             task,
             stream,
+            stream_capacity,
             mutating,
             is_native,
             type_params,
@@ -673,7 +695,7 @@ impl Parser {
             };
             Ok(Either::Right(FnDecl {
                 name, qualifier: None, params, return_ty, body,
-                is_pub: false, throws, task, stream: false, mutating,
+                is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
                 is_native: false, throws_ty,
                 type_params, where_clause: vec![], attrs: vec![], line,
             }))

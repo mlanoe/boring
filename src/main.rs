@@ -15,6 +15,7 @@ pub mod parser;
 pub mod interpreter;
 pub mod checker;
 pub mod transpiler;
+pub mod validator;
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -157,6 +158,26 @@ fn run() {
         }
         Some("build") => {
             match args.get(2).map(|s| s.as_str()) {
+                Some("--target") => {
+                    match args.get(3).map(|s| s.as_str()) {
+                        Some("kernel") => {
+                            match args.get(4).map(|s| s.as_str()) {
+                                Some(path) => emit_kernel(path),      // boring build --target kernel <file.br>
+                                None       => build_project_kernel(), // boring build --target kernel
+                            }
+                        }
+                        Some(target) => {
+                            eprintln!("error: unknown target '{}'", target);
+                            eprintln!("hint:  supported targets: kernel");
+                            process::exit(1);
+                        }
+                        None => {
+                            eprintln!("error: --target requires a value");
+                            eprintln!("hint:  supported targets: kernel");
+                            process::exit(1);
+                        }
+                    }
+                }
                 Some(path) => emit_rust(path),        // boring build file.br
                 None       => build_project(),        // boring build  (uses boring.toml)
             }
@@ -187,6 +208,8 @@ fn print_help() {
     eprintln!("    boring run <file.br>       Run a single file");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
+    eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
+    eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
     eprintln!("    boring --emit-rust <file>  Alias for `boring build <file>`");
 }
@@ -245,6 +268,12 @@ fn run_project() {
 fn build_project() {
     let (toml, _) = load_project_toml();
     emit_rust_with_version(&toml.main, &toml.version);
+}
+
+/// `boring build --target kernel` — emit a kernel Cargo project from `boring.toml`.
+fn build_project_kernel() {
+    let (toml, _) = load_project_toml();
+    emit_kernel_with_version(&toml.main, &toml.version);
 }
 
 // ─── Core: interpret ──────────────────────────────────────────────────────────
@@ -414,4 +443,102 @@ tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror
 
     eprintln!("Generated Cargo project at '{}'", project_dir.display());
     eprintln!("  cd {} && cargo run", project_dir.display());
+}
+
+// ─── Core: kernel transpile ───────────────────────────────────────────────────
+
+fn emit_kernel(path: &str) {
+    emit_kernel_with_version(path, "0.1.0");
+}
+
+fn emit_kernel_with_version(path: &str, version: &str) {
+    let path = PathBuf::from(path);
+
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+
+    let tokens = match lexer::lex(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            report_error(&path, &source, e.line(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(&path, &source, e.line(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    // Validate for kernel-mode compatibility.
+    let diags = validator::validate_kernel(&program);
+    let mut has_errors = false;
+    for diag in &diags {
+        match diag.level {
+            validator::DiagLevel::Warning => eprintln!("warning: {}", diag.message),
+            validator::DiagLevel::Error   => {
+                eprintln!("error: {}", diag.message);
+                has_errors = true;
+            }
+        }
+    }
+    if has_errors {
+        process::exit(1);
+    }
+
+    let kernel_out = transpiler::kernel::transpile_kernel(&program);
+    let rust_code  = kernel_out.code;
+
+    // Determine output project directory next to the source file.
+    let stem = path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base_dir.join(format!("{}_kernel", stem));
+
+    // Create directory layout.
+    let src_dir = project_dir.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src_dir) {
+        eprintln!("error: cannot create '{}': {}", src_dir.display(), e);
+        process::exit(1);
+    }
+
+    // Write src/lib.rs (kernel modules are library crates).
+    let lib_rs = src_dir.join("lib.rs");
+    if let Err(e) = std::fs::write(&lib_rs, rust_code) {
+        eprintln!("error: cannot write '{}': {}", lib_rs.display(), e);
+        process::exit(1);
+    }
+
+    // Write Cargo.toml — no tokio; the kernel crate is provided by the build system.
+    let cargo_toml = format!(
+        r#"[package]
+name = "{stem}"
+version = "{version}"
+edition = "2024"
+
+[lib]
+name = "{stem}"
+path = "src/lib.rs"
+
+[dependencies]
+# kernel crate is provided by the build system (Linux kernel Rust infrastructure)
+"#
+    );
+    let cargo_path = project_dir.join("Cargo.toml");
+    if let Err(e) = std::fs::write(&cargo_path, cargo_toml) {
+        eprintln!("error: cannot write '{}': {}", cargo_path.display(), e);
+        process::exit(1);
+    }
+
+    eprintln!("Generated kernel Cargo project at '{}'", project_dir.display());
+    eprintln!("  Build with the Linux kernel build system (make -C /path/to/linux M=$PWD)");
 }

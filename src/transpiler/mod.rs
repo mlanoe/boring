@@ -23,6 +23,7 @@ mod emit_expr;
 mod emit_methods;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
+pub mod kernel;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 

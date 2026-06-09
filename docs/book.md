@@ -31,6 +31,7 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 23. [Appendix: Boring → Rust Mapping](#27-appendix-boring--rust-mapping)
 24. [Diagnostics](#28-diagnostics)
 25. [Advanced](#29-advanced)
+26. [Rust-for-Linux target](#30-rust-for-linux-target)
 
 ---
 
@@ -5992,3 +5993,233 @@ assert!(2 + 2 == 4);
 assert_eq!(add(2, 3), 5);
 let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 ```
+
+## 30. Rust-for-Linux target
+
+`boring build --target kernel` compiles Boring source to **Rust-for-Linux** — the `no_std` Rust dialect used to write Linux kernel modules, drivers, and subsystems.
+
+The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath. This chapter describes those differences relative to the standard (tokio) backend.
+
+---
+
+### Why a kernel target?
+
+The Linux kernel imposes constraints that make the standard Rust backend unusable:
+
+- **No `std`** — only `core` and the `kernel` crate are available.
+- **No FPU** — floating-point is disabled unless explicitly guarded.
+- **No tokio** — no async executor, no `JoinHandle`, no `select!`.
+- **No `panic`** — a panic is a kernel oops/crash.
+- **Fixed error type** — errors are errno-based (`kernel::error::Error`), not `Box<dyn Error>`.
+- **Bounded allocations** — all channels and streams must have a fixed compile-time capacity.
+
+### Activating the kernel target
+
+```sh
+boring build --target kernel main.br
+# → generates main_kernel/ with src/lib.rs + Cargo.toml
+# Build with: make -C /path/to/linux M=$PWD
+```
+
+The kernel backend runs a **validation pass** before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.
+
+---
+
+### What changes vs the standard backend
+
+#### Primitives
+
+| Boring | Rust std | Rust-kernel |
+|--------|----------|-------------|
+| `int` | `i64` | `i64` — identical |
+| `uint` | `u64` | `u64` — identical |
+| `float` | `f64` | **forbidden** — FPU disabled |
+| `bool` | `bool` | `bool` — identical |
+| `string` | `Arc<str>` | `kernel::str::CString` / `&kernel::str::CStr` |
+| `void` | `()` | `()` — identical |
+
+String literals are emitted as `c_str!("…")`.
+
+#### Ownership qualifiers
+
+| Boring | Rust std | Rust-kernel |
+|--------|----------|-------------|
+| `T'` | `Box<T>` | `Box<T, KVmalloc>` — kernel allocator |
+| `T'auto` | `Rc<T>` | `Arc<T>` ⚠ warning — `Rc` unavailable |
+| `T'task` | `Arc<T>` | `kernel::sync::Arc<T>` |
+| `T'actor` | `Arc<tokio::sync::Mutex<T>>` | `Arc<kernel::sync::Mutex<T>>` |
+| `T'guard` | `Arc<tokio::sync::RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` |
+
+#### Compound types
+
+| Boring | Rust std | Rust-kernel |
+|--------|----------|-------------|
+| `[T]` | `Vec<T>` | `kernel::prelude::Vec<T>` |
+| `{K: V}` | `HashMap<K,V>` | `kernel::rbtree::RBTree<K,V>` — ordered, O(log n), keys must be `Ord` |
+| `{T}` | `HashSet<T>` | `kernel::rbtree::RBTree<T,()>` — same constraints |
+
+#### Error handling
+
+All errors collapse to `kernel::error::Error` (errno-based `i32`). To preserve typed `catch` branches, declare each custom error type as a distinct nominal type bound to an errno:
+
+```boring
+type NetworkError as kernel.error.Error(ENETDOWN)
+type TimeoutError as kernel.error.Error(ETIMEDOUT)
+```
+
+`type` is required — not `use`. `use` creates an alias; `type` declares a distinct type so the compiler can route `catch` branches correctly:
+
+```boring
+try:
+    page = fetch_page(url)
+catch NetworkError e:
+    log("network down")
+catch TimeoutError e:
+    log("timed out")
+```
+
+```rust
+// Generated
+match fetch_page(url) {
+    Ok(page)  => { … }
+    Err(e) if e.code() == ENETDOWN  => { pr_info!("network down"); }
+    Err(e) if e.code() == ETIMEDOUT => { pr_info!("timed out"); }
+    Err(e)    => { … }
+}
+```
+
+#### Print
+
+| Boring | Rust std | Rust-kernel |
+|--------|----------|-------------|
+| `print "…"` | `println!("…")` | `kernel::pr_info!("…\n")` |
+
+---
+
+### `task def` — work items
+
+In the standard backend, `task def` compiles to `async fn` + `tokio::spawn`.
+In the kernel backend, it generates a **work item** dispatched on `system_wq`:
+
+```boring
+task def Page fetch_page(string url):
+    # … fetch logic
+```
+
+```rust
+// Generated (kernel)
+struct FetchPageWork {
+    url: kernel::str::CString,
+    result: Arc<kernel::sync::Mutex<Option<Result<Page, kernel::error::Error>>>>,
+    done_cond: Arc<kernel::sync::CondVar>,
+    work: kernel::workqueue::Work<FetchPageWork>,
+}
+
+impl kernel::workqueue::Work<FetchPageWork> for FetchPageWork {
+    fn run(this: Arc<Self>) {
+        let r = fetch_page_body(this.url);
+        *this.result.lock() = Some(r);
+        this.done_cond.notify_all();
+    }
+}
+
+fn fetch_page(url: kernel::str::CString) -> KernelFuture<Page> { … }
+fn fetch_page_body(url: kernel::str::CString)
+    -> Result<Page, kernel::error::Error> { … }
+```
+
+**Constraint on `self`:** `task def` as an instance method is only allowed on `'task`, `'actor`, and `'guard` receivers — the only qualifiers with a lifetime compatible with a work item. `T&`, `T&mut`, and `T'` are rejected.
+
+#### `KernelFuture<T>`
+
+Every `task def` returns a `KernelFuture<T>` instead of a `JoinHandle`:
+
+| Boring | Rust std | Rust-kernel |
+|--------|----------|-------------|
+| `f.wait()` | `f.await` | `f.wait()` — blocks the current thread (process context only) |
+| `f.done()` | — | `f.done()` — non-blocking poll, returns `bool` |
+
+`wait()` blocks — it must not be called from an IRQ handler or atomic context.
+
+#### `join`
+
+```boring
+let a, b = join [task f1(), task f2()]
+```
+
+Both work items are enqueued concurrently; `.wait()` is called on each in turn. Wall time is `max(t1, t2)`.
+
+---
+
+### `channel<T, N>` — bounded ring buffer
+
+In the standard backend, `channel<T>(N)` maps to `tokio::sync::mpsc::channel(N)`.
+In the kernel backend, it generates a **ring buffer** backed by a fixed-size array:
+
+```boring
+let tx, rx = channel<string, 32>   # explicit capacity
+let tx, rx = channel<string>       # default capacity: 2
+tx.send("hello")                   # blocks if full
+let msg = rx.recv()                # blocks if empty
+```
+
+Both `send()` and `recv()` are blocking — valid in process context only.
+The capacity `N` is a compile-time constant. Omitting it defaults to **2** and emits a warning suggesting you specify it explicitly.
+
+---
+
+### `stream<N> def` — streaming work items
+
+`stream def` runs its body as a work item and sends each `yield`ed value into an internal `channel<T, N>`. The caller receives a `KernelReceiver<T, N>` and consumes values with `.recv()`.
+
+```boring
+stream<16> def string lines(File file):
+    for line in file.readLines():
+        yield line             # → this.tx.send(line)
+
+stream def string words():    # capacity defaults to 2
+    yield "hello"
+    yield "world"
+```
+
+```rust
+// Generated (kernel)
+struct LinesWork {
+    file: File,
+    tx: KernelSender<kernel::str::CString, 16>,
+    work: kernel::workqueue::Work<LinesWork>,
+}
+
+impl kernel::workqueue::Work<LinesWork> for LinesWork {
+    fn run(this: Arc<Self>) {
+        for line in this.file.read_lines() {
+            this.tx.send(line);
+        }
+        // tx dropped → signals end-of-stream
+    }
+}
+
+fn lines(file: File) -> KernelReceiver<kernel::str::CString, 16> { … }
+```
+
+---
+
+### Forbidden constructs and warnings
+
+**Errors** — rejected before emission:
+
+| Construct | Reason |
+|-----------|--------|
+| `float`, floating-point math | FPU disabled in kernel context |
+| `panic(…)` | kernel oops/crash — use `throws` / `Result` |
+| `task def` on `self` with `T&`, `T&mut`, `T'` | lifetime incompatible with a work item |
+
+**Warnings** — emitted with a default, but explicit specification is recommended:
+
+| Construct | Behaviour |
+|-----------|-----------|
+| `channel<T>` without capacity | defaults to 2 — specify `channel<T, N>` explicitly |
+| `stream def` without `<N>` | defaults to 2 — specify `stream<N> def` explicitly |
+| `T'auto` | replaced by `Arc<T>` — `Rc` is unavailable in `no_std` |
+
+---

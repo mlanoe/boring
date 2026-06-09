@@ -259,8 +259,18 @@ impl Parser {
                 }
             }
             TokenKind::Stream => {
-                // `stream def …` / `stream req …` / `stream RetType name(…):` — stream function
-                match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                // `stream def …` / `stream<N> def …` / `stream req …` / shorthand
+                // Skip optional `<N>` to find the real next keyword.
+                let lookahead = {
+                    let next1 = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                    if matches!(next1, Some(TokenKind::Lt)) {
+                        // stream<N> — skip `< Int >` (3 tokens)
+                        self.tokens.get(self.pos + 4).map(|t| &t.kind)
+                    } else {
+                        next1
+                    }
+                };
+                match lookahead {
                     Some(TokenKind::Def) => Ok(Item::Fn(self.parse_fn_decl(is_pub, true)?)),
                     Some(TokenKind::Req) => Ok(Item::Fn(self.parse_fn_decl(is_pub, false)?)),
                     _ if self.is_stream_fn_shorthand() => Ok(Item::Fn(self.parse_fn_decl(is_pub, true)?)),

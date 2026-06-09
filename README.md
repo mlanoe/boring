@@ -52,7 +52,35 @@ fn greet(name: Option<Arc<str>>, visits: i64)
 
 Same semantics. A fraction of the noise.
 
-Boring is not a toy. It has a full interpreter for rapid prototyping and a `--emit-rust` transpiler that outputs clean, readable Rust source you can inspect, modify, and ship.
+Boring is not a toy. It has a full interpreter for rapid prototyping and two transpiler backends that output clean, auditable Rust source you can inspect, modify, and ship.
+
+---
+
+## Targets
+
+Boring compiles the same source to two distinct Rust targets:
+
+| Command | Target | Runtime | Use case |
+|---------|--------|---------|----------|
+| `boring build` | Rust std + tokio | userspace | servers, CLIs, desktop apps |
+| `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux kernel | drivers, subsystems, kernel modules |
+
+The kernel backend applies the same language — structs, enums, traits, ownership qualifiers, error handling, async tasks — but maps every construct to its kernel-native equivalent: `Arc<kernel::sync::Mutex<T>>` instead of `tokio::sync::Mutex`, work items on `system_wq` instead of `tokio::spawn`, ring-buffer channels instead of MPSC, and errno-based errors instead of `Box<dyn Error>`.
+
+```boring
+# Same source, two targets
+task def Page fetch_page(string url) throws:
+    # ... fetch logic
+```
+
+```sh
+boring build main.br                   # → Cargo project with tokio
+boring build --target kernel main.br   # → Rust-for-Linux module
+```
+
+The kernel backend validates your source before emitting — `float` and `panic` are rejected with explicit error messages; channels and streams without an explicit capacity emit a warning and default to 2.
+
+See [`docs/kernel-transpiler-mapping.md`](docs/kernel-transpiler-mapping.md) for the full mapping reference.
 
 ---
 
@@ -245,20 +273,24 @@ cd examples/hello_rust && cargo run
 ```
 boring/
 ├── src/
-│   ├── main.rs           # CLI entry point (--emit-rust flag)
-│   ├── parser/           # Lexer + recursive-descent parser → AST
-│   ├── interpreter/      # Tree-walk interpreter (for rapid iteration)
-│   └── transpiler/       # AST → idiomatic Rust source
+│   ├── main.rs              # CLI entry point
+│   ├── parser/              # Lexer + recursive-descent parser → AST
+│   ├── interpreter/         # Tree-walk interpreter (for rapid iteration)
+│   ├── validator/           # kernel.rs — pre-emission validation pass
+│   └── transpiler/
+│       ├── *.rs             # Standard backend → Rust std + tokio
+│       └── kernel/          # Kernel backend → Rust-for-Linux (no_std)
 ├── docs/
-│   └── book.md           # Full language reference
+│   ├── book.md              # Full language reference
+│   └── kernel-transpiler-mapping.md  # Boring → Rust-for-Linux mapping
 ├── spec/
-│   └── grammar.bnf       # Formal BNF grammar
+│   └── grammar.bnf          # Formal BNF grammar
 ├── examples/
-│   ├── hello.br          # Feature showcase (Boring source)
-│   └── hello.rs          # Generated Rust (from --emit-rust)
-├── LICENSE               # GNU General Public License v3
-├── CLA.md                # Contributor License Agreement
-└── CLA-signatories.md    # List of CLA signatories
+│   ├── hello.br             # Feature showcase (Boring source)
+│   └── hello.rs             # Generated Rust (from boring build)
+├── LICENSE                  # GNU General Public License v3
+├── CLA.md                   # Contributor License Agreement
+└── CLA-signatories.md       # List of CLA signatories
 ```
 
 ---
