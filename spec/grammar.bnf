@@ -800,6 +800,37 @@ type_list       ::= type ("," type)*
 # fire-and-forget:  task fetch()
 # future:           let f = task fetch()
 #                   let data = f.value
+#
+# ── Future<T> methods ────────────────────────────────────────────────────────
+#
+# `Future<T>` is the handle returned by any `task` expression.
+# No import needed — Future is a built-in type.
+#
+# Blocking await (require a `task` context):
+#   f.value          → T          await and return; throws if the task threw
+#   f.wait           → void       await and discard (property or call syntax)
+#   f.value(dur)     → T          await with relative timeout; throws Error.Expired
+#   f.value(inst)    → T          await until absolute deadline; throws Error.Expired
+#   f.wait(dur)      → void       await/discard with relative timeout
+#   f.wait(inst)     → void       await/discard until absolute deadline
+#
+# Non-blocking:
+#   f.done           → bool       true if result is already available (never blocks/throws)
+#   f.done()         → bool       same — property and call syntax both valid
+#
+# Cancellation:
+#   f.cancel()       → void       signal cancellation; next await on f throws Error.Cancelled
+#                                 interpreter: no-op (cancellation tokens not available)
+#
+# Task.cancelled():
+#   Task.cancelled() → bool       true if the current task received a cancellation signal
+#                                 interpreter: always returns false
+#
+# Transpilation:
+#   f.done           → handle.is_finished()
+#   f.cancel()       → handle.abort()
+#   f.value(dur)     → tokio::time::timeout(dur, handle).await??
+#   f.value(inst)    → tokio::time::timeout_at(inst, handle).await??
 
 # ─── Operator overloading ────────────────────────────────────────────────────
 #
@@ -877,10 +908,47 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # struct, enum, trait, ext, use, as, and, or, not, guard,
 # break, continue, self, init,
 # try, catch, throw, throws, defer,
-# task, set, wait, join, select, channel,
+# task, set, wait, join, channel,
+# Note: `select` was removed in 0.3.0 — use Future.done() polling instead.
 # true, false, nil, is,
 # native, stream, yield, static, void, pass, mod,
 # any  # deprecated — use bare Trait or <Trait> instead
+
+# ─── Emission targets ────────────────────────────────────────────────────────
+#
+# The `--target` flag selects the emission backend. The parser, AST, and typing
+# passes are shared; only the emitter changes.
+#
+#   boring build <file.br>                 — standard Rust + tokio (default)
+#   boring build --target kernel <file.br> — Rust-for-Linux (no_std + kernel crates)
+#   boring build --target kernel           — kernel project from boring.toml
+#
+# Kernel target mappings (see docs/kernel-transpiler-mapping.md for full table):
+#
+#   Boring              Rust std                 Rust-for-Linux
+#   ──────────────────  ───────────────────────  ──────────────────────────────
+#   string              Arc<str>                 kernel::str::CStr / CString
+#   {K: V}              HashMap<K, V>            kernel::rbtree::RBTree<K, V>
+#   {T}                 HashSet<T>               RBTree<T, ()>
+#   throws MyError      Result<T, Box<dyn Error>> Result<T, kernel::error::Error>
+#   task def            async fn + tokio::spawn  Work item on system_wq
+#   task expr           tokio::spawn(…)          system_wq.enqueue(work)
+#   Future<T>           JoinHandle<T>            KernelFuture<T>
+#   channel<T, N>       tokio::sync::mpsc(N)     ring buffer + Mutex + CondVar
+#   stream<N> def       futures::Stream          KernelChan<T,N> + Work item
+#   wait(dur)           tokio::time::sleep       kernel::delay::coarse_sleep
+#   T'task              Arc<T>                   kernel::sync::Arc
+#   T'actor             Arc<Mutex<T>>            kernel::sync::Mutex
+#   T'guard             Arc<RwLock<T>>           kernel::sync::RwLock
+#   print!              println!                 pr_info!
+#   assert_eq!          assert_eq!               kernel::build_assert! / WARN_ON
+#
+# Forbidden in kernel target (validation rejects with an explicit error):
+#   float, math builtins (FPU disabled), panic, T& / T&mut on task def
+#
+# Kernel error type binding (required for typed catch in kernel target):
+#   type NetworkError as kernel.error.Error(ENETDOWN)
+#   type TimeoutError as kernel.error.Error(ETIMEDOUT)
 
 # ─── Naming conventions ──────────────────────────────────────────────────────
 #

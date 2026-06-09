@@ -5,6 +5,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] — 2026-06-09
+
+### Added
+
+- **`--target kernel` — Rust-for-Linux transpiler backend** — a second emission backend that targets the Linux kernel (`no_std` + kernel crates). Parser, AST, and typing passes are shared; only the emission layer changes. Activation: `boring build --target kernel file.br` (single file) or `boring build --target kernel` (project from `boring.toml`).
+
+  Key mappings:
+  - `string` → `kernel::str::CStr` / `CString`; string literals → `c_str!("…")`
+  - `{K: V}` / `{T}` → `kernel::rbtree::RBTree<K,V>` / `RBTree<T,()>` (O(log n), keys must implement `Ord`)
+  - `throws MyError` → `Result<T, kernel::error::Error>` with `type MyError as kernel.error.Error(ERRNO)` binding
+  - `task def` → `struct XxxWork: Work` dispatched on `system_wq`; `task expr` → `system_wq.enqueue(work)` returning `KernelFuture<T>`
+  - `channel<T, N>` → ring buffer + `Mutex` + `CondVar`; `stream<N> def` → channel + work item
+  - `Future<T>` → `KernelFuture<T>` with `.done()` (non-blocking poll via `try_lock`) and `.wait()` (blocking, process context only)
+  - `print!` / assertions → `pr_info!` / `WARN_ON`; `panic` and `float` forbidden at validation time
+  - `T'task`, `T'actor`, `T'guard` → `kernel::sync::Arc`, `kernel::sync::Mutex`, `kernel::sync::RwLock`
+
+  A validation pass runs before emission and rejects: `float`, `panic`, `T&`/`T&mut` receivers on `task def`, and warns on implicit channel capacity.
+
+  Architecture: `src/transpiler/kernel/` — `mod.rs`, `emit_top.rs`, `emit_stmt.rs`, `emit_expr.rs`, `helpers.rs` (KernelFuture/KernelChan runtime types). See `docs/kernel-transpiler-mapping.md` for the full mapping table.
+
+- **`Future.done`** — non-blocking poll: `req bool done()` returns `true` if the result is already available, without blocking and without throwing. Both property (`f.done`) and call (`f.done()`) syntax are valid. Transpiles to `handle.is_finished()`.
+- **`Future.cancel()`** — signal cancellation: the running task receives `Error.Cancelled` on its next await; any subsequent `f.value` also throws `Error.Cancelled`. Transpiles to `handle.abort()`. In the interpreter, this is a no-op (no cancellation tokens available).
+- **`Task.cancelled()`** — check whether the current task has been cancelled. Returns `false` in interpreted mode (no cancellation token). Allows graceful cancellation loops: `while not Task.cancelled(): …`
+- **`args()`** builtin — returns `[string]`, the CLI arguments passed to the program (argv[0] excluded). Transpiles to `std::env::args().skip(1).collect()`.
+- **`ord(string)`** builtin — returns the Unicode codepoint (`int`) of the first character of the string.
+- **`chr(int)`** builtin — returns a single-character string for a Unicode codepoint.
+- **`{}` as empty Set** — an empty brace literal `{}` now parses as an empty `HashSet` (`HashSet::new()`). The empty dict literal is `{=}` (unchanged).
+
+### Removed
+
+- **`select:`** — fully removed from the language and AST. The keyword now produces a clear compile-time error pointing to `Future.done()` polling as the replacement. `Stmt::Select`, `SelectStmt`, and `SelectArm` removed from the AST; all dead code in lexer, parser, interpreter, and transpiler cleaned up.
+
+### Fixed
+
+- `f.wait` in a `throws` context now propagates `JoinError` as `BoringError` instead of silently discarding it
+- `Future.cancel()` no longer crashes in the interpreter (returns `Nil`)
+- `Task.cancelled()` no longer crashes in the interpreter (returns `false`)
+- Nested struct declarations inside function bodies are no longer leaked into global scope
+- Bare non-void call results now produce a compile-time `must-use` error ("return value discarded")
+- `tokio-util` dependency removed from generated Cargo.toml (the `sync` feature does not exist)
+
+### Spec
+
+- `spec/grammar.bnf`: `Future<T> methods` section added documenting `done`, `cancel()`, `value`/`wait` overloads, `Task.cancelled()`, and transpilation targets; `select` removed from reserved keywords list with a migration note
+
+---
+
 ## [0.2.3] — 2026-06-08
 
 ### Added
