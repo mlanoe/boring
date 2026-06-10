@@ -80,11 +80,22 @@ Before applying flag defaults, the transpiler runs a structural inference pass. 
 | 2 | Non-parametric enum (all unit variants) | `T'copy` | ✓ |
 | 3 | Recursive type position | `Box<T>` on the recursive field/variant | ✓ |
 | 4 | `dyn Trait` position | `Box<dyn Trait>` | ✓ |
-| 5 | Disproportionate enum variant (payload >> other variants) | warning — suggest boxing the variant payload | strict only |
-| 6 | Stack size exceeds threshold (default 256 bytes) | warning — suggest `T'` | strict only |
-| 7 | None of the above | flag defaults | |
+| 5 | `size_of::<T>() > 1024` | silent promotion to `Box<T>` | strict only |
+| 6 | `32 < size_of::<T>() <= 1024` | warning — suggest `T'` | strict only |
+| 7 | Disproportionate enum variant (payload >> other variants) | warning — suggest boxing the variant payload | strict only |
+| 8 | None of the above | flag defaults | |
 
-Priorities 2–4 are correctness constraints — they apply regardless of flags. Priorities 5–6 are warnings only, never silent promotions.
+Priorities 2–4 are correctness constraints — they apply regardless of flags. Priority 5 is the only case of silent promotion: above 1 KB the stack cost is high enough that the transpiler decides without asking. Priority 6–7 are warnings only.
+
+### Size thresholds
+
+Size is computed via `std::mem::size_of::<T>()` — a compile-time constant in Rust, exact for all concrete types. Generic type parameters and extern types have unknown size and are skipped (no inference, no warning).
+
+| Range | Action |
+|-------|--------|
+| `size_of::<T>() > 1024` | Auto-promote `T` → `Box<T>`, no warning |
+| `32 < size_of::<T>() <= 1024` | Warning: suggest `T'` |
+| `size_of::<T>() <= 32` | No action |
 
 ### Non-parametric enums
 
@@ -186,20 +197,34 @@ Consequences for boring:
 
 The transpiler should emit a warning when a `!Send` type (`Rc`, `RefCell`) is detected in a position that requires `Send` (channel payload, stream item, `spawn_local` capture that crosses an await point).
 
-### Sequential streams in single-thread mode
+### Design note — why `Rc` is not made `Send` in single-thread mode
 
-Two sub-cases depending on the data source:
+One might consider making `Rc<T>` implement `Send` when the transpiler knows the target is single-thread. This is not viable:
 
-| Case | Implementation |
-|------|----------------|
-| In-memory data stream | `impl Iterator<Item = T>` — lazy, no `Send`, consumed by `for` |
-| Async source (I/O, timer) | `impl futures::Stream<Item = T>` without `Send` bound |
+- `Rc` is defined in the Rust stdlib — its `!Send` impl cannot be overridden from outside.
+- A newtype `struct LocalRc<T>(Rc<T>)` with `unsafe impl Send` is technically possible but introduces unsoundness: if generated code is ever used as a dependency in a multi-thread context (library, FFI, test harness), the compiler no longer protects against data races — silent undefined behaviour.
+- There is no Rust compiler mode that relaxes `Send` checks globally based on a single-thread promise.
 
-The first case is trivial — a Rust iterator is lazy by default, no threading constraint, consumed by a `for` loop on the current thread.
+`!Send` is a deliberate invariant, not a limitation. The correct answer is `LocalSet` + `spawn_local` + `local-channel`, which keeps the compiler as the safety guarantor. The constraint is a feature, not a workaround.
 
-The second case uses `futures::Stream` which does not impose `Send` on the trait itself. The Waker integration with `LocalSet` works via the same mechanism as the `!Send` channel below.
+### Streams — in-memory vs async source
 
-**Reference — Rust-for-Linux stream implementation**: the kernel target generates streams as work items enqueued on `system_wq`, backed by a ring buffer (`KernelChan<T, N>`) with `Mutex + CondVar`. The ring buffer pattern is reusable for single-thread; replace `Arc<Mutex<...>> + CondVar` with `Rc<RefCell<VecDeque<T>>> + Waker`. See `src/transpiler/kernel/helpers.rs` (ring buffer, lines 137–215) and `src/transpiler/kernel/emit_top.rs` (stream generation, lines 244–375).
+Two sub-cases depending on the stream body:
+
+| Case | Detection | Implementation | All targets |
+|------|-----------|----------------|-------------|
+| In-memory stream | no `await`, no I/O, no external `yield` in body | `impl Iterator<Item = T>` | ✓ |
+| Async source (I/O, timer) | `await` or I/O call present in body | target-specific (see below) | |
+
+**In-memory streams compile to `impl Iterator<Item = T>` on all targets** — multi-thread, single-thread, and kernel. `Iterator` requires neither `Send` nor a runtime. The `for` loop consumes it lazily on the current thread/context with zero scheduling overhead. The transpiler detects this case statically: if the `stream def` body contains no `await`, no I/O call, and no yield from an external source, it emits an iterator regardless of target or mode.
+
+| Target | Async stream implementation |
+|--------|-----------------------------|
+| multi-thread | channel-backed (`tokio::sync::mpsc`) + `spawn` |
+| single-thread | `local-channel` + `spawn_local` / `LocalSet` |
+| kernel | `KernelChan<T, N>` (ring buffer + `Mutex`/`CondVar`) + `system_wq` work item |
+
+**Reference — Rust-for-Linux stream implementation**: `src/transpiler/kernel/helpers.rs` lines 137–215 (ring buffer) and `src/transpiler/kernel/emit_top.rs` lines 244–375 (stream generation). The ring buffer pattern is reusable for single-thread by replacing `Arc<Mutex<...>> + CondVar` with `Rc<RefCell<VecDeque<T>>> + Waker`.
 
 ### `!Send` channels in single-thread mode — resolved
 
@@ -242,5 +267,6 @@ Internally it uses `Rc<RefCell<VecDeque<T>>>` + standard Tokio `Waker` (cloned f
   3. Detect `dyn Trait` positions → wrap in `Box`.
   4. (strict only) Compute enum variant size distribution → emit level-2 warning if one variant dominates.
   5. (strict only) Compute overall type size → emit level-1 warning if above threshold.
-- Size estimation: walk the type graph, sum field sizes with alignment. Skip generics and extern types. Threshold configurable via `--stack-warn-bytes N` (default 256).
+- Size computation via `std::mem::size_of::<T>()` — compile-time constant, exact for concrete types. Skip generics and extern types.
+- Thresholds: `> 1024` bytes → auto `Box<T>`; `> 32` bytes → warning. Configurable via `--stack-auto-bytes N` (default 1024) and `--stack-warn-bytes N` (default 32).
 - The qualifier table in `book.md` §21 needs updating: replace `T'auto`/`T'task` with `T'shared`, add threading column, document short form matrix.
