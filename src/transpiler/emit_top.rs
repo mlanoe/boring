@@ -233,7 +233,12 @@ impl Transpiler {
 
         // `main` with any async content needs the tokio runtime entry point.
         if is_async && f.name == "main" && self_ty.is_none() {
-            self.line("#[tokio::main]");
+            match self.config.threading {
+                crate::transpiler::ThreadingMode::Single =>
+                    self.line("#[tokio::main(flavor = \"current_thread\")]"),
+                crate::transpiler::ThreadingMode::Multi =>
+                    self.line("#[tokio::main]"),
+            }
         }
 
         // Visibility + async keyword + fn
@@ -447,8 +452,11 @@ impl Transpiler {
             }
         };
 
-        // ── Stream functions: wrap body in async_stream::stream! / try_stream! ──
+        // ── Stream functions: iterator (sequential) or async_stream (async) ──
         if f.stream {
+            if self.stream_iter_fns.contains(&f.name) {
+                return self.emit_iter_stream_fn(f, &type_params, &all_params);
+            }
             return self.emit_stream_fn(f, &type_params, &all_params);
         }
 
@@ -548,6 +556,7 @@ impl Transpiler {
         self.fn_returns_void = is_void_ret;
         let prev_task_vars     = std::mem::take(&mut self.task_vars);
         let prev_arc_vars      = std::mem::take(&mut self.arc_vars);
+        let prev_rc_vars       = std::mem::take(&mut self.rc_vars);
         let prev_weak_vars     = std::mem::take(&mut self.weak_vars);
         // var_struct_types / var_mutex_types / var_rwlock_types accumulate across the whole program;
         // save/restore so variable names from one function body don't shadow another.
@@ -577,13 +586,34 @@ impl Transpiler {
                     self.var_rwlock_types.insert(p.name.clone());
                     self.arc_vars.insert(p.name.clone());
                 }
-                // Arc-qualified and string params are also Arc<T> — must be cloned
-                // before capture in `async move {}` blocks.
-                if Self::is_arc_qualified(ty) || Self::is_string_type(ty) {
+                // Arc/Rc-qualified and string params must be cloned before capture in `async move {}` blocks.
+                if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) || Self::is_string_type(ty) {
                     self.arc_vars.insert(p.name.clone());
+                    // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone.
+                    if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(p.name.clone());
+                    }
                 }
                 if matches!(ty, Type::Optional(_)) {
                     self.optional_vars.insert(p.name.clone());
+                }
+                // Managed mode T' params (OwnerQual::Owned over user type) → managed tracking.
+                // Also resolve non-function type aliases (e.g. `use Pt as LPoint'` → LPoint').
+                let resolved_ty_for_managed = if let Type::Named(n) = ty {
+                    self.non_fn_type_aliases.get(n.as_str()).unwrap_or(ty)
+                } else { ty };
+                if crate::transpiler::Transpiler::is_managed_user_owned(
+                    &self.config, &self.user_types, &self.unit_enums, resolved_ty_for_managed)
+                {
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi => {
+                            self.managed_mutex_vars.insert(p.name.clone());
+                            self.arc_vars.insert(p.name.clone());
+                        }
+                        crate::transpiler::ThreadingMode::Single => {
+                            self.managed_refcell_vars.insert(p.name.clone());
+                        }
+                    }
                 }
                 // Task fn params: calling them produces a Future → needs .await.
                 // Throws fn params: calling them returns Result → needs `?` in throws context.
@@ -623,13 +653,30 @@ impl Transpiler {
             // Register __task_cancel as a known local so emit_expr can resolve it.
             self.known_local_vars.insert("__task_cancel".to_string());
         }
+        // Managed multi-thread: emit a lock guard let-binding for each managed param
+        // to avoid double-lock deadlock when the same param's fields are accessed
+        // more than once in a single expression (std::sync::Mutex is not reentrant).
+        let prev_managed_param_shadows = std::mem::take(&mut self.managed_param_shadows);
+        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+            for p in &f.params {
+                if self.managed_mutex_vars.contains(&p.name) {
+                    let shadow = format!("__{}_mg", p.name);
+                    self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
+                        shadow = shadow, name = p.name));
+                    self.managed_mutex_vars.remove(&p.name);
+                    self.managed_param_shadows.insert(p.name.clone(), shadow);
+                }
+            }
+        }
         self.emit_body(&f.body);
+        self.managed_param_shadows = prev_managed_param_shadows;
         self.in_cancellable_fn = prev_in_cancellable_fn;
         self.in_throws         = prev_throws;
         self.fn_returns_void   = prev_fn_returns_void;
         self.fn_return_ty      = prev_fn_return_ty;
         self.task_vars         = prev_task_vars;
         self.arc_vars          = prev_arc_vars;
+        self.rc_vars           = prev_rc_vars;
         self.weak_vars         = prev_weak_vars;
         self.var_struct_types  = prev_var_struct_types;
         self.var_mutex_types   = prev_var_mutex_types;
@@ -644,6 +691,43 @@ impl Transpiler {
         self.line("}");
     }
 
+    /// Emit a purely-sequential `stream` function as `impl Iterator<Item = T>`.
+    /// `yield expr` → `__items.push(expr)`, body runs eagerly, returns `vec.into_iter()`.
+    pub(crate) fn emit_iter_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str) {
+        let vis = if f.is_pub { "pub " } else { "" };
+        let item_ty = f.return_ty.as_ref()
+            .map(|t| self.emit_stream_item_type(t))
+            .unwrap_or_else(|| "()".to_string());
+
+        let sig = format!(
+            "{}fn {}{}({}) -> impl Iterator<Item = {}>",
+            vis, f.name, type_params, all_params, item_ty
+        );
+        self.line(&format!("{} {{", sig));
+        self.indent += 1;
+        self.line(&format!("let mut __items: Vec<{}> = Vec::new();", item_ty));
+
+        let prev_fn_returns_void = self.fn_returns_void;
+        let prev_fn_return_ty    = self.fn_return_ty.clone();
+        let prev_known           = std::mem::take(&mut self.known_local_vars);
+        let prev_iter_stream     = self.in_iter_stream;
+        self.fn_returns_void = true;
+        self.fn_return_ty    = None;
+        self.in_iter_stream  = true;
+        for p in &f.params { self.known_local_vars.insert(p.name.clone()); }
+
+        self.emit_body(&f.body);
+
+        self.fn_returns_void  = prev_fn_returns_void;
+        self.fn_return_ty     = prev_fn_return_ty;
+        self.known_local_vars = prev_known;
+        self.in_iter_stream   = prev_iter_stream;
+
+        self.line("__items.into_iter()");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// Emit a `stream` function: returns `impl Stream<Item = T>` and wraps the body
     /// in `async_stream::stream! { ... }` (or `try_stream!` when `throws` is set).
     pub(crate) fn emit_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str) {
@@ -652,6 +736,16 @@ impl Transpiler {
         let base_item_ty = f.return_ty.as_ref()
             .map(|t| self.emit_stream_item_type(t))
             .unwrap_or_else(|| "()".to_string());
+        // !Send warning: stream item type is Rc/RefCell in single-thread mode.
+        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single)
+            && (base_item_ty.contains("Rc<") || base_item_ty.contains("RefCell<"))
+        {
+            eprintln!(
+                "warning: stream `{}` item type `{}` is !Send in single-thread mode; \
+                 stream<N> requires Send on the item type",
+                f.name, base_item_ty
+            );
+        }
 
         let (macro_name, item_ty) = if f.throws {
             let err_ty = f.throws_ty.as_ref()
@@ -824,6 +918,18 @@ impl Transpiler {
                 if let ExprKind::Var(v) = &obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) {
                         return format!("{}.lock().await.{}", v, field);
+                    }
+                    // Managed param shadow: use pre-locked guard variable.
+                    if let Some(shadow) = self.managed_param_shadows.get(v.as_str()) {
+                        return format!("{}.{}", shadow, field);
+                    }
+                    // Managed-mode mutex var (std::sync::Mutex, synchronous):
+                    if self.managed_mutex_vars.contains(v.as_str()) {
+                        return format!("{}.lock().unwrap().{}", v, field);
+                    }
+                    // Managed-mode RefCell var (single-thread):
+                    if self.managed_refcell_vars.contains(v.as_str()) {
+                        return format!("{}.borrow().{}", v, field);
                     }
                 }
                 // RwLock var access (owned context): c.field → c.read().await.field
@@ -1086,6 +1192,34 @@ impl Transpiler {
         format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner))
     }
 
+    /// Emit the actor type respecting --threading:
+    /// multi → `Arc<tokio::sync::Mutex<T>>`, single → `RefCell<T>`.
+    pub(crate) fn emit_actor_type(&self, inner: &Type) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single => format!("RefCell<{}>", self.emit_type(inner)),
+        }
+    }
+
+    /// Emit the guard type respecting --threading:
+    /// multi → `Arc<tokio::sync::RwLock<T>>`, single → `RefCell<T>`.
+    pub(crate) fn emit_guard_type(&self, inner: &Type) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single => format!("RefCell<{}>", self.emit_type(inner)),
+        }
+    }
+
+    /// Emit the managed-mode actor type for anonymous T/T':
+    /// multi → `Arc<std::sync::Mutex<T>>` (sync-compatible, no async needed in managed mode),
+    /// single → `RefCell<T>`.
+    pub(crate) fn emit_managed_actor(&self, inner: &Type) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  => format!("Arc<std::sync::Mutex<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single => format!("RefCell<{}>", self.emit_type(inner)),
+        }
+    }
+
     /// Returns true when a binding declared `T'guard` should become `Arc<RwLock<T>>`.
     pub(crate) fn is_rwlock_binding(_mutable: bool, ty: &Type) -> bool {
         matches!(ty, Type::Qualified(_, OwnerQual::Guard))
@@ -1105,11 +1239,11 @@ impl Transpiler {
         format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner))
     }
 
-    /// If `ty` is `T'task`, `T'actor`, or `T'guard`, return the name of the inner named type.
+    /// If `ty` is `T'shared`, `T'actor`, or `T'guard`, return the name of the inner named type.
     /// Used by `pre_scan` to populate `arc_qualified_types`.
     pub(crate) fn arc_inner_type_name(ty: &Type) -> Option<&str> {
         match ty {
-            Type::Qualified(inner, OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard) => {
+            Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => {
                 if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
             }
             _ => None,
@@ -1159,6 +1293,22 @@ impl Transpiler {
                 if self.current_trait_assoc_names.contains(n.as_str()) {
                     return format!("Self::{}", n);
                 }
+                // Priority 4: `dyn Trait` positions — auto-box when T is a known trait name.
+                // Params use `impl Trait` (handled in emit_param before calling emit_type).
+                // Function return types use `impl Trait` (handled in emit_fn before calling emit_type).
+                // All other positions (struct fields, collections, etc.) → Box<dyn Trait>.
+                if self.trait_method_names.contains_key(n.as_str()) {
+                    return format!("Box<dyn {}>", normalize_type_name(n));
+                }
+                // Priority 5: size-based auto-boxing (strict mode only).
+                // If the type exceeds stack_auto_bytes, silently promote to Box<T>.
+                if self.config.mode == crate::transpiler::TranspileMode::Strict {
+                    if let Some(&size) = self.type_sizes.get(n.as_str()) {
+                        if size > self.config.stack_auto_bytes {
+                            return format!("Box<{}>", normalize_type_name(n));
+                        }
+                    }
+                }
                 normalize_type_name(n)
             }
             Type::TypeParam(n) => n.clone(),
@@ -1197,7 +1347,14 @@ impl Transpiler {
                 // Fallback: emit `StructName::AssocName` (valid when defined in a trait impl).
                 format!("{}::{}", normalize_type_name(&base_name), assoc)
             }
-            Type::Impl(inner) => format!("impl {}", self.emit_type(inner)),
+            Type::Impl(inner) => {
+                // `impl Trait` — emit the trait name directly (not Box<dyn Trait>).
+                let inner_s = match inner.as_ref() {
+                    Type::Named(n) => normalize_type_name(n),
+                    other => self.emit_type(other),
+                };
+                format!("impl {}", inner_s)
+            }
             Type::Dyn(inner) => format!("Box<dyn {}>", self.emit_type(inner)),
             Type::Fn(ret, params, throws, task, req) => {
                 let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");
@@ -1217,11 +1374,20 @@ impl Transpiler {
             }
             Type::Qualified(inner, qual) => match qual {
                 OwnerQual::Owned | OwnerQual::Stack => {
-                    // Stack is the default in Rust; Owned = Box
-                    if matches!(qual, OwnerQual::Owned) {
+                    // Managed mode: T' → Arc<Mutex<T>> (multi) or RefCell<T> (single).
+                    // Strict mode: Owned = Box<T>, Stack = T (default).
+                    if matches!(qual, OwnerQual::Owned) && self.config.mode == crate::transpiler::TranspileMode::Managed
+                        && !matches!(inner.as_ref(), Type::Named(n) if self.unit_enums.contains(n.as_str()))
+                    {
+                        self.emit_managed_actor(inner)
+                    } else if matches!(qual, OwnerQual::Owned) {
                         format!("Box<{}>", self.emit_type(inner))
                     } else {
-                        self.emit_type(inner)
+                        // T'stack: explicit stack — skip auto-boxing even if size > threshold.
+                        match inner.as_ref() {
+                            Type::Named(n) => normalize_type_name(n),
+                            _ => self.emit_type(inner),
+                        }
                     }
                 }
                 OwnerQual::Copy    => self.emit_type(inner),
@@ -1234,46 +1400,48 @@ impl Transpiler {
                         _ => format!("&'static {}", self.emit_type(inner)),
                     }
                 }
-                OwnerQual::Auto    => {
-                    let inner_s = self.emit_type(inner);
-                    let dyn_s = if matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) {
-                        format!("dyn {}", inner_s)
-                    } else { inner_s };
-                    format!("Rc<{}>", dyn_s)
-                }
-                OwnerQual::Actor   => {
-                    format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner))
-                }
-                OwnerQual::Guard   => {
-                    format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner))
-                }
-                OwnerQual::Task    => {
-                    // String'task = Arc<str> = string (no double-wrap)
-                    if matches!(**inner, Type::Str) { "Arc<str>".into() }
-                    else {
-                        let inner_s = self.emit_type(inner);
-                        // Trait objects require `dyn` in Rust.
-                        let dyn_s = if matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) {
-                            format!("dyn {}", inner_s)
-                        } else { inner_s };
-                        format!("Arc<{}>", dyn_s)
+                // T'shared — threading-aware: Arc<T> (multi) or Rc<T> (single).
+                OwnerQual::Shared => {
+                    // For T'shared where T is a trait: Arc<dyn Trait> / Rc<dyn Trait>.
+                    // Use normalize_type_name (not emit_type) to avoid double-boxing.
+                    let dyn_s = if let Type::Named(n) = inner.as_ref() {
+                        if self.trait_method_names.contains_key(n.as_str()) {
+                            format!("dyn {}", normalize_type_name(n))
+                        } else {
+                            self.emit_type(inner)
+                        }
+                    } else {
+                        self.emit_type(inner)
+                    };
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Single => format!("Rc<{}>", dyn_s),
+                        crate::transpiler::ThreadingMode::Multi  => format!("Arc<{}>", dyn_s),
                     }
                 }
+                OwnerQual::Actor   => self.emit_actor_type(inner),
+                OwnerQual::Guard   => self.emit_guard_type(inner),
                 OwnerQual::Weak    => {
-                    // Compound qualifier: `T'auto'weak` → `Weak<T>` (rc),
-                    //                    `T'task'weak` → `std::sync::Weak<T>`,
-                    //                    `T'actor'weak`→ `std::sync::Weak<Mutex<T>>`
+                    // Compound qualifier: `T'shared'weak` → Weak<T> (single) or sync::Weak<T> (multi)
+                    //                    `T'actor'weak`  → Weak<RefCell<T>> (single) or sync::Weak<Mutex<T>> (multi)
+                    //                    `T'guard'weak`  → same as actor'weak
                     // NOTE: use the BASE (innermost named) type, not Arc/Rc<base>.
-                    // `Resource'task'weak` = std::sync::Weak<Resource>, not Weak<Arc<Resource>>.
                     match inner.as_ref() {
-                        Type::Qualified(base, OwnerQual::Auto) =>
-                            format!("Weak<{}>", self.emit_type(base)),
-                        Type::Qualified(base, OwnerQual::Task) =>
-                            format!("std::sync::Weak<{}>", self.emit_type(base)),
+                        // T'shared'weak — threading-aware
+                        Type::Qualified(base, OwnerQual::Shared) =>
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Single => format!("Weak<{}>", self.emit_type(base)),
+                                crate::transpiler::ThreadingMode::Multi  => format!("std::sync::Weak<{}>", self.emit_type(base)),
+                            },
                         Type::Qualified(base, OwnerQual::Actor) =>
-                            format!("std::sync::Weak<tokio::sync::Mutex<{}>>", self.emit_type(base)),
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Single => format!("Weak<RefCell<{}>>", self.emit_type(base)),
+                                crate::transpiler::ThreadingMode::Multi  => format!("std::sync::Weak<tokio::sync::Mutex<{}>>", self.emit_type(base)),
+                            },
                         Type::Qualified(base, OwnerQual::Guard) =>
-                            format!("std::sync::Weak<tokio::sync::RwLock<{}>>", self.emit_type(base)),
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Single => format!("Weak<RefCell<{}>>", self.emit_type(base)),
+                                crate::transpiler::ThreadingMode::Multi  => format!("std::sync::Weak<tokio::sync::RwLock<{}>>", self.emit_type(base)),
+                            },
                         // Inferred `T'weak` (e.g. `let d'weak = c`) — assume rc::Weak.
                         // (For arc-weak inferred bindings, the type annotation is overridden
                         //  in emit_let when the RHS is Arc::downgrade.)
@@ -1290,8 +1458,10 @@ impl Transpiler {
                 OwnerQual::BorrowOwned  => format!("&Box<{}>",  self.emit_type(inner)),
                 OwnerQual::BorrowOption => format!("&Option<{}>", self.emit_type(inner)),
                 OwnerQual::BorrowWeak   => format!("&Weak<{}>", self.emit_type(inner)),
-                OwnerQual::BorrowAuto   => format!("&Rc<{}>",   self.emit_type(inner)),
-                OwnerQual::BorrowTask   => format!("&Arc<{}>",  self.emit_type(inner)),
+                OwnerQual::BorrowShared => match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => format!("&Rc<{}>",  self.emit_type(inner)),
+                    crate::transpiler::ThreadingMode::Multi  => format!("&Arc<{}>", self.emit_type(inner)),
+                },
                 OwnerQual::Lifetime(lt) => {
                     // `str` (Type::Str or Named("str")) already resolves to `&str` —
                     // emit `&'a str` directly to avoid the double-reference `&'a &str`.

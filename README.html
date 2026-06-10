@@ -158,7 +158,7 @@ li { margin-bottom: 0.3rem; }
 <hr>
 <h2 id="targets">Targets</h2>
 <p>Boring compiles the same source to two distinct Rust targets:</p>
-<table><thead><tr><th>Command</th><th>Target</th><th>Runtime</th><th>Use case</th></tr></thead><tbody><tr><td><code>boring build</code></td><td>Rust std + tokio</td><td>userspace</td><td>servers, CLIs, desktop apps</td></tr><tr><td><code>boring build --target kernel</code></td><td>Rust-for-Linux (<code>no_std</code>)</td><td>Linux kernel</td><td>drivers, subsystems, kernel modules</td></tr></tbody></table>
+<table><thead><tr><th>Command</th><th>Target</th><th>Runtime</th><th>Use case</th></tr></thead><tbody><tr><td><code>boring build</code></td><td>Rust std + tokio</td><td>userspace</td><td>servers, CLIs, desktop apps</td></tr><tr><td><code>boring build --mode managed</code></td><td>Rust std + tokio</td><td>userspace</td><td>managed memory (<code>T&#x27;</code> → <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>)</td></tr><tr><td><code>boring build --threading single</code></td><td>Rust std + tokio</td><td>userspace</td><td>single-thread (<code>Arc</code> → <code>Rc</code>, <code>spawn</code> → <code>spawn_local</code>)</td></tr><tr><td><code>boring build --target kernel</code></td><td>Rust-for-Linux (<code>no_std</code>)</td><td>Linux kernel</td><td>drivers, subsystems, kernel modules</td></tr></tbody></table>
 <p>The kernel backend applies the same language — structs, enums, traits, ownership qualifiers, error handling, async tasks — but maps every construct to its kernel-native equivalent: <code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code> instead of <code>tokio::sync::Mutex</code>, work items on <code>system_wq</code> instead of <code>tokio::spawn</code>, ring-buffer channels instead of MPSC, and errno-based errors instead of <code>Box&lt;dyn Error&gt;</code>.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Same source, two targets</span>
 <span class="kw">task</span> <span class="kw">def</span> Page <span class="fn">fetch_page</span>(<span class="kt">string</span> url) <span class="kw">throws</span>:
@@ -183,7 +183,7 @@ print <span class="s">"pi ≈ <span class="si">{3.14159:.3}</span>, hex = <span 
 <span class="fm">println!</span>(<span class="s">&quot;pi ≈ {:.3}, hex = {:x}&quot;</span>, <span class="nb">3.14159_f64</span>, <span class="nb">255_i64</span>);</code></pre></div>
 <h3 id="types-and-ownership">Types and ownership</h3>
 <p>Rust&#x27;s ownership system is powerful but verbose. Boring provides a concise qualifier syntax inspired by Swift&#x27;s value/reference types — the right ownership is inferred from context, and common cases have short aliases.</p>
-<table><thead><tr><th>Boring</th><th>Rust</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>copy integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>copy float</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td>thread-safe shared string — the default</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td>optional value</td></tr><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td>heap-allocated exclusive</td></tr><tr><td><code>T&#x27;task</code></td><td><code>Arc&lt;T&gt;</code></td><td>thread-safe shared reference</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th><th>Meaning</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>copy integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>copy float</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td>thread-safe shared string — the default</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td>optional value</td></tr><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td>heap-allocated exclusive</td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td><td>shared reference — threading-aware</td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">greet</span>(<span class="kt">string</span>? name):
     <span class="kw">guard</span> <span class="kw">let</span> n = name <span class="kw">else</span> <span class="kw">return</span> <span class="s">"Hello, stranger!"</span>
     <span class="s">"Hello, <span class="si">{n}</span>!"</span></code></pre></div>
@@ -268,7 +268,7 @@ cargo install --path .</code></pre></div>
 boring examples/hello.br
 
 <span class="co"># Transpile to Rust (generates a Cargo project)</span>
-boring --emit-rust examples/hello.br
+boring build examples/hello.br
 cd examples/hello_rust &amp;&amp; cargo run</code></pre></div>
 <h3 id="the-showcase">The showcase</h3>
 <p><code>examples/hello.br</code> is a runnable tour of every language feature: bindings, functions, control flow, structs, enums, traits, error handling, closures, generics, modules, async tasks, and more. Run it or read it — it is the fastest way to see what Boring looks like.</p>

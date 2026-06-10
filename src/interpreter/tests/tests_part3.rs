@@ -607,10 +607,10 @@ let _result = match o:
     assert_eq!(run_src(src), Value::Int(42));
 }
 
-// ─── T&auto / T&task — borrow of smart pointer ───────────────────────────────
+// ─── T&shared / T&shared — borrow of smart pointer ───────────────────────────────
 
-// `T&auto` is accepted as a parameter type annotation (parses without error).
-// At the interpreter level it behaves identically to `T'auto`: the value is
+// `T&shared` is accepted as a parameter type annotation (parses without error).
+// At the interpreter level it behaves identically to `T'shared`: the value is
 // passed by value (Rc clone semantics at runtime — no real pointer distinction).
 #[test]
 fn test_borrow_auto_param_accepted() {
@@ -618,103 +618,103 @@ fn test_borrow_auto_param_accepted() {
 struct Counter:
     init(int n)
 
-def int peek(Counter&auto c):
+def int peek(Counter&shared c):
     c.n
 
-let Counter'auto obj = Counter(10)
+let Counter'shared obj = Counter(10)
 let _result = peek(obj)
 "#;
     assert_eq!(run_src(src), Value::Int(10));
 }
 
-// `T&task` is accepted as a parameter type annotation.
+// `T&shared` is accepted as a parameter type annotation.
 #[test]
 fn test_borrow_task_param_accepted() {
     let src = r#"
 struct Counter:
     init(int n)
 
-def int peek(Counter&task c):
+def int peek(Counter&shared c):
     c.n
 
-let Counter'task obj = Counter(7)
+let Counter'shared obj = Counter(7)
 let _result = peek(obj)
 "#;
     assert_eq!(run_src(src), Value::Int(7));
 }
 
-// `T&auto` in a return type annotation is accepted.
+// `T&shared` in a return type annotation is accepted.
 #[test]
 fn test_borrow_auto_return_type_accepted() {
     let src = r#"
 struct Box:
     init(int value)
 
-def Box&auto identity(Box&auto b):
+def Box&shared identity(Box&shared b):
     b
 
-let Box'auto b = Box(99)
+let Box'shared b = Box(99)
 let _result = identity(b).value
 "#;
     assert_eq!(run_src(src), Value::Int(99));
 }
 
-// `T&auto` can be used in let-type annotations.
+// `T&shared` can be used in let-type annotations.
 #[test]
 fn test_borrow_auto_let_annotation() {
     let src = r#"
 struct Item:
     init(int v)
 
-let Item'auto raw = Item(55)
-let Item&auto x = raw
+let Item'shared raw = Item(55)
+let Item&shared x = raw
 let _result = x.v
 "#;
     assert_eq!(run_src(src), Value::Int(55));
 }
 
-// ─── T'auto& / T'task& — postfix borrow syntax ───────────────────────────────
+// ─── T'shared& / T'shared& — postfix borrow syntax ───────────────────────────────
 
-// `T'auto&` is equivalent to `T&auto` (borrow of Rc).
+// `T'shared&` is equivalent to `T&shared` (borrow of Rc).
 #[test]
 fn test_postfix_borrow_auto_param() {
     let src = r#"
 struct Counter:
     init(int n)
 
-def int peek(Counter'auto& c):
+def int peek(Counter'shared& c):
     c.n
 
-let Counter'auto obj = Counter(10)
+let Counter'shared obj = Counter(10)
 let _result = peek(obj)
 "#;
     assert_eq!(run_src(src), Value::Int(10));
 }
 
-// `T'task&` is equivalent to `T&task` (borrow of Arc).
+// `T'shared&` is equivalent to `T&shared` (borrow of Arc).
 #[test]
 fn test_postfix_borrow_task_param() {
     let src = r#"
 struct Counter:
     init(int n)
 
-def int peek(Counter'task& c):
+def int peek(Counter'shared& c):
     c.n
 
-let Counter'task obj = Counter(7)
+let Counter'shared obj = Counter(7)
 let _result = peek(obj)
 "#;
     assert_eq!(run_src(src), Value::Int(7));
 }
 
-// Alias use case: `use X as T'auto` then `def foo(X& x)` — the canonical pattern.
+// Alias use case: `use X as T'shared` then `def foo(X& x)` — the canonical pattern.
 #[test]
 fn test_postfix_borrow_via_alias() {
     let src = r#"
 struct Tree:
     init(int value)
 
-use Node as Tree'auto
+use Node as Tree'shared
 
 def int read(Node& n):
     n.value
@@ -725,17 +725,17 @@ let _result = read(root)
     assert_eq!(run_src(src), Value::Int(42));
 }
 
-// `T'auto&` in return type position.
+// `T'shared&` in return type position.
 #[test]
 fn test_postfix_borrow_return_type() {
     let src = r#"
 struct Box:
     init(int value)
 
-def Box'auto& identity(Box'auto& b):
+def Box'shared& identity(Box'shared& b):
     b
 
-let Box'auto b = Box(99)
+let Box'shared b = Box(99)
 let _result = identity(b).value
 "#;
     assert_eq!(run_src(src), Value::Int(99));
@@ -836,28 +836,28 @@ let _result = p.x + p.y
     assert_eq!(run_src(src), Value::Int(7));
 }
 
-// Alias for 'auto variant — constructor creates the same object.
+// Alias for 'shared variant — constructor creates the same object.
 #[test]
 fn test_alias_constructor_auto() {
     let src = r#"
 struct Counter:
     init(pub int n)
 
-use SharedCounter as Counter'auto
+use SharedCounter as Counter'shared
 let c = SharedCounter(10)
 let _result = c.n
 "#;
     assert_eq!(run_src(src), Value::Int(10));
 }
 
-// Alias used with the borrow syntax: `use Node as Tree'auto; def walk(Node& n)`.
+// Alias used with the borrow syntax: `use Node as Tree'shared; def walk(Node& n)`.
 #[test]
 fn test_alias_constructor_and_borrow() {
     let src = r#"
 struct Tree:
     init(pub int value)
 
-use Node as Tree'auto
+use Node as Tree'shared
 
 def int read(Node& n):
     n.value

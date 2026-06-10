@@ -66,7 +66,7 @@ enum MOpt:
     Some(int value)
     None
 
-def string describe(MOpt'auto o):
+def string describe(MOpt'shared o):
     match o:
         Some(n) if n > 10: "big"
         Some(n): "small"

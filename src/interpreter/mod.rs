@@ -1420,7 +1420,7 @@ impl Interpreter {
         aliases.insert("uint".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
         aliases.insert("float".into(),  Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
         aliases.insert("bool".into(),   Type::Qualified(Box::new(Type::Bool),  OwnerQual::Copy));
-        aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Task));
+        aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
         aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Const));
         // Rust-specific numeric types — same runtime representation, preserved for transpilation.
         aliases.insert("i8".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
@@ -1893,7 +1893,7 @@ impl Interpreter {
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_var = stmt.mutable && stmt.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Task))
+                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 if is_shared_var {
                     env.borrow_mut().define_shared_mut(&stmt.name, val);

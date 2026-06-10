@@ -5,6 +5,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.4.0] — 2026-06-10
+
+### Added
+
+- **`--threading single` mode** — single-thread async backend: `task` spawns via `tokio::task::spawn_local` instead of `tokio::spawn`; channels use `local_channel::mpsc` instead of `tokio::sync::mpsc`; `T'shared` resolves to `Rc<T>` instead of `Arc<T>`; `T'actor` resolves to `RefCell<T>`; the `local-channel = "0.1"` dependency is injected automatically into the generated `Cargo.toml`.
+- **`--mode managed` mode** — managed ownership: all user-defined struct and enum types (except unit enums, which are `Copy`) are automatically wrapped in `Arc<Mutex<T>>` (multi-thread) or `RefCell<T>` (single-thread), eliminating explicit ownership qualifiers for the common shared-mutable pattern.
+- **`T'shared` ownership qualifier** — threading-aware ref-counted pointer: `Arc<T>` in multi-thread mode, `Rc<T>` in single-thread mode. Replaces the deprecated `T'auto` (always `Rc`) and `T'task` (always `Arc`), which now produce hard errors.
+- **`T'wshared` and `T'wactor` ownership qualifiers** — weak-pointer shorthands: `T'wshared` → `Weak<T>` (threading-aware); `T'wactor` → `Weak<Mutex<T>>` (multi) / `Weak<RefCell<T>>` (single). Complement the existing `T'wguard`.
+- **`--output-dir` CLI flag** — specifies the destination directory for the generated Cargo project, allowing multiple configurations to coexist side-by-side.
+- **`--stack-auto-bytes` / `--stack-warn-bytes` CLI flags** — configure the size thresholds used by the inference pass to decide between stack and heap allocation, and to emit warnings for oversized stack values.
+- **`dyn Trait` auto-boxing** — bare trait types used in value positions are automatically wrapped in `Box<dyn Trait>` by the transpiler; no explicit annotation needed at call sites.
+- **Size-based auto-boxing in strict mode** — struct fields whose estimated stack size exceeds `--stack-auto-bytes` (default 1 024 B) are automatically promoted to `Box<T>` at emission time. Primitive type names in `Named` form (`"int"`, `"float"`, …) are now correctly mapped to their known sizes by the inference pass. `T'stack` bypasses auto-boxing explicitly when stack placement is intentional.
+- **Enum warning level 2** — the inference pass now detects disproportionate variant sizes (one variant significantly larger than the median) and suggests boxing the outlier field.
+- **`!Send` warnings in single-thread mode** — the transpiler warns when a type or value that is not `Send` is used in a context that would require it (e.g. captured into a `tokio::spawn` task), pointing to `--threading single` as the fix.
+- **`LocalSet` support** — single-thread async entry point uses `tokio::task::LocalSet` and `local_set.run_until(main())` so that `spawn_local` futures are driven on the same thread.
+- **Broadcast channels in single-thread mode** — `broadcast<T, N>` now works in `--threading single` via a prelude that re-exports a `!Send`-compatible local broadcast implementation.
+- **Kernel transpiler: `oneshot`, `watch`, and `broadcast`** — the `--target kernel` backend now maps `oneshot<T>`, `watch<T>`, and `broadcast<T, N>` to their Linux-kernel equivalents (completion + `Mutex`-guarded state, ring buffer).
+
+### Removed
+
+- **`--emit-rust` CLI flag** — removed; the `--output-dir` flag covers all use cases more cleanly.
+- **`T'auto` and `T'task`** — completely removed from the parser. These qualifiers are no longer recognized; use `T'shared` instead.
+
+### Fixed
+
+- `T'actor` in multi-thread mode now consistently emits `tokio::sync::Mutex` (was incorrectly emitting `std::sync::Mutex` in some code paths, causing async-context deadlocks).
+- `T'weak` in single-thread mode now correctly emits `Rc::downgrade` (was using `Arc::downgrade`, causing a type mismatch when `T'shared` resolves to `Rc<T>`).
+- Managed-mode mutex parameters no longer cause a deadlock when their fields are accessed multiple times in a single expression: a `let mut __param_mg = param.lock().unwrap()` guard binding is now emitted at function entry, and all field reads go through the guard (std::sync::Mutex is not reentrant).
+
+### Tests
+
+- 4-combination transpile suite (strict/managed × multi/single) covering all language constructs.
+- `optionals`, `operators`, `modules`, and `ownership` test cases promoted from `ignore_managed` / `ignore_single_managed` to fully green across all four configurations.
+
+---
+
 ## [0.3.0] — 2026-06-09
 
 ### Added
@@ -159,7 +195,7 @@ Initial public release.
 ### Compiler / toolchain
 
 - **Interpreter** — direct execution of `.br` files (`boring run file.br`)
-- **Rust transpiler** — `--emit-rust` generates a ready-to-compile Cargo project
+- **Rust transpiler** — `boring build` generates a ready-to-compile Cargo project
 - **`BoringVal` typed exceptions** — prim + named error types dispatched via `std::any::TypeId` (collision-free across modules)
 - **35 integration tests** covering all language constructs
 
@@ -169,6 +205,8 @@ Initial public release.
 
 ---
 
+[0.4.0]: https://github.com/mlanoe/boring/releases/tag/v0.4.0
+[0.3.0]: https://github.com/mlanoe/boring/releases/tag/v0.3.0
 [0.2.1]: https://github.com/mlanoe/boring/releases/tag/v0.2.1
 [0.2.0]: https://github.com/mlanoe/boring/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mlanoe/boring/releases/tag/v0.1.0

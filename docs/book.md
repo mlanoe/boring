@@ -1,6 +1,6 @@
 # The new programming language is Boring
 
-Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled via `--emit-rust`.
+Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled with `boring build`.
 
 ---
 
@@ -23,7 +23,8 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 15. [Modules](#15-modules)
 16. [Ownership Qualifiers](#21-ownership-qualifiers)
 17. [Defer](#22-defer)
-18. [Channels](#18-channels-channel)
+18. [Streams](#17-streams-stream--yield)
+19. [Channels](#18-channels-channel)
 19. [Tasks (Async)](#23-tasks-async)
 20. [Attributes](#24-attributes)
 21. [Format Specifiers](#25-format-specifiers)
@@ -68,7 +69,6 @@ main    = "main.br"     # optional, defaults to main.br
 ```sh
 boring hello.br              # interpret directly
 boring build hello.br        # emit a Cargo project next to the file
-boring --emit-rust hello.br  # alias for boring build <file>
 ```
 
 ### Hello, World
@@ -220,7 +220,7 @@ if condition {
 | `uint`         | `Uint'copy`      | `u64`           | 64-bit unsigned integer, copy      |
 | `float`        | `Float'copy`     | `f64`           | 64-bit floating-point, copy        |
 | `bool`         | `Bool'copy`      | `bool`          | `true` / `false`, copy             |
-| `string`   | `String'const` or `String'task` | `&str` / `Arc<str>` | String — **recommended default**; the compiler picks the representation from context (literal → `&str`, heap → `Arc<str>`) |
+| `string`   | `String'const` or `String'shared` | `&str` / `Arc<str>` | String — **recommended default**; the compiler picks the representation from context (literal → `&str`, heap → `Arc<str>`) |
 
 ### Integer literals
 
@@ -280,7 +280,7 @@ let string c = a + " " + b     # string — concatenation
 let string d = "Hi, {a}!"      # string — interpolation
 ```
 
-> Boring infers the string representation automatically. Under the hood, literals compile to `String'const` (`&'static str`) and heap strings to `String'task` (`Arc<str>`). See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringtask) for details.
+> Boring infers the string representation automatically. Under the hood, literals compile to `String'const` (`&'static str`) and heap strings to `String'shared` (`Arc<str>`). See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared) for details.
 
 ### String interpolation
 
@@ -518,8 +518,8 @@ For primitive types (`int`, `float`, `bool`) which have value semantics, `===` b
 
 **Rust equivalent**
 ```rust
-Arc::ptr_eq(&a, &b)   // T'task objects
-Rc::ptr_eq(&a, &b)    // T'auto objects
+Arc::ptr_eq(&a, &b)   // T'shared objects (multi-thread)
+Rc::ptr_eq(&a, &b)    // T'shared objects (single-thread)
 ```
 
 ---
@@ -738,19 +738,19 @@ fn countdown(mut n: i64) -> i64 {
 }
 ```
 
-**For reference-counted types** (`T'task`, `T'auto`), `var` only makes the local binding reassignable — the object itself is immutable through a shared reference. Field mutation and mutating methods are forbidden.
+**For reference-counted types** (`T'shared`), `var` only makes the local binding reassignable — the object itself is immutable through a shared reference. Field mutation and mutating methods are forbidden.
 
-- For `T'auto` (single-thread): mutation goes through `var` + regular ownership — there is no need for a mutable `Rc`. If you need to mutate, hold the value directly with `var` instead of sharing it via `T'auto`.
-- For `T'task` (multi-thread): use `T'actor` when shared state needs to be written.
+- For `T'shared` (single-thread, `Rc<T>`): mutation goes through `var` + regular ownership — there is no need for a mutable `Rc`. If you need to mutate, hold the value directly with `var` instead of sharing it via `T'shared`.
+- For `T'shared` (multi-thread, `Arc<T>`): use `T'actor` when shared state needs to be written.
 
 ```boring
 struct Counter:
     var int value = 0
 
-def show(var Counter'task c):
+def show(var Counter'shared c):
     print c.value          # OK — reading is always allowed
-    c = Counter()          # OK — var lets you rebind the Arc pointer
-    # c.value = c.value + 1  # ERROR — cannot mutate through T'task; use T'actor
+    c = Counter()          # OK — var lets you rebind the Arc/Rc pointer
+    # c.value = c.value + 1  # ERROR — cannot mutate through T'shared; use T'actor
 ```
 
 To make this intent explicit, prefer `var T&` (mutable borrow) when you need to mutate a stack object without sharing it:
@@ -891,7 +891,7 @@ fn apply(f: impl Fn(i64) -> i64, x: i64) -> i64 {
 let x = 42   # inline comment (not preserved by the transpiler)
 ```
 
-**Rust equivalent** (full-line comments are preserved by `--emit-rust`)
+**Rust equivalent** (full-line comments are preserved by `boring build`)
 ```rust
 // This is a comment
 let x: i64 = 42;
@@ -3483,7 +3483,7 @@ use std::io::{Write, BufRead};
 Rename or qualify a type:
 
 ```boring
-use NodeRef as Node'task      # Arc<Node>
+use NodeRef as Node'shared      # Arc<Node> or Rc<Node> depending on --threading
 use Score   as int              # i64
 ```
 
@@ -3562,7 +3562,7 @@ use float as Float'copy  # f64
 use bool  as Bool'copy   # bool
 ```
 
-> `String'const` and `String'task` follow the same mechanism but are inferred automatically — you rarely need to write them explicitly. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringtask).
+> `String'const` and `String'shared` follow the same mechanism but are inferred automatically — you rarely need to write them explicitly. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared).
 
 ---
 
@@ -3626,7 +3626,7 @@ let nums = [-1, 2, -3, 4]
 
 ---
 
-## 17. Async Streams (`stream` / `yield`)
+## 17. Streams (`stream` / `yield`)
 
 A **stream function** is declared with the `stream` keyword instead of `def` or `task`. It lazily produces a sequence of values with `yield`, and callers consume it with a plain `for` loop — no extra syntax needed at the call site.
 
@@ -3688,21 +3688,91 @@ for line in read_lines("/etc/hosts"):
 
 ### Transpilation
 
-Stream functions compile to Rust using `async_stream`:
+The transpiler chooses between two emission strategies depending on whether the stream body is **sequential** or **async**:
+
+| Body contains | Strategy | Rust emitted |
+|---------------|----------|--------------|
+| No `wait`, no `task` calls | Sequential — `impl Iterator` | Collects all values into a `Vec`, returns `vec.into_iter()` |
+| Has `wait` or `task` calls | Async — `impl Stream` | `async_stream::stream! { … }` |
+
+#### Sequential streams — `impl Iterator`
+
+When the body has no `wait` statements and makes no `task` function calls, the transpiler treats it as a plain iterator. The body runs eagerly: every `yield` pushes a value into a `Vec`, and the function returns `vec.into_iter()`. No async runtime is needed.
+
+```boring
+stream int count_up(int n):
+    var i = 0
+    while i < n:
+        yield i
+        i += 1
+```
+
+**Rust equivalent**
+```rust
+fn count_up(n: i64) -> impl Iterator<Item = i64> {
+    let mut __items: Vec<i64> = Vec::new();
+    let mut i = 0i64;
+    while i < n {
+        __items.push(i);
+        i += 1;
+    }
+    __items.into_iter()
+}
+```
+
+Consumers compile to a plain Rust `for` loop — no `await`, no pinning:
 
 ```rust
-fn count_up(n: i64) -> impl futures_core::Stream<Item = i64> {
+for x in count_up(5) { … }
+```
+
+#### Async streams — `impl Stream`
+
+When the body contains `wait` or calls a `task` function, the transpiler emits an `async_stream::stream!` block:
+
+```boring
+stream string fetch_pages([string] urls):
+    for url in urls:
+        let html = task fetch(url)
+        yield html.value
+```
+
+**Rust equivalent**
+```rust
+fn fetch_pages(urls: Vec<Arc<str>>) -> impl futures_core::Stream<Item = Arc<str>> {
     async_stream::stream! {
-        let mut i = 0;
-        while i < n {
-            yield i;
-            i += 1;
+        for url in urls {
+            let html = tokio::spawn(async move { fetch(url).await });
+            yield html.await.unwrap();
         }
     }
 }
 ```
 
 Consumers compile to a `while let Some(item) = stream.next().await` loop pinned with `std::pin::pin!`.
+
+#### `throws` streams
+
+Adding `throws` wraps each item in `Result<T, E>` and uses `async_stream::try_stream!`:
+
+```boring
+stream string read_lines(string path) throws IOError:
+    let file = File.open(path)
+    for line in file.lines():
+        yield line
+```
+
+**Rust equivalent**
+```rust
+fn read_lines(path: Arc<str>) -> impl futures_core::Stream<Item = Result<String, IOError>> {
+    async_stream::try_stream! {
+        let file = File::open(&*path)?;
+        for line in file.lines() {
+            yield line?;
+        }
+    }
+}
+```
 
 ---
 
@@ -3712,17 +3782,39 @@ Boring provides **typed mpsc channels** via the built-in `channel` function. A c
 
 ### Creating a channel
 
-Two equivalent syntaxes — choose whichever reads more naturally:
+Three equivalent syntaxes — choose whichever reads more naturally:
 
 ```boring
-# A — explicit type argument
+# A — explicit type argument, capacity as call argument
 let tx, rx = channel<int>(32)
 
 # B — type inferred from the binding annotation
 let int tx, rx = channel(32)
+
+# C — capacity as second type parameter
+let tx, rx = channel<int, 32>
 ```
 
-The capacity argument sets the buffer size (number of messages that fit before senders block).
+All three forms are fully interchangeable. The transpiler extracts the capacity from whichever position it appears — second type argument or first call argument — and forwards it to the backend. On the **tokio backend** it becomes the argument to `tokio::sync::mpsc::channel(N)`. On the **kernel backend** it sets the size of the pre-allocated ring buffer; see [Rust-for-Linux target](#30-rust-for-linux-target).
+
+#### Capacity in single-thread mode
+
+When the transpiler targets single-thread mode (`--threading single`), `channel` maps to `local_channel::mpsc` instead of tokio mpsc. `local_channel` is **unbounded** — the capacity argument is accepted syntactically but has no effect at runtime. Prefer omitting it to make the intent clear, or leave it as documentation:
+
+```boring
+# single-thread mode — capacity is ignored; channel is unbounded
+let tx, rx = channel<int>(4)
+```
+
+**Transpilation comparison**
+
+| Mode | Boring | Rust emitted |
+|------|--------|--------------|
+| Multi-thread (default) | `channel<int>(32)` or `channel<int, 32>` | `tokio::sync::mpsc::channel::<i64>(32)` |
+| Single-thread | `channel<int>(32)` or `channel<int, 32>` | `local_channel::mpsc::channel::<i64>()` — unbounded |
+| Kernel (`channel<T, N>`) | `channel<int, 32>` | `kernel_channel::<i64, 32>()` → `KernelSender/Receiver<i64, 32>` |
+| Kernel (`channel<T>(cap)`) | `channel<int>(32)` | `dyn_kernel_channel::<i64>(32)` → `DynKernelSender/Receiver<i64>` |
+
 
 ### Sending and receiving
 
@@ -3797,13 +3889,15 @@ Functions that contain a `channel(…)` call or a `task:` expression are automat
 
 Boring provides three additional channel types for specialised patterns:
 
-| Boring | Tokio | Use case |
-|--------|-------|----------|
-| `oneshot<T>()` | `tokio::sync::oneshot` | Single response — request/reply |
-| `broadcast<T>(cap)` | `tokio::sync::broadcast` | Fan-out to N independent consumers |
-| `watch<T>(initial)` | `tokio::sync::watch` | Observable current value |
+| Boring | Tokio (multi-thread) | Single-thread | Use case |
+|--------|----------------------|---------------|----------|
+| `oneshot<T>()` | `tokio::sync::oneshot` | `tokio::sync::oneshot` | Single response — request/reply |
+| `broadcast<T>(cap)` | `tokio::sync::broadcast` | `local_broadcast` (`!Send`) | Fan-out to N independent consumers |
+| `watch<T>(initial)` | `tokio::sync::watch` | `tokio::sync::watch` | Observable current value |
 
 #### `oneshot<T>()` — single-shot response
+
+A oneshot channel carries exactly one value from sender to receiver. The sender is consumed when `send` is called; the receiver is consumed when the value is read.
 
 ```boring
 task run():
@@ -3816,17 +3910,24 @@ task run():
 **Rust equivalent**
 ```rust
 let (tx, rx) = tokio::sync::oneshot::channel::<i64>();
-tokio::spawn(async move { tx.send(42).ok() });
+tokio::spawn(async move { tx.send(42).ok(); });
 let result = rx.await.unwrap();
 ```
 
 | Operation | Boring | Rust emitted |
 |-----------|--------|--------------|
 | Create | `let tx, rx = oneshot<T>()` | `tokio::sync::oneshot::channel::<T>()` |
-| Send | `tx.send(v)` | `tx.send(v).ok()` — non-async |
-| Receive | `rx.value` or `rx.recv()` | `rx.await.unwrap()` — consumes rx |
+| Send | `tx.send(v)` | `tx.send(v).ok()` — non-async, consumes `tx` |
+| Receive | `rx.value` or `rx.recv()` | `rx.await.unwrap()` — consumes `rx` |
+
+**Rules:**
+- `tx.send(v)` is synchronous (non-blocking) — it moves the value into the channel immediately.
+- Both endpoints can be sent across threads (`Send`). The same behavior applies in single-thread mode — `tokio::sync::oneshot` is used in both.
+- Reading `rx.value` (or calling `rx.recv()`) consumes `rx`; it cannot be used again.
 
 #### `broadcast<T>(cap)` — fan-out
+
+A broadcast channel delivers every sent message to **all current subscribers** independently. Each receiver maintains its own read cursor.
 
 ```boring
 task run():
@@ -3843,7 +3944,7 @@ task run():
         print "rx2: {msg}"
 ```
 
-**Rust equivalent**
+**Rust equivalent (multi-thread)**
 ```rust
 let (tx, mut rx) = tokio::sync::broadcast::channel::<Arc<str>>(16);
 let mut rx2 = tx.subscribe();
@@ -3861,7 +3962,24 @@ while let Ok(msg) = rx2.recv().await { println!("rx2: {}", msg); }
 | Iterate | `for msg in rx:` | `while let Ok(msg) = rx.recv().await {` |
 | Poll ready | `f.done` | `tokio::time::timeout(Duration::ZERO, rx.recv()).await.is_ok()` |
 
+**Single-thread mode** — In single-thread mode, broadcast maps to an inlined `local_broadcast` primitive (emitted as a prelude in the generated file). It uses `Rc<RefCell<VecDeque<T>>>` per subscriber slot and `tokio::sync::Notify` for wakeups. The only bound on `T` is `Clone`. The API is identical at the Boring level; only the emitted Rust differs:
+
+```rust
+// single-thread broadcast — emitted by the transpiler
+let tx = local_broadcast::<Arc<str>>();
+let mut rx = tx.subscribe();
+let mut rx2 = tx.subscribe();
+// send
+tx.send(Arc::from("hello"));
+// receive (returns T directly, not Result<T, _>)
+while let Some(msg) = rx.recv().await { … }
+```
+
+The capacity argument is accepted but has no effect for `local_broadcast` (the buffer grows dynamically).
+
 #### `watch<T>(initial)` — observable value
+
+A watch channel holds a single *current* value. Senders overwrite it; receivers either read the current value without waiting or wait for the next change.
 
 ```boring
 task run():
@@ -3893,10 +4011,15 @@ println!("current: {}", rx.borrow().clone());
 | Operation | Boring | Rust emitted |
 |-----------|--------|--------------|
 | Create | `let tx, rx = watch<T>(init)` | `tokio::sync::watch::channel::<T>(init)` |
-| Send | `tx.send(v)` | `tx.send(v).ok()` — non-async |
-| Wait + read | `rx.recv()` | `rx.changed().await.ok(); rx.borrow().clone()` |
-| Read current | `rx.value` | `rx.borrow().clone()` — no wait |
-| Iterate | `for val in rx:` | `while rx.changed().await.is_ok() { let val = rx.borrow().clone();` |
+| Send | `tx.send(v)` | `tx.send(v).ok()` — non-async, overwrites current value |
+| Wait for change + read | `rx.recv()` | `rx.changed().await.ok(); rx.borrow().clone()` |
+| Read current (no wait) | `rx.value` | `rx.borrow().clone()` |
+| Iterate changes | `for val in rx:` | `while rx.changed().await.is_ok() { let val = rx.borrow().clone();` |
+
+**Rules:**
+- `rx.value` never blocks — it returns the most recent value immediately.
+- Intermediate values can be skipped: if the sender writes twice before the receiver polls, only the latest value is seen.
+- `watch` is available in both multi-thread and single-thread modes — `tokio::sync::watch` is used in both (its internals use `Arc` which is always `Send`).
 
 ---
 
@@ -4294,8 +4417,8 @@ Boring exposes Rust's ownership model through **type qualifiers** written after 
 When the type can be inferred from the right-hand side, the qualifier can be attached to the **variable name** instead of the type. The two forms are equivalent:
 
 ```boring
-let Worker'task w  = Worker(name = "alice", jobs = 5)   # explicit type
-let w'task         = Worker(name = "alice", jobs = 5)   # inferred — qualifier on name
+let Worker'shared w  = Worker(name = "alice", jobs = 5)   # explicit type
+let w'shared         = Worker(name = "alice", jobs = 5)   # inferred — qualifier on name
 
 var Counter'actor c = Counter()   # explicit type
 var c'actor         = Counter()   # inferred — qualifier on name
@@ -4311,43 +4434,52 @@ The qualifier-on-name form is especially concise when the type is obvious from c
 
 Shorthands cover the most common cases without writing a qualifier explicitly:
 
-| Boring shorthand | Alias for      | Rust            | Meaning                         |
-|------------------|----------------|-----------------|---------------------------------|
-| `T`              | `T'stack`      | `T`             | Stack allocation (Rust default) |
-| `T'`             | `T'heap`       | `Box<T>`        | Exclusive heap ownership        |
-| `T?`             | `T'option`     | `Option<T>`     | Optional value                  |
-| `[T]`            | `Vec<T>`       | `Vec<T>`        | Dynamic array                   |
-| `{T}`            | `Set<T>`       | `HashSet<T>`    | Unordered set                   |
-| `{K=V}`          | `Dict<K,V>`    | `HashMap<K, V>` | Key-value map                   |
+| Boring shorthand | Strict mode (`--mode strict`) | Managed mode (`--mode managed`) | Meaning |
+|------------------|-------------------------------|----------------------------------|---------|
+| `T`  | `T` (stack) | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous — transpiler decides |
+| `T'` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous with indirection — transpiler decides |
+| `T?` | `Option<T>` | `Option<T>` | Optional value |
+| `[T]` | `Vec<T>` | `Vec<T>` | Dynamic array |
+| `{T}` | `HashSet<T>` | `HashSet<T>` | Unordered set |
+| `{K=V}` | `HashMap<K, V>` | `HashMap<K, V>` | Key-value map |
+
+`T` and `T'` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'stack`, `T'heap`, etc.) are **contracts** and are never affected by the mode.
+
+In managed mode, `Arc<Mutex<T>>` is used with `--threading multi` (default) and `RefCell<T>` with `--threading single`.
 
 All ownership qualifiers:
 
-| Boring type  | Rust type      | Semantics                             |
-|--------------|----------------|---------------------------------------|
-| `T'stack`    | `T`                              | Stack allocation (Rust default)       |
-| `T'heap`     | `Box<T>`                         | Exclusive heap ownership              |
-| `T'copy`     | `T` (Copy)                       | Plain copy semantics                  |
-| `T'auto`     | `Rc<T>`                          | Single-thread reference-counted       |
-| `T'task`   | `Arc<T>`                         | Thread-safe shared (read-only)        |
-| `T'actor`    | `Arc<tokio::sync::Mutex<T>>`     | Shared mutable — all accesses auto-locked |
-| `T'guard`    | `Arc<tokio::sync::RwLock<T>>`    | Shared mutable — concurrent reads, exclusive writes |
-| `T'wauto`      | `Weak<T>`                        | Weak ref to `Rc<T>` (single-thread)   |
-| `T'wtask`      | `std::sync::Weak<T>`             | Weak ref to `Arc<T>` (task-safe)      |
-| `T'wactor`     | `std::sync::Weak<Mutex<T>>`      | Weak ref to actor (task-safe)         |
-| `T'wguard`     | `std::sync::Weak<RwLock<T>>`     | Weak ref to guard (task-safe)         |
-| `T'const`    | `&'static T`                     | Compile-time constant                 |
-| `T'option`   | `Option<T>`                      | Optional value                        |
+| Boring type   | `--threading multi`              | `--threading single`  | Semantics                             |
+|---------------|----------------------------------|-----------------------|---------------------------------------|
+| `T'stack`     | `T`                              | `T`                   | Stack allocation (Rust default)       |
+| `T'heap`      | `Box<T>`                         | `Box<T>`              | Exclusive heap ownership              |
+| `T'copy`      | `T` (Copy)                       | `T` (Copy)            | Plain copy semantics                  |
+| `T'shared`    | `Arc<T>`                         | `Rc<T>`               | Shared ref-counted — threading-aware  |
+| `T'actor`     | `Arc<tokio::sync::Mutex<T>>`     | `RefCell<T>`          | Shared mutable — all accesses auto-locked |
+| `T'guard`     | `Arc<tokio::sync::RwLock<T>>`    | `RefCell<T>`          | Shared mutable — concurrent reads, exclusive writes |
+| `T'wshared`   | `std::sync::Weak<T>`             | `Weak<T>`             | Weak ref to `T'shared`                |
+| `T'wactor`    | `std::sync::Weak<Mutex<T>>`      | `Weak<RefCell<T>>`    | Weak ref to actor                     |
+| `T'wguard`    | `std::sync::Weak<RwLock<T>>`     | `Weak<RefCell<T>>`    | Weak ref to guard                     |
+| `T'const`     | `&'static T`                     | `&'static T`          | Compile-time constant                 |
+| `T'option`    | `Option<T>`                      | `Option<T>`           | Optional value                        |
 
-### `let` vs `var` with `T'auto`, `T'task` and `T'actor`
+### Transpilation flags
 
-`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls — the shared value stays read-only. For mutation: hold the value with `var` + plain ownership (`T'auto`), or use `T'actor` for shared mutable state across tasks (`T'task`).
+```
+boring build --mode strict|managed     # memory management (default: strict)
+boring build --threading single|multi  # concurrency model (default: multi)
+```
+
+`--threading` is not available for the `--target kernel` target.
+
+### `let` vs `var` with `T'shared` and `T'actor`
+
+`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls — the shared value stays read-only. For mutation: hold the value with `var` + plain ownership, or use `T'actor` for shared mutable state.
 
 | Declaration | Reassign | `req` methods | `def` methods |
 |---|---|---|---|
-| `let T'auto x` / `let x'auto` | ✗ | ✓ | ✗ — use `var` + plain ownership |
-| `var T'auto x` / `var x'auto` | ✓ | ✓ | ✗ — use `var` + plain ownership |
-| `let T'task x` / `let x'task` | ✗ | ✓ | ✗ |
-| `var T'task x` / `var x'task` | ✓ | ✓ | ✗ — use `'actor` or `'guard` |
+| `let T'shared x` / `let x'shared` | ✗ | ✓ | ✗ — use `var` + plain ownership |
+| `var T'shared x` / `var x'shared` | ✓ | ✓ | ✗ — use `'actor` or `'guard` for mutation |
 | `let T'actor x` / `let x'actor` | ✗ | ✓ | ✗ |
 | `var T'actor x` / `var x'actor` | ✓ | ✓ | ✓ |
 | `let T'guard x` / `let x'guard` | ✗ | ✓ | ✗ |
@@ -4359,11 +4491,11 @@ struct Counter:
     def inc(): self.value += 1
     req int get():  self.value
 
-var c'task  = Counter()
-var c2'task = Counter()
-c = c2        # OK — reassign the Arc pointer
+var c'shared  = Counter()
+var c2'shared = Counter()
+c = c2        # OK — reassign the Arc/Rc pointer
 c.get()       # OK — req (non-mutating) methods work fine
-# c.inc()     # ERROR — def methods are forbidden on T'task even with var
+# c.inc()     # ERROR — def methods are forbidden on T'shared even with var
               #         use T'actor for shared mutable state
 ```
 
@@ -4376,13 +4508,10 @@ Borrows are written with `&` directly after the type name. Two forms are equival
 | `T&`          | `T'stack&`    | `&T`                        | Immutable borrow (default)     |
 | `var T&`      | —             | `&mut T`                    | Mutable borrow                 |
 | `T&heap`      | `T'heap&`     | `&Box<T>`                   | Borrow a heap value            |
-| `T&auto`      | `T'auto&`     | `&Rc<T>`                    | Borrow an Rc (use sparingly)   |
-| `T&task`      | `T'task&`     | `&Arc<T>`                   | Borrow an Arc (use sparingly)  |
+| `T&shared`    | `T'shared&`   | `&Arc<T>` / `&Rc<T>`        | Borrow a shared ref            |
 | `T&actor`     | `T'actor&`    | `&Arc<Mutex<T>>`            | Borrow an actor                |
 | `T&guard`     | `T'guard&`    | `&Arc<RwLock<T>>`           | Borrow a guard                 |
 | `T&option`    | `T'option&`   | `&Option<T>`                | Borrow an optional             |
-| `T&wauto`     | `T'wauto&`    | `&Weak<T>`                  | Borrow a weak Rc pointer       |
-| `T&wtask`     | `T'wtask&`    | `&sync::Weak<T>`            | Borrow a weak Arc pointer      |
 | `T&wactor`    | `T'wactor&`   | `&sync::Weak<Mutex<T>>`     | Borrow a weak actor pointer    |
 | `T&a`         | `T'heap&a`    | `&'a T`                     | Borrow with explicit lifetime  |
 
@@ -4410,12 +4539,12 @@ Other borrow forms with lifetime:
 |--------|------|---------|
 | `T&a` | `&'a T` | borrow a stack value |
 | `T'heap&a` | `&'a Box<T>` | borrow a heap value |
-| `T'task&a` | `&'a Arc<T>` | borrow a shared ref |
+| `T'shared&a` | `&'a Arc<T>` / `&'a Rc<T>` | borrow a shared ref |
 
-The postfix forms (`T'heap&`, `T'auto&`, `T'task&`) are useful with `use` aliases — define the alias once, then borrow with `&`:
+The postfix forms (`T'heap&`, `T'shared&`) are useful with `use` aliases — define the alias once, then borrow with `&`:
 
 ```boring
-use NodeRef as Node'task  # Arc<Node>
+use NodeRef as Node'shared  # Arc<Node> or Rc<Node> depending on --threading
 
 def process(NodeRef& n):   # &Arc<Node>
     print "{n}"
@@ -4449,36 +4578,32 @@ let int   x = 42    # i64
 let uint  n = 100   # u64
 ```
 
-> `String'const` and `String'task` follow the same mechanism and are inferred automatically from context. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringtask).
+> `String'const` and `String'shared` follow the same mechanism and are inferred automatically from context. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared).
 
-### Weak references — `'wauto`, `'wtask`, `'wactor`
+### Weak references — `'wshared`, `'wactor`, `'wguard`
 
 Weak qualifiers are single-token shorthands that combine ownership and non-owning semantics. They produce a non-owning pointer that does not prevent the pointee from being dropped:
 
-| Qualifier     | Expands to       | Rust type                   | Meaning                             |
-|---------------|------------------|-----------------------------|-------------------------------------|
-| `T'wauto`     | `T'auto'weak`    | `Weak<T>`                   | Weak ref to `Rc<T>` — single-thread |
-| `T'wtask`     | `T'task'weak`    | `std::sync::Weak<T>`        | Weak ref to `Arc<T>` — thread-safe  |
-| `T'wactor`    | `T'actor'weak`   | `std::sync::Weak<Mutex<T>>` | Weak ref to actor                   |
-| `T'wguard`    | `T'guard'weak`   | `std::sync::Weak<RwLock<T>>` | Weak ref to guard                  |
+| Qualifier     | Expands to         | Rust type                   | Meaning                             |
+|---------------|--------------------|-----------------------------|-------------------------------------|
+| `T'wshared`   | `T'shared'weak`    | `Weak<T>` / `std::sync::Weak<T>` | Weak ref to `T'shared` — threading-aware |
+| `T'wactor`    | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>` | Weak ref to actor                   |
+| `T'wguard`    | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>` | Weak ref to guard                  |
 
 Borrow variants (when you want to pass a weak pointer without transferring ownership):
 
 | Qualifier  | Rust type                   |
 |------------|-----------------------------|
-| `T&wauto`  | `&Weak<T>`                  |
-| `T&wtask`  | `&sync::Weak<T>`            |
 | `T&wactor` | `&sync::Weak<Mutex<T>>`     |
 | `T&wguard` | `&sync::Weak<RwLock<T>>`    |
 
 At a **binding site**, the qualifier can be inferred from the right-hand side — writing `'weak` alone is enough:
 
-| RHS qualifier  | Inferred weak type      | Rust                          |
-|----------------|-------------------------|-------------------------------|
-| `'auto`        | `T'wauto`               | `Weak<T>`                     |
-| `'task`        | `T'wtask`               | `std::sync::Weak<T>`          |
-| `'actor`       | `T'wactor`              | `std::sync::Weak<Mutex<T>>`   |
-| `'guard`       | `T'wguard`              | `std::sync::Weak<RwLock<T>>`  |
+| RHS qualifier  | Inferred weak type      | Rust                                      |
+|----------------|-------------------------|-------------------------------------------|
+| `'shared`      | `T'wshared`             | `Weak<T>` / `std::sync::Weak<T>`          |
+| `'actor`       | `T'wactor`              | `std::sync::Weak<Mutex<T>>`               |
+| `'guard`       | `T'wguard`              | `std::sync::Weak<RwLock<T>>`              |
 
 **Assigning** a strong reference to a weak binding automatically calls the right downgrade function (`Rc::downgrade` or `Arc::downgrade`). Calling **`.upgrade()`** returns the strong reference wrapped in an optional; it returns `nil` if the object was already dropped.
 
@@ -4486,32 +4611,23 @@ At a **binding site**, the qualifier can be inferred from the right-hand side �
 struct Resource:
     init(pub string label)
 
-# Rc-backed weak ref
-let Resource'auto   strong = Resource(label = "config.toml")
-let Resource'wauto  w1     = strong   # Rc::downgrade — Weak<Resource>
-
-# Arc-backed weak ref
-let Resource'task   shared = Resource(label = "shared.toml")
-let Resource'wtask  w2     = shared   # Arc::downgrade — sync::Weak<Resource>
+# Shared ref (Rc in single-thread, Arc in multi-thread)
+let Resource'shared strong = Resource(label = "config.toml")
+let Resource'wshared w1    = strong   # downgrade — Weak<Resource>
 
 # Qualifier inferred from RHS
-let a'auto  = Resource(label = "rc")
-let b'weak  = a                       # Weak<Resource>         (a is 'auto)
-let c'task  = Resource(label = "arc")
-let d'weak  = c                       # sync::Weak<Resource>   (c is 'task)
+let a'shared = Resource(label = "shared")
+let b'weak   = a                      # Weak<Resource> (a is 'shared)
 
 # .upgrade() recovers the strong reference
 let r = w1.upgrade()
 print r.label                         # config.toml
 ```
 
-**Rust equivalent**
+**Rust equivalent (multi-thread)**
 ```rust
-let strong: Rc<Resource> = Rc::new(Resource { label: Arc::from("config.toml") });
-let w1: Weak<Resource> = Rc::downgrade(&strong);
-
-let shared: Arc<Resource> = Arc::new(Resource { label: Arc::from("shared.toml") });
-let w2: std::sync::Weak<Resource> = Arc::downgrade(&shared);
+let strong: Arc<Resource> = Arc::new(Resource { label: Arc::from("config.toml") });
+let w1: std::sync::Weak<Resource> = Arc::downgrade(&strong);
 
 let r = w1.upgrade().unwrap();
 println!("{}", r.label);
@@ -4522,14 +4638,14 @@ Weak refs are useful for **breaking reference cycles** — for example, a parent
 Weak refs can be passed to and returned from functions:
 
 ```boring
-string describe(Resource'wauto w):
+string describe(Resource'wshared w):
     let r = w.upgrade()
     "resource: {r.label}"
 
 print describe(w1)   # resource: config.toml
 ```
 
-> `T'wauto` is not task-safe. Use `T'wtask` for cross-task weak references.
+> Use `T'wshared` for both single-thread (Weak<Rc<T>>) and multi-thread (sync::Weak<T>) weak references. The transpiler selects the correct type based on `--threading`.
 
 ---
 
@@ -4881,10 +4997,10 @@ strategy automatically — no `move` keyword or explicit `.clone()` required.
 |------------------------|--------------------------------------------------------------|
 | `int`, `float`, `bool` | Copied into the task (Copy types)                           |
 | `string` (literal → `String'const`) | Copied directly — `&'static str` is `Copy`, no allocation |
-| `string` (heap → `String'task`)     | `Arc::clone` — both the task and the outer scope keep access |
+| `string` (heap → `String'shared`)   | `Arc::clone` — both the task and the outer scope keep access |
 | `T'actor`              | `Arc::clone` — the mutex is shared across the tasks          |
 | `T'` (owned)           | Moved into the task; the outer binding is invalidated        |
-| Array / Dict / Set without qualifier | **Blocked** — use `T'task` or `T'auto` instead |
+| Array / Dict / Set without qualifier | **Blocked** — use `T'shared` or `T'actor` instead |
 
 ```boring
 task string transform(string s):
@@ -4911,11 +5027,11 @@ async fn main() {
 }
 ```
 
-### Task methods — `self` must be `T'task`
+### Task methods — `self` must be `T'shared`
 
 A method marked `task` takes ownership of the receiver as `Arc<Self>`.
 This allows the future to safely cross thread boundaries without borrowing.
-The struct variable must therefore be declared with the `'task` qualifier.
+The struct variable must therefore be declared with the `'shared` qualifier.
 
 ```boring
 struct Worker:
@@ -4926,7 +5042,7 @@ task Worker.run():
     print "worker {self.name} processing {self.jobs} jobs"
 
 def main():
-    let w'task = Worker(name = "alice", jobs = 5)
+    let w'shared = Worker(name = "alice", jobs = 5)
     let f = task w.run()      # Arc::clone(&w) is inserted automatically
     print w.name             # alice — w is still accessible
     f.value                   # wait for run() to finish
@@ -4947,13 +5063,13 @@ async fn main() {
 }
 ```
 
-A plain struct (without `'task`) cannot be used with `task w.method()` — the interpreter
+A plain struct (without `'shared`) cannot be used with `task w.method()` — the interpreter
 will reject the capture at runtime, and the generated Rust would not compile
 (`tokio::spawn` requires `'static` bounds that a borrowed `&self` cannot satisfy).
 
 ### Shared mutable state — `T'actor`
 
-`T'task` gives read-only shared access (`Arc<T>`). When multiple tasks need to
+`T'shared` gives read-only shared access (`Arc<T>`). When multiple tasks need to
 **read and write** the same struct, use **`T'actor`** — this wraps the value in
 `Arc<tokio::sync::Mutex<T>>` and **inserts `.lock().await` automatically** at every
 field access and method call. The qualifier works with both `let` and `var`; no
@@ -4996,7 +5112,7 @@ struct App:
 
 | Qualifier | Rust type | Semantics |
 |---|---|---|
-| `T'task` | `Arc<T>` | read-only shared; task methods use `self: Arc<Self>` |
+| `T'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | read-only shared; task methods use `self: Arc<Self>` |
 | `T'actor` | `Arc<tokio::sync::Mutex<T>>` | shared mutable; all accesses auto-locked |
 | `T'guard` | `Arc<tokio::sync::RwLock<T>>` | shared mutable; concurrent reads, exclusive writes |
 
@@ -5452,7 +5568,7 @@ if let user:
 | `bool`            | `Bool'copy`     | `bool`                                |
 | `string` (param)           | —               | `&str` — accepts both literals and heap strings   |
 | `string` (literal)         | `String'const`  | `&'static str` — zero allocation, `Copy`          |
-| `string` (heap / stored)   | `String'task`   | `Arc<str>` — reference-counted, thread-safe, single allocation    |
+| `string` (heap / stored)   | `String'shared` | `Arc<str>` — reference-counted, single allocation    |
 | `T`     | `T'stack`   | `T` (stack, Rust default)             |
 | `T'`    | `T'heap`    | `Box<T>`                              |
 | `T?`    | `T'option`  | `Option<T>`                           |
@@ -5461,12 +5577,10 @@ if let user:
 | `{T}`   | `Set<T>`    | `HashSet<T>`                          |
 | `(T1, T2)`         | —           | `(T1, T2)`                            |
 | `T'copy`           | —           | `T` (requires `Copy`)                 |
-| `T'auto`           | —           | `Rc<T>`                               |
-| `T'task`             | —        | `Arc<T>` — thread-safe shared (read-only) |
+| `T'shared`         | —           | `Arc<T>` (multi) / `Rc<T>` (single)  |
 | `T'actor`          | —           | `Arc<tokio::sync::Mutex<T>>` — shared mutable, all accesses auto-locked |
 | `T'guard`          | —           | `Arc<tokio::sync::RwLock<T>>` — concurrent reads, exclusive writes |
-| `T'wauto`          | `T'auto'weak`  | `Weak<T>` — weak Rc, single-thread    |
-| `T'wtask`          | `T'task'weak`  | `std::sync::Weak<T>` — weak Arc       |
+| `T'wshared`        | `T'shared'weak` | `std::sync::Weak<T>` / `Weak<T>` — weak ref, threading-aware |
 | `T'wactor`         | `T'actor'weak` | `std::sync::Weak<Mutex<T>>`           |
 | `T'wguard`         | `T'guard'weak` | `std::sync::Weak<RwLock<T>>`          |
 | `T'const`          | —              | `&'static T`                          |
@@ -5621,7 +5735,7 @@ This chapter covers features you will rarely need in everyday code. They exist f
 
 ---
 
-### Advanced — Strings: `string`, `String'const`, and `String'task`
+### Advanced — Strings: `string`, `String'const`, and `String'shared`
 
 Boring has one user-facing string type — `string` — whose concrete Rust representation is inferred automatically. You should use bare `string` everywhere; the compiler picks the right form.
 
@@ -5631,25 +5745,25 @@ Boring has one user-facing string type — `string` — whose concrete Rust repr
 |-----------------------------------------------|--------------------|--------------------|
 | Function parameter (`string s`)               | `String'const`     | `&str`             |
 | Initialised from a compile-time literal       | `String'const`     | `&'static str`     |
-| Initialised from concatenation / interpolation | `String'task`     | `Arc<str>`         |
-| Stored in a variable, field, or collection    | `String'task`      | `Arc<str>`         |
+| Initialised from concatenation / interpolation | `String'shared`   | `Arc<str>`         |
+| Stored in a variable, field, or collection    | `String'shared`    | `Arc<str>`         |
 
-`String'const` is zero-cost (`Copy`, stack), `String'task` is reference-counted (`Arc<str>`) — a single allocation storing the string data directly in the Arc.
+`String'const` is zero-cost (`Copy`, stack), `String'shared` is reference-counted (`Arc<str>`) — a single allocation storing the string data directly in the Arc.
 
 #### Explicit long forms
 
 You can write the long forms when you need to be precise:
 
 ```boring
-let String'const a = "hello"      # &'static str — zero allocation
-let String'task  b = a + " world" # Arc<str>     — heap string, single allocation
+let String'const  a = "hello"      # &'static str — zero allocation
+let String'shared b = a + " world" # Arc<str>     — heap string, single allocation
 ```
 
 The long forms are useful in newtypes:
 
 ```boring
-type Label      as String'const   # wraps &'static str
-type SharedName as String'task    # wraps Arc<str>
+type Label      as String'const    # wraps &'static str
+type SharedName as String'shared   # wraps Arc<str>
 ```
 
 #### String representation in tasks
@@ -5659,7 +5773,7 @@ When a string is captured by a task:
 | String kind          | Capture strategy                                            |
 |----------------------|-------------------------------------------------------------|
 | Literal (`String'const`) | Copied directly — `&'static str` is `Copy`, no allocation |
-| Heap (`String'task`)     | `Arc::clone` — task and outer scope both keep access       |
+| Heap (`String'shared`)   | `Arc::clone` — task and outer scope both keep access       |
 
 ```boring
 task string transform(string s):
@@ -6045,8 +6159,7 @@ String literals are emitted as `c_str!("…")`.
 | Boring | Rust std | Rust-kernel |
 |--------|----------|-------------|
 | `T'` | `Box<T>` | `Box<T, KVmalloc>` — kernel allocator |
-| `T'auto` | `Rc<T>` | `Arc<T>` ⚠ warning — `Rc` unavailable |
-| `T'task` | `Arc<T>` | `kernel::sync::Arc<T>` |
+| `T'shared` | `Arc<T>` / `Rc<T>` | `kernel::sync::Arc<T>` — `Rc` unavailable in kernel |
 | `T'actor` | `Arc<tokio::sync::Mutex<T>>` | `Arc<kernel::sync::Mutex<T>>` |
 | `T'guard` | `Arc<tokio::sync::RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` |
 
@@ -6151,55 +6264,97 @@ Both work items are enqueued concurrently; `.wait()` is called on each in turn. 
 
 ---
 
-### `channel<T, N>` — bounded ring buffer
+### `channel` — two ring-buffer variants
 
-In the standard backend, `channel<T>(N)` maps to `tokio::sync::mpsc::channel(N)`.
-In the kernel backend, it generates a **ring buffer** backed by a fixed-size array:
+The kernel backend provides two channel implementations depending on how the capacity is expressed. Both use blocking `send()` / `recv()` — valid in process context only.
+
+#### `channel<T, N>` — const-generic, stack buffer
+
+The capacity is a compile-time type parameter. The buffer is a fixed-size array `[Option<T>; N]` allocated inline (no heap). Emits `KernelSender<T, N>` / `KernelReceiver<T, N>`.
 
 ```boring
-let tx, rx = channel<string, 32>   # explicit capacity
-let tx, rx = channel<string>       # default capacity: 2
+let tx, rx = channel<string, 32>   # const-generic, stack buffer
 tx.send("hello")                   # blocks if full
 let msg = rx.recv()                # blocks if empty
 ```
 
-Both `send()` and `recv()` are blocking — valid in process context only.
-The capacity `N` is a compile-time constant. Omitting it defaults to **2** and emits a warning suggesting you specify it explicitly.
+```rust
+// Generated (kernel)
+let (tx, rx) = kernel_channel::<CString, 32>();
+tx.send(c_str!("hello"));
+let msg = rx.recv();
+```
 
----
+#### `channel<T>(cap)` — runtime capacity, heap buffer
 
-### `stream<N> def` — streaming work items
-
-`stream def` runs its body as a work item and sends each `yield`ed value into an internal `channel<T, N>`. The caller receives a `KernelReceiver<T, N>` and consumes values with `.recv()`.
+The capacity is a call argument. The buffer is a `Vec<Option<T>>` pre-allocated on the kernel heap. Emits `DynKernelSender<T>` / `DynKernelReceiver<T>`.
 
 ```boring
-stream<16> def string lines(File file):
-    for line in file.readLines():
-        yield line             # → this.tx.send(line)
-
-stream def string words():    # capacity defaults to 2
-    yield "hello"
-    yield "world"
+let tx, rx = channel<string>(32)   # runtime cap, heap buffer
+tx.send("hello")
+let msg = rx.recv()
 ```
 
 ```rust
 // Generated (kernel)
+let (tx, rx) = dyn_kernel_channel::<CString>(32);
+tx.send(c_str!("hello"));
+let msg = rx.recv();
+```
+
+Omitting the capacity entirely uses the const-generic variant with `N = 2` and emits a warning recommending an explicit value.
+
+---
+
+### `stream` — sequential iterator or Work item
+
+The kernel backend applies the same two-strategy rule as the tokio backend.
+
+#### Sequential stream
+
+If the body has no `wait` and no `task` calls, the stream is emitted as a plain iterator — no workqueue involved. `yield` → `__items.push(...)`, returns `__items.into_iter()`.
+
+```boring
+stream int range(int n):
+    for i in 0..n:
+        yield i
+```
+
+```rust
+// Generated (kernel)
+fn range(n: i64) -> impl Iterator<Item = i64> {
+    let mut __items: kernel::prelude::Vec<i64> = kernel::prelude::Vec::new();
+    for i in 0i64..n { __items.push(i); }
+    __items.into_iter()
+}
+```
+
+#### Async stream — Work item + `KernelReceiver<T, N>`
+
+If the body contains `wait` or `task` calls, the stream becomes a workqueue work item. The function returns a `KernelReceiver<T, N>`; the caller consumes values with `.recv()`. Use `stream<N>` to set the capacity explicitly (defaults to 2).
+
+```boring
+stream<16> string lines(File file):
+    for line in file.readLines():
+        yield line
+```
+
+```rust
+// Generated (kernel) — three pieces:
 struct LinesWork {
     file: File,
-    tx: KernelSender<kernel::str::CString, 16>,
+    tx:   KernelSender<CString, 16>,
     work: kernel::workqueue::Work<LinesWork>,
 }
-
 impl kernel::workqueue::Work<LinesWork> for LinesWork {
     fn run(this: Arc<Self>) {
         for line in this.file.read_lines() {
-            this.tx.send(line);
+            this.tx.send(line);   // blocks if consumer is slow
         }
         // tx dropped → signals end-of-stream
     }
 }
-
-fn lines(file: File) -> KernelReceiver<kernel::str::CString, 16> { … }
+fn lines(file: File) -> KernelReceiver<CString, 16> { … }
 ```
 
 ---
@@ -6218,8 +6373,8 @@ fn lines(file: File) -> KernelReceiver<kernel::str::CString, 16> { … }
 
 | Construct | Behaviour |
 |-----------|-----------|
-| `channel<T>` without capacity | defaults to 2 — specify `channel<T, N>` explicitly |
-| `stream def` without `<N>` | defaults to 2 — specify `stream<N> def` explicitly |
-| `T'auto` | replaced by `Arc<T>` — `Rc` is unavailable in `no_std` |
+| `channel<T>` without capacity | defaults to const-generic N=2 — specify `channel<T, N>` or `channel<T>(cap)` explicitly |
+| `stream` without `<N>` (async body) | defaults to N=2 — specify `stream<N>` explicitly |
+| `T'shared` | `Rc<T>` replaced by `kernel::sync::Arc<T>` — `Rc` is unavailable in `no_std` |
 
 ---

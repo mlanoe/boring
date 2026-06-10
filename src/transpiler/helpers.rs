@@ -818,6 +818,34 @@ pub(crate) fn body_calls_task_fn(stmts: &[Stmt], task_fns: &std::collections::Ha
     false
 }
 
+/// Returns true when the stream body contains no async operations (no `wait`, no task fn calls,
+/// no `task` expressions). Used to decide whether to emit an `Iterator` instead of an async stream.
+pub(crate) fn body_is_sequential(stmts: &[Stmt], task_fns: &std::collections::HashSet<String>) -> bool {
+    !body_has_wait(stmts) && !body_calls_task_fn(stmts, task_fns)
+}
+
+fn body_has_wait(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Wait(..) => return true,
+            Stmt::If(i) => {
+                if i.branches.iter().any(|(_, b)| body_has_wait(b))
+                    || i.else_body.as_deref().map_or(false, body_has_wait)
+                { return true; }
+            }
+            Stmt::While(w) => { if body_has_wait(&w.body) { return true; } }
+            Stmt::For(f)   => { if body_has_wait(&f.body) { return true; } }
+            Stmt::Defer(b) => { if body_has_wait(b)       { return true; } }
+            Stmt::Try(t)   => {
+                if body_has_wait(&t.body) { return true; }
+                if t.catch_clauses.iter().any(|c| body_has_wait(&c.body)) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn expr_calls_task_fn(expr: &Expr, task_fns: &std::collections::HashSet<String>) -> bool {
     match &expr.kind {
         ExprKind::Call(callee, args) | ExprKind::MethodCall(callee, _, args) => {

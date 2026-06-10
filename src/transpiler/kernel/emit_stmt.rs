@@ -48,6 +48,29 @@ impl KernelTranspiler {
     fn emit_stmt_impl(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
             Stmt::Let(s) => {
+                use crate::ast::ExprKind;
+                if let Some(val) = &s.value {
+                    // Track `let tx = broadcast<T>(cap)` (single-binding sender).
+                    let is_broadcast_call = matches!(&val.kind,
+                        ExprKind::GenericCall(callee, _, _)
+                        if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"))
+                        || matches!(&val.kind,
+                        ExprKind::Call(callee, _)
+                        if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"));
+                    if is_broadcast_call && s.name != "_" {
+                        self.broadcast_senders.insert(s.name.clone());
+                    }
+                    // Track `let rx = tx.subscribe()` so rx.recv() is dispatched correctly.
+                    if let ExprKind::MethodCall(obj, method, _) = &val.kind {
+                        if method == "subscribe" {
+                            if let ExprKind::Var(tx_name) = &obj.kind {
+                                if self.broadcast_senders.contains(tx_name.as_str()) {
+                                    self.broadcast_receivers.insert(s.name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 let kw = if s.mutable { "let mut" } else { "let" };
                 match &s.value {
                     None => {
@@ -128,10 +151,59 @@ impl KernelTranspiler {
             }
 
             Stmt::LetDestructure(s) => {
-                let kw = if s.mutable { "let mut" } else { "let" };
-                let names: Vec<String> = s.bindings.iter().map(|b| b.name.clone()).collect();
+                use crate::ast::ExprKind;
+                // Detect `let tx, rx = oneshot<T>()` and register the variables.
+                let is_oneshot = matches!(&s.value.kind,
+                    ExprKind::GenericCall(callee, _, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "oneshot"))
+                    || matches!(&s.value.kind,
+                    ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "oneshot"));
+                if is_oneshot {
+                    if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+                        if sender.name != "_" { self.oneshot_senders.insert(sender.name.clone()); }
+                        if receiver.name != "_" { self.oneshot_receivers.insert(receiver.name.clone()); }
+                    }
+                }
+                // Detect `let tx, rx = broadcast<T>(cap)` and register the variables.
+                let is_broadcast = matches!(&s.value.kind,
+                    ExprKind::GenericCall(callee, _, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"))
+                    || matches!(&s.value.kind,
+                    ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"));
+                if is_broadcast {
+                    if let Some(sender) = s.bindings.get(0) {
+                        if sender.name != "_" { self.broadcast_senders.insert(sender.name.clone()); }
+                    }
+                    if let Some(receiver) = s.bindings.get(1) {
+                        if receiver.name != "_" { self.broadcast_receivers.insert(receiver.name.clone()); }
+                    }
+                }
+                // Detect `let tx, rx = watch<T>(initial)` and register the variables.
+                let is_watch = matches!(&s.value.kind,
+                    ExprKind::GenericCall(callee, _, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "watch"))
+                    || matches!(&s.value.kind,
+                    ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(n) if n == "watch"));
+                if is_watch {
+                    if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+                        if sender.name != "_" { self.watch_senders.insert(sender.name.clone()); }
+                        if receiver.name != "_" { self.watch_receivers.insert(receiver.name.clone()); }
+                    }
+                }
+                // watch receiver must be `mut` (calls `recv(&mut self)`); oneshot is consumed once.
+                let names: Vec<String> = if is_watch && s.bindings.len() == 2 {
+                    vec![
+                        s.bindings[0].name.clone(),
+                        format!("mut {}", s.bindings[1].name),
+                    ]
+                } else {
+                    s.bindings.iter().map(|b| b.name.clone()).collect()
+                };
                 let val_s = self.emit_expr(&s.value);
-                self.line(&format!("{} ({}) = {};", kw, names.join(", "), val_s));
+                self.line(&format!("let ({}) = {};", names.join(", "), val_s));
             }
 
             Stmt::Throw(t) => {
@@ -209,7 +281,9 @@ impl KernelTranspiler {
             Stmt::Defer(_) => self.line("// TODO: kernel defer"),
             Stmt::Yield(e, _) => {
                 let s = self.emit_expr(e);
-                if self.in_stream_body {
+                if self.in_iter_stream {
+                    self.line(&format!("__items.push({});", s));
+                } else if self.in_stream_body {
                     self.line(&format!("this.tx.send({});", s));
                 } else {
                     self.line(&format!("yield {};", s));
@@ -263,6 +337,24 @@ impl KernelTranspiler {
     }
 
     fn emit_for(&mut self, s: &ForStmt) {
+        // `for msg in rx` on a broadcast receiver → `loop { let msg = rx.recv(); body }`
+        use crate::ast::ExprKind;
+        if let ExprKind::Var(rx_name) = &s.iterable.kind {
+            if self.broadcast_receivers.contains(rx_name.as_str()) {
+                let vars_s = if s.vars.is_empty() {
+                    "_".into()
+                } else {
+                    s.vars.join(", ")
+                };
+                self.line("loop {");
+                self.indent += 1;
+                self.line(&format!("let {} = {}.recv();", vars_s, rx_name));
+                for stmt in &s.body { self.emit_stmt(stmt); }
+                self.indent -= 1;
+                self.line("}");
+                return;
+            }
+        }
         let iter_s = self.emit_expr(&s.iterable);
         let vars_s = if s.vars.len() == 1 {
             s.vars[0].clone()

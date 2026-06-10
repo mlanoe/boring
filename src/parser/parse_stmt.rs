@@ -291,7 +291,7 @@ impl Parser {
         // `let type name = value`    — explicit type annotation (boring convention)
         let (name, ty, _is_move) = if self.is_type_start_before_ident() {
             let base = self.parse_type()?;
-            let ty = self.parse_type_qualifier(base);
+            let ty = self.parse_type_qualifier(base)?;
             // `var T&` → absorb mutability into the borrow type
             let ty = if mutable { Self::apply_var_to_borrow(ty) } else { ty };
             let name = self.expect_ident()?;
@@ -299,7 +299,7 @@ impl Parser {
             let ty = if self.check(&TokenKind::Tick) {
                 let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 if matches!(next_kind, Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard)) {
-                    self.parse_type_qualifier(ty)
+                    self.parse_type_qualifier(ty)?
                 } else {
                     ty
                 }
@@ -324,7 +324,7 @@ impl Parser {
                     Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) => {
                         // Do NOT advance here — parse_type_qualifier consumes the tick + qualifier itself.
                         let placeholder = Type::Named("_".to_string());
-                        let qualified = self.parse_type_qualifier(placeholder);
+                        let qualified = self.parse_type_qualifier(placeholder)?;
                         self.expect(&TokenKind::Eq)?;
                         let value = self.parse_expr()?;
                         self.expect_newline_soft();

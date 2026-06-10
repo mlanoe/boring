@@ -111,7 +111,7 @@ struct PDog6:
 ext PDog6 as PPrint2:
     req string describe(): "Dog({self.name})"
 
-def string print_it(PPrint2'task p): p.describe()
+def string print_it(PPrint2'shared p): p.describe()
 
 let pd6 = PDog6(name = "Fido")
 print print_it(pd6)
@@ -131,7 +131,7 @@ ext PCat2 as PNamed, PAged:
     req string nm(): self.cat_name
     req int ag(): self.cat_age
 
-def string describepc(PNamed'task n, PAged'task a): "{n.nm()} is {a.ag()}"
+def string describepc(PNamed'shared n, PAged'shared a): "{n.nm()} is {a.ag()}"
 
 let pc2 = PCat2(cat_name = "Mimi", cat_age = 3)
 print describepc(pc2, pc2)

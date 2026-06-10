@@ -68,7 +68,7 @@ impl Parser {
 
         let params = self.parse_params()?;
         // All parameters in a `def`/`req` declaration must have explicit type annotations.
-        // Unannotated params produce invalid Rust when using --emit-rust.
+        // Unannotated params produce invalid Rust when using `boring build`.
         for p in &params {
             if p.ty.is_none() && !p.variadic {
                 return Err(ParseError::Generic {
@@ -245,7 +245,7 @@ impl Parser {
             let saved = self.pos;
             if let Ok(t) = self.parse_type() {
                 // Apply ownership qualifier: `Dog'`, `Dog'copy`, etc.
-                let t = self.parse_type_qualifier(t);
+                let t = self.parse_type_qualifier(t)?;
                 // `var T&` → mutable borrow: absorb `mutable` into the type qualifier.
                 let t = if mutable {
                     Self::apply_var_to_borrow(t)
@@ -331,7 +331,7 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(&TokenKind::LParen)?;
         let param_ty = self.parse_type()?;
-        let param_ty = self.parse_type_qualifier(param_ty);
+        let param_ty = self.parse_type_qualifier(param_ty)?;
         let param_name = self.expect_ident()?;
         self.expect(&TokenKind::RParen)?;
         let mut throws = self.eat(&TokenKind::Throws);
@@ -387,7 +387,7 @@ impl Parser {
                 let name = self.expect_ident()?;
                 self.expect(&TokenKind::LParen)?;
                 let param_ty = self.parse_type()?;
-                let param_ty = self.parse_type_qualifier(param_ty);
+                let param_ty = self.parse_type_qualifier(param_ty)?;
                 let param_name = self.expect_ident()?;
                 self.expect(&TokenKind::RParen)?;
                 let mut throws = self.eat(&TokenKind::Throws);
@@ -565,7 +565,7 @@ impl Parser {
         };
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
-        let ty = self.parse_type_qualifier(ty);
+        let ty = self.parse_type_qualifier(ty)?;
         self.expect_newline()?;
         Ok(AliasDecl { name, type_params, ty, newtype: false, line })
     }

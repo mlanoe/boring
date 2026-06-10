@@ -73,7 +73,7 @@ impl Interpreter {
                 //   def methods are still forbidden — use T'actor for that).
                 // `var` = fully mutable (reassign + def methods).
                 let is_shared_var = s.mutable && s.ty.as_ref().map(|ty| {
-                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Task))
+                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 if is_shared_var {
                     target_env.borrow_mut().define_shared_mut(&s.name, val);
@@ -819,15 +819,13 @@ impl Interpreter {
                     OwnerQual::Owned        => "'".to_string(),
                     OwnerQual::Copy         => "'copy".to_string(),
                     OwnerQual::Const        => "'const".to_string(),
-                    OwnerQual::Task         => "'task".to_string(),
                     OwnerQual::Actor        => "'actor".to_string(),
                     OwnerQual::Guard        => "'guard".to_string(),
-                    OwnerQual::Auto         => "'auto".to_string(),
+                    OwnerQual::Shared       => "'shared".to_string(),
                     OwnerQual::Weak         => "'weak".to_string(),
                     OwnerQual::Stack        => "'stack".to_string(),
                     OwnerQual::Lifetime(lt) => format!("'{}", lt),
-                    OwnerQual::BorrowAuto   => "&auto".to_string(),
-                    OwnerQual::BorrowTask   => "&task".to_string(),
+                    OwnerQual::BorrowShared => "&shared".to_string(),
                     OwnerQual::BorrowOwned  => "&heap".to_string(),
                     OwnerQual::BorrowOption => "&option".to_string(),
                     OwnerQual::BorrowWeak   => "&weak".to_string(),
@@ -1298,7 +1296,7 @@ impl Interpreter {
 
     pub(crate) fn type_has_mutable_ref_qual(ty: &Type) -> bool {
         match ty {
-            Type::Qualified(_, OwnerQual::Task | OwnerQual::Auto | OwnerQual::Guard) => true,
+            Type::Qualified(_, OwnerQual::Shared | OwnerQual::Guard) => true,
             Type::Qualified(inner, _) => Self::type_has_mutable_ref_qual(inner),
             Type::Optional(inner)
             | Type::Array(inner)
@@ -1323,7 +1321,7 @@ impl Interpreter {
                     return Err(err(
                         format!(
                             "parametric enum '{}': variant field cannot use \
-                             'auto or 'task qualifier (use ', 'copy or 'const)",
+                             'shared qualifier (use ', 'copy or 'const)",
                             decl.name
                         ),
                         decl.line,

@@ -175,7 +175,17 @@ impl Transpiler {
                                         } else {
                                             format!("{}.clone()", rs_raw)
                                         };
-                                        format!("Box::new({})", clone_expr)
+                                        // In managed mode: wrap in Arc<Mutex<T>> or RefCell<T>.
+                                        if self.is_managed_owned_user(pty) {
+                                            match self.config.threading {
+                                                crate::transpiler::ThreadingMode::Multi =>
+                                                    format!("Arc::new(std::sync::Mutex::new({}))", clone_expr),
+                                                crate::transpiler::ThreadingMode::Single =>
+                                                    format!("RefCell::new({})", clone_expr),
+                                            }
+                                        } else {
+                                            format!("Box::new({})", clone_expr)
+                                        }
                                     } else {
                                         rs_raw
                                     }
@@ -611,6 +621,20 @@ impl Transpiler {
                     if self.var_mutex_types.contains(v.as_str()) {
                         return format!("{}.lock().await.{}", v, field);
                     }
+                    // Managed-mode mutex var (std::sync::Mutex, synchronous):
+                    // w.field → w.lock().unwrap().field
+                    // If the param has a shadow guard, use it directly (no re-locking).
+                    if let Some(shadow) = self.managed_param_shadows.get(v.as_str()) {
+                        return format!("{}.{}", shadow, field);
+                    }
+                    if self.managed_mutex_vars.contains(v.as_str()) {
+                        return format!("{}.lock().unwrap().{}", v, field);
+                    }
+                    // Managed-mode RefCell var (single-thread):
+                    // w.field → w.borrow().field
+                    if self.managed_refcell_vars.contains(v.as_str()) {
+                        return format!("{}.borrow().{}", v, field);
+                    }
                 }
                 // Mutex struct field: self.worker.field → self.worker.lock().await.field
                 if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {
@@ -1042,15 +1066,55 @@ impl Transpiler {
             ExprKind::OptionalField(obj, field) => {
                 // Use .clone() so the result is Option<T> (owned), not Option<&T>.
                 // This makes nil-coalescing (`?.field else default`) work with matching types.
-                format!("{}.as_ref().map(|__v| __v.{}.clone())", self.emit_expr(obj), field)
+                let obj_s = self.emit_expr(obj);
+                let shadow_name = if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_param_shadows.get(v.as_str()).cloned()
+                } else { None };
+                let is_managed_mutex = shadow_name.is_none() && if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_mutex_vars.contains(v.as_str())
+                } else { false };
+                let is_managed_refcell = if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_refcell_vars.contains(v.as_str())
+                } else { false };
+                if let Some(shadow) = shadow_name {
+                    format!("{}.as_ref().map(|__v| __v.{}.clone())", shadow, field)
+                } else if is_managed_mutex {
+                    // Arc<std::sync::Mutex<T>> — use .lock().unwrap()
+                    format!("{}.as_ref().map(|__v| __v.lock().unwrap().{}.clone())", obj_s, field)
+                } else if is_managed_refcell {
+                    // RefCell<T> — use .borrow()
+                    format!("{}.as_ref().map(|__v| __v.borrow().{}.clone())", obj_s, field)
+                } else {
+                    format!("{}.as_ref().map(|__v| __v.{}.clone())", obj_s, field)
+                }
             }
             ExprKind::OptionalMethodCall(obj, method, args) => {
                 // Use emit_expr_owned so string literals are coerced to Arc<str> (not &str).
                 // Without this, opt?.push("hello") would pass &str where Arc<str> is expected.
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
-                // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
-                format!("{}.clone().map(|mut __v| __v.{}({}))", self.emit_expr(obj), method, args_s.join(", "))
+                let obj_s = self.emit_expr(obj);
+                let shadow_name_mc = if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_param_shadows.get(v.as_str()).cloned()
+                } else { None };
+                let is_managed_mutex = shadow_name_mc.is_none() && if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_mutex_vars.contains(v.as_str())
+                } else { false };
+                let is_managed_refcell = if let ExprKind::Var(v) = &obj.kind {
+                    self.managed_refcell_vars.contains(v.as_str())
+                } else { false };
+                if let Some(shadow) = shadow_name_mc {
+                    format!("{}.clone().map(|mut __v| __v.{}({}))", shadow, method, args_s.join(", "))
+                } else if is_managed_mutex {
+                    // Arc<std::sync::Mutex<T>> — use .lock().unwrap()
+                    format!("{}.clone().map(|__v| __v.lock().unwrap().{}({}))", obj_s, method, args_s.join(", "))
+                } else if is_managed_refcell {
+                    // RefCell<T> — use .borrow_mut() for method calls
+                    format!("{}.clone().map(|__v| __v.borrow_mut().{}({}))", obj_s, method, args_s.join(", "))
+                } else {
+                    // Use .clone().map(|mut __v| ...) so that &mut self methods can be called.
+                    // Cloning Option<Box<T>> gives an owned value, and `mut __v` allows &mut deref.
+                    format!("{}.clone().map(|mut __v| __v.{}({}))", obj_s, method, args_s.join(", "))
+                }
             }
 
             ExprKind::Closure(params, _ret_ty, body, throws, task) => {
@@ -1110,7 +1174,13 @@ impl Transpiler {
                                 (sub.arc_vars.contains(*v) || sub.string_arc_vars.contains(*v))
                                     && !param_names.contains(v.as_str())
                             })
-                            .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                            .map(|v| {
+                                if sub.rc_vars.contains(v.as_str()) {
+                                    format!("let {} = Rc::clone(&{});", v, v)
+                                } else {
+                                    format!("let {} = Arc::clone(&{});", v, v)
+                                }
+                            })
                             .collect();
                         arc_caps.join(" ")
                     } else {
@@ -1276,7 +1346,13 @@ impl Transpiler {
                     String::new()
                 } else {
                     arc_captures.iter()
-                        .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                        .map(|v| {
+                            if self.rc_vars.contains(*v) {
+                                format!("let {} = Rc::clone(&{});", v, v)
+                            } else {
+                                format!("let {} = Arc::clone(&{});", v, v)
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join(" ") + " "
                 };
@@ -1296,7 +1372,11 @@ impl Transpiler {
                 // otherwise emit as an inline future expression.
                 if self.in_async {
                     // Mark the spawn as a throws JoinHandle so .value uses the ? unwrap
-                    format!("tokio::spawn({})", timeout_future)
+                    let spawn_fn = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Single => "tokio::task::spawn_local",
+                        crate::transpiler::ThreadingMode::Multi  => "tokio::spawn",
+                    };
+                    format!("{}({})", spawn_fn, timeout_future)
                 } else {
                     timeout_future
                 }
@@ -1336,9 +1416,28 @@ impl Transpiler {
                 };
 
                 let clones: String = arc_captures.iter()
-                    .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                    .map(|v| {
+                        if self.rc_vars.contains(*v) {
+                            format!("let {} = Rc::clone(&{});", v, v)
+                        } else {
+                            format!("let {} = Arc::clone(&{});", v, v)
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
+
+                // !Send warning: spawn_local captures Rc vars in single-thread mode.
+                if !blocking && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                    for v in &arc_captures {
+                        if self.rc_vars.contains(*v) {
+                            eprintln!(
+                                "warning: `spawn_local` captures `{}` which is Rc<T> (a !Send type); \
+                                 Rc values cannot be sent across task boundaries",
+                                v
+                            );
+                        }
+                    }
+                }
 
                 if blocking {
                     // Synchronous closure — tokio::task::spawn_blocking(move || { body })
@@ -1347,22 +1446,22 @@ impl Transpiler {
                     } else {
                         format!("{{ {} move || {} }}", clones, inner_s)
                     };
-                    if self.in_async {
-                        format!("tokio::task::spawn_blocking({})", closure)
-                    } else {
-                        format!("tokio::task::spawn_blocking({})", closure)
-                    }
+                    format!("tokio::task::spawn_blocking({})", closure)
                 } else {
-                    // Asynchronous closure — tokio::spawn(async move { body })
+                    // Asynchronous closure — spawn_local (single) or tokio::spawn (multi)
+                    let spawn_fn = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Single => "tokio::task::spawn_local",
+                        crate::transpiler::ThreadingMode::Multi  => "tokio::spawn",
+                    };
                     if arc_captures.is_empty() {
                         if self.in_async {
-                            format!("tokio::spawn(async move {})", inner_s)
+                            format!("{}(async move {})", spawn_fn, inner_s)
                         } else {
                             format!("async move {}", inner_s)
                         }
                     } else {
                         if self.in_async {
-                            format!("tokio::spawn({{ {} async move {} }})", clones, inner_s)
+                            format!("{}({{ {} async move {} }})", spawn_fn, clones, inner_s)
                         } else {
                             format!("{{ {} async move {} }}", clones, inner_s)
                         }
@@ -1583,10 +1682,29 @@ impl Transpiler {
                     let ty = type_args.first()
                         .map(|t| self.emit_type(t))
                         .unwrap_or_else(|| "_".to_string());
-                    let cap = args.first()
-                        .map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "0".to_string());
-                    return format!("tokio::sync::mpsc::channel::<{}>({})", ty, cap);
+                    // Capacity: second type arg (channel<T, 32>) or first call arg (channel<T>(cap)).
+                    let cap = if type_args.len() >= 2 {
+                        match &type_args[1] {
+                            crate::ast::Type::Named(n) => n.clone(),
+                            other => self.emit_type(other),
+                        }
+                    } else {
+                        args.first()
+                            .map(|a| self.emit_expr(&a.value))
+                            .unwrap_or_else(|| "0".to_string())
+                    };
+                    let channel_mod = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Single => {
+                            self.uses_local_channel.set(true);
+                            "local_channel::mpsc"
+                        }
+                        crate::transpiler::ThreadingMode::Multi  => "tokio::sync::mpsc",
+                    };
+                    // local_channel::mpsc::channel() is unbounded — no capacity argument.
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        return format!("{}::channel::<{}>()", channel_mod, ty);
+                    }
+                    return format!("{}::channel::<{}>({})", channel_mod, ty, cap);
                 }
                 "oneshot" => {
                     let ty = type_args.first()
@@ -1598,9 +1716,20 @@ impl Transpiler {
                     let ty = type_args.first()
                         .map(|t| self.emit_type(t))
                         .unwrap_or_else(|| "_".to_string());
-                    let cap = args.first()
-                        .map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "16".to_string());
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.uses_local_broadcast.set(true);
+                        return format!("local_broadcast::<{}>()", ty);
+                    }
+                    let cap = if type_args.len() >= 2 {
+                        match &type_args[1] {
+                            crate::ast::Type::Named(n) => n.clone(),
+                            other => self.emit_type(other),
+                        }
+                    } else {
+                        args.first()
+                            .map(|a| self.emit_expr(&a.value))
+                            .unwrap_or_else(|| "16".to_string())
+                    };
                     return format!("tokio::sync::broadcast::channel::<{}>({})", ty, cap);
                 }
                 "watch" => {
@@ -1707,18 +1836,22 @@ impl Transpiler {
 
     pub(crate) fn emit_constructor(&self, name: &str, args: &[Arg]) -> String {
         let result = self.emit_constructor_inner(name, args);
-        // Check if the current function returns Box<Name> — if so, wrap the constructor result.
-        let needs_box = match &self.fn_return_ty {
-            Some(Type::Qualified(inner, OwnerQual::Owned)) => {
-                matches!(inner.as_ref(), Type::Named(n) if n == name)
+        // Check if the current function returns T' in managed mode → wrap in managed actor.
+        if let Some(Type::Qualified(inner, OwnerQual::Owned)) = &self.fn_return_ty {
+            if matches!(inner.as_ref(), Type::Named(n) if n == name) {
+                if self.is_managed_owned_user(self.fn_return_ty.as_ref().unwrap()) {
+                    return match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi =>
+                            format!("Arc::new(std::sync::Mutex::new({}))", result),
+                        crate::transpiler::ThreadingMode::Single =>
+                            format!("RefCell::new({})", result),
+                    };
+                }
+                // Strict mode: wrap in Box<T>
+                return format!("Box::new({})", result);
             }
-            _ => false,
-        };
-        if needs_box {
-            format!("Box::new({})", result)
-        } else {
-            result
         }
+        result
     }
 
     pub(crate) fn emit_constructor_inner(&self, name: &str, args: &[Arg]) -> String {
@@ -1736,19 +1869,25 @@ impl Transpiler {
                 Type::Qualified(inner, OwnerQual::Owned) => {
                     if let Type::Named(inner_name) = inner.as_ref() {
                         let inner_s = self.emit_constructor_inner(inner_name, args);
+                        // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>
+                        if self.is_managed_owned_user(&resolved) {
+                            return match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi =>
+                                    format!("Arc::new(std::sync::Mutex::new({}))", inner_s),
+                                crate::transpiler::ThreadingMode::Single =>
+                                    format!("RefCell::new({})", inner_s),
+                            };
+                        }
                         return format!("Box::new({})", inner_s);
                     }
                 }
-                Type::Qualified(inner, OwnerQual::Auto) => {
+                Type::Qualified(inner, OwnerQual::Shared) => {
                     if let Type::Named(inner_name) = inner.as_ref() {
                         let inner_s = self.emit_constructor_inner(inner_name, args);
-                        return format!("Rc::new({})", inner_s);
-                    }
-                }
-                Type::Qualified(inner, OwnerQual::Task) => {
-                    if let Type::Named(inner_name) = inner.as_ref() {
-                        let inner_s = self.emit_constructor_inner(inner_name, args);
-                        return format!("Arc::new({})", inner_s);
+                        return match self.config.threading {
+                            crate::transpiler::ThreadingMode::Single => format!("Rc::new({})", inner_s),
+                            crate::transpiler::ThreadingMode::Multi  => format!("Arc::new({})", inner_s),
+                        };
                     }
                 }
                 Type::Qualified(inner, OwnerQual::Stack | OwnerQual::Copy) => {

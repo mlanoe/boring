@@ -83,7 +83,7 @@ impl Parser {
         };
 
         // Apply ownership qualifier: `Dog'rc`, `[Int]'static`, etc.
-        let ty = self.parse_type_qualifier(ty);
+        let ty = self.parse_type_qualifier(ty)?;
 
         // Optional suffix `?`
         if self.eat(&TokenKind::Question) {
@@ -173,7 +173,7 @@ impl Parser {
             TokenKind::LBracket => {
                 self.advance();
                 let inner = self.parse_type()?;
-                let inner = self.parse_type_qualifier(inner);
+                let inner = self.parse_type_qualifier(inner)?;
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Type::Array(Box::new(inner)))
             }
@@ -192,11 +192,11 @@ impl Parser {
                 let first = self.parse_type()?;
                 if self.eat(&TokenKind::Eq) {
                     let val = self.parse_type()?;
-                    let val = self.parse_type_qualifier(val);
+                    let val = self.parse_type_qualifier(val)?;
                     self.expect(&TokenKind::RBrace)?;
                     Ok(Type::Dict(Box::new(first), Box::new(val)))
                 } else {
-                    let first = self.parse_type_qualifier(first);
+                    let first = self.parse_type_qualifier(first)?;
                     self.expect(&TokenKind::RBrace)?;
                     Ok(Type::Set(Box::new(first)))
                 }
@@ -224,46 +224,39 @@ impl Parser {
     /// `Dog'`        → Qualified(Dog, Owned)
     /// `Dog'copy`    → Qualified(Dog, Copy)
     /// `Dog'const`   → Qualified(Dog, Const)
-    /// `Dog'auto`    → Qualified(Dog, Auto)   — Rc<T>, single-thread ref-counted
-    /// `Dog'shared`  → Qualified(Dog, Task)   — Arc<T>, task-safe ref-counted
+    /// `Dog'shared`  → Qualified(Dog, Shared) — Arc<T> (multi) / Rc<T> (single), threading-aware
     /// `Dog'weak`    → Qualified(Dog, Weak)   — Weak<T>, non-owning ref
-    pub(crate) fn parse_type_qualifier(&mut self, ty: Type) -> Type {
-        // `&auto` / `&shared` / bare `&` — borrow of the smart pointer itself (use sparingly).
-        // Must be checked before the tick path so `T&auto` is handled independently of `T'auto`.
+    pub(crate) fn parse_type_qualifier(&mut self, ty: Type) -> Result<Type, ParseError> {
+        // `&shared` / bare `&` — borrow of the smart pointer itself (use sparingly).
         if self.check(&TokenKind::Ampersand) {
             // Peek at the token after `&` without consuming anything yet.
             let next = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
             match next {
-                Some(TokenKind::Ident(ref s)) if s == "auto" => {
+                Some(TokenKind::Ident(ref s)) if s == "shared" => {
                     self.advance(); // consume `&`
-                    self.advance(); // consume `auto`
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowAuto);
-                }
-                Some(TokenKind::Task) => {
-                    self.advance(); // consume `&`
-                    self.advance(); // consume `task`
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowTask);
+                    self.advance(); // consume `shared`
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowShared));
                 }
                 Some(TokenKind::Ident(ref s)) if s == "heap" => {
                     self.advance(); self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowOwned);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowOwned));
                 }
                 Some(TokenKind::Ident(ref s)) if s == "stack" || s == "copy" => {
                     self.advance(); self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::Borrow);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
                 }
                 Some(TokenKind::Ident(ref s)) if s == "option" => {
                     self.advance(); self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowOption);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowOption));
                 }
                 Some(TokenKind::Ident(ref s)) if s == "weak" => {
                     self.advance(); self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak));
                 }
                 Some(TokenKind::Ident(ref s)) if s == "actor" => {
                     self.advance(); // consume `&`
                     self.advance(); // consume `actor`
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowTask);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowShared));
                 }
                 // `T&a name` — single lowercase letter is a lifetime only when another
                 // identifier follows it (the actual parameter name). If the letter is the
@@ -279,31 +272,31 @@ impl Parser {
                         self.advance(); // consume `&`
                         let lt = if let TokenKind::Ident(s) = self.peek().clone() { s } else { unreachable!() };
                         self.advance(); // consume lifetime letter
-                        return Type::Qualified(Box::new(ty), OwnerQual::Lifetime(lt));
+                        return Ok(Type::Qualified(Box::new(ty), OwnerQual::Lifetime(lt)));
                     } else {
                         // Bare borrow: `T& c` — `c` is the param name, only consume `&`
                         self.advance(); // consume `&`
-                        return Type::Qualified(Box::new(ty), OwnerQual::Borrow);
+                        return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
                     }
                 }
                 // Bare `&` followed by an identifier (the param / field name) — generic borrow.
-                // Used with type aliases: `use Node as Tree'auto; def walk(Node& n)`.
+                // Used with type aliases: `use Node as Tree'shared; def walk(Node& n)`.
                 // The transpiler resolves the alias to determine &Rc<T> vs &Arc<T>.
                 Some(TokenKind::Ident(_)) => {
                     self.advance(); // consume `&`
-                    return Type::Qualified(Box::new(ty), OwnerQual::Borrow);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
                 }
                 _ => {} // not a borrow qualifier — fall through
             }
         }
         if !self.eat(&TokenKind::Tick) {
-            return ty;
+            return Ok(ty);
         }
         let qual = match self.peek().clone() {
             TokenKind::Ident(ref s) => match s.as_str() {
                 "copy"   => { self.advance(); OwnerQual::Copy   }
                 "const"  => { self.advance(); OwnerQual::Const  }
-                "auto"   => { self.advance(); OwnerQual::Auto   }
+                "shared" => { self.advance(); OwnerQual::Shared }
                 // `T'weak` — standalone weak ref; the base qualifier (auto/task/actor)
                 // is inferred from the right-hand side at the let-binding site.
                 "weak"   => { self.advance(); OwnerQual::Weak }
@@ -311,25 +304,34 @@ impl Parser {
                 "heap"   => { self.advance(); OwnerQual::Owned  } // explicit alias for bare '
                 "option" => { self.advance(); OwnerQual::BorrowOption } // T'option → handled in postfix &
                 "actor"  => { self.advance(); OwnerQual::Actor  } // Arc<Mutex<T>> — actor pattern
+                "wshared" => {
+                    self.advance();
+                    // `T'wshared` is sugar for `T'shared'weak`
+                    let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Shared);
+                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
+                }
+                "wactor" => {
+                    self.advance();
+                    // `T'wactor` is sugar for `T'actor'weak`
+                    let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Actor);
+                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
+                }
                 "wguard" => {
                     self.advance();
                     // `T'wguard` is sugar for `T'guard'weak`
                     let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Guard);
-                    return Type::Qualified(Box::new(qualified), OwnerQual::Weak);
+                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
                 }
                 _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
             },
-            // `T'task` — `task` is a reserved keyword, not an ident: Arc<T>
-            TokenKind::Task => { self.advance(); OwnerQual::Task }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<RwLock<T>>
             TokenKind::Guard => { self.advance(); OwnerQual::Guard }
             _ => OwnerQual::Owned,
         };
         // Postfix `&` after any qualifier, with optional lifetime:
-        //   `T'heap&`  → `&Box<T>`      (BorrowOwned)
-        //   `T'heap&a` → `&'a Box<T>`   (Lifetime wrapping the qualified type)
-        //   `T'auto&`  → `&Rc<T>`       (BorrowAuto)
-        //   `T'auto&a` → `&'a Rc<T>`    etc.
+        //   `T'heap&`    → `&Box<T>`      (BorrowOwned)
+        //   `T'heap&a`   → `&'a Box<T>`  (Lifetime wrapping the qualified type)
+        //   `T'shared&`  → `&Rc<T>` / `&Arc<T>`  (BorrowShared)
         if self.check(&TokenKind::Ampersand) {
             // Check for lifetime immediately after `&`: `T'qual&a name`
             // A single lowercase letter is only a lifetime when another ident (the param name)
@@ -349,55 +351,51 @@ impl Parser {
                 let lt = if let TokenKind::Ident(s) = self.peek().clone() { s } else { unreachable!() };
                 self.advance(); // consume lifetime letter
                 let inner = Type::Qualified(Box::new(ty), qual);
-                return Type::Qualified(Box::new(inner), OwnerQual::Lifetime(lt));
+                return Ok(Type::Qualified(Box::new(inner), OwnerQual::Lifetime(lt)));
             }
             match qual {
-                OwnerQual::Auto => {
+                OwnerQual::Shared => {
                     self.advance(); // consume `&`
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowAuto);
-                }
-                OwnerQual::Task => {
-                    self.advance(); // consume `&`
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowTask);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowShared));
                 }
                 OwnerQual::Owned => {
                     self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowOwned);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowOwned));
                 }
                 OwnerQual::Stack | OwnerQual::Copy => {
                     self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::Borrow);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
                 }
                 OwnerQual::Weak => {
                     self.advance();
-                    return Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak);
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak));
                 }
                 OwnerQual::BorrowOption => {
                     // T'option& → &Option<T>
                     self.advance();
-                    return Type::Qualified(Box::new(Type::Optional(Box::new(ty))), OwnerQual::Borrow);
+                    return Ok(Type::Qualified(Box::new(Type::Optional(Box::new(ty))), OwnerQual::Borrow));
                 }
                 _ => {} // other qualifiers (Const, Lifetime): `&` is not a borrow here
             }
         }
         // T'option without & → same as T? (Optional)
         if matches!(qual, OwnerQual::BorrowOption) {
-            return Type::Optional(Box::new(ty));
+            return Ok(Type::Optional(Box::new(ty)));
         }
         let qualified = Type::Qualified(Box::new(ty), qual.clone());
-        // `T'auto'weak`, `T'task'weak`, `T'actor'weak` — weak ref on any ref-counted type.
-        // `'weak` is a second-level qualifier: Qualified(Qualified(T, Auto|Task|Actor), Weak).
-        if matches!(qual, OwnerQual::Auto | OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard) {
+        // `T'shared'weak`, `T'actor'weak` — weak ref on any ref-counted type.
+        // `'weak` is a second-level qualifier: Qualified(Qualified(T, Shared|Actor|Guard), Weak).
+        if matches!(qual, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) {
             if self.check(&TokenKind::Tick) {
                 let after_tick = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 if matches!(after_tick, Some(TokenKind::Ident(ref s)) if s == "weak") {
                     self.advance(); // consume `'`
                     self.advance(); // consume `weak`
-                    return Type::Qualified(Box::new(qualified), OwnerQual::Weak);
+                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
                 }
             }
         }
-        qualified
+        Ok(qualified)
     }
 }
 

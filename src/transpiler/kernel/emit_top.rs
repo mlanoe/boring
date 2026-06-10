@@ -243,6 +243,43 @@ impl KernelTranspiler {
 
     /// Emit a `stream def` function as a Work item + KernelReceiver<T, N> wrapper.
     ///
+    /// Emit a purely-sequential `stream def` as `impl Iterator<Item = T>` (no workqueue).
+    /// `yield expr` → `__items.push(expr)`, body runs eagerly, returns `vec.into_iter()`.
+    pub(super) fn emit_iter_stream_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
+        let vis = if f.is_pub { "pub " } else { "" };
+        let item_ty = f.return_ty.as_ref()
+            .map(|t| self.emit_type(t))
+            .unwrap_or_else(|| "()".to_string());
+
+        let params_s: Vec<String> = f.params.iter().map(|p| {
+            let ty_s = p.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_default();
+            format!("{}: {}", p.name, ty_s)
+        }).collect();
+        let all_params = match self_ty {
+            Some(_) => {
+                let self_ref = if f.mutating { "&mut self" } else { "&self" };
+                if params_s.is_empty() { self_ref.to_string() }
+                else { format!("{}, {}", self_ref, params_s.join(", ")) }
+            }
+            None => params_s.join(", "),
+        };
+
+        self.line(&format!(
+            "{}fn {}({}) -> impl Iterator<Item = {}> {{",
+            vis, f.name, all_params, item_ty
+        ));
+        self.indent += 1;
+        self.line(&format!("let mut __items: kernel::prelude::Vec<{}> = kernel::prelude::Vec::new();", item_ty));
+
+        self.in_iter_stream = true;
+        for stmt in &f.body { self.emit_stmt(stmt); }
+        self.in_iter_stream = false;
+
+        self.line("__items.into_iter()");
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// Generates three pieces:
     ///   1. `struct XxxWork { params..., tx: KernelSender<T, N> }`
     ///   2. `impl kernel::workqueue::Work<XxxWork> { fn run(...) }` with `yield` → `this.tx.send(...)`
@@ -386,7 +423,12 @@ impl KernelTranspiler {
 
         // Delegate stream functions to the specialized emitter
         if f.stream {
-            self.emit_stream_fn(f, self_ty);
+            let empty = std::collections::HashSet::new();
+            if crate::transpiler::helpers::body_is_sequential(&f.body, &empty) {
+                self.emit_iter_stream_fn(f, self_ty);
+            } else {
+                self.emit_stream_fn(f, self_ty);
+            }
             return;
         }
 

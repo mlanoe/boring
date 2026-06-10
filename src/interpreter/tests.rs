@@ -710,9 +710,9 @@ let _result = "Hello, " + name
 
 #[test]
 fn test_sync_qualifier_allows_task_capture() {
-    // A collection qualified 'task can be captured by a task
+    // A collection qualified 'shared can be captured by a task
     let src = r#"
-let [int]'task items = [1, 2, 3]
+let [int]'shared items = [1, 2, 3]
 let f = task: items.len()
 let _result = f.value
 "#;
@@ -734,16 +734,8 @@ let _result = f.value
     assert_eq!(get_var(&interp, "_result"), Value::Str("hello".into()));
 }
 
-#[test]
-fn test_mut_qualifier_blocks_task_capture() {
-    // 'auto is not task-safe
-    let src = r#"
-let [int]'auto items = [1, 2, 3]
-let f = task: items
-"#;
-    let (_, res) = run(src);
-    assert!(res.is_err(), "'auto collections must not be captured by tasks");
-}
+// Note: 'shared IS task-safe (Arc<T> in multi-thread mode).
+// The old 'auto qualifier was not task-safe (Rc<T>); it has been removed.
 
 #[test]
 fn test_generic_future_value_in_task() {
@@ -1656,13 +1648,13 @@ let _result = s.item
 
 #[test]
 fn test_generic_struct_specialized_param() {
-    // Passing a Stack<int> where Stack<int>'task is expected
+    // Passing a Stack<int> where Stack<int>'shared is expected
     let src = r#"
 struct Stack<T>:
     T item
     req T get(): self.item
 
-def int unwrap(Stack<int>'task s): s.get()
+def int unwrap(Stack<int>'shared s): s.get()
 
 let s = Stack(21)
 let _result = unwrap(s)
@@ -1714,7 +1706,7 @@ struct Dog:
 ext Dog as Printable:
     req string describe(): "Dog({self.name})"
 
-def string print_it(Printable'task p): p.describe()
+def string print_it(Printable'shared p): p.describe()
 
 let d = Dog(name = "Fido")
 let _result = print_it(d)
@@ -1739,7 +1731,7 @@ ext Cat as Named, Aged:
     req string name(): self.cat_name
     req int age(): self.cat_age
 
-def string describe(Named'task n, Aged'task a): "{n.name()} is {a.age()}"
+def string describe(Named'shared n, Aged'shared a): "{n.name()} is {a.age()}"
 
 let c = Cat(cat_name = "Mimi", cat_age = 3)
 let _result = describe(c, c)

@@ -1223,20 +1223,20 @@ let b' = a
     assert_eq!(get_var(&interp, "a"), Value::Int(99)); // still valid — copy, not moved
 }
 
-// ─── T'auto'weak / T'task'weak / T'actor'weak — compound weak references ──────
+// ─── T'shared'weak / T'actor'weak — compound weak references ──────
 
 #[test]
 fn test_weak_type_in_signature() {
-    // `Dog'auto'weak` in function return type and parameter type annotations
+    // `Dog'shared'weak` in function return type and parameter type annotations
     let src = r#"
 struct Dog:
     init(pub string name)
 
-def Dog'auto'weak get_weak(Dog'auto d):
-    let Dog'auto'weak w = d
+def Dog'shared'weak get_weak(Dog'shared d):
+    let Dog'shared'weak w = d
     w
 
-let Dog'auto d = Dog(name = "Rex")
+let Dog'shared d = Dog(name = "Rex")
 let w = get_weak(d)
 "#;
     let (_interp, res) = run(src);
@@ -1250,10 +1250,10 @@ fn test_weak_upgrade_returns_object() {
 struct Node:
     init(pub int val)
 
-let Node'auto         strong  = Node(val = 42)
-let Node'auto'weak    weak    = strong
-let upgraded                  = weak.upgrade()
-let result                    = upgraded.val
+let Node'shared         strong  = Node(val = 42)
+let Node'shared'weak    weak    = strong
+let upgraded                    = weak.upgrade()
+let result                      = upgraded.val
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
@@ -1262,23 +1262,23 @@ let result                    = upgraded.val
 
 #[test]
 fn test_weak_not_task_safe() {
-    // T'auto'weak is not task-safe (rc::Weak — single-thread only)
+    // T'shared'weak is not task-safe (Weak<T> — non-owning)
     use crate::ast::{Type, OwnerQual};
     let ty = Type::Qualified(
-        Box::new(Type::Qualified(Box::new(Type::Named("Dog".into())), OwnerQual::Auto)),
+        Box::new(Type::Qualified(Box::new(Type::Named("Dog".into())), OwnerQual::Shared)),
         OwnerQual::Weak,
     );
     assert!(!ty.is_task_safe());
 }
 
 #[test]
-fn test_weak_auto_compound() {
-    // `'weak` infers qualifier from RHS — `a` is `'auto` so `b` becomes `'auto'weak`
+fn test_weak_shared_compound() {
+    // `'weak` infers qualifier from RHS — `a` is `'shared` so `b` becomes `'shared'weak`
     let src = r#"
 struct Dog:
     init(pub string name)
 
-let a'auto = Dog(name = "Rex")
+let a'shared = Dog(name = "Rex")
 let b'weak = a
 let upgraded = b.upgrade()
 let _result = upgraded.name
@@ -1287,29 +1287,14 @@ let _result = upgraded.name
 }
 
 #[test]
-fn test_weak_task_compound() {
-    // `'weak` infers qualifier from RHS — `c` is `'task` so `d` becomes `'task'weak`
-    let src = r#"
-struct Dog:
-    init(pub int age)
-
-let c'task = Dog(age = 5)
-let d'weak = c
-let upgraded = d.upgrade()
-let _result = upgraded.age
-"#;
-    assert_eq!(run_src(src), Value::Int(5));
-}
-
-#[test]
 fn test_weak_explicit_compound_type() {
-    // Explicit `Dog'auto'weak` in type annotation
+    // Explicit `Dog'shared'weak` in type annotation
     let src = r#"
 struct Dog:
     init(pub string name)
 
-let Dog'auto strong = Dog(name = "Buddy")
-let Dog'auto'weak  w = strong
+let Dog'shared strong = Dog(name = "Buddy")
+let Dog'shared'weak  w = strong
 let upgraded = w.upgrade()
 let _result = upgraded.name
 "#;
@@ -1647,7 +1632,7 @@ enum Opt:
     Some(int value)
     None
 
-def string describe(Opt'auto o):
+def string describe(Opt'shared o):
     match o:
         Some(n) if n > 10: "big"
         Some(n): "small"
@@ -1665,7 +1650,7 @@ enum Opt:
     Some(int value)
     None
 
-def string describe(Opt'auto o):
+def string describe(Opt'shared o):
     match o:
         Some(n) if n > 10: "big"
         Some(n): "small"

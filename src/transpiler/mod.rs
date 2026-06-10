@@ -25,6 +25,50 @@ pub(crate) mod helpers;
 pub(crate) use helpers::*;
 pub mod kernel;
 
+// ─── Transpilation config ─────────────────────────────────────────────────────
+
+/// Memory management mode — controls how anonymous `T` and `T'` are resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TranspileMode {
+    /// Production mode (default). `T` → stack, `T'` → `Box<T>`.
+    Strict,
+    /// Prototyping mode. `T` and `T'` → `Arc<Mutex<T>>` (multi) or `RefCell<T>` (single).
+    Managed,
+}
+
+/// Threading model — controls how shared/actor/guard qualifiers are resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThreadingMode {
+    /// Multi-thread Tokio runtime (default). Uses `Arc`, `Mutex`, `RwLock`.
+    Multi,
+    /// Single-thread Tokio `current_thread` runtime. Uses `Rc`, `RefCell`.
+    /// Not available for the Rust-for-Linux target.
+    Single,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TranspileConfig {
+    pub mode: TranspileMode,
+    pub threading: ThreadingMode,
+    /// Stack size threshold for auto-boxing (default: 1024 bytes). Types larger than this
+    /// are silently promoted to Box<T>. Configurable via `--stack-auto-bytes N`.
+    pub stack_auto_bytes: usize,
+    /// Stack size threshold for warning (default: 32 bytes). Types between this and
+    /// `stack_auto_bytes` emit a suggestion to use T'. Configurable via `--stack-warn-bytes N`.
+    pub stack_warn_bytes: usize,
+}
+
+impl Default for TranspileConfig {
+    fn default() -> Self {
+        Self {
+            mode: TranspileMode::Strict,
+            threading: ThreadingMode::Multi,
+            stack_auto_bytes: 1024,
+            stack_warn_bytes: 32,
+        }
+    }
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 pub struct TranspileOutput {
@@ -45,6 +89,12 @@ pub struct TranspileOutput {
     /// True when `json()` or `fromJson()` is used.
     /// The caller should add `serde` and `serde_json` to Cargo.toml.
     pub uses_serde: bool,
+    /// True when the program uses mpsc channels in single-thread mode (local_channel crate).
+    /// The caller should add `local_channel` to Cargo.toml when threading is Single.
+    pub uses_local_channel: bool,
+    /// True when broadcast is used in single-thread mode (local prelude emitted inline).
+    /// No extra Cargo.toml dependency — the prelude is self-contained.
+    pub uses_local_broadcast: bool,
 }
 
 pub fn transpile(program: &Program) -> String {
@@ -52,20 +102,27 @@ pub fn transpile(program: &Program) -> String {
 }
 
 pub fn transpile_full(program: &Program) -> TranspileOutput {
-    let mut t = Transpiler::new();
+    transpile_with_config(program, TranspileConfig::default())
+}
+
+pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
+    let mut t = Transpiler::new(config);
     t.emit_program(program);
-    TranspileOutput { code: t.out, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get() }
+    TranspileOutput { code: t.out, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get() }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
 
 struct Transpiler {
+    pub(crate) config: TranspileConfig,
     pub(crate) out: String,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
     pub(crate) in_throws: bool,
     /// Are we inside a `task` (async) function body?
     pub(crate) in_async: bool,
+    /// Are we inside a sequential `stream` body? (`yield` → `__items.push(...)`)
+    pub(crate) in_iter_stream: bool,
     /// Name of the type currently being impl'd (for self-aware emit).
     pub(crate) self_type: Option<String>,
     /// Variables known to hold a collection (Vec/HashMap/HashSet) — use {:?} when formatting.
@@ -104,6 +161,9 @@ struct Transpiler {
     pub(crate) fn_defaults: std::collections::HashMap<String, Vec<Option<String>>>,
     /// Struct name → [(field_name, field_type)] for constructor coercion.
     pub(crate) struct_fields: std::collections::HashMap<String, Vec<(String, Type)>>,
+    /// Estimated stack sizes (bytes) for user-defined types, computed during pre_scan.
+    /// Used for strict-mode auto-boxing (> stack_auto_bytes → Box<T>).
+    pub(crate) type_sizes: std::collections::HashMap<String, usize>,
     /// Struct name → assoc type name → concrete type (for `T.AssocName` resolution).
     pub(crate) struct_assoc_types: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
     /// Top-level functions that declare `throws`.
@@ -207,11 +267,13 @@ struct Transpiler {
     /// Maps local variable name → its newtype type name.
     /// Populated by emit_let and emit_fn (params) to enable `id as uint` → `id.0`.
     pub(crate) var_newtype_type: std::collections::HashMap<String, String>,
-    /// Top-level functions that declare `stream` (async generator).
+    /// Top-level functions that declare `stream` (async generator, needs tokio/async-stream).
     pub(crate) stream_fns: std::collections::HashSet<String>,
+    /// Subset of stream functions that are purely sequential — emit `impl Iterator` instead.
+    pub(crate) stream_iter_fns: std::collections::HashSet<String>,
     /// Stream functions that also declare `throws` — use `try_stream!` and unwrap at consumer.
     pub(crate) stream_throws_fns: std::collections::HashSet<String>,
-    /// True when the file contains at least one stream function (adds async-stream deps).
+    /// True when the file contains at least one async stream function (adds async-stream deps).
     pub(crate) has_streams: bool,
     /// Variables that are `mpsc::Receiver<T>` — `for x in rx:` emits `rx.recv().await`.
     pub(crate) channel_receivers: std::collections::HashSet<String>,
@@ -336,20 +398,51 @@ struct Transpiler {
     pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
     pub(crate) overloaded_method_keys: std::collections::HashSet<String>,
-    /// Type names (structs/enums) that appear as the inner type of a `'task`, `'actor`, or
+    /// Type names (structs/enums) that appear as the inner type of a `'shared`, `'actor`, or
     /// `'guard` qualifier in at least one struct field or function parameter across the program.
     /// `task fn` methods are only valid on types in this set — they rely on the receiver being
     /// accessed through `Arc<Self>`, which is only guaranteed when the type is arc-qualified.
     pub(crate) arc_qualified_types: std::collections::HashSet<String>,
+    /// Enum names where every variant has no fields — inferred as T'copy (non-parametric enums).
+    pub(crate) unit_enums: std::collections::HashSet<String>,
+    /// "StructName::field_name" and "EnumName::VariantName::N" pairs that need Box wrapping
+    /// because the field type directly or indirectly refers back to the containing type (recursion).
+    pub(crate) recursive_fields: std::collections::HashSet<String>,
+    /// Names of all user-defined structs and enums in the program.
+    /// Used in managed mode to wrap anonymous `T`/`T'` types in Arc<Mutex<T>> or RefCell<T>.
+    pub(crate) user_types: std::collections::HashSet<String>,
+    /// True when the program uses channel primitives that require local_channel in single mode.
+    pub(crate) uses_local_channel: std::rc::Rc<std::cell::Cell<bool>>,
+    /// True when broadcast is used in single-thread mode — triggers inline prelude.
+    pub(crate) uses_local_broadcast: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Variables declared as `T'shared` in single-thread mode — hold `Rc<T>` instead of `Arc<T>`.
+    /// These must be pre-cloned with `Rc::clone` (not `Arc::clone`) before async-move captures.
+    pub(crate) rc_vars: std::collections::HashSet<String>,
+    /// Variables holding `Arc<std::sync::Mutex<T>>` in managed multi mode (anonymous T/T').
+    /// Field reads, method calls, and optional chaining go through `.lock().unwrap()`.
+    pub(crate) managed_mutex_vars: std::collections::HashSet<String>,
+    /// Variables holding `RefCell<T>` in managed single mode (anonymous T/T').
+    /// Field reads go through `.borrow()`, method calls through `.borrow_mut()`.
+    pub(crate) managed_refcell_vars: std::collections::HashSet<String>,
+    /// Managed mutex PARAMETERS shadowed by a guard let-binding at function entry.
+    /// Maps original param name → shadow guard name (e.g. `rhs` → `__rhs_mg`).
+    /// Used to avoid double-lock deadlock when the same param's fields are accessed
+    /// multiple times in a single expression (std::sync::Mutex is not reentrant).
+    pub(crate) managed_param_shadows: std::collections::HashMap<String, String>,
+    /// "TypeName::method_name" → return Type for all ext methods.
+    /// Used in emit_let to infer whether an untyped binding should be tracked as managed.
+    pub(crate) struct_method_return_types: std::collections::HashMap<String, crate::ast::Type>,
 }
 
 impl Transpiler {
-    fn new() -> Self {
+    fn new(config: TranspileConfig) -> Self {
         Transpiler {
+            config,
             out: String::new(),
             indent: 0,
             in_throws: false,
             in_async: false,
+            in_iter_stream: false,
             self_type: None,
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
@@ -367,6 +460,7 @@ impl Transpiler {
             optional_vars: std::collections::HashSet::new(),
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
+            type_sizes: std::collections::HashMap::new(),
             struct_assoc_types: std::collections::HashMap::new(),
             fn_throws: std::collections::HashSet::new(),
             typed_error_enums: std::collections::HashSet::new(),
@@ -407,6 +501,7 @@ impl Transpiler {
             newtype_inner: std::collections::HashMap::new(),
             var_newtype_type: std::collections::HashMap::new(),
             stream_fns: std::collections::HashSet::new(),
+            stream_iter_fns: std::collections::HashSet::new(),
             stream_throws_fns: std::collections::HashSet::new(),
             has_streams: false,
             channel_receivers: std::collections::HashSet::new(),
@@ -457,10 +552,130 @@ impl Transpiler {
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
+            unit_enums: std::collections::HashSet::new(),
+            recursive_fields: std::collections::HashSet::new(),
+            user_types: std::collections::HashSet::new(),
+            uses_local_channel: std::rc::Rc::new(std::cell::Cell::new(false)),
+            uses_local_broadcast: std::rc::Rc::new(std::cell::Cell::new(false)),
+            rc_vars: std::collections::HashSet::new(),
+            managed_mutex_vars: std::collections::HashSet::new(),
+            managed_refcell_vars: std::collections::HashSet::new(),
+            managed_param_shadows: std::collections::HashMap::new(),
+            struct_method_return_types: std::collections::HashMap::new(),
         }
     }
 
 
+
+    // ── Managed-mode helpers ──────────────────────────────────────────────────
+
+    /// Returns true when `ty` is `T'` (OwnerQual::Owned) in managed mode over a user-defined
+    /// type that is NOT a unit enum. Suitable for field/method dispatch and param seeding.
+    pub(crate) fn is_managed_user_owned(config: &TranspileConfig,
+        user_types: &std::collections::HashSet<String>,
+        unit_enums: &std::collections::HashSet<String>,
+        ty: &Type) -> bool
+    {
+        if config.mode != TranspileMode::Managed { return false; }
+        match ty {
+            Type::Qualified(inner, crate::ast::OwnerQual::Owned) => match inner.as_ref() {
+                Type::Named(n) => user_types.contains(n.as_str()) && !unit_enums.contains(n.as_str()),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    // ── Inference helpers ─────────────────────────────────────────────────────
+
+    /// Estimate the stack size in bytes of a type (best-effort, concrete types only).
+    /// Returns None for generic parameters, arrays, or types with unknown inner sizes.
+    fn estimate_size(ty: &Type, program: &Program) -> Option<usize> {
+        match ty {
+            Type::Int | Type::Uint | Type::Float => Some(8),
+            Type::Bool => Some(1),
+            Type::Str => Some(16), // Arc<str> = 2 pointers
+            Type::Nil | Type::Void => Some(0),
+            // Primitive type names that may appear as Named() from init-param parsing
+            Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float") => Some(8),
+            Type::Named(n) if n.as_str() == "bool" => Some(1),
+            Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
+            Type::Qualified(inner, OwnerQual::Copy | OwnerQual::Stack) => Self::estimate_size(inner, program),
+            // Pointer-sized types (Box, Arc, Rc, Option<Box>) — always 8 or 16 bytes
+            Type::Qualified(_, OwnerQual::Owned | OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => Some(16),
+            Type::Optional(inner) => Self::estimate_size(inner, program).map(|s| s + 8), // discriminant
+            Type::Array(_) | Type::Dict(_, _) | Type::Set(_) => None, // dynamic
+            Type::TypeParam(_) | Type::Generic(_, _) => None, // unknown
+            Type::Named(name) => {
+                // Look up struct definition and sum field sizes.
+                for item in &program.items {
+                    if let Item::Struct(s) = item {
+                        if &s.name == name {
+                            // Collect field types: explicit fields first, then init params if no fields.
+                            let mut field_types: Vec<Type> = s.fields.iter()
+                                .map(|f| f.ty.clone())
+                                .collect();
+                            if field_types.is_empty() {
+                                for init in &s.inits {
+                                    if init.body.is_empty() {
+                                        for p in &init.params {
+                                            if let Some(ty) = &p.ty { field_types.push(ty.clone()); }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            let mut total = 0usize;
+                            for ty in &field_types {
+                                match Self::estimate_size(ty, program) {
+                                    Some(s) => total += s,
+                                    None => return None,
+                                }
+                            }
+                            return Some(total);
+                        }
+                    }
+                    if let Item::Enum(e) = item {
+                        if &e.name == name {
+                            // Enum size = max(variant sizes) + discriminant (8 bytes)
+                            let mut max_variant = 0usize;
+                            for v in &e.variants {
+                                let mut variant_size = 0usize;
+                                let mut ok = true;
+                                for f in &v.fields {
+                                    match Self::estimate_size(&f.ty, program) {
+                                        Some(s) => variant_size += s,
+                                        None => { ok = false; break; }
+                                    }
+                                }
+                                if !ok { return None; }
+                                if variant_size > max_variant { max_variant = variant_size; }
+                            }
+                            return Some(max_variant + 8);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns true if `ty` directly references a type named `name` (recursion check).
+    /// Unwraps qualifiers and Optional/Array wrappers to find the inner named type.
+    fn type_references(ty: &Type, name: &str) -> bool {
+        match ty {
+            Type::Named(n) => n == name,
+            Type::Qualified(inner, _) => Self::type_references(inner, name),
+            Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+                Self::type_references(inner, name)
+            }
+            Type::Generic(n, args) => {
+                n == name || args.iter().any(|a| Self::type_references(a, name))
+            }
+            _ => false,
+        }
+    }
 
     // ── Output helpers ────────────────────────────────────────────────────────
 
@@ -485,15 +700,36 @@ impl Transpiler {
         // Pre-scan: collect enum variants and fn defaults before emitting anything.
         self.pre_scan(program);
 
+        // Detect broadcast in single-thread mode early so the prelude can be emitted
+        // before any function definitions.
+        if matches!(self.config.threading, ThreadingMode::Single)
+            && program_uses_broadcast(program)
+        {
+            self.uses_local_broadcast.set(true);
+        }
+
         // Standard prelude
-        self.line("// Generated by boring --emit-rust");
+        self.line("// Generated by boring build");
         self.line("use std::collections::{HashMap, HashSet};");
         self.line("use std::hash::Hash;");
         self.line("use std::rc::{Rc, Weak};");
         self.line("use std::sync::Arc;");
+        // Managed single-thread mode uses RefCell for T/T' — add the import unconditionally when
+        // mode is Managed+Single to avoid "cannot find type RefCell in scope" errors.
+        if matches!(self.config.mode, TranspileMode::Managed)
+            && matches!(self.config.threading, ThreadingMode::Single)
+        {
+            self.line("use std::cell::RefCell;");
+        }
         self.line("use std::f64::consts::{PI, E, TAU};");
         self.line("use std::time::Duration;");
+        if matches!(self.config.threading, ThreadingMode::Single) && self.uses_local_channel.get() {
+            self.line("use local_channel;");
+        }
         self.blank();
+        if matches!(self.config.threading, ThreadingMode::Single) && self.uses_local_broadcast.get() {
+            self.emit_local_broadcast_prelude();
+        }
         // Collection index traits — implement the boring Index API on Rust collections.
         // Three separate traits so each collection has its own natural index type:
         //   Vec<T>         → Option<usize>  (BoringArrayIndex)
@@ -738,14 +974,22 @@ impl Transpiler {
             let box_ty = if self.user_defines_box { "std::boxed::Box" } else { "Box" };
             let main_ret = format!("{}<(), {}<dyn std::error::Error + Send + Sync>>", result_ty, box_ty);
             let ok_ret = if self.user_defines_result { "std::result::Result::Ok(())" } else { "Ok(())" };
+            let use_local_set = needs_async && matches!(self.config.threading, ThreadingMode::Single);
             if needs_async {
-                self.line("#[tokio::main]");
+                match self.config.threading {
+                    ThreadingMode::Single => self.line("#[tokio::main(flavor = \"current_thread\")]"),
+                    ThreadingMode::Multi  => self.line("#[tokio::main]"),
+                }
                 self.line(&format!("async fn main() -> {} {{", main_ret));
                 self.in_async = true;
             } else {
                 self.line(&format!("fn main() -> {} {{", main_ret));
             }
             self.indent += 1;
+            if use_local_set {
+                self.line(&format!("tokio::task::LocalSet::new().run_until(async move {{"));
+                self.indent += 1;
+            }
             // main() returns Result<(), Box<dyn Error>>, so throws function calls should get `?`.
             self.in_throws = true;
             for item in stmts.iter() {
@@ -764,6 +1008,10 @@ impl Transpiler {
             }
             self.line(ok_ret);
             self.in_throws = false;
+            if use_local_set {
+                self.indent -= 1;
+                self.line("}).await");
+            }
             self.indent -= 1;
             self.line("}");
             if needs_async {
@@ -780,6 +1028,124 @@ impl Transpiler {
             let key = format!("Error::{}", variant);
             self.enum_variant_fields.insert(key.clone(), vec![]);
             self.enum_variant_field_types.insert(key, vec![]);
+        }
+
+        // ── Collect user-defined type names (for managed mode wrapping) ────────
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
+                Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
+                _ => {}
+            }
+        }
+
+        // ── Inference pass ──────────────────────────────────────────────────────
+        // Runs before all other pre_scan work so that unit_enums / recursive_fields
+        // are populated when emit_struct / emit_enum read them.
+        for item in &program.items {
+            match item {
+                Item::Enum(e) => {
+                    // Priority 2: non-parametric enum → infer T'copy.
+                    if e.variants.iter().all(|v| v.fields.is_empty()) {
+                        self.unit_enums.insert(e.name.clone());
+                    }
+                    // Priority 3: recursive enum variants → mark for Box wrapping.
+                    for v in &e.variants {
+                        for (idx, f) in v.fields.iter().enumerate() {
+                            if Self::type_references(&f.ty, &e.name) {
+                                let key = format!("{}::{}::{}", e.name, v.name, idx);
+                                self.recursive_fields.insert(key);
+                            }
+                        }
+                    }
+                    // Priorities 5–7: size-based warnings for enums (strict mode only).
+                    if self.config.mode == TranspileMode::Strict && !self.unit_enums.contains(&e.name) {
+                        let auto_bytes = self.config.stack_auto_bytes;
+                        let warn_bytes = self.config.stack_warn_bytes;
+                        // Compute per-variant sizes for level-2 warning.
+                        let variant_sizes: Vec<Option<usize>> = e.variants.iter().map(|v| {
+                            v.fields.iter().try_fold(0usize, |acc, f| {
+                                Self::estimate_size(&f.ty, program).map(|s| acc + s)
+                            })
+                        }).collect();
+                        let known_sizes: Vec<usize> = variant_sizes.iter().filter_map(|s| *s).collect();
+                        if !known_sizes.is_empty() {
+                            let max_size = *known_sizes.iter().max().unwrap();
+                            let total_size = max_size + 8; // discriminant
+                            // Level 1: overall enum too large.
+                            if total_size > auto_bytes {
+                                let largest = e.variants.iter().zip(variant_sizes.iter())
+                                    .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz)))
+                                    .max_by_key(|(_, sz)| *sz)
+                                    .map(|(n, _)| n).unwrap_or("?");
+                                eprintln!("warning: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'` to heap-allocate", e.name, total_size, largest, e.name);
+                            }
+                            // Level 2: one variant disproportionate (payload >> median) — independent of level 1.
+                            if known_sizes.len() > 1 {
+                                let median = { let mut s = known_sizes.clone(); s.sort(); s[s.len()/2] };
+                                if let Some((dom_name, dom_size, dom_variant)) = e.variants.iter().zip(variant_sizes.iter())
+                                    .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz, v)))
+                                    .find(|(_, sz, _)| *sz > median * 2 && *sz > warn_bytes)
+                                {
+                                    // Build the field type string for the suggestion.
+                                    let field_ty_s = if dom_variant.fields.len() == 1 {
+                                        let ft = self.emit_type(&dom_variant.fields[0].ty);
+                                        format!("{}({}')", dom_name, ft)
+                                    } else {
+                                        let fts: Vec<String> = dom_variant.fields.iter()
+                                            .map(|f| format!("{}'", self.emit_type(&f.ty)))
+                                            .collect();
+                                        format!("{}({})", dom_name, fts.join(", "))
+                                    };
+                                    eprintln!(
+                                        "warning: variant `{}` ({} bytes) dominates `{}` ({} bytes median);\n         consider boxing the payload: {}",
+                                        dom_name, dom_size, e.name, median, field_ty_s
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Item::Struct(s) => {
+                    // Priority 3: recursive struct fields → mark for Box wrapping.
+                    for f in &s.fields {
+                        if Self::type_references(&f.ty, &s.name) {
+                            let key = format!("{}::{}", s.name, f.name);
+                            self.recursive_fields.insert(key);
+                        }
+                    }
+                    // Priorities 5–6: size-based warnings (strict mode only).
+                    if self.config.mode == TranspileMode::Strict {
+                        let auto_bytes = self.config.stack_auto_bytes;
+                        let warn_bytes = self.config.stack_warn_bytes;
+                        if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
+                            if size > auto_bytes {
+                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'` to heap-allocate", s.name, size, s.name);
+                            } else if size > warn_bytes {
+                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'` if heap allocation is preferred", s.name, size, s.name);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Build type_sizes cache for auto-boxing in emit_type ─────────────────
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => {
+                    if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
+                        self.type_sizes.insert(s.name.clone(), size);
+                    }
+                }
+                Item::Enum(e) if !self.unit_enums.contains(&e.name) => {
+                    if let Some(size) = Self::estimate_size(&Type::Named(e.name.clone()), program) {
+                        self.type_sizes.insert(e.name.clone(), size);
+                    }
+                }
+                _ => {}
+            }
         }
 
         for item in &program.items {
@@ -944,7 +1310,7 @@ impl Transpiler {
                             self.overloaded_method_keys.insert(method_key);
                         }
                     }
-                    // Track var T'task struct fields → Arc<Mutex<T>>.
+                    // Track T'actor struct fields → Arc<Mutex<T>>.
                     for f in &s.fields {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
                             self.struct_mutex_fields.insert(format!("{}::{}", s.name, f.name));
@@ -1040,6 +1406,11 @@ impl Transpiler {
                         // Register `req` (getter) methods from ext blocks in struct_getters.
                         if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
                             self.struct_getters.insert(format!("{}::{}", tname, m.name));
+                        }
+                        // Track return types for managed-mode inference.
+                        if let Some(ret_ty) = &m.return_ty {
+                            self.struct_method_return_types.insert(
+                                format!("{}::{}", tname, m.name), ret_ty.clone());
                         }
                         // Track overloaded struct methods (same name, different params).
                         let method_key = format!("{}::{}", tname, m.name);
@@ -1237,10 +1608,15 @@ impl Transpiler {
             self.task_fns.insert(f.name.clone());
         }
         if f.stream {
-            self.stream_fns.insert(f.name.clone());
-            self.has_streams = true;
-            if f.throws {
-                self.stream_throws_fns.insert(f.name.clone());
+            let sequential = crate::transpiler::helpers::body_is_sequential(&f.body, &self.task_fns);
+            if sequential {
+                self.stream_iter_fns.insert(f.name.clone());
+            } else {
+                self.stream_fns.insert(f.name.clone());
+                self.has_streams = true;
+                if f.throws {
+                    self.stream_throws_fns.insert(f.name.clone());
+                }
             }
         }
         // Top-level `def TypeName.method() task:` → instance task method.
@@ -1252,4 +1628,195 @@ impl Transpiler {
         }
     }
 
+}
+
+// ─── Pre-scan helpers ─────────────────────────────────────────────────────────
+
+fn program_uses_broadcast(program: &Program) -> bool {
+    use crate::ast::{Item, Stmt, ExprKind};
+    fn expr_is_broadcast(expr: &crate::ast::Expr) -> bool {
+        matches!(&expr.kind,
+            ExprKind::GenericCall(callee, _, _)
+            if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"))
+        || matches!(&expr.kind,
+            ExprKind::Call(callee, _)
+            if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"))
+    }
+    fn stmts_use(stmts: &[Stmt]) -> bool { stmts.iter().any(stmt_uses) }
+    fn stmt_uses(s: &Stmt) -> bool {
+        match s {
+            Stmt::LetDestructure(s) => expr_is_broadcast(&s.value),
+            Stmt::Let(s) => s.value.as_ref().map(|v| expr_is_broadcast(v)).unwrap_or(false),
+            Stmt::Expr(e) => expr_is_broadcast(e),
+            Stmt::If(s) => s.branches.iter().any(|(_, b)| stmts_use(b))
+                || s.else_body.as_ref().map(|b| stmts_use(b)).unwrap_or(false),
+            Stmt::While(s) => stmts_use(&s.body),
+            Stmt::For(s)   => stmts_use(&s.body),
+            Stmt::Loop(s)  => stmts_use(&s.body),
+            _ => false,
+        }
+    }
+    program.items.iter().any(|item| match item {
+        Item::Fn(f) => stmts_use(&f.body),
+        Item::Struct(s) => s.methods.iter().any(|m| stmts_use(&m.body)),
+        Item::Enum(e)   => e.methods.iter().any(|m| stmts_use(&m.body)),
+        _ => false,
+    })
+}
+
+// ─── Local broadcast prelude ──────────────────────────────────────────────────
+
+impl Transpiler {
+    /// Emit a self-contained `!Send` broadcast primitive for single-thread mode.
+    ///
+    /// Mirrors the kernel Option-A design (per-receiver `VecDeque` slot) but uses
+    /// `Rc<RefCell<...>>` and `tokio::sync::Notify` instead of `Arc<Mutex<...>>`
+    /// and `CondVar`, since we are in a single-threaded async context.
+    fn emit_local_broadcast_prelude(&mut self) {
+        self.out.push_str(
+            "// local_broadcast — !Send broadcast for single-thread mode.\n\
+             struct LocalBcastSlot<T> {\n\
+             \x20   buf:    std::collections::VecDeque<T>,\n\
+             \x20   notify: std::rc::Rc<tokio::sync::Notify>,\n\
+             }\n\
+             \n\
+             #[derive(Clone)]\n\
+             struct LocalBroadcastSender<T> {\n\
+             \x20   slots: std::rc::Rc<std::cell::RefCell<Vec<std::rc::Rc<std::cell::RefCell<LocalBcastSlot<T>>>>>>,\n\
+             }\n\
+             \n\
+             struct LocalBroadcastReceiver<T> {\n\
+             \x20   slot:   std::rc::Rc<std::cell::RefCell<LocalBcastSlot<T>>>,\n\
+             }\n\
+             \n\
+             impl<T: Clone> LocalBroadcastSender<T> {\n\
+             \x20   fn send(&self, value: T) {\n\
+             \x20       for slot in self.slots.borrow().iter() {\n\
+             \x20           let mut s = slot.borrow_mut();\n\
+             \x20           s.buf.push_back(value.clone());\n\
+             \x20           s.notify.notify_one();\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   fn subscribe(&self) -> LocalBroadcastReceiver<T> {\n\
+             \x20       let notify = std::rc::Rc::new(tokio::sync::Notify::new());\n\
+             \x20       let slot = std::rc::Rc::new(std::cell::RefCell::new(LocalBcastSlot {\n\
+             \x20           buf: std::collections::VecDeque::new(),\n\
+             \x20           notify: std::rc::Rc::clone(&notify),\n\
+             \x20       }));\n\
+             \x20       self.slots.borrow_mut().push(std::rc::Rc::clone(&slot));\n\
+             \x20       LocalBroadcastReceiver { slot }\n\
+             \x20   }\n\
+             }\n\
+             \n\
+             impl<T> LocalBroadcastReceiver<T> {\n\
+             \x20   async fn recv(&self) -> T {\n\
+             \x20       loop {\n\
+             \x20           let notify = std::rc::Rc::clone(&self.slot.borrow().notify);\n\
+             \x20           if let Some(v) = self.slot.borrow_mut().buf.pop_front() {\n\
+             \x20               return v;\n\
+             \x20           }\n\
+             \x20           notify.notified().await;\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\
+             \n\
+             fn local_broadcast<T: Clone>() -> LocalBroadcastSender<T> {\n\
+             \x20   LocalBroadcastSender { slots: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }\n\
+             }\n\n"
+        );
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transpile_src_with_config(src: &str, config: TranspileConfig) -> String {
+        let tokens = crate::lexer::lex(src).expect("lex error");
+        let program = crate::parser::parse(tokens).expect("parse error");
+        transpile_with_config(&program, config).code
+    }
+
+    #[test]
+    fn test_managed_multi_wraps_owned() {
+        // T' (Owned) → Arc<Mutex<T>> in managed+multi; plain Named is NOT wrapped.
+        let src = "struct Counter:\n    init(pub int n)\ndef Counter' make(): Counter(n = 5)\n";
+        let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("Arc<std::sync::Mutex<Counter>>"),
+            "T' should become Arc<std::sync::Mutex> in managed+multi:\n{}", code);
+    }
+
+    #[test]
+    fn test_managed_single_wraps_owned() {
+        // T' (Owned) → RefCell<T> in managed+single; plain Named is NOT wrapped.
+        let src = "struct Counter:\n    init(pub int n)\ndef Counter' make(): Counter(n = 5)\n";
+        let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Single, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("RefCell<Counter>"),
+            "T' should become RefCell in managed+single:\n{}", code);
+    }
+
+    #[test]
+    fn test_managed_named_not_wrapped() {
+        // Plain Named (Type::Named) is NOT wrapped in managed mode — only T' (Owned) is.
+        let src = "struct Counter:\n    init(pub int n)\n\nlet Counter c = Counter(n = 0)\n";
+        let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(!code.contains("Arc<tokio::sync::Mutex<Counter>>"),
+            "managed mode: plain Named should NOT be wrapped, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_strict_mode_no_managed_wrapping() {
+        let src = "struct Counter:\n    init(pub int n)\n\nlet Counter c = Counter(n = 0)\n";
+        let config = TranspileConfig { mode: TranspileMode::Strict, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(!code.contains("Arc<tokio::sync::Mutex<Counter>>"),
+            "strict mode: Counter should NOT be wrapped, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_managed_unit_enum_not_wrapped() {
+        // Non-parametric enums must remain Copy — never wrapped in managed mode.
+        let src = "enum Color:\n    Red\n    Green\n    Blue\n\nlet Color c = Color.Red\n";
+        let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(!code.contains("Arc<tokio::sync::Mutex<Color>>"),
+            "managed mode: unit enum should NOT be wrapped, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_single_thread_uses_spawn_local() {
+        // In --threading single mode, task expressions must emit tokio::task::spawn_local.
+        let src = "task int work(int n):\n    return n\n\nlet t = task work(1)\n";
+        let config = TranspileConfig { mode: TranspileMode::Strict, threading: ThreadingMode::Single, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("tokio::task::spawn_local"),
+            "single mode: task should emit spawn_local, got:\n{}", code);
+        assert!(!code.contains("tokio::spawn("),
+            "single mode: should NOT emit bare tokio::spawn, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_single_thread_uses_local_channel() {
+        // In --threading single mode, typed channel creation must use local_channel::mpsc.
+        let src = "let tx, rx = channel<int>(10)\n";
+        let config = TranspileConfig { mode: TranspileMode::Strict, threading: ThreadingMode::Single, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("local_channel::mpsc"),
+            "single mode: channel should use local_channel::mpsc, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_multi_thread_uses_tokio_spawn() {
+        // In --threading multi mode (default), task expressions must emit tokio::spawn.
+        let src = "task int work(int n):\n    return n\n\nlet t = task work(1)\n";
+        let config = TranspileConfig { mode: TranspileMode::Strict, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("tokio::spawn("),
+            "multi mode: task should emit tokio::spawn, got:\n{}", code);
+    }
 }

@@ -113,6 +113,14 @@ impl KernelTranspiler {
             }
 
             ExprKind::Field(obj, field) => {
+                // watch rx.value → rx.value() (current value without waiting)
+                if field == "value" {
+                    if let ExprKind::Var(var_name) = &obj.kind {
+                        if self.watch_receivers.contains(var_name.as_str()) {
+                            return format!("{}.value()", var_name);
+                        }
+                    }
+                }
                 let obj_s = self.emit_expr(obj);
                 format!("{}.{}", obj_s, field)
             }
@@ -152,6 +160,39 @@ impl KernelTranspiler {
             }
 
             ExprKind::MethodCall(obj, method, args) => {
+                if let ExprKind::Var(var_name) = &obj.kind {
+                    // oneshot/watch/broadcast senders: tx.send(v) → tx.send(v).ok()
+                    if method == "send"
+                        && (self.oneshot_senders.contains(var_name.as_str())
+                            || self.watch_senders.contains(var_name.as_str())
+                            || self.broadcast_senders.contains(var_name.as_str()))
+                    {
+                        let val = args.first()
+                            .map(|a| self.emit_expr(&a.value))
+                            .unwrap_or_default();
+                        return format!("{}.send({}).ok()", var_name, val);
+                    }
+                    // oneshot receiver: rx.recv() → rx.recv() (consumes self, blocking)
+                    if method == "recv" && self.oneshot_receivers.contains(var_name.as_str()) {
+                        return format!("{}.recv()", var_name);
+                    }
+                    // watch receiver: rx.recv() → rx.recv() (blocks until next change)
+                    if method == "recv" && self.watch_receivers.contains(var_name.as_str()) {
+                        return format!("{}.recv()", var_name);
+                    }
+                    // broadcast receiver: rx.recv() → rx.recv() (blocking, own slot)
+                    if method == "recv" && self.broadcast_receivers.contains(var_name.as_str()) {
+                        return format!("{}.recv()", var_name);
+                    }
+                    // broadcast sender: tx.subscribe() → tx.subscribe()
+                    if method == "subscribe" && self.broadcast_senders.contains(var_name.as_str()) {
+                        return format!("{}.subscribe()", var_name);
+                    }
+                    // watch rx.value → rx.value() (current value without waiting)
+                    if method == "value" && self.watch_receivers.contains(var_name.as_str()) {
+                        return format!("{}.value()", var_name);
+                    }
+                }
                 let obj_s = self.emit_expr(obj);
                 let args_s: Vec<String> = args.iter()
                     .map(|a| self.emit_expr(&a.value))
@@ -255,27 +296,63 @@ impl KernelTranspiler {
             }
 
             ExprKind::GenericCall(callee, tys, args) => {
-                // channel<T> or channel<T, N> → kernel_channel::<T, N>()
+                if let ExprKind::Var(name) = &callee.kind {
+                    // broadcast<T, N> → kernel_broadcast::<T, N>()  (const-generic, stack buffer)
+                    // broadcast<T>(cap) → dyn_kernel_broadcast::<T>(cap)  (runtime, heap buffer)
+                    if name == "broadcast" {
+                        let ty = tys.first()
+                            .map(|t| self.emit_type(t))
+                            .unwrap_or_else(|| "_".into());
+                        if tys.len() >= 2 {
+                            let cap = match &tys[1] {
+                                crate::ast::Type::Named(n) => n.clone(),
+                                other => self.emit_type(other),
+                            };
+                            return format!("kernel_broadcast::<{}, {}>()", ty, cap);
+                        } else {
+                            let cap = args.first()
+                                .map(|a| self.emit_expr(&a.value))
+                                .unwrap_or_else(|| "16".into());
+                            return format!("dyn_kernel_broadcast::<{}>({})", ty, cap);
+                        }
+                    }
+                    // oneshot<T>() → kernel_oneshot::<T>()
+                    if name == "oneshot" {
+                        let ty = tys.first()
+                            .map(|t| self.emit_type(t))
+                            .unwrap_or_else(|| "_".into());
+                        return format!("kernel_oneshot::<{}>()", ty);
+                    }
+                    // watch<T>(initial) → kernel_watch::<T>(initial)
+                    if name == "watch" {
+                        let ty = tys.first()
+                            .map(|t| self.emit_type(t))
+                            .unwrap_or_else(|| "_".into());
+                        let init = args.first()
+                            .map(|a| self.emit_expr(&a.value))
+                            .unwrap_or_else(|| "Default::default()".into());
+                        return format!("kernel_watch::<{}>({})", ty, init);
+                    }
+                }
+                // channel<T, N> → kernel_channel::<T, N>()  (const-generic, stack buffer)
+                // channel<T>(cap) → dyn_kernel_channel::<T>(cap)  (runtime, heap buffer)
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "channel" {
                         let elem_ty = tys.first()
                             .map(|t| self.emit_type(t))
                             .unwrap_or_else(|| "_".into());
-                        // Capacity: second type arg (as integer literal) or first call arg,
-                        // defaulting to 2.
-                        let cap = if tys.len() >= 2 {
-                            // channel<T, 32> — capacity stored as a named type constant
-                            match &tys[1] {
+                        if tys.len() >= 2 {
+                            let cap = match &tys[1] {
                                 crate::ast::Type::Named(n) => n.clone(),
                                 other => self.emit_type(other),
-                            }
-                        } else if let Some(first_arg) = args.first() {
-                            // channel<T>(32) — capacity as call argument
-                            self.emit_expr(&first_arg.value)
+                            };
+                            return format!("kernel_channel::<{}, {}>()", elem_ty, cap);
                         } else {
-                            "2".into()
-                        };
-                        return format!("kernel_channel::<{}, {}>()", elem_ty, cap);
+                            let cap = args.first()
+                                .map(|a| self.emit_expr(&a.value))
+                                .unwrap_or_else(|| "2".into());
+                            return format!("dyn_kernel_channel::<{}>({})", elem_ty, cap);
+                        }
                     }
                 }
                 let callee_s = self.emit_expr(callee);

@@ -43,23 +43,23 @@ print copyb
 struct WDog:
     init(pub string name)
 
-def WDog'auto'weak get_weak(WDog'auto d):
-    let WDog'auto'weak w = d
+def WDog'shared'weak get_weak(WDog'shared d):
+    let WDog'shared'weak w = d
     w
 
-let WDog'auto wd = WDog(name = "Rex")
+let WDog'shared wd = WDog(name = "Rex")
 let ww = get_weak(wd)
 print "weak-sig-ok"
 
 struct WNode:
     init(pub int val)
 
-let WNode'auto strong = WNode(val = 42)
-let WNode'auto'weak weakn = strong
+let WNode'shared strong = WNode(val = 42)
+let WNode'shared'weak weakn = strong
 let upgraded = weakn.upgrade()
 print upgraded.val
 
-let wa'auto = WDog(name = "Rex")
+let wa'shared = WDog(name = "Rex")
 let wb'weak = wa
 let wup = wb.upgrade()
 print wup.name
@@ -67,13 +67,13 @@ print wup.name
 struct WDog2:
     init(pub int age)
 
-let wc'task = WDog2(age = 5)
+let wc'shared = WDog2(age = 5)
 let wd2'weak = wc
 let wupg = wd2.upgrade()
 print wupg.age
 
-let WDog'auto strong2 = WDog(name = "Buddy")
-let WDog'auto'weak  w2 = strong2
+let WDog'shared strong2 = WDog(name = "Buddy")
+let WDog'shared'weak  w2 = strong2
 let upgr2 = w2.upgrade()
 print upgr2.name
 
@@ -86,7 +86,7 @@ print clamp(5, 0, 10)
 print clamp(-3, 0, 10)
 print clamp(42, 0, 10)
 
-let [int]'task items = [1, 2, 3]
+let [int]'shared items = [1, 2, 3]
 let fsync = task: items.len()
 print fsync.value
 
@@ -97,46 +97,46 @@ print fconst.value
 struct OCounter:
     init(int n)
 
-def int peek1(OCounter&auto c):
+def int peek1(OCounter&shared c):
     c.n
 
-let OCounter'auto obj1 = OCounter(10)
+let OCounter'shared obj1 = OCounter(10)
 print peek1(obj1)
 
-def int peek2(OCounter&task c):
+def int peek2(OCounter&shared c):
     c.n
 
-let OCounter'task obj2 = OCounter(7)
+let OCounter'shared obj2 = OCounter(7)
 print peek2(obj2)
 
 struct OBoxB:
     init(int value)
 
-def OBoxB&auto identity(OBoxB&auto b):
+def OBoxB&shared identity(OBoxB&shared b):
     b
 
-let OBoxB'auto ob_b = OBoxB(99)
+let OBoxB'shared ob_b = OBoxB(99)
 print identity(ob_b).value
 
 struct OItem:
     init(int v)
 
-let OItem'auto raw = OItem(55)
-let OItem&auto x = raw
+let OItem'shared raw = OItem(55)
+let OItem&shared x = raw
 print x.v
 
-def int peek3(OCounter'auto& c):
+def int peek3(OCounter'shared& c):
     c.n
 print peek3(obj1)
 
-def int peek4(OCounter'task& c):
+def int peek4(OCounter'shared& c):
     c.n
 print peek4(obj2)
 
 struct OTree:
     init(int value)
 
-use ONode as OTree'auto
+use ONode as OTree'shared
 
 def int readt(ONode& n):
     n.value
@@ -144,10 +144,10 @@ def int readt(ONode& n):
 let ONode root = OTree(42)
 print readt(root)
 
-def OBoxB'auto& identity2(OBoxB'auto& b):
+def OBoxB'shared& identity2(OBoxB'shared& b):
     b
 
-let OBoxB'auto ob_b2 = OBoxB(99)
+let OBoxB'shared ob_b2 = OBoxB(99)
 print identity2(ob_b2).value
 
 struct OPointB:
@@ -196,14 +196,14 @@ print ap.x + ap.y
 struct ACounter:
     init(pub int n)
 
-use SharedCounter as ACounter'auto
+use SharedCounter as ACounter'shared
 let sc = SharedCounter(10)
 print sc.n
 
 struct ATree:
     init(pub int value)
 
-use ANode as ATree'auto
+use ANode as ATree'shared
 
 def int read2(ANode& n):
     n.value

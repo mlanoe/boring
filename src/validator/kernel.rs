@@ -75,11 +75,11 @@ impl KernelValidator {
             Type::Float => {
                 self.error(line, "float is not allowed in kernel context — FPU is disabled");
             }
-            // Rule 6 — T'auto qualifier
-            Type::Qualified(inner, OwnerQual::Auto) => {
+            // Rule 6 — T'shared in kernel context always maps to Arc<T> (no Rc in kernel)
+            Type::Qualified(inner, OwnerQual::Shared) => {
                 self.warn(
                     line,
-                    "T'auto is replaced by Arc<T> in kernel context (Rc unavailable)",
+                    "T'shared maps to Arc<T> in kernel context (Rc unavailable — single-thread mode ignored)",
                 );
                 self.check_type(inner, line);
             }
@@ -801,7 +801,7 @@ impl KernelValidator {
 /// (possibly nested inside borrows or optional wrappers).
 fn is_task_actor_or_guard(ty: &Type) -> bool {
     match ty {
-        Type::Qualified(_, OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard) => true,
+        Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => true,
         Type::Qualified(inner, _) => is_task_actor_or_guard(inner),
         Type::Optional(inner) => is_task_actor_or_guard(inner),
         _ => false,

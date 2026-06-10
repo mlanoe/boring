@@ -620,17 +620,17 @@ print "uid={uid}  order={oid}  email={email}  raw={raw_id}"
 # T'       = T'heap       → Box<T>       (exclusive heap ownership)
 # T?       = T'option     → Option<T>    (optional value)
 # str      = String'const → &str         (borrowed string slice)
-# string   = String'task → Arc<String>  (thread-safe shared)
+# string   = String'shared → Arc<String>  (thread-safe shared)
 # int      = Int'copy     → i64
 # uint     = Uint'copy    → u64
 # float    = Float'copy   → f64
 # bool     = Bool'copy    → bool
 # Other qualifiers:
-# T'auto   = Rc<T>        (single-thread shared reference-count)
-# T'task = Arc<T>       (multi-thread shared reference-count)
+# T'shared   = Rc<T>        (single-thread shared reference-count)
+# T'shared = Arc<T>       (multi-thread shared reference-count)
 # T'weak = Weak<T> or sync::Weak<T> (non-owning, inferred from RHS qualifier)
-#   T'auto'weak  = Weak<T>                     (explicit form, rc — single-thread)
-#   T'task'weak  = std::sync::Weak<T>          (explicit form, arc — task-safe)
+#   T'shared'weak  = Weak<T>                     (explicit form, rc — single-thread)
+#   T'shared'weak  = std::sync::Weak<T>          (explicit form, arc — task-safe)
 #   T'actor'weak = std::sync::Weak<Mutex<T>>   (explicit form, actor — task-safe)
 # T'const  = &'static T   (compile-time constant)
 
@@ -808,7 +808,7 @@ task string fetch_greet(str name):
 task string transform(str s):
     "done: {s}"
 
-# 20-e: task method on Worker (let T'task = Arc<T>, read-only shared)
+# 20-e: task method on Worker (let T'shared = Arc<T>, read-only shared)
 struct Worker:
     string name
     int jobs
@@ -838,14 +838,14 @@ task void run_tasks():
     let ft = task transform(label)
     print "label still: {label}"
     print "transform: {ft.value}"
-    # let T'task: read-only Arc<T>, task method receiver is Arc<Self>
-    let Worker'task w = Worker(name = "alice", jobs = 5)
+    # let T'shared: read-only Arc<T>, task method receiver is Arc<Self>
+    let Worker'shared w = Worker(name = "alice", jobs = 5)
     let fw = task w.run()
     print "w.name={w.name}"
     fw.value
-    # var T'task: reassignable Arc pointer, but def methods still blocked
-    var Worker'task w2 = Worker(name = "bob", jobs = 3)
-    var Worker'task w3 = Worker(name = "carol", jobs = 7)
+    # var T'shared: reassignable Arc pointer, but def methods still blocked
+    var Worker'shared w2 = Worker(name = "bob", jobs = 3)
+    var Worker'shared w3 = Worker(name = "carol", jobs = 7)
     w2 = w3                    # OK — reassign the Arc pointer
     print "w2.name after reassign: {w2.name}"    # carol (req method, allowed)
     # T'actor: Arc<Mutex<T>>, all accesses go through .lock().await
@@ -1020,41 +1020,41 @@ print on_diagonal(Point2D(1.0, 2.0))   # off-diagonal (1, 2)
 # O. Weak references  (T'weak — qualifier inferred from RHS)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# 'weak on a let binding infers the base qualifier ('auto/'task/'actor) from
-# the right-hand side.  The explicit compound forms (T'auto'weak, T'task'weak,
+# 'weak on a let binding infers the base qualifier ('shared/'shared/'actor) from
+# the right-hand side.  The explicit compound forms (T'shared'weak, T'shared'weak,
 # T'actor'weak) are used in type annotations and function signatures.
 
 struct Resource:
     init(pub string label)
 
 # Strong Rc reference — owns the object
-let Resource'auto  strong  = Resource(label = "config.toml")
+let Resource'shared  strong  = Resource(label = "config.toml")
 
-# Explicit form in type annotation: T'auto'weak → Weak<Resource> (rc::Weak)
-let Resource'auto'weak  w1 = strong
+# Explicit form in type annotation: T'shared'weak → Weak<Resource> (rc::Weak)
+let Resource'shared'weak  w1 = strong
 let r1 = w1.upgrade()
 print "w1: {r1.label}"            # w1: config.toml
 
-# Inferred form on let binding — 'weak infers 'auto from `a`
-let a'auto  = Resource(label = "rc-inferred")
+# Inferred form on let binding — 'weak infers 'shared from `a`
+let a'shared  = Resource(label = "rc-inferred")
 let b'weak  = a                   # Weak<Resource> (rc::Weak)
 let rb = b.upgrade()
 print "b: {rb.label}"             # b: rc-inferred
 
-# Arc-backed weak ref — T'task'weak → std::sync::Weak<Resource>
-let Resource'task  shared  = Resource(label = "arc.toml")
-let Resource'task'weak  w2 = shared
+# Arc-backed weak ref — T'shared'weak → std::sync::Weak<Resource>
+let Resource'shared  shared  = Resource(label = "arc.toml")
+let Resource'shared'weak  w2 = shared
 let r2 = w2.upgrade()
 print "w2: {r2.label}"            # w2: arc.toml
 
-# Inferred form on let binding — 'weak infers 'task from `c`
-let c'task  = Resource(label = "arc-inferred")
+# Inferred form on let binding — 'weak infers 'shared from `c`
+let c'shared  = Resource(label = "arc-inferred")
 let d'weak  = c                   # sync::Weak<Resource> (arc::Weak)
 let rd = d.upgrade()
 print "d: {rd.label}"             # d: arc-inferred
 
 # Weak refs work in function parameters
-def string describe_resource(Resource'auto'weak w):
+def string describe_resource(Resource'shared'weak w):
     let r = w.upgrade()
     "resource: {r.label}"
 

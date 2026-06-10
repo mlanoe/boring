@@ -143,7 +143,7 @@ impl Transpiler {
                 let is_mutex = Self::is_mutex_binding(f.mutable, &f.ty);
                 if let Some(def) = &f.default {
                     if is_mutex {
-                        // var T'task → Arc::new(Mutex::new(raw_value))
+                        // var T'actor → Arc::new(Mutex::new(raw_value))
                         let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                         let raw = self.emit_let_value(Some(inner), def);
                         self.line(&format!("{}: Arc::new(tokio::sync::Mutex::new({})),", f.name, raw));
@@ -678,10 +678,18 @@ impl Transpiler {
         let has_debug_derive = e.attrs.iter().any(|a| a.name == "derive" && a.args.iter().any(|arg| arg.contains("Debug")));
         // Pre-check for @error variant attrs so we know whether thiserror will add Debug.
         let has_variant_error_attr = e.variants.iter().any(|v| v.attrs.iter().any(|a| a.name == "error"));
+        // Non-parametric enums (all unit variants) are inferred as Copy.
+        let is_unit_enum = self.unit_enums.contains(&e.name);
         if !has_clone_derive {
             // thiserror auto-inject below will add Debug when needed; don't duplicate it.
             if is_error_type && !has_debug_derive && !has_variant_error_attr {
-                self.line("#[derive(Debug, Clone)]");
+                if is_unit_enum {
+                    self.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]");
+                } else {
+                    self.line("#[derive(Debug, Clone)]");
+                }
+            } else if is_unit_enum {
+                self.line("#[derive(Clone, Copy, PartialEq, Eq, Hash)]");
             } else {
                 self.line("#[derive(Clone)]");
             }
@@ -727,12 +735,22 @@ impl Transpiler {
                 // Recursive enums that genuinely need Box wrap themselves (Box<Self>); other
                 // `T'` annotations on variant fields are treated as plain T to avoid pattern issues.
                 let fields_s: Vec<String> = v.fields.iter()
-                    .map(|f| {
-                        let unwrapped = match &f.ty {
-                            Type::Qualified(inner, OwnerQual::Owned) => inner.as_ref().clone(),
-                            other => other.clone(),
-                        };
-                        self.emit_type(&unwrapped)
+                    .enumerate()
+                    .map(|(idx, f)| {
+                        let rec_key = format!("{}::{}::{}", e.name, v.name, idx);
+                        let is_recursive = self.recursive_fields.contains(&rec_key);
+                        if is_recursive {
+                            // Auto-inferred recursive field — wrap in Box to break the cycle.
+                            format!("Box<{}>", self.emit_type(&f.ty))
+                        } else {
+                            // Non-recursive: unwrap explicit Owned/Box qualifiers so that
+                            // nested pattern matching works without Box wrapping.
+                            let unwrapped = match &f.ty {
+                                Type::Qualified(inner, OwnerQual::Owned) => inner.as_ref().clone(),
+                                other => other.clone(),
+                            };
+                            self.emit_type(&unwrapped)
+                        }
                     })
                     .collect();
                 self.line(&format!("{}({}),", v.name, fields_s.join(", ")));
@@ -1124,12 +1142,24 @@ impl Transpiler {
             if f.name == "eq" || f.name == "lt" {
                 // We need PartialEq for PartialOrd to work.
                 // Emit `impl PartialEq for TypeName` based on field-wise equality.
-                // When the method param is Box<T>, we must Box::new(rhs.clone()) at the call site.
-                let param_is_box = f.params.first()
-                    .and_then(|p| p.ty.as_ref())
+                // When the method param is Box<T> (strict T'), we must Box::new(rhs.clone()).
+                // In managed mode, T' → Arc<Mutex<T>>, so wrap with Arc::new(Mutex::new(...)).
+                let param_ty = f.params.first().and_then(|p| p.ty.as_ref());
+                let param_is_box = param_ty
                     .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned)))
                     .unwrap_or(false);
-                let rhs_arg = if param_is_box {
+                let param_is_managed = param_is_box && param_ty.map(|t|
+                    crate::transpiler::Transpiler::is_managed_user_owned(
+                        &self.config, &self.user_types, &self.unit_enums, t)
+                ).unwrap_or(false);
+                let rhs_arg = if param_is_managed {
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi =>
+                            "Arc::new(std::sync::Mutex::new(rhs.clone()))".to_string(),
+                        crate::transpiler::ThreadingMode::Single =>
+                            "RefCell::new(rhs.clone())".to_string(),
+                    }
+                } else if param_is_box {
                     "Box::new(rhs.clone())".to_string()
                 } else {
                     "rhs.clone()".to_string()
@@ -1153,8 +1183,20 @@ impl Transpiler {
                     self.indent += 1;
                     self.line("fn eq(&self, rhs: &Self) -> bool {");
                     self.indent += 1;
+                    let self_rhs = if param_is_managed {
+                        match self.config.threading {
+                            crate::transpiler::ThreadingMode::Multi =>
+                                "Arc::new(std::sync::Mutex::new(self.clone()))".to_string(),
+                            crate::transpiler::ThreadingMode::Single =>
+                                "RefCell::new(self.clone())".to_string(),
+                        }
+                    } else if param_is_box {
+                        "Box::new(self.clone())".to_string()
+                    } else {
+                        "self.clone()".to_string()
+                    };
                     self.line(&format!("!self.clone().lt({rhs}) && !rhs.clone().lt({self_rhs})",
-                        rhs = rhs_arg, self_rhs = if param_is_box { "Box::new(self.clone())" } else { "self.clone()" }));
+                        rhs = rhs_arg, self_rhs = self_rhs));
                     self.indent -= 1;
                     self.line("}");
                     self.indent -= 1;
@@ -1164,8 +1206,22 @@ impl Transpiler {
                     self.indent += 1;
                     self.line("fn partial_cmp(&self, rhs: &Self) -> Option<std::cmp::Ordering> {");
                     self.indent += 1;
-                    let rhs_box = if param_is_box { "Box::new(rhs.clone())" } else { "rhs.clone()" };
-                    let self_box = if param_is_box { "Box::new(self.clone())" } else { "self.clone()" };
+                    let rhs_box = if param_is_managed {
+                        match self.config.threading {
+                            crate::transpiler::ThreadingMode::Multi =>
+                                "Arc::new(std::sync::Mutex::new(rhs.clone()))".to_string(),
+                            crate::transpiler::ThreadingMode::Single =>
+                                "RefCell::new(rhs.clone())".to_string(),
+                        }
+                    } else if param_is_box { "Box::new(rhs.clone())".to_string() } else { "rhs.clone()".to_string() };
+                    let self_box = if param_is_managed {
+                        match self.config.threading {
+                            crate::transpiler::ThreadingMode::Multi =>
+                                "Arc::new(std::sync::Mutex::new(self.clone()))".to_string(),
+                            crate::transpiler::ThreadingMode::Single =>
+                                "RefCell::new(self.clone())".to_string(),
+                        }
+                    } else if param_is_box { "Box::new(self.clone())".to_string() } else { "self.clone()".to_string() };
                     self.line(&format!("if self.clone().lt({rhs}) {{ Some(std::cmp::Ordering::Less) }}", rhs = rhs_box));
                     self.line(&format!("else if rhs.clone().lt({self_}) {{ Some(std::cmp::Ordering::Greater) }}", self_ = self_box));
                     self.line("else { Some(std::cmp::Ordering::Equal) }");

@@ -133,11 +133,11 @@ req print_menu():
 # --- Ajoute des tâches en parallèle avec un sémaphore ---
 task void add_tasks_in_parallel_with_semaphore(
     var TodoList'actor todo_list,
-    Metrics'task metrics,
+    Metrics'shared metrics,
     uint count,
     uint max_concurrent
 ):
-    let semaphore'task = Semaphore(max_concurrent)
+    let semaphore'shared = Semaphore(max_concurrent)
     var futures = []
 
     for i in 0..count:
@@ -154,7 +154,7 @@ task void add_tasks_in_parallel_with_semaphore(
 # --- Complète des tâches en parallèle avec des canaux ---
 task void complete_tasks_with_channels(
     var TodoList'actor todo_list,
-    Metrics'task metrics
+    Metrics'shared metrics
 ):
     let sender, receiver = mpsc.channel(32)
 
@@ -185,7 +185,7 @@ task void complete_tasks_with_channels(
 # --- Ajoute des tâches avec timeout et annulation ---
 task void add_tasks_with_timeout_and_cancellation(
     TodoList'actor todo_list,
-    Metrics'task metrics
+    Metrics'shared metrics
 ):
     var futures = []
 
@@ -215,7 +215,7 @@ task void add_tasks_with_timeout_and_cancellation(
 # --- Exemple de gestion d'erreurs groupées ---
 task void add_and_complete_tasks(
     TodoList'actor todo_list,
-    Metrics'task metrics,
+    Metrics'shared metrics,
     [string] descriptions
 ) throws string:
     let futures = descriptions.map((desc):
@@ -229,7 +229,7 @@ task void add_and_complete_tasks(
   
 task def void main():
     let todo_list'actor = TodoList()
-    let metrics'task = Metrics()
+    let metrics'shared = Metrics()
     let file_path = "tasks.txt"
 
     # Charger les tâches depuis un fichier
@@ -330,7 +330,7 @@ mod tests:
     @test
     task test_parallel_tasks_with_semaphore():
         let todo_list'actor = TodoList()
-        let metrics'task = Metrics()
+        let metrics'shared = Metrics()
         (task:
             add_tasks_in_parallel_with_semaphore(
                 todo_list,
@@ -345,7 +345,7 @@ mod tests:
     @test
     task test_timeout_and_cancellation():
         let todo_list'actor = TodoList()
-        let metrics'task = Metrics()
+        let metrics'shared = Metrics()
         (task:
             add_tasks_with_timeout_and_cancellation(
                 todo_list,

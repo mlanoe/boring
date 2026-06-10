@@ -713,16 +713,13 @@ pub enum UnaryOp {
 /// `Dog'stack`   → Stack           (Dog        — explicit stack, equivalent to bare Dog)
 /// `Dog'copy`    → Copy            (Dog: Copy  — copied on every use)
 /// `Dog'const`   → Const           (&'static D — compile-time constant / string literal)
-/// `Dog'auto`    → Auto            (Rc<Dog>    — ref-counted, single-thread)
-/// `Dog'shared`  → Task            (Arc<Dog>   — ref-counted, thread-safe / task-safe)
-/// `Dog'weak`    → Weak            (Weak<Dog>  — non-owning ref, must upgrade to Dog'auto)
+/// `Dog'shared`  → Shared          (Arc<Dog> multi / Rc<Dog> single — threading-aware)
+/// `Dog'weak`    → Weak            (Weak<Dog>  — non-owning ref, must upgrade to Dog'shared)
 /// `Dog&a`         → Lifetime("a")   (&'a Dog        — borrow with explicit lifetime)
 /// `Dog'heap&a`    → Lifetime("a")   (&'a Box<Dog>   — borrow qualified type with lifetime)
 /// `Dog'shared&a`  → Lifetime("a")   (&'a Arc<Dog>   — borrow qualified type with lifetime)
-/// `Dog&auto`    → BorrowAuto      (&Rc<Dog>   — borrow the Rc itself; use sparingly)
-/// `Dog'auto&`   → BorrowAuto      (&Rc<Dog>   — postfix form, same as Dog&auto)
-/// `Dog&shared`  → BorrowTask      (&Arc<Dog>  — borrow the Arc itself; use sparingly)
-/// `Dog'shared&` → BorrowTask      (&Arc<Dog>  — postfix form, same as Dog&shared)
+/// `Dog&shared`  → BorrowShared    (&Arc<Dog> multi / &Rc<Dog> single — threading-aware borrow)
+/// `Dog'shared&` → BorrowShared    (&Arc<Dog> / &Rc<Dog> — postfix form, same as Dog&shared)
 /// `Dog&heap`    → BorrowOwned     (&Box<Dog>  — borrow a heap-allocated value)
 /// `Dog'heap&`   → BorrowOwned     (&Box<Dog>  — postfix form, same as Dog&heap)
 /// `Dog&stack`   → Borrow          (&Dog       — explicit stack borrow, same as Dog&)
@@ -739,10 +736,12 @@ pub enum OwnerQual {
     Owned,
     Copy,
     Const,
-    Auto,
-    Task,
-    Actor,   // Arc<tokio::sync::Mutex<T>> — actor pattern, always mutex
-    Guard,   // Arc<tokio::sync::RwLock<T>> — reader-writer lock pattern
+    Actor,   // Arc<tokio::sync::Mutex<T>> (multi) or RefCell<T> (single)
+    Guard,   // Arc<tokio::sync::RwLock<T>> (multi) or RefCell<T> (single)
+    /// Arc<T> (multi-thread) or Rc<T> (single-thread).
+    /// The `--threading` flag determines which is emitted.
+    /// Replaces the deprecated `T'auto` and `T'task` qualifiers.
+    Shared,
     Weak,
     /// Force stack allocation for the Rust transpiler: `Point'stack` → plain `Point` in Rust.
     /// By default structs are heap-allocated (`Box<T>`); `'stack` opts out of that.
@@ -751,14 +750,11 @@ pub enum OwnerQual {
     /// Explicit lifetime annotation for Rust transpilation: `string'a` → `&'a str`.
     /// The interpreter treats this identically to a plain borrow (no runtime enforcement).
     Lifetime(String),
-    /// Borrow of the Rc smart pointer: `Dog&auto` or `Dog'auto&` → `&Rc<Dog>` in Rust.
-    /// Lets you pass a reference to the Rc itself without cloning the counter.
-    /// Use sparingly — prefer `Dog'auto` (clone) or bare `Dog` (deref coercion) for normal use.
-    BorrowAuto,
-    /// Borrow of the Arc smart pointer: `Dog&shared` or `Dog'shared&` → `&Arc<Dog>` in Rust.
-    /// Lets you pass a reference to the Arc itself in multi-threaded / task contexts.
+    /// Threading-aware borrow of the smart pointer: `Dog&shared` or `Dog'shared&`.
+    /// → `&Arc<Dog>` (multi) or `&Rc<Dog>` (single) depending on `--threading`.
+    /// Lets you pass a reference to the smart pointer itself without cloning.
     /// Use sparingly — prefer `Dog'shared` (clone) or bare `Dog` (deref coercion) for normal use.
-    BorrowTask,
+    BorrowShared,
     /// Generic borrow of a type whose smart-pointer kind is determined by alias resolution.
     /// Written as `T&` where `T` is a type alias (e.g. `use Node as Tree'auto; (Node& n)`).
     /// The transpiler resolves this to `&Rc<T>` or `&Arc<T>` based on the alias target.
@@ -828,7 +824,7 @@ impl Type {
             // Owned = exclusive move → never copy
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => false,
             // Lifetime refs and borrows of smart pointers are copy at the borrow level
-            Type::Qualified(_, OwnerQual::Lifetime(_) | OwnerQual::BorrowAuto | OwnerQual::BorrowTask | OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
+            Type::Qualified(_, OwnerQual::Lifetime(_) | OwnerQual::BorrowShared | OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
             // All other qualifiers give copy/shared semantics
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased
@@ -853,19 +849,17 @@ impl Type {
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => true,  // exclusive move → source invalidated
             Type::Qualified(_, OwnerQual::Copy)       => true,  // independent copy
             Type::Qualified(_, OwnerQual::Const)      => true,  // global constant, immutable
-            Type::Qualified(_, OwnerQual::Task)       => true,  // Arc<T> — thread-safe, task-safe
+            Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe
             Type::Qualified(_, OwnerQual::Actor)      => true,  // Arc<Mutex<T>> — actor pattern, task-safe
             Type::Qualified(_, OwnerQual::Guard)      => true,  // Arc<RwLock<T>> — guard pattern, task-safe
-            Type::Qualified(_, OwnerQual::Auto)       => false, // Rc<T>  — single-thread only
-            Type::Qualified(_, OwnerQual::Weak)       => false, // Weak<T> — single-thread only
+            Type::Qualified(_, OwnerQual::Weak)       => false, // Weak<T> — non-owning, conservative
             Type::Qualified(_, OwnerQual::Lifetime(_)) => true, // borrow — task-safe for transpilation
-            Type::Qualified(_, OwnerQual::BorrowTask) => true,  // &Arc<T> — task-safe borrow
-            Type::Qualified(_, OwnerQual::BorrowAuto) => false, // &Rc<T>  — single-thread only
+            Type::Qualified(_, OwnerQual::BorrowShared) => true, // &Arc<T> / &Rc<T> — threading-aware borrow
             Type::Qualified(_, OwnerQual::BorrowOwned)  => false,
             Type::Qualified(_, OwnerQual::BorrowOption) => false,
             Type::Qualified(_, OwnerQual::BorrowWeak)   => false,
             Type::Qualified(_, OwnerQual::Borrow)       => false, // unknown until alias resolved — conservative
-            Type::Qualified(_, OwnerQual::BorrowMut)   => false, // &mut T — conservative (target unknown)
+            Type::Qualified(_, OwnerQual::BorrowMut)    => false, // &mut T — conservative (target unknown)
             Type::TypeParam(_) => true,
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),

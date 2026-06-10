@@ -56,19 +56,36 @@ impl Transpiler {
             if let ExprKind::Var(var_name) = &obj.kind {
                 if self.channel_senders.contains(var_name.as_str()) {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
-                    return if self.in_throws || self.in_try_body {
+                    // In single-thread mode, local_channel::mpsc::send() is synchronous (not async).
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    return if is_single {
+                        if self.in_throws || self.in_try_body {
+                            format!("{}.send({}).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name, val)
+                        } else {
+                            format!("{}.send({}).expect(\"channel receiver dropped\")", var_name, val)
+                        }
+                    } else if self.in_throws || self.in_try_body {
                         format!("{}.send({}).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name, val)
                     } else {
                         format!("{}.send({}).await.expect(\"channel receiver dropped\")", var_name, val)
                     };
                 }
-                // oneshot/broadcast/watch senders: non-async, swallow error with .ok()
+                // oneshot/watch senders: non-async, swallow error with .ok()
                 if self.oneshot_senders.contains(var_name.as_str())
-                    || self.broadcast_senders.contains(var_name.as_str())
                     || self.watch_senders.contains(var_name.as_str())
                 {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
                     return format!("{}.send({}).ok()", var_name, val);
+                }
+                // broadcast sender: single-thread LocalBroadcastSender::send() returns ();
+                // multi-thread tokio::sync::broadcast::Sender::send() returns Result.
+                if self.broadcast_senders.contains(var_name.as_str()) {
+                    let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
+                    return if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        format!("{}.send({})", var_name, val)
+                    } else {
+                        format!("{}.send({}).ok()", var_name, val)
+                    };
                 }
             }
         }
@@ -91,7 +108,11 @@ impl Transpiler {
                     };
                 }
                 // broadcast receiver: rx.recv() → rx.recv().await
+                // In single-thread mode, LocalBroadcastReceiver::recv() returns T directly (no Result).
                 if self.broadcast_receivers.contains(var_name.as_str()) {
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        return format!("{}.recv().await", var_name);
+                    }
                     return if self.in_throws || self.in_try_body {
                         format!("{}.recv().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name)
                     } else {
@@ -236,6 +257,25 @@ impl Transpiler {
                 } else {
                     call
                 };
+            }
+        }
+        // Managed-mode mutex var method: w.method(args) → w.lock().unwrap().method(args)
+        // Uses std::sync::Mutex (synchronous), no .await needed.
+        if let ExprKind::Var(v) = &obj.kind {
+            if self.managed_mutex_vars.contains(v.as_str()) {
+                let (rust_method, extra_wrap) = map_method(method, args.len());
+                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                let call = format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", "));
+                let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                return call;
+            }
+            // Managed-mode RefCell var method: w.method(args) → w.borrow_mut().method(args)
+            if self.managed_refcell_vars.contains(v.as_str()) {
+                let (rust_method, extra_wrap) = map_method(method, args.len());
+                let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
+                let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                return call;
             }
         }
         // Mutex struct field method: self.worker.method(args) → self.worker.lock().await.method(args)
@@ -1333,10 +1373,12 @@ impl Transpiler {
 
     pub(crate) fn make_sub(&self) -> Transpiler {
         Transpiler {
+            config: self.config,
             out: String::new(),
             indent: self.indent,
             in_throws: self.in_throws,
             in_async: self.in_async,
+            in_iter_stream: self.in_iter_stream,
             self_type: self.self_type.clone(),
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),
@@ -1354,6 +1396,7 @@ impl Transpiler {
             optional_vars: self.optional_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
+            type_sizes: self.type_sizes.clone(),
             struct_assoc_types: self.struct_assoc_types.clone(),
             fn_throws: self.fn_throws.clone(),
             typed_error_enums: self.typed_error_enums.clone(),
@@ -1393,6 +1436,7 @@ impl Transpiler {
             newtype_inner: self.newtype_inner.clone(),
             var_newtype_type: self.var_newtype_type.clone(),
             stream_fns: self.stream_fns.clone(),
+            stream_iter_fns: self.stream_iter_fns.clone(),
             stream_throws_fns: self.stream_throws_fns.clone(),
             has_streams: self.has_streams,
             channel_receivers: self.channel_receivers.clone(),
@@ -1447,6 +1491,16 @@ impl Transpiler {
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),
+            unit_enums: self.unit_enums.clone(),
+            recursive_fields: self.recursive_fields.clone(),
+            user_types: self.user_types.clone(),
+            uses_local_channel: std::rc::Rc::clone(&self.uses_local_channel),
+            uses_local_broadcast: std::rc::Rc::clone(&self.uses_local_broadcast),
+            rc_vars: self.rc_vars.clone(),
+            managed_mutex_vars: self.managed_mutex_vars.clone(),
+            managed_refcell_vars: self.managed_refcell_vars.clone(),
+            managed_param_shadows: self.managed_param_shadows.clone(),
+            struct_method_return_types: self.struct_method_return_types.clone(),
         }
     }
 

@@ -589,7 +589,7 @@ impl Parser {
         if Self::is_type_name(&s) {
             // Simple/primitive type name — use the normal type parser (handles generics etc.)
             let ty = self.parse_type()?;
-            let ty = self.parse_type_qualifier(ty);
+            let ty = self.parse_type_qualifier(ty)?;
             return Ok(Some(ty));
         }
         // Module-qualified path: lowercase module segment followed by at least one dot.
@@ -693,11 +693,12 @@ impl Parser {
         if is_type_start {
             let saved = self.pos;
             if let Ok(ty) = self.parse_type() {
-                let ty = self.parse_type_qualifier(ty);
-                // Accept any token that can be used as an identifier (including soft keywords
-                // like `join`, `wait`, etc.) as the function / field name following the type.
-                if self.keyword_as_ident_str(self.peek()).is_some() {
-                    return Some(ty);
+                if let Ok(ty) = self.parse_type_qualifier(ty) {
+                    // Accept any token that can be used as an identifier (including soft keywords
+                    // like `join`, `wait`, etc.) as the function / field name following the type.
+                    if self.keyword_as_ident_str(self.peek()).is_some() {
+                        return Some(ty);
+                    }
                 }
             }
             self.pos = saved;

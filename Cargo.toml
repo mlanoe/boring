@@ -1,6 +1,6 @@
 [package]
 name        = "boring"
-version     = "0.3.0"
+version     = "0.4.0"
 edition     = "2021"
 description = "A language that compiles to Rust — clean syntax, zero-cost abstractions, no boilerplate"
 license     = "GPL-3.0"
@@ -17,4 +17,5 @@ path = "src/main.rs"
 [dependencies]
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
+local-channel = "0.1"
 

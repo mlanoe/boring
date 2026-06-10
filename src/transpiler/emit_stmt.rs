@@ -80,8 +80,12 @@ impl Transpiler {
             Stmt::Yield(expr, _)    => {
                 // Use emit_expr_owned so string literals are Arc<str>, not &str,
                 // matching the stream's Item type.
-                let s = format!("yield {};", self.emit_expr_owned(expr));
-                self.line(&s);
+                let val = self.emit_expr_owned(expr);
+                if self.in_iter_stream {
+                    self.line(&format!("__items.push({});", val));
+                } else {
+                    self.line(&format!("yield {};", val));
+                }
             }
             Stmt::Comment(text)     => self.line(&format!("// {}", text)),
             Stmt::Expr(e)           => {
@@ -127,6 +131,30 @@ impl Transpiler {
         // Track every declared local variable so that field/method access can distinguish
         // instance variables (use `.`) from type/module paths (use `::`).
         self.known_local_vars.insert(s.name.clone());
+        // Track `let tx = broadcast<T>(cap)` (single-binding sender).
+        if let Some(val) = &s.value {
+            let is_broadcast_call = matches!(&val.kind,
+                ExprKind::GenericCall(callee, _, _)
+                if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"))
+                || matches!(&val.kind,
+                ExprKind::Call(callee, _)
+                if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"));
+            if is_broadcast_call && s.name != "_" {
+                self.broadcast_senders.insert(s.name.clone());
+            }
+        }
+        // Track `let rx = tx.subscribe()` so rx is recognized as a broadcast receiver.
+        if let Some(val) = &s.value {
+            if let ExprKind::MethodCall(obj, method, _) = &val.kind {
+                if method == "subscribe" {
+                    if let ExprKind::Var(tx_name) = &obj.kind {
+                        if self.broadcast_senders.contains(tx_name.as_str()) {
+                            self.broadcast_receivers.insert(s.name.clone());
+                        }
+                    }
+                }
+            }
+        }
         // Shadowing: clear previous struct-type tracking so a re-declared variable with a
         // different type (e.g. `let d = Doubler()` then `let d'weak = c`) doesn't inherit
         // the old struct type and incorrectly suppress `.await.unwrap()` on `.value`.
@@ -188,6 +216,37 @@ impl Transpiler {
                     }
                     let kw = if s.mutable { "let mut" } else { "let" };
                     self.line(&format!("{} {}: {} = {};", kw, s.name, rwlock_ty, init));
+                    return;
+                }
+            }
+            // Managed mode T' (OwnerQual::Owned) over a user type:
+            // multi → Arc<std::sync::Mutex<T>>, single → RefCell<T>.
+            // Track the variable so field/method access emits correct locking.
+            if self.is_managed_owned_user(ty) {
+                if let Type::Qualified(inner, OwnerQual::Owned) = ty {
+                    let managed_ty = self.emit_managed_actor(inner);
+                    let raw_val = self.emit_let_value(Some(inner.as_ref()), s_value);
+                    let init = self.wrap_managed(&raw_val);
+                    let kw = if s.mutable { "let mut" } else { "let" };
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi => {
+                            self.managed_mutex_vars.insert(s.name.clone());
+                            self.arc_vars.insert(s.name.clone());
+                        }
+                        crate::transpiler::ThreadingMode::Single => {
+                            self.managed_refcell_vars.insert(s.name.clone());
+                        }
+                    }
+                    self.line(&format!("{} {}: {} = {};", kw, s.name, managed_ty, init));
+                    // Shadow the mutex guard immediately so multiple field accesses in the same
+                    // expression don't deadlock (std::sync::Mutex is non-reentrant).
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+                        let shadow = format!("__{}_mg", s.name);
+                        self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
+                            shadow = shadow, name = s.name));
+                        self.managed_mutex_vars.remove(&s.name);
+                        self.managed_param_shadows.insert(s.name.clone(), shadow);
+                    }
                     return;
                 }
             }
@@ -268,6 +327,20 @@ impl Transpiler {
         {
             self.dict_vars.insert(s.name.clone());
         }
+        // Managed mode inference: if no explicit type annotation and the expression result
+        // is inferred to be a managed-mode wrapped type (Arc<Mutex<T>> or RefCell<T>),
+        // track the variable for correct field/method call-site transforms.
+        if s.ty.is_none() && self.infers_as_managed(s_value) {
+            match self.config.threading {
+                crate::transpiler::ThreadingMode::Multi => {
+                    self.managed_mutex_vars.insert(s.name.clone());
+                    self.arc_vars.insert(s.name.clone());
+                }
+                crate::transpiler::ThreadingMode::Single => {
+                    self.managed_refcell_vars.insert(s.name.clone());
+                }
+            }
+        }
         // Track tuple variables for method dispatch (length, isEmpty, first, last).
         if let ExprKind::Tuple(elems) = &s_value.kind {
             self.tuple_vars.insert(s.name.clone(), elems.len());
@@ -337,14 +410,24 @@ impl Transpiler {
                         let call_s = format!("{fn_name}({all_args}).await");
                         let inner_s = format!("{{ {} }}", call_s);
                         let kw = if s.mutable { "let mut" } else { "let" };
+                        let spawn_fn = match self.config.threading {
+                            crate::transpiler::ThreadingMode::Single => "tokio::task::spawn_local",
+                            crate::transpiler::ThreadingMode::Multi  => "tokio::spawn",
+                        };
                         let spawn_s = if arc_captures.is_empty() {
-                            format!("tokio::spawn(async move {})", inner_s)
+                            format!("{}(async move {})", spawn_fn, inner_s)
                         } else {
                             let clones: String = arc_captures.iter()
-                                .map(|v| format!("let {} = Arc::clone(&{});", v, v))
+                                .map(|v| {
+                                    if self.rc_vars.contains(v.as_str()) {
+                                        format!("let {} = Rc::clone(&{});", v, v)
+                                    } else {
+                                        format!("let {} = Arc::clone(&{});", v, v)
+                                    }
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" ");
-                            format!("tokio::spawn({{ {} async move {} }})", clones, inner_s)
+                            format!("{}({{ {} async move {} }})", spawn_fn, clones, inner_s)
                         };
                         self.line(&format!("{} {} = {};", kw, s.name, spawn_s));
                         return;
@@ -464,12 +547,15 @@ impl Transpiler {
                 self.var_newtype_type.insert(s.name.clone(), ty_name.clone());
             }
         }
-        // Track Arc<T> variables (string or T'task / T'actor) — must be cloned before
+        // Track Arc<T> variables (string, T'shared, T'actor, T'guard) — must be cloned before
         // being moved into an `async move {}` block so the outer binding stays valid.
-        // Note: T'auto (Rc<T>) is NOT task-safe so it never needs Arc::clone for tasks.
         if let Some(ty) = &s.ty {
-            if Self::is_string_type(ty) || Self::is_arc_qualified(ty) {
+            if Self::is_string_type(ty) || Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) {
                 self.arc_vars.insert(s.name.clone());
+                // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone (not Arc::clone).
+                if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                    self.rc_vars.insert(s.name.clone());
+                }
             }
             // Track T'weak variables — already Weak<T>, must not be downgraded again.
             if Self::is_weak_qualified(ty) {
@@ -478,6 +564,22 @@ impl Transpiler {
             // Track Optional-typed variables so they are never double-wrapped in Some().
             if matches!(ty, Type::Optional(_)) {
                 self.optional_vars.insert(s.name.clone());
+            }
+            // Track managed-mode T' (non-optional) variables — field/method access needs locking.
+            if self.is_managed_owned_user(ty) {
+                match self.config.threading {
+                    crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(s.name.clone()); }
+                    crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(s.name.clone()); }
+                }
+            }
+            // Track managed-mode T'? (optional) variables — optional-chain access needs locking.
+            if let Type::Optional(inner) = ty {
+                if self.is_managed_owned_user(inner.as_ref()) {
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(s.name.clone()); }
+                        crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(s.name.clone()); }
+                    }
+                }
             }
             // Track var type for match subject enum inference.
             self.var_types.insert(s.name.clone(), ty.clone());
@@ -521,6 +623,20 @@ impl Transpiler {
             self.line(&format!("{}static {}{} = {};", vis, s.name, ty, val));
         } else {
             self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, val));
+            // Shadow non-optional managed mutex locals immediately to avoid double-lock deadlock.
+            // Optional managed vars (T'?) stay in managed_mutex_vars but must NOT be shadowed
+            // here because they are Option<Arc<Mutex<T>>> and lock() is not on Option.
+            let is_optional_ty = s.ty.as_ref().map_or(false, |t| matches!(t, Type::Optional(_)));
+            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                && !is_optional_ty
+                && self.managed_mutex_vars.contains(&s.name)
+            {
+                let shadow = format!("__{}_mg", s.name);
+                self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
+                    shadow = shadow, name = s.name));
+                self.managed_mutex_vars.remove(&s.name);
+                self.managed_param_shadows.insert(s.name.clone(), shadow);
+            }
         }
     }
 
@@ -585,14 +701,123 @@ impl Transpiler {
             || matches!(ty, Type::Qualified(inner, _) if matches!(**inner, Type::Str))
     }
 
-    /// Returns true for types that map to `Arc<T>` (or `Arc<Mutex<T>>` / `Arc<RwLock<T>>`) in Rust.
+    /// Returns true for types that map to `Arc<Mutex<T>>` or `Arc<RwLock<T>>` in Rust.
+    /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard))
+        matches!(ty, Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }
 
-    /// Returns true for `T'auto` which maps to `Rc<T>` in Rust.
+    /// Returns true for `T'shared` (Arc<T> multi or Rc<T> single).
     pub(crate) fn is_rc_qualified(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Auto))
+        matches!(ty, Type::Qualified(_, OwnerQual::Shared))
+    }
+
+    /// Returns true when `ty` is an anonymous `T'` (OwnerQual::Owned) and the inner type
+    /// is a user-defined struct/enum. In managed mode this resolves to Arc<std::sync::Mutex<T>>
+    /// (multi) or RefCell<T> (single) rather than Box<T>.
+    pub(crate) fn is_managed_owned_user(&self, ty: &Type) -> bool {
+        crate::transpiler::Transpiler::is_managed_user_owned(
+            &self.config, &self.user_types, &self.unit_enums, ty)
+    }
+
+    /// Static version for use from emit_top.rs (where calling self.is_managed_owned_user is awkward).
+    pub(crate) fn is_managed_owned_user_static(
+        config: &crate::transpiler::TranspileConfig,
+        user_types: &std::collections::HashSet<String>,
+        unit_enums: &std::collections::HashSet<String>,
+        ty: &Type) -> bool
+    {
+        crate::transpiler::Transpiler::is_managed_user_owned(config, user_types, unit_enums, ty)
+    }
+
+    /// Wrap a raw constructor value in the managed-mode wrapper.
+    /// Multi: `Arc::new(std::sync::Mutex::new(val))`
+    /// Single: `RefCell::new(val)`
+    pub(crate) fn wrap_managed(&self, val: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi =>
+                format!("Arc::new(std::sync::Mutex::new({}))", val),
+            crate::transpiler::ThreadingMode::Single =>
+                format!("RefCell::new({})", val),
+        }
+    }
+
+    /// Infer whether an expression's result type is a managed-mode owned user type.
+    /// Returns true when the result would be `Arc<Mutex<T>>` (multi) or `RefCell<T>` (single).
+    /// Used to auto-track untyped `let` bindings in managed mode.
+    fn infers_as_managed(&self, expr: &Expr) -> bool {
+        use crate::ast::ExprKind;
+        use crate::ast::BinOp;
+        if self.config.mode != crate::transpiler::TranspileMode::Managed { return false; }
+        match &expr.kind {
+            // Direct constructor call of a user type with T' return: if the result is used
+            // in an untyped binding and the called type is a user type, check if it's the
+            // top-level binding — but we can't know without explicit type, so skip plain calls.
+            ExprKind::BinOp(op, l, _r) => {
+                // a op b where op is an arithmetic/comparison operator dispatched to a struct method
+                let mname = match op {
+                    BinOp::Add => "add", BinOp::Sub => "sub", BinOp::Mul => "mul",
+                    BinOp::Div => "div", BinOp::Rem => "rem",
+                    BinOp::Eq => "eq", BinOp::NotEq => "ne",
+                    BinOp::Lt => "lt", BinOp::LtEq => "le", BinOp::Gt => "gt", BinOp::GtEq => "ge",
+                    _ => return false,
+                };
+                // Determine struct type of left operand
+                let struct_ty = if let ExprKind::Var(v) = &l.kind {
+                    self.var_struct_types.get(v.as_str()).cloned()
+                        .or_else(|| {
+                            // Also handle plain (non-tracked) vars whose type we know from constructor
+                            None
+                        })
+                } else { None };
+                if let Some(sty) = struct_ty {
+                    let key = format!("{}::{}", sty, mname);
+                    if let Some(ret_ty) = self.struct_method_return_types.get(&key) {
+                        return self.is_managed_owned_user(ret_ty);
+                    }
+                }
+                false
+            }
+            ExprKind::MethodCall(obj, method, _args) => {
+                let struct_ty = if let ExprKind::Var(v) = &obj.kind {
+                    self.var_struct_types.get(v.as_str()).cloned()
+                } else { None };
+                if let Some(sty) = struct_ty {
+                    let key = format!("{}::{}", sty, method);
+                    if let Some(ret_ty) = self.struct_method_return_types.get(&key) {
+                        return self.is_managed_owned_user(ret_ty);
+                    }
+                }
+                false
+            }
+            ExprKind::UnaryOp(crate::ast::UnaryOp::Neg, operand) => {
+                // `-a` where `a` is a struct with `neg()` method returning managed type
+                let struct_ty = if let ExprKind::Var(v) = &operand.kind {
+                    self.var_struct_types.get(v.as_str()).cloned()
+                } else { None };
+                if let Some(sty) = struct_ty {
+                    let key = format!("{}::neg", sty);
+                    if let Some(ret_ty) = self.struct_method_return_types.get(&key) {
+                        return self.is_managed_owned_user(ret_ty);
+                    }
+                }
+                false
+            }
+            ExprKind::Call(callee, _args) => {
+                if let ExprKind::Var(fn_name) = &callee.kind {
+                    // Function returning managed type
+                    if let Some(ret_ty) = self.fn_return_types.get(fn_name.as_str()) {
+                        if self.is_managed_owned_user(ret_ty) { return true; }
+                    }
+                    // Non-function type alias constructor: `AP` → `APoint'`
+                    if let Some(alias_ty) = self.non_fn_type_aliases.get(fn_name.as_str()) {
+                        if self.is_managed_owned_user(alias_ty) { return true; }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Returns true for `T'weak` (any form) which maps to `Weak<T>` in Rust.
@@ -600,12 +825,12 @@ impl Transpiler {
         matches!(ty, Type::Qualified(_, OwnerQual::Weak))
     }
 
-    /// Returns true for `T'task'weak` / `T'actor'weak` — weak ref to an Arc-backed type.
+    /// Returns true for `T'shared'weak` / `T'actor'weak` — weak ref to an Arc-backed type.
     /// These require `Arc::downgrade` and `std::sync::Weak<T>` in Rust.
     pub(crate) fn is_arc_weak(ty: &Type) -> bool {
         matches!(ty,
             Type::Qualified(inner, OwnerQual::Weak)
-            if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Task | OwnerQual::Actor | OwnerQual::Guard))
+            if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard))
         )
     }
 
@@ -777,10 +1002,22 @@ impl Transpiler {
                     || inner_val.ends_with(".ok()")
                     || inner_val.ends_with(".map(|i| i as i64)");
                 if already_opt { return inner_val; }
-                // `T'? (Box<T>?)`: wrap the value in Box::new(...) before Some(...)
+                // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
                 let wrapped = if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned)) {
-                    if inner_val.starts_with("Box::new(") { inner_val }
-                    else { format!("Box::new({})", inner_val) }
+                    // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>
+                    if self.is_managed_owned_user(inner.as_ref()) {
+                        if inner_val.starts_with("Arc::new(std::sync::Mutex::new(")
+                            || inner_val.starts_with("RefCell::new(")
+                        {
+                            inner_val
+                        } else {
+                            self.wrap_managed(&inner_val)
+                        }
+                    } else {
+                        // Strict mode: wrap in Box::new(...)
+                        if inner_val.starts_with("Box::new(") { inner_val }
+                        else { format!("Box::new({})", inner_val) }
+                    }
                 } else {
                     inner_val
                 };
@@ -811,18 +1048,8 @@ impl Transpiler {
                 let s = self.emit_expr(value);
                 if s.starts_with('&') { s } else { format!("&{}", s) }
             }
-            // T&auto (e.g. OCounter&auto) → &Rc<T>: pass reference to the Rc.
-            Some(Type::Qualified(_, OwnerQual::BorrowAuto)) => {
-                // Use the raw variable name (not .clone()) so the borrow is valid.
-                if let ExprKind::Var(v) = &value.kind {
-                    format!("&{}", v)
-                } else {
-                    let s = self.emit_expr(value);
-                    if s.starts_with('&') { s } else { format!("&{}", s) }
-                }
-            }
-            // T&task (e.g. OCounter&task) → &Arc<T>: pass reference to the Arc.
-            Some(Type::Qualified(_, OwnerQual::BorrowTask)) => {
+            // T&shared (e.g. OCounter&shared) → &Arc<T> (multi) or &Rc<T> (single): pass reference.
+            Some(Type::Qualified(_, OwnerQual::BorrowShared)) => {
                 // Use the raw variable name (not .clone()) so the borrow is valid.
                 if let ExprKind::Var(v) = &value.kind {
                     format!("&{}", v)
@@ -856,20 +1083,38 @@ impl Transpiler {
                     format!("Arc::<str>::from({}.to_string())", s)
                 }
             }
-            // T'auto → Rc<T>: wrap in Rc::new().
-            Some(t) if Self::is_rc_qualified(t) => {
+            // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.
+            Some(Type::Qualified(_, OwnerQual::Shared)) => {
                 let inner = self.emit_expr(value);
-                // Don't double-wrap: if the value is already Rc (from a variable declared 'auto),
-                // pass it through directly.
-                let already_rc = inner.starts_with("Rc::new(")
-                    || inner.starts_with("Rc::clone(")
-                    || matches!(&value.kind, ExprKind::Var(v)
-                        if matches!(self.var_types.get(v.as_str()),
-                            Some(Type::Qualified(_, OwnerQual::Auto))));
-                if already_rc {
-                    inner
-                } else {
-                    format!("Rc::new({})", inner)
+                match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => {
+                        let already_rc = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
+                            || matches!(&value.kind, ExprKind::Var(v)
+                                if matches!(self.var_types.get(v.as_str()),
+                                    Some(Type::Qualified(_, OwnerQual::Shared))));
+                        if already_rc {
+                            inner
+                        } else if matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
+                            format!("Rc::clone(&{})", inner)
+                        } else if matches!(&value.kind, ExprKind::Var(_)) {
+                            format!("Rc::new({}.clone())", inner)
+                        } else {
+                            format!("Rc::new({})", inner)
+                        }
+                    }
+                    crate::transpiler::ThreadingMode::Multi => {
+                        if inner.starts_with("Arc::new(") || inner.starts_with("Arc::clone(") {
+                            return inner;
+                        }
+                        let is_existing_arc = matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
+                        if is_existing_arc {
+                            format!("Arc::clone(&{})", inner)
+                        } else if matches!(&value.kind, ExprKind::Var(_)) {
+                            format!("Arc::new({}.clone())", inner)
+                        } else {
+                            format!("Arc::new({})", inner)
+                        }
+                    }
                 }
             }
             // T'weak → Weak<T>: downgrade from Rc or Arc, unless already Weak.
@@ -882,9 +1127,12 @@ impl Transpiler {
                 {
                     return inner;
                 }
-                // Use Arc::downgrade when: explicit `T'task'weak` / `T'actor'weak` type,
-                // or the RHS variable is known to be an Arc.
-                if Self::is_arc_weak(t) || self.arc_vars.contains(inner.as_str()) {
+                // Use Arc::downgrade only in multi-thread mode for compound-weak types,
+                // or when the RHS variable is known to be an Arc.
+                // In single-thread mode, `T'shared` uses Rc, so all weak refs use Rc::downgrade.
+                let use_arc = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                    && (Self::is_arc_weak(t) || self.arc_vars.contains(inner.as_str()));
+                if use_arc {
                     format!("Arc::downgrade(&{})", inner)
                 } else {
                     format!("Rc::downgrade(&{})", inner)
@@ -930,10 +1178,18 @@ impl Transpiler {
                     self.emit_expr(value)
                 }
             }
-            // T'owned (Box<T>): wrap the expression in Box::new(...) unless already boxed.
-            Some(Type::Qualified(_, OwnerQual::Owned)) => {
+            // T'owned (Box<T> in strict, Arc<Mutex<T>>/RefCell<T> in managed): wrap accordingly.
+            Some(ty @ Type::Qualified(_, OwnerQual::Owned)) => {
                 let inner = self.emit_expr(value);
-                if inner.starts_with("Box::new(") {
+                if self.is_managed_owned_user(ty) {
+                    if inner.starts_with("Arc::new(std::sync::Mutex::new(")
+                        || inner.starts_with("RefCell::new(")
+                    {
+                        inner
+                    } else {
+                        self.wrap_managed(&inner)
+                    }
+                } else if inner.starts_with("Box::new(") {
                     inner
                 } else {
                     format!("Box::new({})", inner)
@@ -1061,7 +1317,19 @@ impl Transpiler {
             let cap = if let ExprKind::Call(_, args) = &s.value.kind {
                 args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0".to_string())
             } else { "0".to_string() };
-            format!("tokio::sync::mpsc::channel::<{}>({})", item_ty, cap)
+            let channel_mod = match self.config.threading {
+                crate::transpiler::ThreadingMode::Single => {
+                    self.uses_local_channel.set(true);
+                    "local_channel::mpsc"
+                }
+                crate::transpiler::ThreadingMode::Multi  => "tokio::sync::mpsc",
+            };
+            // local_channel::mpsc::channel() is unbounded — no capacity argument.
+            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                format!("{}::channel::<{}>()", channel_mod, item_ty)
+            } else {
+                format!("{}::channel::<{}>({})", channel_mod, item_ty, cap)
+            }
         } else {
             self.emit_expr(&s.value)
         };
@@ -1109,6 +1377,20 @@ impl Transpiler {
                     // Tuple/Array/Dict return: use emit_let_value for per-element
                     // coercion (e.g. string literals → Arc<str> in the right slots).
                     self.emit_let_value(self.fn_return_ty.as_ref(), e)
+                } else if let Some(ret_ty) = &self.fn_return_ty.clone() {
+                    // Managed mode T' return: wrap in Arc<Mutex<T>> or RefCell<T>
+                    if self.is_managed_owned_user(ret_ty) {
+                        let inner = self.emit_expr_owned(e);
+                        if inner.starts_with("Arc::new(std::sync::Mutex::new(")
+                            || inner.starts_with("RefCell::new(")
+                        {
+                            inner
+                        } else {
+                            self.wrap_managed(&inner)
+                        }
+                    } else {
+                        self.emit_expr_owned(e)
+                    }
                 } else {
                     self.emit_expr_owned(e)
                 };
@@ -1577,7 +1859,7 @@ impl Transpiler {
         } else {
             None
         };
-        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Auto | OwnerQual::Task | OwnerQual::Owned)));
+        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Owned)));
         let subj = if is_smart_ptr {
             format!("(*{})", subj_raw)
         } else {
@@ -1904,18 +2186,23 @@ impl Transpiler {
             }
         }
 
-        // Detect `for item in stream_fn(args):` — emit a pinned stream consumer instead.
-        let stream_fn_name: Option<String> = match &s.iterable.kind {
+        // Detect `for item in stream_fn(args):` — iterator or async stream consumer.
+        let stream_fn_name: Option<(String, bool)> = match &s.iterable.kind {
             ExprKind::Call(callee, _) => {
                 if let ExprKind::Var(name) = &callee.kind {
-                    if self.stream_fns.contains(name.as_str()) {
-                        Some(name.clone())
+                    if self.stream_iter_fns.contains(name.as_str()) {
+                        Some((name.clone(), true))
+                    } else if self.stream_fns.contains(name.as_str()) {
+                        Some((name.clone(), false))
                     } else { None }
                 } else { None }
             }
             _ => None,
         };
-        if let Some(ref fn_name) = stream_fn_name {
+        if let Some((ref fn_name, is_iter)) = stream_fn_name {
+            if is_iter {
+                return self.emit_for_iter_stream(s);
+            }
             return self.emit_for_stream(s, fn_name);
         }
 
@@ -2036,6 +2323,22 @@ impl Transpiler {
         self.known_local_vars = saved_locals;
     }
 
+    /// Emit a `for item in iter_stream_fn(args):` as a plain Rust `for` loop.
+    /// The callee returns `impl Iterator<Item = T>` — no `.await`, no pinning.
+    pub(crate) fn emit_for_iter_stream(&mut self, s: &ForStmt) {
+        let iter_expr = self.emit_expr(&s.iterable);
+        let vars = if s.vars.is_empty() {
+            "_".into()
+        } else {
+            s.vars.iter().map(|v| crate::transpiler::helpers::escape_rust_keyword(v)).collect::<Vec<_>>().join(", ")
+        };
+        self.line(&format!("for {} in {} {{", vars, iter_expr));
+        self.indent += 1;
+        self.emit_loop_body(&s.body);
+        self.indent -= 1;
+        self.line("}");
+    }
+
     /// Emit a `for item in stream_fn(args):` loop as a pinned stream consumer.
     ///
     /// ```rust
@@ -2096,11 +2399,21 @@ impl Transpiler {
         } else {
             s.vars.iter().map(|v| escape_rust_keyword(v)).collect::<Vec<_>>().join(", ")
         };
-        self.line(&format!("while let Ok({}) = {}.recv().await {{", vars, rx_name));
-        self.indent += 1;
-        self.emit_loop_body(&s.body);
-        self.indent -= 1;
-        self.line("}");
+        // In single-thread mode, LocalBroadcastReceiver::recv() returns T (no Result).
+        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+            self.line("loop {");
+            self.indent += 1;
+            self.line(&format!("let {} = {}.recv().await;", vars, rx_name));
+            self.emit_loop_body(&s.body);
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.line(&format!("while let Ok({}) = {}.recv().await {{", vars, rx_name));
+            self.indent += 1;
+            self.emit_loop_body(&s.body);
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     pub(crate) fn emit_for_watch(&mut self, s: &ForStmt, rx_name: String) {

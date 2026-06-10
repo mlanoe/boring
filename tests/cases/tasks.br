@@ -40,7 +40,7 @@ struct Worker:
 task void Worker.run():
     print "worker {self.name} processing {self.jobs} jobs"
 
-let Worker'task w = Worker(name = "alice", jobs = 5)
+let Worker'shared w = Worker(name = "alice", jobs = 5)
 let fw2 = task w.run()
 fw2.value
 print "w.name={w.name}"

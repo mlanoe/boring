@@ -157,40 +157,10 @@ fn run() {
             }
         }
         Some("build") => {
-            match args.get(2).map(|s| s.as_str()) {
-                Some("--target") => {
-                    match args.get(3).map(|s| s.as_str()) {
-                        Some("kernel") => {
-                            match args.get(4).map(|s| s.as_str()) {
-                                Some(path) => emit_kernel(path),      // boring build --target kernel <file.br>
-                                None       => build_project_kernel(), // boring build --target kernel
-                            }
-                        }
-                        Some(target) => {
-                            eprintln!("error: unknown target '{}'", target);
-                            eprintln!("hint:  supported targets: kernel");
-                            process::exit(1);
-                        }
-                        None => {
-                            eprintln!("error: --target requires a value");
-                            eprintln!("hint:  supported targets: kernel");
-                            process::exit(1);
-                        }
-                    }
-                }
-                Some(path) => emit_rust(path),        // boring build file.br
-                None       => build_project(),        // boring build  (uses boring.toml)
-            }
+            let build_args = &args[2..];
+            parse_build_command(build_args);
         }
 
-        // ── Legacy / direct-file commands ──────────────────────────────────
-        Some("--emit-rust") => {
-            let path = args.get(2).unwrap_or_else(|| {
-                eprintln!("usage: boring --emit-rust <file.br>");
-                process::exit(1);
-            });
-            emit_rust(path);
-        }
         Some(path) => run_file(path),
         None => {
             print_help();
@@ -208,10 +178,11 @@ fn print_help() {
     eprintln!("    boring run <file.br>       Run a single file");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
+    eprintln!("    boring build --mode managed              Use managed memory mode (Arc<Mutex> defaults)");
+    eprintln!("    boring build --threading single          Use single-thread Tokio runtime");
     eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
-    eprintln!("    boring --emit-rust <file>  Alias for `boring build <file>`");
 }
 
 // ─── Project commands ─────────────────────────────────────────────────────────
@@ -265,15 +236,134 @@ fn run_project() {
 }
 
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
-fn build_project() {
+
+fn build_project_with_config(config: transpiler::TranspileConfig) {
     let (toml, _) = load_project_toml();
-    emit_rust_with_version(&toml.main, &toml.version);
+    emit_rust_with_version_and_config(&toml.main, &toml.version, config);
 }
 
 /// `boring build --target kernel` — emit a kernel Cargo project from `boring.toml`.
 fn build_project_kernel() {
     let (toml, _) = load_project_toml();
     emit_kernel_with_version(&toml.main, &toml.version);
+}
+
+/// Parse `boring build [flags] [file.br]` arguments after the `build` subcommand.
+fn parse_build_command(build_args: &[String]) {
+    use transpiler::{TranspileConfig, TranspileMode, ThreadingMode};
+
+    let mut target_kernel = false;
+    let mut mode = TranspileMode::Strict;
+    let mut threading = ThreadingMode::Multi;
+    let mut stack_auto_bytes: usize = 1024;
+    let mut stack_warn_bytes: usize = 32;
+    let mut file: Option<&str> = None;
+    let mut output_dir: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < build_args.len() {
+        match build_args[i].as_str() {
+            "--target" => {
+                i += 1;
+                match build_args.get(i).map(|s| s.as_str()) {
+                    Some("kernel") => target_kernel = true,
+                    Some(t) => {
+                        eprintln!("error: unknown target '{}'", t);
+                        eprintln!("hint:  supported targets: kernel");
+                        process::exit(1);
+                    }
+                    None => {
+                        eprintln!("error: --target requires a value");
+                        eprintln!("hint:  supported targets: kernel");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--mode" => {
+                i += 1;
+                match build_args.get(i).map(|s| s.as_str()) {
+                    Some("strict")  => mode = TranspileMode::Strict,
+                    Some("managed") => mode = TranspileMode::Managed,
+                    Some(m) => {
+                        eprintln!("error: unknown mode '{}' — expected strict or managed", m);
+                        process::exit(1);
+                    }
+                    None => {
+                        eprintln!("error: --mode requires a value (strict or managed)");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--threading" => {
+                i += 1;
+                match build_args.get(i).map(|s| s.as_str()) {
+                    Some("multi")  => threading = ThreadingMode::Multi,
+                    Some("single") => threading = ThreadingMode::Single,
+                    Some(t) => {
+                        eprintln!("error: unknown threading model '{}' — expected single or multi", t);
+                        process::exit(1);
+                    }
+                    None => {
+                        eprintln!("error: --threading requires a value (single or multi)");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--output-dir" => {
+                i += 1;
+                match build_args.get(i) {
+                    Some(dir) => output_dir = Some(PathBuf::from(dir)),
+                    None => {
+                        eprintln!("error: --output-dir requires a path");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--stack-auto-bytes" => {
+                i += 1;
+                match build_args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(n) => stack_auto_bytes = n,
+                    None => {
+                        eprintln!("error: --stack-auto-bytes requires a positive integer");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--stack-warn-bytes" => {
+                i += 1;
+                match build_args.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(n) => stack_warn_bytes = n,
+                    None => {
+                        eprintln!("error: --stack-warn-bytes requires a positive integer");
+                        process::exit(1);
+                    }
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                file = Some(&build_args[i]);
+            }
+            arg => {
+                eprintln!("error: unknown flag '{}'", arg);
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    if target_kernel && threading != ThreadingMode::Multi {
+        eprintln!("error: --threading is not available for the kernel target");
+        process::exit(1);
+    }
+
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, stack_warn_bytes };
+
+    match (target_kernel, file, output_dir) {
+        (true,  Some(path), _)          => emit_kernel(path),
+        (true,  None, _)                => build_project_kernel(),
+        (false, Some(path), Some(dir))  => emit_rust_to_dir(path, "0.1.0", config, dir),
+        (false, Some(path), None)       => emit_rust_with_config(path, config),
+        (false, None, _)                => build_project_with_config(config),
+    }
 }
 
 // ─── Core: interpret ──────────────────────────────────────────────────────────
@@ -327,11 +417,24 @@ fn run_file(path: &str) {
 
 // ─── Core: transpile ──────────────────────────────────────────────────────────
 
-fn emit_rust(path: &str) {
-    emit_rust_with_version(path, "0.1.0");
+fn emit_rust_with_config(path: &str, config: transpiler::TranspileConfig) {
+    emit_rust_with_version_and_config(path, "0.1.0", config);
 }
 
-fn emit_rust_with_version(path: &str, version: &str) {
+fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig) {
+    let path = PathBuf::from(path);
+
+    // Determine output project directory next to the source file
+    let stem = path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base_dir.join(format!("{}_rust", stem));
+
+    emit_rust_to_dir(path.to_str().unwrap_or(""), version, config, project_dir);
+}
+
+fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConfig, project_dir: PathBuf) {
     let path = PathBuf::from(path);
 
     let source = match std::fs::read_to_string(&path) {
@@ -358,7 +461,7 @@ fn emit_rust_with_version(path: &str, version: &str) {
         }
     };
 
-    let transpile_out = transpiler::transpile_full(&program);
+    let transpile_out = transpiler::transpile_with_config(&program, config);
     let rust_code = transpile_out.code;
     let has_streams = transpile_out.has_streams;
     let uses_log = transpile_out.uses_log;
@@ -366,13 +469,11 @@ fn emit_rust_with_version(path: &str, version: &str) {
     let uses_reqwest = transpile_out.uses_reqwest;
     let uses_tokio_util = transpile_out.uses_tokio_util;
     let uses_serde = transpile_out.uses_serde;
+    let uses_local_channel = transpile_out.uses_local_channel;
 
-    // Determine output project directory next to the source file
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
-    let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let project_dir = base_dir.join(format!("{}_rust", stem));
 
     // Create directory layout
     let src_dir = project_dir.join("src");
@@ -383,7 +484,7 @@ fn emit_rust_with_version(path: &str, version: &str) {
 
     // Write src/main.rs  (strip the old standalone rustc comment if present)
     let clean_code = rust_code
-        .strip_prefix("// Generated by boring --emit-rust. Compile with: rustc --edition 2021 <file.rs>\n")
+        .strip_prefix("// Generated by boring build. Compile with: rustc --edition 2021 <file.rs>\n")
         .unwrap_or(&rust_code);
     let main_rs = src_dir.join("main.rs");
     if let Err(e) = std::fs::write(&main_rs, clean_code) {
@@ -422,6 +523,11 @@ fn emit_rust_with_version(path: &str, version: &str) {
     } else {
         ""
     };
+    let local_channel_dep = if uses_local_channel {
+        "\nlocal-channel = \"0.1\"\n"
+    } else {
+        ""
+    };
     let cargo_toml = format!(
         r#"[package]
 name = "{stem}"
@@ -433,7 +539,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}"#
+tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{local_channel_dep}"#
     );
     let cargo_path = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_path, cargo_toml) {

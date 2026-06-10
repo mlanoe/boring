@@ -63,6 +63,8 @@ Boring compiles the same source to two distinct Rust targets:
 | Command | Target | Runtime | Use case |
 |---------|--------|---------|----------|
 | `boring build` | Rust std + tokio | userspace | servers, CLIs, desktop apps |
+| `boring build --mode managed` | Rust std + tokio | userspace | managed memory (`T'` → `Arc<Mutex<T>>`) |
+| `boring build --threading single` | Rust std + tokio | userspace | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
 | `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux kernel | drivers, subsystems, kernel modules |
 
 The kernel backend applies the same language — structs, enums, traits, ownership qualifiers, error handling, async tasks — but maps every construct to its kernel-native equivalent: `Arc<kernel::sync::Mutex<T>>` instead of `tokio::sync::Mutex`, work items on `system_wq` instead of `tokio::spawn`, ring-buffer channels instead of MPSC, and errno-based errors instead of `Box<dyn Error>`.
@@ -127,7 +129,7 @@ Boring provides a concise qualifier syntax inspired by Swift's value/reference t
 | `string` | `Arc<str>` | thread-safe shared string — the default |
 | `T?` | `Option<T>` | optional value |
 | `T'` | `Box<T>` | heap-allocated exclusive |
-| `T'task` | `Arc<T>` | thread-safe shared reference |
+| `T'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | shared reference — threading-aware |
 
 ```boring
 string greet(string? name):
@@ -258,7 +260,7 @@ This compiles the `boring` binary and places it in `~/.cargo/bin`, which is alre
 boring examples/hello.br
 
 # Transpile to Rust (generates a Cargo project)
-boring --emit-rust examples/hello.br
+boring build examples/hello.br
 cd examples/hello_rust && cargo run
 ```
 

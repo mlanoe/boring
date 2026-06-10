@@ -25,8 +25,22 @@ pub(super) struct KernelTranspiler {
     pub(super) has_channel: bool,
     /// True if at least one `stream def` is present — triggers KernelChan prelude (KernelSender/KernelReceiver).
     pub(super) has_stream: bool,
-    /// True when emitting the body of a `stream def` — `yield` → `this.tx.send(...)`.
+    /// True when emitting the body of an async `stream def` — `yield` → `this.tx.send(...)`.
     pub(super) in_stream_body: bool,
+    /// True when emitting the body of a sequential `stream def` — `yield` → `__items.push(...)`.
+    pub(super) in_iter_stream: bool,
+    /// Variables bound as `oneshot` senders — `tx.send(v)` → `tx.send(v).ok()`.
+    pub(super) oneshot_senders: std::collections::HashSet<String>,
+    /// Variables bound as `oneshot` receivers — `rx.recv()` → `rx.recv()` (blocking).
+    pub(super) oneshot_receivers: std::collections::HashSet<String>,
+    /// Variables bound as `watch` senders — `tx.send(v)` → `tx.send(v).ok()`.
+    pub(super) watch_senders: std::collections::HashSet<String>,
+    /// Variables bound as `watch` receivers — `rx.recv()` → read current value.
+    pub(super) watch_receivers: std::collections::HashSet<String>,
+    /// Variables bound as `broadcast` senders — `tx.send(v)` → `tx.send(v).ok()`.
+    pub(super) broadcast_senders: std::collections::HashSet<String>,
+    /// Variables bound as `broadcast` receivers — `rx.recv()` → blocking read from own slot.
+    pub(super) broadcast_receivers: std::collections::HashSet<String>,
 }
 
 impl KernelTranspiler {
@@ -38,6 +52,13 @@ impl KernelTranspiler {
             has_channel: false,
             has_stream: false,
             in_stream_body: false,
+            in_iter_stream: false,
+            oneshot_senders: std::collections::HashSet::new(),
+            oneshot_receivers: std::collections::HashSet::new(),
+            watch_senders: std::collections::HashSet::new(),
+            watch_receivers: std::collections::HashSet::new(),
+            broadcast_senders: std::collections::HashSet::new(),
+            broadcast_receivers: std::collections::HashSet::new(),
         }
     }
 
@@ -129,8 +150,8 @@ impl KernelTranspiler {
                 }
                 // T'stack → T
                 OwnerQual::Stack | OwnerQual::Copy => self.emit_type(inner),
-                // T'auto / T'task → Arc<T>  (no Rc in kernel)
-                OwnerQual::Auto | OwnerQual::Task => {
+                // T'shared → Arc<T>  (no Rc in kernel — single-thread mode not applicable)
+                OwnerQual::Shared => {
                     format!("Arc<{}>", self.emit_type(inner))
                 }
                 // T'actor → Arc<kernel::sync::Mutex<T>>
@@ -146,7 +167,7 @@ impl KernelTranspiler {
                     format!("Weak<{}>", self.emit_type(inner))
                 }
                 // T& → &T  /  T'shared& → &T
-                OwnerQual::Borrow | OwnerQual::BorrowTask => {
+                OwnerQual::Borrow | OwnerQual::BorrowShared => {
                     format!("&{}", self.emit_type(inner))
                 }
                 // var T& → &mut T
