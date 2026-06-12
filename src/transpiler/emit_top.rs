@@ -29,7 +29,16 @@ impl Transpiler {
             Item::Ext(e)    => self.emit_ext(e),
             Item::Mod(m)    => self.emit_mod(m),
             Item::Alias(a)  => self.emit_alias(a),
-            Item::Let(s)    => self.emit_let(s, false),
+            Item::Let(s)    => {
+                if s.is_static {
+                    // Top-level `static let` → emit as `const` at module scope.
+                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "_".to_string());
+                    let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
+                    self.line(&format!("const {}: {} = {};", s.name, ty_str, val_str));
+                } else {
+                    self.emit_let(s, false);
+                }
+            }
             Item::Stmt(s)   => self.emit_stmt(s, false),
         }
     }
@@ -178,6 +187,8 @@ impl Transpiler {
                 .filter_map(|p| p.ty.clone())
                 .collect();
             self.fn_sigs.entry(f.name.clone()).or_insert(param_types);
+            let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
+            self.fn_rebindable.entry(f.name.clone()).or_insert(rebindable_flags);
             let param_names: Vec<String> = f.params.iter()
                 .map(|p| p.name.clone())
                 .collect();
@@ -201,6 +212,11 @@ impl Transpiler {
                 format!("({})", attr.args.join(", "))
             };
             self.line(&format!("#[{}{}]", attr.name, args_s));
+        }
+        // Managed mode: add #[track_caller] so panic messages report the call site rather
+        // than the panic site inside the function body.
+        if self.config.mode == crate::transpiler::TranspileMode::Managed && !f.is_native {
+            self.line("#[track_caller]");
         }
         // Auto-detect: a function that declares T'actor locals or consumes stream functions
         // will generate .await calls and therefore implicitly needs to be async.
@@ -395,6 +411,17 @@ impl Transpiler {
             self.cancellable_task_fns.insert(f.name.clone());
             self.uses_tokio_util.set(true);
         }
+        // Pre-inference pass: run qualifier inference before emitting params so that
+        // unqualified parameters can be emitted with their inferred qualifier.
+        // emit_body will re-run it (it clears first), so there is no double-application.
+        {
+            let prev = std::mem::take(&mut self.fn_current_params);
+            self.fn_current_params = f.params.iter()
+                .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+                .collect();
+            self.infer_qualifiers(&f.body);
+            self.fn_current_params = prev;
+        }
         let params_s: Vec<String> = f.params.iter().map(|p| self.emit_param(p)).collect();
         let all_params = match self_ty {
             Some(_) => {
@@ -467,7 +494,7 @@ impl Transpiler {
                 // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
                 if let Type::Named(n) = t {
                     if self.trait_method_names.contains_key(n.as_str()) {
-                        return format!("impl {}", normalize_type_name(n));
+                        return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
                     }
                 }
                 self.emit_type(t)
@@ -491,13 +518,13 @@ impl Transpiler {
                         Type::Int  | Type::Uint => Some("i64".to_string()),
                         Type::Float => Some("f64".to_string()),
                         Type::Bool  => Some("bool".to_string()),
-                        Type::Str   => Some("Arc<str>".to_string()),
+                        Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                         Type::Named(n) => match n.as_str() {
                             "int" | "i64" | "i32" | "i16" | "i8" | "isize" => Some("i64".to_string()),
                             "uint" | "u64" | "u32" | "u16" | "u8" | "usize" => Some("u64".to_string()),
                             "float" | "f64" | "f32" => Some("f64".to_string()),
                             "bool"   => Some("bool".to_string()),
-                            "string" | "str" => Some("Arc<str>".to_string()),
+                            "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                             _ => None,
                         },
                         _ => None,
@@ -540,6 +567,7 @@ impl Transpiler {
         let prev_throws   = self.in_throws;
         let prev_async         = self.in_async;
         let prev_fn_returns_void = self.fn_returns_void;
+        let prev_fn_declared_void = self.fn_declared_void;
         // Track the current function's type parameters for generic match detection.
         let prev_fn_type_params = std::mem::replace(
             &mut self.current_fn_type_params,
@@ -547,16 +575,19 @@ impl Transpiler {
         );
         // A function is "void" if it has no declared return type, or returns () / Nil / Void,
         // and is not a throws function (which wraps in Result<(),...>).
-        let is_void_ret = !f.throws && match &f.return_ty {
+        let declared_void = match &f.return_ty {
             None => true,
             Some(Type::Void) | Some(Type::Nil) => true,
             Some(Type::Named(n)) if n == "void" || n == "nil" => true,
             _ => false,
         };
+        let is_void_ret = !f.throws && declared_void;
         self.fn_returns_void = is_void_ret;
+        self.fn_declared_void = declared_void;
         let prev_task_vars     = std::mem::take(&mut self.task_vars);
         let prev_arc_vars      = std::mem::take(&mut self.arc_vars);
         let prev_rc_vars       = std::mem::take(&mut self.rc_vars);
+        let prev_shared_ref_params = std::mem::take(&mut self.shared_ref_params);
         let prev_weak_vars     = std::mem::take(&mut self.weak_vars);
         // var_struct_types / var_mutex_types / var_rwlock_types accumulate across the whole program;
         // save/restore so variable names from one function body don't shadow another.
@@ -567,6 +598,8 @@ impl Transpiler {
         let prev_optional_vars    = std::mem::take(&mut self.optional_vars);
         let prev_var_types        = std::mem::take(&mut self.var_types);
         let prev_string_vars      = std::mem::take(&mut self.string_vars);
+        let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
+        let prev_managed_mutex_vars   = std::mem::take(&mut self.managed_mutex_vars);
         // Pre-seed known_local_vars, var_struct_types, var_types, and var_mutex_types from params.
         for p in &f.params {
             self.known_local_vars.insert(p.name.clone());
@@ -576,10 +609,14 @@ impl Transpiler {
                 if Self::is_string_type(ty) {
                     self.string_vars.insert(p.name.clone());
                 }
-                // T'actor params → var_mutex_types (Arc<Mutex<T>> method dispatch).
+                // T'actor params → var_mutex_types (Arc<Mutex<T>> or Rc<RefCell<T>> method dispatch).
                 if Self::is_mutex_binding(p.mutable, ty) {
                     self.var_mutex_types.insert(p.name.clone());
                     self.arc_vars.insert(p.name.clone());
+                    // In single-thread mode, T'actor = Rc<RefCell<T>> → use Rc::clone.
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(p.name.clone());
+                    }
                 }
                 // T'guard params → var_rwlock_types (Arc<RwLock<T>> method dispatch).
                 if Self::is_rwlock_binding(p.mutable, ty) {
@@ -592,6 +629,10 @@ impl Transpiler {
                     // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone.
                     if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                         self.rc_vars.insert(p.name.clone());
+                    }
+                    // Shared/actor params are passed as &Rc<T> / &Arc<T> — matching requires (**var).
+                    if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) {
+                        self.shared_ref_params.insert(p.name.clone());
                     }
                 }
                 if matches!(ty, Type::Optional(_)) {
@@ -647,6 +688,18 @@ impl Transpiler {
         self.in_async  = is_async;
         let prev_fn_return_ty = self.fn_return_ty.clone();
         self.fn_return_ty = f.return_ty.clone();
+        let prev_fn_current_params = std::mem::take(&mut self.fn_current_params);
+        self.fn_current_params = f.params.iter()
+            .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+            .collect();
+        let prev_auto_ref_params = std::mem::take(&mut self.auto_ref_params);
+        self.auto_ref_params = f.params.iter()
+            .filter(|p| matches!(&p.ty,
+                Some(Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
+                if !matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
+            ))
+            .map(|p| p.name.clone())
+            .collect();
         let prev_in_cancellable_fn = self.in_cancellable_fn;
         if is_cancellable {
             self.in_cancellable_fn = true;
@@ -668,15 +721,51 @@ impl Transpiler {
                 }
             }
         }
+        if self.config.instrument {
+            let span_label = if let Some(ty) = self_ty {
+                format!("{}::{}", ty, f.name)
+            } else {
+                f.name.clone()
+            };
+            if f.name == "main" && self_ty.is_none() {
+                self.line("let _boring_dump = __boring_instrument::DumpGuard;");
+            }
+            self.line(&format!("let _boring_span = __boring_instrument::Span::enter(\"{}\");", span_label));
+        }
         self.emit_body(&f.body);
+        // Cross-function propagation: update fn_sigs with inferred param qualifiers so that
+        // callers defined after this function see the qualified signature and can propagate
+        // the constraint to their own anonymous variables.
+        if self_ty.is_none() {
+            if let Some(sig) = self.fn_sigs.get_mut(&f.name) {
+                for (i, param) in f.params.iter().enumerate() {
+                    if let Some(inferred_qual) = self.inferred_qualifiers.get(&param.name).cloned() {
+                        if let Some(param_ty) = sig.get_mut(i) {
+                            let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
+                                && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
+                                && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)));
+                            if !already_qualified {
+                                *param_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(
+                                    param_ty, inferred_qual,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.managed_param_shadows = prev_managed_param_shadows;
         self.in_cancellable_fn = prev_in_cancellable_fn;
         self.in_throws         = prev_throws;
         self.fn_returns_void   = prev_fn_returns_void;
+        self.fn_declared_void  = prev_fn_declared_void;
         self.fn_return_ty      = prev_fn_return_ty;
+        self.fn_current_params = prev_fn_current_params;
+        self.auto_ref_params   = prev_auto_ref_params;
         self.task_vars         = prev_task_vars;
         self.arc_vars          = prev_arc_vars;
         self.rc_vars           = prev_rc_vars;
+        self.shared_ref_params = prev_shared_ref_params;
         self.weak_vars         = prev_weak_vars;
         self.var_struct_types  = prev_var_struct_types;
         self.var_mutex_types   = prev_var_mutex_types;
@@ -685,6 +774,8 @@ impl Transpiler {
         self.optional_vars     = prev_optional_vars;
         self.var_types         = prev_var_types;
         self.string_vars       = prev_string_vars;
+        self.managed_refcell_vars = prev_managed_refcell_vars;
+        self.managed_mutex_vars   = prev_managed_mutex_vars;
         self.in_async          = prev_async;
         self.current_fn_type_params = prev_fn_type_params;
         self.indent -= 1;
@@ -815,9 +906,9 @@ impl Transpiler {
     /// - Other vars (Arc<str>) → `var.clone()`
     pub(crate) fn emit_dict_key_owned(&self, key: &Expr) -> String {
         match &key.kind {
-            ExprKind::Str(s) => format!("Arc::<str>::from(\"{}\")", escape_str(s)),
+            ExprKind::Str(s) => format!("{}::<str>::from(\"{}\")", if self.use_rc_str() { "Rc" } else { "Arc" }, escape_str(s)),
             ExprKind::Var(v) if self.chars_vars.contains(v.as_str()) =>
-                format!("Arc::<str>::from({}.to_string())", v),
+                format!("{}::<str>::from({}.to_string())", if self.use_rc_str() { "Rc" } else { "Arc" }, v),
             ExprKind::Var(v) => format!("{}.clone()", v),
             _ => self.emit_expr_owned(key),
         }
@@ -836,6 +927,18 @@ impl Transpiler {
         false
     }
 
+    /// Returns true if the parameter type is a trait-object wrapper (e.g. `T'shared` where T is
+    /// a known trait). `&Rc<dyn Trait>` does not support unsized coercion from `&Rc<Concrete>`,
+    /// so these params must be passed by value despite the auto-ref convention.
+    pub(crate) fn is_trait_object_param(&self, ty: Option<&Type>) -> bool {
+        match ty {
+            Some(Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) => {
+                matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn emit_param(&self, p: &Param) -> String {
         // FnMut closure params need `mut` so the closure can be called.
         // `req` function params (Fn) do not need mut.
@@ -847,15 +950,52 @@ impl Transpiler {
         match &p.ty {
             Some(ty) if p.variadic => format!("{}: Vec<{}>", name, self.emit_type(ty)),
             Some(ty) => {
-                // If the param type is a known trait name, emit `impl TraitName`.
-                let ty_s = if let Type::Named(n) = ty {
-                    if self.trait_method_names.contains_key(n.as_str()) {
-                        format!("impl {}", normalize_type_name(n))
+                // If the param has no explicit qualifier but inference resolved one, apply it.
+                let inferred_ty;
+                let needs_inference = !matches!(ty, crate::ast::Type::Qualified(..))
+                    || matches!(ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
+                    || matches!(ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)))
+                    || matches!(ty, crate::ast::Type::Optional(inner)
+                        if matches!(inner.as_ref(), crate::ast::Type::Named(_)
+                            | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned)
+                            | crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_))));
+                let effective_ty = if needs_inference {
+                    if let Some(qual) = self.inferred_qualifiers.get(&p.name) {
+                        inferred_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, qual.clone());
+                        &inferred_ty
                     } else {
-                        self.emit_type(ty)
+                        ty
                     }
                 } else {
-                    self.emit_type(ty)
+                    ty
+                };
+                // If the param type is a known trait name, emit `impl TraitName`.
+                let ty_s = if let crate::ast::Type::Named(n) = effective_ty {
+                    if self.trait_method_names.contains_key(n.as_str()) {
+                        format!("impl {}", normalize_type_name(n, self.use_rc_str()))
+                    } else {
+                        self.emit_type(effective_ty)
+                    }
+                } else {
+                    self.emit_type(effective_ty)
+                };
+                // Auto-ref: 'shared/'actor/'guard/'weak parameters are always passed by
+                // reference. `var` (rebindable) emits `&mut Wrapper<T>`; otherwise `&Wrapper<T>`.
+                // Exception: trait object wrappers (e.g. T'shared where T is a trait) require
+                // unsized coercion that only works on owned values — keep by value there.
+                // `var` on 'stack/'heap/'owned (out-param) also emits `&mut T`.
+                let ty_s = match effective_ty {
+                    Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) |
+                    Type::Qualified(inner, OwnerQual::Weak)
+                        if !matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) =>
+                    {
+                        if p.rebindable { format!("&mut {}", ty_s) } else { format!("&{}", ty_s) }
+                    }
+                    // var + explicit 'stack/'heap/'owned qualifier on a user type → out-param.
+                    // Primitives (var int x) remain mutable locals, no &mut.
+                    Type::Qualified(_, OwnerQual::Stack | OwnerQual::Owned)
+                        if p.rebindable => format!("&mut {}", ty_s),
+                    _ => ty_s,
                 };
                 format!("{}: {}", name, ty_s)
             }
@@ -867,10 +1007,10 @@ impl Transpiler {
     /// Use this at binding/call/return sites where `Arc<str>` is expected.
     pub(crate) fn emit_expr_owned(&self, expr: &Expr) -> String {
         match &expr.kind {
-            ExprKind::Str(s) => format!("Arc::<str>::from(\"{}\")", escape_str(s)),
+            ExprKind::Str(s) => format!("{}::<str>::from(\"{}\")", if self.use_rc_str() { "Rc" } else { "Arc" }, escape_str(s)),
             ExprKind::StringInterp(_) => {
-                // format!(...) gives String; wrap in Arc
-                format!("Arc::<str>::from({})", self.emit_expr(expr))
+                // format!(...) gives String; wrap in Arc/Rc
+                format!("{}::<str>::from({})", if self.use_rc_str() { "Rc" } else { "Arc" }, self.emit_expr(expr))
             }
             // self.field in owned context → .clone() so Arc<T> fields don't move out of &self
             ExprKind::Field(obj, field) => {
@@ -881,6 +1021,12 @@ impl Transpiler {
                         if self.struct_type_var_names.contains(&key)
                             || self.struct_type_mut_var_names.contains(&key) {
                             return self.emit_expr(expr);
+                        }
+                        // Enum variant or external PascalCase type: TokenKind.Let → TokenKind::Let
+                        if self.enum_variant_fields.contains_key(&key)
+                            || !self.known_local_vars.contains(type_name.as_str())
+                        {
+                            return format!("{}::{}", type_name, field);
                         }
                     }
                     // oneshot rx.value → rx.await.unwrap() (receive the single value)
@@ -914,10 +1060,26 @@ impl Transpiler {
                     return self.emit_expr(expr);
                 }
                 let obj_s = self.emit_expr(obj);
-                // Mutex var access (owned context): w.field → w.lock().await.field
+                // Mutex var access (owned context): w.field → w.lock().await.field (multi) or w.borrow().field (single)
                 if let ExprKind::Var(v) = &obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) {
-                        return format!("{}.lock().await.{}", v, field);
+                        let access = self.actor_read_access(v);
+                        // If the field itself is an actor (Rc<RefCell<T>>), we must clone the Rc
+                        // to avoid moving out of a temporary borrow guard.
+                        let needs_clone = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single)
+                            && self.struct_fields.get(
+                                self.var_types.get(v.as_str())
+                                    .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
+                                    .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
+                                    .unwrap_or("")
+                            ).and_then(|fields| fields.iter().find(|(fname,_)| fname == field))
+                            .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
+                            .unwrap_or(false);
+                        return if needs_clone {
+                            format!("Rc::clone(&{}.{})", access, field)
+                        } else {
+                            format!("{}.{}", access, field)
+                        };
                     }
                     // Managed param shadow: use pre-locked guard variable.
                     if let Some(shadow) = self.managed_param_shadows.get(v.as_str()) {
@@ -992,11 +1154,12 @@ impl Transpiler {
                 } else {
                     map_field(field)
                 };
-                if obj_s == "self" && !field_s.ends_with(')') {
+                let result = if obj_s == "self" && !field_s.ends_with(')') {
                     format!("{}.{}.clone()", obj_s, field_s)
                 } else {
                     format!("{}.{}", obj_s, field_s)
-                }
+                };
+                if field_s.contains(" as ") { format!("({})", result) } else { result }
             }
             // Method calls that produce &str (e.g. `.trim()`) need Arc::<str>::from(x.to_string())
             // when used in an owned string (Arc<str>) context.
@@ -1004,7 +1167,7 @@ impl Transpiler {
                 if matches!(method.as_str(), "trim") =>
             {
                 let s = self.emit_expr(expr);
-                format!("Arc::<str>::from({}.to_string())", s)
+                format!("{}::<str>::from({}.to_string())", if self.use_rc_str() { "Rc" } else { "Arc" }, s)
             }
             // Struct variable in owned position: clone to avoid moving out.
             // In Boring, structs are copy-by-value semantics; Rust requires explicit .clone().
@@ -1013,6 +1176,12 @@ impl Transpiler {
                 && !self.var_mutex_types.contains(v.as_str()) =>
             {
                 format!("{}.clone()", self.emit_expr(expr))
+            }
+            // String variable in owned position: clone to avoid moving Rc<str>.
+            ExprKind::Var(v) if self.string_vars.contains(v.as_str())
+                || self.string_arc_vars.contains(v.as_str()) =>
+            {
+                format!("{}.clone()", v)
             }
             _ => self.emit_expr(expr),
         }
@@ -1023,6 +1192,12 @@ impl Transpiler {
     /// final return value.
     pub(crate) fn emit_body(&mut self, stmts: &[Stmt]) {
         if stmts.is_empty() { return; }
+        // Priority 5: use-site qualifier inference — runs before size-based decisions, all modes.
+        self.infer_qualifiers(stmts);
+        // After inference: validate union constraints (both caller-side and body-side),
+        // then emit hints for unqualified parameters that could benefit from annotation.
+        self.validate_union_constraints(stmts);
+        self.suggest_param_annotations();
         // Collect defer bodies (preserve order; will emit LIFO at end).
         let defers: Vec<&[Stmt]> = stmts.iter().filter_map(|s| {
             if let Stmt::Defer(d) = s { Some(d.as_slice()) } else { None }
@@ -1036,13 +1211,21 @@ impl Transpiler {
             }
             // For throws functions whose last statement is NOT an expression (e.g. a for loop),
             // add implicit `Ok(())` so the function satisfies `Result<(), E>`.
-            if self.in_throws {
+            // Skip when suppress_ok_wrap is set — we're emitting a branch of an if/match expression,
+            // not a function body, so the last value is already correct without a sentinel.
+            if self.in_throws && !self.suppress_ok_wrap {
                 let last_stmt = non_defers.last();
                 let needs_ok = match last_stmt {
                     Some(Stmt::Expr(_)) | Some(Stmt::Return(_)) | Some(Stmt::Throw(_)) => false,
                     _ => true,
                 };
-                if needs_ok { self.line("Ok(())"); }
+                if needs_ok {
+                    if self.fn_declared_void {
+                        self.line("Ok(())");
+                    } else {
+                        self.line("unreachable!()");
+                    }
+                }
             }
             return;
         }
@@ -1170,6 +1353,12 @@ impl Transpiler {
     // ── Types ─────────────────────────────────────────────────────────────────
 
     /// Returns true when a binding declared `T'actor` should become `Arc<Mutex<T>>`.
+    /// Extract the top-level `OwnerQual` from a `Type::Qualified`, if present.
+    /// Returns a placeholder variant that matches nothing if the type is not qualified.
+    pub(crate) fn unwrap_qual(ty: &Type) -> &OwnerQual {
+        if let Type::Qualified(_, q) = ty { q } else { &OwnerQual::Stack }
+    }
+
     /// Only applies to user-defined struct types (PascalCase names), not primitives or `string`.
     /// The `mutable` parameter is ignored — `T'actor` is always mutex regardless of let/var.
     pub(crate) fn is_mutex_binding(_mutable: bool, ty: &Type) -> bool {
@@ -1188,31 +1377,68 @@ impl Transpiler {
     }
 
     /// Emit `Arc<tokio::sync::Mutex<T>>` for the inner type.
-    pub(crate) fn emit_mutex_type(&self, inner: &Type) -> String {
-        format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner))
-    }
-
     /// Emit the actor type respecting --threading:
-    /// multi → `Arc<tokio::sync::Mutex<T>>`, single → `RefCell<T>`.
+    /// multi → `Arc<tokio::sync::Mutex<T>>`, single → `Rc<RefCell<T>>`.
+    /// `T'actor` means "shared mutable ownership": Arc<Mutex> in multi, Rc<RefCell> in single.
     pub(crate) fn emit_actor_type(&self, inner: &Type) -> String {
         match self.config.threading {
             crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner)),
-            crate::transpiler::ThreadingMode::Single => format!("RefCell<{}>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
         }
     }
 
+    /// Thread-aware mutex type — matches emit_actor_type.
+    /// Use for type annotations that must stay in sync with the init expression.
+    pub(crate) fn emit_mutex_type(&self, inner: &Type) -> String {
+        self.emit_actor_type(inner)
+    }
+
     /// Emit the guard type respecting --threading:
-    /// multi → `Arc<tokio::sync::RwLock<T>>`, single → `RefCell<T>`.
+    /// multi → `Arc<tokio::sync::RwLock<T>>`, single → `Rc<RefCell<T>>`.
+    /// `T'guard` means "shared read/write ownership": Arc<RwLock> in multi, Rc<RefCell> in single
+    /// (single-thread has no real distinction between exclusive and shared locks).
     pub(crate) fn emit_guard_type(&self, inner: &Type) -> String {
         match self.config.threading {
             crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner)),
-            crate::transpiler::ThreadingMode::Single => format!("RefCell<{}>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
+        }
+    }
+
+    /// Thread-aware rwlock type — matches emit_guard_type.
+    pub(crate) fn emit_rwlock_type(&self, inner: &Type) -> String {
+        self.emit_guard_type(inner)
+    }
+
+    /// actor read: `expr.lock().await` (multi-async), `expr.lock().unwrap()` (multi-sync), `expr.borrow()` (single).
+    pub(crate) fn actor_read_access(&self, expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.lock().await", expr),
+            crate::transpiler::ThreadingMode::Multi                   => format!("{}.lock().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow()", expr),
+        }
+    }
+
+    /// actor write guard: `expr.lock().await` (multi-async), `expr.lock().unwrap()` (multi-sync), `expr.borrow_mut()` (single).
+    pub(crate) fn actor_write_guard(&self, expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.lock().await", expr),
+            crate::transpiler::ThreadingMode::Multi                   => format!("{}.lock().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow_mut()", expr),
+        }
+    }
+
+    /// guard (rwlock) write guard: `expr.write().await` (multi-async), `expr.write().unwrap()` (multi-sync), `expr.borrow_mut()` (single).
+    pub(crate) fn guard_write_guard(&self, expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.write().await", expr),
+            crate::transpiler::ThreadingMode::Multi                   => format!("{}.write().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow_mut()", expr),
         }
     }
 
     /// Emit the managed-mode actor type for anonymous T/T':
     /// multi → `Arc<std::sync::Mutex<T>>` (sync-compatible, no async needed in managed mode),
-    /// single → `RefCell<T>`.
+    /// single → `RefCell<T>` (local interior mutability — not shared, no Rc needed).
     pub(crate) fn emit_managed_actor(&self, inner: &Type) -> String {
         match self.config.threading {
             crate::transpiler::ThreadingMode::Multi  => format!("Arc<std::sync::Mutex<{}>>", self.emit_type(inner)),
@@ -1232,11 +1458,6 @@ impl Transpiler {
         } else {
             None
         }
-    }
-
-    /// Emit `Arc<tokio::sync::RwLock<T>>` for the inner type.
-    pub(crate) fn emit_rwlock_type(&self, inner: &Type) -> String {
-        format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner))
     }
 
     /// If `ty` is `T'shared`, `T'actor`, or `T'guard`, return the name of the inner named type.
@@ -1273,7 +1494,7 @@ impl Transpiler {
             Type::Int   => "i64".into(),
             Type::Uint  => "u64".into(),
             Type::Float => "f64".into(),
-            Type::Str   => "Arc<str>".into(),
+            Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },
             Type::Bool  => "bool".into(),
             Type::Nil | Type::Void => "()".into(),
             Type::Never => "!".into(),
@@ -1298,18 +1519,18 @@ impl Transpiler {
                 // Function return types use `impl Trait` (handled in emit_fn before calling emit_type).
                 // All other positions (struct fields, collections, etc.) → Box<dyn Trait>.
                 if self.trait_method_names.contains_key(n.as_str()) {
-                    return format!("Box<dyn {}>", normalize_type_name(n));
+                    return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
                 }
-                // Priority 5: size-based auto-boxing (strict mode only).
+                // Priority 6: size-based auto-boxing (strict mode only).
                 // If the type exceeds stack_auto_bytes, silently promote to Box<T>.
                 if self.config.mode == crate::transpiler::TranspileMode::Strict {
                     if let Some(&size) = self.type_sizes.get(n.as_str()) {
                         if size > self.config.stack_auto_bytes {
-                            return format!("Box<{}>", normalize_type_name(n));
+                            return format!("Box<{}>", normalize_type_name(n, self.use_rc_str()));
                         }
                     }
                 }
-                normalize_type_name(n)
+                normalize_type_name(n, self.use_rc_str())
             }
             Type::TypeParam(n) => n.clone(),
             Type::Optional(inner) => format!("Option<{}>", self.emit_type(inner)),
@@ -1345,12 +1566,12 @@ impl Transpiler {
                     }
                 }
                 // Fallback: emit `StructName::AssocName` (valid when defined in a trait impl).
-                format!("{}::{}", normalize_type_name(&base_name), assoc)
+                format!("{}::{}", normalize_type_name(&base_name, self.use_rc_str()), assoc)
             }
             Type::Impl(inner) => {
                 // `impl Trait` — emit the trait name directly (not Box<dyn Trait>).
                 let inner_s = match inner.as_ref() {
-                    Type::Named(n) => normalize_type_name(n),
+                    Type::Named(n) => normalize_type_name(n, self.use_rc_str()),
                     other => self.emit_type(other),
                 };
                 format!("impl {}", inner_s)
@@ -1385,28 +1606,19 @@ impl Transpiler {
                     } else {
                         // T'stack: explicit stack — skip auto-boxing even if size > threshold.
                         match inner.as_ref() {
-                            Type::Named(n) => normalize_type_name(n),
+                            Type::Named(n) => normalize_type_name(n, self.use_rc_str()),
                             _ => self.emit_type(inner),
                         }
                     }
                 }
                 OwnerQual::Copy    => self.emit_type(inner),
-                OwnerQual::Const   => {
-                    match inner.as_ref() {
-                        Type::Str => "&str".into(),
-                        // Arrays/collections with 'const → use Arc for thread-safe sharing.
-                        Type::Array(_) | Type::Dict(_, _) | Type::Set(_) =>
-                            format!("Arc<{}>", self.emit_type(inner)),
-                        _ => format!("&'static {}", self.emit_type(inner)),
-                    }
-                }
                 // T'shared — threading-aware: Arc<T> (multi) or Rc<T> (single).
                 OwnerQual::Shared => {
                     // For T'shared where T is a trait: Arc<dyn Trait> / Rc<dyn Trait>.
                     // Use normalize_type_name (not emit_type) to avoid double-boxing.
                     let dyn_s = if let Type::Named(n) = inner.as_ref() {
                         if self.trait_method_names.contains_key(n.as_str()) {
-                            format!("dyn {}", normalize_type_name(n))
+                            format!("dyn {}", normalize_type_name(n, self.use_rc_str()))
                         } else {
                             self.emit_type(inner)
                         }
@@ -1456,21 +1668,73 @@ impl Transpiler {
                 }
                 OwnerQual::BorrowMut    => format!("&mut {}",    self.emit_type(inner)),
                 OwnerQual::BorrowOwned  => format!("&Box<{}>",  self.emit_type(inner)),
-                OwnerQual::BorrowOption => format!("&Option<{}>", self.emit_type(inner)),
+                OwnerQual::BorrowOption    => format!("&Option<{}>",     self.emit_type(inner)),
+                OwnerQual::BorrowOptionMut => format!("&mut Option<{}>", self.emit_type(inner)),
                 OwnerQual::BorrowWeak   => format!("&Weak<{}>", self.emit_type(inner)),
                 OwnerQual::BorrowShared => match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => format!("&Rc<{}>",  self.emit_type(inner)),
                     crate::transpiler::ThreadingMode::Multi  => format!("&Arc<{}>", self.emit_type(inner)),
                 },
                 OwnerQual::Lifetime(lt) => {
-                    // `str` (Type::Str or Named("str")) already resolves to `&str` —
-                    // emit `&'a str` directly to avoid the double-reference `&'a &str`.
+                    // `mut T&a` is encoded as Lifetime(BorrowMut(T)) → emit `&'a mut T`.
+                    if let Type::Qualified(inner2, OwnerQual::BorrowMut) = inner.as_ref() {
+                        return format!("&'{} mut {}", lt, self.emit_type(inner2));
+                    }
+                    // `str` already resolves to `&str` — avoid `&'a &str`.
                     let is_str_slice = matches!(**inner, Type::Str)
                         || matches!(**inner, Type::Named(ref n) if n == "str");
                     if is_str_slice { format!("&'{} str", lt) }
                     else { format!("&'{} {}", lt, self.emit_type(inner)) }
                 }
+                // Qualifier union / named group (`'one`, `'many`, `'mut`, `'req`, `T'a|b|c`).
+                // Emits as the plain inner type — the union is a Boring-level constraint only.
+                OwnerQual::Union(_) => self.emit_type(inner),
             }
+        }
+    }
+
+    /// Like `emit_type` but for struct/enum field positions.
+    /// `impl Trait` is not a valid field type in Rust — use `Rc<dyn Fn(...)>` instead.
+    /// `Rc` (rather than `Box`) is used so the field is `Clone`, matching auto-derived Clone on
+    /// the containing struct/enum.
+    pub(crate) fn emit_field_type(&self, ty: &Type, rebindable: bool) -> String {
+        match ty {
+            Type::Fn(ret, params, throws, _task, _req) => {
+                let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");
+                let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or_else(|| "()".into());
+                let r = if *throws {
+                    format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base)
+                } else {
+                    base
+                };
+                // Always Fn (not FnMut): called through Rc so mutation would need RefCell anyway.
+                // Rc makes the field Clone without any extra work.
+                format!("Rc<dyn Fn({}) -> {}>", ps, r)
+            }
+            // All bare-T struct fields are always inline in the parent struct's allocation —
+            // suppress size-based auto-boxing regardless of rebindability (var/let/mut).
+            // A var field is still stored in-place inside the struct; boxing it would add
+            // unnecessary indirection and fragment the allocation.
+            Type::Named(n) => {
+                if let Some(rest) = n.strip_prefix('$') {
+                    if let Some((name, _)) = rest.split_once(':') {
+                        return name.to_string();
+                    }
+                }
+                if let Some(fn_ty) = self.fn_type_aliases.get(n.as_str()) {
+                    return self.emit_type(&fn_ty.clone());
+                }
+                if self.current_trait_assoc_names.contains(n.as_str()) {
+                    return format!("Self::{}", n);
+                }
+                // Priority 4 (dyn Trait) still applies — correctness constraint.
+                if self.trait_method_names.contains_key(n.as_str()) {
+                    return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
+                }
+                // Size-based auto-boxing is suppressed: field bytes are part of the parent layout.
+                normalize_type_name(n, self.use_rc_str())
+            }
+            other => self.emit_type(other),
         }
     }
 

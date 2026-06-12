@@ -26,10 +26,9 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 | `T'wshared`   | `std::sync::Weak<T>`                 | `Weak<T>`                  |
 | `T'wactor`    | `std::sync::Weak<Mutex<T>>`          | `Weak<RefCell<T>>`         |
 | `T'wguard`    | `std::sync::Weak<RwLock<T>>`         | `Weak<RefCell<T>>`         |
-| `T'const`     | `&'static T`                         | `&'static T`               |
 | `T'option`    | `Option<T>`                          | `Option<T>`                |
 
-`T'wshared`, `T'wactor`, `T'wguard` are shorthands for `T'shared'weak`, `T'actor'weak`, `T'guard'weak` — they produce a non-owning pointer that does not prevent the pointee from being dropped.
+`T'wshared`, `T'wactor`, `T'wguard` are shorthands for weak non-owning pointers that do not prevent the pointee from being dropped.
 
 `T'guard` in single-thread maps to `RefCell<T>` (same as `T'actor`) — `RefCell` has no read/write distinction. The qualifier is preserved as documentation of intent; no warning is emitted.
 
@@ -37,28 +36,32 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 
 ## Anonymous forms — `T` and `T'`
 
-Both forms delegate the memory decision to the active flags.
+Both forms delegate the memory decision to the inference pass, then to the active flags as a last resort.
 
-| Form  | Meaning                                        |
-|-------|------------------------------------------------|
-| `T`   | Anonymous, no indirection hint — flags decide  |
-| `T'`  | Anonymous, indirection needed — flags decide   |
-| `T?`  | Always `Option<T>` — flag-independent          |
+| Form  | Meaning                                                         |
+|-------|-----------------------------------------------------------------|
+| `T`   | Anonymous — inference decides; fallback to flags               |
+| `T'`  | Anonymous with indirection hint — inference decides; fallback `Box<T>` |
+| `T?`  | Always `Option<T>` — flag-independent                          |
 
-### Resolution by flag combination
+The difference between `T` and `T'`: `T'` restricts the inference candidate set to `{Owned, Shared, Actor, Guard}` (Stack and Const are excluded). If inference cannot resolve a unique qualifier, the fallback is `'heap` instead of `'stack`.
 
-|                   | `--threading multi`          | `--threading single`         |
-|-------------------|------------------------------|------------------------------|
+See [qualifier-inference.md](qualifier-inference.md) for the full inference algorithm.
+
+### Resolution after inference
+
+|                       | `--threading multi`          | `--threading single`         |
+|-----------------------|------------------------------|------------------------------|
 | **`--mode strict`**   | `T` → `T`, `T'` → `Box<T>`  | `T` → `T`, `T'` → `Box<T>`  |
 | **`--mode managed`**  | `T`/`T'` → `Arc<Mutex<T>>`  | `T`/`T'` → `RefCell<T>`     |
 
-Threading does not affect `T`/`T'` in strict mode — stack and heap are thread-agnostic. It only matters in managed mode and for explicit `T'shared`, `T'actor`, `T'guard` qualifiers.
+Threading does not affect the `T`/`T'` fallback in strict mode — stack and heap are thread-agnostic. It only matters in managed mode and for explicit `T'shared`, `T'actor`, `T'guard` qualifiers.
 
 ---
 
-## Inference — structural constraints
+## Inference priority table
 
-Before applying flag defaults, the transpiler applies structural inference. These take priority over the flags; the developer can always override with an explicit qualifier.
+Before applying flag defaults, the transpiler runs a series of inference passes. Each pass has a fixed priority; the first pass that resolves a qualifier wins.
 
 | Priority | Situation | Result |
 |----------|-----------|--------|
@@ -66,16 +69,10 @@ Before applying flag defaults, the transpiler applies structural inference. Thes
 | 2 | Non-parametric enum (all unit variants) | `T'copy` — always, regardless of flags |
 | 3 | Recursive type position | `Box<T>` inserted on the recursive field/variant |
 | 4 | `dyn Trait` position | `Box<dyn Trait>` |
-| 5 | `sizeof(T) > 1024` in strict mode | `T` auto-promoted to `Box<T>` |
+| 5 | Use-site qualifier inference | qualifier demanded by call sites — all modes |
+| 6 | `sizeof(T) > --stack-auto-bytes` in strict mode | `T` promoted to `Box<T>` |
 
-Priorities 2–4 are correctness constraints — they apply in all flag combinations. Priority 5 applies only in `--mode strict` and can be suppressed with an explicit `T'stack` qualifier.
-
-**Non-parametric enums** — an enum whose every variant carries no payload is a C-style discriminant, always `Copy`:
-
-```
-enum Color { Red, Green, Blue }         # → T'copy, even in managed mode
-enum Direction { North, South, East }   # → T'copy, even in managed mode
-```
+Priorities 2–4 are correctness constraints — they are never overridden. Priority 5 (use-site inference) runs before size-based decisions and applies in all flag combinations. Priority 6 applies only in `--mode strict` when priority 5 yields no result. Flag defaults are applied last.
 
 ---
 
@@ -83,8 +80,8 @@ enum Direction { North, South, East }   # → T'copy, even in managed mode
 
 Targets production code. After inference, unresolved anonymous forms:
 
-- `T'` → `Box<T>`
 - `T` → plain `T` (stack, single owner)
+- `T'` → `Box<T>`
 
 ---
 
@@ -137,7 +134,7 @@ Consequences:
 - `Rc<T>` and `RefCell<T>` are usable **within a task** — fields, local variables, intra-task computation.
 - As soon as a value must **cross a task boundary** (channel, stream, `spawn_local` with a moved value containing `Rc`), it must be `Send`. The `T'shared`/`T'actor` qualifiers on communicated types effectively resolve to `Arc`/`Mutex` even in single-thread mode.
 
-The transpiler uses the **`local-channel`** crate (v0.1.5, maintained by the actix-web team) for `!Send` async channels in `LocalSet`/`current_thread` contexts:
+The transpiler uses the **`local-channel`** crate (v0.1.5) for `!Send` async channels in `LocalSet`/`current_thread` contexts:
 
 ```toml
 [dependencies]
@@ -154,8 +151,6 @@ spawn_local(async move {
 });
 ```
 
-Internally it uses `Rc<RefCell<VecDeque<T>>>` + standard Tokio `Waker`. No unsafe code is required.
-
 ### Streams
 
 Two sub-cases depending on the stream body:
@@ -164,8 +159,6 @@ Two sub-cases depending on the stream body:
 |------|-----------|----------------|-------------|
 | In-memory stream | no `await`, no I/O in body | `impl Iterator<Item = T>` | ✓ |
 | Async source (I/O, timer) | `await` or I/O call present | target-specific (see below) | |
-
-**In-memory streams compile to `impl Iterator<Item = T>` on all targets.** `Iterator` requires neither `Send` nor a runtime.
 
 | Target | Async stream implementation |
 |--------|-----------------------------|
@@ -181,28 +174,41 @@ Two sub-cases depending on the stream body:
 
 ---
 
-## Size-based inference (strict mode only)
+## Size-based auto-boxing (strict mode only)
 
-| Range | Action |
-|-------|--------|
-| `sizeof(T) > 1024` | Auto-promote `T` → `Box<T>` (silent in output, warning to stderr) |
-| `32 < sizeof(T) <= 1024` | Warning: suggest explicit `T'` |
-| `sizeof(T) <= 32` | No action |
+When use-site inference (priority 5) does not resolve a qualifier for an anonymous `T`, the transpiler falls back to a size-based decision:
 
-Size is computed statically by the transpiler by summing field sizes. Generic type parameters and extern types have unknown size and are skipped (no action taken).
+| Estimated size | Action |
+|---|---|
+| ≤ `--stack-auto-bytes` (default: 256 B) | leave as `T` (stack) |
+| > `--stack-auto-bytes` | silently promote to `Box<T>` |
 
-Configurable thresholds: `--stack-auto-bytes N` (default 1024) and `--stack-warn-bytes N` (default 32).
+Configurable: `boring build --stack-auto-bytes N`.
+
+**Suppressed for non-rebindable `T` struct fields.** When a struct field uses the bare anonymous form `T` (no qualifier) with a `let` or `mut` binding, size-based promotion does not apply and no warning is emitted. A struct field is always inline in the parent's allocation — boxing it would add an indirection without reducing the parent's layout.
+
+This suppression applies only to bare `T`. A `T'` field (indirection hint) is **not** suppressed: its fallback remains `'heap` (`Box<T>`) regardless of size, because the developer explicitly requested indirection.
+
+```boring
+struct BigData:
+    let float[256] samples    # 2048 bytes — bare T, no Box, no warning; inline in BigData
+    let string name
+
+struct Wrapper:
+    let BigData inner         # bare T — sizeof(BigData) folds into sizeof(Wrapper), no promotion
+    let BigData' backup       # T' — always Box<BigData>, even on a let field
+```
 
 ## Enum size warnings (strict mode only)
 
 ```
 # Level 1 — overall enum too large
-warning: `Message` is 1025 bytes on the stack (largest variant: `Data`);
-         consider `Message'` to heap-allocate the whole enum
+warning: `Message` is 260 bytes on the stack (largest variant: `Data`);
+         consider `Message'heap` to heap-allocate the whole enum
 
 # Level 2 — one variant disproportionate
-warning: variant `Data` (1024 bytes) dominates `Message` (4 bytes median);
-         consider boxing the payload: Data([u8; 1024]')
+warning: variant `Data` (256 bytes) dominates `Message` (4 bytes median);
+         consider boxing the payload: Data(u8[256]'heap)
 ```
 
 Level 2 keeps the enum on the stack while boxing only the heavy payload.

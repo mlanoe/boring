@@ -5,6 +5,63 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.6.0] — 2026-06-14
+
+### Added
+
+- **`dbg(expr)`** — new builtin that maps to Rust's `dbg!()`: prints `[file:line] expr = value` to stderr and returns the value unchanged.  Usable inline inside any expression.
+- **`todo()` / `todo(msg)`** — panic placeholder for unfinished code paths; maps to `todo!()`.
+- **`unreachable()` / `unreachable(msg)`** — assertion that a code path is never reached; maps to `unreachable!()`.
+- **`--mode managed` debug enhancements** — building with `--mode managed` now also:
+  - Writes `.cargo/config.toml` with `RUST_BACKTRACE = "1"` so panics always print a full stack trace without any manual environment variable.
+  - Adds `#[track_caller]` to every emitted function and method so panic messages report the call site rather than the panic site deep in the standard library.
+- **`--sanitize address|thread|memory`** — new build flag.  Writes `.cargo/config.toml` with `-Zsanitizer=<san>` and the host target triple (detected via `rustc --version --verbose`).  Combinable with all other flags.  Requires a nightly toolchain (`cargo +nightly run`).
+- **`--instrument`** — new build flag.  Prepends an inline `__boring_instrument` module (no external dependency) that wraps every function body with a RAII `Span` guard tracking call counts and wall-clock durations.  On program exit (including unwind panics via a `DumpGuard` in `main`) two files are written:
+  - `boring_coverage.json` — per-function aggregated stats (`calls`, `total_us`, `avg_us`), sorted alphabetically.
+  - `boring_trace.json` — all calls in Chrome Trace Format, directly openable in Perfetto (`ui.perfetto.dev`) and Speedscope (`speedscope.app`) without conversion.
+  - Methods are labelled `Type::method` in both outputs.
+
+### Changed
+
+- **`grammar.bnf`** — emission targets section expanded with documentation of `--instrument`, `--sanitize`, and `--mode managed` debug enhancements; builtin debugging functions table added.
+- **`docs/book.md`** — chapters 32–33 merged into a single **Chapter 32 — Debugging & Profiling** with five numbered subsections (32.1 builtins · 32.2 managed mode · 32.3 sanitizers · 32.4 instrumentation · 32.5 combining all tools).
+- **`Cargo.toml`** — version bumped from 0.4.0 to 0.6.0 (0.5.0 was released without bumping the crate manifest).
+
+---
+
+## [0.5.0] — 2026-06-14
+
+### Added
+
+- **Qualifier inference — constraint elimination** — unqualified variables start with the full candidate set `{Stack, Owned, Shared, Actor, Guard, Const}`. Each usage signal eliminates incompatible qualifiers (`retain`). When exactly one remains it is chosen automatically; when none remain a compile error is reported; when several remain a size-based fallback resolves the tie (≤ 256 B → `'stack`, > 256 B → `'heap`). The zero-annotation goal: qualifier-free Boring code emits the same Rust as hand-annotated code.
+- **Signal table** — the signals that constrain the candidate set: explicit call-site qualifier demand, `def` method call (eliminates `'shared`/`'const`), `mut` binding (eliminates `'shared`/`'const`), task capture as method receiver (`{Actor, Guard}`), task capture read-only (`{Shared, Actor, Guard}`).
+- **`mut` keyword** — new binding form `mut x = expr`: fixed binding, mutable instance. Adds a mutation constraint to the inference candidate set (eliminates `'shared` and `'const`). Recognised in the grammar, AST, transpiler, and syntax-highlighting files.
+- **`T'` inference** — tick variables (`T'`) now participate in constraint elimination with a restricted initial candidate set `{Owned, Shared, Actor, Guard}` (Stack and Const excluded). Inference can promote a tick variable to `'shared`, `'actor`, or `'guard` based on usage signals; fallback when unresolved is `'heap` (`Box<T>`). The suppression of size-based auto-boxing for non-rebindable bare `T` struct fields does not apply to `T'` fields — their fallback is always `Box<T>`.
+- **Parameter auto-apply** — inferred qualifiers are applied to function parameters at emission time; a pre-inference pass runs before `emit_param` so that the emitted Rust signature already carries the correct type wrapper. Applies to both `T` and `T'` parameters.
+- **Cross-function propagation** — after a function body is emitted, inferred parameter qualifiers are written back into `fn_sigs`; callers defined later in the file benefit without re-analysis.
+- **Struct field inference** — `infer_struct_field_qualifiers` scans all method and setter bodies for `self.field` access patterns and resolves each unqualified field to `'actor` or `'guard` using the same signal table. Results are written into the existing `struct_mutex_fields` / `struct_rwlock_fields` registries; no change to the emission layer. All fields are resolved from internal usage only, consistent with module-boundary constraints.
+- **`var` reassignment as mutation signal** — assigning to a `var` variable (`x = …`, `x.field = …`, `x.a.b.c = …`, `x[i] = …`) now constrains its qualifier set to `{Stack, Owned, Actor, Guard}`. The assignment target is walked recursively to find the root variable, so deeply nested field and index assignments are covered. Previously only `def` method calls triggered this constraint.
+- **`set` setter as mutation signal (struct fields)** — setter bodies (`set prop(T v):`) are now walked by `infer_struct_field_qualifiers` in addition to `def` method bodies, so field mutation performed through a setter is correctly accounted for in field qualifier inference.
+- **Closure capture signals** — closures are now treated like `task` bodies for qualifier inference: a variable captured as a method receiver constrains to `{Actor, Guard}`; a variable captured read-only constrains to `{Shared, Actor, Guard}`. Previously only explicit `task` blocks triggered capture-based constraints.
+- **`T?` / `T'?` optional inference** — optional variables participate in constraint elimination; the inferred qualifier is applied to the inner type of the `Option` (`Option<Arc<Mutex<T>>>`, not `Arc<Mutex<Option<T>>>`).
+- **Qualifier unions / groups** — parameter forms `T'one`, `T'many`, `T'mut`, `T'req` seed the inference with the corresponding member set as the initial candidates. Useful for expressing "any mutable qualifier" without writing an explicit one; the body signals then narrow to a single candidate.
+- **Parameter seeding** — parameters were not previously seeded into the inference system; only local `let`/`var` bindings were tracked. All `T`, `T'`, and `T'<group>` parameters now participate in constraint elimination from the start of `infer_qualifiers`.
+
+### Changed
+
+- **`--stack-auto-bytes` default lowered from 1 024 to 256 bytes** — aligned with Clippy's `large_types_passed_by_value` lint; more conservative default that avoids silently placing large structs on the stack.
+- **`--stack-warn-bytes` removed** — the intermediate warning zone ("suggest `'heap`") conflicted with the zero-annotation goal by nudging developers to write explicit qualifiers. The size-based fallback is now a single binary threshold: ≤ `--stack-auto-bytes` → `'stack`, above → `'heap` silently.
+- **Syntax highlighting** — `mut` added to the `declaration-keywords` pattern in the tmLanguage files for VSCode, Eclipse, and Linguist.
+- **`grammar.bnf`** — `let_stmt` now accepts `"let" | "mut" | "var"`.
+- **`transpilation-modes.md` split** — qualifier inference content extracted to a dedicated `docs/qualifier-inference.md`; `transpilation-modes.md` now focuses on flags, qualifier vocabulary, and mode/threading behaviour.
+
+### Fixed
+
+- Enum disproportionate-variant warning threshold previously used the removed `stack_warn_bytes`; now derived from `stack_auto_bytes / 4`.
+- Warning messages for oversized structs and enum variants now suggest `'heap` explicitly instead of the ambiguous `T'` sigil.
+
+---
+
 ## [0.4.0] — 2026-06-10
 
 ### Added

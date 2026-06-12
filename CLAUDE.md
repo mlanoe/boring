@@ -1,0 +1,137 @@
+# Boring — language quick reference for Claude
+
+Boring is a high-level language that transpiles to Rust. Source files use `.br` extension.
+
+## Core syntax rules
+
+- Type is written **before** the name: `let int x = 42`
+- Qualifier is written **after** the type: `let int'stack x = 42`
+- Qualifier after variable name when type is inferred: `let x'stack = 42`
+- Indentation-based blocks (Python-style), no braces
+- `#` for comments
+
+## Variables
+
+```boring
+let x = 42              # immutable binding, immutable instance
+mut x = 42              # fixed binding, mutable instance
+var x = 42              # rebindable, mutable (qualifier permitting)
+```
+
+## Functions
+
+```boring
+def greet(string name):         # void, def required
+    print "Hello, {name}!"
+
+int add(int a, int b):          # return type present, def optional
+    a + b
+
+def int add(int a, int b):      # explicit def, equivalent
+    a + b
+
+def mut T foo():                # returns a mutable instance
+req mut T get():                # read-only method, returns a mutable instance
+```
+
+- `req` — read-only method, callable on `let` and `var` bindings → `&self`
+- `def` — mutating method, callable on `var` bindings only → `&mut self`
+- `def mut` / `req mut` — the `mut` after the keyword applies to the **return value**, not `self`
+
+## Structs
+
+```boring
+struct Point:
+    float x
+    float y
+
+struct Counter:
+    var int value = 0       # var field = mutable
+
+    def inc():
+        value += 1
+```
+
+## Ownership qualifiers
+
+| Qualifier | Rust impl | Mutable | Notes |
+|---|---|---|---|
+| `'shared` | `Rc<T>` / `Arc<T>` | no | immutable shared ref |
+| `'actor` | `Rc<RefCell<T>>` / `Arc<Mutex<T>>` | yes | interior mutability |
+| `'guard` | `Mutex<T>` / `RwLock<T>` | under lock | |
+| `'stack` | `T` | neutral | stack allocation hint |
+| `'heap` | `Box<T>` | neutral | heap allocation hint |
+
+```boring
+let Counter'actor c = Counter(0)
+let int'stack n = 10
+```
+
+## Binding × mutability
+
+| Syntax | Rebindable | Mutable |
+|---|---|---|
+| `let` | no | no |
+| `mut` | no | yes |
+| `var` | yes | depends on qualifier |
+
+Qualifier constraints: `mut 'shared` → compile error. `var 'guard` → warning.
+
+Parameter passing hierarchy: `var` ≥ `mut` ≥ `let` (caller can pass down, never up).
+
+## Enums
+
+```boring
+enum Shape:
+    Circle(float)
+    Rect(float, float)
+```
+
+## Pattern matching
+
+```boring
+match shape:
+    Circle(r): print "circle {r}"
+    Rect(w, h): print "rect {w}x{h}"
+```
+
+## String interpolation
+
+```boring
+let name = "World"
+print "Hello, {name}!"
+```
+
+- `{{` → literal `{` ; `}}` → literal `}`
+- `{}` (empty hole) → literal `{}`
+- `{expr:fmt}` → formatted interpolation with a **static** format specifier (e.g. `{n:.2f}`, `{n:x}` for hex); the format part is a raw string, not an expression — `{n:{fmt}}` does **not** interpolate `fmt`, it produces the literal `{:{fmt}}`
+- `{:x}` (empty expr, non-empty fmt) → literal `{:x}`, nothing is formatted
+- A lone `{` inside a string is **always** treated as the start of an interpolation hole — it is **not** a literal brace. `"{"` is a lexer error (unterminated string). Use `"{{"` instead.
+
+## Common types
+
+| Boring | Rust |
+|---|---|
+| `int` | `i64` |
+| `uint` | `u64` |
+| `float` | `f64` |
+| `bool` | `bool` |
+| `string` | `Arc<str>` (default) or `&'static str` (strict mode, literals only) |
+| `[T]` | `Vec<T>` |
+| `{K: V}` | `HashMap<K, V>` |
+
+### `string` implementation
+
+- **Default mode**: `Arc<str>` — enables sharing and arbitrary value lifetimes.
+- **Strict mode**: `&'static str` — restricted to compile-time string literals; forbidden for computed or interpolated values.
+
+The mode is inferred by the transpiler from usage context; there is no explicit qualifier to force it.
+
+## Project structure
+
+```sh
+boring run          # interpret
+boring build        # emit Cargo project
+```
+
+Source: `docs/book.md` for the full language reference.

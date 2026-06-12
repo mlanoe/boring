@@ -90,20 +90,17 @@ let [int]'shared items = [1, 2, 3]
 let fsync = task: items.len()
 print fsync.value
 
-let [int]'const citems = [1, 2, 3]
-let fconst = task: citems.len()
-print fconst.value
 
 struct OCounter:
     init(int n)
 
-def int peek1(OCounter&shared c):
+def int peek1(OCounter'shared c):
     c.n
 
 let OCounter'shared obj1 = OCounter(10)
 print peek1(obj1)
 
-def int peek2(OCounter&shared c):
+def int peek2(OCounter'shared c):
     c.n
 
 let OCounter'shared obj2 = OCounter(7)
@@ -112,7 +109,7 @@ print peek2(obj2)
 struct OBoxB:
     init(int value)
 
-def OBoxB&shared identity(OBoxB&shared b):
+def OBoxB& identity(OBoxB& b):
     b
 
 let OBoxB'shared ob_b = OBoxB(99)
@@ -122,14 +119,14 @@ struct OItem:
     init(int v)
 
 let OItem'shared raw = OItem(55)
-let OItem&shared x = raw
+let OItem'shared x = raw
 print x.v
 
-def int peek3(OCounter'shared& c):
+def int peek3(OCounter'shared c):
     c.n
 print peek3(obj1)
 
-def int peek4(OCounter'shared& c):
+def int peek4(OCounter'shared c):
     c.n
 print peek4(obj2)
 
@@ -144,7 +141,7 @@ def int readt(ONode& n):
 let ONode root = OTree(42)
 print readt(root)
 
-def OBoxB'shared& identity2(OBoxB'shared& b):
+def OBoxB& identity2(OBoxB& b):
     b
 
 let OBoxB'shared ob_b2 = OBoxB(99)

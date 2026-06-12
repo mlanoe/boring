@@ -21,6 +21,7 @@ mod emit_struct;
 mod emit_stmt;
 mod emit_expr;
 mod emit_methods;
+mod infer_qualifiers;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
 pub mod kernel;
@@ -50,12 +51,16 @@ pub enum ThreadingMode {
 pub struct TranspileConfig {
     pub mode: TranspileMode,
     pub threading: ThreadingMode,
-    /// Stack size threshold for auto-boxing (default: 1024 bytes). Types larger than this
+    /// Stack size threshold for auto-boxing (default: 256 bytes). Types larger than this
     /// are silently promoted to Box<T>. Configurable via `--stack-auto-bytes N`.
     pub stack_auto_bytes: usize,
-    /// Stack size threshold for warning (default: 32 bytes). Types between this and
-    /// `stack_auto_bytes` emit a suggestion to use T'. Configurable via `--stack-warn-bytes N`.
-    pub stack_warn_bytes: usize,
+    /// When true, every function body is wrapped with a `__boring_instrument::Span` guard that
+    /// records call counts and wall-clock durations.  On program exit the guard writes
+    /// `boring_coverage.json` (aggregated stats) and `boring_trace.json` (Chrome Trace Format).
+    pub instrument: bool,
+    /// Sanitizer to enable in the generated Cargo project (`address`, `thread`, or `memory`).
+    /// Requires a nightly toolchain.  Handled by the CLI — the transpiler itself is unaffected.
+    pub sanitize: Option<&'static str>,
 }
 
 impl Default for TranspileConfig {
@@ -63,8 +68,9 @@ impl Default for TranspileConfig {
         Self {
             mode: TranspileMode::Strict,
             threading: ThreadingMode::Multi,
-            stack_auto_bytes: 1024,
-            stack_warn_bytes: 32,
+            stack_auto_bytes: 256,
+            instrument: false,
+            sanitize: None::<&'static str>,
         }
     }
 }
@@ -95,6 +101,9 @@ pub struct TranspileOutput {
     /// True when broadcast is used in single-thread mode (local prelude emitted inline).
     /// No extra Cargo.toml dependency — the prelude is self-contained.
     pub uses_local_broadcast: bool,
+    /// True when `--instrument` was requested.  The generated code includes the inline
+    /// `__boring_instrument` module; no external Cargo.toml dependency is needed.
+    pub uses_instrument: bool,
 }
 
 pub fn transpile(program: &Program) -> String {
@@ -108,7 +117,34 @@ pub fn transpile_full(program: &Program) -> TranspileOutput {
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
     let mut t = Transpiler::new(config);
     t.emit_program(program);
-    TranspileOutput { code: t.out, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get() }
+    let code = if matches!(t.config.threading, ThreadingMode::Single) {
+        t.out
+            .replace("Arc::<str>::from", "Rc::<str>::from")
+            .replace("Arc::from(", "Rc::from(")
+            .replace("Arc::clone(", "Rc::clone(")
+            .replace("Arc<str>", "Rc<str>")
+            // Global statics require Send — restore Arc<str> inside Mutex for static vars.
+            .replace("std::sync::Mutex<Rc<str>>", "std::sync::Mutex<Arc<str>>")
+            .replace("std::sync::Mutex::new(Rc::<str>::from(", "std::sync::Mutex::new(Arc::<str>::from(")
+            // Assignments to static string vars (through Mutex) also need Arc<str>.
+            .replace(".unwrap_or_else(|e| e.into_inner()) = Rc::<str>::from(", ".unwrap_or_else(|e| e.into_inner()) = Arc::<str>::from(")
+            // In single-thread mode, error types and BoringVal don't need Send + Sync.
+            .replace("Box<dyn std::error::Error + Send + Sync>", "Box<dyn std::error::Error>")
+            .replace("trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync", "trait BoringVal: std::fmt::Display + std::any::Any")
+            .replace("impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T", "impl<T: std::fmt::Display + std::any::Any + 'static> BoringVal for T")
+            .replace("impl std::fmt::Debug for dyn BoringVal + Send + Sync", "impl std::fmt::Debug for dyn BoringVal")
+            .replace("Box<dyn BoringVal + Send + Sync>", "Box<dyn BoringVal>")
+    } else {
+        t.out
+    };
+    // If the generated code defines both `enum Value` and `fn value_equals`, inject a
+    // PartialEq impl so that Value comparisons (==, !=) compile.
+    let code = if code.contains("enum Value {") && code.contains("fn value_equals(") {
+        code + "\nimpl PartialEq for Value {\n    fn eq(&self, other: &Self) -> bool { value_equals(self.clone(), other.clone()) }\n}\nimpl Eq for Value {}\n"
+    } else {
+        code
+    };
+    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: config.instrument }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -130,6 +166,8 @@ struct Transpiler {
     /// Variables known to hold a Vec specifically (not HashMap/HashSet, and not reduce scalars).
     /// Used to apply BoringFmt wrapping for Display-without-quotes printing.
     pub(crate) vec_vars: std::collections::HashSet<String>,
+    /// Variables known to hold a Vec<Arc<str>> — for loop vars iterating these are strings.
+    pub(crate) str_vec_vars: std::collections::HashSet<String>,
     /// Variables known to hold a HashSet (for `remove(&v)` and `add`→`insert` dispatch).
     pub(crate) set_vars: std::collections::HashSet<String>,
     /// Variables known to hold a tuple — maps name → arity.
@@ -189,6 +227,12 @@ struct Transpiler {
     pub(crate) arc_vars: std::collections::HashSet<String>,
     /// Local variables declared with `T'weak` — already `Weak<T>`, skip Rc::downgrade.
     pub(crate) weak_vars: std::collections::HashSet<String>,
+    /// Parameters that are auto-ref ('shared/'actor/'guard/'weak) — emitted as &Arc/&Weak.
+    /// When assigned to an owned context, the transpiler inserts Arc::clone automatically.
+    pub(crate) auto_ref_params: std::collections::HashSet<String>,
+    /// Per-function rebindable flags: fn_name → [is_rebindable per param index].
+    /// A rebindable (var) param receives `&mut Wrapper<T>` at the call site.
+    pub(crate) fn_rebindable: std::collections::HashMap<String, Vec<bool>>,
     /// Variadic param index per function: fn_name → index of the `...` param.
     pub(crate) fn_variadic: std::collections::HashMap<String, usize>,
     /// Inside a `try:` body closure — calls to throws functions get `?`.
@@ -240,6 +284,12 @@ struct Transpiler {
     /// True when the current function's declared return type is `()` (void).
     /// Prevents expression-return without semicolon for void functions.
     pub(crate) fn_returns_void: bool,
+    /// True when the function's declared return type is void (ignoring throws wrapper).
+    /// Unlike fn_returns_void, this is true for `def void f() throws:` as well.
+    pub(crate) fn_declared_void: bool,
+    /// When true, suppress `Ok(...)` wrapping on the last expression even if `in_throws` is set.
+    /// Used for if/match expression branches that need `?` propagation but not `Ok()` wrapping.
+    pub(crate) suppress_ok_wrap: bool,
     /// trait_name → set of method names declared in that trait (signatures + defaults).
     /// Used to split struct body methods between `impl Trait for Struct {}` and `impl Struct {}`.
     pub(crate) trait_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
@@ -258,6 +308,10 @@ struct Transpiler {
     /// Declared return type of the current function, if known.
     /// Used to coerce last-expression returns with `Some()` when the return type is Optional.
     pub(crate) fn_return_ty: Option<Type>,
+    /// Parameters of the current function (name → declared type).
+    /// Set before emit_body; used by the qualifier inference pass for annotation hints
+    /// and body-compatibility checks on union-qualified parameters.
+    pub(crate) fn_current_params: std::collections::HashMap<String, Type>,
     /// Names declared as `type Name as InnerType` newtype wrappers.
     /// Used in emit_constructor to emit `Name(val)` (tuple struct) rather than `Name { field: val }`.
     pub(crate) newtype_types: std::collections::HashSet<String>,
@@ -418,6 +472,9 @@ struct Transpiler {
     /// Variables declared as `T'shared` in single-thread mode — hold `Rc<T>` instead of `Arc<T>`.
     /// These must be pre-cloned with `Rc::clone` (not `Arc::clone`) before async-move captures.
     pub(crate) rc_vars: std::collections::HashSet<String>,
+    /// Parameters of type `T'shared` or `T'actor` passed as `&Rc<T>` / `&Arc<T>`.
+    /// Matching on these requires `(**var)` — two dereferences — to reach `T`.
+    pub(crate) shared_ref_params: std::collections::HashSet<String>,
     /// Variables holding `Arc<std::sync::Mutex<T>>` in managed multi mode (anonymous T/T').
     /// Field reads, method calls, and optional chaining go through `.lock().unwrap()`.
     pub(crate) managed_mutex_vars: std::collections::HashSet<String>,
@@ -432,6 +489,13 @@ struct Transpiler {
     /// "TypeName::method_name" → return Type for all ext methods.
     /// Used in emit_let to infer whether an untyped binding should be tracked as managed.
     pub(crate) struct_method_return_types: std::collections::HashMap<String, crate::ast::Type>,
+    /// Method names (bare, without struct prefix) that are declared as `throws`.
+    /// Used to add `?` propagation when calling `self.method()` or `obj.method()` inside throws context.
+    pub(crate) struct_method_throws: std::collections::HashSet<String>,
+    /// Use-site qualifier inference (priority 5).
+    /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
+    /// function body before emission. Cleared between function bodies.
+    pub(crate) inferred_qualifiers: std::collections::HashMap<String, crate::ast::OwnerQual>,
 }
 
 impl Transpiler {
@@ -446,6 +510,7 @@ impl Transpiler {
             self_type: None,
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
+            str_vec_vars: std::collections::HashSet::new(),
             set_vars: std::collections::HashSet::new(),
             tuple_vars: std::collections::HashMap::new(),
             dict_vars: std::collections::HashSet::new(),
@@ -471,6 +536,8 @@ impl Transpiler {
             throws_fn_params: std::collections::HashSet::new(),
             arc_vars: std::collections::HashSet::new(),
             weak_vars: std::collections::HashSet::new(),
+            auto_ref_params: std::collections::HashSet::new(),
+            fn_rebindable: std::collections::HashMap::new(),
             fn_variadic: std::collections::HashMap::new(),
             in_try_body: false,
             in_type_setter: false,
@@ -491,12 +558,15 @@ impl Transpiler {
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
             fn_returns_void: false,
+            fn_declared_void: false,
+            suppress_ok_wrap: false,
             trait_method_names: std::collections::HashMap::new(),
             user_conv_targets: std::collections::HashSet::new(),
             string_arc_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             impl_type_params: Vec::new(),
             fn_return_ty: None,
+            fn_current_params: std::collections::HashMap::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
             var_newtype_type: std::collections::HashMap::new(),
@@ -558,10 +628,13 @@ impl Transpiler {
             uses_local_channel: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_local_broadcast: std::rc::Rc::new(std::cell::Cell::new(false)),
             rc_vars: std::collections::HashSet::new(),
+            shared_ref_params: std::collections::HashSet::new(),
             managed_mutex_vars: std::collections::HashSet::new(),
             managed_refcell_vars: std::collections::HashSet::new(),
             managed_param_shadows: std::collections::HashMap::new(),
             struct_method_return_types: std::collections::HashMap::new(),
+            struct_method_throws: std::collections::HashSet::new(),
+            inferred_qualifiers: std::collections::HashMap::new(),
         }
     }
 
@@ -586,11 +659,22 @@ impl Transpiler {
         }
     }
 
+    // ── String type helpers ───────────────────────────────────────────────────
+
+    /// Whether to use `Rc<str>` instead of `Arc<str>` for `string` — for passing to free functions.
+    pub(crate) fn use_rc_str(&self) -> bool {
+        matches!(self.config.threading, ThreadingMode::Single)
+    }
+
     // ── Inference helpers ─────────────────────────────────────────────────────
 
     /// Estimate the stack size in bytes of a type (best-effort, concrete types only).
     /// Returns None for generic parameters, arrays, or types with unknown inner sizes.
     fn estimate_size(ty: &Type, program: &Program) -> Option<usize> {
+        Self::estimate_size_inner(ty, program, &mut std::collections::HashSet::new())
+    }
+
+    fn estimate_size_inner(ty: &Type, program: &Program, visiting: &mut std::collections::HashSet<String>) -> Option<usize> {
         match ty {
             Type::Int | Type::Uint | Type::Float => Some(8),
             Type::Bool => Some(1),
@@ -600,62 +684,72 @@ impl Transpiler {
             Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float") => Some(8),
             Type::Named(n) if n.as_str() == "bool" => Some(1),
             Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
-            Type::Qualified(inner, OwnerQual::Copy | OwnerQual::Stack) => Self::estimate_size(inner, program),
+            Type::Qualified(inner, OwnerQual::Copy | OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
             // Pointer-sized types (Box, Arc, Rc, Option<Box>) — always 8 or 16 bytes
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => Some(16),
-            Type::Optional(inner) => Self::estimate_size(inner, program).map(|s| s + 8), // discriminant
+            Type::Optional(inner) => Self::estimate_size_inner(inner, program, visiting).map(|s| s + 8), // discriminant
             Type::Array(_) | Type::Dict(_, _) | Type::Set(_) => None, // dynamic
             Type::TypeParam(_) | Type::Generic(_, _) => None, // unknown
             Type::Named(name) => {
-                // Look up struct definition and sum field sizes.
-                for item in &program.items {
-                    if let Item::Struct(s) = item {
-                        if &s.name == name {
-                            // Collect field types: explicit fields first, then init params if no fields.
-                            let mut field_types: Vec<Type> = s.fields.iter()
-                                .map(|f| f.ty.clone())
-                                .collect();
-                            if field_types.is_empty() {
-                                for init in &s.inits {
-                                    if init.body.is_empty() {
-                                        for p in &init.params {
-                                            if let Some(ty) = &p.ty { field_types.push(ty.clone()); }
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            let mut total = 0usize;
-                            for ty in &field_types {
-                                match Self::estimate_size(ty, program) {
-                                    Some(s) => total += s,
-                                    None => return None,
-                                }
-                            }
-                            return Some(total);
-                        }
-                    }
-                    if let Item::Enum(e) = item {
-                        if &e.name == name {
-                            // Enum size = max(variant sizes) + discriminant (8 bytes)
-                            let mut max_variant = 0usize;
-                            for v in &e.variants {
-                                let mut variant_size = 0usize;
-                                let mut ok = true;
-                                for f in &v.fields {
-                                    match Self::estimate_size(&f.ty, program) {
-                                        Some(s) => variant_size += s,
-                                        None => { ok = false; break; }
-                                    }
-                                }
-                                if !ok { return None; }
-                                if variant_size > max_variant { max_variant = variant_size; }
-                            }
-                            return Some(max_variant + 8);
-                        }
-                    }
+                // Cycle guard: a recursive type (Env → Env?) will be heap-allocated (Box/Rc),
+                // so treat it as pointer-sized (16 bytes) when we detect a cycle.
+                if visiting.contains(name.as_str()) {
+                    return Some(16);
                 }
-                None
+                visiting.insert(name.clone());
+                // Look up struct definition and sum field sizes.
+                let result = (|| {
+                    for item in &program.items {
+                        if let Item::Struct(s) = item {
+                            if &s.name == name {
+                                // Collect field types: explicit fields first, then init params if no fields.
+                                let mut field_types: Vec<Type> = s.fields.iter()
+                                    .map(|f| f.ty.clone())
+                                    .collect();
+                                if field_types.is_empty() {
+                                    for init in &s.inits {
+                                        if init.body.is_empty() {
+                                            for p in &init.params {
+                                                if let Some(ty) = &p.ty { field_types.push(ty.clone()); }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                let mut total = 0usize;
+                                for ty in &field_types {
+                                    match Self::estimate_size_inner(ty, program, visiting) {
+                                        Some(s) => total += s,
+                                        None => return None,
+                                    }
+                                }
+                                return Some(total);
+                            }
+                        }
+                        if let Item::Enum(e) = item {
+                            if &e.name == name {
+                                // Enum size = max(variant sizes) + discriminant (8 bytes)
+                                let mut max_variant = 0usize;
+                                for v in &e.variants {
+                                    let mut variant_size = 0usize;
+                                    let mut ok = true;
+                                    for f in &v.fields {
+                                        match Self::estimate_size_inner(&f.ty, program, visiting) {
+                                            Some(s) => variant_size += s,
+                                            None => { ok = false; break; }
+                                        }
+                                    }
+                                    if !ok { return None; }
+                                    if variant_size > max_variant { max_variant = variant_size; }
+                                }
+                                return Some(max_variant + 8);
+                            }
+                        }
+                    }
+                    None
+                })();
+                visiting.remove(name.as_str());
+                result
             }
             _ => None,
         }
@@ -663,11 +757,35 @@ impl Transpiler {
 
     /// Returns true if `ty` directly references a type named `name` (recursion check).
     /// Unwraps qualifiers and Optional/Array wrappers to find the inner named type.
+    /// Also checks for indirect (transitive) cycles via `reachable` — a set of type names
+    /// that eventually reach back to `name` through non-heap struct/enum fields.
+    fn type_references_transitive(
+        ty: &Type,
+        name: &str,
+        reachable: &std::collections::HashSet<String>,
+    ) -> bool {
+        match ty {
+            Type::Named(n) => n == name || reachable.contains(n.as_str()),
+            Type::Array(_) | Type::Dict(_, _) | Type::Set(_) | Type::Qualified(_, _) => false,
+            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+                Self::type_references_transitive(inner, name, reachable)
+            }
+            Type::Generic(n, args) => {
+                n == name || reachable.contains(n.as_str())
+                    || args.iter().any(|a| Self::type_references_transitive(a, name, reachable))
+            }
+            _ => false,
+        }
+    }
+
     fn type_references(ty: &Type, name: &str) -> bool {
         match ty {
             Type::Named(n) => n == name,
-            Type::Qualified(inner, _) => Self::type_references(inner, name),
-            Type::Optional(inner) | Type::Array(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
+            // Heap-allocated or pointer-sized containers: never cause infinite struct size.
+            // Array/Dict/Set are Vec/HashMap/HashSet-backed (heap); Qualified types are pointer-sized
+            // (Box<T>, Rc<T>, Arc<T>, Rc<RefCell<T>>, etc.) — do not follow.
+            Type::Array(_) | Type::Dict(_, _) | Type::Set(_) | Type::Qualified(_, _) => false,
+            Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => {
                 Self::type_references(inner, name)
             }
             Type::Generic(n, args) => {
@@ -714,11 +832,8 @@ impl Transpiler {
         self.line("use std::hash::Hash;");
         self.line("use std::rc::{Rc, Weak};");
         self.line("use std::sync::Arc;");
-        // Managed single-thread mode uses RefCell for T/T' — add the import unconditionally when
-        // mode is Managed+Single to avoid "cannot find type RefCell in scope" errors.
-        if matches!(self.config.mode, TranspileMode::Managed)
-            && matches!(self.config.threading, ThreadingMode::Single)
-        {
+        // Single-thread mode uses RefCell for T'actor/T'guard — add import whenever threading=single.
+        if matches!(self.config.threading, ThreadingMode::Single) {
             self.line("use std::cell::RefCell;");
         }
         self.line("use std::f64::consts::{PI, E, TAU};");
@@ -871,6 +986,68 @@ impl Transpiler {
              impl std::error::Error for Error {}\n\n"
         );
 
+        if self.config.instrument {
+            self.out.push_str(
+                "mod __boring_instrument {\n\
+                 \x20   use std::collections::HashMap;\n\
+                 \x20   use std::sync::Mutex;\n\
+                 \x20   use std::time::{Instant, SystemTime, UNIX_EPOCH};\n\
+                 \x20   struct CallStats { count: u64, total_ns: u64 }\n\
+                 \x20   static REGISTRY: Mutex<Option<HashMap<&'static str, CallStats>>> = Mutex::new(None);\n\
+                 \x20   static JOURNAL: Mutex<Option<Vec<(u128, &'static str, u64)>>> = Mutex::new(None);\n\
+                 \x20   pub struct Span { name: &'static str, start: Instant, ts_ns: u128 }\n\
+                 \x20   impl Span {\n\
+                 \x20       pub fn enter(name: &'static str) -> Self {\n\
+                 \x20           { let mut r = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()); if r.is_none() { *r = Some(HashMap::new()); } }\n\
+                 \x20           { let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner()); if j.is_none() { *j = Some(Vec::new()); } }\n\
+                 \x20           let ts_ns = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);\n\
+                 \x20           Self { name, start: Instant::now(), ts_ns }\n\
+                 \x20       }\n\
+                 \x20   }\n\
+                 \x20   impl Drop for Span {\n\
+                 \x20       fn drop(&mut self) {\n\
+                 \x20           let dur = self.start.elapsed().as_nanos() as u64;\n\
+                 \x20           if let Some(r) = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {\n\
+                 \x20               let e = r.entry(self.name).or_insert(CallStats { count: 0, total_ns: 0 });\n\
+                 \x20               e.count += 1; e.total_ns += dur;\n\
+                 \x20           }\n\
+                 \x20           if let Some(j) = JOURNAL.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {\n\
+                 \x20               j.push((self.ts_ns, self.name, dur));\n\
+                 \x20           }\n\
+                 \x20       }\n\
+                 \x20   }\n\
+                 \x20   pub struct DumpGuard;\n\
+                 \x20   impl Drop for DumpGuard { fn drop(&mut self) { dump(); } }\n\
+                 \x20   pub fn dump() {\n\
+                 \x20       if let Some(r) = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {\n\
+                 \x20           let mut entries: Vec<_> = r.iter().collect();\n\
+                 \x20           entries.sort_by_key(|(n, _)| *n);\n\
+                 \x20           let mut out = String::from(\"{\\n\");\n\
+                 \x20           let len = entries.len();\n\
+                 \x20           for (i, (name, s)) in entries.iter().enumerate() {\n\
+                 \x20               let avg = if s.count > 0 { s.total_ns / s.count / 1000 } else { 0 };\n\
+                 \x20               let comma = if i + 1 < len { \",\" } else { \"\" };\n\
+                 \x20               out.push_str(&format!(\"  \\\"{}\\\": {{\\\"calls\\\": {}, \\\"total_us\\\": {}, \\\"avg_us\\\": {}}}{}\n\", name, s.count, s.total_ns / 1000, avg, comma));\n\
+                 \x20           }\n\
+                 \x20           out.push('}');\n\
+                 \x20           let _ = std::fs::write(\"boring_coverage.json\", out);\n\
+                 \x20       }\n\
+                 \x20       if let Some(j) = JOURNAL.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {\n\
+                 \x20           let mut out = String::from(\"{\\n  \\\"traceEvents\\\": [\");\n\
+                 \x20           let len = j.len();\n\
+                 \x20           for (i, (ts, name, dur)) in j.iter().enumerate() {\n\
+                 \x20               let ts_us = ts / 1000;\n\
+                 \x20               let comma = if i + 1 < len { \",\" } else { \"\" };\n\
+                 \x20               out.push_str(&format!(\"\\n    {{\\\"name\\\":\\\"{}\\\",\\\"ph\\\":\\\"X\\\",\\\"ts\\\":{},\\\"dur\\\":{},\\\"pid\\\":1,\\\"tid\\\":1,\\\"cat\\\":\\\"boring\\\"}}{}\", name, ts_us, dur / 1000, comma));\n\
+                 \x20           }\n\
+                 \x20           out.push_str(\"\\n  ],\\n  \\\"displayTimeUnit\\\": \\\"ms\\\"\\n}\");\n\
+                 \x20           let _ = std::fs::write(\"boring_trace.json\", out);\n\
+                 \x20       }\n\
+                 \x20   }\n\
+                 }\n\n"
+            );
+        }
+
         // Emit module-level mutable vars that are accessed by functions as LazyLock<Mutex<T>> statics.
         // These cannot be locals inside main() because functions reference them as free variables.
         if !self.global_vars_used_in_fns.is_empty() {
@@ -880,7 +1057,7 @@ impl Transpiler {
             let global_vars_raw: Vec<(String, Option<Type>, String)> = program.items.iter()
                 .filter_map(|item| {
                     if let Item::Let(s) = item {
-                        if s.mutable && self.global_vars_used_in_fns.contains(&s.name) {
+                        if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
                             let init = self.global_var_inits.get(&s.name).cloned()
                                 .unwrap_or_else(|| "Default::default()".into());
                             Some((s.name.clone(), s.ty.clone(), init))
@@ -897,7 +1074,7 @@ impl Transpiler {
             for (name, ty, init) in &global_vars {
                 let rust_ty = if let Some(t) = ty {
                     self.emit_type(t)
-                } else if init.starts_with("Arc::new(") || init.starts_with("Arc::<str>::from(") || init.starts_with("\"") {
+                } else if init.starts_with("Arc::new(") || init.starts_with("Arc::<str>::from(") || init.starts_with("Rc::<str>::from(") || init.starts_with("\"") {
                     "Arc<str>".to_string()
                 } else if init.starts_with("vec![") {
                     "Vec<i64>".to_string()
@@ -921,7 +1098,12 @@ impl Transpiler {
         let mut emitted_fn_sigs: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &program.items {
             match item {
-                Item::Stmt(_) | Item::Let(_) => stmts.push(item),
+                Item::Stmt(_) => stmts.push(item),
+                Item::Let(s) if s.is_static => {
+                    self.emit_item(item);
+                    self.blank();
+                }
+                Item::Let(_) => stmts.push(item),
                 Item::Fn(f) if f.qualifier.is_none() => {
                     // Build a unique signature key: name + param types.
                     // For non-overloaded functions the key is just the name (same as before).
@@ -986,6 +1168,10 @@ impl Transpiler {
                 self.line(&format!("fn main() -> {} {{", main_ret));
             }
             self.indent += 1;
+            if self.config.instrument {
+                self.line("let _boring_dump = __boring_instrument::DumpGuard;");
+                self.line("let _boring_span = __boring_instrument::Span::enter(\"main\");");
+            }
             if use_local_set {
                 self.line(&format!("tokio::task::LocalSet::new().run_until(async move {{"));
                 self.indent += 1;
@@ -996,7 +1182,7 @@ impl Transpiler {
                 match item {
                     Item::Let(s) => {
                         // Skip top-level mutable vars that are emitted as module-level statics.
-                        if s.mutable && self.global_vars_used_in_fns.contains(&s.name) {
+                        if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
                             // Already emitted as LazyLock<Mutex<T>> static — skip.
                         } else {
                             self.emit_let(s, false);
@@ -1042,6 +1228,61 @@ impl Transpiler {
         // ── Inference pass ──────────────────────────────────────────────────────
         // Runs before all other pre_scan work so that unit_enums / recursive_fields
         // are populated when emit_struct / emit_enum read them.
+
+        // Build non-heap direct-children map for transitive cycle detection.
+        // direct_children[A] = {B, C, …} means type A has a non-heap field of type B or C.
+        // Array/Dict/Set/Qualified are heap-backed so they break infinite-size cycles.
+        let mut direct_children: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        fn collect_named(ty: &Type, out: &mut std::collections::HashSet<String>) {
+            match ty {
+                Type::Named(n) => { out.insert(n.clone()); }
+                Type::Array(_) | Type::Dict(_, _) | Type::Set(_) | Type::Qualified(_, _) => {}
+                Type::Optional(inner) | Type::Dyn(inner) | Type::Impl(inner) => collect_named(inner, out),
+                Type::Generic(n, args) => {
+                    out.insert(n.clone());
+                    for a in args { collect_named(a, out); }
+                }
+                _ => {}
+            }
+        }
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => {
+                    let mut children = std::collections::HashSet::new();
+                    for f in &s.fields { collect_named(&f.ty, &mut children); }
+                    direct_children.insert(s.name.clone(), children);
+                }
+                Item::Enum(e) => {
+                    let mut children = std::collections::HashSet::new();
+                    for v in &e.variants {
+                        for f in &v.fields { collect_named(&f.ty, &mut children); }
+                    }
+                    direct_children.insert(e.name.clone(), children);
+                }
+                _ => {}
+            }
+        }
+        // For each type T, compute which types can reach T without going through a heap container.
+        // reachable_to[T] = set of types S such that S ──non-heap-path──> T
+        let all_type_names: Vec<String> = direct_children.keys().cloned().collect();
+        let mut reachable_to: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for target in &all_type_names {
+            // BFS: find all types that can reach `target`
+            let mut reaches = std::collections::HashSet::new();
+            let mut worklist = vec![target.clone()];
+            while let Some(t) = worklist.pop() {
+                for (src, children) in &direct_children {
+                    if children.contains(&t) && !reaches.contains(src) {
+                        reaches.insert(src.clone());
+                        worklist.push(src.clone());
+                    }
+                }
+            }
+            reachable_to.insert(target.clone(), reaches);
+        }
+
         for item in &program.items {
             match item {
                 Item::Enum(e) => {
@@ -1050,19 +1291,20 @@ impl Transpiler {
                         self.unit_enums.insert(e.name.clone());
                     }
                     // Priority 3: recursive enum variants → mark for Box wrapping.
+                    // Use transitive cycle detection to catch mutual recursion (e.g. ExprKind↔Expr).
+                    let reaches_back = reachable_to.get(&e.name)
+                        .cloned().unwrap_or_default();
                     for v in &e.variants {
                         for (idx, f) in v.fields.iter().enumerate() {
-                            if Self::type_references(&f.ty, &e.name) {
+                            if Self::type_references_transitive(&f.ty, &e.name, &reaches_back) {
                                 let key = format!("{}::{}::{}", e.name, v.name, idx);
                                 self.recursive_fields.insert(key);
                             }
                         }
                     }
-                    // Priorities 5–7: size-based warnings for enums (strict mode only).
+                    // Size-based warning for enums (strict mode only).
                     if self.config.mode == TranspileMode::Strict && !self.unit_enums.contains(&e.name) {
                         let auto_bytes = self.config.stack_auto_bytes;
-                        let warn_bytes = self.config.stack_warn_bytes;
-                        // Compute per-variant sizes for level-2 warning.
                         let variant_sizes: Vec<Option<usize>> = e.variants.iter().map(|v| {
                             v.fields.iter().try_fold(0usize, |acc, f| {
                                 Self::estimate_size(&f.ty, program).map(|s| acc + s)
@@ -1072,28 +1314,26 @@ impl Transpiler {
                         if !known_sizes.is_empty() {
                             let max_size = *known_sizes.iter().max().unwrap();
                             let total_size = max_size + 8; // discriminant
-                            // Level 1: overall enum too large.
                             if total_size > auto_bytes {
                                 let largest = e.variants.iter().zip(variant_sizes.iter())
                                     .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz)))
                                     .max_by_key(|(_, sz)| *sz)
                                     .map(|(n, _)| n).unwrap_or("?");
-                                eprintln!("warning: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'` to heap-allocate", e.name, total_size, largest, e.name);
+                                eprintln!("warning: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.name, total_size, largest, e.name);
                             }
-                            // Level 2: one variant disproportionate (payload >> median) — independent of level 1.
+                            // Disproportionate variant warning: one variant dominates the median.
                             if known_sizes.len() > 1 {
                                 let median = { let mut s = known_sizes.clone(); s.sort(); s[s.len()/2] };
                                 if let Some((dom_name, dom_size, dom_variant)) = e.variants.iter().zip(variant_sizes.iter())
                                     .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz, v)))
-                                    .find(|(_, sz, _)| *sz > median * 2 && *sz > warn_bytes)
+                                    .find(|(_, sz, _)| *sz > median * 2 && *sz > auto_bytes / 4)
                                 {
-                                    // Build the field type string for the suggestion.
                                     let field_ty_s = if dom_variant.fields.len() == 1 {
                                         let ft = self.emit_type(&dom_variant.fields[0].ty);
-                                        format!("{}({}')", dom_name, ft)
+                                        format!("{}({}'heap)", dom_name, ft)
                                     } else {
                                         let fts: Vec<String> = dom_variant.fields.iter()
-                                            .map(|f| format!("{}'", self.emit_type(&f.ty)))
+                                            .map(|f| format!("{}'heap", self.emit_type(&f.ty)))
                                             .collect();
                                         format!("{}({})", dom_name, fts.join(", "))
                                     };
@@ -1107,22 +1347,22 @@ impl Transpiler {
                     }
                 }
                 Item::Struct(s) => {
-                    // Priority 3: recursive struct fields → mark for Box wrapping.
+                    // Priority 3: recursive struct fields → mark for Box wrapping (direct only).
+                    // We do NOT use transitive detection here — boxing a struct field indirectly
+                    // breaks all field-access patterns (expr.kind → (*expr.kind) everywhere).
+                    // Mutual recursion between structs and enums is broken by boxing the enum side.
                     for f in &s.fields {
                         if Self::type_references(&f.ty, &s.name) {
                             let key = format!("{}::{}", s.name, f.name);
                             self.recursive_fields.insert(key);
                         }
                     }
-                    // Priorities 5–6: size-based warnings (strict mode only).
+                    // Size-based warning (strict mode only).
                     if self.config.mode == TranspileMode::Strict {
                         let auto_bytes = self.config.stack_auto_bytes;
-                        let warn_bytes = self.config.stack_warn_bytes;
                         if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
                             if size > auto_bytes {
-                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'` to heap-allocate", s.name, size, s.name);
-                            } else if size > warn_bytes {
-                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'` if heap allocation is preferred", s.name, size, s.name);
+                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.name, size, s.name);
                             }
                         }
                     }
@@ -1283,6 +1523,7 @@ impl Transpiler {
                     // Track instance methods that are `task` for .await at call sites.
                     for m in &s.methods {
                         if m.task { self.instance_task_methods.insert(m.name.clone()); }
+                        if m.throws { self.struct_method_throws.insert(m.name.clone()); }
                     }
                     // Detect overloaded inline methods — same logic as ext blocks.
                     for m in &s.methods {
@@ -1318,6 +1559,8 @@ impl Transpiler {
                         if Self::is_rwlock_binding(f.mutable, &f.ty) {
                             self.struct_rwlock_fields.insert(format!("{}::{}", s.name, f.name));
                         }
+                        // Note: infer_struct_field_qualifiers runs after this loop and may add
+                        // further entries to struct_mutex_fields / struct_rwlock_fields.
                         // Collect arc-qualified inner type names for task fn method validation.
                         if let Some(n) = Self::arc_inner_type_name(&f.ty) {
                             self.arc_qualified_types.insert(n.to_string());
@@ -1371,6 +1614,9 @@ impl Transpiler {
                             self.display_types.insert(s.name.clone());
                         }
                     }
+                    // Infer qualifiers for private unqualified fields from method body usage.
+                    // Must run after struct_req_methods is populated (used for def/req detection).
+                    self.infer_struct_field_qualifiers(s);
                 }
                 Item::Ext(e) => {
                     // Collect arc-qualified types from ext method params.
@@ -1411,6 +1657,9 @@ impl Transpiler {
                         if let Some(ret_ty) = &m.return_ty {
                             self.struct_method_return_types.insert(
                                 format!("{}::{}", tname, m.name), ret_ty.clone());
+                        }
+                        if m.throws {
+                            self.struct_method_throws.insert(m.name.clone());
                         }
                         // Track overloaded struct methods (same name, different params).
                         let method_key = format!("{}::{}", tname, m.name);
@@ -1470,7 +1719,7 @@ impl Transpiler {
                             self.arc_qualified_types.insert(n.to_string());
                         }
                     }
-                    if s.mutable {
+                    if s.binding.is_mutable() {
                         // Top-level mutable var declarations — collect type and initial value.
                         let init_val = self.emit_expr_owned(s.value.as_ref().unwrap());
                         self.global_var_types.insert(s.name.clone(), s.ty.clone());
@@ -1595,7 +1844,16 @@ impl Transpiler {
         self.fn_defaults.insert(f.name.clone(), defaults.clone());
         self.fn_defaults.insert(this_mangled, defaults);
         if let Some(ret_ty) = &f.return_ty {
-            self.fn_return_types.insert(f.name.clone(), ret_ty.clone());
+            // For overloaded functions, a non-void definition should not be overwritten by
+            // a void one (e.g. exec_stmt: Signal? beats exec_stmt: void for already_opt detection).
+            let existing = self.fn_return_types.get(f.name.as_str());
+            let overwrite = match (existing, ret_ty) {
+                (Some(existing_ty), Type::Void) if !matches!(existing_ty, Type::Void) => false,
+                _ => true,
+            };
+            if overwrite {
+                self.fn_return_types.insert(f.name.clone(), ret_ty.clone());
+            }
         }
         if f.throws {
             self.fn_throws.insert(f.name.clone());

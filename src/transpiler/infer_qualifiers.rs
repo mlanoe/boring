@@ -1,0 +1,1199 @@
+use super::Transpiler;
+use crate::ast::{BindingKind, Expr, ExprKind, MatchBody, OwnerQual, Stmt, Type};
+use super::helpers::collect_var_names;
+
+impl Transpiler {
+    /// Pre-pass: walk a function body and populate `inferred_qualifiers`.
+    ///
+    /// Each anonymous local variable starts as a candidate for all qualifiers:
+    /// {Stack, Owned, Shared, Actor, Guard}. Every usage signal eliminates
+    /// incompatible qualifiers from the candidate set (constraint elimination).
+    ///
+    /// Resolution at the end of the pass:
+    /// - exactly 1 candidate remaining → that qualifier is inferred
+    /// - 0 candidates → conflict error (no qualifier satisfies all constraints)
+    /// - >1 candidates → no inference (size-based fallback applies at emit time)
+    ///
+    /// Alias rule: `let y = x` records `y` as an alias of `x`. Constraints applied
+    /// to either member are propagated to the whole group.
+    pub(crate) fn infer_qualifiers(&mut self, stmts: &[Stmt]) {
+        self.inferred_qualifiers.clear();
+
+        let mut alias_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut anonymous_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut var_struct_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut mut_bindings: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut tick_bindings: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Union-typed params: maps name → initial candidate set (the Union members).
+        let mut union_initial: std::collections::HashMap<String, Vec<OwnerQual>> = std::collections::HashMap::new();
+
+        let return_qual = self.fn_return_ty.as_ref().and_then(qual_of_type);
+
+        // Seed anonymous_vars with unqualified and Union-qualified parameters so that
+        // body usage signals can constrain them just like local let-bindings.
+        for (name, ty) in &self.fn_current_params {
+            match ty {
+                // Bare T parameter — full candidate set.
+                // Only include parameters whose type is a user-defined struct or enum
+                // (present in type_sizes). Primitives, traits, type aliases, fn-type aliases,
+                // and type parameters are excluded: the fallback would infer 'stack and
+                // emit_param would wrap them incorrectly (Addable'stack → "Addable" instead
+                // of impl Addable, Pt'stack bypasses the non-fn alias expansion, etc.).
+                Type::Named(n) if self.type_sizes.contains_key(n.as_str()) => {
+                    anonymous_vars.insert(name.clone());
+                    // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
+                    var_struct_types.insert(name.clone(), n.clone());
+                }
+                // T' parameter — indirection-only candidate set.
+                Type::Qualified(_, OwnerQual::Owned) => {
+                    anonymous_vars.insert(name.clone());
+                    tick_bindings.insert(name.clone());
+                }
+                // T'<group> parameter — Union members as candidate set.
+                Type::Qualified(_, OwnerQual::Union(members)) => {
+                    anonymous_vars.insert(name.clone());
+                    union_initial.insert(name.clone(), members.clone());
+                }
+                _ => {}
+            }
+        }
+
+        for stmt in stmts {
+            collect_anonymous_vars(stmt, &mut anonymous_vars, &mut alias_of, &mut var_struct_types, &mut mut_bindings, &mut tick_bindings);
+        }
+
+        // Each anonymous variable starts as a candidate for every qualifier.
+        // T' → indirection-only; T'<group> → Union members; bare T → full set.
+        let mut candidates: std::collections::HashMap<String, Vec<OwnerQual>> = anonymous_vars
+            .iter()
+            .map(|name| {
+                let quals = if let Some(initial) = union_initial.get(name.as_str()) {
+                    initial.clone()
+                } else if tick_bindings.contains(name.as_str()) {
+                    indirection_qualifiers()
+                } else {
+                    all_qualifiers()
+                };
+                (name.clone(), quals)
+            })
+            .collect();
+
+        // `mut` binding → mutation signal at declaration site: eliminates Shared.
+        for var_name in &mut_bindings {
+            constrain_candidates(
+                &mut candidates, var_name,
+                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                &alias_of,
+            );
+        }
+
+        for stmt in stmts {
+            self.walk_stmt_for_qualifiers(
+                stmt, &anonymous_vars, &var_struct_types, &alias_of,
+                return_qual.as_ref(), &mut candidates,
+            );
+        }
+
+        // Tail-expression inference: bare variable as last expression inherits return qualifier.
+        if let Some(ref rq) = return_qual {
+            if let Some(last) = stmts.iter().rev().find(|s| !matches!(s, Stmt::Defer(_))) {
+                if let Stmt::Expr(e) = last {
+                    if let ExprKind::Var(name) = &e.kind {
+                        if anonymous_vars.contains(name.as_str()) {
+                            constrain_candidates(&mut candidates, name, &[rq.clone()], &alias_of);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve candidates → inferred_qualifiers.
+        for (var_name, remaining) in &candidates {
+            // Only report for roots (not aliases) to avoid duplicate errors.
+            let is_alias = alias_of.contains_key(var_name.as_str());
+            match remaining.len() {
+                0 if !is_alias => {
+                    eprintln!(
+                        "error: `{}` has no valid qualifier — usage constraints are incompatible\n  \
+                         fix: annotate `{}` explicitly",
+                        var_name, var_name
+                    );
+                }
+                1 => {
+                    self.inferred_qualifiers.insert(var_name.clone(), remaining[0].clone());
+                }
+                _ => {
+                    // Multiple candidates remaining: apply priority-ordered fallback.
+                    let is_known_struct = var_struct_types.contains_key(var_name.as_str());
+                    let type_size = var_struct_types.get(var_name.as_str())
+                        .and_then(|tn| self.type_sizes.get(tn.as_str()))
+                        .copied();
+                    if let Some(q) = resolve_fallback(
+                        remaining, is_known_struct, false, type_size, self.config.stack_auto_bytes,
+                    ) {
+                        self.inferred_qualifiers.insert(var_name.clone(), q);
+                    }
+                }
+            }
+        }
+    }
+
+    fn walk_stmt_for_qualifiers(
+        &mut self,
+        stmt: &Stmt,
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        return_qual: Option<&OwnerQual>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(val) = &s.value {
+                    self.walk_expr_for_qualifiers(val, anonymous_vars, var_struct_types, alias_of, candidates);
+                }
+            }
+            Stmt::Expr(e) => {
+                self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            Stmt::Return(r) => {
+                if let Some(e) = &r.value {
+                    if let (Some(rq), ExprKind::Var(name)) = (return_qual, &e.kind) {
+                        if anonymous_vars.contains(name.as_str()) {
+                            constrain_candidates(candidates, name, &[rq.clone()], alias_of);
+                        }
+                    }
+                    self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates);
+                }
+            }
+            Stmt::If(s) => {
+                for (cond, body) in &s.branches {
+                    self.walk_expr_for_qualifiers(cond, anonymous_vars, var_struct_types, alias_of, candidates);
+                    for st in body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates);
+                    }
+                }
+                if let Some(else_body) = &s.else_body {
+                    for st in else_body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates);
+                    }
+                }
+            }
+            Stmt::While(s) => {
+                self.walk_expr_for_qualifiers(&s.condition, anonymous_vars, var_struct_types, alias_of, candidates);
+                for st in &s.body {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates);
+                }
+            }
+            Stmt::For(s) => {
+                self.walk_expr_for_qualifiers(&s.iterable, anonymous_vars, var_struct_types, alias_of, candidates);
+                for st in &s.body {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates);
+                }
+            }
+            Stmt::Match(s) => {
+                self.walk_expr_for_qualifiers(&s.subject, anonymous_vars, var_struct_types, alias_of, candidates);
+                for arm in &s.arms {
+                    if let Some(guard) = &arm.guard {
+                        self.walk_expr_for_qualifiers(guard, anonymous_vars, var_struct_types, alias_of, candidates);
+                    }
+                    match &arm.body {
+                        MatchBody::Expr(e) => {
+                            self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates);
+                        }
+                        MatchBody::Block(stmts) => {
+                            for st in stmts {
+                                self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expr_for_qualifiers(
+        &mut self,
+        expr: &Expr,
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        match &expr.kind {
+            ExprKind::Call(callee, args) => {
+                self.walk_expr_for_qualifiers(callee, anonymous_vars, var_struct_types, alias_of, candidates);
+                for arg in args {
+                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates);
+                }
+                // Call site with a concrete qualifier demand: intersect to the compatible set.
+                // For 'shared/'actor/'guard demands, 'stack and 'heap are also compatible
+                // because a plain T or Box<T> can be wrapped at the call site.
+                if let ExprKind::Var(fn_name) = &callee.kind {
+                    let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
+                    if let Some(param_types) = param_types {
+                        for (i, arg) in args.iter().enumerate() {
+                            let Some(demanded) = param_types.get(i).and_then(qual_of_type) else { continue };
+                            let ExprKind::Var(var_name) = &arg.value.kind else { continue };
+                            if anonymous_vars.contains(var_name.as_str()) {
+                                constrain_candidates(candidates, var_name, &coercible_from(demanded), alias_of);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::MethodCall(obj, method, args) => {
+                self.walk_expr_for_qualifiers(obj, anonymous_vars, var_struct_types, alias_of, candidates);
+                for arg in args {
+                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates);
+                }
+                // def (mutating) method call: variable must support direct mutation.
+                // Eliminates Shared from the candidate set.
+                if let ExprKind::Var(var_name) = &obj.kind {
+                    if anonymous_vars.contains(var_name.as_str()) {
+                        let is_req = var_struct_types.get(var_name.as_str())
+                            .map(|struct_name| {
+                                self.struct_req_methods.contains(&format!("{}::{}", struct_name, method))
+                            })
+                            .unwrap_or(false);
+                        if !is_req {
+                            constrain_candidates(
+                                candidates, var_name,
+                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                                alias_of,
+                            );
+                        }
+                    }
+                }
+            }
+            ExprKind::BinOp(_, l, r) => {
+                self.walk_expr_for_qualifiers(l, anonymous_vars, var_struct_types, alias_of, candidates);
+                self.walk_expr_for_qualifiers(r, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            ExprKind::UnaryOp(_, e) => {
+                self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            ExprKind::If(if_stmt) => {
+                for (cond, body) in &if_stmt.branches {
+                    self.walk_expr_for_qualifiers(cond, anonymous_vars, var_struct_types, alias_of, candidates);
+                    for st in body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates);
+                    }
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for st in else_body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates);
+                    }
+                }
+            }
+            // Task capture: variables captured in task bodies need Arc-based qualifiers.
+            // Receiver of method call → needs mutation → {Actor, Guard}.
+            // Non-receiver → read-only → {Shared, Actor, Guard}.
+            ExprKind::Task(inner) => {
+                self.constrain_task_captures(inner, anonymous_vars, alias_of, candidates);
+                self.walk_expr_for_qualifiers(inner, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            ExprKind::TaskWithTimeout(dur, inner) => {
+                self.walk_expr_for_qualifiers(dur, anonymous_vars, var_struct_types, alias_of, candidates);
+                self.constrain_task_captures(inner, anonymous_vars, alias_of, candidates);
+                self.walk_expr_for_qualifiers(inner, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            // Assignment is a mutation signal: eliminates Shared.
+            // Walks the target recursively to find the root variable:
+            // `x = val`, `x.field = val`, `x[i] = val`, `x.a.b.c = val`, etc.
+            ExprKind::Assign(target, val) => {
+                if let Some(var_name) = mutation_root(target) {
+                    if anonymous_vars.contains(var_name) {
+                        constrain_candidates(
+                            candidates, var_name,
+                            &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                            alias_of,
+                        );
+                    }
+                }
+                self.walk_expr_for_qualifiers(target, anonymous_vars, var_struct_types, alias_of, candidates);
+                self.walk_expr_for_qualifiers(val, anonymous_vars, var_struct_types, alias_of, candidates);
+            }
+            // Closure captures: same logic as task captures.
+            // A closure that captures x as a method receiver needs mutation → {Actor, Guard}.
+            // A closure that only reads x → {Shared, Actor, Guard}.
+            ExprKind::Closure(_, _, body, _, _) => {
+                use crate::ast::ClosureBody;
+                match body {
+                    ClosureBody::Expr(e) => {
+                        self.constrain_task_captures(e, anonymous_vars, alias_of, candidates);
+                        self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates);
+                    }
+                    ClosureBody::Block(stmts) => {
+                        let block_expr = Expr {
+                            kind: ExprKind::Block(stmts.clone()),
+                            line: 0,
+                        };
+                        self.constrain_task_captures(&block_expr, anonymous_vars, alias_of, candidates);
+                        for st in stmts {
+                            self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Constrain qualifiers for variables captured by a task body.
+    /// All captured vars must be Arc-based (crossable across async boundaries).
+    /// Receivers of method calls additionally need mutation → {Actor, Guard}.
+    fn constrain_task_captures(
+        &mut self,
+        body: &Expr,
+        anonymous_vars: &std::collections::HashSet<String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        let captured: std::collections::HashSet<String> = collect_var_names(body).into_iter().collect();
+        let receivers = method_receivers(body);
+
+        for var_name in &captured {
+            if !anonymous_vars.contains(var_name.as_str()) { continue; }
+            let compatible: &[OwnerQual] = if receivers.contains(var_name.as_str()) {
+                &[OwnerQual::Actor, OwnerQual::Guard]
+            } else {
+                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]
+            };
+            constrain_candidates(candidates, var_name, compatible, alias_of);
+        }
+    }
+
+    /// Infer qualifiers for private, unqualified struct fields by scanning all method bodies
+    /// in the same struct. The same constraint-elimination algorithm used for local variables
+    /// is applied to `self.field` accesses across all methods.
+    ///
+    /// Results are written directly into `struct_mutex_fields` and `struct_rwlock_fields` so
+    /// the existing field-access emission infrastructure handles wrapping/unwrapping automatically.
+    /// Only private fields (`is_pub == false`) with no explicit qualifier are considered.
+    pub(crate) fn infer_struct_field_qualifiers(&mut self, s: &crate::ast::StructDecl) {
+
+        // Collect private, unqualified fields with their declared inner type name.
+        let target_fields: std::collections::HashMap<String, String> = s.fields.iter()
+            .filter(|f| !matches!(f.ty, Type::Qualified(..)))
+            .filter_map(|f| {
+                // Only struct-typed fields (Named type) are candidates for qualifier inference.
+                if let Type::Named(type_name) = &f.ty {
+                    Some((f.name.clone(), type_name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if target_fields.is_empty() { return; }
+
+        let mut candidates: std::collections::HashMap<String, Vec<OwnerQual>> = target_fields
+            .keys()
+            .map(|name| (name.clone(), all_qualifiers()))
+            .collect();
+
+        let empty_alias: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        // Walk every method body looking for self.field access patterns.
+        for method in &s.methods {
+            self.walk_stmts_for_field_qualifiers(
+                &method.body,
+                &s.name,
+                &target_fields,
+                &empty_alias,
+                &mut candidates,
+            );
+        }
+        for setter in &s.setters {
+            self.walk_stmts_for_field_qualifiers(
+                &setter.body,
+                &s.name,
+                &target_fields,
+                &empty_alias,
+                &mut candidates,
+            );
+        }
+
+        // Resolve candidates for struct fields.
+        for (field_name, remaining) in &candidates {
+            let key = format!("{}::{}", s.name, field_name);
+            let resolved = match remaining.len() {
+                0 => continue,
+                1 => remaining[0].clone(),
+                _ => {
+                    // Multi-candidate fallback for struct fields.
+                    // Struct fields are always laid out inline in the parent allocation,
+                    // so 'stack is always preferred when available.
+                    let type_size = target_fields.get(field_name.as_str())
+                        .and_then(|tn| self.type_sizes.get(tn.as_str()))
+                        .copied();
+                    match resolve_fallback(remaining, true, true, type_size, self.config.stack_auto_bytes) {
+                        Some(q) => q,
+                        None => continue,
+                    }
+                }
+            };
+            match &resolved {
+                OwnerQual::Actor => { self.struct_mutex_fields.insert(key); }
+                OwnerQual::Guard => { self.struct_rwlock_fields.insert(key); }
+                // Stack / Owned / Shared: no registry needed — plain T or Box<T>.
+                _ => {}
+            }
+        }
+    }
+
+    fn walk_stmts_for_field_qualifiers(
+        &mut self,
+        stmts: &[Stmt],
+        struct_name: &str,
+        target_fields: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        for stmt in stmts {
+            self.walk_stmt_for_field_qualifiers(stmt, struct_name, target_fields, alias_of, candidates);
+        }
+    }
+
+    fn walk_stmt_for_field_qualifiers(
+        &mut self,
+        stmt: &Stmt,
+        struct_name: &str,
+        target_fields: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(val) = &s.value {
+                    self.walk_expr_for_field_qualifiers(val, struct_name, target_fields, alias_of, candidates);
+                }
+            }
+            Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
+                self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
+            }
+            Stmt::If(s) => {
+                for (cond, body) in &s.branches {
+                    self.walk_expr_for_field_qualifiers(cond, struct_name, target_fields, alias_of, candidates);
+                    self.walk_stmts_for_field_qualifiers(body, struct_name, target_fields, alias_of, candidates);
+                }
+                if let Some(eb) = &s.else_body {
+                    self.walk_stmts_for_field_qualifiers(eb, struct_name, target_fields, alias_of, candidates);
+                }
+            }
+            Stmt::While(s) => {
+                self.walk_expr_for_field_qualifiers(&s.condition, struct_name, target_fields, alias_of, candidates);
+                self.walk_stmts_for_field_qualifiers(&s.body, struct_name, target_fields, alias_of, candidates);
+            }
+            Stmt::For(s) => {
+                self.walk_expr_for_field_qualifiers(&s.iterable, struct_name, target_fields, alias_of, candidates);
+                self.walk_stmts_for_field_qualifiers(&s.body, struct_name, target_fields, alias_of, candidates);
+            }
+            Stmt::Match(s) => {
+                self.walk_expr_for_field_qualifiers(&s.subject, struct_name, target_fields, alias_of, candidates);
+                for arm in &s.arms {
+                    match &arm.body {
+                        MatchBody::Expr(e) => {
+                            self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
+                        }
+                        MatchBody::Block(stmts) => {
+                            self.walk_stmts_for_field_qualifiers(stmts, struct_name, target_fields, alias_of, candidates);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_expr_for_field_qualifiers(
+        &mut self,
+        expr: &Expr,
+        struct_name: &str,
+        target_fields: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        match &expr.kind {
+            ExprKind::Call(callee, args) => {
+                self.walk_expr_for_field_qualifiers(callee, struct_name, target_fields, alias_of, candidates);
+                for arg in args {
+                    self.walk_expr_for_field_qualifiers(&arg.value, struct_name, target_fields, alias_of, candidates);
+                }
+                // self.field passed to a function demanding a concrete qualifier.
+                if let ExprKind::Var(fn_name) = &callee.kind {
+                    let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
+                    if let Some(param_types) = param_types {
+                        for (i, arg) in args.iter().enumerate() {
+                            let Some(demanded) = param_types.get(i).and_then(qual_of_type) else { continue };
+                            let Some(field_name) = self_field_name(&arg.value) else { continue };
+                            if target_fields.contains_key(field_name) {
+                                constrain_candidates(candidates, field_name, &coercible_from(demanded), alias_of);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::MethodCall(obj, method, args) => {
+                for arg in args {
+                    self.walk_expr_for_field_qualifiers(&arg.value, struct_name, target_fields, alias_of, candidates);
+                }
+                // self.field.method() — check if it's a def (mutating) call.
+                if let Some(field_name) = self_field_name(obj) {
+                    if let Some(field_struct_type) = target_fields.get(field_name) {
+                        let is_req = self.struct_req_methods
+                            .contains(&format!("{}::{}", field_struct_type, method));
+                        if !is_req {
+                            constrain_candidates(
+                                candidates, field_name,
+                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                                alias_of,
+                            );
+                        }
+                    }
+                } else {
+                    self.walk_expr_for_field_qualifiers(obj, struct_name, target_fields, alias_of, candidates);
+                }
+            }
+            ExprKind::BinOp(_, l, r) => {
+                self.walk_expr_for_field_qualifiers(l, struct_name, target_fields, alias_of, candidates);
+                self.walk_expr_for_field_qualifiers(r, struct_name, target_fields, alias_of, candidates);
+            }
+            ExprKind::UnaryOp(_, e) => {
+                self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
+            }
+            ExprKind::If(if_stmt) => {
+                for (cond, body) in &if_stmt.branches {
+                    self.walk_expr_for_field_qualifiers(cond, struct_name, target_fields, alias_of, candidates);
+                    self.walk_stmts_for_field_qualifiers(body, struct_name, target_fields, alias_of, candidates);
+                }
+                if let Some(eb) = &if_stmt.else_body {
+                    self.walk_stmts_for_field_qualifiers(eb, struct_name, target_fields, alias_of, candidates);
+                }
+            }
+            // Task capture: self.field captured in a task body.
+            ExprKind::Task(inner) | ExprKind::TaskWithTimeout(_, inner) => {
+                self.constrain_task_field_captures(inner, target_fields, alias_of, candidates);
+                self.walk_expr_for_field_qualifiers(inner, struct_name, target_fields, alias_of, candidates);
+            }
+            _ => {}
+        }
+    }
+
+    /// Constrain qualifiers for struct fields captured by a task body.
+    fn constrain_task_field_captures(
+        &self,
+        body: &Expr,
+        target_fields: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) {
+        let receivers = method_receivers(body);
+        let accessed = self_field_names_in_expr(body);
+
+        for field_name in &accessed {
+            if !target_fields.contains_key(field_name.as_str()) { continue; }
+            let compatible: &[OwnerQual] = if receivers.contains(field_name.as_str()) {
+                &[OwnerQual::Actor, OwnerQual::Guard]
+            } else {
+                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]
+            };
+            constrain_candidates(candidates, field_name, compatible, alias_of);
+        }
+    }
+
+    /// Post-inference pass: for every call site where a parameter type is a qualifier union,
+    /// check that the argument's qualifier (inferred or explicitly declared) is a member of
+    /// the allowed set. Emits an error if a disallowed qualifier is found.
+    pub(crate) fn validate_union_constraints(&self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.validate_stmt(stmt);
+        }
+    }
+
+    fn validate_stmt(&self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(val) = &s.value { self.validate_expr(val); }
+            }
+            Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
+                self.validate_expr(e);
+            }
+            Stmt::If(s) => {
+                for (cond, body) in &s.branches {
+                    self.validate_expr(cond);
+                    for st in body { self.validate_stmt(st); }
+                }
+                if let Some(eb) = &s.else_body {
+                    for st in eb { self.validate_stmt(st); }
+                }
+            }
+            Stmt::While(s) => {
+                self.validate_expr(&s.condition);
+                for st in &s.body { self.validate_stmt(st); }
+            }
+            Stmt::For(s) => {
+                self.validate_expr(&s.iterable);
+                for st in &s.body { self.validate_stmt(st); }
+            }
+            Stmt::Match(s) => {
+                self.validate_expr(&s.subject);
+                for arm in &s.arms {
+                    match &arm.body {
+                        MatchBody::Expr(e) => self.validate_expr(e),
+                        MatchBody::Block(stmts) => {
+                            for st in stmts { self.validate_stmt(st); }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_expr(&self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Call(callee, args) => {
+                for arg in args { self.validate_expr(&arg.value); }
+                if let ExprKind::Var(fn_name) = &callee.kind {
+                    let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
+                    if let Some(param_types) = param_types {
+                        for (i, arg) in args.iter().enumerate() {
+                            let Some(param_ty) = param_types.get(i) else { continue };
+                            let ExprKind::Var(var_name) = &arg.value.kind else { continue };
+
+                            // Caller check: Union-typed parameter → argument qualifier must be in the union.
+                            if let Type::Qualified(_, OwnerQual::Union(members)) = param_ty {
+                                let Some(arg_qual) = self.var_qual(var_name) else { continue };
+                                if !members.iter().any(|m| quals_equal(m, &arg_qual)) {
+                                    let allowed: Vec<&str> = members.iter().map(|q| qual_name(q)).collect();
+                                    eprintln!(
+                                        "error line {}: qualifier '{}' for `{}` is not allowed here\n  \
+                                         → parameter {} of `{}` accepts only: {}\n  \
+                                         fix: annotate `{}` with one of the listed qualifiers",
+                                        expr.line, qual_name(&arg_qual), var_name,
+                                        i + 1, fn_name, allowed.join("|"),
+                                        var_name
+                                    );
+                                }
+                            }
+
+                            // Body-compatibility check: Union-typed argument passed where a concrete
+                            // qualifier is demanded — verify the demanded qualifier is in the union.
+                            if let Some(demanded) = qual_of_type(param_ty) {
+                                if let Some(arg_union) = self.var_union(var_name) {
+                                    if !arg_union.iter().any(|m| quals_equal(m, &demanded)) {
+                                        let union_s: Vec<&str> = arg_union.iter().map(|q| qual_name(q)).collect();
+                                        eprintln!(
+                                            "error line {}: `{}` has qualifier constraint '{}'\n  \
+                                             → this call demands '{}' which is outside the constraint\n  \
+                                             fix: change the qualifier constraint on `{}` to include '{}', \
+                                             or pick a concrete qualifier",
+                                            expr.line, var_name, union_s.join("|"),
+                                            qual_name(&demanded), var_name, qual_name(&demanded)
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::MethodCall(obj, _, args) => {
+                self.validate_expr(obj);
+                for arg in args { self.validate_expr(&arg.value); }
+            }
+            ExprKind::BinOp(_, l, r) => { self.validate_expr(l); self.validate_expr(r); }
+            ExprKind::UnaryOp(_, e) => { self.validate_expr(e); }
+            ExprKind::If(if_stmt) => {
+                for (cond, body) in &if_stmt.branches {
+                    self.validate_expr(cond);
+                    for st in body { self.validate_stmt(st); }
+                }
+                if let Some(eb) = &if_stmt.else_body {
+                    for st in eb { self.validate_stmt(st); }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Get the resolved qualifier for a named variable:
+    /// first checks inferred qualifiers, then the variable's declared type.
+    fn var_qual(&self, name: &str) -> Option<OwnerQual> {
+        if let Some(q) = self.inferred_qualifiers.get(name) {
+            return Some(q.clone());
+        }
+        if let Some(ty) = self.var_types.get(name) {
+            return qual_of_type(ty);
+        }
+        None
+    }
+
+    /// If the variable has a Union qualifier (declared), return the member list.
+    fn var_union<'a>(&'a self, name: &str) -> Option<&'a Vec<OwnerQual>> {
+        let ty = self.fn_current_params.get(name).or_else(|| self.var_types.get(name))?;
+        if let Type::Qualified(_, OwnerQual::Union(members)) = ty {
+            return Some(members);
+        }
+        None
+    }
+
+    /// After inference: for each unqualified parameter whose body uses demanded a concrete
+    /// qualifier, emit a hint suggesting an explicit annotation on the parameter.
+    pub(crate) fn suggest_param_annotations(&self) {
+        for (param_name, param_ty) in &self.fn_current_params {
+            if qual_of_type(param_ty).is_some() { continue; }
+            if matches!(param_ty, Type::Qualified(_, OwnerQual::Union(_))) { continue; }
+            if let Some(inferred) = self.inferred_qualifiers.get(param_name.as_str()) {
+                eprintln!(
+                    "hint: parameter `{}` is always used as '{}' in this body\n  \
+                     → consider annotating it explicitly to make the contract clear at call sites",
+                    param_name, qual_name(inferred)
+                );
+            }
+        }
+    }
+}
+
+/// Intersect the candidate set for `var_name` (and its aliases) with `compatible`.
+/// Qualifiers not in `compatible` are eliminated.
+fn constrain_candidates(
+    candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    var_name: &str,
+    compatible: &[OwnerQual],
+    alias_of: &std::collections::HashMap<String, String>,
+) {
+    let root = alias_of.get(var_name).map(|s| s.as_str()).unwrap_or(var_name).to_string();
+
+    if let Some(list) = candidates.get_mut(&root) {
+        list.retain(|q| compatible.iter().any(|c| quals_equal(q, c)));
+    }
+    for (alias, target) in alias_of {
+        if target.as_str() == root.as_str() {
+            if let Some(list) = candidates.get_mut(alias) {
+                list.retain(|q| compatible.iter().any(|c| quals_equal(q, c)));
+            }
+        }
+    }
+}
+
+/// Returns true for built-in primitive type names that have a fixed Rust representation and
+/// must not go through qualifier inference as parameters (inferring 'stack would incorrectly
+/// wrap them via normalize_type_name, e.g. string'stack → Rc<str> instead of &str).
+fn is_primitive_type(name: &str) -> bool {
+    matches!(name, "int" | "uint" | "float" | "bool" | "string" | "str"
+        | "void" | "nil" | "never" | "String"
+        | "i8" | "i16" | "i32" | "i64" | "isize"
+        | "u8" | "u16" | "u32" | "u64" | "usize"
+        | "f32" | "f64")
+}
+
+/// For 'shared/'actor/'guard demands, 'stack and 'heap are also acceptable
+/// because a plain T or Box<T> can be wrapped at the call site.
+/// For 'stack/'heap demands, only the exact qualifier is accepted.
+fn coercible_from(demanded: OwnerQual) -> Vec<OwnerQual> {
+    match demanded {
+        OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard =>
+            vec![OwnerQual::Stack, OwnerQual::Owned, demanded],
+        _ => vec![demanded],
+    }
+}
+
+fn all_qualifiers() -> Vec<OwnerQual> {
+    vec![
+        OwnerQual::Stack,
+        OwnerQual::Owned,
+        OwnerQual::Shared,
+        OwnerQual::Actor,
+        OwnerQual::Guard,
+    ]
+}
+
+/// Priority-ordered fallback when multiple qualifier candidates remain after constraint
+/// elimination.
+///
+/// Priority-ordered fallback when multiple qualifier candidates remain after constraint
+/// elimination.
+///
+/// 1. If `Stack` ∈ candidates:
+///    - struct field (any binding) → `'stack` (bytes are part of parent allocation)
+///    - local variable, sizeof(T) ≤ stack_auto_bytes → `'stack`
+///    - type too large → skip `'stack`, go to ordered chain
+///
+/// 2. Ordered chain: `'heap` > `'shared` > `'actor` > `'guard`
+fn resolve_fallback(
+    candidates: &[OwnerQual],
+    _is_known_struct: bool,
+    is_struct_field: bool,
+    type_size: Option<usize>,
+    stack_auto_bytes: usize,
+) -> Option<OwnerQual> {
+    let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
+    let fits = type_size.map_or(true, |s| s <= stack_auto_bytes);
+
+    const TAIL: &[OwnerQual] = &[
+        OwnerQual::Owned,
+        OwnerQual::Shared,
+        OwnerQual::Actor,
+        OwnerQual::Guard,
+    ];
+
+    // Step 1: 'stack — struct field of any binding, or small local variable.
+    if has(&OwnerQual::Stack) {
+        if is_struct_field {
+            return Some(OwnerQual::Stack);
+        }
+        if fits {
+            return Some(OwnerQual::Stack);
+        }
+        return TAIL.iter().find(|q| has(q)).cloned();
+    }
+
+    // Step 2: neither 'stack nor other stack-allocated in candidates — first from the ordered chain.
+    TAIL.iter().find(|q| has(q)).cloned()
+}
+
+/// Candidate set for T' (tick) variables: indirection is certain, kind is inferred.
+fn indirection_qualifiers() -> Vec<OwnerQual> {
+    vec![
+        OwnerQual::Owned,
+        OwnerQual::Shared,
+        OwnerQual::Actor,
+        OwnerQual::Guard,
+    ]
+}
+
+fn collect_anonymous_vars(
+    stmt: &Stmt,
+    anonymous_vars: &mut std::collections::HashSet<String>,
+    alias_of: &mut std::collections::HashMap<String, String>,
+    var_struct_types: &mut std::collections::HashMap<String, String>,
+    mut_bindings: &mut std::collections::HashSet<String>,
+    tick_bindings: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        Stmt::Let(s) => {
+            let is_tick = match &s.ty {
+                Some(Type::Qualified(_, OwnerQual::Owned)) => true,
+                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned)),
+                _ => false,
+            };
+            let is_anonymous = is_tick || match &s.ty {
+                None => true,
+                Some(Type::Named(_)) => true,
+                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Named(_)),
+                _ => false,
+            };
+            if is_anonymous {
+                anonymous_vars.insert(s.name.clone());
+                // T' or T'? binding: indirection hint, restricts to {Owned, Shared, Actor, Guard}.
+                if is_tick {
+                    tick_bindings.insert(s.name.clone());
+                }
+                // `mut` binding: mutation signal at declaration site.
+                if s.binding == BindingKind::Mut {
+                    mut_bindings.insert(s.name.clone());
+                }
+                if let Some(val) = &s.value {
+                    match &val.kind {
+                        ExprKind::Var(src) => {
+                            alias_of.insert(s.name.clone(), src.clone());
+                        }
+                        ExprKind::Call(callee, _) => {
+                            if let ExprKind::Var(type_name) = &callee.kind {
+                                if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                    var_struct_types.insert(s.name.clone(), type_name.clone());
+                                }
+                            }
+                        }
+                        // some(Counter(0)) — capture inner struct type for optional vars
+                        ExprKind::Call(callee, args)
+                            if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "some") =>
+                        {
+                            if let Some(arg) = args.first() {
+                                if let ExprKind::Call(inner_callee, _) = &arg.value.kind {
+                                    if let ExprKind::Var(type_name) = &inner_callee.kind {
+                                        if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                            var_struct_types.insert(s.name.clone(), type_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Stmt::If(s) => {
+            for (_, body) in &s.branches {
+                for st in body { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
+            }
+            if let Some(else_body) = &s.else_body {
+                for st in else_body { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
+            }
+        }
+        Stmt::While(s) => {
+            for st in &s.body { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
+        }
+        Stmt::For(s) => {
+            for st in &s.body { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
+        }
+        Stmt::Match(s) => {
+            for arm in &s.arms {
+                match &arm.body {
+                    MatchBody::Block(stmts) => {
+                        for st in stmts { collect_anonymous_vars(st, anonymous_vars, alias_of, var_struct_types, mut_bindings, tick_bindings); }
+                    }
+                    MatchBody::Expr(_) => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk an assignment target expression to find the root variable name.
+/// Handles arbitrary nesting: `x`, `x.field`, `x[i]`, `x.a.b[i].c`, etc.
+fn mutation_root(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::Var(n) => Some(n.as_str()),
+        ExprKind::Field(obj, _) | ExprKind::Index(obj, _) => mutation_root(obj),
+        _ => None,
+    }
+}
+
+fn qual_of_type(ty: &Type) -> Option<OwnerQual> {
+    match ty {
+        Type::Qualified(_, q) => match q {
+            OwnerQual::Stack | OwnerQual::Owned | OwnerQual::Shared
+            | OwnerQual::Actor | OwnerQual::Guard => Some(q.clone()),
+            OwnerQual::Union(_) => None,
+            _ => None,
+        },
+        // Optional<Qualified> — extract the inner qualifier.
+        Type::Optional(inner) => qual_of_type(inner.as_ref()),
+        _ => None,
+    }
+}
+
+/// Build the correctly-nested type when applying an inferred qualifier.
+/// Handles bare T, T' (tick), T?, and T'? so that the qualifier ends up
+/// inside the Optional wrapper rather than outside it.
+pub(crate) fn apply_inferred_qual(ty: &Type, qual: OwnerQual) -> Type {
+    match ty {
+        // T? or T'? — qualifier goes inside the Optional
+        Type::Optional(inner) => {
+            let inner_base = match inner.as_ref() {
+                Type::Qualified(b, _) => b.as_ref().clone(), // strip existing qual (e.g. Owned from T')
+                other => other.clone(),
+            };
+            Type::Optional(Box::new(Type::Qualified(Box::new(inner_base), qual)))
+        }
+        // T' or T'<group> — replace existing qualifier with the inferred one
+        Type::Qualified(inner, _) => Type::Qualified(inner.clone(), qual),
+        // bare T
+        other => Type::Qualified(Box::new(other.clone()), qual),
+    }
+}
+
+fn quals_equal(a: &OwnerQual, b: &OwnerQual) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
+}
+
+fn qual_name(q: &OwnerQual) -> &'static str {
+    match q {
+        OwnerQual::Stack  => "stack",
+        OwnerQual::Owned  => "heap",
+        OwnerQual::Shared => "shared",
+        OwnerQual::Actor  => "actor",
+        OwnerQual::Guard  => "guard",
+        _                 => "?",
+    }
+}
+
+/// Collect variable names that appear as the object (receiver) of a method call
+/// anywhere inside an expression tree.
+fn method_receivers(expr: &Expr) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    collect_receivers_in_expr(expr, &mut out);
+    out
+}
+
+fn collect_receivers_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match &expr.kind {
+        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+            if let ExprKind::Var(name) = &obj.kind {
+                out.insert(name.clone());
+            }
+            collect_receivers_in_expr(obj, out);
+            for a in args { collect_receivers_in_expr(&a.value, out); }
+        }
+        ExprKind::Call(callee, args) => {
+            collect_receivers_in_expr(callee, out);
+            for a in args { collect_receivers_in_expr(&a.value, out); }
+        }
+        ExprKind::BinOp(_, l, r) => {
+            collect_receivers_in_expr(l, out);
+            collect_receivers_in_expr(r, out);
+        }
+        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) | ExprKind::OptionalField(e, _) => {
+            collect_receivers_in_expr(e, out);
+        }
+        ExprKind::If(s) => {
+            for (cond, body) in &s.branches {
+                collect_receivers_in_expr(cond, out);
+                for st in body { collect_receivers_in_stmt(st, out); }
+            }
+            if let Some(eb) = &s.else_body {
+                for st in eb { collect_receivers_in_stmt(st, out); }
+            }
+        }
+        ExprKind::Block(stmts) => {
+            for st in stmts { collect_receivers_in_stmt(st, out); }
+        }
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
+            for e in elems { collect_receivers_in_expr(e, out); }
+        }
+        ExprKind::Assign(target, val) => {
+            collect_receivers_in_expr(target, out);
+            collect_receivers_in_expr(val, out);
+        }
+        ExprKind::Else(e, d) | ExprKind::TryElse(e, d) => {
+            collect_receivers_in_expr(e, out);
+            collect_receivers_in_expr(d, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_receivers_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { collect_receivers_in_expr(v, out); } }
+        Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
+            collect_receivers_in_expr(e, out);
+        }
+        Stmt::If(s) => {
+            for (cond, body) in &s.branches {
+                collect_receivers_in_expr(cond, out);
+                for st in body { collect_receivers_in_stmt(st, out); }
+            }
+            if let Some(eb) = &s.else_body {
+                for st in eb { collect_receivers_in_stmt(st, out); }
+            }
+        }
+        Stmt::While(s) => {
+            collect_receivers_in_expr(&s.condition, out);
+            for st in &s.body { collect_receivers_in_stmt(st, out); }
+        }
+        Stmt::For(s) => {
+            collect_receivers_in_expr(&s.iterable, out);
+            for st in &s.body { collect_receivers_in_stmt(st, out); }
+        }
+        Stmt::Match(s) => {
+            collect_receivers_in_expr(&s.subject, out);
+            for arm in &s.arms {
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_receivers_in_expr(e, out),
+                    MatchBody::Block(stmts) => {
+                        for st in stmts { collect_receivers_in_stmt(st, out); }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// If `expr` is `self.field_name`, return `field_name`.
+fn self_field_name(expr: &Expr) -> Option<&str> {
+    if let ExprKind::Field(obj, field) = &expr.kind {
+        if let ExprKind::Var(v) = &obj.kind {
+            if v == "self" {
+                return Some(field.as_str());
+            }
+        }
+    }
+    None
+}
+
+/// Collect all `self.field` names accessed anywhere in an expression tree.
+fn self_field_names_in_expr(expr: &Expr) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    collect_self_fields_in_expr(expr, &mut out);
+    out
+}
+
+fn collect_self_fields_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    if let Some(field) = self_field_name(expr) {
+        out.insert(field.to_string());
+        return;
+    }
+    match &expr.kind {
+        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+            collect_self_fields_in_expr(obj, out);
+            for a in args { collect_self_fields_in_expr(&a.value, out); }
+        }
+        ExprKind::Call(callee, args) => {
+            collect_self_fields_in_expr(callee, out);
+            for a in args { collect_self_fields_in_expr(&a.value, out); }
+        }
+        ExprKind::BinOp(_, l, r) => {
+            collect_self_fields_in_expr(l, out);
+            collect_self_fields_in_expr(r, out);
+        }
+        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) => {
+            collect_self_fields_in_expr(e, out);
+        }
+        ExprKind::If(s) => {
+            for (cond, body) in &s.branches {
+                collect_self_fields_in_expr(cond, out);
+                for st in body { collect_self_fields_in_stmt(st, out); }
+            }
+            if let Some(eb) = &s.else_body {
+                for st in eb { collect_self_fields_in_stmt(st, out); }
+            }
+        }
+        ExprKind::Block(stmts) => {
+            for st in stmts { collect_self_fields_in_stmt(st, out); }
+        }
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
+            for e in elems { collect_self_fields_in_expr(e, out); }
+        }
+        ExprKind::Assign(target, val) => {
+            collect_self_fields_in_expr(target, out);
+            collect_self_fields_in_expr(val, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_self_fields_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { collect_self_fields_in_expr(v, out); } }
+        Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
+            collect_self_fields_in_expr(e, out);
+        }
+        Stmt::If(s) => {
+            for (cond, body) in &s.branches {
+                collect_self_fields_in_expr(cond, out);
+                for st in body { collect_self_fields_in_stmt(st, out); }
+            }
+            if let Some(eb) = &s.else_body {
+                for st in eb { collect_self_fields_in_stmt(st, out); }
+            }
+        }
+        Stmt::While(s) => {
+            collect_self_fields_in_expr(&s.condition, out);
+            for st in &s.body { collect_self_fields_in_stmt(st, out); }
+        }
+        Stmt::For(s) => {
+            collect_self_fields_in_expr(&s.iterable, out);
+            for st in &s.body { collect_self_fields_in_stmt(st, out); }
+        }
+        _ => {}
+    }
+}

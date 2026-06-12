@@ -2,6 +2,8 @@
 
 Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled with `boring build`.
 
+One of Boring's core goals is **zero-annotation ownership**: the compiler infers the right memory strategy from how values are actually used — whether they live on the stack, the heap, or behind shared or mutable references — without requiring the developer to annotate every variable. You get Rust's safety and performance guarantees without writing `Arc<Mutex<T>>` by hand. When the compiler cannot determine a unique strategy from context, it falls back to sensible defaults, and explicit annotations are always available as an escape hatch. See [Qualifier Inference](#30-qualifier-inference) for the full picture.
+
 ---
 
 ## Table of Contents
@@ -32,7 +34,8 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 23. [Appendix: Boring → Rust Mapping](#27-appendix-boring--rust-mapping)
 24. [Diagnostics](#28-diagnostics)
 25. [Advanced](#29-advanced)
-26. [Rust-for-Linux target](#30-rust-for-linux-target)
+26. [Qualifier Inference](#30-qualifier-inference)
+27. [Rust-for-Linux target](#31-rust-for-linux-target)
 
 ---
 
@@ -45,6 +48,7 @@ boring new my_project   # scaffold a project directory
 cd my_project
 boring run              # interpret main.br
 boring build            # emit a Cargo project (→ my_project_rust/)
+boring build --compile  # emit a Cargo project and immediately compile it
 ```
 
 `boring new` creates:
@@ -95,32 +99,78 @@ print "Hello, {name}!"
 
 ## 2. Variables and Mutability
 
+Boring separates two orthogonal concepts:
+
+- **Rebindable**: can the variable point to a different instance?
+- **Mutable**: can the pointed instance be modified?
+
+Three keywords control this:
+
+| Keyword | Rebindable | Mutable |
+|---|---|---|
+| `let` | no | no |
+| `mut` | no | yes |
+| `var` | yes | depends on qualifier |
+
 ### Immutable bindings — `let`
 
 ```boring
-let x = 42
-let name = "Alice"
+struct Counter:
+    var int value = 0
+    def inc(): value += 1
+    req int get(): value
+
+let Counter c = Counter()
+c.get()          # ok — req methods work on let
+# c.inc()        # ERROR — def requires mut or var
+# c = Counter()  # ERROR — let cannot be rebound
 ```
 
-By default, all bindings are immutable. Rust's `let` with no `mut`.
+Fixed binding, immutable instance. Neither the binding nor the instance can change.
 
-**Rust equivalent**
-```rust
-let x: i64 = 42;
-let name: &'static str = "Alice";
-```
-
-### Mutable bindings — `var`
+### Fixed mutable bindings — `mut`
 
 ```boring
-var counter = 0
-counter += 1
+mut Counter c = Counter()
+c.inc()          # ok — def methods work on mut
+c.inc()
+c.get()          # 2
+# c = Counter()  # ERROR — mut cannot be rebound
 ```
 
-**Rust equivalent**
-```rust
-let mut counter: i64 = 0;
-counter += 1;
+Fixed binding, mutable instance. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that `var` prevents.
+
+`let` and `var` are sufficient to write correct code. `mut` is an optional precision when you know the binding will never be rebound.
+
+`mut` is **only valid on mutable types** — it is forbidden on primitive types (`int`, `float`, `bool`) since they are always copied, not mutated in place:
+
+```boring
+mut a = 0        # ERROR — primitive values are always copied, use var
+mut int a = 0    # ERROR — int is always copied, use var
+mut Counter c = Counter()  # ok — Counter is a mutable type
+```
+
+### Rebindable mutable bindings — `var`
+
+```boring
+var Counter c = Counter()
+c.inc()          # ok — def methods work
+c = Counter()    # ok — rebind to a fresh instance
+c.get()          # 0 — started over
+```
+
+Rebindable binding — the variable can point to a different instance. Mutability depends on the type.
+
+The difference between `mut` and `var` is visible when rebinding matters:
+
+```boring
+mut Counter a = Counter()
+var Counter b = Counter()
+
+a.inc()          # ok
+b.inc()          # ok
+# a = Counter()  # ERROR — mut cannot be rebound
+b = Counter()    # ok — var can
 ```
 
 ### Compound assignment operators
@@ -191,7 +241,7 @@ match status:
 ```
 
 **Rules:**
-- Works with both `let` and `var`.
+- Works with `let`, `mut`, and `var`.
 - Reading the variable before any assignment is a **runtime error**: `variable 'v' used before being assigned`.
 - The transpiler emits `let v;` / `let mut v;` and Rust's own control-flow analysis ensures every path assigns the variable before use.
 
@@ -220,7 +270,7 @@ if condition {
 | `uint`         | `Uint'copy`      | `u64`           | 64-bit unsigned integer, copy      |
 | `float`        | `Float'copy`     | `f64`           | 64-bit floating-point, copy        |
 | `bool`         | `Bool'copy`      | `bool`          | `true` / `false`, copy             |
-| `string`   | `String'const` or `String'shared` | `&str` / `Arc<str>` | String — **recommended default**; the compiler picks the representation from context (literal → `&str`, heap → `Arc<str>`) |
+| `string`   | `String'shared` | `Arc<str>` | String — reference-counted; the compiler infers `&str` for string literals in strict mode |
 
 ### Integer literals
 
@@ -280,7 +330,7 @@ let string c = a + " " + b     # string — concatenation
 let string d = "Hi, {a}!"      # string — interpolation
 ```
 
-> Boring infers the string representation automatically. Under the hood, literals compile to `String'const` (`&'static str`) and heap strings to `String'shared` (`Arc<str>`). See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared) for details.
+> Boring infers the string representation automatically. Under the hood, string literals in strict mode compile to `&'static str`; heap strings compile to `Arc<str>`. See [Advanced — Strings](#advanced--strings-string-and-stringshared) for details.
 
 ### String interpolation
 
@@ -3562,7 +3612,7 @@ use float as Float'copy  # f64
 use bool  as Bool'copy   # bool
 ```
 
-> `String'const` and `String'shared` follow the same mechanism but are inferred automatically — you rarely need to write them explicitly. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared).
+> `String'shared` is inferred automatically when a string is stored or computed — you rarely need to write it explicitly. See [Advanced — Strings](#advanced--strings-string-and-stringshared).
 
 ---
 
@@ -4460,8 +4510,29 @@ All ownership qualifiers:
 | `T'wshared`   | `std::sync::Weak<T>`             | `Weak<T>`             | Weak ref to `T'shared`                |
 | `T'wactor`    | `std::sync::Weak<Mutex<T>>`      | `Weak<RefCell<T>>`    | Weak ref to actor                     |
 | `T'wguard`    | `std::sync::Weak<RwLock<T>>`     | `Weak<RefCell<T>>`    | Weak ref to guard                     |
-| `T'const`     | `&'static T`                     | `&'static T`          | Compile-time constant                 |
-| `T'option`    | `Option<T>`                      | `Option<T>`           | Optional value                        |
+| `T?`          | `Option<T>`                      | `Option<T>`           | Optional value                        |
+
+### Qualifier groups — parameter constraints
+
+On function parameters, a qualifier group expresses "this parameter accepts any qualifier from this set". The transpiler narrows the set further using the same inference signals as for anonymous variables.
+
+```boring
+def process(Counter'mut c):   # 'mut → accepts 'stack, 'heap, 'actor, 'guard
+    spawn_actor(c)            # demands 'actor → infers 'actor for c
+```
+
+| Group | Accepted qualifiers |
+|---|---|
+| `T'one` | `'stack`, `'heap` — single-owner forms |
+| `T'many` | `'shared`, `'actor`, `'guard` — shared-owner forms |
+| `T'mut` | `'stack`, `'heap`, `'actor`, `'guard` — any mutable form |
+| `T'req` | `'shared` — always immutable |
+
+Pipe-separated unions are also valid: `T'stack|heap` accepts only `'stack` or `'heap`.
+
+Groups have no Rust representation — no trait bound is emitted. The constraint is enforced at the Boring level: the transpiler rejects callers that pass a qualifier outside the declared group, and uses the body's inference signals to resolve to a single concrete qualifier for emission. If inference cannot resolve to one qualifier, the first member of the group is used as fallback.
+
+> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer.
 
 ### Transpilation flags
 
@@ -4472,17 +4543,39 @@ boring build --threading single|multi  # concurrency model (default: multi)
 
 `--threading` is not available for the `--target kernel` target.
 
-### `let` vs `var` with `T'shared` and `T'actor`
+### Binding × qualifier combinations
 
-`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls — the shared value stays read-only. For mutation: hold the value with `var` + plain ownership, or use `T'actor` for shared mutable state.
+Each qualifier imposes constraints on `mut`. `mut` is forbidden with `'shared` — it is a compile error.
+
+| Binding | `'shared` | `'actor` | `'guard` | `'stack` | `'heap` |
+|---|---|---|---|---|---|
+| `let` | yes | yes | yes | yes | yes |
+| `mut` | **error** | yes | yes | yes | yes |
+| `var` | yes | yes | yes | yes | yes |
+
+Qualifiers carry three kinds of information: Rust mapping, passing semantics, and mutability constraints:
+
+| Qualifier | Passing semantics | Mutability |
+|---|---|---|
+| `'shared` | pointer shared | forbidden — immutable shared ref |
+| `'actor` | pointer shared | allowed |
+| `'guard` | pointer shared | under lock only |
+| `'stack` | move | determined by `let`/`mut`/`var` |
+| `'heap` | move | determined by `let`/`mut`/`var` |
+
+### `let`, `mut`, `var` with `T'shared` and `T'actor`
+
+`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls — the shared value stays read-only. For mutation: hold the value with `mut` + plain ownership, or use `T'actor` for shared mutable state.
 
 | Declaration | Reassign | `req` methods | `def` methods |
 |---|---|---|---|
-| `let T'shared x` / `let x'shared` | ✗ | ✓ | ✗ — use `var` + plain ownership |
+| `let T'shared x` / `let x'shared` | ✗ | ✓ | ✗ |
 | `var T'shared x` / `var x'shared` | ✓ | ✓ | ✗ — use `'actor` or `'guard` for mutation |
 | `let T'actor x` / `let x'actor` | ✗ | ✓ | ✗ |
+| `mut T'actor x` / `mut x'actor` | ✗ | ✓ | ✓ |
 | `var T'actor x` / `var x'actor` | ✓ | ✓ | ✓ |
 | `let T'guard x` / `let x'guard` | ✗ | ✓ | ✗ |
+| `mut T'guard x` / `mut x'guard` | ✗ | ✓ | ✓ |
 | `var T'guard x` / `var x'guard` | ✓ | ✓ | ✓ |
 
 ```boring
@@ -4501,21 +4594,22 @@ c.get()       # OK — req (non-mutating) methods work fine
 
 ### Reference syntax — `&`
 
-Borrows are written with `&` directly after the type name. Two forms are equivalent:
+Borrows are written with `&` directly after the type name. The binding keyword defines what the callee can do with the reference:
 
-| Prefix form   | Postfix form  | Rust type                   | Notes                          |
-|---------------|---------------|-----------------------------|--------------------------------|
-| `T&`          | `T'stack&`    | `&T`                        | Immutable borrow (default)     |
-| `var T&`      | —             | `&mut T`                    | Mutable borrow                 |
-| `T&heap`      | `T'heap&`     | `&Box<T>`                   | Borrow a heap value            |
-| `T&shared`    | `T'shared&`   | `&Arc<T>` / `&Rc<T>`        | Borrow a shared ref            |
-| `T&actor`     | `T'actor&`    | `&Arc<Mutex<T>>`            | Borrow an actor                |
-| `T&guard`     | `T'guard&`    | `&Arc<RwLock<T>>`           | Borrow a guard                 |
-| `T&option`    | `T'option&`   | `&Option<T>`                | Borrow an optional             |
-| `T&wactor`    | `T'wactor&`   | `&sync::Weak<Mutex<T>>`     | Borrow a weak actor pointer    |
-| `T&a`         | `T'heap&a`    | `&'a T`                     | Borrow with explicit lifetime  |
+| Syntax | Rust type | Semantics |
+|---|---|---|
+| `T& m` / `let T& m` | `&T` | read-only — callee cannot modify content or binding |
+| `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
+| `var T& m` | `&mut Box<T>` | callee can rebind the caller's variable (rare) |
 
-`T&copy` is identical to `T&` — Copy types borrow as `&T`. `T'const` is already a reference (`&'static T`) — a borrow of it has no meaning.
+`var T&` is the only way for a callee to replace what the caller's variable points to. In most cases, returning a value is preferred.
+
+| Form          | Rust type     | Notes                                                  |
+|---------------|---------------|--------------------------------------------------------|
+| `T&`          | `&T`          | Universal borrow — coerced from any qualifier          |
+| `mut T&`      | `&mut T`      | Mutable universal borrow                               |
+| `T?&`         | `&Option<T>`  | Borrow an optional                                     |
+| `T&a`         | `&'a T`       | Borrow with explicit lifetime                          |
 
 Lifetimes are only valid in borrow position (`&`), never on owned qualifiers (`'`). The lifetime letter is declared as a type parameter with `<'a>` and can appear anywhere a borrow is written:
 
@@ -4533,32 +4627,12 @@ fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
 }
 ```
 
-Other borrow forms with lifetime:
+Borrow forms with lifetime:
 
 | Boring | Rust | Meaning |
 |--------|------|---------|
-| `T&a` | `&'a T` | borrow a stack value |
-| `T'heap&a` | `&'a Box<T>` | borrow a heap value |
-| `T'shared&a` | `&'a Arc<T>` / `&'a Rc<T>` | borrow a shared ref |
-
-The postfix forms (`T'heap&`, `T'shared&`) are useful with `use` aliases — define the alias once, then borrow with `&`:
-
-```boring
-use NodeRef as Node'shared  # Arc<Node> or Rc<Node> depending on --threading
-
-def process(NodeRef& n):   # &Arc<Node>
-    print "{n}"
-
-def update(var Node& n):   # &mut Node
-    n.value = 42
-```
-
-**Rust equivalent**
-```rust
-type NodeRef = Arc<Node>;
-fn process(n: &Arc<Node>) { println!("{}", n); }
-fn update(n: &mut Node)   { n.value = 42; }
-```
+| `T&a` | `&'a T` | borrow a value |
+| `T'&a` | `&'a Box<T>` | borrow a heap-allocated value |
 
 ### Built-in type aliases
 
@@ -4578,7 +4652,7 @@ let int   x = 42    # i64
 let uint  n = 100   # u64
 ```
 
-> `String'const` and `String'shared` follow the same mechanism and are inferred automatically from context. See [Advanced — Strings](#advanced--strings-string-stringconst-and-stringshared).
+> `String'shared` is inferred automatically when a string is stored or computed. See [Advanced — Strings](#advanced--strings-string-and-stringshared).
 
 ### Weak references — `'wshared`, `'wactor`, `'wguard`
 
@@ -4589,13 +4663,6 @@ Weak qualifiers are single-token shorthands that combine ownership and non-ownin
 | `T'wshared`   | `T'shared'weak`    | `Weak<T>` / `std::sync::Weak<T>` | Weak ref to `T'shared` — threading-aware |
 | `T'wactor`    | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>` | Weak ref to actor                   |
 | `T'wguard`    | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>` | Weak ref to guard                  |
-
-Borrow variants (when you want to pass a weak pointer without transferring ownership):
-
-| Qualifier  | Rust type                   |
-|------------|-----------------------------|
-| `T&wactor` | `&sync::Weak<Mutex<T>>`     |
-| `T&wguard` | `&sync::Weak<RwLock<T>>`    |
 
 At a **binding site**, the qualifier can be inferred from the right-hand side — writing `'weak` alone is enough:
 
@@ -4646,6 +4713,8 @@ print describe(w1)   # resource: config.toml
 ```
 
 > Use `T'wshared` for both single-thread (Weak<Rc<T>>) and multi-thread (sync::Weak<T>) weak references. The transpiler selects the correct type based on `--threading`.
+
+> In most programs you never need to write a qualifier explicitly. The transpiler infers the right one from how each variable is used. See [chapter 30 — Qualifier Inference](#30-qualifier-inference) for the full inference algorithm, including signal table, size-based fallback, and cross-function propagation.
 
 ---
 
@@ -4996,7 +5065,7 @@ strategy automatically — no `move` keyword or explicit `.clone()` required.
 | Variable type          | Capture strategy                                             |
 |------------------------|--------------------------------------------------------------|
 | `int`, `float`, `bool` | Copied into the task (Copy types)                           |
-| `string` (literal → `String'const`) | Copied directly — `&'static str` is `Copy`, no allocation |
+| `string` (literal → `&'static str`) | Copied directly — `&'static str` is `Copy`, no allocation |
 | `string` (heap → `String'shared`)   | `Arc::clone` — both the task and the outer scope keep access |
 | `T'actor`              | `Arc::clone` — the mutex is shared across the tasks          |
 | `T'` (owned)           | Moved into the task; the outer binding is invalidated        |
@@ -5521,6 +5590,61 @@ if let user:
 | `fromJson<T>(s)` | plain | `serde_json::from_str::<T>(&s).ok()` |
 | `try? fromJson<T>(s)` | any | `serde_json::from_str::<T>(&s).ok()` |
 
+### Debugging
+
+These builtins are available without any import and are designed for interactive debugging.
+
+#### `dbg`
+
+Prints the expression's value to **stderr** with the source file and line number, then returns
+the value unchanged.  Usable inline inside any expression.
+
+```boring
+let x = dbg(add(3, 4))     # [src/main.rs:12] add(3, 4) = 7
+let y = dbg(x * x)         # [src/main.rs:13] x * x = 49
+```
+
+```rust
+let x = dbg!(add(3, 4));
+let y = dbg!(x * x);
+```
+
+#### `todo` / `unreachable`
+
+Placeholder panics for unfinished code paths.
+
+```boring
+int not_yet(int x):
+    todo()                  # panics with "not yet implemented"
+
+int impossible(int x):
+    unreachable()           # panics with "entered unreachable code"
+```
+
+```rust
+fn not_yet(x: i64) -> i64 { todo!() }
+fn impossible(x: i64) -> i64 { unreachable!() }
+```
+
+Both accept an optional message argument:
+
+```boring
+todo("implement sorting")
+unreachable("variant {v} should have been handled above")
+```
+
+| Builtin | Rust | Purpose |
+|---------|------|---------|
+| `dbg(expr)` | `dbg!(expr)` | Print value + location, return value |
+| `todo()` | `todo!()` | Mark unfinished code — panics if reached |
+| `unreachable()` | `unreachable!()` | Assert a code path is never taken |
+| `assert(cond)` | `assert!(cond)` | Runtime assertion — panics on failure |
+| `assert(cond, msg)` | `assert!(cond, "{:?}", msg)` | Assertion with message |
+| `assert_eq(a, b)` | `assert_eq!(a, b)` | Assert equality |
+| `assert_neq(a, b)` | `assert_ne!(a, b)` | Assert inequality |
+| `panic()` | `panic!("explicit panic")` | Unconditional panic |
+| `panic(msg)` | `panic!("{:?}", msg)` | Panic with message |
+
 ---
 
 ## 27. Appendix: Boring → Rust Mapping
@@ -5567,11 +5691,12 @@ if let user:
 | `float`           | `Float'copy`    | `f64`                                 |
 | `bool`            | `Bool'copy`     | `bool`                                |
 | `string` (param)           | —               | `&str` — accepts both literals and heap strings   |
-| `string` (literal)         | `String'const`  | `&'static str` — zero allocation, `Copy`          |
+| `string` (literal)         | —               | `&'static str` — zero allocation, `Copy` (strict mode) |
 | `string` (heap / stored)   | `String'shared` | `Arc<str>` — reference-counted, single allocation    |
 | `T`     | `T'stack`   | `T` (stack, Rust default)             |
 | `T'`    | `T'heap`    | `Box<T>`                              |
-| `T?`    | `T'option`  | `Option<T>`                           |
+| `T?`    | —           | `Option<T>`                           |
+| `T?&`   | —           | `&Option<T>`                          |
 | `[T]`   | `Vec<T>`    | `Vec<T>`                              |
 | `{K=V}` | `Dict<K,V>` | `HashMap<K, V>`                       |
 | `{T}`   | `Set<T>`    | `HashSet<T>`                          |
@@ -5583,7 +5708,6 @@ if let user:
 | `T'wshared`        | `T'shared'weak` | `std::sync::Weak<T>` / `Weak<T>` — weak ref, threading-aware |
 | `T'wactor`         | `T'actor'weak` | `std::sync::Weak<Mutex<T>>`           |
 | `T'wguard`         | `T'guard'weak` | `std::sync::Weak<RwLock<T>>`          |
-| `T'const`          | —              | `&'static T`                          |
 | `Index<T>`         | —           | `Option<usize>` (array/set) or `Option<K>` (dict) |
 | `Trait` (bare)     | —           | `Box<dyn Trait>` — dynamic dispatch, heap |
 | `<Trait>`          | —           | `impl Trait` — static dispatch, no allocation |
@@ -5735,34 +5859,32 @@ This chapter covers features you will rarely need in everyday code. They exist f
 
 ---
 
-### Advanced — Strings: `string`, `String'const`, and `String'shared`
+### Advanced — Strings: `string` and `String'shared`
 
 Boring has one user-facing string type — `string` — whose concrete Rust representation is inferred automatically. You should use bare `string` everywhere; the compiler picks the right form.
 
 #### Inference rules
 
-| Context                                       | Inferred type      | Rust type          |
-|-----------------------------------------------|--------------------|--------------------|
-| Function parameter (`string s`)               | `String'const`     | `&str`             |
-| Initialised from a compile-time literal       | `String'const`     | `&'static str`     |
-| Initialised from concatenation / interpolation | `String'shared`   | `Arc<str>`         |
-| Stored in a variable, field, or collection    | `String'shared`    | `Arc<str>`         |
+| Context                                       | Rust type          |
+|-----------------------------------------------|--------------------|
+| Function parameter (`string s`)               | `&str`             |
+| Initialised from a compile-time literal (strict mode) | `&'static str` — zero allocation, `Copy` |
+| Initialised from concatenation / interpolation | `Arc<str>`        |
+| Stored in a variable, field, or collection    | `Arc<str>`         |
 
-`String'const` is zero-cost (`Copy`, stack), `String'shared` is reference-counted (`Arc<str>`) — a single allocation storing the string data directly in the Arc.
+`String'shared` is reference-counted (`Arc<str>`) — a single allocation storing the string data directly in the Arc. In strict mode, string literals compile to `&'static str` automatically, without any explicit qualifier.
 
-#### Explicit long forms
+#### Explicit long form
 
-You can write the long forms when you need to be precise:
+You can write the long form when you need to be precise:
 
 ```boring
-let String'const  a = "hello"      # &'static str — zero allocation
-let String'shared b = a + " world" # Arc<str>     — heap string, single allocation
+let String'shared b = a + " world" # Arc<str> — heap string, single allocation
 ```
 
-The long forms are useful in newtypes:
+The long form is useful in newtypes:
 
 ```boring
-type Label      as String'const    # wraps &'static str
 type SharedName as String'shared   # wraps Arc<str>
 ```
 
@@ -5772,7 +5894,7 @@ When a string is captured by a task:
 
 | String kind          | Capture strategy                                            |
 |----------------------|-------------------------------------------------------------|
-| Literal (`String'const`) | Copied directly — `&'static str` is `Copy`, no allocation |
+| Literal (`&'static str` in strict mode) | Copied directly — `&'static str` is `Copy`, no allocation |
 | Heap (`String'shared`)   | `Arc::clone` — task and outer scope both keep access       |
 
 ```boring
@@ -6108,7 +6230,227 @@ assert_eq!(add(2, 3), 5);
 let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 ```
 
-## 30. Rust-for-Linux target
+---
+
+## 30. Qualifier Inference
+
+Boring's ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
+
+#### The zero-annotation goal
+
+Boring aims to let you write code that looks like a high-level scripting language while emitting Rust that is as precise and zero-cost as hand-written systems code. The qualifier system is the bridge: it maps naturally to `T`, `Box<T>`, `Arc<T>`, `Arc<Mutex<T>>`, and `Arc<RwLock<T>>` without forcing you to spell those types out.
+
+```boring
+let c = Counter(0)      # qualifier not written — inferred from use
+spawn_actor(c)          # demands 'actor → c inferred as Arc<Mutex<Counter>>
+```
+
+The emitted Rust is identical to what you would write by hand, but you never had to decide.
+
+#### Constraint elimination
+
+Each unqualified local variable starts as a candidate for every qualifier: `{Stack, Owned, Shared, Actor, Guard}`. Every usage signal narrows the set by eliminating qualifiers that are incompatible. When exactly one candidate remains, it is chosen. When none remain, the constraints are contradictory and the compiler reports an error. When several remain, the compiler applies a priority-ordered fallback (see below).
+
+| Signal | Compatible qualifiers |
+|---|---|
+| Call site demanding `T'shared` | `{Shared}` |
+| Call site demanding `T'actor` | `{Actor}` |
+| Call site demanding `T'guard` | `{Guard}` |
+| Call site demanding `T'stack` | `{Stack}` |
+| Call site demanding `T'heap` | `{Owned}` |
+| `def` method call on the variable | `{Stack, Owned, Actor, Guard}` |
+| `mut` binding (`mut x = ...`) | `{Stack, Owned, Actor, Guard}` |
+| Task capture as method receiver | `{Actor, Guard}` |
+| Task capture, read-only | `{Shared, Actor, Guard}` |
+| `req` method call | *(no constraint — all qualifiers remain)* |
+
+Each signal intersects the current candidate set. The order of signals does not matter.
+
+#### Priority-ordered fallback
+
+When the candidate set still contains multiple qualifiers after all signals are applied, the transpiler resolves the tie using the following algorithm:
+
+**Step 1 — `'stack` candidate.** If `'stack` is in the candidate set:
+
+| Context | Decision |
+|---|---|
+| Struct field (any binding — `let`, `mut`, `var`) | `'stack` — field bytes are part of the parent allocation; no indirection regardless of size |
+| Local variable, sizeof(T) ≤ `--stack-auto-bytes` | `'stack` |
+| Local variable, sizeof(T) > `--stack-auto-bytes` | skip `'stack`; continue with step 3 |
+
+All bare-T struct fields suppress size-based auto-boxing. This applies to `var` fields as well as `let`/`mut` fields — a `var` field is still stored in-place inside the struct. Boxing it would add unnecessary indirection and fragment the allocation. `T'` fields are not affected: an indirection hint always produces `Box<T>`.
+
+```boring
+struct Wrapper:
+    let BigData inner    # bare T — always inline regardless of size
+    var BigData heavy    # var field — also inline, no size-based Box
+    let BigData' backup  # T' — always Box<BigData>
+```
+
+**Step 2 — ordered chain.** If `'stack` was not selected, the transpiler picks the first qualifier present in the remaining candidates, in this order:
+
+`'heap` > `'shared` > `'actor` > `'guard`
+
+#### Threshold
+
+The stack size threshold is configurable:
+
+```
+boring build --stack-auto-bytes 512  # promote locals > 512 bytes to Box<T>
+```
+
+Default: 256 bytes.
+
+> The size estimate is best-effort: it sums struct fields recursively but treats `Vec`, `HashMap`, and pointer-sized types as 8–16 bytes. The estimate is conservative — when in doubt the transpiler prefers `'heap` over a potentially large stack frame.
+
+#### Example: sharing + mutation → conflict
+
+```boring
+let c = Counter(0)
+c.inc()             # def call → eliminates Shared, Const → {Stack, Owned, Actor, Guard}
+share_with(c)       # demands 'shared → intersect to {Shared}
+                    # result: {} → error: no qualifier satisfies all constraints
+```
+
+This is correct: `Arc<T>` does not support `.inc()` (a mutating method). The developer must choose: either pass `c` to `share_with` only, or use `T'guard` explicitly to get `Arc<RwLock<T>>`.
+
+#### Return-type demand
+
+If the function has a declared return type with a qualifier, a bare variable in tail position or in a `return` statement inherits that qualifier.
+
+```boring
+Counter'actor make_counter():
+    let c = Counter(0)   # anonymous
+    c                    # tail expression → infers 'actor from return type
+```
+
+#### Alias propagation
+
+`let y = x` makes `y` an alias of `x`. Any constraint applied to either one is propagated to the whole group.
+
+```boring
+let c = Counter(0)
+let d = c               # d is an alias of c
+spawn_actor(d)          # demands 'actor on d → also applied to c
+```
+
+#### Task captures
+
+Variables captured by a `task:` body must be `Arc`-based so they can be cloned and moved into the async closure.
+
+- Captured as a method receiver (e.g. `c.inc()` inside the task) → `{Actor, Guard}`
+- Captured read-only → `{Shared, Actor, Guard}`
+
+```boring
+let c = Counter(0)
+task:
+    c.inc()    # c is a receiver inside the task → infers 'actor
+```
+
+#### Parameter auto-apply
+
+Parameters without an explicit qualifier, with a tick (`T'`), or with a qualifier group (`T'mut`, `T'many`, …) are all subject to body inference. The inferred qualifier is applied automatically at emission — the Rust function signature carries the correct type even if the Boring source does not.
+
+```boring
+def process(Counter c):     # bare — full candidate set
+    spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
+
+def process(Counter' c):    # tick — {Owned, Shared, Actor, Guard}
+    spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
+
+def process(Counter'mut c): # group — {Stack, Owned, Actor, Guard}
+    spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
+```
+
+If the body provides no narrowing signal, the fallback for bare `T` is size-based, for `T'` is `'heap`, and for a group is the first member of the group.
+
+#### Cross-function propagation
+
+After a function body is processed, `fn_sigs` is updated with the inferred parameter qualifiers. Functions defined later in the same file that call this function will see the qualified signature and propagate the constraint to their own variables.
+
+```boring
+def process(Counter c):   # inferred 'actor from body
+    spawn_actor(c)
+
+let c = Counter(0)
+process(c)                # fn_sigs now shows Counter'actor → c infers 'actor
+```
+
+**Limitation:** propagation is a single forward pass. If a caller is defined before the callee in the file, no propagation occurs. Mutual recursion is not covered.
+
+#### Struct field inference
+
+Private and public fields with no explicit qualifier are inferred from the struct's own method bodies using the same constraint-elimination algorithm. Only fields of struct types (`Named` types) are candidates.
+
+```boring
+struct Service:
+    Counter stats        # no qualifier
+
+    def record():
+        spawn_actor(stats)   # demands 'actor
+        # inferred: stats: Arc<Mutex<Counter>>
+```
+
+Results are applied at emit time: the field is emitted with the inferred Rust wrapper, and all `self.stats` accesses in method bodies are wrapped or unwrapped accordingly. Public fields are resolved from internal usage only — external callers must work with the inferred type. Generating per-qualifier struct variants would leak implementation details through the module boundary.
+
+**Limitation:** cross-file inference is not supported. A field accessed only from another module retains its fallback type.
+
+#### The `mut` binding keyword
+
+`mut x = expr` marks a fixed binding with a mutable instance. It contributes a mutation signal at the declaration site — equivalent to a `def` method call on the same line, but earlier. This allows the compiler to narrow the candidate set before any method calls are seen.
+
+```boring
+mut c = Counter(0)      # eliminates Shared, Const → {Stack, Owned, Actor, Guard}
+spawn_actor(c)          # demands 'actor → infers 'actor
+```
+
+#### Explicit annotation as escape hatch
+
+When inference cannot resolve a unique qualifier — for example when a variable is used in two mutually exclusive ways — you annotate explicitly:
+
+```boring
+let Counter'guard c = Counter(0)   # developer decides: RwLock
+```
+
+An explicit qualifier has the highest priority and overrides all inference signals. The compiler will still validate that the declared qualifier is compatible with the usage in the body.
+
+#### `T'` — the indirection hint
+
+`T'` (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Stack` and `Const` from the start.
+
+```boring
+let c' = Counter(0)        # tick → candidates: {Owned, Shared, Actor, Guard}
+spawn_actor(c)             # demands 'actor → {Actor} → emits Arc<Mutex<Counter>>
+```
+
+If no signal further constrains the set, the fallback is `'heap` (`Box<T>`):
+
+```boring
+let c' = Counter(0)        # tick, no further signal → Box<Counter>
+```
+
+This is distinct from the plain `T` fallback, which is `'stack` for small types. `T'` is the right form when you know a value should live on the heap or be shared, but the specific qualifier depends on how it is used.
+
+#### Optional forms — `T?` and `T'?`
+
+Optional variables (`T?` and `T'?`) participate in inference the same way as their non-optional counterparts. The inferred qualifier is applied to the **inner type** of the `Option`, not to the `Option` itself.
+
+```boring
+let c? = some(Counter(0))   # T? → full candidate set
+spawn_actor(c?)             # demands Counter'actor → infers 'actor
+# emits: Option<Arc<Mutex<Counter>>>
+```
+
+```boring
+let c'? = some(Counter(0))  # T'? → restricted set {Owned, Shared, Actor, Guard}
+                             # no signal → fallback → Option<Box<Counter>>
+```
+
+`T?` with inferred `'actor` becomes `Option<Arc<Mutex<Counter>>>` — the `Option` wraps the qualified value, not the other way around. Conflict detection works the same as for bare variables.
+
+---
+
+## 31. Rust-for-Linux target
 
 `boring build --target kernel` compiles Boring source to **Rust-for-Linux** — the `no_std` Rust dialect used to write Linux kernel modules, drivers, and subsystems.
 
@@ -6378,3 +6720,253 @@ fn lines(file: File) -> KernelReceiver<CString, 16> { … }
 | `T'shared` | `Rc<T>` replaced by `kernel::sync::Arc<T>` — `Rc` is unavailable in `no_std` |
 
 ---
+
+## 32. Debugging & Profiling
+
+Boring provides several layers of debugging support, from language-level builtins to build flags that activate Rust's own tooling.  All flags are orthogonal and composable.
+
+| Tool | Activation | What it does |
+|------|------------|--------------|
+| `dbg`, `todo`, `unreachable`, `assert` | language builtins | Inspect values and guard invariants at the source level |
+| `--mode managed` | build flag | Automatic backtraces + `#[track_caller]` on every function |
+| `--sanitize` | build flag | Detect memory errors and data races via Rust sanitizers |
+| `--instrument` | build flag | Per-function call counts and wall-clock timings |
+| `--compile` | build flag | Transpile then immediately invoke `cargo build` |
+| `--rust-options` | build flag | Pass extra flags to `cargo build` (implies `--compile`) |
+
+---
+
+### 32.1 Language builtins
+
+These builtins are available without any import.  They are described in full in [§26 Built-in Functions](#26-built-in-functions); this section summarises the debugging-specific ones.
+
+| Builtin | Rust | Purpose |
+|---------|------|---------|
+| `dbg(expr)` | `dbg!(expr)` | Print `[file:line] expr = value` to stderr; returns value |
+| `todo()` | `todo!()` | Panic placeholder for unfinished code paths |
+| `unreachable()` | `unreachable!()` | Assert a code path is never taken |
+| `assert(cond)` | `assert!(cond)` | Runtime assertion — panics on failure |
+| `assert(cond, msg)` | `assert!(cond, "{:?}", msg)` | Assertion with message |
+| `assert_eq(a, b)` | `assert_eq!(a, b)` | Assert equality |
+| `assert_neq(a, b)` | `assert_ne!(a, b)` | Assert inequality |
+| `panic()` / `panic(msg)` | `panic!(…)` | Unconditional panic |
+
+`dbg` is usable inline inside any expression and returns its argument unchanged:
+
+```boring
+let x = dbg(add(3, 4))     # stderr: [src/main.rs:12] add(3, 4) = 7
+let y = dbg(x * x)         # stderr: [src/main.rs:13] x * x = 49
+```
+
+---
+
+### 32.2 `--mode managed` — enhanced error reporting
+
+When you build with `--mode managed`, two behaviours are activated automatically — no source changes required.
+
+#### Automatic backtraces
+
+A `.cargo/config.toml` is written into the generated project:
+
+```toml
+[env]
+RUST_BACKTRACE = "1"
+```
+
+Every panic prints a full stack trace without having to set any environment variable by hand.
+
+#### `#[track_caller]` on all functions
+
+Every function and method receives `#[track_caller]`.  When a function panics (via `assert`, `todo`, `unreachable`, or `panic`), Rust reports the **call site** rather than the panic site deep inside the standard library.
+
+```boring
+def assert_bigger(int a, int b):
+    assert a > b, "expected {a} > {b}"
+
+assert_bigger(3, 10)   # ← this line appears in the panic message
+```
+
+Combined with `RUST_BACKTRACE=1`, panics in managed mode give you the full picture immediately.
+
+```sh
+boring build --mode managed main.br
+cd main_rust && cargo run
+```
+
+---
+
+### 32.3 `--sanitize` — memory and concurrency error detection
+
+Enables a Rust sanitizer in the generated Cargo project.  A `.cargo/config.toml` is written with the appropriate `rustflags` and the host target triple (detected automatically via `rustc --version --verbose`):
+
+```toml
+[build]
+rustflags = ["-Zsanitizer=address"]
+target    = "aarch64-apple-darwin"
+```
+
+> **Requires a nightly toolchain.**  Run the generated project with `cargo +nightly run`.
+
+```sh
+boring build --sanitize address main.br   # heap/stack overflows, use-after-free
+boring build --sanitize thread  main.br   # data races
+boring build --sanitize memory  main.br   # reads of uninitialised memory
+```
+
+| Sanitizer | Detects |
+|-----------|---------|
+| `address` | Heap buffer overflow, stack buffer overflow, use-after-free, use-after-return |
+| `thread` | Data races — concurrent reads/writes without synchronisation |
+| `memory` | Use of uninitialised memory |
+
+When `--mode managed` and `--sanitize` are both active, the generated `.cargo/config.toml` includes both the `[env]` and `[build]` sections.
+
+---
+
+### 32.4 `--instrument` — call counts and wall-clock profiling
+
+`boring build --instrument` adds zero-dependency, RAII-based profiling to every function.  No changes to Boring source files are needed.
+
+```sh
+boring build --instrument main.br
+```
+
+An inline `__boring_instrument` module is prepended to the Rust output — no extra `Cargo.toml` dependency.  Every function body receives a `Span` guard:
+
+```rust
+fn add(a: i64, b: i64) -> i64 {
+    let _boring_span = __boring_instrument::Span::enter("add");
+    // … body …
+}
+impl Greeter {
+    fn hello(&self) -> Arc<str> {
+        let _boring_span = __boring_instrument::Span::enter("Greeter::hello");
+        // … body …
+    }
+}
+```
+
+`Span` fires on normal return, early return, and panic unwind alike.  `main` additionally receives a `DumpGuard` that flushes results to disk even when a panic propagates to the top level:
+
+```rust
+fn main() {
+    let _boring_dump = __boring_instrument::DumpGuard;   // dropped last → writes files
+    let _boring_span = __boring_instrument::Span::enter("main");
+    // …
+}
+```
+
+> **Note** — `panic = "abort"` bypasses all destructors; the output files are not written on abort.  The default (`panic = "unwind"`) is unaffected.
+
+#### Output files
+
+Two files are written in the current working directory on program exit:
+
+**`boring_coverage.json`** — per-function aggregated statistics, sorted alphabetically:
+
+```json
+{
+  "Greeter::hello": {"calls": 1, "total_us": 66, "avg_us": 66},
+  "add":            {"calls": 1, "total_us": 0,  "avg_us": 0},
+  "fact":           {"calls": 6, "total_us": 24, "avg_us": 4},
+  "main":           {"calls": 1, "total_us": 829,"avg_us": 829}
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `calls` | Number of times the function was called |
+| `total_us` | Cumulative wall-clock time across all calls (µs) |
+| `avg_us` | Average wall-clock time per call (µs) |
+
+**`boring_trace.json`** — all calls in [Chrome Trace Format](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/), directly openable in **Perfetto** (`ui.perfetto.dev`) and **Speedscope** (`speedscope.app`):
+
+```json
+{
+  "traceEvents": [
+    {"name":"add", "ph":"X","ts":1781467928688709,"dur":0,  "pid":1,"tid":1,"cat":"boring"},
+    {"name":"fact","ph":"X","ts":1781467928689060,"dur":14, "pid":1,"tid":1,"cat":"boring"},
+    {"name":"main","ph":"X","ts":1781467928688708,"dur":383,"pid":1,"tid":1,"cat":"boring"}
+  ],
+  "displayTimeUnit": "ms"
+}
+```
+
+| Field | Value |
+|-------|-------|
+| `name` | Function name (`Type::method` for methods) |
+| `ph` | `"X"` — complete event (timestamp + duration in one record) |
+| `ts` | Call entry timestamp — microseconds since Unix epoch |
+| `dur` | Wall-clock duration of this specific call (µs) |
+| `cat` | `"boring"` — filterable category in Perfetto |
+
+To open in Perfetto: `ui.perfetto.dev` → *Open trace file* → `boring_trace.json`.  
+To open in Speedscope: `speedscope.app` → drag and drop `boring_trace.json`.
+
+---
+
+### 32.5 `--compile` and `--rust-options` — single-pass build
+
+By default `boring build` only generates the Cargo project — you then run `cargo build` yourself.  `--compile` fuses the two steps:
+
+```sh
+boring build --compile main.br          # transpile + cargo build (debug)
+boring build --compile                  # same, using boring.toml
+```
+
+`--rust-options "<flags>"` passes extra arguments verbatim to `cargo build` and implies `--compile`:
+
+```sh
+boring build --rust-options "--release" main.br
+boring build --rust-options "--release --features tracing"
+boring build --rust-options "--release"   # project-mode via boring.toml
+```
+
+The flags are split on whitespace so a single quoted string covers multiple cargo arguments.
+
+`--rust-options` is independent of `--sanitize`.  To enable a sanitizer and build in one step:
+
+```sh
+boring build --sanitize address --rust-options "+nightly build" main.br
+```
+
+Or keep the two steps separate when nightly is required — `boring build --sanitize` writes `.cargo/config.toml` and then you run `cargo +nightly run` manually.
+
+### 32.6 Combining all debug tools
+
+All flags are independent and composable:
+
+```sh
+boring build \
+    --mode managed \
+    --sanitize address \
+    --instrument \
+    main.br
+cd main_rust && cargo +nightly run
+```
+
+With `--compile` the last two lines collapse into one when a sanitizer is not needed:
+
+```sh
+boring build \
+    --mode managed \
+    --instrument \
+    --compile \
+    main.br
+```
+
+This single command produces a binary that:
+- Prints full stack traces on every panic (`RUST_BACKTRACE=1`)
+- Reports the exact call site on panics (`#[track_caller]`)
+- Writes `boring_coverage.json` + `boring_trace.json` on exit
+
+| Flag | Cargo.toml dep | `.cargo/config.toml` | Toolchain |
+|------|---------------|----------------------|-----------|
+| `--mode managed` | — | `[env] RUST_BACKTRACE=1` | stable |
+| `--sanitize` | — | `[build] rustflags + target` | **nightly** |
+| `--instrument` | — | — | stable |
+| `--compile` | — | — | stable |
+| `--rust-options` | — | — | stable |
+
+---
+

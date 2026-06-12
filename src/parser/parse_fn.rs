@@ -51,12 +51,18 @@ impl Parser {
             || ((prefix_task || prefix_stream)
                 && !self.check(&TokenKind::Def)
                 && !self.check(&TokenKind::Req));
+        // `def mut` / `req mut` — mutable return value.
+        // Parsed after consuming `def`/`req`, before the return type.
+        let return_mutable;
         if !shorthand {
             if mutating {
                 self.expect(&TokenKind::Def)?;
             } else {
                 self.expect(&TokenKind::Req)?;
             }
+            return_mutable = self.eat(&TokenKind::Mut);
+        } else {
+            return_mutable = false;
         }
 
         // Return type is optional: `def foo()` defaults to void, `def int foo()` is explicit.
@@ -156,6 +162,7 @@ impl Parser {
             stream,
             stream_capacity,
             mutating,
+            return_mutable,
             is_native,
             type_params,
             where_clause,
@@ -237,7 +244,8 @@ impl Parser {
 
     pub(crate) fn parse_param(&mut self) -> Result<Param, ParseError> {
         let line = self.line();
-        let mutable = self.eat(&TokenKind::Var);
+        let rebindable = self.eat(&TokenKind::Var);
+        let mutable = rebindable || self.eat(&TokenKind::Mut);
         let mut variadic = false;
 
         // Support `Type[qual][...]? name` (Swift-style) or bare `name` parameter syntax.
@@ -322,7 +330,7 @@ impl Parser {
             None
         };
 
-        Ok(Param { name, ty, mutable, owned, variadic, default, line })
+        Ok(Param { name, ty, mutable, rebindable, owned, variadic, default, line })
     }
 
     pub(crate) fn parse_set_decl(&mut self, is_pub: bool) -> Result<SetDecl, ParseError> {
@@ -398,7 +406,7 @@ impl Parser {
                 let body = self.parse_method_body()?;
                 let param = crate::ast::Param {
                     name: param_name, ty: Some(param_ty),
-                    mutable: false, owned: false, variadic: false, default: None, line,
+                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line,
                 };
                 Ok(TypeMemberKind::Method(TypeMethod {
                     kind: TypeMethodKind::Set, name, params: vec![param],
@@ -668,6 +676,7 @@ impl Parser {
         } else {
             self.expect(&TokenKind::Def)?; true
         };
+        let return_mutable = if !shorthand { self.eat(&TokenKind::Mut) } else { false };
         let (return_ty, _qualifier, name) = self.parse_fn_head()?;
         let (type_params, _) = self.parse_type_params();
         let params = self.parse_params()?;
@@ -696,12 +705,12 @@ impl Parser {
             Ok(Either::Right(FnDecl {
                 name, qualifier: None, params, return_ty, body,
                 is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
-                is_native: false, throws_ty,
+                return_mutable, is_native: false, throws_ty,
                 type_params, where_clause: vec![], attrs: vec![], line,
             }))
         } else {
             self.expect_newline()?;
-            Ok(Either::Left(FnSignature { name, params, return_ty, throws, task, stream: false, mutating, type_params, line }))
+            Ok(Either::Left(FnSignature { name, params, return_ty, throws, task, stream: false, mutating, return_mutable, type_params, line }))
         }
     }
 }

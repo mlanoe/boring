@@ -140,7 +140,17 @@ impl Transpiler {
                         let field_tys = self.enum_variant_field_types.get(&key).cloned().unwrap_or_default();
                         let vals: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                             let ty = field_tys.get(i);
-                            self.emit_let_value(ty, &a.value)
+                            let raw = self.emit_let_value(ty, &a.value);
+                            let rec_key = format!("{}::{}::{}", type_name, method, i);
+                            if self.recursive_fields.contains(&rec_key) {
+                                if matches!(ty, Some(Type::Optional(_))) {
+                                    format!("{}.map(Box::new)", raw)
+                                } else {
+                                    format!("Box::new({})", raw)
+                                }
+                            } else {
+                                raw
+                            }
                         }).collect();
                         // When the user defines their own Result<T,E> enum, Rust can't infer
                         // both type params from one variant's args. Add turbofish to disambiguate.
@@ -246,6 +256,14 @@ impl Transpiler {
                 }
                 // Use emit_expr_owned so string interpolations/trim results get Arc<str> wrapping.
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                    // Single-thread: T'actor = Rc<RefCell<T>> → .borrow_mut().method()
+                    let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
+                    let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                    let throws = (self.in_throws || self.in_try_body)
+                        && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
+                    return if throws { format!("{}?", call) } else { call };
+                }
                 let call = format!("{}.lock().await.{}({})", v, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 // Add .await for user task methods AND known tokio async instance methods (recv, etc.)
@@ -296,6 +314,53 @@ impl Transpiler {
                                 call
                             };
                         }
+                    }
+                }
+            }
+        }
+        // Actor-typed field method call: `outer.actor_field.method(args)`.
+        // When `actor_field` has type `T'actor` (Rc<RefCell<T>> in single-thread),
+        // emit `outer.actor_field.borrow_mut().method(args)`.
+        if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
+            if let ExprKind::Var(v) = &inner_obj.kind {
+                // Determine the struct type of the outer variable.
+                let outer_struct = self.var_struct_types.get(v.as_str())
+                    .or_else(|| self.var_struct_type.get(v.as_str()))
+                    .cloned()
+                    .or_else(|| {
+                        if self.managed_refcell_vars.contains(v.as_str())
+                            || self.managed_mutex_vars.contains(v.as_str())
+                            || self.var_mutex_types.contains(v.as_str())
+                        {
+                            self.var_types.get(v.as_str()).and_then(|t| {
+                                match t {
+                                    crate::ast::Type::Named(n) => Some(n.clone()),
+                                    crate::ast::Type::Qualified(inner, _) => {
+                                        if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        } else { None }
+                    });
+                if let Some(struct_name) = outer_struct {
+                    // Look up the field's declared type.
+                    let field_ty = self.struct_fields.get(struct_name.as_str())
+                        .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                        .map(|(_, ty)| ty.clone());
+                    let is_actor_field = matches!(&field_ty,
+                        Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor)));
+                    if is_actor_field {
+                        let (rust_method, extra_wrap) = map_method(method, args.len());
+                        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                        let obj_s = self.emit_expr(obj);
+                        let call = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                            format!("{}.borrow_mut().{}({})", obj_s, rust_method, args_s.join(", "))
+                        } else {
+                            format!("{}.lock().await.{}({})", obj_s, rust_method, args_s.join(", "))
+                        };
+                        let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                        return call;
                     }
                 }
             }
@@ -397,8 +462,22 @@ impl Transpiler {
 
         // ── Detect string receiver ────────────────────────────────────────────
         let receiver_is_string = match &obj.kind {
-            ExprKind::Var(v) => self.string_arc_vars.contains(v.as_str())
-                             || self.string_vars.contains(v.as_str()),
+            ExprKind::Var(v) => {
+                // Must be in string_vars AND confirmed NOT a collection type.
+                // string_vars can have false positives (e.g. when a var is also
+                // tracked as a Vec), so we cross-check var_types.
+                let in_string_set = self.string_arc_vars.contains(v.as_str())
+                    || self.string_vars.contains(v.as_str());
+                let not_collection = !self.vec_vars.contains(v.as_str())
+                    && !self.collection_vars.contains(v.as_str());
+                let type_confirms = {
+                    let vt = self.var_types.get(v.as_str());
+                    vt.is_none()
+                    || matches!(vt, Some(Type::Str))
+                    || matches!(vt, Some(Type::Named(n)) if n == "string" || n == "str")
+                };
+                in_string_set && not_collection && type_confirms
+            }
             ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
             _ => false,
         };
@@ -516,6 +595,80 @@ impl Transpiler {
                         start_s, obj_s, end_s
                     );
                 }
+                // Pattern methods: Rc<str>/Arc<str> doesn't implement Pattern, need .as_ref().
+                // For &str literals, no coercion needed (already &str which implements Pattern).
+                "split" => {
+                    let sep_arg = args.first();
+                    let needs_coerce = sep_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let sep_s = sep_arg.map(|a| self.emit_expr(&a.value))
+                        .unwrap_or_else(|| "\"\"".to_string());
+                    let sep_s = if needs_coerce { format!("{}.as_ref()", sep_s) } else { sep_s };
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    return format!(
+                        "{}.split({}).map(|p| {}::from(p.to_string())).collect::<Vec<_>>()",
+                        obj_s, sep_s, str_ty
+                    );
+                }
+                "startsWith" | "hasPrefix" => {
+                    let arg = args.first();
+                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                    return format!("{}.starts_with({})", obj_s, arg_s);
+                }
+                "endsWith" | "hasSuffix" => {
+                    let arg = args.first();
+                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                    return format!("{}.ends_with({})", obj_s, arg_s);
+                }
+                "contains" => {
+                    let arg = args.first();
+                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                    return format!("{}.contains({})", obj_s, arg_s);
+                }
+                "replace" | "replaceAll" => {
+                    let from_arg = args.first();
+                    let to_arg = args.get(1);
+                    let from_needs_coerce = from_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let to_needs_coerce = to_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                    let from_s = from_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                    let to_s = to_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                    let from_s = if from_needs_coerce { format!("{}.as_ref()", from_s) } else { from_s };
+                    let to_s = if to_needs_coerce { format!("{}.as_ref()", to_s) } else { to_s };
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    return format!(
+                        "{}::from({}.replace({}, {}).as_str())",
+                        str_ty, obj_s, from_s, to_s
+                    );
+                }
+                "repeat" if args.len() >= 1 => {
+                    let n_s = self.emit_expr(&args[0].value);
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    return format!("{}::from({}.repeat(({}) as usize).as_str())", str_ty, obj_s, n_s);
+                }
+                "trim" | "trimStart" | "trimEnd" => {
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    let rust_m = match method { "trimStart" => "trim_start", "trimEnd" => "trim_end", _ => "trim" };
+                    return format!("{}::from({}.{}())", str_ty, obj_s, rust_m);
+                }
+                "toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper" => {
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    return format!("{}::from({}.to_uppercase().as_str())", str_ty, obj_s);
+                }
+                "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => {
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                    return format!("{}::from({}.to_lowercase().as_str())", str_ty, obj_s);
+                }
                 _ => {}
             }
         }
@@ -534,6 +687,19 @@ impl Transpiler {
                     let key_s = self.emit_dict_key_borrow(&args[0].value);
                     let def_s = self.emit_expr(&args[1].value);
                     return format!("{}.get({}).cloned().unwrap_or({})", obj_s, key_s, def_s);
+                }
+                "set" | "put" if args.len() >= 2 => {
+                    let key_s = self.emit_expr_owned(&args[0].value);
+                    let val_s = self.emit_expr_owned(&args[1].value);
+                    return format!("{}.insert({}, {})", obj_s, key_s, val_s);
+                }
+                "contains" | "containsKey" | "has" => {
+                    let key_s = self.emit_dict_key_borrow(&args[0].value);
+                    return format!("{}.contains_key({})", obj_s, key_s);
+                }
+                "remove" if args.len() >= 1 => {
+                    let key_s = self.emit_dict_key_borrow(&args[0].value);
+                    return format!("{}.remove({})", obj_s, key_s);
                 }
                 "map" => {
                     if let Some(first_arg) = args.first() {
@@ -591,6 +757,18 @@ impl Transpiler {
                     let other_s = args.first().map(|a| self.emit_expr(&a.value))
                         .unwrap_or_else(|| "Default::default()".to_string());
                     return format!("{}.difference(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s);
+                }
+                "add" | "insert" if args.len() >= 1 => {
+                    let val_s = self.emit_expr_owned(&args[0].value);
+                    return format!("{}.insert({})", obj_s, val_s);
+                }
+                "remove" if args.len() >= 1 => {
+                    let val_s = self.emit_expr_owned(&args[0].value);
+                    return format!("{}.remove(&{})", obj_s, val_s);
+                }
+                "contains" if args.len() >= 1 => {
+                    let val_s = self.emit_expr_owned(&args[0].value);
+                    return format!("{}.contains(&{})", obj_s, val_s);
                 }
                 _ => {}
             }
@@ -813,7 +991,7 @@ impl Transpiler {
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else { !self.known_local_vars.contains(v.as_str()) }
             }
-            _ => obj_s.contains("::") && !obj_s.ends_with(')'),
+            _ => obj_s.contains("::") && !obj_s.ends_with(')') && !obj_s.ends_with('}'),
         };
         if is_path_receiver {
             // Normalize bare stdlib module names to their fully-qualified forms.
@@ -836,9 +1014,18 @@ impl Transpiler {
         }
         // If the receiver is a known user struct, preserve method names (don't remap to Rust builtins).
         let is_user_struct_receiver = match &obj.kind {
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
-                .map(|t| self.struct_fields.contains_key(t.as_str()))
-                .unwrap_or(false),
+            ExprKind::Var(v) => {
+                if v == "self" {
+                    // Inside a method body, self_type names the current struct.
+                    self.self_type.as_deref()
+                        .map(|t| self.struct_fields.contains_key(t))
+                        .unwrap_or(false)
+                } else {
+                    self.var_struct_types.get(v.as_str())
+                        .map(|t| self.struct_fields.contains_key(t.as_str()))
+                        .unwrap_or(false)
+                }
+            }
             _ => false,
         };
         // Map boring method names → Rust equivalents
@@ -867,7 +1054,7 @@ impl Transpiler {
                         match &p.ty {
                             None => true,
                             Some(expected) => {
-                                match infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types) {
+                                match infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types, &self.struct_fields) {
                                     Some(actual) => types_compatible(expected, &actual),
                                     None => true,
                                 }
@@ -904,6 +1091,14 @@ impl Transpiler {
         } else if is_user_struct_receiver {
             // User-defined struct methods: coerce string literals to Arc<str> to match
             // generated method signatures (Boring `string` params map to `Arc<str>`).
+            args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
+        } else if (rust_method == "push" || rust_method == "extend") && {
+            // Only wrap when pushing into a Vec<Arc<str>> (str_vec_vars or field with string type).
+            match &obj.kind {
+                ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),
+                _ => false,
+            }
+        } {
             args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
         } else {
             args.iter().map(|a| self.emit_expr(&a.value)).collect()
@@ -997,8 +1192,12 @@ impl Transpiler {
             "read_line", "write_all", "acquire", "recv",
         ];
         let is_tokio_async = TOKIO_ASYNC_METHODS.iter().any(|&m| m == method);
+        let propagates_throw = (self.in_throws || self.in_try_body)
+            && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
-            format!("{}.await", call)
+            if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) }
+        } else if propagates_throw {
+            format!("{}?", call)
         } else {
             call
         }
@@ -1049,6 +1248,7 @@ impl Transpiler {
     /// Also reorders labeled (named) arguments to match the declared parameter order.
     pub(crate) fn emit_args_coerced(&self, fn_name: &str, args: &[Arg]) -> String {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
+        let rebindable_flags = self.fn_rebindable.get(fn_name).cloned().unwrap_or_default();
         let defaults = self.fn_defaults.get(fn_name).cloned().unwrap_or_default();
         let variadic_idx = self.fn_variadic.get(fn_name).copied();
         let param_names = self.fn_param_names.get(fn_name).cloned().unwrap_or_default();
@@ -1092,6 +1292,7 @@ impl Transpiler {
             }
             if let Some(a) = args.get(i) {
                 let param_ty = sig.get(i);
+                let param_rebindable = rebindable_flags.get(i).copied().unwrap_or(false);
                 // When passing a `throws` function where a non-throws fn param is expected,
                 // wrap it in a closure that unwraps the Result.
                 let coerced = if let ExprKind::Var(fn_name) = &a.value.kind {
@@ -1116,7 +1317,94 @@ impl Transpiler {
                         } else { None }
                     } else { None }
                 } else { None };
-                result.push(coerced.unwrap_or_else(|| self.emit_let_value(param_ty, &a.value)));
+                // Error: 'weak argument passed to a non-weak parameter.
+                // upgrade() returns Option — the transpiler cannot insert it implicitly.
+                if let ExprKind::Var(vname) = &a.value.kind {
+                    let arg_ty = self.fn_current_params.get(vname.as_str())
+                        .or_else(|| self.var_types.get(vname.as_str()));
+                    let arg_is_weak = matches!(arg_ty, Some(Type::Qualified(_, OwnerQual::Weak)));
+                    let param_is_non_weak = matches!(param_ty,
+                        Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) |
+                        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
+                    );
+                    if arg_is_weak && param_is_non_weak {
+                        eprintln!(
+                            "error line {}: cannot pass `{}` (weak reference) to a non-weak parameter — \
+                             weak references may be invalid. Call .upgrade() first and handle the Option.",
+                            a.value.line, vname
+                        );
+                    }
+                }
+                let emitted = coerced.unwrap_or_else(|| self.emit_let_value(param_ty, &a.value));
+                // Counter& coercion: parameter expects &T (Borrow/BorrowMut), caller may hold
+                // any qualifier. Wrap the emitted argument with the appropriate deref.
+                let emitted = if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) {
+                    let mutable = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
+                    let ref_prefix = if mutable { "&mut " } else { "&" };
+                    let arg_qual = if let ExprKind::Var(vname) = &a.value.kind {
+                        self.fn_current_params.get(vname.as_str())
+                            .or_else(|| self.var_types.get(vname.as_str()))
+                    } else { None };
+                    // Q4: 'shared → mut Counter& is a compile error — 'shared has no interior mutability.
+                    if mutable && matches!(arg_qual, Some(Type::Qualified(_, OwnerQual::Shared))) {
+                        if let ExprKind::Var(vname) = &a.value.kind {
+                            eprintln!(
+                                "error line {}: cannot pass `{}` ('shared) to `mut Counter&` — \
+                                 'shared does not support mutable references. \
+                                 Use 'actor (Arc<Mutex<T>>) or 'guard (Arc<RwLock<T>>) instead.",
+                                a.value.line, vname
+                            );
+                        }
+                    }
+                    match arg_qual {
+                        Some(Type::Qualified(_, OwnerQual::Stack)) |
+                        Some(Type::Qualified(_, OwnerQual::Owned)) =>
+                            format!("{}*{}", ref_prefix, emitted),  // &*box_val or plain &val
+                        Some(Type::Qualified(_, OwnerQual::Shared)) =>
+                            format!("{}**{}", ref_prefix, emitted), // &**arc
+                        Some(Type::Qualified(_, OwnerQual::Actor)) => {
+                            // Q5: MutexGuard held across .await — reject the combination.
+                            if self.task_fns.contains(fn_name) {
+                                eprintln!(
+                                    "error line {}: cannot pass 'actor argument to `mut Counter&` in async \
+                                     function `{}` — holding a MutexGuard across .await makes the future \
+                                     !Send. Acquire the lock inside the callee body instead.",
+                                    a.value.line, fn_name
+                                );
+                            }
+                            format!("{{ let __g = {}.lock(); {}*__g }}", emitted, ref_prefix)
+                        }
+                        Some(Type::Qualified(_, OwnerQual::Guard)) => {
+                            // Q5: RwLockGuard held across .await — same issue.
+                            if self.task_fns.contains(fn_name) {
+                                eprintln!(
+                                    "error line {}: cannot pass 'guard argument to `mut Counter&` in async \
+                                     function `{}` — holding an RwLockGuard across .await makes the future \
+                                     !Send. Acquire the lock inside the callee body instead.",
+                                    a.value.line, fn_name
+                                );
+                            }
+                            let lock_method = if mutable { "write" } else { "read" };
+                            format!("{{ let __g = {}.{}(); {}*__g }}", emitted, lock_method, ref_prefix)
+                        }
+                        _ => format!("{}{}", ref_prefix, emitted),
+                    }
+                // Auto-ref: 'shared/'actor/'guard/'weak params are passed by reference.
+                // `var` (rebindable) params receive `&mut Arc<...>` instead of `&Arc<...>`.
+                // Exception: trait object wrappers (Rc<dyn Trait> / Arc<dyn Trait>) require
+                // an unsized coercion that only works on owned values — pass by value there.
+                } else if is_auto_ref_param(param_ty) && !self.is_trait_object_param(param_ty) {
+                    if param_rebindable { format!("&mut {}", emitted) } else { format!("&{}", emitted) }
+                // var (rebindable) 'stack/'heap param: out-parameter, pass &mut.
+                // Only applies to qualified user types — primitives (var int x) are mutable locals.
+                } else if param_rebindable && matches!(param_ty,
+                    Some(Type::Qualified(_, OwnerQual::Stack | OwnerQual::Owned))
+                ) {
+                    format!("&mut {}", emitted)
+                } else {
+                    emitted
+                };
+                result.push(emitted);
             } else {
                 result.push(
                     defaults.get(i).and_then(|d| d.clone())
@@ -1175,11 +1463,16 @@ impl Transpiler {
 
     pub(crate) fn emit_interp(&self, segs: &[StringSegment]) -> String {
         let (fmt, args) = self.build_format_string(segs);
+        let str_ty = match self.config.threading {
+            crate::transpiler::ThreadingMode::Single => "Rc::<str>",
+            crate::transpiler::ThreadingMode::Multi  => "Arc::<str>",
+        };
         if args.is_empty() {
-            format!("\"{}\"", fmt)
+            format!("{}::from(\"{}\")", str_ty, fmt)
         } else {
-            format!("format!(\"{}\"{})", fmt,
-                args.iter().map(|a| format!(", {}", a)).collect::<String>())
+            let fmt_call = format!("format!(\"{}\"{})", fmt,
+                args.iter().map(|a| format!(", {}", a)).collect::<String>());
+            format!("{}::from({}.as_str())", str_ty, fmt_call)
         }
     }
 
@@ -1325,6 +1618,20 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Var(v) => self.dict_vars.contains(v.as_str()),
             ExprKind::Dict(_) => true,
+            // Field access: look up the field type in struct_fields
+            ExprKind::Field(obj, field_name) => {
+                let struct_name = match &obj.kind {
+                    ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
+                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                        .or_else(|| self.var_struct_type.get(v.as_str()))
+                        .cloned(),
+                    _ => None,
+                };
+                struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Dict(..)))
+                    .unwrap_or(false)
+            }
             // Chained dict → dict methods
             ExprKind::MethodCall(inner, m, _) => {
                 const DICT_RETURNING: &[&str] = &["map", "filter", "set", "put", "remove"];
@@ -1342,6 +1649,36 @@ impl Transpiler {
         }
     }
 
+    /// Return true when `expr` yields an actor-qualified value (Rc<RefCell<T>> or Arc<Mutex<T>>).
+    /// Used to detect if-let bindings that need to be tracked as managed vars.
+    pub(crate) fn expr_yields_actor(&self, expr: &crate::ast::Expr) -> bool {
+        use crate::ast::{ExprKind, Type, OwnerQual};
+        match &expr.kind {
+            ExprKind::Var(v) => {
+                if let Some(ty) = self.var_types.get(v.as_str()) {
+                    return matches!(ty, Type::Qualified(_, OwnerQual::Actor))
+                        || matches!(ty, Type::Optional(inner) if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Actor)));
+                }
+                self.managed_refcell_vars.contains(v.as_str()) || self.managed_mutex_vars.contains(v.as_str())
+            }
+            ExprKind::Field(obj, field_name) => {
+                let struct_name = match &obj.kind {
+                    ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
+                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                        .or_else(|| self.var_struct_type.get(v.as_str()))
+                        .cloned(),
+                    _ => None,
+                };
+                struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                    .map(|(_, ty)| matches!(ty, Type::Qualified(_, OwnerQual::Actor))
+                        || matches!(ty, Type::Optional(inner) if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Actor))))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
     /// Return true when `expr` produces a `HashSet` value.
     ///
     /// Analogous to `expr_is_dict`:
@@ -1354,6 +1691,20 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Var(v) => self.set_vars.contains(v.as_str()),
             ExprKind::Set(_) => true,
+            // Field access: look up the field type in struct_fields
+            ExprKind::Field(obj, field_name) => {
+                let struct_name = match &obj.kind {
+                    ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
+                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                        .or_else(|| self.var_struct_type.get(v.as_str()))
+                        .cloned(),
+                    _ => None,
+                };
+                struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Set(_)))
+                    .unwrap_or(false)
+            }
             ExprKind::MethodCall(inner, m, _) => {
                 const SET_RETURNING: &[&str] = &["union", "intersection", "difference", "add", "remove"];
                 SET_RETURNING.contains(&m.as_str()) && self.expr_is_set(inner)
@@ -1382,6 +1733,7 @@ impl Transpiler {
             self_type: self.self_type.clone(),
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),
+            str_vec_vars: self.str_vec_vars.clone(),
             set_vars: self.set_vars.clone(),
             tuple_vars: self.tuple_vars.clone(),
             dict_vars: self.dict_vars.clone(),
@@ -1390,6 +1742,7 @@ impl Transpiler {
             fn_return_types: self.fn_return_types.clone(),
             index_vars: self.index_vars.clone(),
             fn_sigs: self.fn_sigs.clone(),
+            fn_rebindable: self.fn_rebindable.clone(),
             enum_variants: self.enum_variants.clone(),
             enum_variant_fields: self.enum_variant_fields.clone(),
             enum_variant_field_types: self.enum_variant_field_types.clone(),
@@ -1427,6 +1780,8 @@ impl Transpiler {
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
             fn_returns_void: self.fn_returns_void,
+            fn_declared_void: self.fn_declared_void,
+            suppress_ok_wrap: false,
             trait_method_names: self.trait_method_names.clone(),
             user_conv_targets: self.user_conv_targets.clone(),
             string_arc_vars: self.string_arc_vars.clone(),
@@ -1497,10 +1852,15 @@ impl Transpiler {
             uses_local_channel: std::rc::Rc::clone(&self.uses_local_channel),
             uses_local_broadcast: std::rc::Rc::clone(&self.uses_local_broadcast),
             rc_vars: self.rc_vars.clone(),
+            shared_ref_params: self.shared_ref_params.clone(),
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),
+            struct_method_throws: self.struct_method_throws.clone(),
+            inferred_qualifiers: self.inferred_qualifiers.clone(),
+            fn_current_params: std::collections::HashMap::new(),
+            auto_ref_params: self.auto_ref_params.clone(),
         }
     }
 
@@ -1514,7 +1874,7 @@ impl Transpiler {
                 None    => "return;".into(),
             },
             Stmt::Let(s) => {
-                let kw = if s.mutable { "let mut" } else { "let" };
+                let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 let ty = s.ty.as_ref().map(|t| format!(": {}", self.emit_type(t))).unwrap_or_default();
                 format!("{} {}{} = {};", kw, s.name, ty, self.emit_expr(s.value.as_ref().expect("invariant: Let statement in expression context must have an initializer value")))
             }
@@ -1714,8 +2074,26 @@ impl Transpiler {
                     let static_name = n.to_uppercase();
                     return format!("{}.lock().unwrap_or_else(|e| e.into_inner()).clone()", static_name);
                 }
+                // Bare PascalCase enum variant not in known_local_vars — qualify it.
+                // e.g. `Nil` (Value::Nil) or `Uninitialized` (Value::Uninitialized)
+                if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && !self.known_local_vars.contains(n)
+                    && !self.struct_fields.contains_key(n)
+                {
+                    if let Some(enum_type) = self.enum_variants.get(n) {
+                        return format!("{}::{}", enum_type, n);
+                    }
+                }
                 escape_rust_keyword(n)
             }
         }
     }
+}
+
+
+fn is_auto_ref_param(ty: Option<&Type>) -> bool {
+    matches!(ty,
+        Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) |
+        Some(Type::Qualified(_, OwnerQual::Weak))
+    )
 }

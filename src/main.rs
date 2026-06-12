@@ -180,6 +180,12 @@ fn print_help() {
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
     eprintln!("    boring build --mode managed              Use managed memory mode (Arc<Mutex> defaults)");
     eprintln!("    boring build --threading single          Use single-thread Tokio runtime");
+    eprintln!("    boring build --instrument                Instrument functions (coverage + trace journals)
+    boring build --emit-rust                 Print generated Rust source to stdout (no project created)
+    boring build --sanitize address|thread|memory  Enable a sanitizer (requires nightly toolchain)
+    boring build --compile                   Transpile then run cargo build in the generated project
+    boring build --rust-options \"<flags>\"   Pass extra flags to cargo build (implies --compile)
+                                            Example: --rust-options \"--release\"");
     eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
@@ -255,8 +261,12 @@ fn parse_build_command(build_args: &[String]) {
     let mut target_kernel = false;
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
-    let mut stack_auto_bytes: usize = 1024;
-    let mut stack_warn_bytes: usize = 32;
+    let mut stack_auto_bytes: usize = 256;
+    let mut instrument = false;
+    let mut sanitize: Option<&'static str> = None;
+    let mut emit_rust = false;
+    let mut compile = false;
+    let mut rust_options: Vec<String> = Vec::new();
     let mut file: Option<&str> = None;
     let mut output_dir: Option<PathBuf> = None;
 
@@ -329,12 +339,34 @@ fn parse_build_command(build_args: &[String]) {
                     }
                 }
             }
-            "--stack-warn-bytes" => {
+            "--instrument" => instrument = true,
+            "--emit-rust"  => emit_rust = true,
+            "--compile"    => compile = true,
+            "--rust-options" => {
                 i += 1;
-                match build_args.get(i).and_then(|s| s.parse::<usize>().ok()) {
-                    Some(n) => stack_warn_bytes = n,
+                match build_args.get(i) {
+                    Some(opts) => {
+                        rust_options.extend(opts.split_whitespace().map(|s| s.to_string()));
+                        compile = true;
+                    }
                     None => {
-                        eprintln!("error: --stack-warn-bytes requires a positive integer");
+                        eprintln!("error: --rust-options requires a value");
+                        process::exit(1);
+                    }
+                }
+            }
+            "--sanitize" => {
+                i += 1;
+                match build_args.get(i).map(|s| s.as_str()) {
+                    Some("address") => sanitize = Some("address"),
+                    Some("thread")  => sanitize = Some("thread"),
+                    Some("memory")  => sanitize = Some("memory"),
+                    Some(s) => {
+                        eprintln!("error: unknown sanitizer '{}' — expected address, thread, or memory", s);
+                        process::exit(1);
+                    }
+                    None => {
+                        eprintln!("error: --sanitize requires a value (address, thread, or memory)");
                         process::exit(1);
                     }
                 }
@@ -355,14 +387,66 @@ fn parse_build_command(build_args: &[String]) {
         process::exit(1);
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, stack_warn_bytes };
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize };
 
-    match (target_kernel, file, output_dir) {
-        (true,  Some(path), _)          => emit_kernel(path),
-        (true,  None, _)                => build_project_kernel(),
-        (false, Some(path), Some(dir))  => emit_rust_to_dir(path, "0.1.0", config, dir),
-        (false, Some(path), None)       => emit_rust_with_config(path, config),
-        (false, None, _)                => build_project_with_config(config),
+    if emit_rust {
+        match file {
+            Some(path) => print_rust(path, config),
+            None => {
+                let (toml, _) = load_project_toml();
+                print_rust(&toml.main, config);
+            }
+        }
+        return;
+    }
+
+    let project_dir = match (target_kernel, file, output_dir) {
+        (true,  Some(path), _)          => { emit_kernel(path); return; }
+        (true,  None, _)                => { build_project_kernel(); return; }
+        (false, Some(path), Some(dir))  => { emit_rust_to_dir(path, "0.1.0", config, dir.clone()); dir }
+        (false, Some(path), None)       => {
+            let stem = std::path::Path::new(path)
+                .file_stem().map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "output".to_string());
+            let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+            let dir = base.join(format!("{}_rust", stem));
+            emit_rust_with_config(path, config);
+            dir
+        }
+        (false, None, _)                => {
+            let (toml, _) = load_project_toml();
+            let stem = std::path::Path::new(&toml.main)
+                .file_stem().map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "output".to_string());
+            let base = std::path::Path::new(&toml.main).parent().unwrap_or(std::path::Path::new("."));
+            let dir = base.join(format!("{}_rust", stem));
+            build_project_with_config(config);
+            dir
+        }
+    };
+
+    if compile {
+        run_cargo_build(&project_dir, &rust_options);
+    }
+}
+
+fn run_cargo_build(project_dir: &PathBuf, rust_options: &[String]) {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build");
+    cmd.args(rust_options);
+    cmd.current_dir(project_dir);
+
+    eprintln!("Running: cargo build {}", rust_options.join(" "));
+    match cmd.status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("error: cargo build exited with status {}", status);
+            process::exit(status.code().unwrap_or(1));
+        }
+        Err(e) => {
+            eprintln!("error: failed to invoke cargo: {}", e);
+            process::exit(1);
+        }
     }
 }
 
@@ -419,6 +503,28 @@ fn run_file(path: &str) {
 
 fn emit_rust_with_config(path: &str, config: transpiler::TranspileConfig) {
     emit_rust_with_version_and_config(path, "0.1.0", config);
+}
+
+/// Transpile a `.br` file and print the generated Rust source to stdout.
+fn print_rust(path: &str, config: transpiler::TranspileConfig) {
+    let path = PathBuf::from(path);
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+    let tokens = match lexer::lex(&source) {
+        Ok(t) => t,
+        Err(e) => { report_error(&path, &source, e.line(), &e.msg()); process::exit(1); }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => { report_error(&path, &source, e.line(), &e.msg()); process::exit(1); }
+    };
+    let out = transpiler::transpile_with_config(&program, config);
+    print!("{}", out.code);
 }
 
 fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig) {
@@ -547,8 +653,58 @@ tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror
         process::exit(1);
     }
 
+    // Write .cargo/config.toml when managed mode or --sanitize is requested.
+    let needs_cargo_config = config.mode == transpiler::TranspileMode::Managed
+        || config.sanitize.is_some();
+    if needs_cargo_config {
+        let cargo_config_dir = project_dir.join(".cargo");
+        if let Err(e) = std::fs::create_dir_all(&cargo_config_dir) {
+            eprintln!("error: cannot create '.cargo/': {}", e);
+            process::exit(1);
+        }
+        let mut cargo_config = String::new();
+        // Managed mode: automatically enable backtraces so panics show the full call stack.
+        if config.mode == transpiler::TranspileMode::Managed {
+            cargo_config.push_str("[env]\nRUST_BACKTRACE = \"1\"\n");
+        }
+        // Sanitizer: inject rustflags targeting the host triple (requires nightly toolchain).
+        if let Some(ref san) = config.sanitize {
+            let host = host_target();
+            if !cargo_config.is_empty() { cargo_config.push('\n'); }
+            cargo_config.push_str(&format!(
+                "[build]\nrustflags = [\"-Zsanitizer={san}\"]\ntarget = \"{host}\"\n",
+                san = san, host = host
+            ));
+        }
+        let config_path = cargo_config_dir.join("config.toml");
+        if let Err(e) = std::fs::write(&config_path, cargo_config) {
+            eprintln!("error: cannot write '{}': {}", config_path.display(), e);
+            process::exit(1);
+        }
+        if config.sanitize.is_some() {
+            eprintln!("note: sanitizer enabled — run with: cargo +nightly run");
+        }
+    }
+
     eprintln!("Generated Cargo project at '{}'", project_dir.display());
     eprintln!("  cd {} && cargo run", project_dir.display());
+}
+
+/// Returns the host Rust target triple by invoking `rustc --version --verbose`.
+fn host_target() -> String {
+    let output = std::process::Command::new("rustc")
+        .args(["--version", "--verbose"])
+        .output()
+        .ok();
+    if let Some(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if let Some(target) = line.strip_prefix("host: ") {
+                return target.trim().to_string();
+            }
+        }
+    }
+    "x86_64-unknown-linux-gnu".to_string()
 }
 
 // ─── Core: kernel transpile ───────────────────────────────────────────────────

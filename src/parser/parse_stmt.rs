@@ -50,13 +50,17 @@ impl Parser {
                 while self.is_newline() { self.advance(); }
                 Ok(Stmt::Comment(text))
             }
-            TokenKind::Let | TokenKind::Var | TokenKind::Static => {
+            TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static => {
                 if self.is_let_destructure() {
                     let line = self.line();
                     let _is_static = self.eat(&TokenKind::Static);
-                    let mutable = matches!(self.peek(), TokenKind::Var);
-                    self.advance(); // consume let/var
-                    Ok(Stmt::LetDestructure(self.parse_let_destructure(mutable, line)?))
+                    let binding = match self.peek() {
+                        TokenKind::Mut => BindingKind::Mut,
+                        TokenKind::Var => BindingKind::Var,
+                        _ => BindingKind::Let,
+                    };
+                    self.advance(); // consume let/mut/var
+                    Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, line)?))
                 } else {
                     Ok(Stmt::Let(self.parse_let_stmt()?))
                 }
@@ -282,9 +286,10 @@ impl Parser {
         let line = self.line();
         // optional `static` before `let` / `var`
         let is_static = self.eat(&TokenKind::Static);
-        let mutable = match self.peek() {
-            TokenKind::Var => { self.advance(); true }
-            _ => { self.advance(); false } // let
+        let binding = match self.peek() {
+            TokenKind::Mut => { self.advance(); BindingKind::Mut }
+            TokenKind::Var => { self.advance(); BindingKind::Var }
+            _ => { self.advance(); BindingKind::Let } // let
         };
         // `let name = value`         — no type annotation, borrow by default
         // `let name' = value`        — no type annotation, move (tick without qualifier)
@@ -292,8 +297,8 @@ impl Parser {
         let (name, ty, _is_move) = if self.is_type_start_before_ident() {
             let base = self.parse_type()?;
             let ty = self.parse_type_qualifier(base)?;
-            // `var T&` → absorb mutability into the borrow type
-            let ty = if mutable { Self::apply_var_to_borrow(ty) } else { ty };
+            // `var T&` / `mut T&` → absorb mutability into the borrow type
+            let ty = if binding.is_mutable() { Self::apply_var_to_borrow(ty) } else { ty };
             let name = self.expect_ident()?;
             // `var T name'qualifier = value` — qualifier after the name applies to the type
             let ty = if self.check(&TokenKind::Tick) {
@@ -318,7 +323,7 @@ impl Parser {
                         self.expect(&TokenKind::Eq)?;
                         let value = self.parse_expr()?;
                         self.expect_newline_soft();
-                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, line });
                     }
                     // `name'qualifier = Ctor(...)` → qualifier on variable, type inferred from RHS
                     Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) => {
@@ -338,7 +343,7 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: Some(value), is_move: false, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, line });
                     }
                     _ => {}
                 }
@@ -348,18 +353,18 @@ impl Parser {
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: None, is_move: false, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, line });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { mutable, is_pub, is_static, name, ty, value: Some(value), is_move: false, line })
+        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, line })
     }
 
     /// Parse the binding list of a destructuring `let`.
     /// Handles both the parenthesised form `(a, b)` and the bare form `a, b`.
     /// Called after the `let`/`var` keyword has already been consumed.
-    pub(crate) fn parse_let_destructure(&mut self, mutable: bool, line: usize) -> Result<LetDestructureStmt, ParseError> {
+    pub(crate) fn parse_let_destructure(&mut self, binding: BindingKind, line: usize) -> Result<LetDestructureStmt, ParseError> {
         let parens = self.eat(&TokenKind::LParen);
         if parens { self.skip_newlines_and_indent(); }
         let mut bindings = Vec::new();
@@ -385,7 +390,7 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetDestructureStmt { mutable, bindings, value, line })
+        Ok(LetDestructureStmt { binding, bindings, value, line })
     }
 
     pub(crate) fn parse_return_stmt(&mut self) -> Result<ReturnStmt, ParseError> {

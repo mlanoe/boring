@@ -50,11 +50,21 @@ impl Transpiler {
                     format!("std::cell::RefCell<{}>", inner)
                 }
             } else if let Some(inner) = Self::mutex_inner(&f.ty) {
-                // T'actor field → Arc<tokio::sync::Mutex<T>>
                 self.emit_mutex_type(inner)
             } else {
+                let rec_key = format!("{}::{}", s.name, f.name);
                 let fmut = if f.mutable { "/* var */ " } else { "" };
-                format!("{}{}", fmut, self.emit_type(&f.ty))
+                if self.recursive_fields.contains(&rec_key) {
+                    // Recursive struct field — wrap in Box<> to break the infinite-size cycle.
+                    match &f.ty {
+                        Type::Optional(inner) =>
+                            format!("{}Option<Box<{}>>", fmut, self.emit_type(inner)),
+                        other =>
+                            format!("{}Box<{}>", fmut, self.emit_type(other)),
+                    }
+                } else {
+                    format!("{}{}", fmut, self.emit_field_type(&f.ty, f.mutable))
+                }
             };
             self.line(&format!("{}{}: {},", fvis, f.name, ty_s));
         }
@@ -143,10 +153,15 @@ impl Transpiler {
                 let is_mutex = Self::is_mutex_binding(f.mutable, &f.ty);
                 if let Some(def) = &f.default {
                     if is_mutex {
-                        // var T'actor → Arc::new(Mutex::new(raw_value))
                         let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                         let raw = self.emit_let_value(Some(inner), def);
-                        self.line(&format!("{}: Arc::new(tokio::sync::Mutex::new({})),", f.name, raw));
+                        let init = match self.config.threading {
+                            crate::transpiler::ThreadingMode::Multi =>
+                                format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
+                            crate::transpiler::ThreadingMode::Single =>
+                                format!("Rc::new(RefCell::new({}))", raw),
+                        };
+                        self.line(&format!("{}: {},", f.name, init));
                     } else {
                         let val = self.emit_let_value(Some(&f.ty), def);
                         if is_transient {
@@ -454,7 +469,13 @@ impl Transpiler {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
                             let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                             let raw = self.emit_let_value(Some(inner), def);
-                            self.line(&format!("{}: Arc::new(tokio::sync::Mutex::new({})),", f.name, raw));
+                            let init = match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi =>
+                                    format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
+                                crate::transpiler::ThreadingMode::Single =>
+                                    format!("Rc::new(RefCell::new({}))", raw),
+                            };
+                            self.line(&format!("{}: {},", f.name, init));
                         } else {
                             let val = self.emit_let_value(Some(&f.ty), def);
                             if f.transient {
@@ -484,6 +505,8 @@ impl Transpiler {
             }).collect();
             self.line(&format!("pub fn new({}) -> Self {{", params_s.join(", ")));
             self.indent += 1;
+            // Add init params to known_local_vars so bare param names don't resolve to self.field.
+            for p in &init.params { self.known_local_vars.insert(p.name.clone()); }
             // Check if the body consists entirely of `self.field = expr` assignments.
             // If so, emit a struct literal instead of using `self` directly.
             let all_self_assigns = init.body.iter().all(|stmt| {
@@ -564,6 +587,8 @@ impl Transpiler {
             }
             self.indent -= 1;
             self.line("}");
+            // Clean up init param names from known_local_vars.
+            for p in &init.params { self.known_local_vars.remove(p.name.as_str()); }
         }
         self.blank();
     }
@@ -680,18 +705,28 @@ impl Transpiler {
         let has_variant_error_attr = e.variants.iter().any(|v| v.attrs.iter().any(|a| a.name == "error"));
         // Non-parametric enums (all unit variants) are inferred as Copy.
         let is_unit_enum = self.unit_enums.contains(&e.name);
+        // Non-unit enums can derive PartialEq only when no variant field is actor/shared
+        // (those map to Rc<RefCell<T>>/Arc<Mutex<T>> which don't implement PartialEq).
+        let has_actor_field = !is_unit_enum && e.variants.iter().any(|v| {
+            v.fields.iter().any(|f| matches!(&f.ty,
+                Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Shared)))
+        });
         if !has_clone_derive {
             // thiserror auto-inject below will add Debug when needed; don't duplicate it.
             if is_error_type && !has_debug_derive && !has_variant_error_attr {
                 if is_unit_enum {
                     self.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]");
-                } else {
+                } else if has_actor_field {
                     self.line("#[derive(Debug, Clone)]");
+                } else {
+                    self.line("#[derive(Debug, Clone, PartialEq)]");
                 }
             } else if is_unit_enum {
-                self.line("#[derive(Clone, Copy, PartialEq, Eq, Hash)]");
+                self.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]");
+            } else if has_actor_field {
+                self.line("#[derive(Debug, Clone)]");
             } else {
-                self.line("#[derive(Clone)]");
+                self.line("#[derive(Debug, Clone, PartialEq)]");
             }
         }
         // Auto-inject thiserror when any variant has @error("..."), unless already
@@ -749,7 +784,7 @@ impl Transpiler {
                                 Type::Qualified(inner, OwnerQual::Owned) => inner.as_ref().clone(),
                                 other => other.clone(),
                             };
-                            self.emit_type(&unwrapped)
+                            self.emit_field_type(&unwrapped, true)
                         }
                     })
                     .collect();
@@ -793,6 +828,13 @@ impl Transpiler {
                 }
             }
         }
+        // Skip getters where variants share the same field name but have DIFFERENT types —
+        // a single getter cannot return multiple types without generics.
+        named_field_getters.retain(|(_, cases)| {
+            if cases.len() <= 1 { return true; }
+            let first_ty = &cases[0].1.ty;
+            cases.iter().all(|(_, f, _)| &f.ty == first_ty)
+        });
 
         // impl block
         let prev = self.self_type.replace(e.name.clone());
@@ -845,6 +887,14 @@ impl Transpiler {
                 self.line(&format!("fn {}(&self) -> Option<{}> {{", fname, ret_ty));
                 self.indent += 1;
                 // Generate one if-let arm per variant that has this field.
+                // Only use double-deref for fields actually stored as Box<T> (recursive fields).
+                // Explicit Owned/Box qualifiers on non-recursive fields are unwrapped at storage
+                // time, so the Rust field is T, not Box<T> — a single clone() suffices.
+                let field_is_boxed = cases.iter().any(|(idx, _, variant_name)| {
+                    let rec_key = format!("{}::{}::{}", e.name, variant_name, idx);
+                    self.recursive_fields.contains(&rec_key)
+                });
+                let clone_expr = if field_is_boxed { "(**__fv).clone()" } else { "__fv.clone()" };
                 for (idx, _field, variant_name) in cases {
                     let n_fields = e.variants.iter()
                         .find(|v| v.name == *variant_name)
@@ -853,8 +903,8 @@ impl Transpiler {
                     let pats: Vec<String> = (0..n_fields).map(|i| {
                         if i == *idx { "__fv".to_string() } else { "_".to_string() }
                     }).collect();
-                    self.line(&format!("if let {}::{}({}) = self {{ return Some(__fv.clone()); }}",
-                        e.name, variant_name, pats.join(", ")));
+                    self.line(&format!("if let {}::{}({}) = self {{ return Some({}); }}",
+                        e.name, variant_name, pats.join(", "), clone_expr));
                 }
                 self.line("None");
                 self.indent -= 1;
@@ -1000,7 +1050,7 @@ impl Transpiler {
             // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
             if let Type::Named(n) = t {
                 if self.trait_method_names.contains_key(n.as_str()) {
-                    return format!("impl {}", normalize_type_name(n));
+                    return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
                 }
             }
             self.emit_type(t)

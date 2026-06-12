@@ -31,12 +31,12 @@ impl KernelTranspiler {
                     let val_s = self.emit_expr(val);
                     if let Some(ty) = &s.ty {
                         let ty_s = self.emit_type(ty);
-                        if s.mutable {
+                        if s.binding.is_mutable() {
                             self.line(&format!("static mut {}: {} = {};", s.name, ty_s, val_s));
                         } else {
                             self.line(&format!("static {}: {} = {};", s.name, ty_s, val_s));
                         }
-                    } else if s.mutable {
+                    } else if s.binding.is_mutable() {
                         self.line(&format!("// TODO: kernel top-level var {} = {};", s.name, val_s));
                     } else {
                         self.line(&format!("// TODO: kernel top-level let {} = {};", s.name, val_s));

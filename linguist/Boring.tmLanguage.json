@@ -36,8 +36,8 @@
       "begin": "\"\"\"",
       "end": "\"\"\"",
       "patterns": [
-        { "include": "#string-interpolation" },
-        { "include": "#escape" }
+        { "include": "#escape" },
+        { "include": "#string-interpolation" }
       ]
     },
 
@@ -46,14 +46,14 @@
       "begin": "\"",
       "end": "\"",
       "patterns": [
-        { "include": "#string-interpolation" },
-        { "include": "#escape" }
+        { "include": "#escape" },
+        { "include": "#string-interpolation" }
       ]
     },
 
     "string-interpolation": {
       "name": "meta.interpolation.boring",
-      "begin": "\\{(?![{])",
+      "begin": "\\{(?![{}])",
       "end": "\\}",
       "beginCaptures": {
         "0": { "name": "punctuation.section.interpolation.begin.boring" }
@@ -63,6 +63,10 @@
       },
       "contentName": "source.boring.embedded",
       "patterns": [
+        {
+          "name": "constant.other.format-spec.boring",
+          "match": ":[^}]*"
+        },
         { "include": "#comment" },
         { "include": "#string" },
         { "include": "#number" },
@@ -78,7 +82,7 @@
 
     "escape": {
       "name": "constant.character.escape.boring",
-      "match": "\\\\(?:[nrt\\\\\"0]|u\\{[0-9A-Fa-f]+\\})"
+      "match": "\\{\\{|\\}\\}|\\{\\}|\\\\(?:[nrt\\\\\"0]|u\\{[0-9A-Fa-f]+\\})"
     },
 
     "number": {
@@ -175,7 +179,7 @@
 
     "declaration-keywords": {
       "name": "keyword.other.declaration.boring",
-      "match": "\\b(let|var|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|any|select|join|channel)\\b"
+      "match": "\\b(let|mut|var|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|any|select|join|channel)\\b"
     },
 
     "operator-keywords": {

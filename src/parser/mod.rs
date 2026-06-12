@@ -292,13 +292,17 @@ impl Parser {
                     Ok(Item::Stmt(self.parse_stmt()?))
                 }
             }
-            TokenKind::Static | TokenKind::Let | TokenKind::Var => {
+            TokenKind::Static | TokenKind::Let | TokenKind::Mut | TokenKind::Var => {
                 if self.is_let_destructure() {
                     let line = self.line();
                     let _is_static = self.eat(&TokenKind::Static);
-                    let mutable = matches!(self.peek(), TokenKind::Var);
-                    self.advance(); // consume let/var
-                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(mutable, line)?)))
+                    let binding = match self.peek() {
+                        TokenKind::Mut => BindingKind::Mut,
+                        TokenKind::Var => BindingKind::Var,
+                        _ => BindingKind::Let,
+                    };
+                    self.advance(); // consume let/mut/var
+                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(binding, line)?)))
                 } else {
                     Ok(Item::Let(self.parse_let_stmt_pub(is_pub)?))
                 }
@@ -713,6 +717,15 @@ impl Parser {
         match ty {
             Type::Qualified(inner, OwnerQual::Borrow) =>
                 Type::Qualified(inner, OwnerQual::BorrowMut),
+            // `mut T?&` → &mut Option<T>
+            Type::Qualified(inner, OwnerQual::BorrowOption) =>
+                Type::Qualified(inner, OwnerQual::BorrowOptionMut),
+            // `mut T&a` → &'a mut T  (encoded as Lifetime wrapping BorrowMut)
+            Type::Qualified(inner, OwnerQual::Lifetime(lt)) =>
+                Type::Qualified(
+                    Box::new(Type::Qualified(inner, OwnerQual::BorrowMut)),
+                    OwnerQual::Lifetime(lt),
+                ),
             other => other,
         }
     }
@@ -1494,7 +1507,7 @@ impl Parser {
         let line = self.line();
         // Optional per-variant attributes: `@error("message")`, `@doc("...")`, etc.
         let attrs = if self.check(&TokenKind::At) { self.parse_attrs() } else { vec![] };
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_keyword()?;
         let mut fields = Vec::new();
         if self.eat(&TokenKind::LParen) {
             while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
@@ -1585,7 +1598,7 @@ impl Parser {
                     self.expect_newline_soft();
                     type_signatures.push(FnSignature {
                         name: sig_name, params, return_ty, throws, task, stream: false, mutating,
-                        type_params: type_params_sig, line,
+                        return_mutable: false, type_params: type_params_sig, line,
                     });
                 }
             } else {
@@ -1650,33 +1663,59 @@ impl Parser {
     fn keyword_as_ident_str(&self, tok: &TokenKind) -> Option<String> {
         match tok {
             TokenKind::Ident(s) => Some(s.clone()),
-            // Keywords that are commonly used as method/field/function names:
-            TokenKind::Get       => Some("get".into()),
-            TokenKind::Set       => Some("set".into()),
-            TokenKind::Wait      => Some("wait".into()),
-            TokenKind::Join      => Some("join".into()),
-            TokenKind::Type      => Some("type".into()),
-            TokenKind::Init      => Some("init".into()),
-            TokenKind::Pass      => Some("pass".into()),
-            TokenKind::Stream    => Some("stream".into()),
-            TokenKind::Yield     => Some("yield".into()),
-            TokenKind::Loop      => Some("loop".into()),
-            TokenKind::Do        => Some("do".into()),
-            TokenKind::Mod       => Some("mod".into()),
-            TokenKind::Static    => Some("static".into()),
-            TokenKind::Native    => Some("native".into()),
-            TokenKind::Transient => Some("transient".into()),
-            TokenKind::Req       => Some("req".into()),
+            // All keywords allowed as field/method names (e.g. enum variants, method names).
+            TokenKind::Let       => Some("Let".into()),
+            TokenKind::Var       => Some("Var".into()),
             TokenKind::Def       => Some("def".into()),
-            TokenKind::Ext       => Some("ext".into()),
-            TokenKind::Task      => Some("task".into()),
-            TokenKind::In        => Some("in".into()),
-            TokenKind::Guard     => Some("guard".into()),
             TokenKind::Return    => Some("return".into()),
+            TokenKind::If        => Some("If".into()),
+            TokenKind::Elif      => Some("Elif".into()),
+            TokenKind::Else      => Some("Else".into()),
+            TokenKind::Match     => Some("Match".into()),
+            TokenKind::While     => Some("While".into()),
+            TokenKind::Do        => Some("do".into()),
+            TokenKind::Loop      => Some("loop".into()),
+            TokenKind::Wait      => Some("wait".into()),
+            TokenKind::For       => Some("For".into()),
+            TokenKind::In        => Some("in".into()),
+            TokenKind::Break     => Some("Break".into()),
+            TokenKind::Continue  => Some("Continue".into()),
+            TokenKind::Struct    => Some("Struct".into()),
+            TokenKind::Enum      => Some("Enum".into()),
+            TokenKind::Trait     => Some("Trait".into()),
+            TokenKind::Use       => Some("Use".into()),
+            TokenKind::Ext       => Some("ext".into()),
+            TokenKind::As        => Some("As".into()),
+            TokenKind::And       => Some("And".into()),
+            TokenKind::Or        => Some("Or".into()),
+            TokenKind::Not       => Some("Not".into()),
+            TokenKind::Is        => Some("Is".into()),
+            TokenKind::SelfKw    => Some("SelfKw".into()),
             TokenKind::Throw     => Some("throw".into()),
+            TokenKind::Throws    => Some("Throws".into()),
             TokenKind::Try       => Some("try".into()),
             TokenKind::Catch     => Some("catch".into()),
+            TokenKind::Defer     => Some("Defer".into()),
+            TokenKind::Void      => Some("Void".into()),
             TokenKind::Pub       => Some("pub".into()),
+            TokenKind::Guard     => Some("guard".into()),
+            TokenKind::Task      => Some("task".into()),
+            TokenKind::Join      => Some("join".into()),
+            TokenKind::Stream    => Some("stream".into()),
+            TokenKind::Yield     => Some("yield".into()),
+            TokenKind::Static    => Some("static".into()),
+            TokenKind::Type      => Some("type".into()),
+            TokenKind::Req       => Some("req".into()),
+            TokenKind::Transient => Some("transient".into()),
+            TokenKind::With      => Some("With".into()),
+            TokenKind::Get       => Some("get".into()),
+            TokenKind::Set       => Some("set".into()),
+            TokenKind::Init      => Some("init".into()),
+            TokenKind::Pass      => Some("pass".into()),
+            TokenKind::Native    => Some("native".into()),
+            TokenKind::Mod       => Some("mod".into()),
+            TokenKind::Bool(b)   => Some(if *b { "True".into() } else { "False".into() }),
+            TokenKind::Nil       => Some("Nil".into()),
             _ => None,
         }
     }

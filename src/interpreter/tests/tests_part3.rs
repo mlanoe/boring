@@ -607,106 +607,6 @@ let _result = match o:
     assert_eq!(run_src(src), Value::Int(42));
 }
 
-// ─── T&shared / T&shared — borrow of smart pointer ───────────────────────────────
-
-// `T&shared` is accepted as a parameter type annotation (parses without error).
-// At the interpreter level it behaves identically to `T'shared`: the value is
-// passed by value (Rc clone semantics at runtime — no real pointer distinction).
-#[test]
-fn test_borrow_auto_param_accepted() {
-    let src = r#"
-struct Counter:
-    init(int n)
-
-def int peek(Counter&shared c):
-    c.n
-
-let Counter'shared obj = Counter(10)
-let _result = peek(obj)
-"#;
-    assert_eq!(run_src(src), Value::Int(10));
-}
-
-// `T&shared` is accepted as a parameter type annotation.
-#[test]
-fn test_borrow_task_param_accepted() {
-    let src = r#"
-struct Counter:
-    init(int n)
-
-def int peek(Counter&shared c):
-    c.n
-
-let Counter'shared obj = Counter(7)
-let _result = peek(obj)
-"#;
-    assert_eq!(run_src(src), Value::Int(7));
-}
-
-// `T&shared` in a return type annotation is accepted.
-#[test]
-fn test_borrow_auto_return_type_accepted() {
-    let src = r#"
-struct Box:
-    init(int value)
-
-def Box&shared identity(Box&shared b):
-    b
-
-let Box'shared b = Box(99)
-let _result = identity(b).value
-"#;
-    assert_eq!(run_src(src), Value::Int(99));
-}
-
-// `T&shared` can be used in let-type annotations.
-#[test]
-fn test_borrow_auto_let_annotation() {
-    let src = r#"
-struct Item:
-    init(int v)
-
-let Item'shared raw = Item(55)
-let Item&shared x = raw
-let _result = x.v
-"#;
-    assert_eq!(run_src(src), Value::Int(55));
-}
-
-// ─── T'shared& / T'shared& — postfix borrow syntax ───────────────────────────────
-
-// `T'shared&` is equivalent to `T&shared` (borrow of Rc).
-#[test]
-fn test_postfix_borrow_auto_param() {
-    let src = r#"
-struct Counter:
-    init(int n)
-
-def int peek(Counter'shared& c):
-    c.n
-
-let Counter'shared obj = Counter(10)
-let _result = peek(obj)
-"#;
-    assert_eq!(run_src(src), Value::Int(10));
-}
-
-// `T'shared&` is equivalent to `T&shared` (borrow of Arc).
-#[test]
-fn test_postfix_borrow_task_param() {
-    let src = r#"
-struct Counter:
-    init(int n)
-
-def int peek(Counter'shared& c):
-    c.n
-
-let Counter'shared obj = Counter(7)
-let _result = peek(obj)
-"#;
-    assert_eq!(run_src(src), Value::Int(7));
-}
-
 // Alias use case: `use X as T'shared` then `def foo(X& x)` — the canonical pattern.
 #[test]
 fn test_postfix_borrow_via_alias() {
@@ -723,22 +623,6 @@ let Node root = Tree(42)
 let _result = read(root)
 "#;
     assert_eq!(run_src(src), Value::Int(42));
-}
-
-// `T'shared&` in return type position.
-#[test]
-fn test_postfix_borrow_return_type() {
-    let src = r#"
-struct Box:
-    init(int value)
-
-def Box'shared& identity(Box'shared& b):
-    b
-
-let Box'shared b = Box(99)
-let _result = identity(b).value
-"#;
-    assert_eq!(run_src(src), Value::Int(99));
 }
 
 // ─── T = stack by default, T& = borrow ───────────────────────────────────────

@@ -325,8 +325,8 @@ wait_stmt       ::= "wait" expr NEWLINE
 # Move syntax: appending `'` to the binding name requests ownership transfer.
 #   `let b = a`   — borrow by default: `b` is a reference, `a` remains valid
 #   `let b' = a`  — move: `b` takes ownership, `a` is invalidated
-let_stmt        ::= "pub"? "static"? ("let" | "var") type? IDENT "'"? "=" expr NEWLINE
-                  | "pub"? "static"? ("let" | "var") destructure "=" expr NEWLINE
+let_stmt        ::= "pub"? "static"? ("let" | "mut" | "var") type? IDENT "'"? "=" expr NEWLINE
+                  | "pub"? "static"? ("let" | "mut" | "var") destructure "=" expr NEWLINE
 
 destructure     ::= "(" binding ("," binding)* ")"   # parenthesised form
                   | binding ("," binding)+             # bare form (two bindings minimum)
@@ -904,7 +904,7 @@ SEMICOLON       ::= ";"                # treated as NEWLINE by the lexer — sep
 COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 
 # Keywords (reserved):
-# def, req, transient, let, var, pub, return, if, elif, else, match, while, do, loop, for, in,
+# def, req, transient, let, mut, var, pub, return, if, elif, else, match, while, do, loop, for, in,
 # struct, enum, trait, ext, use, as, and, or, not, guard,
 # break, continue, self, init,
 # try, catch, throw, throws, defer,
@@ -914,7 +914,7 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # native, stream, yield, static, void, pass, mod,
 # any  # deprecated — use bare Trait or <Trait> instead
 
-# ─── Emission targets ────────────────────────────────────────────────────────
+# ─── Emission targets and build flags ───────────────────────────────────────
 #
 # The `--target` flag selects the emission backend. The parser, AST, and typing
 # passes are shared; only the emitter changes.
@@ -922,6 +922,30 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   boring build <file.br>                 — standard Rust + tokio (default)
 #   boring build --target kernel <file.br> — Rust-for-Linux (no_std + kernel crates)
 #   boring build --target kernel           — kernel project from boring.toml
+#   boring build --emit-rust <file.br>     — print generated Rust to stdout, no project created
+#
+# Debugging and profiling flags (orthogonal, composable, stable unless noted):
+#
+#   --mode managed        Auto-derive Debug on all types; #[track_caller] on every
+#                         function; writes .cargo/config.toml with RUST_BACKTRACE=1.
+#   --sanitize <san>      Writes .cargo/config.toml with -Zsanitizer=<san> and the
+#                         host target triple.  <san> ∈ { address | thread | memory }.
+#                         Requires a nightly toolchain (cargo +nightly run).
+#   --instrument          Prepends an inline __boring_instrument module (no external
+#                         dep).  Wraps every function body with a RAII Span guard.
+#                         On exit writes boring_coverage.json (per-function stats)
+#                         and boring_trace.json (Chrome Trace Format, Perfetto /
+#                         Speedscope compatible).
+#
+# Builtin debugging functions (resolved as ordinary calls — not reserved keywords):
+#
+#   dbg(expr)             → dbg!(expr)      print file:line + value, return value
+#   todo()                → todo!()         panic placeholder for unfinished paths
+#   unreachable()         → unreachable!()  assert a branch is never reached
+#   assert(cond)          → assert!(cond)   runtime assertion
+#   assert_eq(a, b)       → assert_eq!(a,b) equality assertion
+#   assert_neq(a, b)      → assert_ne!(a,b) inequality assertion
+#   panic(msg)            → panic!("{:?}",…) unconditional panic
 #
 # Kernel target mappings (see docs/kernel-transpiler-mapping.md for full table):
 #

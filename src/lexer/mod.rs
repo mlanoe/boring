@@ -280,7 +280,7 @@ pub enum TokenKind {
     Ident(String),
 
     // Keywords
-    Let, Var, Def, Return,
+    Let, Mut, Var, Def, Return,
     If, Elif, Else,
     Match,
     While, Do, Loop, Wait,
@@ -848,6 +848,7 @@ fn lex_ident(first: char, chars: &mut CharIter<'_>) -> String {
 fn keyword_or_ident(s: String) -> TokenKind {
     match s.as_str() {
         "let"      => TokenKind::Let,
+        "mut"      => TokenKind::Mut,
         "var"      => TokenKind::Var,
         "def"      => TokenKind::Def,
         "return"   => TokenKind::Return,

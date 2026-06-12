@@ -28,11 +28,11 @@
       "patterns": [
         {
           "name": "constant.character.escape.boring",
-          "match": "\\\\[ntr\\\\\"0]|\\\\u\\{[0-9A-Fa-f]+\\}"
+          "match": "\\{\\{|\\}\\}|\\{\\}|\\\\[ntr\\\\\"0]|\\\\u\\{[0-9A-Fa-f]+\\}"
         },
         {
           "name": "meta.interpolation.boring",
-          "begin": "\\{(?!\\{)",
+          "begin": "\\{(?![{}])",
           "end": "\\}",
           "beginCaptures": {
             "0": { "name": "punctuation.section.interpolation.begin.boring" }
@@ -41,6 +41,10 @@
             "0": { "name": "punctuation.section.interpolation.end.boring" }
           },
           "patterns": [
+            {
+              "name": "constant.other.format-spec.boring",
+              "match": ":[^}]*"
+            },
             { "include": "#comment" },
             { "include": "#string" },
             { "include": "#number" },
@@ -96,7 +100,7 @@
         },
         {
           "name": "keyword.other.declaration.boring",
-          "match": "\\b(let|var|def|struct|enum|trait|use|ext|as|type|mod|init|pub|native|req|transient|set|task|stream|static)\\b"
+          "match": "\\b(let|mut|var|def|struct|enum|trait|use|ext|as|type|mod|init|pub|native|req|transient|set|task|stream|static)\\b"
         },
         {
           "name": "keyword.operator.word.boring",

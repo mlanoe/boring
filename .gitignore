@@ -4,3 +4,4 @@ tests/cases/*_rust/
 examples/*_rust/
 stdlib/*_rust/
 Cargo.lock
+.claude/worktrees/

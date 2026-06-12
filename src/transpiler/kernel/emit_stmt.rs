@@ -71,7 +71,7 @@ impl KernelTranspiler {
                         }
                     }
                 }
-                let kw = if s.mutable { "let mut" } else { "let" };
+                let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 match &s.value {
                     None => {
                         if let Some(ty) = &s.ty {

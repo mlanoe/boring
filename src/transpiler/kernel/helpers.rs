@@ -174,15 +174,11 @@ impl KernelTranspiler {
                 OwnerQual::BorrowMut => {
                     format!("&mut {}", self.emit_type(inner))
                 }
-                // T'const → &kernel::str::CStr for strings, &'static T otherwise
-                OwnerQual::Const => match inner.as_ref() {
-                    Type::Str => "&kernel::str::CStr".into(),
-                    Type::Named(n) if n == "string" || n == "str" => "&kernel::str::CStr".into(),
-                    _ => format!("&'static {}", self.emit_type(inner)),
-                },
                 OwnerQual::Lifetime(lt) => {
                     format!("&'{} {}", lt, self.emit_type(inner))
                 }
+                // Qualifier union — emit as plain inner type (Boring-level constraint only).
+                OwnerQual::Union(_) => self.emit_type(inner),
                 _ => format!("&{}", self.emit_type(inner)),
             },
 

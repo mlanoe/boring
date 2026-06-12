@@ -102,8 +102,9 @@ pub struct FnDecl {
     pub task: bool,
     pub stream: bool,
     pub stream_capacity: Option<usize>,  // Some(N) if stream<N>, None for default capacity
-    pub mutating: bool,   // true for `def`, false for `req`
-    pub is_native: bool,  // body is `native` — implemented by the runtime
+    pub mutating: bool,         // true for `def`, false for `req`
+    pub return_mutable: bool,   // true for `def mut` / `req mut` — mutable return value
+    pub is_native: bool,        // body is `native` — implemented by the runtime
     /// Optional error type: `def foo() throws MyError:` → `Result<_, MyError>` in Rust.
     /// `None` = untyped throw (transpiler emits `Box<dyn Error>` or equivalent).
     pub throws_ty: Option<Type>,
@@ -118,6 +119,7 @@ pub struct Param {
     pub name: String,
     pub ty: Option<Type>,
     pub mutable: bool,
+    pub rebindable: bool, // true when declared with `var` — out-parameter semantics
     pub owned: bool,
     pub variadic: bool,        // `int... args` — collects remaining args as Array
     pub default: Option<Expr>, // `string name = "world"` — used when arg is absent
@@ -314,8 +316,29 @@ pub struct FnSignature {
     pub task: bool,
     pub stream: bool,
     pub mutating: bool,
+    pub return_mutable: bool,
     pub type_params: Vec<String>,
     pub line: usize,
+}
+
+// ─── Binding kind ────────────────────────────────────────────────────────────
+
+/// Describes the binding semantics of a `let` / `mut` / `var` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindingKind {
+    /// `let` — fixed binding, immutable instance.
+    Let,
+    /// `mut` — fixed binding, mutable instance.
+    Mut,
+    /// `var` — rebindable, mutable instance.
+    Var,
+}
+
+impl BindingKind {
+    /// Returns `true` for `Mut` and `Var` — both produce a mutable Rust binding.
+    pub fn is_mutable(&self) -> bool {
+        matches!(self, BindingKind::Mut | BindingKind::Var)
+    }
 }
 
 // ─── Statements ──────────────────────────────────────────────────────────────
@@ -363,7 +386,7 @@ pub enum Stmt {
 /// Each binding may optionally carry a type annotation: `(int x, string y)`.
 #[derive(Debug, Clone)]
 pub struct LetDestructureStmt {
-    pub mutable: bool,
+    pub binding: BindingKind,
     pub bindings: Vec<DestructureBinding>,
     pub value: Expr,
     pub line: usize,
@@ -405,7 +428,7 @@ pub struct IfLetStmt {
 
 #[derive(Debug, Clone)]
 pub struct LetStmt {
-    pub mutable: bool,
+    pub binding: BindingKind,
     pub is_pub: bool,
     pub is_static: bool,
     pub name: String,
@@ -716,18 +739,9 @@ pub enum UnaryOp {
 /// `Dog'shared`  → Shared          (Arc<Dog> multi / Rc<Dog> single — threading-aware)
 /// `Dog'weak`    → Weak            (Weak<Dog>  — non-owning ref, must upgrade to Dog'shared)
 /// `Dog&a`         → Lifetime("a")   (&'a Dog        — borrow with explicit lifetime)
-/// `Dog'heap&a`    → Lifetime("a")   (&'a Box<Dog>   — borrow qualified type with lifetime)
+/// `Dog'&a`        → Lifetime("a")   (&'a Box<Dog>   — borrow a heap value with lifetime)
 /// `Dog'shared&a`  → Lifetime("a")   (&'a Arc<Dog>   — borrow qualified type with lifetime)
-/// `Dog&shared`  → BorrowShared    (&Arc<Dog> multi / &Rc<Dog> single — threading-aware borrow)
-/// `Dog'shared&` → BorrowShared    (&Arc<Dog> / &Rc<Dog> — postfix form, same as Dog&shared)
-/// `Dog&heap`    → BorrowOwned     (&Box<Dog>  — borrow a heap-allocated value)
-/// `Dog'heap&`   → BorrowOwned     (&Box<Dog>  — postfix form, same as Dog&heap)
-/// `Dog&stack`   → Borrow          (&Dog       — explicit stack borrow, same as Dog&)
-/// `Dog'stack&`  → Borrow          (&Dog       — postfix form)
-/// `Dog&copy`    → Borrow          (&Dog       — borrow a Copy type, same as Dog&)
-/// `Dog'copy&`   → Borrow          (&Dog       — postfix form)
-/// `Dog&option`  → BorrowOption    (&Option<Dog> — borrow an optional value)
-/// `Dog'option&` → BorrowOption    (&Option<Dog> — postfix form)
+/// `Dog?&`       → BorrowOption    (&Option<Dog> — borrow an optional value)
 /// `Dog&weak`    → BorrowWeak      (&Weak<Dog> — borrow a weak pointer)
 /// `Dog'weak&`   → BorrowWeak      (&Weak<Dog> — postfix form)
 /// `var Dog&`    → BorrowMut       (&mut Dog   — mutable borrow; `var` prefix on any borrow type)
@@ -735,7 +749,6 @@ pub enum UnaryOp {
 pub enum OwnerQual {
     Owned,
     Copy,
-    Const,
     Actor,   // Arc<tokio::sync::Mutex<T>> (multi) or RefCell<T> (single)
     Guard,   // Arc<tokio::sync::RwLock<T>> (multi) or RefCell<T> (single)
     /// Arc<T> (multi-thread) or Rc<T> (single-thread).
@@ -750,20 +763,18 @@ pub enum OwnerQual {
     /// Explicit lifetime annotation for Rust transpilation: `string'a` → `&'a str`.
     /// The interpreter treats this identically to a plain borrow (no runtime enforcement).
     Lifetime(String),
-    /// Threading-aware borrow of the smart pointer: `Dog&shared` or `Dog'shared&`.
-    /// → `&Arc<Dog>` (multi) or `&Rc<Dog>` (single) depending on `--threading`.
-    /// Lets you pass a reference to the smart pointer itself without cloning.
-    /// Use sparingly — prefer `Dog'shared` (clone) or bare `Dog` (deref coercion) for normal use.
+    /// Internal: threading-aware borrow of the smart pointer → `&Arc<T>` / `&Rc<T>`.
+    /// No longer produced by the parser. Kept for backwards compatibility with serialized ASTs.
     BorrowShared,
-    /// Generic borrow of a type whose smart-pointer kind is determined by alias resolution.
-    /// Written as `T&` where `T` is a type alias (e.g. `use Node as Tree'auto; (Node& n)`).
-    /// The transpiler resolves this to `&Rc<T>` or `&Arc<T>` based on the alias target.
-    /// The interpreter treats this identically to the inner type (no runtime distinction).
+    /// Universal borrow: `T&` → `&T`. The transpiler coerces any qualifier at the call site.
     Borrow,
-    /// Borrow of a heap (Box) value: `Dog&heap` or `Dog'heap&` → `&Box<Dog>` in Rust.
+    /// Internal: borrow of a heap (Box) value → `&Box<T>`.
+    /// No longer produced by the parser (`T'heap&` / `T&heap` are removed).
     BorrowOwned,
-    /// Borrow of an optional value: `Dog&option` or `Dog'option&` → `&Option<Dog>` in Rust.
+    /// Borrow of an optional value: `Dog?&` → `&Option<Dog>` in Rust.
     BorrowOption,
+    /// Mutable borrow of an optional: `mut T?&` → `&mut Option<T>` in Rust.
+    BorrowOptionMut,
     /// Borrow of a weak pointer: `Dog&weak` or `Dog'weak&` → `&Weak<Dog>` in Rust.
     BorrowWeak,
     /// Mutable borrow: `var T&` → `&mut T` in Rust.
@@ -771,6 +782,12 @@ pub enum OwnerQual {
     /// or binding declaration.  The interpreter treats this like `Borrow` at runtime;
     /// the transpiler emits `&mut T`.
     BorrowMut,
+    /// Qualifier union: `T'stack|heap|actor` — restricts which qualifiers callers may provide.
+    /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
+    /// validates that every call site provides one of the listed qualifiers.
+    /// Also used for the named groups: `'one` (`Stack|Owned`), `'many`
+    /// (`Shared|Actor|Guard`), `'mut` (`Stack|Owned|Actor|Guard`), `'req` (`Shared`).
+    Union(Vec<OwnerQual>),
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -848,7 +865,6 @@ impl Type {
             // Qualifiers
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => true,  // exclusive move → source invalidated
             Type::Qualified(_, OwnerQual::Copy)       => true,  // independent copy
-            Type::Qualified(_, OwnerQual::Const)      => true,  // global constant, immutable
             Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe
             Type::Qualified(_, OwnerQual::Actor)      => true,  // Arc<Mutex<T>> — actor pattern, task-safe
             Type::Qualified(_, OwnerQual::Guard)      => true,  // Arc<RwLock<T>> — guard pattern, task-safe
@@ -856,10 +872,11 @@ impl Type {
             Type::Qualified(_, OwnerQual::Lifetime(_)) => true, // borrow — task-safe for transpilation
             Type::Qualified(_, OwnerQual::BorrowShared) => true, // &Arc<T> / &Rc<T> — threading-aware borrow
             Type::Qualified(_, OwnerQual::BorrowOwned)  => false,
-            Type::Qualified(_, OwnerQual::BorrowOption) => false,
+            Type::Qualified(_, OwnerQual::BorrowOption | OwnerQual::BorrowOptionMut) => false,
             Type::Qualified(_, OwnerQual::BorrowWeak)   => false,
             Type::Qualified(_, OwnerQual::Borrow)       => false, // unknown until alias resolved — conservative
             Type::Qualified(_, OwnerQual::BorrowMut)    => false, // &mut T — conservative (target unknown)
+            Type::Qualified(inner, OwnerQual::Union(_)) => inner.is_task_safe(), // union: delegate to inner
             Type::TypeParam(_) => true,
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),

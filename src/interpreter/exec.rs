@@ -6,6 +6,22 @@ impl Interpreter {
     pub(crate) fn exec_stmt(&mut self, stmt: &Stmt, env: EnvRef) -> Result<(), Signal> {
         match stmt {
             Stmt::Let(s) => {
+                // Validate `mut` with primitive types — primitives are always copied.
+                if s.binding == BindingKind::Mut {
+                    let prim_via_type = s.ty.as_ref().map(|ty| {
+                        matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Bool)
+                        || matches!(ty, Type::Named(n) if matches!(n.as_str(), "int"|"uint"|"float"|"bool"|"Int"|"Uint"|"Float"|"Bool"))
+                    }).unwrap_or(false);
+                    let prim_via_value = s.ty.is_none() && s.value.as_ref().map(|v| {
+                        matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
+                    }).unwrap_or(false);
+                    if prim_via_type || prim_via_value {
+                        return Err(err(
+                            "primitive values are always copied, use `var` instead".to_string(),
+                            s.line,
+                        ));
+                    }
+                }
                 // `static let/var` → store in global env, initialise only once
                 let target_env: EnvRef = if s.is_static {
                     Rc::clone(&self.global)
@@ -72,12 +88,12 @@ impl Interpreter {
                 // `var T'shared` = reassignable only (Arc<T> has no interior mutability,
                 //   def methods are still forbidden — use T'actor for that).
                 // `var` = fully mutable (reassign + def methods).
-                let is_shared_var = s.mutable && s.ty.as_ref().map(|ty| {
+                let is_shared_var = s.binding.is_mutable() && s.ty.as_ref().map(|ty| {
                     matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 if is_shared_var {
                     target_env.borrow_mut().define_shared_mut(&s.name, val);
-                } else if s.mutable {
+                } else if s.binding.is_mutable() {
                     target_env.borrow_mut().define_mut(&s.name, val);
                 } else {
                     target_env.borrow_mut().define(&s.name, val);
@@ -99,7 +115,7 @@ impl Interpreter {
                     }
                 }
                 // `let b' = a` — move: only meaningful for owned (non-copy) values.
-                // For T'copy / T'const / T'shared / T'local, `let b = a` already gives
+                // For T'copy / T'shared / T'local, `let b = a` already gives
                 // the right semantics; the `'` is a no-op and the source is NOT invalidated.
                 if s.is_move && !val_is_copy {
                     target_env.borrow_mut().mark_owned_var(&s.name);
@@ -129,7 +145,7 @@ impl Interpreter {
                         let resolved = self.resolve_type(ty);
                         v = Self::coerce_to_type(v, &resolved);
                     }
-                    if s.mutable {
+                    if s.binding.is_mutable() {
                         env.borrow_mut().define_mut(&binding.name, v);
                     } else {
                         env.borrow_mut().define(&binding.name, v);
@@ -818,7 +834,6 @@ impl Interpreter {
                 let qual_str = match qual {
                     OwnerQual::Owned        => "'".to_string(),
                     OwnerQual::Copy         => "'copy".to_string(),
-                    OwnerQual::Const        => "'const".to_string(),
                     OwnerQual::Actor        => "'actor".to_string(),
                     OwnerQual::Guard        => "'guard".to_string(),
                     OwnerQual::Shared       => "'shared".to_string(),
@@ -827,10 +842,22 @@ impl Interpreter {
                     OwnerQual::Lifetime(lt) => format!("'{}", lt),
                     OwnerQual::BorrowShared => "&shared".to_string(),
                     OwnerQual::BorrowOwned  => "&heap".to_string(),
-                    OwnerQual::BorrowOption => "&option".to_string(),
+                    OwnerQual::BorrowOption    => "?&".to_string(),
+                    OwnerQual::BorrowOptionMut => "mut ?&".to_string(),
                     OwnerQual::BorrowWeak   => "&weak".to_string(),
                     OwnerQual::Borrow       => "&".to_string(),
                     OwnerQual::BorrowMut    => "var &".to_string(),
+                    OwnerQual::Union(members) => {
+                        let names: Vec<&str> = members.iter().map(|q| match q {
+                            OwnerQual::Stack  => "stack",
+                            OwnerQual::Owned  => "heap",
+                            OwnerQual::Shared => "shared",
+                            OwnerQual::Actor  => "actor",
+                            OwnerQual::Guard  => "guard",
+                            _                 => "?",
+                        }).collect();
+                        format!("'{}", names.join("|"))
+                    }
                 };
                 format!("{}{}", Self::display_type(inner), qual_str)
             }
@@ -1321,7 +1348,7 @@ impl Interpreter {
                     return Err(err(
                         format!(
                             "parametric enum '{}': variant field cannot use \
-                             'shared qualifier (use ', 'copy or 'const)",
+                             'shared qualifier (use ', 'copy or 'stack)",
                             decl.name
                         ),
                         decl.line,

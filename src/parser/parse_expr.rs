@@ -633,7 +633,7 @@ impl Parser {
                 TokenKind::DotDot | TokenKind::DotDotEq => {
                     let inclusive = self.peek() == &TokenKind::DotDotEq;
                     self.advance();
-                    let end = self.parse_primary()?;
+                    let end = self.parse_postfix_inner(false)?;
                     expr = Expr {
                         kind: ExprKind::Range {
                             start: Box::new(expr),
@@ -996,7 +996,7 @@ impl Parser {
         let line = self.line();
         let name = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
-        let param = Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line };
+        let param = Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line };
         let body = self.parse_closure_body()?;
         // Check: multiline trailing closure cannot be chained
         if matches!(body, ClosureBody::Block(_)) && matches!(self.peek(), TokenKind::Dot) {
@@ -1039,7 +1039,7 @@ impl Parser {
                 // Untyped param: just an identifier
                 let line = self.line();
                 let name = self.expect_ident()?;
-                params.push(Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line });
+                params.push(Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line });
             }
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -1182,7 +1182,7 @@ impl Parser {
                 {
                     self.advance(); // consume ident
                     self.advance(); // consume ':'
-                    let param = Param { name, ty: None, mutable: false, owned: false, variadic: false, default: None, line };
+                    let param = Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line };
                     let body = self.parse_closure_body()?;
                     let (throws, task) = Self::infer_throws_task(&body);
                     return Ok(Expr { kind: ExprKind::Closure(vec![param], None, body, throws, task), line });
@@ -1201,7 +1201,7 @@ impl Parser {
                 self.advance(); // consume ':'
                 let param = Param {
                     name: "__x".to_string(),
-                    ty: None, mutable: false, owned: false, variadic: false,
+                    ty: None, mutable: false, rebindable: false, owned: false, variadic: false,
                     default: None, line,
                 };
                 let base = Expr { kind: ExprKind::Var("__x".to_string()), line };

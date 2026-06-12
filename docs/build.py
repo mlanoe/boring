@@ -10,7 +10,7 @@ ROOT = DOCS.parent
 # ── Syntax highlighter ────────────────────────────────────────────────────────
 
 BORING_KW = {
-    "let","var","def","req","set","type","struct","enum","trait","ext","mod","use","pub",
+    "let","mut","var","def","req","set","type","struct","enum","trait","ext","mod","use","pub",
     "return","if","elif","else","match","while","for","in","loop","do",
     "break","continue","guard","try","catch","throw","throws","defer","task",
     "stream","yield","channel",

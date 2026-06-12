@@ -116,9 +116,10 @@ pub(crate) fn is_collection_type(ty: Option<&Type>) -> bool {
 }
 
 /// Normalize boring primitive type names (lowercase aliases) to Rust equivalents.
-pub(crate) fn normalize_type_name(name: &str) -> String {
+/// Pass `use_rc = true` in single-thread mode so `string` maps to `Rc<str>` instead of `Arc<str>`.
+pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
     match name {
-        "string"            => "Arc<str>".into(),
+        "string"            => if use_rc { "Rc<str>".into() } else { "Arc<str>".into() },
         "str"               => "&str".into(),
         "String"            => "String".into(),
         "int"    | "Int"    => "i64".into(),
@@ -196,9 +197,13 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "joined"           => ("join".into(), None),
         // split() returns an iterator in Rust; collect to Vec so .len() and indexing work.
         "split"            => ("split".into(), Some(".collect::<Vec<_>>()")),
+        // chars() returns Chars iterator in Rust; collect to Vec<Arc<str>> so .len() and indexing work.
+        "chars"            => ("chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>".into(), Some("")),
         "trim"             => ("trim".into(), None),
-        "toUpperCase" | "uppercased" | "upper" => ("to_uppercase".into(), None),
-        "toLowerCase" | "lowercased" | "lower" => ("to_lowercase".into(), None),
+        "parse_int"        => ("parse::<i64>().ok".into(), Some("")),
+        "parse_float"      => ("parse::<f64>().ok".into(), Some("")),
+        "toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper" => ("to_uppercase".into(), None),
+        "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => ("to_lowercase".into(), None),
         "startsWith" | "hasPrefix"   => ("starts_with".into(), None),
         "endsWith"   | "hasSuffix"   => ("ends_with".into(), None),
         "first"            => ("first".into(), None),
@@ -300,7 +305,10 @@ pub(crate) fn escape_str(s: &str) -> String {
             '"'  => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
             c    => out.push(c),
         }
     }
@@ -316,7 +324,10 @@ pub(crate) fn escape_str_macro(s: &str) -> String {
             '"'  => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
             c    => out.push(c),
         }
     }
@@ -667,10 +678,10 @@ pub(crate) fn body_has_actor_binding(stmts: &[Stmt]) -> bool {
         match stmt {
             Stmt::Let(l) => {
                 if let Some(ty) = &l.ty {
-                    if Transpiler::is_mutex_binding(l.mutable, ty) {
+                    if Transpiler::is_mutex_binding(l.binding.is_mutable(), ty) {
                         return true;
                     }
-                    if Transpiler::is_rwlock_binding(l.mutable, ty) {
+                    if Transpiler::is_rwlock_binding(l.binding.is_mutable(), ty) {
                         return true;
                     }
                 }
@@ -1378,6 +1389,7 @@ pub(crate) fn infer_overload_expr_type(
     expr: &Expr,
     var_types: &std::collections::HashMap<String, crate::ast::Type>,
     fn_return_types: &std::collections::HashMap<String, crate::ast::Type>,
+    struct_fields: &std::collections::HashMap<String, Vec<(String, Type)>>,
 ) -> Option<Type> {
     match &expr.kind {
         ExprKind::Int(_)                              => Some(Type::Int),
@@ -1391,6 +1403,17 @@ pub(crate) fn infer_overload_expr_type(
             if let ExprKind::Var(fn_name) = &callee.kind {
                 fn_return_types.get(fn_name.as_str()).cloned()
             } else { None }
+        }
+        // Field access: look up the field type from struct_fields using the object's type.
+        ExprKind::Field(obj_expr, field_name) => {
+            let obj_ty = infer_overload_expr_type(obj_expr, var_types, fn_return_types, struct_fields)?;
+            let struct_name = match &obj_ty {
+                Type::Named(n) => Some(n.as_str()),
+                Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None },
+                _ => None,
+            }?;
+            let fields = struct_fields.get(struct_name)?;
+            fields.iter().find(|(fname, _)| fname == field_name).map(|(_, ft)| ft.clone())
         }
         _ => None,
     }

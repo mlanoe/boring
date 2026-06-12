@@ -1421,7 +1421,7 @@ impl Interpreter {
         aliases.insert("float".into(),  Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
         aliases.insert("bool".into(),   Type::Qualified(Box::new(Type::Bool),  OwnerQual::Copy));
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
-        aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Const));
+        aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Stack));
         // Rust-specific numeric types — same runtime representation, preserved for transpilation.
         aliases.insert("i8".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
         aliases.insert("i16".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
@@ -1436,7 +1436,7 @@ impl Interpreter {
         aliases.insert("f32".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
         aliases.insert("f64".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
         // Uppercase base-type aliases — resolve Named("String") etc. to the primitive type so
-        // that explicit qualifications like `String'const`, `Int'copy` work correctly.
+        // that explicit qualifications like `String'shared`, `Int'copy` work correctly.
         aliases.insert("String".into(), Type::Str);
         aliases.insert("Int".into(),    Type::Int);
         aliases.insert("Uint".into(),   Type::Uint);
@@ -1850,6 +1850,22 @@ impl Interpreter {
                 Ok(())
             }
             Item::Let(stmt) => {
+                // Validate `mut` with primitive types — primitives are always copied.
+                if stmt.binding == BindingKind::Mut {
+                    let prim_via_type = stmt.ty.as_ref().map(|ty| {
+                        matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Bool)
+                        || matches!(ty, Type::Named(n) if matches!(n.as_str(), "int"|"uint"|"float"|"bool"|"Int"|"Uint"|"Float"|"Bool"))
+                    }).unwrap_or(false);
+                    let prim_via_value = stmt.ty.is_none() && stmt.value.as_ref().map(|v| {
+                        matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
+                    }).unwrap_or(false);
+                    if prim_via_type || prim_via_value {
+                        return Err(Signal::Error(RuntimeError {
+                            message: "primitive values are always copied, use `var` instead".into(),
+                            line: stmt.line,
+                        }));
+                    }
+                }
                 // Top-level lets are always global; `is_static` here is a no-op
                 // (top-level is already global), but we honour `is_pub` as a marker.
                 if let Some(ty) = &stmt.ty {
@@ -1892,12 +1908,12 @@ impl Interpreter {
                 } else { val };
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
-                let is_shared_var = stmt.mutable && stmt.ty.as_ref().map(|ty| {
+                let is_shared_var = stmt.binding.is_mutable() && stmt.ty.as_ref().map(|ty| {
                     matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
                 if is_shared_var {
                     env.borrow_mut().define_shared_mut(&stmt.name, val);
-                } else if stmt.mutable {
+                } else if stmt.binding.is_mutable() {
                     env.borrow_mut().define_mut(&stmt.name, val);
                 } else {
                     env.borrow_mut().define(&stmt.name, val);
@@ -1916,7 +1932,7 @@ impl Interpreter {
                     }
                 }
                 // `let b' = a` — move: only meaningful for owned (non-copy) values.
-                // For T'copy / T'const / T'shared / T'local, the source is NOT invalidated.
+                // For T'copy / T'shared / T'local, the source is NOT invalidated.
                 if stmt.is_move && !val_is_copy {
                     env.borrow_mut().mark_owned_var(&stmt.name);
                     if let Some(v) = &stmt.value {

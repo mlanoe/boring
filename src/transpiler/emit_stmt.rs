@@ -89,7 +89,15 @@ impl Transpiler {
             }
             Stmt::Comment(text)     => self.line(&format!("// {}", text)),
             Stmt::Expr(e)           => {
-                if is_last && self.in_throws {
+                if is_last && self.in_throws && !self.suppress_ok_wrap && self.fn_declared_void {
+                    // Void throws function: emit the expression as a statement (for side-effects/?)
+                    // then Ok(()). Skip nil entirely (no side-effect).
+                    if !matches!(&e.kind, ExprKind::Nil) {
+                        let s = format!("{};", self.emit_expr_owned(e));
+                        self.line(&s);
+                    }
+                    self.line("Ok(())");
+                } else if is_last && self.in_throws && !self.suppress_ok_wrap {
                     let s = format!("Ok({})", self.emit_expr_owned(e));
                     self.line(&s);
                 } else if is_last && !self.fn_returns_void {
@@ -103,7 +111,38 @@ impl Transpiler {
                         // Function returns Option<T>; expression is not already Option-typed.
                         // Wrap scalar/integer/variable values in Some() so Rust is happy.
                         let raw = self.emit_expr(e);
-                        if raw == "None" || raw.starts_with("Some(") {
+                        let already_opt = raw == "None" || raw.starts_with("Some(")
+                            || matches!(&e.kind, ExprKind::Var(v)
+                                if self.optional_vars.contains(v.as_str())
+                                || self.var_types.get(v.as_str())
+                                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
+                            || matches!(&e.kind, ExprKind::Call(callee, _)
+                                if matches!(&callee.kind, ExprKind::Var(fn_name)
+                                    if self.fn_return_types.get(fn_name.as_str())
+                                        .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
+                            || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
+                                if matches!(&recv.kind, ExprKind::Var(v)
+                                    if self.var_struct_types.get(v.as_str()).map(|sty| {
+                                        self.struct_method_return_types
+                                            .get(&format!("{}::{}", sty, method))
+                                            .map(|t| matches!(t, Type::Optional(_)))
+                                            .unwrap_or(false)
+                                    }).unwrap_or(false)))
+                            // If-expression whose branches already produce Option (nil/some/method)
+                            || matches!(&e.kind, ExprKind::If(if_stmt) if {
+                                fn branch_ends_optional(body: &[Stmt]) -> bool {
+                                    match body.last() {
+                                        Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
+                                            || matches!(&e.kind, ExprKind::Call(callee, _)
+                                                if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
+                                            || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
+                                        _ => false,
+                                    }
+                                }
+                                if_stmt.branches.iter().any(|(_, b)| branch_ends_optional(b))
+                                    || if_stmt.else_body.as_ref().map(|b| branch_ends_optional(b)).unwrap_or(false)
+                            });
+                        if already_opt {
                             raw
                         } else {
                             format!("Some({})", raw)
@@ -120,14 +159,43 @@ impl Transpiler {
                     self.line(&s);
                 } else {
                     // Void function or non-last: always emit as a statement with semicolon.
-                    let s = self.emit_expr(e);
-                    self.line(&format!("{};", s));
+                    // Skip nil (None) as a standalone statement — it's a no-op placeholder.
+                    if !matches!(&e.kind, ExprKind::Nil) {
+                        let s = self.emit_expr(e);
+                        self.line(&format!("{};", s));
+                    }
                 }
             }
         }
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
+        // Validate `mut` qualifier combinations.
+        if s.binding == BindingKind::Mut {
+            let prim_via_type = s.ty.as_ref().map(|ty| {
+                matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Bool)
+            }).unwrap_or(false);
+            let prim_via_value = s.ty.is_none() && s.value.as_ref().map(|v| {
+                matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
+            }).unwrap_or(false);
+            if prim_via_type || prim_via_value {
+                eprintln!(
+                    "error line {}: primitive values are always copied, use `var` instead",
+                    s.line
+                );
+                std::process::exit(1);
+            }
+            if let Some(ty) = &s.ty {
+                if matches!(Self::unwrap_qual(ty), OwnerQual::Shared) {
+                    eprintln!(
+                        "error line {}: `mut` is not allowed with the `'shared` qualifier — \
+                         use `'actor` for interior mutability instead",
+                        s.line
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
         // Track every declared local variable so that field/method access can distinguish
         // instance variables (use `.`) from type/module paths (use `::`).
         self.known_local_vars.insert(s.name.clone());
@@ -162,7 +230,7 @@ impl Transpiler {
         // `let v` / `var v` — deferred initialisation: emit `let v;` and let Rust
         // enforce definite assignment via its own control-flow analysis.
         if s.value.is_none() {
-            let kw = if s.mutable { "let mut" } else { "let" };
+            let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
             if let Some(ty) = &s.ty {
                 self.line(&format!("{} {}: {};", kw, s.name, self.emit_type(ty)));
             } else {
@@ -171,17 +239,26 @@ impl Transpiler {
             return;
         }
         let s_value = s.value.as_ref().expect("invariant: Let statement without type annotation must have an initializer value");
-        // T'actor → Arc<tokio::sync::Mutex<T>>.
-        // All field reads/writes and method calls on this variable will go through .lock().await.
+        // T'actor → Arc<Mutex<T>> (multi) or Rc<RefCell<T>> (single).
+        // All field reads/writes and method calls on this variable will go through the lock/borrow.
         // Works with both `let` and `var` — the actor qualifier alone triggers mutex semantics.
         if let Some(ty) = &s.ty {
-            if Self::is_mutex_binding(s.mutable, ty) {
+            if Self::is_mutex_binding(s.binding.is_mutable(), ty) {
                 if let Some(inner) = Self::mutex_inner(ty) {
                     let mutex_ty = self.emit_mutex_type(inner);
                     let raw_val = self.emit_let_value(Some(inner), s_value);
-                    let init = format!("Arc::new(tokio::sync::Mutex::new({}))", raw_val);
+                    let init = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi =>
+                            format!("Arc::new(tokio::sync::Mutex::new({}))", raw_val),
+                        crate::transpiler::ThreadingMode::Single =>
+                            format!("Rc::new(RefCell::new({}))", raw_val),
+                    };
                     self.var_mutex_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
+                    // In single-thread mode, T'actor = Rc<RefCell<T>> → use Rc::clone, not Arc::clone.
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(s.name.clone());
+                    }
                     // Track struct type for getter dispatch, same as the general path below.
                     if let ExprKind::Call(callee, _) = &s_value.kind {
                         if let ExprKind::Var(type_name) = &callee.kind {
@@ -196,12 +273,17 @@ impl Transpiler {
                     return;
                 }
             }
-            // T'guard → Arc<tokio::sync::RwLock<T>>.
-            if Self::is_rwlock_binding(s.mutable, ty) {
+            // T'guard → Arc<RwLock<T>> (multi) or Rc<RefCell<T>> (single).
+            if Self::is_rwlock_binding(s.binding.is_mutable(), ty) {
                 if let Some(inner) = Self::rwlock_inner(ty) {
                     let rwlock_ty = self.emit_rwlock_type(inner);
                     let raw_val = self.emit_let_value(Some(inner), s_value);
-                    let init = format!("Arc::new(tokio::sync::RwLock::new({}))", raw_val);
+                    let init = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi =>
+                            format!("Arc::new(tokio::sync::RwLock::new({}))", raw_val),
+                        crate::transpiler::ThreadingMode::Single =>
+                            format!("Rc::new(RefCell::new({}))", raw_val),
+                    };
                     self.var_rwlock_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     // Track struct type for getter dispatch.
@@ -214,7 +296,7 @@ impl Transpiler {
                             }
                         }
                     }
-                    let kw = if s.mutable { "let mut" } else { "let" };
+                    let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                     self.line(&format!("{} {}: {} = {};", kw, s.name, rwlock_ty, init));
                     return;
                 }
@@ -227,7 +309,7 @@ impl Transpiler {
                     let managed_ty = self.emit_managed_actor(inner);
                     let raw_val = self.emit_let_value(Some(inner.as_ref()), s_value);
                     let init = self.wrap_managed(&raw_val);
-                    let kw = if s.mutable { "let mut" } else { "let" };
+                    let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                     match self.config.threading {
                         crate::transpiler::ThreadingMode::Multi => {
                             self.managed_mutex_vars.insert(s.name.clone());
@@ -251,12 +333,34 @@ impl Transpiler {
                 }
             }
         }
-        let kw = if s.mutable { "let mut" } else { "let" };
+        // Infer actor/refcell type for local let bindings from function return type (no explicit annotation).
+        // E.g. `let child = new_env(...)` where `new_env` returns `Env'actor` — add child to managed_refcell_vars.
+        if s.ty.is_none() {
+            let ret_ty = match &s_value.kind {
+                ExprKind::Call(callee, _) => {
+                    if let ExprKind::Var(fn_name) = &callee.kind {
+                        self.fn_return_types.get(fn_name.as_str()).cloned()
+                    } else { None }
+                }
+                _ => None,
+            };
+            if let Some(Type::Qualified(_, crate::ast::OwnerQual::Actor)) = ret_ty {
+                match self.config.threading {
+                    crate::transpiler::ThreadingMode::Multi => {
+                        self.managed_mutex_vars.insert(s.name.clone());
+                    }
+                    crate::transpiler::ThreadingMode::Single => {
+                        self.managed_refcell_vars.insert(s.name.clone());
+                    }
+                }
+            }
+        }
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
         let vis = if s.is_pub { "pub " } else { "" };
         // Mutable string bindings must be Arc<str> (not &str) so they can be reassigned
-        let is_mutable_string_lit = s.mutable && s.ty.is_none()
+        let is_mutable_string_lit = s.binding.is_mutable() && s.ty.is_none()
             && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
-        let is_mutable_string_ty = s.mutable
+        let is_mutable_string_ty = s.binding.is_mutable()
             && matches!(&s.ty, Some(Type::Named(n)) if n == "string" || n == "str")
             && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
         let (ty, val) = if is_mutable_string_lit || is_mutable_string_ty {
@@ -284,6 +388,48 @@ impl Transpiler {
             } else if val == "None" {
                 // Cast that produces None (e.g. `42 as bool`) — add type annotation.
                 ": Option<()>".to_string()
+            } else if let Some(inferred_qual) = self.inferred_qualifiers.get(&s.name).cloned() {
+                // Priority 5: use-site qualifier inference — apply the inferred qualifier.
+                // Handles bare T, T', T?, and T'? initialisers.
+                let type_name_opt = match &s_value.kind {
+                    // Counter(0)
+                    ExprKind::Call(callee, _) => {
+                        if let ExprKind::Var(n) = &callee.kind {
+                            if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                Some((n.clone(), false))
+                            } else { None }
+                        } else { None }
+                    }
+                    // some(Counter(0))
+                    ExprKind::Call(callee, args)
+                        if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "some") =>
+                    {
+                        if let Some(arg) = args.first() {
+                            if let ExprKind::Call(inner, _) = &arg.value.kind {
+                                if let ExprKind::Var(n) = &inner.kind {
+                                    if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                        Some((n.clone(), true))
+                                    } else { None }
+                                } else { None }
+                            } else { None }
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some((type_name, is_optional)) = type_name_opt {
+                    let base_ty = crate::ast::Type::Named(type_name);
+                    let declared_ty = if is_optional || matches!(&s.ty, Some(crate::ast::Type::Optional(_))) {
+                        crate::ast::Type::Optional(Box::new(base_ty))
+                    } else {
+                        base_ty
+                    };
+                    let qualified_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(
+                        &declared_ty, inferred_qual,
+                    );
+                    format!(": {}", self.emit_type(&qualified_ty))
+                } else {
+                    String::new()
+                }
             } else {
                 String::new()
             };
@@ -296,9 +442,13 @@ impl Transpiler {
         }
         // Also track immutable string literal vars so string methods (parseInt, indexOf, slice…)
         // can dispatch correctly even without an explicit type annotation.
-        let is_immutable_string_lit = !s.mutable && s.ty.is_none()
+        let is_immutable_string_lit = !s.binding.is_mutable() && s.ty.is_none()
             && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
-        if is_immutable_string_lit {
+        // readLine() returns Arc<str> — track its result as a string var.
+        let is_readline_call = matches!(&s_value.kind,
+            ExprKind::Call(callee, _)
+            if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "readLine"));
+        if is_immutable_string_lit || is_readline_call {
             self.string_vars.insert(s.name.clone());
         }
         // Track variables that hold collections (for {:?} formatting later)
@@ -312,6 +462,15 @@ impl Transpiler {
             || matches!(&s.ty, Some(Type::Array(_)))
         {
             self.vec_vars.insert(s.name.clone());
+        }
+        // Track Vec<Arc<str>> variables: assigned from split/chars or declared as [string].
+        let is_str_array_ty = matches!(&s.ty, Some(Type::Array(inner))
+            if matches!(inner.as_ref(), Type::Str)
+            || matches!(inner.as_ref(), Type::Named(n) if n == "string" || n == "str"));
+        let is_split_or_chars = matches!(&s_value.kind,
+            ExprKind::MethodCall(_, m, _) if m == "split" || m == "chars");
+        if is_str_array_ty || is_split_or_chars {
+            self.str_vec_vars.insert(s.name.clone());
         }
         // Track HashSet variables for `remove(&v)` and `add`→`insert` dispatch.
         if matches!(&s.ty, Some(Type::Set(_)))
@@ -409,7 +568,7 @@ impl Transpiler {
                         };
                         let call_s = format!("{fn_name}({all_args}).await");
                         let inner_s = format!("{{ {} }}", call_s);
-                        let kw = if s.mutable { "let mut" } else { "let" };
+                        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                         let spawn_fn = match self.config.threading {
                             crate::transpiler::ThreadingMode::Single => "tokio::task::spawn_local",
                             crate::transpiler::ThreadingMode::Multi  => "tokio::spawn",
@@ -460,8 +619,15 @@ impl Transpiler {
                 // If the callee is a function with an Optional return type, mark the var as optional.
                 if s.ty.is_none() {
                     if let Some(ret_ty) = self.fn_return_types.get(type_name.as_str()) {
-                        if matches!(ret_ty, Type::Optional(_)) {
-                            self.optional_vars.insert(s.name.clone());
+                        match ret_ty {
+                            Type::Optional(_) => { self.optional_vars.insert(s.name.clone()); }
+                            // Track function calls returning a named struct type so field access
+                            // Optional detection works (prevents double-wrapping in struct literals).
+                            Type::Named(n) if self.struct_fields.contains_key(n.as_str()) => {
+                                let n = n.clone();
+                                self.var_struct_types.insert(s.name.clone(), n);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -470,6 +636,22 @@ impl Transpiler {
         // When value is nil (None), the var is always optional.
         if matches!(&s_value.kind, ExprKind::Nil) {
             self.optional_vars.insert(s.name.clone());
+        }
+        // If-expression with nil/some branches already produces Option<T>.
+        if s.ty.is_none() {
+            fn body_ends_optional_sv(body: &[Stmt]) -> bool {
+                match body.last() {
+                    Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
+                        || matches!(&e.kind, ExprKind::Call(callee, _)
+                            if matches!(&callee.kind, ExprKind::Var(v) if v == "some")),
+                    _ => false,
+                }
+            }
+            if let ExprKind::If(if_stmt) = &s_value.kind {
+                let is_opt = if_stmt.branches.iter().any(|(_, b)| body_ends_optional_sv(b))
+                    || if_stmt.else_body.as_ref().map(|b| body_ends_optional_sv(b)).unwrap_or(false);
+                if is_opt { self.optional_vars.insert(s.name.clone()); }
+            }
         }
         // Optional chaining produces Option<T> — mark the variable as optional.
         if s.ty.is_none() && matches!(&s_value.kind,
@@ -588,6 +770,96 @@ impl Transpiler {
                 self.string_vars.insert(s.name.clone());
             }
         }
+        // Infer type of unannotated vars from field access on actor variables.
+        // e.g. `let env = interp.global_env` where interp: Interpreter'actor and global_env: Env'actor
+        // Without this, overload resolution can't distinguish `env_define(env,…)` overloads.
+        if s.ty.is_none() {
+            // `let sub = make_parser(...)` where make_parser returns Parser'actor — infer actor type.
+            if matches!(&s_value.kind, ExprKind::Call(_, _) | ExprKind::MethodCall(_, _, _)) {
+                let fn_name = match &s_value.kind {
+                    ExprKind::Call(callee, _) => {
+                        if let ExprKind::Var(n) = &callee.kind { Some(n.clone()) } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some(fname) = fn_name {
+                    if let Some(ret_ty) = self.fn_return_types.get(fname.as_str()).cloned() {
+                        let is_actor = Self::is_mutex_binding(false, &ret_ty) || Self::is_rwlock_binding(false, &ret_ty);
+                        if is_actor {
+                            self.var_mutex_types.insert(s.name.clone());
+                            self.arc_vars.insert(s.name.clone());
+                            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                                self.rc_vars.insert(s.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            // `var f = Foo(...) as Foo'actor` — register f as actor/rc var (no explicit ty annotation).
+            if let ExprKind::Cast(_, dst_ty) = &s_value.kind {
+                let is_actor = Self::is_mutex_binding(false, dst_ty) || Self::is_rwlock_binding(false, dst_ty);
+                let is_rc_like = Self::is_rc_qualified(dst_ty);
+                if is_actor {
+                    self.var_mutex_types.insert(s.name.clone());
+                    self.arc_vars.insert(s.name.clone());
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(s.name.clone());
+                    }
+                } else if is_rc_like {
+                    self.arc_vars.insert(s.name.clone());
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(s.name.clone());
+                    }
+                }
+            }
+            // Propagate actor/rc type when `let g = f` where f is already an actor var.
+            if let ExprKind::Var(src) = &s_value.kind {
+                if self.var_mutex_types.contains(src.as_str()) {
+                    self.var_mutex_types.insert(s.name.clone());
+                    self.arc_vars.insert(s.name.clone());
+                    if self.rc_vars.contains(src.as_str()) {
+                        self.rc_vars.insert(s.name.clone());
+                    }
+                } else if self.rc_vars.contains(src.as_str()) {
+                    self.rc_vars.insert(s.name.clone());
+                    self.arc_vars.insert(s.name.clone());
+                }
+                if self.string_vars.contains(src.as_str()) {
+                    self.string_vars.insert(s.name.clone());
+                }
+                if let Some(ty) = self.var_types.get(src.as_str()).cloned() {
+                    self.var_types.insert(s.name.clone(), ty);
+                }
+            }
+            if let ExprKind::Field(obj_expr, field_name) = &s_value.kind {
+                if let ExprKind::Var(v) = &obj_expr.kind {
+                    if self.var_mutex_types.contains(v.as_str()) {
+                        let struct_ty_name = self.var_struct_types.get(v.as_str())
+                            .cloned()
+                            .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                                Type::Named(n) => Some(n.clone()),
+                                Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
+                                _ => None,
+                            }));
+                        if let Some(ty_name) = struct_ty_name {
+                            if let Some(fields) = self.struct_fields.get(ty_name.as_str()).cloned() {
+                                if let Some((_, field_ty)) = fields.iter().find(|(fname, _)| fname == field_name) {
+                                    let field_ty = field_ty.clone();
+                                    if Self::is_mutex_binding(false, &field_ty) || Self::is_rwlock_binding(false, &field_ty) {
+                                        self.var_mutex_types.insert(s.name.clone());
+                                        self.arc_vars.insert(s.name.clone());
+                                        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                                            self.rc_vars.insert(s.name.clone());
+                                        }
+                                    }
+                                    self.var_types.insert(s.name.clone(), field_ty);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Reference-identity wrapping: if this variable is used in `x is y` comparisons
         // (which require pointer equality), wrap the value in `Rc::new(...)` so that:
         //   - assignment from another Rc variable (`let cdb = cda`) → `cda.clone()` shares pointer
@@ -620,7 +892,7 @@ impl Transpiler {
             }
         }
         if s.is_static {
-            self.line(&format!("{}static {}{} = {};", vis, s.name, ty, val));
+            self.line(&format!("{}static {}: {} = {};", vis, s.name, ty.trim_start_matches(": ").trim(), val));
         } else {
             self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, val));
             // Shadow non-optional managed mutex locals immediately to avoid double-lock deadlock.
@@ -705,6 +977,19 @@ impl Transpiler {
     /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
         matches!(ty, Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
+    }
+
+    /// Returns true if `value` is a variable whose qualifier is 'heap (Box<T>).
+    /// Used at call sites to emit *x dereference instead of x.clone() when wrapping in Rc/Arc.
+    fn arg_is_heap_var(&self, value: &Expr) -> bool {
+        let ExprKind::Var(v) = &value.kind else { return false };
+        if let Some(q) = self.inferred_qualifiers.get(v.as_str()) {
+            return matches!(q, OwnerQual::Owned);
+        }
+        if let Some(ty) = self.var_types.get(v.as_str()) {
+            return matches!(ty, Type::Qualified(_, OwnerQual::Owned));
+        }
+        false
     }
 
     /// Returns true for `T'shared` (Arc<T> multi or Rc<T> single).
@@ -836,7 +1121,7 @@ impl Transpiler {
 
     pub(crate) fn is_str_ref_type(ty: &Type) -> bool {
         matches!(ty, Type::Named(n) if n == "str")
-            || matches!(ty, Type::Qualified(inner, OwnerQual::Const) if matches!(**inner, Type::Str))
+            || matches!(ty, Type::Qualified(inner, OwnerQual::Stack) if matches!(**inner, Type::Str))
     }
 
     /// Returns true if the expression produces a string (Arc<str>) value.
@@ -846,6 +1131,14 @@ impl Transpiler {
             ExprKind::Var(v) => self.string_vars.contains(v.as_str())
                 || self.string_arc_vars.contains(v.as_str()),
             ExprKind::BinOp(BinOp::Add, l, r) => self.is_string_expr(l) || self.is_string_expr(r),
+            // readLine() returns Arc<str> — treat as string expression for comparison purposes
+            ExprKind::Call(callee, _) => {
+                if let ExprKind::Var(name) = &callee.kind {
+                    matches!(name.as_str(), "readLine" | "str" | "string")
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -893,7 +1186,7 @@ impl Transpiler {
             ExprKind::Var(v) => {
                 if let Some(ty) = self.var_types.get(v.as_str()) {
                     let rust_ty = match ty {
-                        Type::Named(n) => normalize_type_name(n),
+                        Type::Named(n) => normalize_type_name(n, self.use_rc_str()),
                         _ => self.emit_type(ty),
                     };
                     if is_specific_numeric_type(&rust_ty) {
@@ -913,6 +1206,19 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
+        // Implicit Arc::clone for auto-ref parameters assigned to an owned context.
+        // e.g. `counter = c` where `c: Counter'actor` (emitted as &Arc<Mutex<Counter>>)
+        // and `counter` expects an owned Arc<Mutex<Counter>>.
+        if let ExprKind::Var(name) = &value.kind {
+            if self.auto_ref_params.contains(name.as_str()) {
+                // Clone when storing an auto-ref param into an owned field of the same qualifier.
+                // Exclude 'weak destination: assigning 'shared → 'weak needs Rc::downgrade, not clone.
+                if matches!(declared_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard))) {
+                    let clone_fn = if self.use_rc_str() { "Rc::clone" } else { "Arc::clone" };
+                    return format!("{}({})", clone_fn, name);
+                }
+            }
+        }
         // Resolve named type aliases through non_fn_type_aliases before dispatching.
         // e.g. `use Pt as LPoint'` makes `Pt` an alias for `Box<LPoint>`;
         // when calling `describe(p)` where describe expects `Pt`, we must Box::new() the arg.
@@ -923,15 +1229,20 @@ impl Transpiler {
         };
         // Context-aware DotIdent: `.Variant` with a known Named enum type → `EnumType::Variant`.
         // This ensures `.South` resolves to `Direction::South` (not a later enum with same variant).
+        // Also handles qualified types (e.g. Direction'stack inferred by cross-fn propagation).
         if let ExprKind::DotIdent(variant) = &value.kind {
             if let Some(Type::Named(enum_type)) = declared_ty {
-                let enum_rust = normalize_type_name(enum_type);
+                let enum_rust = normalize_type_name(enum_type, self.use_rc_str());
                 return format!("{}::{}", enum_rust, variant);
             }
-            if let Some(Type::Qualified(inner, OwnerQual::Owned)) = declared_ty {
+            if let Some(Type::Qualified(inner, qual)) = declared_ty {
                 if let Type::Named(enum_type) = inner.as_ref() {
-                    let enum_rust = normalize_type_name(enum_type);
-                    return format!("Box::new({}::{})", enum_rust, variant);
+                    let enum_rust = normalize_type_name(enum_type, self.use_rc_str());
+                    if matches!(qual, OwnerQual::Owned) {
+                        return format!("Box::new({}::{})", enum_rust, variant);
+                    } else {
+                        return format!("{}::{}", enum_rust, variant);
+                    }
                 }
             }
         }
@@ -942,7 +1253,7 @@ impl Transpiler {
         if let ExprKind::Call(callee, dot_args) = &value.kind {
             if let ExprKind::DotIdent(method) = &callee.kind {
                 if let Some(Type::Named(type_name)) = declared_ty {
-                    let rust_type = normalize_type_name(type_name);
+                    let rust_type = normalize_type_name(type_name, self.use_rc_str());
                     let rust_method = camel_to_snake(method);
                     let vals: Vec<String> = dot_args.iter()
                         .map(|a| self.emit_expr(&a.value))
@@ -998,9 +1309,40 @@ impl Transpiler {
                 // • method calls known to return Option (indexOf, parseInt, parseFloat, string indexOf/find)
                 //   whose emitted form ends with ".ok()" or ".map(|i| i as i64)"
                 let already_opt = inner_val.starts_with("Some(") || inner_val == "None"
-                    || matches!(&value.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
+                    || matches!(&value.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str())
+                        || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
                     || inner_val.ends_with(".ok()")
-                    || inner_val.ends_with(".map(|i| i as i64)");
+                    || inner_val.ends_with(".map(|i| i as i64)")
+                    // A throws-propagated call (ending in `?`) in an Optional declared context
+                    // is already Option<T> — the throws function returns Result<Option<T>>.
+                    || (inner_val.ends_with("?") && matches!(&value.kind, ExprKind::Call(_, _)))
+                    // Field access on a known struct where the field type is Optional
+                    || matches!(&value.kind, ExprKind::Field(obj, field_name) if {
+                        let sn = match &obj.kind {
+                            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+                            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+                            _ => None,
+                        };
+                        sn.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                            .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                            .map(|(_, ty)| matches!(ty, Type::Optional(_)))
+                            .unwrap_or(false)
+                    })
+                    // If-expression whose branches already produce Option (nil/some/method branches)
+                    || matches!(&value.kind, ExprKind::If(if_stmt) if {
+                        fn body_ends_optional(body: &[Stmt]) -> bool {
+                            match body.last() {
+                                Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
+                                    || matches!(&e.kind, ExprKind::Call(callee, _)
+                                        if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
+                                    // Method call on a variable — likely returns Optional in Optional ctx.
+                                    || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
+                                _ => false,
+                            }
+                        }
+                        if_stmt.branches.iter().any(|(_, b)| body_ends_optional(b))
+                            || if_stmt.else_body.as_ref().map(|b| body_ends_optional(b)).unwrap_or(false)
+                    });
                 if already_opt { return inner_val; }
                 // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
                 let wrapped = if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned)) {
@@ -1040,6 +1382,20 @@ impl Transpiler {
                             .collect();
                         format!("vec![{}]", es.join(", "))
                     }
+                    _ => self.emit_expr(value),
+                }
+            }
+            // {string} Set field: emit typed HashSet::new() for empty set literals.
+            Some(Type::Dict(..)) => {
+                // Empty set literal `{}` parsed as ExprKind::Set — coerce to HashMap::new().
+                match &value.kind {
+                    ExprKind::Set(elems) if elems.is_empty() => "HashMap::new()".to_string(),
+                    _ => self.emit_expr_owned(value),
+                }
+            }
+            Some(Type::Set(elem_ty)) if Self::is_string_type(elem_ty) || Self::is_str_ref_type(elem_ty) => {
+                match &value.kind {
+                    ExprKind::Set(elems) if elems.is_empty() => "HashSet::<Arc<str>>::new()".to_string(),
                     _ => self.emit_expr(value),
                 }
             }
@@ -1084,8 +1440,11 @@ impl Transpiler {
                 }
             }
             // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.
+            // 'stack source: wrap with .clone() to avoid moving the original binding.
+            // 'heap source (Box<T>): dereference with * to move out of the box before wrapping.
             Some(Type::Qualified(_, OwnerQual::Shared)) => {
                 let inner = self.emit_expr(value);
+                let is_heap = self.arg_is_heap_var(value);
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => {
                         let already_rc = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
@@ -1096,6 +1455,8 @@ impl Transpiler {
                             inner
                         } else if matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
                             format!("Rc::clone(&{})", inner)
+                        } else if is_heap {
+                            format!("Rc::new(*{})", inner)
                         } else if matches!(&value.kind, ExprKind::Var(_)) {
                             format!("Rc::new({}.clone())", inner)
                         } else {
@@ -1109,6 +1470,8 @@ impl Transpiler {
                         let is_existing_arc = matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
                         if is_existing_arc {
                             format!("Arc::clone(&{})", inner)
+                        } else if is_heap {
+                            format!("Arc::new(*{})", inner)
                         } else if matches!(&value.kind, ExprKind::Var(_)) {
                             format!("Arc::new({}.clone())", inner)
                         } else {
@@ -1138,14 +1501,30 @@ impl Transpiler {
                     format!("Rc::downgrade(&{})", inner)
                 }
             }
-            // [T]'const / Dict'const / Set'const → Arc<Collection>: wrap in Arc::new().
-            Some(Type::Qualified(inner, OwnerQual::Const))
-                if matches!(inner.as_ref(), Type::Array(_) | Type::Dict(_, _) | Type::Set(_)) => {
-                let v = self.emit_expr(value);
-                if v.starts_with("Arc::new(") { v } else { format!("Arc::new({})", v) }
-            }
-            // T'task / T'actor → Arc<T> (or Arc<Mutex<T>> for actor): wrap in Arc::new().
+            // T'task / T'actor → Arc<T> (or Arc<Mutex<T>> for actor, Rc<RefCell<T>> in single).
+            // 'stack source: wrap contents with .clone().
+            // 'heap source (Box<T>): dereference with * to move out of the box before wrapping.
             Some(t) if Self::is_arc_qualified(t) => {
+                let is_actor = Self::is_mutex_binding(false, t);
+                let is_guard = Self::is_rwlock_binding(false, t);
+                let is_actor_or_guard = is_actor || is_guard;
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let is_heap = self.arg_is_heap_var(value);
+                // In single-thread mode, T'actor/T'guard = Rc<RefCell<T>> — use Rc::clone.
+                if is_actor_or_guard && is_single {
+                    let inner = self.emit_expr(value);
+                    let is_existing_rc = inner.starts_with("Rc::clone(") || inner.starts_with("Rc::new(")
+                        || matches!(&value.kind, ExprKind::Var(v)
+                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                    return if is_existing_rc {
+                        if inner.starts_with("Rc::") { inner }
+                        else { format!("Rc::clone(&{})", inner) }
+                    } else if is_heap {
+                        format!("Rc::new(RefCell::new(*{}))", inner)
+                    } else {
+                        format!("Rc::new(RefCell::new({}))", inner)
+                    };
+                }
                 let inner = self.emit_expr(value);
                 // Already wrapped in Arc::new/clone — pass through.
                 if inner.starts_with("Arc::new(") || inner.starts_with("Arc::clone(") {
@@ -1153,14 +1532,28 @@ impl Transpiler {
                 }
                 // If the value is an existing Arc variable, clone it instead of moving.
                 let is_existing_arc =
-                    (Self::is_mutex_binding(false, t) && matches!(&value.kind, ExprKind::Var(v) if self.var_mutex_types.contains(v.as_str())))
+                    (is_actor && matches!(&value.kind, ExprKind::Var(v) if self.var_mutex_types.contains(v.as_str())))
                     || matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
                 if is_existing_arc {
                     format!("Arc::clone(&{})", inner)
+                } else if is_heap {
+                    // Unbox before wrapping in the appropriate lock type.
+                    if is_actor {
+                        format!("Arc::new(tokio::sync::Mutex::new(*{}))", inner)
+                    } else if is_guard {
+                        format!("Arc::new(tokio::sync::RwLock::new(*{}))", inner)
+                    } else {
+                        format!("Arc::new(*{})", inner)
+                    }
                 } else if matches!(&value.kind, ExprKind::Var(_)) {
-                    // Clone the value when wrapping a variable in Arc::new so that the original
-                    // binding is not moved — important when the same variable is passed multiple times.
-                    format!("Arc::new({}.clone())", inner)
+                    // 'stack source: wrap with lock + .clone() to preserve the original binding.
+                    if is_actor {
+                        format!("Arc::new(tokio::sync::Mutex::new({}.clone()))", inner)
+                    } else if is_guard {
+                        format!("Arc::new(tokio::sync::RwLock::new({}.clone()))", inner)
+                    } else {
+                        format!("Arc::new({}.clone())", inner)
+                    }
                 } else {
                     format!("Arc::new({})", inner)
                 }
@@ -1236,7 +1629,7 @@ impl Transpiler {
             for (i, binding) in s.bindings.iter().enumerate() {
                 if binding.name == "_" { continue; }
                 let tmp = &tmp_vars[i];
-                let kw = if s.mutable { "let mut" } else { "let" };
+                let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 self.line(&format!("{} {} = {}{};", kw, binding.name, tmp, unwrap_or_q));
             }
             return;
@@ -1340,7 +1733,7 @@ impl Transpiler {
         let bindings: Vec<String> = s.bindings.iter().map(|b| {
             if b.name == "_" { "_".into() }
             else {
-                let mut_kw = if s.mutable { "mut " } else { "" };
+                let mut_kw = if s.binding.is_mutable() { "mut " } else { "" };
                 format!("{}{}", mut_kw, b.name)
             }
         }).collect();
@@ -1351,6 +1744,59 @@ impl Transpiler {
             bindings.join(", ")
         };
         self.line(&format!("let ({}) = {};", bindings_s, val));
+        // Track optional_vars for tuple destructure: if the RHS function returns a Tuple,
+        // mark bindings whose element type is Optional so they aren't double-wrapped in Some().
+        if let ExprKind::Call(callee, _) = &s.value.kind {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                if let Some(Type::Tuple(elem_tys)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
+                    for (i, binding) in s.bindings.iter().enumerate() {
+                        if binding.name == "_" { continue; }
+                        if let Some(ty) = elem_tys.get(i) {
+                            if matches!(ty, Type::Optional(_)) {
+                                self.optional_vars.insert(binding.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Also handle if-expression RHS: scan tuple branches to detect Optional fields.
+        // e.g. `let (a, b) = if cond: (x, nil) elif ...: (x, some(y)) else: (x, nil)`
+        // → `b` is Optional.
+        if let ExprKind::If(if_stmt) = &s.value.kind {
+            fn tuple_elem_is_optional(body: &[Stmt], idx: usize) -> bool {
+                match body.last() {
+                    Some(Stmt::Expr(e)) => match &e.kind {
+                        ExprKind::Tuple(elems) => {
+                            if let Some(elem) = elems.get(idx) {
+                                matches!(&elem.kind, ExprKind::Nil)
+                                    || matches!(&elem.kind, ExprKind::Call(callee, _)
+                                        if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
+                            } else { false }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            for (i, binding) in s.bindings.iter().enumerate() {
+                if binding.name == "_" { continue; }
+                let is_opt = if_stmt.branches.iter().any(|(_, b)| tuple_elem_is_optional(b, i))
+                    || if_stmt.else_body.as_ref().map(|b| tuple_elem_is_optional(b, i)).unwrap_or(false);
+                if is_opt {
+                    self.optional_vars.insert(binding.name.clone());
+                }
+            }
+        }
+        // Track optional_vars from explicit binding type annotations (e.g. `let (string a, Type? b) = v`).
+        for binding in s.bindings.iter() {
+            if binding.name == "_" { continue; }
+            if let Some(ty) = &binding.ty {
+                if matches!(ty, Type::Optional(_)) {
+                    self.optional_vars.insert(binding.name.clone());
+                }
+            }
+        }
     }
 
     pub(crate) fn emit_return(&mut self, s: &ReturnStmt) {
@@ -1368,8 +1814,24 @@ impl Transpiler {
                     if self.trait_method_names.contains_key(n.as_str()));
                 let val = if is_optional_return && !is_option_expr(e) {
                     let inner = self.emit_expr_owned(e);
+                    // Check if the return expression is already an Option.
                     let already_opt = inner.starts_with("Some(") || inner == "None"
-                        || matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()));
+                        || matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
+                        || matches!(&e.kind, ExprKind::Var(v) if self.var_types.get(v.as_str())
+                            .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
+                        || matches!(&e.kind, ExprKind::Call(callee, _)
+                            if matches!(&callee.kind, ExprKind::Var(fn_name)
+                                if self.fn_return_types.get(fn_name.as_str())
+                                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
+                        || (inner.ends_with("?") && matches!(&e.kind, ExprKind::Call(_, _)))
+                        || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
+                            if matches!(&recv.kind, ExprKind::Var(v)
+                                if self.var_struct_types.get(v.as_str()).map(|sty| {
+                                    self.struct_method_return_types
+                                        .get(&format!("{}::{}", sty, method))
+                                        .map(|t| matches!(t, Type::Optional(_)))
+                                        .unwrap_or(false)
+                                }).unwrap_or(false)));
                     if already_opt { inner } else { format!("Some({})", inner) }
                 } else if matches!(&self.fn_return_ty,
                     Some(Type::Tuple(_)) | Some(Type::Array(_)) | Some(Type::Dict(_, _)))
@@ -1428,6 +1890,30 @@ impl Transpiler {
         let make_err = |box_expr: &str| -> String {
             format!("return Err({}{});", box_expr, dyn_cast)
         };
+        // If not in a throws function, generate panic! instead of Err — the function
+        // signature is `-> T` not `-> Result<T, _>`, so Err would be a type error.
+        let not_throws = !self.in_throws && !self.in_try_body;
+        if not_throws {
+            match &s.value {
+                None => { self.line("panic!(\"throw\");"); return; }
+                Some(e) => match &e.kind {
+                    ExprKind::Str(msg) => {
+                        self.line(&format!("panic!(\"{}\");", escape_str(msg)));
+                        return;
+                    }
+                    ExprKind::StringInterp(segs) => {
+                        let s = self.emit_interp(segs);
+                        self.line(&format!("panic!(\"{{}}\", {});", s));
+                        return;
+                    }
+                    _ => {
+                        let msg = self.emit_expr(e);
+                        self.line(&format!("panic!(\"{{}}\", {});", msg));
+                        return;
+                    }
+                }
+            }
+        }
         match &s.value {
             // Bare `throw` inside a catch block — re-throw the original error as-is.
             // `error` is Box<dyn Error>, so just forward it.
@@ -1537,7 +2023,7 @@ impl Transpiler {
     pub(crate) fn emit_if(&mut self, s: &IfStmt, is_last: bool) {
         // When this if/else is the last statement in a value-returning function,
         // use emit_body so branch tails are returned without semicolons.
-        let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;
+        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
         for (i, (cond, body)) in s.branches.iter().enumerate() {
             let kw = if i == 0 { "if" } else { "} else if" };
             let cond_s = self.emit_expr(cond);
@@ -1566,17 +2052,59 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_if_let(&mut self, s: &IfLetStmt, is_last: bool) {
-        // Track if-let bindings as known locals.
+        // Track if-let bindings as known locals; also track actor-typed bindings.
         for clause in &s.clauses {
             match clause {
-                CondClause::Let(name, _) => { self.known_local_vars.insert(name.clone()); }
+                CondClause::Let(name, expr) => {
+                    self.known_local_vars.insert(name.clone());
+                    // If the expression is an optional actor field, track the binding as managed.
+                    let is_actor = self.expr_yields_actor(expr);
+                    if is_actor {
+                        match self.config.threading {
+                            crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
+                            crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.clone()); }
+                        }
+                        // Also track the inner struct type so method return types can be inferred.
+                        // e.g. `if let p = self.parent:` where parent: Env'actor? → var_struct_types["p"] = "Env"
+                        let struct_ty = match &expr.kind {
+                            crate::ast::ExprKind::Field(obj, field_name) => {
+                                let sn = match &obj.kind {
+                                    crate::ast::ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
+                                    crate::ast::ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+                                    _ => None,
+                                };
+                                sn.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                                    .and_then(|(_, ty)| match ty {
+                                        crate::ast::Type::Optional(inner) => match inner.as_ref() {
+                                            crate::ast::Type::Qualified(inner2, _) => match inner2.as_ref() {
+                                                crate::ast::Type::Named(n) => Some(n.clone()),
+                                                _ => None,
+                                            },
+                                            crate::ast::Type::Named(n) => Some(n.clone()),
+                                            _ => None,
+                                        },
+                                        crate::ast::Type::Qualified(inner, _) => match inner.as_ref() {
+                                            crate::ast::Type::Named(n) => Some(n.clone()),
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    })
+                            }
+                            _ => None,
+                        };
+                        if let Some(sty) = struct_ty {
+                            self.var_struct_types.insert(name.clone(), sty);
+                        }
+                    }
+                }
                 CondClause::LetPat(pat, _) => { Self::collect_pattern_binds(pat, &mut self.known_local_vars); }
                 CondClause::Expr(_) => {}
             }
         }
         // When this if-let is the last statement in a value-returning function,
         // use emit_body so the branch tail is returned without a semicolon.
-        let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;
+        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
         // Multi-clause: emit as a chain of let-else or if-let
         let cond_s = self.emit_cond_clauses(&s.clauses);
         self.line(&format!("if {} {{", cond_s));
@@ -1603,7 +2131,15 @@ impl Transpiler {
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {
         clauses.iter().map(|c| match c {
             CondClause::Let(name, expr) => {
-                format!("let Some({}) = {}", name, self.emit_expr(expr))
+                let expr_s = self.emit_expr(expr);
+                // If the expression is an optional actor field, clone it to avoid
+                // moving out of a shared reference in req methods.
+                let expr_s = if self.expr_yields_actor(expr) {
+                    format!("{}.clone()", expr_s)
+                } else {
+                    expr_s
+                };
+                format!("let Some({}) = {}", name, expr_s)
             }
             CondClause::LetPat(pat, expr) => {
                 format!("let {} = {}", self.emit_pattern(pat), self.emit_expr(expr))
@@ -1690,7 +2226,7 @@ impl Transpiler {
                     }).collect();
 
                     // Emit the transformed match against __boring_error_typed
-                    let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;
+                    let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
                     self.line("match __boring_error_typed {");
                     self.indent += 1;
                     for arm in &arms_transformed {
@@ -1738,7 +2274,7 @@ impl Transpiler {
 
         // When the whole match is the last stmt in a value-returning function,
         // each arm body also returns its value — use emit_body instead of emit_loop_body.
-        let use_value_body = is_last && !self.fn_returns_void && !self.in_throws;
+        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
 
         // Detect if the match subject is a function type parameter being matched against
         // concrete struct types. Rust cannot match `S` (a type param) against struct patterns,
@@ -1860,14 +2396,56 @@ impl Transpiler {
             None
         };
         let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Owned)));
-        let subj = if is_smart_ptr {
+        // Shared/actor params are passed as &Rc<T> / &Arc<T> — need double deref to reach T.
+        let is_shared_ref_param = if let ExprKind::Var(vname) = &s.subject.kind {
+            self.shared_ref_params.contains(vname.as_str())
+        } else { false };
+        // Arc<str> cannot be matched against &str patterns — emit `match &*var {` to coerce.
+        let is_arc_str = matches!(&subj_ty, Some(Type::Str))
+            || s.arms.iter().any(|arm| arm.patterns.iter().any(|p| matches!(p, Pattern::Lit(LitPattern::Str(_)))));
+        let subj = if is_smart_ptr && is_shared_ref_param {
+            format!("(**{})", subj_raw)
+        } else if is_smart_ptr {
             format!("(*{})", subj_raw)
+        } else if is_arc_str {
+            format!("&*{}", subj_raw)
         } else {
             subj_raw
         };
+        // When the match subject is `T?` (Option<T>), bare enum-variant patterns like
+        // `Signal::BreakSignal(_)` must be wrapped in `Some(...)` to satisfy Rust's type checker.
+        let subj_is_optional = matches!(&subj_ty, Some(Type::Optional(_)))
+            || if let ExprKind::Var(vname) = &s.subject.kind {
+                self.optional_vars.contains(vname.as_str())
+            } else { false };
+        let arms_for_emit: Vec<MatchArm>;
+        let arms_ref: &[MatchArm] = if subj_is_optional {
+            let has_variant_arm = s.arms.iter().any(|arm| arm.patterns.iter().any(|p| {
+                matches!(p, Pattern::Variant(_, _) | Pattern::Bind(_))
+                    && !matches!(p, Pattern::None)
+            }));
+            if has_variant_arm {
+                arms_for_emit = s.arms.iter().map(|arm| {
+                    let new_pats: Vec<Pattern> = arm.patterns.iter().map(|p| match p {
+                        Pattern::Lit(LitPattern::Nil) | Pattern::None => p.clone(),
+                        Pattern::Wildcard => p.clone(),
+                        Pattern::Bind(n) if n == "_" => p.clone(),
+                        other => Pattern::Some(Box::new(other.clone())),
+                    }).collect();
+                    MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line }
+                }).collect();
+                &arms_for_emit
+            } else {
+                &s.arms
+            }
+        } else {
+            arms_for_emit = vec![];
+            &s.arms
+        };
+
         self.line(&format!("match {} {{", subj));
         self.indent += 1;
-        for arm in &s.arms {
+        for arm in arms_ref {
             self.emit_match_arm(arm, use_value_body);
         }
         self.indent -= 1;
@@ -1962,14 +2540,80 @@ impl Transpiler {
         let pats: Vec<String> = arm.patterns.iter().map(|p| self.emit_pattern(p)).collect();
         let guard = arm.guard.as_ref().map(|g| format!(" if {}", self.emit_expr(g))).unwrap_or_default();
         let pat_s = pats.join(" | ");
+        // Register all bound variables from this arm's patterns in known_local_vars so that
+        // field accesses like `s.name` on pattern-bound vars are not treated as module paths.
+        let mut bound: Vec<String> = Vec::new();
+        for p in &arm.patterns {
+            Self::collect_pattern_bindings(p, &mut bound);
+        }
+        for b in &bound {
+            self.known_local_vars.insert(b.clone());
+        }
+        // Infer types for match-arm bound variables from enum variant field types.
+        // e.g. `Value.Int(a)` → var_types["a"] = Type::Int; `Value.Float(f)` → Type::Float.
+        let mut bound_types: Vec<(String, Type)> = Vec::new();
+        for p in &arm.patterns {
+            Self::collect_pattern_var_types(p, &self.enum_variant_field_types, &mut bound_types);
+        }
+        let mut bound_structs: Vec<String> = Vec::new();
+        let mut bound_optionals: Vec<String> = Vec::new();
+        for (name, ty) in &bound_types {
+            self.var_types.insert(name.clone(), ty.clone());
+            if Self::is_string_type(ty) {
+                self.string_vars.insert(name.clone());
+            }
+            // Register Optional-typed pattern vars so they aren't double-wrapped in Some().
+            if matches!(ty, Type::Optional(_)) {
+                self.optional_vars.insert(name.clone());
+                bound_optionals.push(name.clone());
+            }
+            // Register struct-typed pattern vars so field accesses aren't mistaken for JoinHandle
+            if let Type::Named(struct_name) = ty {
+                if self.struct_fields.contains_key(struct_name.as_str()) {
+                    self.var_struct_types.insert(name.clone(), struct_name.clone());
+                    bound_structs.push(name.clone());
+                }
+            }
+        }
+        // Register actor-typed pattern vars so field/method accesses get .borrow() wrapping.
+        // These are scoped to this arm body and removed afterward.
+        let mut bound_actors: Vec<String> = Vec::new();
+        for (name, ty) in &bound_types {
+            if matches!(ty, Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
+                bound_actors.push(name.clone());
+                match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
+                    crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.clone()); }
+                }
+            }
+        }
+        // Collect boxed bindings — pattern vars bound from recursive (Box<T>) fields.
+        // We emit `let x = *x;` at the top of the arm body to auto-unbox them.
+        let mut boxed_bindings: Vec<String> = Vec::new();
+        let subj_enum_ref = self.match_subject_enum.as_deref();
+        for p in &arm.patterns {
+            Self::collect_boxed_bindings(p, &self.enum_variant_field_types, &self.recursive_fields, subj_enum_ref, &mut boxed_bindings);
+        }
         match &arm.body {
             MatchBody::Expr(e) => {
-                let expr_s = self.emit_expr(e);
-                self.line(&format!("{}{} => {},", pat_s, guard, expr_s));
+                if boxed_bindings.is_empty() {
+                    let expr_s = self.emit_expr(e);
+                    self.line(&format!("{}{} => {},", pat_s, guard, expr_s));
+                } else {
+                    // Can't emit let statements in expr position; wrap in a block.
+                    self.line(&format!("{}{} => {{", pat_s, guard));
+                    self.indent += 1;
+                    for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
+                    let expr_s = self.emit_expr(e);
+                    self.line(&expr_s);
+                    self.indent -= 1;
+                    self.line("}");
+                }
             }
             MatchBody::Block(stmts) => {
                 self.line(&format!("{}{} => {{", pat_s, guard));
                 self.indent += 1;
+                for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
                 if use_value_body {
                     self.emit_body(stmts);
                 } else {
@@ -1978,6 +2622,135 @@ impl Transpiler {
                 self.indent -= 1;
                 self.line("}");
             }
+        }
+        for b in &bound {
+            self.known_local_vars.remove(b.as_str());
+        }
+        for (name, _) in &bound_types {
+            self.var_types.remove(name.as_str());
+            self.string_vars.remove(name.as_str());
+        }
+        for name in &bound_structs {
+            self.var_struct_types.remove(name.as_str());
+        }
+        for name in &bound_optionals {
+            self.optional_vars.remove(name.as_str());
+        }
+        // Remove actor tracking added for this arm (scoped to the arm body).
+        for name in &bound_actors {
+            self.managed_refcell_vars.remove(name.as_str());
+            self.managed_mutex_vars.remove(name.as_str());
+        }
+    }
+
+    /// Infer types for pattern-bound variables using enum_variant_field_types.
+    /// e.g. Pattern::Variant("Value", "Int", [Bind("a")]) → ("a", Type::Int)
+    /// Collect names of pattern bindings that are stored as Box<T> in the enum variant.
+    /// These must be auto-unboxed (`let x = *x;`) at the start of the match arm body.
+    /// `subject_enum` is the enum name of the match subject, used to prefer the right variant.
+    fn collect_boxed_bindings(
+        pat: &Pattern,
+        enum_variant_field_types: &std::collections::HashMap<String, Vec<Type>>,
+        recursive_fields: &std::collections::HashSet<String>,
+        subject_enum: Option<&str>,
+        out: &mut Vec<String>,
+    ) {
+        match pat {
+            Pattern::Variant(qual_name, fields) => {
+                // Try to find the enum variant key "Enum::Variant".
+                // Prefer the match subject enum if available to avoid picking the wrong variant.
+                let field_tys_key = if enum_variant_field_types.contains_key(qual_name.as_str()) {
+                    Some(qual_name.as_str().to_string())
+                } else if !qual_name.contains("::") {
+                    let suffix = format!("::{}", qual_name);
+                    // First, prefer the subject enum's variant if it exists.
+                    let subject_key = subject_enum.and_then(|en| {
+                        let k = format!("{}::{}", en, qual_name);
+                        if enum_variant_field_types.contains_key(k.as_str()) { Some(k) } else { None }
+                    });
+                    subject_key.or_else(|| {
+                        enum_variant_field_types.iter()
+                            .filter(|(k, _)| k.ends_with(&suffix))
+                            .max_by_key(|(_, v)| v.len())
+                            .map(|(k, _)| k.clone())
+                    })
+                } else { None };
+                if let Some(key) = field_tys_key {
+                    let parts: Vec<&str> = key.splitn(2, "::").collect();
+                    let (enum_name, variant_name) = if parts.len() == 2 { (parts[0], parts[1]) } else { return };
+                    for (i, f) in fields.iter().enumerate() {
+                        let rec_key = format!("{}::{}::{}", enum_name, variant_name, i);
+                        if recursive_fields.contains(&rec_key) {
+                            if let Pattern::Bind(name) = f {
+                                out.push(name.clone());
+                            }
+                        } else {
+                            Self::collect_boxed_bindings(f, enum_variant_field_types, recursive_fields, subject_enum, out);
+                        }
+                    }
+                }
+            }
+            Pattern::Some(inner) => Self::collect_boxed_bindings(inner, enum_variant_field_types, recursive_fields, subject_enum, out),
+            Pattern::Tuple(fields) => {
+                for f in fields { Self::collect_boxed_bindings(f, enum_variant_field_types, recursive_fields, subject_enum, out); }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pattern_var_types(
+        pat: &Pattern,
+        enum_variant_field_types: &std::collections::HashMap<String, Vec<Type>>,
+        out: &mut Vec<(String, Type)>,
+    ) {
+        match pat {
+            Pattern::Variant(qual_name, fields) => {
+                // qual_name may be "Enum::Variant" or just "Variant"; try both.
+                // Also try all enums whose variant matches the unqualified name.
+                let field_tys = enum_variant_field_types.get(qual_name.as_str())
+                    .cloned()
+                    .or_else(|| {
+                        // Try "Foo::Bar" forms when qual_name is "Bar".
+                        // Prefer the variant with the most fields (avoids empty unit variants
+                        // like TokenKind::Return shadowing Stmt::Return(ReturnStmt)).
+                        if !qual_name.contains("::") {
+                            let suffix = format!("::{}", qual_name);
+                            enum_variant_field_types.iter()
+                                .filter(|(k, _)| k.ends_with(&suffix))
+                                .max_by_key(|(_, v)| v.len())
+                                .map(|(_, v)| v.clone())
+                        } else { None }
+                    })
+                    .unwrap_or_default();
+                for (i, f) in fields.iter().enumerate() {
+                    if let Pattern::Bind(name) = f {
+                        if let Some(ty) = field_tys.get(i) {
+                            out.push((name.clone(), ty.clone()));
+                        }
+                    } else {
+                        Self::collect_pattern_var_types(f, enum_variant_field_types, out);
+                    }
+                }
+            }
+            Pattern::Some(inner) => Self::collect_pattern_var_types(inner, enum_variant_field_types, out),
+            Pattern::Tuple(fields) => {
+                for f in fields { Self::collect_pattern_var_types(f, enum_variant_field_types, out); }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<String>) {
+        match pat {
+            Pattern::Bind(n) => out.push(n.clone()),
+            Pattern::Variant(_, fields) => {
+                for f in fields { Self::collect_pattern_bindings(f, out); }
+            }
+            Pattern::Some(inner) => Self::collect_pattern_bindings(inner, out),
+            Pattern::Tuple(fields) => {
+                for f in fields { Self::collect_pattern_bindings(f, out); }
+            }
+            _ => {}
         }
     }
 
@@ -2020,7 +2793,7 @@ impl Transpiler {
                     if s.contains('.') || s.contains('e') || s.contains('E') { s }
                     else { format!("{}.0", s) }
                 }
-                LitPattern::Str(s)  => format!("\"{}\"", s),
+                LitPattern::Str(s)  => format!("\"{}\"", crate::transpiler::helpers::escape_str(s)),
                 LitPattern::Bool(b) => b.to_string(),
                 LitPattern::Nil     => "None".into(),
             },
@@ -2048,7 +2821,14 @@ impl Transpiler {
                         return "None".into();
                     }
                 }
-                // Check if this is a struct (not an enum variant).
+                // If the name is a variant of the match subject enum, prefer the variant
+                // interpretation — even if a struct with the same name exists.
+                let is_subject_variant = self.match_subject_enum.as_deref().map(|en| {
+                    self.enum_variant_fields.contains_key(&format!("{}::{}", en, name))
+                }).unwrap_or(false);
+
+                // Check if this is a struct (not an enum variant) — only when not a subject variant.
+                if !is_subject_variant {
                 if let Some(field_names) = self.struct_fields.get(name.as_str()) {
                     // Struct destructuring: `Point2D { x, y }` or `Point2D { x: a, y: _ }`
                     if fields.is_empty() {
@@ -2066,6 +2846,7 @@ impl Transpiler {
                     }).collect();
                     return format!("{} {{ {} }}", name, pairs.join(", "));
                 }
+                } // end !is_subject_variant
                 // Qualify with enum name: `Num(v)` → `ExprEnum::Num(v)`
                 // Priority: 1) use the inferred enum from match subject (match_subject_enum)
                 //           2) disambiguate by field count (tuple vs unit variant)
@@ -2109,7 +2890,17 @@ impl Transpiler {
                     name.clone()
                 };
                 if fields.is_empty() {
-                    qualified
+                    // Check if the qualified variant is actually a tuple variant (has fields in Rust).
+                    // If so, emit `Variant(..)` to match all fields (Boring unit pattern = wildcard).
+                    let variant_has_fields = self.enum_variant_fields
+                        .get(&qualified)
+                        .map(|f| !f.is_empty())
+                        .unwrap_or(false);
+                    if variant_has_fields {
+                        format!("{} (..)", qualified)
+                    } else {
+                        qualified
+                    }
                 } else {
                     let fs: Vec<String> = fields.iter().map(|p| self.emit_pattern(p)).collect();
                     format!("{}({})", qualified, fs.join(", "))
@@ -2183,6 +2974,18 @@ impl Transpiler {
                 for v in &s.vars {
                     self.chars_vars.insert(v.clone());
                 }
+            }
+        }
+        // Track loop variables from Vec<Arc<str>> iterables so string methods dispatch correctly.
+        let iterable_is_str_vec = match &s.iterable.kind {
+            ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),
+            ExprKind::MethodCall(_, m, _) => m == "split",
+            _ => false,
+        };
+        if iterable_is_str_vec {
+            for v in &s.vars {
+                self.string_arc_vars.insert(v.clone());
+                self.string_vars.insert(v.clone());
             }
         }
 
@@ -2308,6 +3111,11 @@ impl Transpiler {
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
             ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
+                format!("{}.iter().cloned()", iter)
+            }
+            // Local variable iteration: use iter().cloned() so the variable is not moved
+            // and can be reused after the loop. into_iter() would consume the collection.
+            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) => {
                 format!("{}.iter().cloned()", iter)
             }
             _ => format!("{}.into_iter()", iter),
