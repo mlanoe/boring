@@ -1,0 +1,774 @@
+# == BUILT-IN METHODS ==
+
+def string val_type_name(Value v):
+    match v:
+        Value.Int(_): "int"
+        Value.Float(_): "float"
+        Value.Str(_): "string"
+        Value.Bool(_): "bool"
+        Value.Array(_): "array"
+        Value.Dict(_): "dict"
+        Value.Set(_): "set"
+        Value.Nil: "nil"
+        Value.Void: "void"
+        Value.Tuple(_): "tuple"
+        Value.Range(_, _, _): "range"
+        Value.Object(name, _): name
+        Value.EnumVariant(type_name, _, _): type_name
+        _: "unknown"
+
+def Value call_method(Interpreter'actor interp, Value recv, string method_name, [Value] args) throws:
+    match recv:
+        Value.Str(s):
+            match method_name:
+                "length":
+                    Value.Int(s.length)
+                "len":
+                    Value.Int(s.length)
+                "split":
+                    let sep = args[0] else Value.Str("")
+                    match sep:
+                        Value.Str(sv):
+                            Value.Array(s.split(sv).map((part): Value.Str(part)))
+                        _: throw "split: expected string separator"
+                "trim":
+                    Value.Str(s.trim())
+                "trimStart":
+                    Value.Str(s.trimStart())
+                "trimEnd":
+                    Value.Str(s.trimEnd())
+                "startsWith":
+                    let arg = args[0] else Value.Str("")
+                    match arg:
+                        Value.Str(sv): Value.Bool(s.startsWith(sv))
+                        _: throw "startsWith: expected string argument"
+                "endsWith":
+                    let arg = args[0] else Value.Str("")
+                    match arg:
+                        Value.Str(sv): Value.Bool(s.endsWith(sv))
+                        _: throw "endsWith: expected string argument"
+                "contains":
+                    let arg = args[0] else Value.Str("")
+                    match arg:
+                        Value.Str(sv): Value.Bool(s.contains(sv))
+                        _: throw "contains: expected string argument"
+                "replace":
+                    let from_val = args[0] else Value.Str("")
+                    let to_val = args[1] else Value.Str("")
+                    match from_val:
+                        Value.Str(from_s):
+                            match to_val:
+                                Value.Str(to_s): Value.Str(s.replace(from_s, to_s))
+                                _: throw "replace: expected string arguments"
+                        _: throw "replace: expected string arguments"
+                "toUpper":
+                    Value.Str(s.toUpper())
+                "toLower":
+                    Value.Str(s.toLower())
+                "chars":
+                    Value.Array(s.chars().map((c): Value.Str(c)))
+                "lines":
+                    Value.Array(s.split("\n").map((l): Value.Str(l)))
+                "slice":
+                    let start_val = args[0] else Value.Int(0)
+                    let end_val = args[1] else Value.Int(s.length)
+                    match start_val:
+                        Value.Int(start):
+                            match end_val:
+                                Value.Int(end): Value.Str(s.slice(start, end))
+                                _: throw "slice: expected int end"
+                        _: throw "slice: expected int start"
+                "indexOf":
+                    let arg = args[0] else Value.Str("")
+                    match arg:
+                        Value.Str(sv):
+                            let idx = s.indexOf(sv)
+                            if idx == -1:
+                                Value.Nil
+                            else:
+                                Value.Int(idx)
+                        _: throw "indexOf: expected string argument"
+                "repeat":
+                    let arg = args[0] else Value.Int(0)
+                    match arg:
+                        Value.Int(n): Value.Str(s.repeat(n))
+                        _: throw "repeat: expected int argument"
+                "padLeft":
+                    let width_val = args[0] else Value.Int(0)
+                    let pad_val = args[1] else Value.Str(" ")
+                    match width_val:
+                        Value.Int(w):
+                            match pad_val:
+                                Value.Str(p): Value.Str(s.padLeft(w, p))
+                                _: throw "padLeft: expected string pad"
+                        _: throw "padLeft: expected int width"
+                "padRight":
+                    let width_val = args[0] else Value.Int(0)
+                    let pad_val = args[1] else Value.Str(" ")
+                    match width_val:
+                        Value.Int(w):
+                            match pad_val:
+                                Value.Str(p): Value.Str(s.padRight(w, p))
+                                _: throw "padRight: expected string pad"
+                        _: throw "padRight: expected int width"
+                "parseInt":
+                    let parsed = s.parseInt()
+                    if parsed == nil:
+                        Value.Nil
+                    else:
+                        Value.Int(parsed!)
+                "parseFloat":
+                    let parsed = s.parseFloat()
+                    if parsed == nil:
+                        Value.Nil
+                    else:
+                        Value.Float(parsed!)
+                "isDigit":
+                    Value.Bool(s.length == 1 and s.chars().all((c): c >= "0" and c <= "9"))
+                "isAlpha":
+                    Value.Bool(s.length == 1 and ((s >= "a" and s <= "z") or (s >= "A" and s <= "Z")))
+                "isEmpty":
+                    Value.Bool(s.length == 0)
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Array(arr):
+            match method_name:
+                "length":
+                    Value.Int(arr.length)
+                "len":
+                    Value.Int(arr.length)
+                "append":
+                    let other_val = args[0] else Value.Nil
+                    match other_val:
+                        Value.Array(other):
+                            var result = arr
+                            var i = 0
+                            while i < other.length:
+                                result.append(other[i])
+                                i = i + 1
+                            Value.Array(result)
+                        _:
+                            var result = arr
+                            result.append(other_val)
+                            Value.Array(result)
+                "push":
+                    let val = args[0] else Value.Nil
+                    var result = arr
+                    result.append(val)
+                    Value.Array(result)
+                "pop":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        arr[arr.length - 1]
+                "remove":
+                    let idx_val = args[0] else Value.Int(0)
+                    match idx_val:
+                        Value.Int(idx):
+                            var result = arr
+                            result.remove(idx)
+                            Value.Array(result)
+                        _: throw "remove: expected int index"
+                "insert":
+                    let idx_val = args[0] else Value.Int(0)
+                    let val = args[1] else Value.Nil
+                    match idx_val:
+                        Value.Int(idx):
+                            var result = arr
+                            result.insert(idx, val)
+                            Value.Array(result)
+                        _: throw "insert: expected int index"
+                "first":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        arr[0]
+                "last":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        arr[arr.length - 1]
+                "contains":
+                    let target = args[0] else Value.Nil
+                    Value.Bool(arr.contains(target))
+                "map":
+                    let closure = args[0] else Value.Nil
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        let r = interp.callValue(closure, [arr[i]])
+                        result.append(r)
+                        i = i + 1
+                    Value.Array(result)
+                "filter":
+                    let closure = args[0] else Value.Nil
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        let r = interp.callValue(closure, [arr[i]])
+                        match r:
+                            Value.Bool(b):
+                                if b:
+                                    result.append(arr[i])
+                            _: throw "filter: predicate must return bool"
+                        i = i + 1
+                    Value.Array(result)
+                "reduce":
+                    let init = args[0] else Value.Nil
+                    let closure = args[1] else Value.Nil
+                    var acc = init
+                    var i = 0
+                    while i < arr.length:
+                        acc = interp.callValue(closure, [acc, arr[i]])
+                        i = i + 1
+                    acc
+                "sorted":
+                    var result = arr
+                    result = result.sorted()
+                    Value.Array(result)
+                "sortedBy":
+                    let closure = args[0] else Value.Nil
+                    var keys = []
+                    var i = 0
+                    while i < arr.length:
+                        let k = interp.callValue(closure, [arr[i]])
+                        keys.append(k)
+                        i = i + 1
+                    var indices = []
+                    var j = 0
+                    while j < arr.length:
+                        indices.append(Value.Int(j))
+                        j = j + 1
+                    let sorted_indices = indices.sortedBy((idx_val):
+                        match idx_val:
+                            Value.Int(idx): keys[idx]
+                            _: Value.Nil
+                    )
+                    var result = []
+                    var k = 0
+                    while k < sorted_indices.length:
+                        match sorted_indices[k]:
+                            Value.Int(idx): result.append(arr[idx])
+                            _: throw "sortedBy: internal error"
+                        k = k + 1
+                    Value.Array(result)
+                "reversed":
+                    var result = arr
+                    result = result.reversed()
+                    Value.Array(result)
+                "any":
+                    let closure = args[0] else Value.Nil
+                    var found = false
+                    var i = 0
+                    while i < arr.length and not found:
+                        let r = interp.callValue(closure, [arr[i]])
+                        match r:
+                            Value.Bool(b):
+                                if b:
+                                    found = true
+                            _: throw "any: predicate must return bool"
+                        i = i + 1
+                    Value.Bool(found)
+                "all":
+                    let closure = args[0] else Value.Nil
+                    var all_pass = true
+                    var i = 0
+                    while i < arr.length and all_pass:
+                        let r = interp.callValue(closure, [arr[i]])
+                        match r:
+                            Value.Bool(b):
+                                if not b:
+                                    all_pass = false
+                            _: throw "all: predicate must return bool"
+                        i = i + 1
+                    Value.Bool(all_pass)
+                "count":
+                    if args.length == 0:
+                        Value.Int(arr.length)
+                    else:
+                        let closure = args[0]
+                        var n = 0
+                        var i = 0
+                        while i < arr.length:
+                            let r = interp.callValue(closure, [arr[i]])
+                            match r:
+                                Value.Bool(b):
+                                    if b:
+                                        n = n + 1
+                                _: throw "count: predicate must return bool"
+                            i = i + 1
+                        Value.Int(n)
+                "take":
+                    let n_val = args[0] else Value.Int(0)
+                    match n_val:
+                        Value.Int(n):
+                            let end = if n < arr.length: n else: arr.length
+                            Value.Array(arr.slice(0, end))
+                        _: throw "take: expected int argument"
+                "drop":
+                    let n_val = args[0] else Value.Int(0)
+                    match n_val:
+                        Value.Int(n):
+                            let start = if n < arr.length: n else: arr.length
+                            Value.Array(arr.slice(start, arr.length))
+                        _: throw "drop: expected int argument"
+                "slice":
+                    let start_val = args[0] else Value.Int(0)
+                    let end_val = args[1] else Value.Int(arr.length)
+                    match start_val:
+                        Value.Int(start):
+                            match end_val:
+                                Value.Int(end):
+                                    let s = if start < arr.length: start else: arr.length
+                                    let e = if end < arr.length: end else: arr.length
+                                    Value.Array(arr.slice(s, e))
+                                _: throw "slice: expected int end"
+                        _: throw "slice: expected int start"
+                "zip":
+                    let other_val = args[0] else Value.Array([])
+                    match other_val:
+                        Value.Array(other):
+                            var result = []
+                            let len = if arr.length < other.length: arr.length else: other.length
+                            var i = 0
+                            while i < len:
+                                result.append(Value.Tuple([arr[i], other[i]]))
+                                i = i + 1
+                            Value.Array(result)
+                        _: throw "zip: expected array argument"
+                "enumerate":
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        result.append(Value.Tuple([Value.Int(i), arr[i]]))
+                        i = i + 1
+                    Value.Array(result)
+                "indexOf":
+                    let target = args[0] else Value.Nil
+                    var found_idx = Value.Nil
+                    var i = 0
+                    while i < arr.length and found_idx == nil:
+                        if arr[i] == target:
+                            found_idx = Value.Int(i)
+                        i = i + 1
+                    found_idx
+                "flat":
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        match arr[i]:
+                            Value.Array(inner):
+                                var j = 0
+                                while j < inner.length:
+                                    result.append(inner[j])
+                                    j = j + 1
+                            other:
+                                result.append(other)
+                        i = i + 1
+                    Value.Array(result)
+                "flatMap":
+                    let closure = args[0] else Value.Nil
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        let r = interp.callValue(closure, [arr[i]])
+                        match r:
+                            Value.Array(inner):
+                                var j = 0
+                                while j < inner.length:
+                                    result.append(inner[j])
+                                    j = j + 1
+                            other:
+                                result.append(other)
+                        i = i + 1
+                    Value.Array(result)
+                "join":
+                    let sep_val = args[0] else Value.Str("")
+                    match sep_val:
+                        Value.Str(sep):
+                            var parts = []
+                            var i = 0
+                            while i < arr.length:
+                                match arr[i]:
+                                    Value.Str(sv): parts.append(sv)
+                                    Value.Int(n): parts.append("{n}")
+                                    Value.Float(f): parts.append("{f}")
+                                    Value.Bool(b): parts.append("{b}")
+                                    _: parts.append("nil")
+                                i = i + 1
+                            Value.Str(parts.join(sep))
+                        _: throw "join: expected string separator"
+                "sum":
+                    var int_sum = 0
+                    var float_sum = 0.0
+                    var has_float = false
+                    var i = 0
+                    while i < arr.length:
+                        match arr[i]:
+                            Value.Int(n): int_sum = int_sum + n
+                            Value.Float(f):
+                                float_sum = float_sum + f
+                                has_float = true
+                            _: throw "sum: non-numeric element"
+                        i = i + 1
+                    if has_float:
+                        Value.Float(float_sum + int_sum)
+                    else:
+                        Value.Int(int_sum)
+                "min":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        var min_val = arr[0]
+                        var i = 1
+                        while i < arr.length:
+                            match arr[i]:
+                                Value.Int(n):
+                                    match min_val:
+                                        Value.Int(m):
+                                            if n < m:
+                                                min_val = arr[i]
+                                        _: throw "min: mixed types"
+                                Value.Float(f):
+                                    match min_val:
+                                        Value.Float(m):
+                                            if f < m:
+                                                min_val = arr[i]
+                                        _: throw "min: mixed types"
+                                _: throw "min: non-numeric element"
+                            i = i + 1
+                        min_val
+                "max":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        var max_val = arr[0]
+                        var i = 1
+                        while i < arr.length:
+                            match arr[i]:
+                                Value.Int(n):
+                                    match max_val:
+                                        Value.Int(m):
+                                            if n > m:
+                                                max_val = arr[i]
+                                        _: throw "max: mixed types"
+                                Value.Float(f):
+                                    match max_val:
+                                        Value.Float(m):
+                                            if f > m:
+                                                max_val = arr[i]
+                                        _: throw "max: mixed types"
+                                _: throw "max: non-numeric element"
+                            i = i + 1
+                        max_val
+                "shuffle":
+                    Value.Array(arr)
+                "distinct":
+                    var result = []
+                    var i = 0
+                    while i < arr.length:
+                        if not result.contains(arr[i]):
+                            result.append(arr[i])
+                        i = i + 1
+                    Value.Array(result)
+                "isEmpty":
+                    Value.Bool(arr.length == 0)
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Dict(pairs):
+            match method_name:
+                "length":
+                    Value.Int(pairs.length)
+                "len":
+                    Value.Int(pairs.length)
+                "get":
+                    let key = args[0] else Value.Nil
+                    let default = args[1] else Value.Nil
+                    var found = default
+                    var i = 0
+                    while i < pairs.length:
+                        let pair = pairs[i]
+                        match pair:
+                            Value.Tuple(kv):
+                                if kv[0] == key:
+                                    found = kv[1]
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    found
+                "set":
+                    let key = args[0] else Value.Nil
+                    let val = args[1] else Value.Nil
+                    var new_pairs = pairs
+                    var updated = false
+                    var i = 0
+                    while i < new_pairs.length:
+                        let pair = new_pairs[i]
+                        match pair:
+                            Value.Tuple(kv):
+                                if kv[0] == key:
+                                    new_pairs[i] = Value.Tuple([key, val])
+                                    updated = true
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    if not updated:
+                        new_pairs.append(Value.Tuple([key, val]))
+                    Value.Dict(new_pairs)
+                "contains":
+                    let key = args[0] else Value.Nil
+                    var found = false
+                    var i = 0
+                    while i < pairs.length:
+                        match pairs[i]:
+                            Value.Tuple(kv):
+                                if kv[0] == key:
+                                    found = true
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    Value.Bool(found)
+                "remove":
+                    let key = args[0] else Value.Nil
+                    var result = []
+                    var i = 0
+                    while i < pairs.length:
+                        match pairs[i]:
+                            Value.Tuple(kv):
+                                if kv[0] != key:
+                                    result.append(pairs[i])
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    Value.Dict(result)
+                "keys":
+                    var result = []
+                    var i = 0
+                    while i < pairs.length:
+                        match pairs[i]:
+                            Value.Tuple(kv): result.append(kv[0])
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    Value.Array(result)
+                "values":
+                    var result = []
+                    var i = 0
+                    while i < pairs.length:
+                        match pairs[i]:
+                            Value.Tuple(kv): result.append(kv[1])
+                            _: throw "dict: corrupt entry"
+                        i = i + 1
+                    Value.Array(result)
+                "entries":
+                    Value.Array(pairs)
+                "merge":
+                    let other_val = args[0] else Value.Dict([])
+                    match other_val:
+                        Value.Dict(other):
+                            var result = pairs
+                            var i = 0
+                            while i < other.length:
+                                match other[i]:
+                                    Value.Tuple(kv):
+                                        var found = false
+                                        var j = 0
+                                        while j < result.length:
+                                            match result[j]:
+                                                Value.Tuple(rkv):
+                                                    if rkv[0] == kv[0]:
+                                                        result[j] = Value.Tuple([kv[0], kv[1]])
+                                                        found = true
+                                                _: throw "dict: corrupt entry"
+                                            j = j + 1
+                                        if not found:
+                                            result.append(other[i])
+                                    _: throw "dict: corrupt entry"
+                                i = i + 1
+                            Value.Dict(result)
+                        _: throw "merge: expected dict argument"
+                "isEmpty":
+                    Value.Bool(pairs.length == 0)
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Set(elements):
+            match method_name:
+                "length":
+                    Value.Int(elements.length)
+                "len":
+                    Value.Int(elements.length)
+                "contains":
+                    let val = args[0] else Value.Nil
+                    Value.Bool(elements.contains(val))
+                "add":
+                    let val = args[0] else Value.Nil
+                    if elements.contains(val):
+                        Value.Set(elements)
+                    else:
+                        var result = elements
+                        result.append(val)
+                        Value.Set(result)
+                "remove":
+                    let val = args[0] else Value.Nil
+                    var result = []
+                    var i = 0
+                    while i < elements.length:
+                        if elements[i] != val:
+                            result.append(elements[i])
+                        i = i + 1
+                    Value.Set(result)
+                "toArray":
+                    Value.Array(elements)
+                "union":
+                    let other_val = args[0] else Value.Set([])
+                    let other = match other_val:
+                        Value.Set(s): s
+                        Value.Array(a): a
+                        _: throw "union: expected set or array"
+                    var result = elements
+                    var i = 0
+                    while i < other.length:
+                        if not result.contains(other[i]):
+                            result.append(other[i])
+                        i = i + 1
+                    Value.Set(result)
+                "intersection":
+                    let other_val = args[0] else Value.Set([])
+                    let other = match other_val:
+                        Value.Set(s): s
+                        Value.Array(a): a
+                        _: throw "intersection: expected set or array"
+                    var result = []
+                    var i = 0
+                    while i < elements.length:
+                        if other.contains(elements[i]):
+                            result.append(elements[i])
+                        i = i + 1
+                    Value.Set(result)
+                "difference":
+                    let other_val = args[0] else Value.Set([])
+                    let other = match other_val:
+                        Value.Set(s): s
+                        Value.Array(a): a
+                        _: throw "difference: expected set or array"
+                    var result = []
+                    var i = 0
+                    while i < elements.length:
+                        if not other.contains(elements[i]):
+                            result.append(elements[i])
+                        i = i + 1
+                    Value.Set(result)
+                "isSubset":
+                    let other_val = args[0] else Value.Set([])
+                    let other = match other_val:
+                        Value.Set(s): s
+                        Value.Array(a): a
+                        _: throw "isSubset: expected set or array"
+                    var all_in = true
+                    var i = 0
+                    while i < elements.length and all_in:
+                        if not other.contains(elements[i]):
+                            all_in = false
+                        i = i + 1
+                    Value.Bool(all_in)
+                "isSuperset":
+                    let other_val = args[0] else Value.Set([])
+                    let other = match other_val:
+                        Value.Set(s): s
+                        Value.Array(a): a
+                        _: throw "isSuperset: expected set or array"
+                    var all_in = true
+                    var i = 0
+                    while i < other.length and all_in:
+                        if not elements.contains(other[i]):
+                            all_in = false
+                        i = i + 1
+                    Value.Bool(all_in)
+                "isEmpty":
+                    Value.Bool(elements.length == 0)
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Int(n):
+            match method_name:
+                "abs":
+                    if n < 0:
+                        Value.Int(0 - n)
+                    else:
+                        Value.Int(n)
+                "sqrt":
+                    Value.Float(n.sqrt())
+                "floor":
+                    Value.Int(n)
+                "ceil":
+                    Value.Int(n)
+                "round":
+                    Value.Int(n)
+                "toStr":
+                    Value.Str("{n}")
+                "toBin":
+                    Value.Str(n.toBin())
+                "toHex":
+                    Value.Str(n.toHex())
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Float(f):
+            match method_name:
+                "abs":
+                    if f < 0.0:
+                        Value.Float(0.0 - f)
+                    else:
+                        Value.Float(f)
+                "sqrt":
+                    Value.Float(f.sqrt())
+                "floor":
+                    Value.Int(f.floor())
+                "ceil":
+                    Value.Int(f.ceil())
+                "round":
+                    Value.Int(f.round())
+                "toStr":
+                    Value.Str("{f}")
+                "toBin":
+                    Value.Str(f.floor().toBin())
+                "toHex":
+                    Value.Str(f.floor().toHex())
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        Value.Range(start, end, step):
+            match method_name:
+                "toArray":
+                    var result = []
+                    var i = start
+                    let s = if step == nil: 1 else: step!
+                    while i < end:
+                        result.append(Value.Int(i))
+                        i = i + s
+                    Value.Array(result)
+                "contains":
+                    let val = args[0] else Value.Nil
+                    match val:
+                        Value.Int(n):
+                            let s = if step == nil: 1 else: step!
+                            var found = false
+                            var i = start
+                            while i < end and not found:
+                                if i == n:
+                                    found = true
+                                i = i + s
+                            Value.Bool(found)
+                        _: Value.Bool(false)
+                "length":
+                    let s = if step == nil: 1 else: step!
+                    let len = (end - start + s - 1) / s
+                    Value.Int(if len < 0: 0 else: len)
+                "step":
+                    let s_val = args[0] else Value.Int(1)
+                    match s_val:
+                        Value.Int(sv): Value.Range(start, end, sv)
+                        _: throw "step: expected int argument"
+                _:
+                    throw "unknown method {method_name} on {val_type_name(recv)}"
+
+        _:
+            throw "unknown method {method_name} on {val_type_name(recv)}"

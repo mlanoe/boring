@@ -1,0 +1,136 @@
+# == TOKENS ==
+
+enum RawInterpPart:
+    Lit(string s)
+    Hole(string expr)
+    HoleFormatted(string expr, string fmt)
+
+enum TokenKind:
+    # Literals
+    Int(int n)
+    Float(float f)
+    Str(string s)
+    StringInterp([RawInterpPart] parts)
+    Bool(bool b)
+    Nil
+
+    # Identifier
+    Ident(string name)
+
+    # Keywords
+    Let
+    Var
+    Def
+    Return
+    If
+    Elif
+    Else
+    Match
+    While
+    Do
+    Loop
+    Wait
+    For
+    In
+    Break
+    Continue
+    Struct
+    Enum
+    Trait
+    Use
+    Ext
+    As
+    And
+    Or
+    Not
+    Is
+    SelfKw
+    Throw
+    Throws
+    Try
+    Catch
+    Defer
+    Void
+    Pub
+    Guard
+    Task
+    Join
+    Stream
+    Yield
+    Static
+    Type
+    Req
+    Transient
+    With
+    Get
+    Set
+    Init
+    Pass
+    Native
+    Mod
+
+    # Operators
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    Eq
+    EqEq
+    EqEqEq
+    BangEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+    Dot
+    DotDot
+    DotDotEq
+    DotDotDot
+    Question
+    QuestionDot
+    Bang
+    Tick
+
+    # Bitwise operators
+    Ampersand
+    Pipe
+    Caret
+    Tilde
+
+    # Compound assignment
+    PlusEq
+    MinusEq
+    StarEq
+    SlashEq
+    PercentEq
+    AmpersandEq
+    PipeEq
+    CaretEq
+    QuestionEq
+    PipeArrow
+
+    # Delimiters
+    LParen
+    RParen
+    LBracket
+    RBracket
+    LBrace
+    RBrace
+    Comma
+    Colon
+    At
+
+    # Layout
+    Newline
+    Semicolon
+    Indent
+    Dedent
+    Eof
+
+    # Comment
+    Comment(string text)
+
+struct Token:
+    TokenKind kind
+    int line

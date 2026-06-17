@@ -1,0 +1,1213 @@
+# == EVAL EXPR ==
+
+# Environment helpers
+
+def Value env_get(Interpreter'actor interp, string name) throws:
+    let env = interp.env
+    let result = env.get(name)
+    if let val = result:
+        val
+    else:
+        throw "undefined variable '{name}'"
+
+def void env_set(Interpreter'actor interp, string name, Value val) throws:
+    let env = interp.env
+    let ok = env.set(name, val)
+    if not ok:
+        throw "cannot assign to undefined variable '{name}'"
+
+def void env_define(Interpreter'actor interp, string name, Value val, bool is_mutable):
+    interp.env.define(name, val, is_mutable)
+
+def Env'actor push_scope(Interpreter'actor interp):
+    let child = Env.child(interp.env)
+    interp.env = child
+    child
+
+def void pop_scope(Interpreter'actor interp):
+    let parent = interp.env.parent
+    if let p = parent:
+        interp.env = p
+
+# Main expression evaluator
+
+def Value eval_expr(Interpreter'actor interp, Expr expr) throws:
+    match expr.kind:
+        # Literals
+        ExprKind.Int(n):
+            Value.Int(n)
+        ExprKind.Float(f):
+            Value.Float(f)
+        ExprKind.Str(s):
+            Value.Str(s)
+        ExprKind.Bool(b):
+            Value.Bool(b)
+        ExprKind.Nil:
+            Value.Nil
+
+        # Variable lookup
+        ExprKind.Var(name):
+            let result = interp.env.get(name)
+            if let val = result:
+                match val:
+                    Value.Uninitialized:
+                        throw "variable '{name}' used before being assigned"
+                    _:
+                        val
+            else:
+                # Check implicit self field access
+                let self_opt = interp.env.get("self")
+                if let self_val = self_opt:
+                    match self_val:
+                        Value.Object(obj):
+                            let field_opt = obj.get_field(name)
+                            if let fval = field_opt:
+                                fval
+                            else:
+                                throw "undefined variable '{name}'"
+                        _:
+                            throw "undefined variable '{name}'"
+                else:
+                    throw "undefined variable '{name}'"
+
+        # Binary operations
+        ExprKind.BinOp(op, left, right):
+            eval_binop(interp, op, left, right)
+
+        # Unary operations
+        ExprKind.UnaryOp(op, inner):
+            let val = eval_expr(interp, inner)
+            match op:
+                UnaryOp.Neg:
+                    match val:
+                        Value.Int(n):
+                            Value.Int(0 - n)
+                        Value.Float(f):
+                            Value.Float(0.0 - f)
+                        _:
+                            throw "cannot negate {val.type_name()}"
+                UnaryOp.Not:
+                    match val:
+                        Value.Bool(b):
+                            Value.Bool(not b)
+                        _:
+                            throw "expected bool for 'not', got {val.type_name()}"
+                UnaryOp.Force:
+                    match val:
+                        Value.Nil:
+                            throw "force-unwrap of nil value"
+                        other:
+                            other
+
+        # Function/constructor call
+        ExprKind.Call(callee_expr, args):
+            let callee = eval_expr(interp, callee_expr)
+            let arg_vals = eval_args(interp, args)
+            call_value(interp, callee, arg_vals)
+
+        # Method call
+        ExprKind.MethodCall(recv_expr, method, args):
+            let recv = eval_expr(interp, recv_expr)
+            let arg_vals = eval_args(interp, args)
+            call_method(interp, recv, method, arg_vals)
+
+        # Field access
+        ExprKind.Field(obj_expr, field_name):
+            let obj = eval_expr(interp, obj_expr)
+            get_field(interp, obj, field_name)
+
+        # Index access
+        ExprKind.Index(obj_expr, idx_expr):
+            let obj = eval_expr(interp, obj_expr)
+            let idx = eval_expr(interp, idx_expr)
+            get_index(interp, obj, idx)
+
+        # Array literal
+        ExprKind.ArrayLit(items):
+            var vals = []
+            for item in items:
+                vals.append(eval_expr(interp, item))
+            Value.Array(vals)
+
+        # Dict literal
+        ExprKind.DictLit(pairs):
+            var entries = []
+            for pair in pairs:
+                let k = eval_expr(interp, pair.key)
+                let v = eval_expr(interp, pair.value)
+                entries.append(DictEntry(k, v))
+            Value.Dict(entries)
+
+        # Set literal
+        ExprKind.SetLit(items):
+            var vals = []
+            for item in items:
+                let v = eval_expr(interp, item)
+                if not vals.contains(v):
+                    vals.append(v)
+            Value.Set(vals)
+
+        # String interpolation
+        ExprKind.StringInterp(parts, exprs):
+            var result = ""
+            var expr_idx = 0
+            for part in parts:
+                match part:
+                    StringPart.Lit(s):
+                        result = result + s
+                    StringPart.Hole:
+                        if expr_idx < exprs.length:
+                            let v = eval_expr(interp, exprs[expr_idx])
+                            result = result + display_value(interp, v)
+                            expr_idx = expr_idx + 1
+            Value.Str(result)
+
+        # Closure
+        ExprKind.Closure(params, body):
+            Value.Closure(params, body, interp.env)
+
+        # Type cast
+        ExprKind.Cast(inner_expr, ty):
+            let val = eval_expr(interp, inner_expr)
+            cast_value(interp, val, ty)
+
+        # Range
+        ExprKind.Range(start_expr, end_expr, inclusive):
+            let s = eval_expr(interp, start_expr)
+            let e = eval_expr(interp, end_expr)
+            match s:
+                Value.Int(a):
+                    match e:
+                        Value.Int(b):
+                            Value.Range(a, b, inclusive)
+                        _:
+                            throw "range end must be Int, got {e.type_name()}"
+                _:
+                    throw "range start must be Int, got {s.type_name()}"
+
+        # If expression
+        ExprKind.IfExpr(cond_expr, then_expr, else_expr):
+            let cond_val = eval_expr(interp, cond_expr)
+            match cond_val:
+                Value.Bool(b):
+                    if b:
+                        eval_expr(interp, then_expr)
+                    else:
+                        if let else_e = else_expr:
+                            eval_expr(interp, else_e)
+                        else:
+                            Value.Nil
+                _:
+                    throw "condition must be bool, got {cond_val.type_name()}"
+
+        # Runtime type check
+        ExprKind.Is(inner_expr, ty):
+            let val = eval_expr(interp, inner_expr)
+            let result = value_is_type(interp, val, ty)
+            Value.Bool(result)
+
+        _:
+            throw "unhandled expression kind"
+
+# Evaluate a list of call arguments
+def [Value] eval_args(Interpreter'actor interp, [Expr] args) throws:
+    var vals = []
+    for arg in args:
+        vals.append(eval_expr(interp, arg))
+    vals
+
+# Binary operation dispatch
+def Value eval_binop(Interpreter'actor interp, BinOp op, Expr lhs, Expr rhs) throws:
+    # Short-circuit logical ops
+    match op:
+        BinOp.And:
+            let l = eval_expr(interp, lhs)
+            match l:
+                Value.Bool(false):
+                    Value.Bool(false)
+                Value.Bool(true):
+                    let r = eval_expr(interp, rhs)
+                    match r:
+                        Value.Bool(b):
+                            Value.Bool(b)
+                        _:
+                            throw "right side of 'and' must be bool"
+                _:
+                    throw "left side of 'and' must be bool"
+        BinOp.Or:
+            let l = eval_expr(interp, lhs)
+            match l:
+                Value.Bool(true):
+                    Value.Bool(true)
+                Value.Bool(false):
+                    let r = eval_expr(interp, rhs)
+                    match r:
+                        Value.Bool(b):
+                            Value.Bool(b)
+                        _:
+                            throw "right side of 'or' must be bool"
+                _:
+                    throw "left side of 'or' must be bool"
+        _:
+            let l = eval_expr(interp, lhs)
+            let r = eval_expr(interp, rhs)
+            apply_binop(op, l, r)
+
+# Apply a binary operator to two already-evaluated values
+def Value apply_binop(BinOp op, Value l, Value r) throws:
+    match op:
+        BinOp.Add:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a + b)
+                        Value.Float(b):
+                            Value.Float(a as float + b)
+                        _:
+                            throw "cannot add Int and {r.type_name()}"
+                Value.Float(a):
+                    match r:
+                        Value.Float(b):
+                            Value.Float(a + b)
+                        Value.Int(b):
+                            Value.Float(a + b as float)
+                        _:
+                            throw "cannot add Float and {r.type_name()}"
+                Value.Str(a):
+                    match r:
+                        Value.Str(b):
+                            Value.Str(a + b)
+                        _:
+                            throw "cannot add String and {r.type_name()}"
+                Value.Array(a):
+                    match r:
+                        Value.Array(b):
+                            var merged = a
+                            for item in b:
+                                merged.append(item)
+                            Value.Array(merged)
+                        _:
+                            throw "cannot add Array and {r.type_name()}"
+                _:
+                    throw "cannot add {l.type_name()} and {r.type_name()}"
+        BinOp.Sub:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a - b)
+                        Value.Float(b):
+                            Value.Float(a as float - b)
+                        _:
+                            throw "cannot subtract {r.type_name()} from Int"
+                Value.Float(a):
+                    match r:
+                        Value.Float(b):
+                            Value.Float(a - b)
+                        Value.Int(b):
+                            Value.Float(a - b as float)
+                        _:
+                            throw "cannot subtract {r.type_name()} from Float"
+                _:
+                    throw "cannot subtract {r.type_name()} from {l.type_name()}"
+        BinOp.Mul:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a * b)
+                        Value.Float(b):
+                            Value.Float(a as float * b)
+                        _:
+                            throw "cannot multiply Int by {r.type_name()}"
+                Value.Float(a):
+                    match r:
+                        Value.Float(b):
+                            Value.Float(a * b)
+                        Value.Int(b):
+                            Value.Float(a * b as float)
+                        _:
+                            throw "cannot multiply Float by {r.type_name()}"
+                _:
+                    throw "cannot multiply {l.type_name()} and {r.type_name()}"
+        BinOp.Div:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            if b == 0:
+                                throw "division by zero"
+                            Value.Int(a / b)
+                        Value.Float(b):
+                            Value.Float(a as float / b)
+                        _:
+                            throw "cannot divide Int by {r.type_name()}"
+                Value.Float(a):
+                    match r:
+                        Value.Float(b):
+                            Value.Float(a / b)
+                        Value.Int(b):
+                            Value.Float(a / b as float)
+                        _:
+                            throw "cannot divide Float by {r.type_name()}"
+                _:
+                    throw "cannot divide {l.type_name()} by {r.type_name()}"
+        BinOp.Rem:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            if b == 0:
+                                throw "remainder by zero"
+                            Value.Int(a % b)
+                        _:
+                            throw "cannot remainder Int by {r.type_name()}"
+                Value.Float(a):
+                    match r:
+                        Value.Float(b):
+                            Value.Float(a % b)
+                        Value.Int(b):
+                            Value.Float(a % b as float)
+                        _:
+                            throw "cannot remainder Float by {r.type_name()}"
+                _:
+                    throw "cannot remainder {l.type_name()} by {r.type_name()}"
+        BinOp.Eq:
+            Value.Bool(l == r)
+        BinOp.NotEq:
+            Value.Bool(l != r)
+        BinOp.Lt:
+            Value.Bool(compare_values(l, r) < 0)
+        BinOp.Gt:
+            Value.Bool(compare_values(l, r) > 0)
+        BinOp.LtEq:
+            Value.Bool(compare_values(l, r) <= 0)
+        BinOp.GtEq:
+            Value.Bool(compare_values(l, r) >= 0)
+        BinOp.BitAnd:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a & b)
+                        _:
+                            throw "bitwise-and requires Int operands"
+                _:
+                    throw "bitwise-and requires Int operands"
+        BinOp.BitOr:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a | b)
+                        _:
+                            throw "bitwise-or requires Int operands"
+                _:
+                    throw "bitwise-or requires Int operands"
+        BinOp.BitXor:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            Value.Int(a ^ b)
+                        _:
+                            throw "bitwise-xor requires Int operands"
+                _:
+                    throw "bitwise-xor requires Int operands"
+        BinOp.Shl:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            if b < 0:
+                                throw "shift amount cannot be negative"
+                            Value.Int(a << b)
+                        _:
+                            throw "shift requires Int operands"
+                _:
+                    throw "shift requires Int operands"
+        BinOp.Shr:
+            match l:
+                Value.Int(a):
+                    match r:
+                        Value.Int(b):
+                            if b < 0:
+                                throw "shift amount cannot be negative"
+                            Value.Int(a >> b)
+                        _:
+                            throw "shift requires Int operands"
+                _:
+                    throw "shift requires Int operands"
+        BinOp.Is:
+            match r:
+                Value.Nil:
+                    Value.Bool(l == Value.Nil)
+                _:
+                    Value.Bool(l.type_name() == r.type_name())
+        BinOp.And:
+            throw "And handled by short-circuit path"
+        BinOp.Or:
+            throw "Or handled by short-circuit path"
+
+# Compare two values: returns negative/zero/positive
+req int compare_values(Value l, Value r) throws:
+    match l:
+        Value.Int(a):
+            match r:
+                Value.Int(b):
+                    if a < b: -1
+                    else if a > b: 1
+                    else: 0
+                Value.Float(b):
+                    let af = a as float
+                    if af < b: -1
+                    else if af > b: 1
+                    else: 0
+                _:
+                    throw "cannot compare Int and {r.type_name()}"
+        Value.Float(a):
+            match r:
+                Value.Float(b):
+                    if a < b: -1
+                    else if a > b: 1
+                    else: 0
+                Value.Int(b):
+                    let bf = b as float
+                    if a < bf: -1
+                    else if a > bf: 1
+                    else: 0
+                _:
+                    throw "cannot compare Float and {r.type_name()}"
+        Value.Str(a):
+            match r:
+                Value.Str(b):
+                    if a < b: -1
+                    else if a > b: 1
+                    else: 0
+                _:
+                    throw "cannot compare String and {r.type_name()}"
+        _:
+            throw "cannot compare {l.type_name()} and {r.type_name()}"
+
+# Field access on a value
+def Value get_field(Interpreter'actor interp, Value obj, string field_name) throws:
+    match obj:
+        Value.Object(inner):
+            let val_opt = inner.get_field(field_name)
+            if let v = val_opt:
+                v
+            else:
+                throw "no field '{field_name}' on object of type {inner.type_name}"
+        Value.EnumVariant(type_name, variant, fields):
+            if field_name == "type":
+                Value.Str(type_name)
+            else if field_name == "variant":
+                Value.Str(variant)
+            else:
+                throw "cannot access field '{field_name}' on enum variant"
+        Value.Nil:
+            throw "field access on nil"
+        _:
+            throw "cannot access field '{field_name}' on {obj.type_name()}"
+
+# Index access on a value
+def Value get_index(Interpreter'actor interp, Value obj, Value idx) throws:
+    match obj:
+        Value.Array(items):
+            match idx:
+                Value.Int(i):
+                    if i < 0 or i >= items.length:
+                        throw "array index {i} out of bounds (length {items.length})"
+                    items[i]
+                _:
+                    throw "array index must be Int, got {idx.type_name()}"
+        Value.Dict(entries):
+            for entry in entries:
+                if entry.key == idx:
+                    entry.value
+            throw "key not found in dict"
+        Value.Str(s):
+            match idx:
+                Value.Int(i):
+                    if i < 0 or i >= s.length:
+                        throw "string index {i} out of bounds"
+                    Value.Str(s.char_at(i))
+                _:
+                    throw "string index must be Int, got {idx.type_name()}"
+        Value.Range(start, end, inclusive):
+            match idx:
+                Value.Int(i):
+                    let actual = start + i
+                    let limit = if inclusive: end + 1 else end
+                    if actual >= limit:
+                        throw "range index {i} out of bounds"
+                    Value.Int(actual)
+                _:
+                    throw "range index must be Int"
+        _:
+            throw "cannot index into {obj.type_name()}"
+
+# Call a value (function, closure, constructor)
+def Value call_value(Interpreter'actor interp, Value callee, [Value] args) throws:
+    match callee:
+        Value.Fn(decl, captured_env):
+            call_fn(interp, decl, captured_env, args)
+        Value.Closure(params, body, captured_env):
+            call_closure(interp, params, body, captured_env, args)
+        Value.Struct(decl, captured_env):
+            instantiate_struct(interp, decl, args)
+        Value.EnumVariant(type_name, variant, _):
+            Value.EnumVariant(type_name, variant, args)
+        Value.NativeFn(func):
+            func(args)
+        _:
+            throw "'{callee.type_name()}' is not callable"
+
+# Call a method on a receiver value
+def Value call_method(Interpreter'actor interp, Value recv, string method, [Value] args) throws:
+    match recv:
+        Value.Object(obj):
+            call_object_method(interp, obj, method, args)
+        Value.Array(items):
+            call_array_method(interp, items, method, args)
+        Value.Str(s):
+            call_string_method(s, method, args)
+        Value.Dict(entries):
+            call_dict_method(interp, entries, method, args)
+        Value.Set(items):
+            call_set_method(interp, items, method, args)
+        Value.Int(n):
+            call_int_method(n, method, args)
+        Value.Float(f):
+            call_float_method(f, method, args)
+        _:
+            throw "no method '{method}' on {recv.type_name()}"
+
+# Call built-in array methods
+def Value call_array_method(Interpreter'actor interp, [Value] items, string method, [Value] args) throws:
+    match method:
+        "length":
+            Value.Int(items.length)
+        "append":
+            if args.length != 1:
+                throw "append takes 1 argument"
+            items.append(args[0])
+            Value.Nil
+        "pop":
+            if items.length == 0:
+                throw "pop on empty array"
+            items.pop()
+        "get":
+            if args.length == 0:
+                throw "get requires index argument"
+            match args[0]:
+                Value.Int(i):
+                    if i < 0 or i >= items.length:
+                        Value.Nil
+                    else:
+                        items[i]
+                _:
+                    throw "get index must be Int"
+        "contains":
+            if args.length != 1:
+                throw "contains takes 1 argument"
+            Value.Bool(items.contains(args[0]))
+        "first":
+            if items.length == 0:
+                Value.Nil
+            else:
+                items[0]
+        "last":
+            if items.length == 0:
+                Value.Nil
+            else:
+                items[items.length - 1]
+        "reverse":
+            var rev = []
+            var i = items.length - 1
+            while i >= 0:
+                rev.append(items[i])
+                i = i - 1
+            Value.Array(rev)
+        "join":
+            let sep = if args.length > 0:
+                match args[0]:
+                    Value.Str(s): s
+                    _: ""
+            else:
+                ""
+            var result = ""
+            var idx = 0
+            while idx < items.length:
+                if idx > 0:
+                    result = result + sep
+                match items[idx]:
+                    Value.Str(s):
+                        result = result + s
+                    other:
+                        result = result + display_value(interp, other)
+                idx = idx + 1
+            Value.Str(result)
+        _:
+            throw "no method '{method}' on Array"
+
+# Call built-in string methods
+def Value call_string_method(string s, string method, [Value] args) throws:
+    match method:
+        "length":
+            Value.Int(s.length)
+        "contains":
+            if args.length != 1:
+                throw "contains takes 1 argument"
+            match args[0]:
+                Value.Str(sub):
+                    Value.Bool(s.contains(sub))
+                _:
+                    throw "contains argument must be string"
+        "starts_with":
+            if args.length != 1:
+                throw "starts_with takes 1 argument"
+            match args[0]:
+                Value.Str(prefix):
+                    Value.Bool(s.starts_with(prefix))
+                _:
+                    throw "starts_with argument must be string"
+        "ends_with":
+            if args.length != 1:
+                throw "ends_with takes 1 argument"
+            match args[0]:
+                Value.Str(suffix):
+                    Value.Bool(s.ends_with(suffix))
+                _:
+                    throw "ends_with argument must be string"
+        "to_upper":
+            Value.Str(s.to_upper())
+        "to_lower":
+            Value.Str(s.to_lower())
+        "trim":
+            Value.Str(s.trim())
+        "split":
+            if args.length != 1:
+                throw "split takes 1 argument"
+            match args[0]:
+                Value.Str(sep):
+                    let parts = s.split(sep)
+                    var result = []
+                    for p in parts:
+                        result.append(Value.Str(p))
+                    Value.Array(result)
+                _:
+                    throw "split argument must be string"
+        "replace":
+            if args.length != 2:
+                throw "replace takes 2 arguments"
+            match args[0]:
+                Value.Str(from):
+                    match args[1]:
+                        Value.Str(to):
+                            Value.Str(s.replace(from, to))
+                        _:
+                            throw "replace second argument must be string"
+                _:
+                    throw "replace first argument must be string"
+        "parse_int":
+            let n = s.parse_int()
+            if let v = n:
+                Value.Int(v)
+            else:
+                Value.Nil
+        "parse_float":
+            let f = s.parse_float()
+            if let v = f:
+                Value.Float(v)
+            else:
+                Value.Nil
+        _:
+            throw "no method '{method}' on String"
+
+# Call built-in dict methods
+def Value call_dict_method(Interpreter'actor interp, [{string=Value}] entries, string method, [Value] args) throws:
+    match method:
+        "get":
+            if args.length < 1:
+                throw "get requires key argument"
+            let key = args[0]
+            let default_val = if args.length > 1: args[1] else: Value.Nil
+            for entry in entries:
+                if entry.key == key:
+                    entry.value
+            default_val
+        "set":
+            if args.length != 2:
+                throw "set requires key and value"
+            let key = args[0]
+            let val = args[1]
+            var found = false
+            for entry in entries:
+                if entry.key == key:
+                    entry.value = val
+                    found = true
+            if not found:
+                entries.append(DictEntry(key, val))
+            Value.Nil
+        "contains_key":
+            if args.length != 1:
+                throw "contains_key takes 1 argument"
+            let key = args[0]
+            var result = false
+            for entry in entries:
+                if entry.key == key:
+                    result = true
+            Value.Bool(result)
+        "keys":
+            var result = []
+            for entry in entries:
+                result.append(entry.key)
+            Value.Array(result)
+        "values":
+            var result = []
+            for entry in entries:
+                result.append(entry.value)
+            Value.Array(result)
+        "length":
+            Value.Int(entries.length)
+        _:
+            throw "no method '{method}' on Dict"
+
+# Call built-in set methods
+def Value call_set_method(Interpreter'actor interp, [Value] items, string method, [Value] args) throws:
+    match method:
+        "contains":
+            if args.length != 1:
+                throw "contains takes 1 argument"
+            Value.Bool(items.contains(args[0]))
+        "insert":
+            if args.length != 1:
+                throw "insert takes 1 argument"
+            if not items.contains(args[0]):
+                items.append(args[0])
+            Value.Nil
+        "remove":
+            if args.length != 1:
+                throw "remove takes 1 argument"
+            var result = []
+            for item in items:
+                if item != args[0]:
+                    result.append(item)
+            items = result
+            Value.Nil
+        "length":
+            Value.Int(items.length)
+        _:
+            throw "no method '{method}' on Set"
+
+# Call built-in int methods
+def Value call_int_method(int n, string method, [Value] args) throws:
+    match method:
+        "abs":
+            if n < 0:
+                Value.Int(0 - n)
+            else:
+                Value.Int(n)
+        "to_string":
+            Value.Str("{n}")
+        "as_float":
+            Value.Float(n as float)
+        _:
+            throw "no method '{method}' on Int"
+
+# Call built-in float methods
+def Value call_float_method(float f, string method, [Value] args) throws:
+    match method:
+        "abs":
+            if f < 0.0:
+                Value.Float(0.0 - f)
+            else:
+                Value.Float(f)
+        "floor":
+            Value.Int(f.floor())
+        "ceil":
+            Value.Int(f.ceil())
+        "round":
+            Value.Int(f.round())
+        "to_string":
+            Value.Str("{f}")
+        "sqrt":
+            Value.Float(f.sqrt())
+        _:
+            throw "no method '{method}' on Float"
+
+# Type cast
+def Value cast_value(Interpreter'actor interp, Value val, TypeRef ty) throws:
+    let type_name = ty.name
+    match type_name:
+        "int":
+            match val:
+                Value.Int(n): Value.Int(n)
+                Value.Float(f): Value.Int(f as int)
+                Value.Bool(b): if b: Value.Int(1) else: Value.Int(0)
+                Value.Str(s):
+                    let n = s.parse_int()
+                    if let v = n: Value.Int(v)
+                    else: throw "cannot cast string '{s}' to int"
+                _: throw "cannot cast {val.type_name()} to int"
+        "float":
+            match val:
+                Value.Float(f): Value.Float(f)
+                Value.Int(n): Value.Float(n as float)
+                Value.Str(s):
+                    let f = s.parse_float()
+                    if let v = f: Value.Float(v)
+                    else: throw "cannot cast string '{s}' to float"
+                _: throw "cannot cast {val.type_name()} to float"
+        "string":
+            Value.Str(display_value(interp, val))
+        "bool":
+            match val:
+                Value.Bool(b): Value.Bool(b)
+                Value.Int(n): Value.Bool(n != 0)
+                Value.Nil: Value.Bool(false)
+                _: Value.Bool(true)
+        _:
+            throw "unknown cast target type '{type_name}'"
+
+# Runtime type check
+req bool value_is_type(Interpreter'actor interp, Value val, TypeRef ty) throws:
+    let type_name = ty.name
+    match type_name:
+        "int": match val: Value.Int(_): true _: false
+        "float": match val: Value.Float(_): true _: false
+        "string": match val: Value.Str(_): true _: false
+        "bool": match val: Value.Bool(_): true _: false
+        "nil": match val: Value.Nil: true _: false
+        _:
+            val.type_name() == type_name
+
+# Display a value as string for interpolation
+req string display_value(Interpreter'actor interp, Value val):
+    match val:
+        Value.Nil: "nil"
+        Value.Bool(b): if b: "true" else: "false"
+        Value.Int(n): "{n}"
+        Value.Float(f): "{f}"
+        Value.Str(s): s
+        Value.Array(items):
+            var result = "["
+            var i = 0
+            while i < items.length:
+                if i > 0:
+                    result = result + ", "
+                result = result + display_value(interp, items[i])
+                i = i + 1
+            result + "]"
+        Value.Dict(entries):
+            var result = "{{"
+            var i = 0
+            while i < entries.length:
+                if i > 0:
+                    result = result + ", "
+                result = result + display_value(interp, entries[i].key) + ": " + display_value(interp, entries[i].value)
+                i = i + 1
+            result + "}}"
+        Value.Object(obj):
+            obj.type_name
+        Value.EnumVariant(type_name, variant, fields):
+            if fields.length == 0:
+                "{type_name}.{variant}"
+            else:
+                var result = "{type_name}.{variant}("
+                var i = 0
+                while i < fields.length:
+                    if i > 0:
+                        result = result + ", "
+                    result = result + display_value(interp, fields[i])
+                    i = i + 1
+                result + ")"
+        _:
+            "<value>"
+
+# Call a method on a struct object
+def Value call_object_method(Interpreter'actor interp, Object'actor obj, string method, [Value] args) throws:
+    let type_name = obj.type_name
+    let method_decl_opt = interp.find_method(type_name, method)
+    if let method_decl = method_decl_opt:
+        let child_env = push_scope(interp)
+        env_define(interp, "self", Value.Object(obj), false)
+        var i = 0
+        while i < method_decl.params.length and i < args.length:
+            let param = method_decl.params[i]
+            env_define(interp, param.name, args[i], param.is_mutable)
+            i = i + 1
+        let result = eval_block(interp, method_decl.body)
+        pop_scope(interp)
+        result
+    else:
+        throw "no method '{method}' on type '{type_name}'"
+
+# Evaluate a function call
+def Value call_fn(Interpreter'actor interp, FnDecl decl, Env'actor captured_env, [Value] args) throws:
+    let saved_env = interp.env
+    interp.env = Env.child(captured_env)
+    var i = 0
+    while i < decl.params.length and i < args.length:
+        let param = decl.params[i]
+        env_define(interp, param.name, args[i], param.is_mutable)
+        i = i + 1
+    let result = eval_block(interp, decl.body)
+    interp.env = saved_env
+    result
+
+# Evaluate a closure call
+def Value call_closure(Interpreter'actor interp, [string] params, [Stmt] body, Env'actor captured_env, [Value] args) throws:
+    let saved_env = interp.env
+    interp.env = Env.child(captured_env)
+    var i = 0
+    while i < params.length and i < args.length:
+        env_define(interp, params[i], args[i], false)
+        i = i + 1
+    let result = eval_block(interp, body)
+    interp.env = saved_env
+    result
+
+# Evaluate a block of statements, returning the last expression value
+def Value eval_block(Interpreter'actor interp, [Stmt] stmts) throws:
+    var last = Value.Nil
+    var i = 0
+    while i < stmts.length:
+        let stmt = stmts[i]
+        if i == stmts.length - 1:
+            last = eval_stmt_as_expr(interp, stmt)
+        else:
+            exec_stmt(interp, stmt)
+        i = i + 1
+    last
+
+# Execute a statement (side-effects only)
+def void exec_stmt(Interpreter'actor interp, Stmt stmt) throws:
+    match stmt:
+        Stmt.Expr(e):
+            eval_expr(interp, e)
+        Stmt.Let(name, expr, is_mutable):
+            let val = eval_expr(interp, expr)
+            env_define(interp, name, val, is_mutable)
+        Stmt.Return(expr_opt):
+            if let e = expr_opt:
+                let val = eval_expr(interp, e)
+                throw ReturnSignal(val)
+            else:
+                throw ReturnSignal(Value.Nil)
+        Stmt.While(cond, body):
+            var running = true
+            while running:
+                let cond_val = eval_expr(interp, cond)
+                match cond_val:
+                    Value.Bool(b):
+                        if b:
+                            let child = push_scope(interp)
+                            eval_block(interp, body)
+                            pop_scope(interp)
+                        else:
+                            running = false
+                    _:
+                        throw "while condition must be bool"
+        Stmt.For(var_name, iter_expr, body):
+            let iter_val = eval_expr(interp, iter_expr)
+            match iter_val:
+                Value.Array(items):
+                    for item in items:
+                        let child = push_scope(interp)
+                        env_define(interp, var_name, item, false)
+                        eval_block(interp, body)
+                        pop_scope(interp)
+                Value.Range(start, end, inclusive):
+                    let limit = if inclusive: end + 1 else: end
+                    var n = start
+                    while n < limit:
+                        let child = push_scope(interp)
+                        env_define(interp, var_name, Value.Int(n), false)
+                        eval_block(interp, body)
+                        pop_scope(interp)
+                        n = n + 1
+                _:
+                    throw "for loop requires iterable, got {iter_val.type_name()}"
+        Stmt.Assign(target, expr):
+            let val = eval_expr(interp, expr)
+            assign_target(interp, target, val)
+        Stmt.Throw(expr):
+            let val = eval_expr(interp, expr)
+            throw ExceptionSignal(val)
+        _:
+            throw "unhandled statement kind"
+
+# Evaluate the last statement as an expression (for implicit return)
+def Value eval_stmt_as_expr(Interpreter'actor interp, Stmt stmt) throws:
+    match stmt:
+        Stmt.Expr(e):
+            eval_expr(interp, e)
+        Stmt.If(cond, then_body, else_body):
+            let cond_val = eval_expr(interp, cond)
+            match cond_val:
+                Value.Bool(b):
+                    if b:
+                        let child = push_scope(interp)
+                        let result = eval_block(interp, then_body)
+                        pop_scope(interp)
+                        result
+                    else:
+                        if let eb = else_body:
+                            let child = push_scope(interp)
+                            let result = eval_block(interp, eb)
+                            pop_scope(interp)
+                            result
+                        else:
+                            Value.Nil
+                _:
+                    throw "if condition must be bool"
+        Stmt.Match(subject_expr, arms):
+            let subject = eval_expr(interp, subject_expr)
+            eval_match(interp, subject, arms)
+        _:
+            exec_stmt(interp, stmt)
+            Value.Nil
+
+# Match evaluation
+def Value eval_match(Interpreter'actor interp, Value subject, [MatchArm] arms) throws:
+    for arm in arms:
+        let matched = try_match_pattern(interp, subject, arm.pattern)
+        if let bindings = matched:
+            if let guard = arm.guard:
+                let child = push_scope(interp)
+                for binding in bindings:
+                    env_define(interp, binding.name, binding.value, false)
+                let guard_val = eval_expr(interp, guard)
+                pop_scope(interp)
+                match guard_val:
+                    Value.Bool(true):
+                        let child2 = push_scope(interp)
+                        for binding in bindings:
+                            env_define(interp, binding.name, binding.value, false)
+                        let result = eval_block(interp, arm.body)
+                        pop_scope(interp)
+                        result
+                    _:
+                        continue
+            else:
+                let child = push_scope(interp)
+                for binding in bindings:
+                    env_define(interp, binding.name, binding.value, false)
+                let result = eval_block(interp, arm.body)
+                pop_scope(interp)
+                result
+    Value.Nil
+
+# Try to match a value against a pattern, returning bindings or nil
+req [Binding]? try_match_pattern(Interpreter'actor interp, Value subject, Pattern pat) throws:
+    match pat:
+        Pattern.Wildcard:
+            []
+        Pattern.Literal(lit_val):
+            if subject == lit_val:
+                []
+            else:
+                nil
+        Pattern.Var(name):
+            [Binding(name, subject)]
+        Pattern.EnumVariant(type_name, variant, sub_patterns):
+            match subject:
+                Value.EnumVariant(stype, svariant, sfields):
+                    if stype == type_name and svariant == variant:
+                        if sub_patterns.length == 0:
+                            []
+                        else if sub_patterns.length == sfields.length:
+                            var all_bindings = []
+                            var ok = true
+                            var i = 0
+                            while i < sub_patterns.length:
+                                let sub_match = try_match_pattern(interp, sfields[i], sub_patterns[i])
+                                if let sb = sub_match:
+                                    for b in sb:
+                                        all_bindings.append(b)
+                                else:
+                                    ok = false
+                                i = i + 1
+                            if ok: all_bindings else: nil
+                        else:
+                            nil
+                    else:
+                        nil
+                _:
+                    nil
+        Pattern.Tuple(sub_patterns):
+            match subject:
+                Value.Tuple(items):
+                    if items.length == sub_patterns.length:
+                        var all_bindings = []
+                        var ok = true
+                        var i = 0
+                        while i < sub_patterns.length:
+                            let sub_match = try_match_pattern(interp, items[i], sub_patterns[i])
+                            if let sb = sub_match:
+                                for b in sb:
+                                    all_bindings.append(b)
+                            else:
+                                ok = false
+                            i = i + 1
+                        if ok: all_bindings else: nil
+                    else:
+                        nil
+                _:
+                    nil
+        _:
+            nil
+
+# Assignment to a target expression
+def void assign_target(Interpreter'actor interp, Expr target, Value val) throws:
+    match target.kind:
+        ExprKind.Var(name):
+            let ok = interp.env.set(name, val)
+            if not ok:
+                throw "cannot assign to undefined variable '{name}'"
+        ExprKind.Field(obj_expr, field_name):
+            let obj = eval_expr(interp, obj_expr)
+            match obj:
+                Value.Object(inner):
+                    inner.set_field(field_name, val)
+                _:
+                    throw "cannot assign field on non-object"
+        ExprKind.Index(obj_expr, idx_expr):
+            let obj = eval_expr(interp, obj_expr)
+            let idx = eval_expr(interp, idx_expr)
+            match obj:
+                Value.Array(items):
+                    match idx:
+                        Value.Int(i):
+                            if i < 0 or i >= items.length:
+                                throw "array index {i} out of bounds"
+                            items[i] = val
+                        _:
+                            throw "array index must be Int"
+                _:
+                    throw "cannot index-assign into {obj.type_name()}"
+        _:
+            throw "invalid assignment target"
+
+# Instantiate a struct from constructor args
+def Value instantiate_struct(Interpreter'actor interp, StructDecl decl, [Value] args) throws:
+    var fields = []
+    var i = 0
+    while i < decl.fields.length and i < args.length:
+        let field = decl.fields[i]
+        fields.append(FieldEntry(field.name, args[i]))
+        i = i + 1
+    # Fill remaining fields with defaults
+    while i < decl.fields.length:
+        let field = decl.fields[i]
+        if let default_expr = field.default_val:
+            let dval = eval_expr(interp, default_expr)
+            fields.append(FieldEntry(field.name, dval))
+        else:
+            fields.append(FieldEntry(field.name, Value.Nil))
+        i = i + 1
+    let obj = Object.new(decl.name, fields)
+    Value.Object(obj)

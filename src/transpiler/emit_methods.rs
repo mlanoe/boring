@@ -11,6 +11,13 @@ impl Transpiler {
             }
         }
 
+        // .clone() — pass-through to Rust's Clone trait. Used in .br source when a value
+        // needs to be used multiple times (Boring has reference semantics; Rust needs explicit clone).
+        if method == "clone" && args.is_empty() {
+            let obj_s = self.emit_expr(obj);
+            return format!("{}.clone()", obj_s);
+        }
+
         // Task.cancelled() → __task_cancel.cancelled() (inside a cancellable task def fn)
         if method == "cancelled" && args.is_empty() {
             if let ExprKind::Var(v) = &obj.kind {
@@ -1389,12 +1396,12 @@ impl Transpiler {
                         }
                         _ => format!("{}{}", ref_prefix, emitted),
                     }
-                // Auto-ref: 'shared/'actor/'guard/'weak params are passed by reference.
-                // `var` (rebindable) params receive `&mut Arc<...>` instead of `&Arc<...>`.
-                // Exception: trait object wrappers (Rc<dyn Trait> / Arc<dyn Trait>) require
-                // an unsized coercion that only works on owned values — pass by value there.
-                } else if is_auto_ref_param(param_ty) && !self.is_trait_object_param(param_ty) {
-                    if param_rebindable { format!("&mut {}", emitted) } else { format!("&{}", emitted) }
+                // Qualified smart-pointer params ('shared/'actor/'guard/'weak) are passed by
+                // owned value — emit_let_value already handles Rc::clone / Arc::clone.
+                // Exception: trait object wrappers (Rc<dyn Trait> / Arc<dyn Trait>) also pass
+                // by value (unsized coercion requires an owned value anyway).
+                } else if is_auto_ref_param(param_ty) {
+                    emitted
                 // var (rebindable) 'stack/'heap param: out-parameter, pass &mut.
                 // Only applies to qualified user types — primitives (var int x) are mutable locals.
                 } else if param_rebindable && matches!(param_ty,

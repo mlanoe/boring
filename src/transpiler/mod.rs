@@ -1524,6 +1524,11 @@ impl Transpiler {
                     for m in &s.methods {
                         if m.task { self.instance_task_methods.insert(m.name.clone()); }
                         if m.throws { self.struct_method_throws.insert(m.name.clone()); }
+                        // Track return types for already_opt detection in emit_stmt.
+                        if let Some(ret_ty) = &m.return_ty {
+                            let key = format!("{}::{}", s.name, m.name);
+                            self.struct_method_return_types.insert(key, ret_ty.clone());
+                        }
                     }
                     // Detect overloaded inline methods — same logic as ext blocks.
                     for m in &s.methods {

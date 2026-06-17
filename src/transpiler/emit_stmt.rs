@@ -1209,16 +1209,8 @@ impl Transpiler {
         // Implicit Arc::clone for auto-ref parameters assigned to an owned context.
         // e.g. `counter = c` where `c: Counter'actor` (emitted as &Arc<Mutex<Counter>>)
         // and `counter` expects an owned Arc<Mutex<Counter>>.
-        if let ExprKind::Var(name) = &value.kind {
-            if self.auto_ref_params.contains(name.as_str()) {
-                // Clone when storing an auto-ref param into an owned field of the same qualifier.
-                // Exclude 'weak destination: assigning 'shared → 'weak needs Rc::downgrade, not clone.
-                if matches!(declared_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard))) {
-                    let clone_fn = if self.use_rc_str() { "Rc::clone" } else { "Arc::clone" };
-                    return format!("{}({})", clone_fn, name);
-                }
-            }
-        }
+        // Note: T'actor/'shared/'guard params are now by-value (owned clones at call site).
+        // The regular emit_let_value coercion paths below handle Rc::clone/Arc::clone correctly.
         // Resolve named type aliases through non_fn_type_aliases before dispatching.
         // e.g. `use Pt as LPoint'` makes `Pt` an alias for `Box<LPoint>`;
         // when calling `describe(p)` where describe expects `Pt`, we must Box::new() the arg.
@@ -1316,6 +1308,20 @@ impl Transpiler {
                     // A throws-propagated call (ending in `?`) in an Optional declared context
                     // is already Option<T> — the throws function returns Result<Option<T>>.
                     || (inner_val.ends_with("?") && matches!(&value.kind, ExprKind::Call(_, _)))
+                    // Free-function call whose declared return type is Option<T>
+                    || matches!(&value.kind, ExprKind::Call(callee, _)
+                        if matches!(&callee.kind, ExprKind::Var(fn_name)
+                            if self.fn_return_types.get(fn_name.as_str())
+                                .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
+                    // Method call where the struct method return type is Optional
+                    || matches!(&value.kind, ExprKind::MethodCall(recv, method, _)
+                        if matches!(&recv.kind, ExprKind::Var(v)
+                            if self.var_struct_types.get(v.as_str()).map(|sty| {
+                                self.struct_method_return_types
+                                    .get(&format!("{}::{}", sty, method))
+                                    .map(|t| matches!(t, Type::Optional(_)))
+                                    .unwrap_or(false)
+                            }).unwrap_or(false)))
                     // Field access on a known struct where the field type is Optional
                     || matches!(&value.kind, ExprKind::Field(obj, field_name) if {
                         let sn = match &obj.kind {
@@ -1447,13 +1453,13 @@ impl Transpiler {
                 let is_heap = self.arg_is_heap_var(value);
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => {
-                        let already_rc = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
-                            || matches!(&value.kind, ExprKind::Var(v)
+                        let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(");
+                        let is_existing_shared_var = matches!(&value.kind, ExprKind::Var(v)
                                 if matches!(self.var_types.get(v.as_str()),
                                     Some(Type::Qualified(_, OwnerQual::Shared))));
-                        if already_rc {
+                        if already_rc_expr {
                             inner
-                        } else if matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
+                        } else if is_existing_shared_var || matches!(&value.kind, ExprKind::Var(v) if self.rc_vars.contains(v.as_str())) {
                             format!("Rc::clone(&{})", inner)
                         } else if is_heap {
                             format!("Rc::new(*{})", inner)
@@ -1515,10 +1521,15 @@ impl Transpiler {
                     let inner = self.emit_expr(value);
                     let is_existing_rc = inner.starts_with("Rc::clone(") || inner.starts_with("Rc::new(")
                         || matches!(&value.kind, ExprKind::Var(v)
-                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                        // MethodCall(obj, "clone", []) on a known rc_var — already an Rc<RefCell<T>>
+                        || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
+                            if m == "clone" && args.is_empty()
+                            && matches!(&obj.kind, ExprKind::Var(v)
+                                if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str())));
                     return if is_existing_rc {
                         if inner.starts_with("Rc::") { inner }
-                        else { format!("Rc::clone(&{})", inner) }
+                        else { format!("Rc::clone(&{})", inner.trim_end_matches(".clone()")) }
                     } else if is_heap {
                         format!("Rc::new(RefCell::new(*{}))", inner)
                     } else {
@@ -2464,6 +2475,11 @@ impl Transpiler {
                     Type::Named(n) => Some(n.as_str()),
                     // MOpt'auto → Rc<MOpt>: extract "MOpt"
                     Type::Qualified(inner, _) => match inner.as_ref() {
+                        Type::Named(n) => Some(n.as_str()),
+                        _ => None,
+                    },
+                    // Optional(Named(n)) — unwrap the Option to get the inner enum name.
+                    Type::Optional(inner) => match inner.as_ref() {
                         Type::Named(n) => Some(n.as_str()),
                         _ => None,
                     },

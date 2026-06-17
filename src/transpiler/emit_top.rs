@@ -630,10 +630,7 @@ impl Transpiler {
                     if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                         self.rc_vars.insert(p.name.clone());
                     }
-                    // Shared/actor params are passed as &Rc<T> / &Arc<T> — matching requires (**var).
-                    if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) {
-                        self.shared_ref_params.insert(p.name.clone());
-                    }
+                    // Params are now by-value (owned clone), so single deref (*var) suffices for match.
                 }
                 if matches!(ty, Type::Optional(_)) {
                     self.optional_vars.insert(p.name.clone());
@@ -979,18 +976,12 @@ impl Transpiler {
                 } else {
                     self.emit_type(effective_ty)
                 };
-                // Auto-ref: 'shared/'actor/'guard/'weak parameters are always passed by
-                // reference. `var` (rebindable) emits `&mut Wrapper<T>`; otherwise `&Wrapper<T>`.
-                // Exception: trait object wrappers (e.g. T'shared where T is a trait) require
-                // unsized coercion that only works on owned values — keep by value there.
-                // `var` on 'stack/'heap/'owned (out-param) also emits `&mut T`.
+                // `var` on 'stack/'heap/'owned (out-param) emits `&mut T`.
+                // Qualified smart-pointer params ('shared/'actor/'guard/'weak) are passed by
+                // owned value (clone at call site) — passing by reference creates temporaries.
                 let ty_s = match effective_ty {
-                    Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) |
-                    Type::Qualified(inner, OwnerQual::Weak)
-                        if !matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())) =>
-                    {
-                        if p.rebindable { format!("&mut {}", ty_s) } else { format!("&{}", ty_s) }
-                    }
+                    Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) |
+                    Type::Qualified(_, OwnerQual::Weak) => ty_s,
                     // var + explicit 'stack/'heap/'owned qualifier on a user type → out-param.
                     // Primitives (var int x) remain mutable locals, no &mut.
                     Type::Qualified(_, OwnerQual::Stack | OwnerQual::Owned)

@@ -1,0 +1,256 @@
+# == PARSER CORE ==
+
+# ── Parser struct ─────────────────────────────────────────────────────────────
+
+struct Parser:
+    [Token] tokens
+    int pos
+
+    req TokenKind peek():
+        self.tokens[self.pos].kind
+
+    req TokenKind peek2():
+        let next = self.pos + 1
+        if next < self.tokens.length:
+            self.tokens[next].kind
+        else:
+            TokenKind.Eof
+
+    def Token advance():
+        let t = self.tokens[self.pos]
+        if self.pos + 1 < self.tokens.length:
+            self.pos = self.pos + 1
+        t
+
+    def bool eat(TokenKind k):
+        if self.peek() == k:
+            self.advance()
+            true
+        else:
+            false
+
+    def Token expect(TokenKind k) throws:
+        if self.peek() == k:
+            self.advance()
+        else:
+            throw "expected {k}, got {self.peek()}"
+
+    req bool at_end():
+        self.peek() == TokenKind.Eof
+
+    req int current_line():
+        self.tokens[self.pos].line
+
+# ── Type parsing ──────────────────────────────────────────────────────────────
+
+def Type parse_type(Parser'actor p) throws:
+    let base = parse_type_base(p)
+    if p.eat(TokenKind.Question):
+        Type.Optional(base)
+    else:
+        base
+
+def Type parse_type_base(Parser'actor p) throws:
+    match p.peek():
+        TokenKind.Ident(s):
+            p.advance()
+            match s:
+                "int":   Type.Int
+                "uint":  Type.Uint
+                "float": Type.Float
+                "string": Type.Str
+                "bool":  Type.Bool
+                "void":  Type.Void
+                _:       Type.Named(s)
+        TokenKind.Void:
+            p.advance()
+            Type.Void
+        TokenKind.LBracket:
+            p.advance()
+            let inner = parse_type(p)
+            p.expect(TokenKind.RBracket)
+            Type.Array(inner)
+        TokenKind.LBrace:
+            p.advance()
+            let key = parse_type(p)
+            p.expect(TokenKind.Eq)
+            let val = parse_type(p)
+            p.expect(TokenKind.RBrace)
+            Type.Dict(key, val)
+        TokenKind.LParen:
+            p.advance()
+            let types = [Type]{}
+            if p.peek() != TokenKind.RParen:
+                types.append(parse_type(p))
+                while p.eat(TokenKind.Comma):
+                    if p.peek() == TokenKind.RParen:
+                        break
+                    types.append(parse_type(p))
+            p.expect(TokenKind.RParen)
+            Type.Tuple(types)
+        _:
+            throw "expected type, got {p.peek()} at line {p.current_line()}"
+
+# ── Fn / struct / enum / program parsing ─────────────────────────────────────
+
+def FnDecl parse_fn_decl(Parser'actor p) throws:
+    let line = p.current_line()
+    let mutating = true
+    if p.eat(TokenKind.Req):
+        mutating = false
+    else:
+        p.expect(TokenKind.Def)
+    let return_ty = Type.Void
+    let has_ret = false
+    match p.peek():
+        TokenKind.Ident(_): has_ret = true
+        TokenKind.Void:     has_ret = true
+        TokenKind.LBracket: has_ret = true
+        TokenKind.LBrace:   has_ret = true
+        TokenKind.LParen:   has_ret = true
+        _: pass
+    if has_ret:
+        return_ty = parse_type(p)
+    let name = p.expect(TokenKind.Ident(""))
+    let params = [Param]{}
+    p.expect(TokenKind.LParen)
+    while p.peek() != TokenKind.RParen:
+        params.append(parse_param(p))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    let throws = p.eat(TokenKind.Throws)
+    p.expect(TokenKind.Colon)
+    let body = parse_block(p)
+    FnDecl(name: name.text, params: params, return_ty: return_ty, throws: throws, mutating: mutating, body: body, line: line)
+
+def Param parse_param(Parser'actor p) throws:
+    let line = p.current_line()
+    let mutable = p.eat(TokenKind.Var)
+    let ty = parse_type(p)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    Param(name: name_tok.text, ty: ty, mutable: mutable, line: line)
+
+def StructDecl parse_struct_decl(Parser'actor p) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Struct)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text
+    p.expect(TokenKind.Colon)
+    p.expect(TokenKind.Newline)
+    p.expect(TokenKind.Indent)
+    let fields = [FieldDecl]{}
+    let methods = [FnDecl]{}
+    let inits = [InitDecl]{}
+    while p.peek() != TokenKind.Dedent:
+        if p.peek() == TokenKind.Eof:
+            break
+        match p.peek():
+            TokenKind.Def:
+                methods.append(parse_fn_decl(p))
+            TokenKind.Req:
+                methods.append(parse_fn_decl(p))
+            TokenKind.Init:
+                inits.append(parse_init_decl(p))
+            _:
+                fields.append(parse_field_decl(p))
+    p.eat(TokenKind.Dedent)
+    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line)
+
+def FieldDecl parse_field_decl(Parser'actor p) throws:
+    let line = p.current_line()
+    let mutable = p.eat(TokenKind.Var)
+    let ty = parse_type(p)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let default = nil
+    if p.eat(TokenKind.Eq):
+        default = parse_expr(p)
+    while p.eat(TokenKind.Newline):
+        pass
+    FieldDecl(name: name_tok.text, ty: ty, mutable: mutable, default: default, line: line)
+
+def InitDecl parse_init_decl(Parser'actor p) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Init)
+    p.expect(TokenKind.LParen)
+    let params = [Param]{}
+    while p.peek() != TokenKind.RParen:
+        params.append(parse_param(p))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    let body = [Stmt]{}
+    if p.eat(TokenKind.Colon):
+        body = parse_block(p)
+    else:
+        while p.eat(TokenKind.Newline):
+            pass
+    InitDecl(params: params, body: body, line: line)
+
+def EnumDecl parse_enum_decl(Parser'actor p) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Enum)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text
+    p.expect(TokenKind.Colon)
+    p.expect(TokenKind.Newline)
+    p.expect(TokenKind.Indent)
+    let variants = [EnumVariant]{}
+    let methods = [FnDecl]{}
+    while p.peek() != TokenKind.Dedent:
+        if p.peek() == TokenKind.Eof:
+            break
+        match p.peek():
+            TokenKind.Def:
+                methods.append(parse_fn_decl(p))
+            TokenKind.Req:
+                methods.append(parse_fn_decl(p))
+            _:
+                variants.append(parse_enum_variant(p))
+    p.eat(TokenKind.Dedent)
+    EnumDecl(name: name, variants: variants, methods: methods, line: line)
+
+def EnumVariant parse_enum_variant(Parser'actor p) throws:
+    let line = p.current_line()
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text
+    let fields = [Type]{}
+    if p.eat(TokenKind.LParen):
+        while p.peek() != TokenKind.RParen:
+            fields.append(parse_type(p))
+            if p.peek() != TokenKind.RParen:
+                p.expect(TokenKind.Comma)
+        p.expect(TokenKind.RParen)
+    while p.eat(TokenKind.Newline):
+        pass
+    EnumVariant(name: name, fields: fields, line: line)
+
+def Item parse_item(Parser'actor p) throws:
+    match p.peek():
+        TokenKind.Def:
+            Item.Fn(parse_fn_decl(p))
+        TokenKind.Req:
+            Item.Fn(parse_fn_decl(p))
+        TokenKind.Struct:
+            Item.Struct(parse_struct_decl(p))
+        TokenKind.Enum:
+            Item.Enum(parse_enum_decl(p))
+        _:
+            Item.Stmt(parse_stmt(p))
+
+def Program parse_program(Parser'actor p) throws:
+    let items = [Item]{}
+    while p.eat(TokenKind.Newline):
+        pass
+    while p.peek() != TokenKind.Eof:
+        items.append(parse_item(p))
+        while p.eat(TokenKind.Newline):
+            pass
+    Program(items: items)
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def Program parse(string source) throws:
+    let tokens = lex(source)
+    let p = Parser(tokens: tokens, pos: 0)
+    parse_program(p)

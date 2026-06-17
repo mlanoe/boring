@@ -1,0 +1,720 @@
+# == LEXER ==
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def string lex_ident_chars(string first, [string] chars, int pos) int:
+    throw "use the Lexer method instead"
+
+def int measure_indent(string line) throws:
+    var int spaces = 0
+    var int tabs = 0
+    for ch in line.chars():
+        if ch == " ":
+            spaces += 1
+        elif ch == "\t":
+            tabs += 1
+        else:
+            break
+    if spaces > 0 and tabs > 0:
+        throw "inconsistent indentation (mixed tabs and spaces)"
+    return spaces + tabs * 4
+
+def int comment_start_index([string] chars) int:
+    throw "use the Lexer method instead"
+
+# ── Preprocess triple strings ────────────────────────────────────────────────
+
+def string dedent_triple(string raw):
+    var string s = raw
+    if s.startsWith("\n"):
+        s = s.chars() |> skip(1) |> join("")
+    if s.endsWith("\n"):
+        let n = s.length
+        s = s.chars() |> take(n - 1) |> join("")
+    if s.length == 0:
+        return ""
+    let lines = s.split("\n")
+    var int min_indent = 999999
+    for ln in lines:
+        if ln.trim().length > 0:
+            var int count = 0
+            for ch in ln.chars():
+                if ch == " " or ch == "\t":
+                    count += 1
+                else:
+                    break
+            if count < min_indent:
+                min_indent = count
+    if min_indent == 999999:
+        min_indent = 0
+    if min_indent == 0:
+        return s
+    var [string] result = []
+    for ln in lines:
+        if ln.trim().length == 0:
+            result.append("")
+        elif ln.length >= min_indent:
+            result.append(ln.chars() |> skip(min_indent) |> join(""))
+        else:
+            result.append(ln)
+    return result |> join("\n")
+
+def string preprocess_triple_strings(string source) throws:
+    let chars = source.chars()
+    let n = chars.length
+    var string result = ""
+    var int i = 0
+    var int line = 1
+    while i < n:
+        let ch = chars[i]
+        if ch == "\n":
+            line += 1
+            result = result + "\n"
+            i += 1
+            continue
+        if ch == "#":
+            while i < n and chars[i] != "\n":
+                result = result + chars[i]
+                i += 1
+            continue
+        if ch == "\"":
+            if i + 2 < n and chars[i + 1] == "\"" and chars[i + 2] == "\"":
+                let start_line = line
+                i += 3
+                var string raw = ""
+                var int newlines_consumed = 0
+                var bool closed = false
+                while i < n:
+                    if i + 2 < n and chars[i] == "\"" and chars[i + 1] == "\"" and chars[i + 2] == "\"":
+                        i += 3
+                        closed = true
+                        break
+                    if chars[i] == "\n":
+                        newlines_consumed += 1
+                        line += 1
+                    raw = raw + chars[i]
+                    i += 1
+                if not closed:
+                    throw "line {start_line}: unterminated triple-quoted string"
+                let content = dedent_triple(raw)
+                result = result + "\""
+                for c in content.chars():
+                    if c == "\"":
+                        result = result + "\\\""
+                    elif c == "\n":
+                        result = result + "\\n"
+                    elif c == "\r":
+                        result = result + "\\r"
+                    else:
+                        result = result + c
+                result = result + "\""
+                var int nl = 0
+                while nl < newlines_consumed:
+                    result = result + "\n"
+                    nl += 1
+                continue
+            result = result + "\""
+            i += 1
+            while i < n:
+                let c = chars[i]
+                result = result + c
+                i += 1
+                if c == "\\":
+                    if i < n:
+                        result = result + chars[i]
+                        i += 1
+                elif c == "{{":
+                    var int depth = 1
+                    while i < n and depth > 0:
+                        let ic = chars[i]
+                        result = result + ic
+                        i += 1
+                        if ic == "{{":
+                            depth += 1
+                        elif ic == "}}":
+                            depth -= 1
+                elif c == "\"" or c == "\n":
+                    if c == "\n":
+                        line += 1
+                    break
+            continue
+        result = result + ch
+        i += 1
+    return result
+
+# ── Split interpolation hole on first ':' at depth 0 ─────────────────────────
+
+def [string] split_hole_fmt(string s):
+    var int depth = 0
+    var int idx = 0
+    for ch in s.chars():
+        if ch == "(" or ch == "[" or ch == "{{":
+            depth += 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            let expr = s.chars() |> take(idx) |> join("")
+            let rest = s.chars() |> skip(idx + 1) |> join("") |> trimStart()
+            if rest.length == 0:
+                return [s, ""]
+            return [expr, rest]
+        idx += 1
+    return [s, ""]
+
+# ── Lexer struct ──────────────────────────────────────────────────────────────
+
+struct Lexer:
+    [string] chars
+    var int pos
+    var int line
+    var int col
+    var [int] indent_stack
+    var [Token] tokens
+    var int paren_depth
+    var int inner_colon_blocks
+    var [int] inner_block_base_indents
+
+    init([string] chars):
+        self.chars = chars
+        self.pos = 0
+        self.line = 1
+        self.col = 1
+        self.indent_stack = [0]
+        self.tokens = []
+        self.paren_depth = 0
+        self.inner_colon_blocks = 0
+        self.inner_block_base_indents = []
+
+    req bool at_end():
+        self.pos >= self.chars.length
+
+    req string? peek_char():
+        if self.pos < self.chars.length:
+            self.chars[self.pos]
+        else:
+            nil
+
+    req string? peek_char_at(int offset):
+        let idx = self.pos + offset
+        if idx < self.chars.length:
+            self.chars[idx]
+        else:
+            nil
+
+    def string advance():
+        let ch = self.chars[self.pos]
+        self.pos += 1
+        if ch == "\n":
+            self.line += 1
+            self.col = 1
+        else:
+            self.col += 1
+        return ch
+
+    req bool match_char(string expected):
+        if self.pos < self.chars.length and self.chars[self.pos] == expected:
+            return true
+        return false
+
+    def string consume():
+        let ch = self.chars[self.pos]
+        self.pos += 1
+        self.col += 1
+        return ch
+
+    def void push(TokenKind kind):
+        self.tokens.append(Token { kind = kind, line = self.line })
+
+    # ── Comment-start scanning (skips inside strings) ──────────────────────
+    req int find_comment_start([string] line_chars):
+        var int i = 0
+        while i < line_chars.length:
+            let ch = line_chars[i]
+            if ch == "#":
+                return i
+            if ch == "\"":
+                i += 1
+                while i < line_chars.length:
+                    let c = line_chars[i]
+                    i += 1
+                    if c == "\\":
+                        if i < line_chars.length:
+                            i += 1
+                    elif c == "{{":
+                        if i < line_chars.length and line_chars[i] == "{{":
+                            i += 1
+                        else:
+                            var int depth = 1
+                            while i < line_chars.length and depth > 0:
+                                let ic = line_chars[i]
+                                i += 1
+                                if ic == "{{":
+                                    depth += 1
+                                elif ic == "}}":
+                                    depth -= 1
+                    elif c == "\"" or c == "\n":
+                        break
+                continue
+            i += 1
+        return line_chars.length
+
+    # ── Lex a string (after opening quote consumed) ────────────────────────
+    def TokenKind lex_string() throws:
+        var [RawInterpPart] parts = []
+        var string current_lit = ""
+        while true:
+            if self.at_end():
+                throw "line {self.line}: unterminated string literal"
+            let ch = self.consume()
+            if ch == "\n":
+                throw "line {self.line}: unterminated string literal"
+            elif ch == "\"":
+                break
+            elif ch == "{{":
+                if self.match_char("{{"):
+                    self.consume()
+                    current_lit = current_lit + "{{"
+                else:
+                    if current_lit.length > 0:
+                        parts.append(RawInterpPart.Lit(current_lit))
+                        current_lit = ""
+                    var string inner = ""
+                    var int depth = 0
+                    while true:
+                        if self.at_end():
+                            throw "line {self.line}: unterminated string literal"
+                        let ic = self.consume()
+                        if ic == "{":
+                            depth += 1
+                            inner = inner + ic
+                        elif ic == "}}":
+                            if depth == 0:
+                                break
+                            depth -= 1
+                            inner = inner + ic
+                        else:
+                            inner = inner + ic
+                    let split = split_hole_fmt(inner)
+                    let expr = split[0].trim()
+                    let fmt = split[1]
+                    if fmt.length > 0:
+                        parts.append(RawInterpPart.HoleFormatted(expr, fmt))
+                    else:
+                        parts.append(RawInterpPart.Hole(expr))
+            elif ch == "}}":
+                if self.match_char("}}"):
+                    self.consume()
+                current_lit = current_lit + "}}"
+            elif ch == "\\":
+                if self.at_end():
+                    current_lit = current_lit + "\\"
+                else:
+                    let esc = self.consume()
+                    if esc == "n":
+                        current_lit = current_lit + "\n"
+                    elif esc == "t":
+                        current_lit = current_lit + "\t"
+                    elif esc == "r":
+                        current_lit = current_lit + "\r"
+                    elif esc == "0":
+                        current_lit = current_lit + "\0"
+                    elif esc == "\\":
+                        current_lit = current_lit + "\\"
+                    elif esc == "\"":
+                        current_lit = current_lit + "\""
+                    elif esc == "u":
+                        if self.match_char("{{"):
+                            self.consume()
+                            var string hex = ""
+                            while not self.at_end() and self.chars[self.pos] != "}}":
+                                hex = hex + self.consume()
+                            if not self.at_end():
+                                self.consume()
+                            current_lit = current_lit + "\u{hex}"
+                        else:
+                            current_lit = current_lit + "u"
+                    else:
+                        current_lit = current_lit + "\\"
+            else:
+                current_lit = current_lit + ch
+        if parts.length == 0:
+            return TokenKind.Str(current_lit)
+        if current_lit.length > 0:
+            parts.append(RawInterpPart.Lit(current_lit))
+        return TokenKind.StringInterp(parts)
+
+    # ── Lex a number (first digit already read) ────────────────────────────
+    def TokenKind lex_number(string first) throws:
+        if first == "0" and not self.at_end():
+            let prefix = self.chars[self.pos]
+            if prefix == "x" or prefix == "X":
+                self.consume()
+                var string hex = ""
+                while not self.at_end():
+                    let c = self.chars[self.pos]
+                    if c == "_":
+                        self.consume()
+                        continue
+                    if (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F"):
+                        hex = hex + self.consume()
+                    else:
+                        break
+                return TokenKind.Int(hex as int)
+            elif prefix == "b" or prefix == "B":
+                self.consume()
+                var string bin = ""
+                while not self.at_end():
+                    let c = self.chars[self.pos]
+                    if c == "_":
+                        self.consume()
+                        continue
+                    if c == "0" or c == "1":
+                        bin = bin + self.consume()
+                    else:
+                        break
+                return TokenKind.Int(bin as int)
+            elif prefix == "o" or prefix == "O":
+                self.consume()
+                var string oct = ""
+                while not self.at_end():
+                    let c = self.chars[self.pos]
+                    if c == "_":
+                        self.consume()
+                        continue
+                    if c >= "0" and c <= "7":
+                        oct = oct + self.consume()
+                    else:
+                        break
+                return TokenKind.Int(oct as int)
+        var string s = first
+        while not self.at_end():
+            let c = self.chars[self.pos]
+            if c == "_":
+                self.consume()
+                continue
+            if c >= "0" and c <= "9":
+                s = s + self.consume()
+            else:
+                break
+        if not self.at_end() and self.chars[self.pos] == ".":
+            if self.pos + 1 < self.chars.length:
+                let next = self.chars[self.pos + 1]
+                if next >= "0" and next <= "9":
+                    s = s + self.consume()
+                    while not self.at_end():
+                        let c = self.chars[self.pos]
+                        if c == "_":
+                            self.consume()
+                            continue
+                        if c >= "0" and c <= "9":
+                            s = s + self.consume()
+                        else:
+                            break
+                    if not self.at_end():
+                        let e = self.chars[self.pos]
+                        if e == "e" or e == "E":
+                            s = s + self.consume()
+                            if not self.at_end():
+                                let sign = self.chars[self.pos]
+                                if sign == "+" or sign == "-":
+                                    s = s + self.consume()
+                            while not self.at_end() and self.chars[self.pos] >= "0" and self.chars[self.pos] <= "9":
+                                s = s + self.consume()
+                    return TokenKind.Float(s as float)
+        return TokenKind.Int(s as int)
+
+    # ── Lex an identifier (first char already read) ────────────────────────
+    def string lex_ident(string first):
+        var string s = first
+        while not self.at_end():
+            let c = self.chars[self.pos]
+            if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_":
+                s = s + self.consume()
+            else:
+                break
+        return s
+
+    # ── Map identifier to keyword or Ident token ──────────────────────────
+    req TokenKind keyword_or_ident(string s):
+        match s:
+            "let": return TokenKind.Let
+            "var": return TokenKind.Var
+            "def": return TokenKind.Def
+            "return": return TokenKind.Return
+            "if": return TokenKind.If
+            "elif": return TokenKind.Elif
+            "else": return TokenKind.Else
+            "match": return TokenKind.Match
+            "while": return TokenKind.While
+            "do": return TokenKind.Do
+            "loop": return TokenKind.Loop
+            "wait": return TokenKind.Wait
+            "for": return TokenKind.For
+            "in": return TokenKind.In
+            "break": return TokenKind.Break
+            "continue": return TokenKind.Continue
+            "struct": return TokenKind.Struct
+            "enum": return TokenKind.Enum
+            "trait": return TokenKind.Trait
+            "use": return TokenKind.Use
+            "ext": return TokenKind.Ext
+            "as": return TokenKind.As
+            "and": return TokenKind.And
+            "or": return TokenKind.Or
+            "not": return TokenKind.Not
+            "is": return TokenKind.Is
+            "self": return TokenKind.SelfKw
+            "throw": return TokenKind.Throw
+            "throws": return TokenKind.Throws
+            "try": return TokenKind.Try
+            "catch": return TokenKind.Catch
+            "defer": return TokenKind.Defer
+            "void": return TokenKind.Void
+            "pub": return TokenKind.Pub
+            "guard": return TokenKind.Guard
+            "task": return TokenKind.Task
+            "join": return TokenKind.Join
+            "stream": return TokenKind.Stream
+            "yield": return TokenKind.Yield
+            "static": return TokenKind.Static
+            "type": return TokenKind.Type
+            "req": return TokenKind.Req
+            "transient": return TokenKind.Transient
+            "with": return TokenKind.With
+            "get": return TokenKind.Get
+            "set": return TokenKind.Set
+            "init": return TokenKind.Init
+            "pass": return TokenKind.Pass
+            "native": return TokenKind.Native
+            "mod": return TokenKind.Mod
+            "true": return TokenKind.Bool(true)
+            "false": return TokenKind.Bool(false)
+            "nil": return TokenKind.Nil
+            _: return TokenKind.Ident(s)
+
+    # ── Lex one token at current position ─────────────────────────────────
+    def TokenKind lex_one_token() throws:
+        let ch = self.consume()
+        match ch:
+            "(": return TokenKind.LParen
+            ")": return TokenKind.RParen
+            "[": return TokenKind.LBracket
+            "]": return TokenKind.RBracket
+            "{{": return TokenKind.LBrace
+            "}}": return TokenKind.RBrace
+            ",": return TokenKind.Comma
+            ";": return TokenKind.Semicolon
+            "@": return TokenKind.At
+            "'": return TokenKind.Tick
+            "~": return TokenKind.Tilde
+            ":": return TokenKind.Colon
+            "+":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.PlusEq
+                return TokenKind.Plus
+            "-":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.MinusEq
+                return TokenKind.Minus
+            "*":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.StarEq
+                return TokenKind.Star
+            "/":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.SlashEq
+                return TokenKind.Slash
+            "%":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.PercentEq
+                return TokenKind.Percent
+            "&":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.AmpersandEq
+                return TokenKind.Ampersand
+            "|":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.PipeEq
+                if self.match_char(">"):
+                    self.consume()
+                    return TokenKind.PipeArrow
+                return TokenKind.Pipe
+            "^":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.CaretEq
+                return TokenKind.Caret
+            "?":
+                if self.match_char("."):
+                    self.consume()
+                    return TokenKind.QuestionDot
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.QuestionEq
+                return TokenKind.Question
+            "!":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.BangEq
+                return TokenKind.Bang
+            "=":
+                if self.match_char("="):
+                    self.consume()
+                    if self.match_char("="):
+                        self.consume()
+                        return TokenKind.EqEqEq
+                    return TokenKind.EqEq
+                return TokenKind.Eq
+            "<":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.LtEq
+                return TokenKind.Lt
+            ">":
+                if self.match_char("="):
+                    self.consume()
+                    return TokenKind.GtEq
+                return TokenKind.Gt
+            ".":
+                if self.match_char("."):
+                    self.consume()
+                    if self.match_char("."):
+                        self.consume()
+                        return TokenKind.DotDotDot
+                    if self.match_char("="):
+                        self.consume()
+                        return TokenKind.DotDotEq
+                    return TokenKind.DotDot
+                return TokenKind.Dot
+            "\"":
+                return self.lex_string()
+            _:
+                if ch >= "0" and ch <= "9":
+                    return self.lex_number(ch)
+                if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_":
+                    let ident = self.lex_ident(ch)
+                    return self.keyword_or_ident(ident)
+                throw "line {self.line}: unexpected character '{ch}'"
+
+    # ── Lex a single physical line (no indent/dedent logic) ───────────────
+    def [Token] lex_line_tokens(string content) throws:
+        let line_chars = content.chars()
+        let cut = self.find_comment_start(line_chars)
+        var string trimmed_content = ""
+        var int ci = 0
+        while ci < cut:
+            trimmed_content = trimmed_content + line_chars[ci]
+            ci += 1
+        trimmed_content = trimmed_content.trim()
+        let save_pos = self.pos
+        let save_line = self.line
+        let save_col = self.col
+        self.chars = trimmed_content.chars()
+        self.pos = 0
+        var [Token] line_tokens = []
+        while self.pos < self.chars.length:
+            let c = self.chars[self.pos]
+            if c == " " or c == "\t":
+                self.pos += 1
+                continue
+            let kind = self.lex_one_token()
+            line_tokens.append(Token { kind = kind, line = self.line })
+        return line_tokens
+
+    # ── Main tokenize pass ────────────────────────────────────────────────
+    def [Token] tokenize(string preprocessed) throws:
+        let all_lines = preprocessed.split("\n")
+        var int i = 0
+        self.line = 1
+        self.indent_stack = [0]
+        self.tokens = []
+        self.paren_depth = 0
+        self.inner_colon_blocks = 0
+        self.inner_block_base_indents = []
+        while i < all_lines.length:
+            self.line = i + 1
+            let raw = all_lines[i]
+            let trimmed = raw.trim()
+            if trimmed.length == 0:
+                if self.paren_depth == 0:
+                    self.push(TokenKind.Newline)
+                i += 1
+                continue
+            let apply_indent = self.paren_depth == 0 or self.inner_colon_blocks > 0
+            if trimmed.startsWith("#") and apply_indent:
+                let comment_indent = measure_indent(raw)
+                let cur_indent = self.indent_stack[self.indent_stack.length - 1]
+                if comment_indent < cur_indent:
+                    while true:
+                        let top = self.indent_stack[self.indent_stack.length - 1]
+                        if top <= comment_indent:
+                            break
+                        self.indent_stack.pop()
+                        self.push(TokenKind.Dedent)
+                let text = trimmed.chars() |> skip(1) |> join("") |> trim()
+                self.push(TokenKind.Comment(text))
+                self.push(TokenKind.Newline)
+                i += 1
+                continue
+            let line_indent = if apply_indent: measure_indent(raw) else: 0
+            if apply_indent:
+                while self.inner_colon_blocks > 0:
+                    let base = self.inner_block_base_indents[self.inner_block_base_indents.length - 1]
+                    if line_indent <= base:
+                        self.inner_colon_blocks -= 1
+                        self.inner_block_base_indents.pop()
+                    else:
+                        break
+                let cur_indent = self.indent_stack[self.indent_stack.length - 1]
+                if line_indent > cur_indent:
+                    self.indent_stack.append(line_indent)
+                    self.push(TokenKind.Indent)
+                elif line_indent < cur_indent:
+                    while true:
+                        let top = self.indent_stack[self.indent_stack.length - 1]
+                        if top == line_indent:
+                            break
+                        if top < line_indent:
+                            throw "line {self.line}: dedent does not match any outer indentation level"
+                        self.indent_stack.pop()
+                        self.push(TokenKind.Dedent)
+            let line_tokens = self.lex_line_tokens(raw.trim())
+            var bool last_is_colon = false
+            for t in line_tokens:
+                match t.kind:
+                    TokenKind.LParen: self.paren_depth += 1
+                    TokenKind.LBracket: self.paren_depth += 1
+                    TokenKind.LBrace: self.paren_depth += 1
+                    TokenKind.RParen: self.paren_depth -= 1
+                    TokenKind.RBracket: self.paren_depth -= 1
+                    TokenKind.RBrace: self.paren_depth -= 1
+                    _: pass
+                match t.kind:
+                    TokenKind.Colon: last_is_colon = true
+                    _: last_is_colon = false
+                self.tokens.append(t)
+            if last_is_colon and self.paren_depth > 0:
+                self.inner_colon_blocks += 1
+                self.inner_block_base_indents.append(line_indent)
+            if self.paren_depth == 0 or last_is_colon or self.inner_colon_blocks > 0:
+                self.push(TokenKind.Newline)
+            i += 1
+        while self.indent_stack.length > 1:
+            self.indent_stack.pop()
+            self.push(TokenKind.Dedent)
+        self.push(TokenKind.Eof)
+        return self.tokens
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
+def [Token] lex(string source) throws:
+    let preprocessed = preprocess_triple_strings(source)
+    let lexer = Lexer(preprocessed.chars())
+    return lexer.tokenize(preprocessed)

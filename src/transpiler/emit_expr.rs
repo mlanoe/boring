@@ -2243,6 +2243,16 @@ impl Transpiler {
                         .map(|(_, ty)| ty);
                     let mutex_key = format!("{}::{}", name, label);
                     let val = if self.struct_mutex_fields.contains(&mutex_key) {
+                        // If the value is already an actor/rc variable, just clone the Rc pointer.
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else {
                         let inner_ty = field_ty.and_then(Self::mutex_inner);
                         let raw = self.emit_let_value(inner_ty, eff_value);
                         match self.config.threading {
@@ -2250,6 +2260,7 @@ impl Transpiler {
                                 format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
                             crate::transpiler::ThreadingMode::Single =>
                                 format!("Rc::new(RefCell::new({}))", raw),
+                        }
                         }
                     } else if self.recursive_fields.contains(&mutex_key) {
                         // Recursive struct field — wrap in Box::new() at construction site.

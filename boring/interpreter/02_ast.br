@@ -1,0 +1,514 @@
+# == AST TYPES ==
+
+# ─── Attributes ───────────────────────────────────────────────────────────────
+
+struct Attr:
+    string name
+    [string] args
+    int line
+
+# ─── Top-level ────────────────────────────────────────────────────────────────
+
+struct Program:
+    [Item] items
+
+enum Item:
+    Use(UseDecl decl)
+    Fn(FnDecl decl)
+    Struct(StructDecl decl)
+    Enum(EnumDecl decl)
+    Trait(TraitDecl decl)
+    Ext(ExtDecl decl)
+    Mod(ModDecl decl)
+    Let(LetStmt stmt)
+    Alias(AliasDecl decl)
+    Stmt(Stmt stmt)
+
+struct ModDecl:
+    string name
+    [Item] items
+    int line
+
+struct AliasDecl:
+    string name
+    [string] type_params
+    Type ty
+    bool newtype
+    int line
+
+struct ExtDecl:
+    string type_name
+    [Type] type_args
+    [string] type_params
+    [{string=string}] where_clause
+    [string] traits
+    [FnDecl] methods
+    [SetDecl] setters
+    [AsDecl] conversions
+    [AssocTypeDef] assoc_type_defs
+    int line
+
+struct UseDecl:
+    [string] path
+    bool glob
+    [string] items
+    int line
+
+# ─── Declarations ─────────────────────────────────────────────────────────────
+
+struct FnDecl:
+    string name
+    string? qualifier
+    [Param] params
+    Type? return_ty
+    [Stmt] body
+    bool is_pub
+    bool throws
+    bool task
+    bool stream
+    int? stream_capacity
+    bool mutating
+    bool is_native
+    Type? throws_ty
+    [string] type_params
+    [{string=string}] where_clause
+    [Attr] attrs
+    int line
+
+struct Param:
+    string name
+    Type? ty
+    bool mutable
+    bool owned
+    bool variadic
+    Expr? default
+    int line
+
+struct SetDecl:
+    string name
+    string param_name
+    Type param_ty
+    bool is_pub
+    bool throws
+    bool task
+    [Stmt] body
+    int line
+
+struct StructDecl:
+    string name
+    bool is_pub
+    bool is_native
+    [string] protocols
+    [FieldDecl] fields
+    [InitDecl] inits
+    [FnDecl] methods
+    [AsDecl] conversions
+    [string] type_params
+    [{string=string}] where_clause
+    [SetDecl] setters
+    [TypeMethod] type_methods
+    [TypeVar] type_vars
+    [AssocTypeDef] assoc_type_defs
+    [Attr] attrs
+    int line
+
+enum TypeMethodKind:
+    Def
+    Req
+    Set
+
+struct TypeMethod:
+    TypeMethodKind kind
+    string name
+    [Param] params
+    Type? return_ty
+    [Stmt] body
+    bool is_pub
+    bool throws
+    bool task
+    int line
+
+struct TypeVar:
+    string name
+    Type? ty
+    Expr default
+    bool is_pub
+    bool mutable
+    int line
+
+struct AsDecl:
+    bool is_pub
+    Type ty
+    bool throws
+    bool task
+    [Stmt] body
+    int line
+
+struct FieldDecl:
+    string name
+    bool is_pub
+    bool mutable
+    bool transient
+    Type ty
+    Expr? default
+    int line
+
+struct InitDecl:
+    [InitParam] params
+    [Stmt] body
+    int line
+
+struct InitParam:
+    bool is_pub
+    bool mutable
+    string name
+    Type? ty
+    Expr? default
+    int line
+
+struct EnumDecl:
+    string name
+    bool is_pub
+    bool is_native
+    [string] type_params
+    [string] protocols
+    [EnumVariant] variants
+    [FnDecl] methods
+    [SetDecl] setters
+    [AsDecl] conversions
+    [Attr] attrs
+    int line
+
+struct EnumVariant:
+    string name
+    [VariantField] fields
+    [Attr] attrs
+    int line
+
+struct VariantField:
+    string? name
+    Type ty
+
+struct AssocTypeDecl:
+    string name
+    Type? constraint
+    [string] type_params
+    int line
+
+struct AssocTypeDef:
+    string name
+    Type ty
+    int line
+
+struct TraitDecl:
+    string name
+    [string] parents
+    [FnSignature] signatures
+    [FnDecl] defaults
+    [FnSignature] type_signatures
+    [string] type_params
+    [AssocTypeDecl] assoc_types
+    int line
+
+struct FnSignature:
+    string name
+    [Param] params
+    Type? return_ty
+    bool throws
+    bool task
+    bool stream
+    bool mutating
+    [string] type_params
+    int line
+
+# ─── Statements ───────────────────────────────────────────────────────────────
+
+enum Stmt:
+    Let(LetStmt stmt)
+    LetDestructure(LetDestructureStmt stmt)
+    Return(ReturnStmt stmt)
+    Break(int line, Expr? value)
+    Continue(int line)
+    Throw(ThrowStmt stmt)
+    If(IfStmt stmt)
+    IfLet(IfLetStmt stmt)
+    Match(MatchStmt stmt)
+    While(WhileStmt stmt)
+    WhileLet(WhileLetStmt stmt)
+    DoWhile(DoWhileStmt stmt)
+    Loop(LoopStmt stmt)
+    Wait(Expr expr, int line)
+    For(ForStmt stmt)
+    Guard(GuardStmt stmt)
+    Try(TryStmt stmt)
+    Defer([Stmt] body)
+    Expr(Expr expr)
+    Fn(FnDecl decl)
+    Struct(StructDecl decl)
+    Enum(EnumDecl decl)
+    Mod(ModDecl decl)
+    Alias(AliasDecl decl)
+    Yield(Expr expr, int line)
+    Comment(string text)
+
+struct LetDestructureStmt:
+    bool mutable
+    [DestructureBinding] bindings
+    Expr value
+    int line
+
+struct DestructureBinding:
+    string name
+    Type? ty
+
+enum CondClause:
+    Let(string name, Expr expr)
+    LetPat(Pattern pat, Expr expr)
+    Expr(Expr expr)
+
+struct IfLetStmt:
+    [CondClause] clauses
+    [Stmt] then_body
+    [Stmt]? else_body
+    int line
+
+struct LetStmt:
+    bool mutable
+    bool is_pub
+    bool is_static
+    string name
+    Type? ty
+    Expr? value
+    bool is_move
+    int line
+
+struct ReturnStmt:
+    Expr? value
+    int line
+
+struct IfStmt:
+    [{Expr=[Stmt]}] branches
+    [Stmt]? else_body
+    int line
+
+struct MatchStmt:
+    Expr subject
+    [MatchArm] arms
+    int line
+
+struct MatchArm:
+    [Pattern] patterns
+    Expr? guard
+    MatchBody body
+    int line
+
+enum MatchBody:
+    Expr(Expr expr)
+    Block([Stmt] stmts)
+
+struct WhileStmt:
+    Expr condition
+    [Stmt] body
+    int line
+
+struct WhileLetStmt:
+    string name
+    Pattern? pattern
+    Expr value
+    [Stmt] body
+    int line
+
+struct DoWhileStmt:
+    [Stmt] body
+    Expr condition
+    int line
+
+struct LoopStmt:
+    [Stmt] body
+    int line
+
+struct TryStmt:
+    [Stmt] body
+    [CatchClause] catch_clauses
+    int line
+
+struct CatchClause:
+    [string] types
+    string? variant
+    [Stmt] body
+    int line
+
+struct ThrowStmt:
+    Expr? value
+    int line
+
+struct ForStmt:
+    [string] vars
+    Expr iterable
+    [Stmt] body
+    int line
+
+struct GuardStmt:
+    GuardCond cond
+    [Stmt] else_body
+    int line
+
+enum GuardCond:
+    Expr(Expr expr)
+    Clauses([CondClause] clauses)
+
+# ─── Patterns ─────────────────────────────────────────────────────────────────
+
+enum Pattern:
+    Wildcard
+    Bind(string name)
+    Variant(string name, [Pattern] fields)
+    Lit(LitPattern lit)
+    None
+    Some(Pattern inner)
+    Tuple([Pattern] elems)
+
+enum LitPattern:
+    Int(int n)
+    Float(float f)
+    Str(string s)
+    Bool(bool b)
+    Nil
+
+# ─── String interpolation ─────────────────────────────────────────────────────
+
+enum StringSegment:
+    Lit(string text)
+    Expr(Expr expr)
+    FormattedExpr(Expr expr, string fmt_spec)
+
+# ─── Expressions ──────────────────────────────────────────────────────────────
+
+struct Expr:
+    ExprKind kind
+    int line
+
+struct Arg:
+    string? label
+    Expr value
+    bool spread
+
+enum ClosureBody:
+    Expr(Expr expr)
+    Block([Stmt] stmts)
+
+enum ExprKind:
+    Int(int n)
+    Float(float f)
+    Str(string s)
+    StringInterp([StringSegment] segments)
+    Bool(bool b)
+    Nil
+    Void
+    Var(string name)
+    BinOp(BinOp op, Expr left, Expr right)
+    UnaryOp(UnaryOp op, Expr expr)
+    Assign(Expr target, Expr value)
+    Field(Expr expr, string name)
+    Index(Expr expr, Expr index)
+    Call(Expr callee, [Arg] args)
+    MethodCall(Expr receiver, string name, [Arg] args)
+    GenericCall(Expr callee, [Type] type_args, [Arg] args)
+    Pipe(Expr left, string name, [Arg] args)
+    TryElse(Expr expr, Expr default)
+    TryElseBlock([Stmt] body, [Stmt] else_body)
+    Array([Expr] elems)
+    Tuple([Expr] elems)
+    Dict([(Expr, Expr)] pairs)
+    Set([Expr] elems)
+    DotIdent(string name)
+    Range(Expr start, Expr end, bool inclusive)
+    Cast(Expr expr, Type ty)
+    Else(Expr expr, Expr default)
+    OptionalField(Expr expr, string name)
+    OptionalMethodCall(Expr expr, string name, [Arg] args)
+    Closure([Param] params, Type? return_ty, ClosureBody body, bool throws, bool task)
+    If(IfStmt stmt)
+    Match(MatchStmt stmt)
+    Block([Stmt] stmts)
+    Do([Stmt] stmts)
+    Loop(LoopStmt stmt)
+    Task(Expr expr)
+    TaskWithTimeout(Expr timeout, Expr expr)
+    JoinAll([Expr] exprs)
+    MacroCall(string name, [Expr] args)
+
+# ─── Operators ────────────────────────────────────────────────────────────────
+
+enum BinOp:
+    Add
+    Sub
+    Mul
+    Div
+    Rem
+    Eq
+    NotEq
+    RefEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+    And
+    Or
+    BitAnd
+    BitOr
+    BitXor
+    Shl
+    Shr
+    Is
+    IsNot
+
+enum UnaryOp:
+    Neg
+    Not
+    BitNot
+
+# ─── Ownership qualifiers ─────────────────────────────────────────────────────
+
+enum OwnerQual:
+    Owned
+    Copy
+    Const
+    Actor
+    Guard
+    Shared
+    Weak
+    Stack
+    Lifetime(string name)
+    BorrowShared
+    Borrow
+    BorrowOwned
+    BorrowOption
+    BorrowWeak
+    BorrowMut
+
+# ─── Types ────────────────────────────────────────────────────────────────────
+
+enum Type:
+    Int
+    Uint
+    Float
+    Str
+    Bool
+    Nil
+    Void
+    Never
+    Named(string name)
+    Optional(Type inner)
+    Array(Type elem)
+    Tuple([Type] elems)
+    Dict(Type key, Type value)
+    Set(Type elem)
+    Fn(Type? return_ty, [Type] params, bool throws, bool task, bool req)
+    Qualified(Type ty, OwnerQual qual)
+    Dyn(Type inner)
+    Impl(Type inner)
+    TypeParam(string name)
+    Generic(string name, [Type] args)
+    SelfAssoc(string name)
+    AssocOf(Type base, string name)
