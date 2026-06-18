@@ -77,10 +77,11 @@ let WDog'shared'weak  w2 = strong2
 let upgr2 = w2.upgrade()
 print upgr2.name
 
-def int clamp(var int x, int lo, int hi):
-    if x < lo: x = lo
-    if x > hi: x = hi
-    return x
+def int clamp(int x, int lo, int hi):
+    var result = x
+    if result < lo: result = lo
+    if result > hi: result = hi
+    return result
 
 print clamp(5, 0, 10)
 print clamp(-3, 0, 10)

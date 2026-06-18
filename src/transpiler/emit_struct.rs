@@ -22,9 +22,17 @@ impl Transpiler {
             let has_custom_cmp = ["eq", "ne", "lt", "le", "gt", "ge"].iter().any(|m| {
                 self.struct_operator_methods.contains(&format!("{}::{}", s.name, m))
             });
+            // In non-async multi-thread mode, actor fields map to Arc<std::sync::Mutex<T>> which
+            // does NOT implement PartialEq — skip the derive to avoid a compile error.
+            let has_sync_mutex_field = !self.use_async_actors()
+                && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                && s.fields.iter().any(|f| {
+                    Self::is_arc_qualified(&f.ty)
+                    || matches!(&f.ty, Type::Optional(inner) if Self::is_arc_qualified(inner))
+                });
             if has_non_clone_field {
                 self.line("#[derive(Debug)]");
-            } else if has_custom_cmp {
+            } else if has_custom_cmp || has_sync_mutex_field {
                 self.line("#[derive(Debug, Clone)]");
             } else {
                 self.line("#[derive(Debug, Clone, PartialEq)]");
@@ -155,12 +163,7 @@ impl Transpiler {
                     if is_mutex {
                         let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                         let raw = self.emit_let_value(Some(inner), def);
-                        let init = match self.config.threading {
-                            crate::transpiler::ThreadingMode::Multi =>
-                                format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
-                            crate::transpiler::ThreadingMode::Single =>
-                                format!("Rc::new(RefCell::new({}))", raw),
-                        };
+                        let init = self.emit_actor_new(&raw);
                         self.line(&format!("{}: {},", f.name, init));
                     } else {
                         let val = self.emit_let_value(Some(&f.ty), def);
@@ -469,12 +472,7 @@ impl Transpiler {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
                             let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
                             let raw = self.emit_let_value(Some(inner), def);
-                            let init = match self.config.threading {
-                                crate::transpiler::ThreadingMode::Multi =>
-                                    format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
-                                crate::transpiler::ThreadingMode::Single =>
-                                    format!("Rc::new(RefCell::new({}))", raw),
-                            };
+                            let init = self.emit_actor_new(&raw);
                             self.line(&format!("{}: {},", f.name, init));
                         } else {
                             let val = self.emit_let_value(Some(&f.ty), def);
@@ -712,21 +710,26 @@ impl Transpiler {
                 Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Shared)))
         });
         if !has_clone_derive {
-            // thiserror auto-inject below will add Debug when needed; don't duplicate it.
-            if is_error_type && !has_debug_derive && !has_variant_error_attr {
-                if is_unit_enum {
+            // When thiserror will auto-inject Debug below, omit Debug here to avoid duplicates.
+            let thiserror_will_add_debug = has_variant_error_attr && !has_debug_derive;
+            if is_unit_enum {
+                if thiserror_will_add_debug {
+                    self.line("#[derive(Clone, Copy, PartialEq, Eq, Hash)]");
+                } else {
                     self.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]");
-                } else if has_actor_field {
+                }
+            } else if has_actor_field {
+                if thiserror_will_add_debug {
+                    self.line("#[derive(Clone)]");
+                } else {
                     self.line("#[derive(Debug, Clone)]");
+                }
+            } else {
+                if thiserror_will_add_debug {
+                    self.line("#[derive(Clone, PartialEq)]");
                 } else {
                     self.line("#[derive(Debug, Clone, PartialEq)]");
                 }
-            } else if is_unit_enum {
-                self.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]");
-            } else if has_actor_field {
-                self.line("#[derive(Debug, Clone)]");
-            } else {
-                self.line("#[derive(Debug, Clone, PartialEq)]");
             }
         }
         // Auto-inject thiserror when any variant has @error("..."), unless already

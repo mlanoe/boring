@@ -155,6 +155,8 @@ struct Transpiler {
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
     pub(crate) in_throws: bool,
+    /// Are we inside a `req` (non-mutating, &self) function body?
+    pub(crate) in_req_fn: bool,
     /// Are we inside a `task` (async) function body?
     pub(crate) in_async: bool,
     /// Are we inside a sequential `stream` body? (`yield` → `__items.push(...)`)
@@ -475,6 +477,8 @@ struct Transpiler {
     /// Parameters of type `T'shared` or `T'actor` passed as `&Rc<T>` / `&Arc<T>`.
     /// Matching on these requires `(**var)` — two dereferences — to reach `T`.
     pub(crate) shared_ref_params: std::collections::HashSet<String>,
+    /// `var` parameters of primitive/stack type — emitted as `&mut T`, so usages are auto-derefed.
+    pub(crate) var_primitive_params: std::collections::HashSet<String>,
     /// Variables holding `Arc<std::sync::Mutex<T>>` in managed multi mode (anonymous T/T').
     /// Field reads, method calls, and optional chaining go through `.lock().unwrap()`.
     pub(crate) managed_mutex_vars: std::collections::HashSet<String>,
@@ -505,6 +509,7 @@ impl Transpiler {
             out: String::new(),
             indent: 0,
             in_throws: false,
+            in_req_fn: false,
             in_async: false,
             in_iter_stream: false,
             self_type: None,
@@ -629,6 +634,7 @@ impl Transpiler {
             uses_local_broadcast: std::rc::Rc::new(std::cell::Cell::new(false)),
             rc_vars: std::collections::HashSet::new(),
             shared_ref_params: std::collections::HashSet::new(),
+            var_primitive_params: std::collections::HashSet::new(),
             managed_mutex_vars: std::collections::HashSet::new(),
             managed_refcell_vars: std::collections::HashSet::new(),
             managed_param_shadows: std::collections::HashMap::new(),
@@ -835,6 +841,11 @@ impl Transpiler {
         // Single-thread mode uses RefCell for T'actor/T'guard — add import whenever threading=single.
         if matches!(self.config.threading, ThreadingMode::Single) {
             self.line("use std::cell::RefCell;");
+        }
+        // Multi-thread mode with no async fns uses std::sync::Mutex for T'actor (no .await needed).
+        let has_async_fns = !self.task_fns.is_empty() || !self.stream_fns.is_empty();
+        if matches!(self.config.threading, ThreadingMode::Multi) && !has_async_fns {
+            self.line("use std::sync::{Mutex, RwLock};");
         }
         self.line("use std::f64::consts::{PI, E, TAU};");
         self.line("use std::time::Duration;");
@@ -1848,6 +1859,8 @@ impl Transpiler {
         self.fn_sigs.insert(this_mangled.clone(), param_types);
         self.fn_defaults.insert(f.name.clone(), defaults.clone());
         self.fn_defaults.insert(this_mangled, defaults);
+        let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
+        self.fn_rebindable.entry(f.name.clone()).or_insert(rebindable_flags);
         if let Some(ret_ty) = &f.return_ty {
             // For overloaded functions, a non-void definition should not be overwritten by
             // a void one (e.g. exec_stmt: Signal? beats exec_stmt: void for already_opt detection).

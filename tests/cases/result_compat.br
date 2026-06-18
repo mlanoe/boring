@@ -13,10 +13,10 @@ if let Err(e) = r2:
     print "err: {e}"
 
 # while let Ok
-def Result<int, string> next_ok(var int n):
+def Result<int, string> next_ok(int n):
     if n <= 0: return Err("done")
-    n = n - 1
-    return Ok(n + 1)
+    let v = n - 1
+    return Ok(v + 1)
 
 var c = 3
 while let Ok(n) = next_ok(c):

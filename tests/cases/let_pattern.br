@@ -24,10 +24,10 @@ else:
     print "small"
 
 # while let Some(x) using a function
-def int? next(var int counter):
+def int? next(int counter):
     if counter <= 0: return nil
-    counter = counter - 1
-    return counter + 1
+    let c = counter - 1
+    return c + 1
 
 var c = 3
 while let Some(n) = next(c):

@@ -33,6 +33,10 @@ impl Transpiler {
                         }
                     }
                 }
+                // `var` primitive params are `&mut T` — auto-deref on use.
+                if self.var_primitive_params.contains(n.as_str()) {
+                    return format!("(*{})", n);
+                }
                 self.map_builtin_var(n)
             }
 
@@ -284,6 +288,11 @@ impl Transpiler {
                         let val_s = self.emit_expr_owned(value);
                         return format!("*{}.lock().unwrap_or_else(|e| e.into_inner()) = {}", static_name, val_s);
                     }
+                    // `var` primitive param: `n = val` → `*n = val`.
+                    if self.var_primitive_params.contains(var_name.as_str()) {
+                        let val_s = self.emit_expr(value);
+                        return format!("*{} = {}", var_name, val_s);
+                    }
                 }
                 if let ExprKind::Field(obj, field) = &target.kind {
                     // Instance setter property: `t.prop = v` → `t.set_prop(v)`.
@@ -440,19 +449,22 @@ impl Transpiler {
                 // emit_expr_owned wraps string literals in Arc::from; falls through for other types
                 // For index LHS (arr[i] = v), emit without .clone() since we're writing not reading.
                 let target_s = if let ExprKind::Index(arr_obj, idx_expr) = &target.kind {
-                    if let ExprKind::Var(arr_name) = &arr_obj.kind {
-                        if !self.dict_vars.contains(arr_name.as_str()) {
-                            let raw_idx = self.emit_expr(idx_expr);
-                            let idx_s = match &idx_expr.kind {
-                                ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) => format!("({}) as usize", raw_idx),
-                                _ => raw_idx,
-                            };
+                    let raw_idx = self.emit_expr(idx_expr);
+                    let idx_s = match &idx_expr.kind {
+                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) => format!("({}) as usize", raw_idx),
+                        _ => raw_idx,
+                    };
+                    match &arr_obj.kind {
+                        ExprKind::Var(arr_name) if !self.dict_vars.contains(arr_name.as_str()) => {
                             format!("{}[{}]", arr_name, idx_s)
-                        } else {
-                            self.emit_expr(target)
                         }
-                    } else {
-                        self.emit_expr(target)
+                        // self.field[i] = v — struct field array element assignment
+                        ExprKind::Field(inner_obj, field_name)
+                            if matches!(&inner_obj.kind, ExprKind::Var(v) if v == "self") =>
+                        {
+                            format!("self.{}[{}]", field_name, idx_s)
+                        }
+                        _ => self.emit_expr(target),
                     }
                 } else {
                     self.emit_expr(target)
@@ -683,18 +695,22 @@ impl Transpiler {
                 if let ExprKind::Var(v) = &obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) {
                         let access = self.actor_read_access(v);
-                        // In single-thread mode, if the field is itself an Rc<RefCell<T>> (actor/guard),
-                        // we must Rc::clone it to avoid moving out of the borrow guard.
-                        let field_is_rc = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single)
-                            && self.var_types.get(v.as_str())
+                        // If the field is itself an Rc/Arc<RefCell/Mutex<T>> (actor/guard),
+                        // we must clone it to avoid moving out of the borrow/lock guard.
+                        let field_is_shared = self.var_types.get(v.as_str())
                                 .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
                                 .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
                                 .and_then(|tname| self.struct_fields.get(tname))
                                 .and_then(|fields| fields.iter().find(|(fname, _)| fname == field))
                                 .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
                                 .unwrap_or(false);
-                        return if field_is_rc {
-                            format!("Rc::clone(&{}.{})", access, field)
+                        return if field_is_shared {
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Single =>
+                                    format!("Rc::clone(&{}.{})", access, field),
+                                crate::transpiler::ThreadingMode::Multi =>
+                                    format!("Arc::clone(&{}.{})", access, field),
+                            }
                         } else {
                             format!("{}.{}", access, field)
                         };
@@ -1182,15 +1198,9 @@ impl Transpiler {
                 }
 
                 // T as T'actor → Rc::new(RefCell::new(src)) in single-thread mode,
-                // Arc::new(Mutex::new(src)) in multi-thread mode.
-                // This handles Boring `let x = Struct(...) as Struct'actor` patterns.
+                // Arc::new(Mutex::new(src)) or Arc::new(tokio::sync::Mutex::new(src)) in multi-thread mode.
                 if matches!(ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
-                    return match self.config.threading {
-                        crate::transpiler::ThreadingMode::Single =>
-                            format!("Rc::new(RefCell::new({}))", src),
-                        crate::transpiler::ThreadingMode::Multi =>
-                            format!("Arc::new(Mutex::new({}))", src),
-                    };
+                    return self.emit_actor_new(&src);
                 }
 
                 match ty {
@@ -2257,7 +2267,7 @@ impl Transpiler {
                         let raw = self.emit_let_value(inner_ty, eff_value);
                         match self.config.threading {
                             crate::transpiler::ThreadingMode::Multi =>
-                                format!("Arc::new(tokio::sync::Mutex::new({}))", raw),
+                                self.emit_actor_new(&raw),
                             crate::transpiler::ThreadingMode::Single =>
                                 format!("Rc::new(RefCell::new({}))", raw),
                         }
@@ -2304,7 +2314,7 @@ impl Transpiler {
                     if !provided.contains(field_name) {
                         let init = match self.config.threading {
                             crate::transpiler::ThreadingMode::Multi =>
-                                format!("Arc::new(tokio::sync::Mutex::new(Default::default()))"),
+                                self.emit_actor_new("Default::default()"),
                             crate::transpiler::ThreadingMode::Single =>
                                 format!("Rc::new(RefCell::new(Default::default()))"),
                         };
@@ -2588,8 +2598,8 @@ impl Transpiler {
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
             "readLine"   => {
-                // Emit Arc<str> so the result is directly usable as a `string` value.
-                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect(\"failed to read from stdin\"); Arc::<str>::from(__line.trim()) }".into()
+                // trim_end strips trailing \n/\r but preserves leading whitespace (indentation).
+                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect(\"failed to read from stdin\"); Arc::<str>::from(__line.trim_end()) }".into()
             }
             // drop(x) — explicitly releases ownership, maps directly to Rust's drop()
             "drop" => {

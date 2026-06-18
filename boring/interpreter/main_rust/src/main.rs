@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::cell::RefCell;
+use std::sync::{Mutex, RwLock};
 use std::f64::consts::{PI, E, TAU};
 use std::time::Duration;
 
@@ -82,13 +82,13 @@ impl<'a, T: std::fmt::Display> std::fmt::Display for BoringFmt<'a, T> {
 
 // BoringVal — bridge trait that gives BoringError::Other both Display and Any (downcast).
 // Every user-defined error enum automatically satisfies the blanket impl below.
-trait BoringVal: std::fmt::Display + std::any::Any {
+trait BoringVal: std::fmt::Display + std::any::Any + Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
 }
-impl<T: std::fmt::Display + std::any::Any + 'static> BoringVal for T {
+impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T {
     fn as_any(&self) -> &dyn std::any::Any { self }
 }
-impl std::fmt::Debug for dyn BoringVal {
+impl std::fmt::Debug for dyn BoringVal + Send + Sync {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "BoringVal({})", self)
     }
@@ -103,8 +103,8 @@ enum BoringError {
     Float(f64),
     Bool(bool),
     Str(&'static str),
-    String(Rc<str>),
-    Other(std::any::TypeId, std::boxed::Box<dyn BoringVal>),
+    String(Arc<str>),
+    Other(std::any::TypeId, std::boxed::Box<dyn BoringVal + Send + Sync>),
 }
 impl std::fmt::Display for BoringError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -146,24 +146,24 @@ impl std::error::Error for Error {}
 
 #[derive(Debug, Clone, PartialEq)]
 enum RawInterpPart {
-    Lit(Rc<str>),
-    Hole(Rc<str>),
-    HoleFormatted(Rc<str>, Rc<str>),
+    Lit(Arc<str>),
+    Hole(Arc<str>),
+    HoleFormatted(Arc<str>, Arc<str>),
 }
 
 impl RawInterpPart {
-    fn s(&self) -> Option<Rc<str>> {
+    fn s(&self) -> Option<Arc<str>> {
         if let RawInterpPart::Lit(__fv) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn expr(&self) -> Option<Rc<str>> {
+    fn expr(&self) -> Option<Arc<str>> {
         if let RawInterpPart::Hole(__fv) = self { return Some(__fv.clone()); }
         if let RawInterpPart::HoleFormatted(__fv, _) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn fmt(&self) -> Option<Rc<str>> {
+    fn fmt(&self) -> Option<Arc<str>> {
         if let RawInterpPart::HoleFormatted(_, __fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -174,11 +174,11 @@ impl RawInterpPart {
 enum TokenKind {
     Int(i64),
     Float(f64),
-    Str(Rc<str>),
+    Str(Arc<str>),
     StringInterp(Vec<RawInterpPart>),
     Bool(bool),
     Nil,
-    Ident(Rc<str>),
+    Ident(Arc<str>),
     Let,
     Var,
     Def,
@@ -278,7 +278,7 @@ enum TokenKind {
     Indent,
     Dedent,
     Eof,
-    Comment(Rc<str>),
+    Comment(Arc<str>),
 }
 
 impl TokenKind {
@@ -292,7 +292,7 @@ impl TokenKind {
         None
     }
 
-    fn s(&self) -> Option<Rc<str>> {
+    fn s(&self) -> Option<Arc<str>> {
         if let TokenKind::Str(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -307,12 +307,12 @@ impl TokenKind {
         None
     }
 
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let TokenKind::Ident(__fv) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn text(&self) -> Option<Rc<str>> {
+    fn text(&self) -> Option<Arc<str>> {
         if let TokenKind::Comment(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -332,13 +332,14 @@ impl std::fmt::Display for Token {
 }
 
 impl Token {
-    fn text(&self) -> Rc<str> {
-        match self.kind.clone() {
+    fn text(&self) -> Arc<str> {
+        let kind = self.kind.clone();
+        match kind {
             TokenKind::Ident(s) => {
                 s.clone()
             }
             _ => {
-                Rc::<str>::from("")
+                Arc::<str>::from("")
             }
         }
     }
@@ -347,8 +348,8 @@ impl Token {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Attr {
-    pub name: Rc<str>,
-    pub args: Vec<Rc<str>>,
+    pub name: Arc<str>,
+    pub args: Vec<Arc<str>>,
     pub line: i64,
 }
 
@@ -392,7 +393,7 @@ enum Item {
 
 #[derive(Debug, Clone, PartialEq)]
 struct ModDecl {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub items: Vec<Item>,
     pub line: i64,
 }
@@ -408,8 +409,8 @@ impl ModDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct AliasDecl {
-    pub name: Rc<str>,
-    pub type_params: Vec<Rc<str>>,
+    pub name: Arc<str>,
+    pub type_params: Vec<Arc<str>>,
     pub ty: Type,
     pub newtype: bool,
     pub line: i64,
@@ -426,11 +427,11 @@ impl AliasDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct ExtDecl {
-    pub type_name: Rc<str>,
+    pub type_name: Arc<str>,
     pub type_args: Vec<Type>,
-    pub type_params: Vec<Rc<str>>,
-    pub where_clause: Vec<HashMap<Rc<str>, Rc<str>>>,
-    pub traits: Vec<Rc<str>>,
+    pub type_params: Vec<Arc<str>>,
+    pub where_clause: Vec<HashMap<Arc<str>, Arc<str>>>,
+    pub traits: Vec<Arc<str>>,
     pub methods: Vec<FnDecl>,
     pub setters: Vec<SetDecl>,
     pub conversions: Vec<AsDecl>,
@@ -449,9 +450,9 @@ impl ExtDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct UseDecl {
-    pub path: Vec<Rc<str>>,
+    pub path: Vec<Arc<str>>,
     pub glob: bool,
-    pub items: Vec<Rc<str>>,
+    pub items: Vec<Arc<str>>,
     pub line: i64,
 }
 
@@ -466,8 +467,8 @@ impl UseDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct FnDecl {
-    pub name: Rc<str>,
-    pub qualifier: Option<Rc<str>>,
+    pub name: Arc<str>,
+    pub qualifier: Option<Arc<str>>,
     pub params: Vec<Param>,
     pub return_ty: Option<Type>,
     pub body: Vec<Stmt>,
@@ -479,8 +480,8 @@ struct FnDecl {
     pub mutating: bool,
     pub is_native: bool,
     pub throws_ty: Option<Type>,
-    pub type_params: Vec<Rc<str>>,
-    pub where_clause: Vec<HashMap<Rc<str>, Rc<str>>>,
+    pub type_params: Vec<Arc<str>>,
+    pub where_clause: Vec<HashMap<Arc<str>, Arc<str>>>,
     pub attrs: Vec<Attr>,
     pub line: i64,
 }
@@ -496,7 +497,7 @@ impl FnDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Param {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Option<Type>,
     pub mutable: bool,
     pub owned: bool,
@@ -516,8 +517,8 @@ impl Param {
 
 #[derive(Debug, Clone, PartialEq)]
 struct SetDecl {
-    pub name: Rc<str>,
-    pub param_name: Rc<str>,
+    pub name: Arc<str>,
+    pub param_name: Arc<str>,
     pub param_ty: Type,
     pub is_pub: bool,
     pub can_throw: bool,
@@ -537,16 +538,16 @@ impl SetDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct StructDecl {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub is_pub: bool,
     pub is_native: bool,
-    pub protocols: Vec<Rc<str>>,
+    pub protocols: Vec<Arc<str>>,
     pub fields: Vec<FieldDecl>,
     pub inits: Vec<InitDecl>,
     pub methods: Vec<FnDecl>,
     pub conversions: Vec<AsDecl>,
-    pub type_params: Vec<Rc<str>>,
-    pub where_clause: Vec<HashMap<Rc<str>, Rc<str>>>,
+    pub type_params: Vec<Arc<str>>,
+    pub where_clause: Vec<HashMap<Arc<str>, Arc<str>>>,
     pub setters: Vec<SetDecl>,
     pub type_methods: Vec<TypeMethod>,
     pub type_vars: Vec<TypeVar>,
@@ -575,7 +576,7 @@ enum TypeMethodKind {
 #[derive(Debug, Clone, PartialEq)]
 struct TypeMethod {
     pub kind: TypeMethodKind,
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub params: Vec<Param>,
     pub return_ty: Option<Type>,
     pub body: Vec<Stmt>,
@@ -596,7 +597,7 @@ impl TypeMethod {
 
 #[derive(Debug, Clone, PartialEq)]
 struct TypeVar {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Option<Type>,
     pub default: Expr,
     pub is_pub: bool,
@@ -634,7 +635,7 @@ impl AsDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct FieldDecl {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub is_pub: bool,
     pub mutable: bool,
     pub is_transient: bool,
@@ -672,7 +673,7 @@ impl InitDecl {
 struct InitParam {
     pub is_pub: bool,
     pub mutable: bool,
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Option<Type>,
     pub default: Option<Expr>,
     pub line: i64,
@@ -689,11 +690,11 @@ impl InitParam {
 
 #[derive(Debug, Clone, PartialEq)]
 struct EnumDecl {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub is_pub: bool,
     pub is_native: bool,
-    pub type_params: Vec<Rc<str>>,
-    pub protocols: Vec<Rc<str>>,
+    pub type_params: Vec<Arc<str>>,
+    pub protocols: Vec<Arc<str>>,
     pub variants: Vec<EnumVariant>,
     pub methods: Vec<FnDecl>,
     pub setters: Vec<SetDecl>,
@@ -713,7 +714,7 @@ impl EnumDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct EnumVariant {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub fields: Vec<VariantField>,
     pub attrs: Vec<Attr>,
     pub line: i64,
@@ -730,7 +731,7 @@ impl EnumVariant {
 
 #[derive(Debug, Clone, PartialEq)]
 struct VariantField {
-    pub name: Option<Rc<str>>,
+    pub name: Option<Arc<str>>,
     pub ty: Type,
 }
 
@@ -745,9 +746,9 @@ impl VariantField {
 
 #[derive(Debug, Clone, PartialEq)]
 struct AssocTypeDecl {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub constraint: Option<Type>,
-    pub type_params: Vec<Rc<str>>,
+    pub type_params: Vec<Arc<str>>,
     pub line: i64,
 }
 
@@ -762,7 +763,7 @@ impl AssocTypeDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct AssocTypeDef {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Type,
     pub line: i64,
 }
@@ -778,12 +779,12 @@ impl AssocTypeDef {
 
 #[derive(Debug, Clone, PartialEq)]
 struct TraitDecl {
-    pub name: Rc<str>,
-    pub parents: Vec<Rc<str>>,
+    pub name: Arc<str>,
+    pub parents: Vec<Arc<str>>,
     pub signatures: Vec<FnSignature>,
     pub defaults: Vec<FnDecl>,
     pub type_signatures: Vec<FnSignature>,
-    pub type_params: Vec<Rc<str>>,
+    pub type_params: Vec<Arc<str>>,
     pub assoc_types: Vec<AssocTypeDecl>,
     pub line: i64,
 }
@@ -799,14 +800,14 @@ impl TraitDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 struct FnSignature {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub params: Vec<Param>,
     pub return_ty: Option<Type>,
     pub can_throw: bool,
     pub is_task: bool,
     pub is_stream: bool,
     pub mutating: bool,
-    pub type_params: Vec<Rc<str>>,
+    pub type_params: Vec<Arc<str>>,
     pub line: i64,
 }
 
@@ -846,7 +847,7 @@ enum Stmt {
     Mod(ModDecl),
     Alias(AliasDecl),
     Yield(Expr, i64),
-    Comment(Rc<str>),
+    Comment(Arc<str>),
 }
 
 impl Stmt {
@@ -875,7 +876,7 @@ impl Stmt {
         None
     }
 
-    fn text(&self) -> Option<Rc<str>> {
+    fn text(&self) -> Option<Arc<str>> {
         if let Stmt::Comment(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -901,7 +902,7 @@ impl LetDestructureStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 struct DestructureBinding {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Option<Type>,
 }
 
@@ -916,13 +917,13 @@ impl DestructureBinding {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CondClause {
-    Let(Rc<str>, Expr),
+    Let(Arc<str>, Expr),
     LetPat(Pattern, Expr),
     Expr(Expr),
 }
 
 impl CondClause {
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let CondClause::Let(__fv, _) = self { return Some(__fv.clone()); }
         None
     }
@@ -963,7 +964,7 @@ struct LetStmt {
     pub mutable: bool,
     pub is_pub: bool,
     pub is_static: bool,
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub ty: Option<Type>,
     pub value: Option<Expr>,
     pub is_move: bool,
@@ -1095,7 +1096,7 @@ impl WhileStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 struct WhileLetStmt {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub pattern: Option<Pattern>,
     pub value: Expr,
     pub body: Vec<Stmt>,
@@ -1160,8 +1161,8 @@ impl TryStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 struct CatchClause {
-    pub types: Vec<Rc<str>>,
-    pub variant: Option<Rc<str>>,
+    pub types: Vec<Arc<str>>,
+    pub variant: Option<Arc<str>>,
     pub body: Vec<Stmt>,
     pub line: i64,
 }
@@ -1192,7 +1193,7 @@ impl ThrowStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 struct ForStmt {
-    pub vars: Vec<Rc<str>>,
+    pub vars: Vec<Arc<str>>,
     pub iterable: Expr,
     pub body: Vec<Stmt>,
     pub line: i64,
@@ -1260,8 +1261,8 @@ impl GuardCond {
 #[derive(Debug, Clone, PartialEq)]
 enum Pattern {
     Wildcard,
-    Bind(Rc<str>),
-    Variant(Rc<str>, Vec<Pattern>),
+    Bind(Arc<str>),
+    Variant(Arc<str>, Vec<Pattern>),
     Lit(LitPattern),
     None,
     Some(Box<Pattern>),
@@ -1269,7 +1270,7 @@ enum Pattern {
 }
 
 impl Pattern {
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let Pattern::Bind(__fv) = self { return Some(__fv.clone()); }
         if let Pattern::Variant(__fv, _) = self { return Some(__fv.clone()); }
         None
@@ -1301,7 +1302,7 @@ impl Pattern {
 enum LitPattern {
     Int(i64),
     Float(f64),
-    Str(Rc<str>),
+    Str(Arc<str>),
     Bool(bool),
     Nil,
 }
@@ -1317,7 +1318,7 @@ impl LitPattern {
         None
     }
 
-    fn s(&self) -> Option<Rc<str>> {
+    fn s(&self) -> Option<Arc<str>> {
         if let LitPattern::Str(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -1331,13 +1332,13 @@ impl LitPattern {
 
 #[derive(Debug, Clone, PartialEq)]
 enum StringSegment {
-    Lit(Rc<str>),
+    Lit(Arc<str>),
     Expr(Expr),
-    FormattedExpr(Expr, Rc<str>),
+    FormattedExpr(Expr, Arc<str>),
 }
 
 impl StringSegment {
-    fn text(&self) -> Option<Rc<str>> {
+    fn text(&self) -> Option<Arc<str>> {
         if let StringSegment::Lit(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -1348,7 +1349,7 @@ impl StringSegment {
         None
     }
 
-    fn fmt_spec(&self) -> Option<Rc<str>> {
+    fn fmt_spec(&self) -> Option<Arc<str>> {
         if let StringSegment::FormattedExpr(_, __fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -1372,7 +1373,7 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Arg {
-    pub label: Option<Rc<str>>,
+    pub label: Option<Arc<str>>,
     pub value: Expr,
     pub spread: bool,
 }
@@ -1409,33 +1410,33 @@ impl ClosureBody {
 enum ExprKind {
     Int(i64),
     Float(f64),
-    Str(Rc<str>),
+    Str(Arc<str>),
     StringInterp(Vec<StringSegment>),
     Bool(bool),
     Nil,
     Void,
-    Var(Rc<str>),
+    Var(Arc<str>),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
     Assign(Box<Expr>, Box<Expr>),
-    Field(Box<Expr>, Rc<str>),
+    Field(Box<Expr>, Arc<str>),
     Index(Box<Expr>, Box<Expr>),
     Call(Box<Expr>, Vec<Arg>),
-    MethodCall(Box<Expr>, Rc<str>, Vec<Arg>),
+    MethodCall(Box<Expr>, Arc<str>, Vec<Arg>),
     GenericCall(Box<Expr>, Vec<Type>, Vec<Arg>),
-    Pipe(Box<Expr>, Rc<str>, Vec<Arg>),
+    Pipe(Box<Expr>, Arc<str>, Vec<Arg>),
     TryElse(Box<Expr>, Box<Expr>),
     TryElseBlock(Vec<Stmt>, Vec<Stmt>),
     Array(Vec<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
-    DotIdent(Rc<str>),
+    DotIdent(Arc<str>),
     Range(Box<Expr>, Box<Expr>, bool),
     Cast(Box<Expr>, Type),
     Else(Box<Expr>, Box<Expr>),
-    OptionalField(Box<Expr>, Rc<str>),
-    OptionalMethodCall(Box<Expr>, Rc<str>, Vec<Arg>),
+    OptionalField(Box<Expr>, Arc<str>),
+    OptionalMethodCall(Box<Expr>, Arc<str>, Vec<Arg>),
     Closure(Vec<Param>, Option<Type>, Box<ClosureBody>, bool, bool),
     If(IfStmt),
     Match(Box<MatchStmt>),
@@ -1445,12 +1446,12 @@ enum ExprKind {
     Task(Box<Expr>),
     TaskWithTimeout(Box<Expr>, Box<Expr>),
     JoinAll(Vec<Expr>),
-    MacroCall(Rc<str>, Vec<Expr>),
+    MacroCall(Arc<str>, Vec<Expr>),
     WildcardPat,
     LiteralPat(Box<Expr>),
-    VarPat(Rc<str>),
+    VarPat(Arc<str>),
     TuplePat(Vec<Expr>),
-    EnumPat(Rc<str>, Rc<str>, Vec<Expr>),
+    EnumPat(Arc<str>, Arc<str>, Vec<Expr>),
 }
 
 impl ExprKind {
@@ -1464,7 +1465,7 @@ impl ExprKind {
         None
     }
 
-    fn s(&self) -> Option<Rc<str>> {
+    fn s(&self) -> Option<Arc<str>> {
         if let ExprKind::Str(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -1479,7 +1480,7 @@ impl ExprKind {
         None
     }
 
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let ExprKind::Var(__fv) = self { return Some(__fv.clone()); }
         if let ExprKind::Field(_, __fv) = self { return Some(__fv.clone()); }
         if let ExprKind::MethodCall(_, __fv, _) = self { return Some(__fv.clone()); }
@@ -1637,12 +1638,12 @@ impl ExprKind {
         None
     }
 
-    fn type_name(&self) -> Option<Rc<str>> {
+    fn type_name(&self) -> Option<Arc<str>> {
         if let ExprKind::EnumPat(__fv, _, _) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn variant(&self) -> Option<Rc<str>> {
+    fn variant(&self) -> Option<Arc<str>> {
         if let ExprKind::EnumPat(_, __fv, _) = self { return Some(__fv.clone()); }
         None
     }
@@ -1698,7 +1699,7 @@ enum OwnerQual {
     Shared,
     Weak,
     Stack,
-    Lifetime(Rc<str>),
+    Lifetime(Arc<str>),
     BorrowShared,
     Borrow,
     BorrowOwned,
@@ -1708,7 +1709,7 @@ enum OwnerQual {
 }
 
 impl OwnerQual {
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let OwnerQual::Lifetime(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -1725,7 +1726,7 @@ enum Type {
     Nil,
     Void,
     Never,
-    Named(Rc<str>),
+    Named(Arc<str>),
     Optional(Box<Type>),
     Array(Box<Type>),
     Tuple(Vec<Type>),
@@ -1735,14 +1736,14 @@ enum Type {
     Qualified(Box<Type>, OwnerQual),
     Dyn(Box<Type>),
     Impl(Box<Type>),
-    TypeParam(Rc<str>),
-    Generic(Rc<str>, Vec<Type>),
-    SelfAssoc(Rc<str>),
-    AssocOf(Box<Type>, Rc<str>),
+    TypeParam(Arc<str>),
+    Generic(Arc<str>, Vec<Type>),
+    SelfAssoc(Arc<str>),
+    AssocOf(Box<Type>, Arc<str>),
 }
 
 impl Type {
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let Type::Named(__fv) = self { return Some(__fv.clone()); }
         if let Type::TypeParam(__fv) = self { return Some(__fv.clone()); }
         if let Type::Generic(__fv, _) = self { return Some(__fv.clone()); }
@@ -1826,17 +1827,17 @@ impl Type {
 
 }
 
-fn lex_ident_chars(first: Rc<str>, chars: Vec<Rc<str>>, pos: i64) -> Rc<str> {
+fn lex_ident_chars(first: Arc<str>, chars: Vec<Arc<str>>, pos: i64) -> Arc<str> {
     panic!("use the Lexer method instead");
 }
 
-fn measure_indent(line: Rc<str>) -> i64 {
+fn measure_indent(line: Arc<str>) -> i64 {
     let mut spaces: i64 = 0;
     let mut tabs: i64 = 0;
-    for ch in line.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().into_iter() {
-        if (ch == Rc::<str>::from(" ")) {
+    for ch in line.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().into_iter() {
+        if (ch == Arc::<str>::from(" ")) {
             spaces += 1;
-        } else if (ch == Rc::<str>::from("\t")) {
+        } else if (ch == Arc::<str>::from("\t")) {
             tabs += 1;
         } else {
             break;
@@ -1848,28 +1849,28 @@ fn measure_indent(line: Rc<str>) -> i64 {
     return (spaces + (tabs * 4));
 }
 
-fn comment_start_index(chars: Vec<Rc<str>>) -> i64 {
+fn comment_start_index(chars: Vec<Arc<str>>) -> i64 {
     panic!("use the Lexer method instead");
 }
 
-fn dedent_triple(raw: Rc<str>) -> Rc<str> {
-    let mut s: Rc<str> = raw.clone().clone();
+fn dedent_triple(raw: Arc<str>) -> Arc<str> {
+    let mut s: Arc<str> = raw.clone().clone();
     if s.starts_with("\n") {
-        s = { let __start = (1) as usize; Rc::<str>::from(s.chars().skip(__start).take(((s.len() as i64)) as usize - __start).collect::<String>().as_str()) };
+        s = { let __start = (1) as usize; Arc::<str>::from(s.chars().skip(__start).take(((s.len() as i64)) as usize - __start).collect::<String>().as_str()) };
     }
     if s.ends_with("\n") {
-        s = { let __start = (0) as usize; Rc::<str>::from(s.chars().skip(__start).take((((s.len() as i64) - 1)) as usize - __start).collect::<String>().as_str()) };
+        s = { let __start = (0) as usize; Arc::<str>::from(s.chars().skip(__start).take((((s.len() as i64) - 1)) as usize - __start).collect::<String>().as_str()) };
     }
     if ((s.len() as i64) == 0) {
-        return Rc::<str>::from("");
+        return Arc::<str>::from("");
     }
-    let mut lines = s.split("\n").map(|p| Rc::<str>::from(p.to_string())).collect::<Vec<_>>();
+    let mut lines = s.split("\n").map(|p| Arc::<str>::from(p.to_string())).collect::<Vec<_>>();
     let mut min_indent: i64 = 999999;
     for ln in lines.iter().cloned() {
-        if ((Rc::<str>::from(ln.trim()).len() as i64) > 0) {
+        if ((Arc::<str>::from(ln.trim()).len() as i64) > 0) {
             let mut count: i64 = 0;
-            for ch in ln.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().into_iter() {
-                if ((ch == Rc::<str>::from(" ")) || (ch == Rc::<str>::from("\t"))) {
+            for ch in ln.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().into_iter() {
+                if ((ch == Arc::<str>::from(" ")) || (ch == Arc::<str>::from("\t"))) {
                     count += 1;
                 } else {
                     break;
@@ -1886,116 +1887,116 @@ fn dedent_triple(raw: Rc<str>) -> Rc<str> {
     if (min_indent == 0) {
         return s.clone();
     }
-    let mut result: Vec<Rc<str>> = vec![];
+    let mut result: Vec<Arc<str>> = vec![];
     for ln in lines.iter().cloned() {
-        if ((Rc::<str>::from(ln.trim()).len() as i64) == 0) {
-            result.push(Rc::<str>::from(""));
+        if ((Arc::<str>::from(ln.trim()).len() as i64) == 0) {
+            result.push(Arc::<str>::from(""));
         } else if ((ln.len() as i64) >= min_indent) {
-            result.push({ let __start = (min_indent) as usize; Rc::<str>::from(ln.chars().skip(__start).take(((ln.len() as i64)) as usize - __start).collect::<String>().as_str()) });
+            result.push({ let __start = (min_indent) as usize; Arc::<str>::from(ln.chars().skip(__start).take(((ln.len() as i64)) as usize - __start).collect::<String>().as_str()) });
         } else {
             result.push(ln.clone());
         }
     }
-    let mut out: Rc<str> = Rc::<str>::from("");
+    let mut out: Arc<str> = Arc::<str>::from("");
     for ii in (0..(result.len() as i64)) {
         if (ii > 0) {
-            out = Rc::<str>::from(format!("{}{}", out, "\n"));
+            out = Arc::<str>::from(format!("{}{}", out, "\n"));
         }
-        out = Rc::<str>::from(format!("{}{}", out, result[(ii) as usize].clone()));
+        out = Arc::<str>::from(format!("{}{}", out, result[(ii) as usize].clone()));
     }
     return out.clone();
 }
 
-fn preprocess_triple_strings(source: Rc<str>) -> Rc<str> {
-    let chars = source.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>();
+fn preprocess_triple_strings(source: Arc<str>) -> Arc<str> {
+    let chars = source.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>();
     let n = (chars.len() as i64);
-    let mut result: Rc<str> = Rc::<str>::from("");
+    let mut result: Arc<str> = Arc::<str>::from("");
     let mut i: i64 = 0;
     let mut line: i64 = 1;
     while (i < n) {
         let ch = chars[(i) as usize].clone();
-        if (ch == Rc::<str>::from("\n")) {
+        if (ch == Arc::<str>::from("\n")) {
             line += 1;
-            result = Rc::<str>::from(format!("{}{}", result, "\n"));
+            result = Arc::<str>::from(format!("{}{}", result, "\n"));
             i += 1;
             continue;
         }
-        if (ch == Rc::<str>::from("#")) {
-            while ((i < n) && (chars[(i) as usize].clone() != Rc::<str>::from("\n"))) {
-                result = Rc::<str>::from(format!("{}{}", result, chars[(i) as usize].clone()));
+        if (ch == Arc::<str>::from("#")) {
+            while ((i < n) && (chars[(i) as usize].clone() != Arc::<str>::from("\n"))) {
+                result = Arc::<str>::from(format!("{}{}", result, chars[(i) as usize].clone()));
                 i += 1;
             }
             continue;
         }
-        if (ch == Rc::<str>::from("\"")) {
-            if ((((i + 2) < n) && (chars[((i + 1)) as usize].clone() == Rc::<str>::from("\""))) && (chars[((i + 2)) as usize].clone() == Rc::<str>::from("\""))) {
+        if (ch == Arc::<str>::from("\"")) {
+            if ((((i + 2) < n) && (chars[((i + 1)) as usize].clone() == Arc::<str>::from("\""))) && (chars[((i + 2)) as usize].clone() == Arc::<str>::from("\""))) {
                 let start_line = line;
                 i += 3;
-                let mut raw: Rc<str> = Rc::<str>::from("");
+                let mut raw: Arc<str> = Arc::<str>::from("");
                 let mut newlines_consumed: i64 = 0;
                 let mut closed: bool = false;
                 while (i < n) {
-                    if (((((i + 2) < n) && (chars[(i) as usize].clone() == Rc::<str>::from("\""))) && (chars[((i + 1)) as usize].clone() == Rc::<str>::from("\""))) && (chars[((i + 2)) as usize].clone() == Rc::<str>::from("\""))) {
+                    if (((((i + 2) < n) && (chars[(i) as usize].clone() == Arc::<str>::from("\""))) && (chars[((i + 1)) as usize].clone() == Arc::<str>::from("\""))) && (chars[((i + 2)) as usize].clone() == Arc::<str>::from("\""))) {
                         i += 3;
                         closed = true;
                         break;
                     }
-                    if (chars[(i) as usize].clone() == Rc::<str>::from("\n")) {
+                    if (chars[(i) as usize].clone() == Arc::<str>::from("\n")) {
                         newlines_consumed += 1;
                         line += 1;
                     }
-                    raw = Rc::<str>::from(format!("{}{}", raw, chars[(i) as usize].clone()));
+                    raw = Arc::<str>::from(format!("{}{}", raw, chars[(i) as usize].clone()));
                     i += 1;
                 }
                 if (!closed) {
-                    panic!("{}", Rc::<str>::from(format!("line {}: unterminated triple-quoted string", start_line).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("line {}: unterminated triple-quoted string", start_line).as_str()));
                 }
                 let content = dedent_triple(raw.clone().clone());
-                result = Rc::<str>::from(format!("{}{}", result, "\""));
-                for c in content.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().into_iter() {
-                    if (c == Rc::<str>::from("\"")) {
-                        result = Rc::<str>::from(format!("{}{}", result, "\\\""));
-                    } else if (c == Rc::<str>::from("\n")) {
-                        result = Rc::<str>::from(format!("{}{}", result, "\\n"));
-                    } else if (c == Rc::<str>::from("\r")) {
-                        result = Rc::<str>::from(format!("{}{}", result, "\\r"));
+                result = Arc::<str>::from(format!("{}{}", result, "\""));
+                for c in content.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().into_iter() {
+                    if (c == Arc::<str>::from("\"")) {
+                        result = Arc::<str>::from(format!("{}{}", result, "\\\""));
+                    } else if (c == Arc::<str>::from("\n")) {
+                        result = Arc::<str>::from(format!("{}{}", result, "\\n"));
+                    } else if (c == Arc::<str>::from("\r")) {
+                        result = Arc::<str>::from(format!("{}{}", result, "\\r"));
                     } else {
-                        result = Rc::<str>::from(format!("{}{}", result, c));
+                        result = Arc::<str>::from(format!("{}{}", result, c));
                     }
                 }
-                result = Rc::<str>::from(format!("{}{}", result, "\""));
+                result = Arc::<str>::from(format!("{}{}", result, "\""));
                 let mut nl: i64 = 0;
                 while (nl < newlines_consumed) {
-                    result = Rc::<str>::from(format!("{}{}", result, "\n"));
+                    result = Arc::<str>::from(format!("{}{}", result, "\n"));
                     nl += 1;
                 }
                 continue;
             }
-            result = Rc::<str>::from(format!("{}{}", result, "\""));
+            result = Arc::<str>::from(format!("{}{}", result, "\""));
             i += 1;
             while (i < n) {
                 let c = chars[(i) as usize].clone();
-                result = Rc::<str>::from(format!("{}{}", result, c));
+                result = Arc::<str>::from(format!("{}{}", result, c));
                 i += 1;
-                if (c == Rc::<str>::from("\\")) {
+                if (c == Arc::<str>::from("\\")) {
                     if (i < n) {
-                        result = Rc::<str>::from(format!("{}{}", result, chars[(i) as usize].clone()));
+                        result = Arc::<str>::from(format!("{}{}", result, chars[(i) as usize].clone()));
                         i += 1;
                     }
-                } else if (c == Rc::<str>::from("{")) {
+                } else if (c == Arc::<str>::from("{")) {
                     let mut depth: i64 = 1;
                     while ((i < n) && (depth > 0)) {
                         let ic = chars[(i) as usize].clone();
-                        result = Rc::<str>::from(format!("{}{}", result, ic));
+                        result = Arc::<str>::from(format!("{}{}", result, ic));
                         i += 1;
-                        if (ic == Rc::<str>::from("{")) {
+                        if (ic == Arc::<str>::from("{")) {
                             depth += 1;
-                        } else if (ic == Rc::<str>::from("}")) {
+                        } else if (ic == Arc::<str>::from("}")) {
                             depth -= 1;
                         }
                     }
-                } else if ((c == Rc::<str>::from("\"")) || (c == Rc::<str>::from("\n"))) {
-                    if (c == Rc::<str>::from("\n")) {
+                } else if ((c == Arc::<str>::from("\"")) || (c == Arc::<str>::from("\n"))) {
+                    if (c == Arc::<str>::from("\n")) {
                         line += 1;
                     }
                     break;
@@ -2003,37 +2004,37 @@ fn preprocess_triple_strings(source: Rc<str>) -> Rc<str> {
             }
             continue;
         }
-        result = Rc::<str>::from(format!("{}{}", result, ch));
+        result = Arc::<str>::from(format!("{}{}", result, ch));
         i += 1;
     }
     return result.clone();
 }
 
-fn split_hole_fmt(s: Rc<str>) -> Vec<Rc<str>> {
+fn split_hole_fmt(s: Arc<str>) -> Vec<Arc<str>> {
     let mut depth: i64 = 0;
     let mut idx: i64 = 0;
-    for ch in s.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().into_iter() {
-        if (((ch == Rc::<str>::from("(")) || (ch == Rc::<str>::from("["))) || (ch == Rc::<str>::from("{"))) {
+    for ch in s.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().into_iter() {
+        if (((ch == Arc::<str>::from("(")) || (ch == Arc::<str>::from("["))) || (ch == Arc::<str>::from("{"))) {
             depth += 1;
-        } else if (((ch == Rc::<str>::from(")")) || (ch == Rc::<str>::from("]"))) || (ch == Rc::<str>::from("}"))) {
+        } else if (((ch == Arc::<str>::from(")")) || (ch == Arc::<str>::from("]"))) || (ch == Arc::<str>::from("}"))) {
             depth -= 1;
-        } else if ((ch == Rc::<str>::from(":")) && (depth == 0)) {
-            let expr = { let __start = (0) as usize; Rc::<str>::from(s.chars().skip(__start).take((idx) as usize - __start).collect::<String>().as_str()) };
-            let __rest_tmp = { let __start = ((idx + 1)) as usize; Rc::<str>::from(s.chars().skip(__start).take(((s.len() as i64)) as usize - __start).collect::<String>().as_str()) };
-            let rest = Rc::<str>::from(__rest_tmp.trim());
+        } else if ((ch == Arc::<str>::from(":")) && (depth == 0)) {
+            let expr = { let __start = (0) as usize; Arc::<str>::from(s.chars().skip(__start).take((idx) as usize - __start).collect::<String>().as_str()) };
+            let rest_raw = { let __start = ((idx + 1)) as usize; Arc::<str>::from(s.chars().skip(__start).take(((s.len() as i64)) as usize - __start).collect::<String>().as_str()) };
+            let rest = rest_raw.trim();
             if ((rest.len() as i64) == 0) {
-                return vec![s.clone().clone(), Rc::<str>::from(Rc::<str>::from("").to_string())];
+                return vec![s.clone().clone(), Arc::<str>::from("")];
             }
-            return vec![Rc::<str>::from(expr.to_string()), Rc::<str>::from(rest.to_string())];
+            return vec![Arc::<str>::from(expr.to_string()), Arc::<str>::from(rest.to_string())];
         }
         idx += 1;
     }
-    return vec![s.clone().clone(), Rc::<str>::from(Rc::<str>::from("").to_string())];
+    return vec![s.clone().clone(), Arc::<str>::from("")];
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct Lexer {
-    chars: /* var */ Vec<Rc<str>>,
+    chars: /* var */ Vec<Arc<str>>,
     pos: /* var */ i64,
     line: /* var */ i64,
     col: /* var */ i64,
@@ -2051,7 +2052,7 @@ impl std::fmt::Display for Lexer {
 }
 
 impl Lexer {
-    pub fn new(chars: Vec<Rc<str>>) -> Self {
+    pub fn new(chars: Vec<Arc<str>>) -> Self {
         Lexer { chars: chars, pos: 0, line: 1, col: 1, indent_stack: vec![0], tokens: vec![], paren_depth: 0, inner_colon_blocks: 0, inner_block_base_indents: vec![] }
     }
 
@@ -2059,7 +2060,7 @@ impl Lexer {
         (self.pos >= (self.chars.len() as i64))
     }
 
-    fn peek_char(&self) -> Option<Rc<str>> {
+    fn peek_char(&self) -> Option<Arc<str>> {
         if (self.pos < (self.chars.len() as i64)) {
             Some(self.chars[(self.pos) as usize].clone())
         } else {
@@ -2067,7 +2068,7 @@ impl Lexer {
         }
     }
 
-    fn peek_char_at(&self, offset: i64) -> Option<Rc<str>> {
+    fn peek_char_at(&self, offset: i64) -> Option<Arc<str>> {
         let idx = (self.pos + offset);
         if (idx < (self.chars.len() as i64)) {
             Some(self.chars[(idx) as usize].clone())
@@ -2076,10 +2077,10 @@ impl Lexer {
         }
     }
 
-    fn advance(&mut self) -> Rc<str> {
+    fn advance(&mut self) -> Arc<str> {
         let ch = self.chars[(self.pos) as usize].clone();
         self.pos += 1;
-        if (ch == Rc::<str>::from("\n")) {
+        if (ch == Arc::<str>::from("\n")) {
             self.line += 1;
             self.col = 1;
         } else {
@@ -2088,14 +2089,14 @@ impl Lexer {
         return ch;
     }
 
-    fn match_char(&self, expected: Rc<str>) -> bool {
+    fn match_char(&self, expected: Arc<str>) -> bool {
         if ((self.pos < (self.chars.len() as i64)) && (self.chars[(self.pos) as usize].clone() == expected)) {
             return true;
         }
         return false;
     }
 
-    fn consume(&mut self) -> Rc<str> {
+    fn consume(&mut self) -> Arc<str> {
         let ch = self.chars[(self.pos) as usize].clone();
         self.pos += 1;
         self.col += 1;
@@ -2103,41 +2104,41 @@ impl Lexer {
     }
 
     fn push(&mut self, kind: TokenKind) -> () {
-        self.tokens.push(Token { kind: kind, line: self.line });
+        self.tokens.push(Token { kind: kind.clone(), line: self.line });
     }
 
-    fn find_comment_start(&self, line_chars: Vec<Rc<str>>) -> i64 {
+    fn find_comment_start(&self, line_chars: Vec<Arc<str>>) -> i64 {
         let mut i: i64 = 0;
         while (i < (line_chars.len() as i64)) {
             let ch = line_chars[(i) as usize].clone();
-            if (ch == Rc::<str>::from("#")) {
+            if (ch == Arc::<str>::from("#")) {
                 return i;
             }
-            if (ch == Rc::<str>::from("\"")) {
+            if (ch == Arc::<str>::from("\"")) {
                 i += 1;
                 while (i < (line_chars.len() as i64)) {
                     let c = line_chars[(i) as usize].clone();
                     i += 1;
-                    if (c == Rc::<str>::from("\\")) {
+                    if (c == Arc::<str>::from("\\")) {
                         if (i < (line_chars.len() as i64)) {
                             i += 1;
                         }
-                    } else if (c == Rc::<str>::from("{")) {
-                        if ((i < (line_chars.len() as i64)) && (line_chars[(i) as usize].clone() == Rc::<str>::from("{"))) {
+                    } else if (c == Arc::<str>::from("{")) {
+                        if ((i < (line_chars.len() as i64)) && (line_chars[(i) as usize].clone() == Arc::<str>::from("{"))) {
                             i += 1;
                         } else {
                             let mut depth: i64 = 1;
                             while ((i < (line_chars.len() as i64)) && (depth > 0)) {
                                 let ic = line_chars[(i) as usize].clone();
                                 i += 1;
-                                if (ic == Rc::<str>::from("{")) {
+                                if (ic == Arc::<str>::from("{")) {
                                     depth += 1;
-                                } else if (ic == Rc::<str>::from("}")) {
+                                } else if (ic == Arc::<str>::from("}")) {
                                     depth -= 1;
                                 }
                             }
                         }
-                    } else if ((c == Rc::<str>::from("\"")) || (c == Rc::<str>::from("\n"))) {
+                    } else if ((c == Arc::<str>::from("\"")) || (c == Arc::<str>::from("\n"))) {
                         break;
                     }
                 }
@@ -2148,99 +2149,99 @@ impl Lexer {
         return (line_chars.len() as i64);
     }
 
-    fn lex_string(&mut self) -> Result<TokenKind, Box<dyn std::error::Error>> {
+    fn lex_string(&mut self) -> Result<TokenKind, Box<dyn std::error::Error + Send + Sync>> {
         let mut parts: Vec<RawInterpPart> = vec![];
-        let mut current_lit: Rc<str> = Rc::<str>::from("");
+        let mut current_lit: Arc<str> = Arc::<str>::from("");
         while true {
             if self.at_end() {
-                return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
+                return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
             }
             let ch = self.consume();
-            if (ch == Rc::<str>::from("\n")) {
-                return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
-            } else if (ch == Rc::<str>::from("\"")) {
+            if (ch == Arc::<str>::from("\n")) {
+                return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
+            } else if (ch == Arc::<str>::from("\"")) {
                 break;
-            } else if (ch == Rc::<str>::from("{")) {
-                if self.match_char(Rc::<str>::from("{")) {
+            } else if (ch == Arc::<str>::from("{")) {
+                if self.match_char(Arc::<str>::from("{")) {
                     self.consume();
-                    current_lit = Rc::<str>::from(format!("{}{}", current_lit, "{"));
+                    current_lit = Arc::<str>::from(format!("{}{}", current_lit, "{"));
                 } else {
                     if ((current_lit.len() as i64) > 0) {
                         parts.push(RawInterpPart::Lit(current_lit.clone().clone()));
-                        current_lit = Rc::<str>::from("");
+                        current_lit = Arc::<str>::from("");
                     }
-                    let mut inner: Rc<str> = Rc::<str>::from("");
+                    let mut inner: Arc<str> = Arc::<str>::from("");
                     let mut depth: i64 = 0;
                     while true {
                         if self.at_end() {
-                            return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
+                            return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("line {}: unterminated string literal", self.line).as_str())))));
                         }
                         let ic = self.consume();
-                        if (ic == Rc::<str>::from("{")) {
+                        if (ic == Arc::<str>::from("{")) {
                             depth += 1;
-                            inner = Rc::<str>::from(format!("{}{}", inner, ic));
-                        } else if (ic == Rc::<str>::from("}")) {
+                            inner = Arc::<str>::from(format!("{}{}", inner, ic));
+                        } else if (ic == Arc::<str>::from("}")) {
                             if (depth == 0) {
                                 break;
                             }
                             depth -= 1;
-                            inner = Rc::<str>::from(format!("{}{}", inner, ic));
+                            inner = Arc::<str>::from(format!("{}{}", inner, ic));
                         } else {
-                            inner = Rc::<str>::from(format!("{}{}", inner, ic));
+                            inner = Arc::<str>::from(format!("{}{}", inner, ic));
                         }
                     }
                     let split = split_hole_fmt(inner.clone().clone());
-                    let __expr_tmp = split[(0) as usize].clone();
-                    let expr = Rc::<str>::from(__expr_tmp.trim());
+                    let expr_raw = split[(0) as usize].clone();
+                    let expr = expr_raw.trim();
                     let fmt = split[(1) as usize].clone();
                     if ((fmt.len() as i64) > 0) {
-                        parts.push(RawInterpPart::HoleFormatted(Rc::<str>::from(expr.to_string()), Rc::<str>::from(fmt.to_string())));
+                        parts.push(RawInterpPart::HoleFormatted(Arc::<str>::from(expr.to_string()), Arc::<str>::from(fmt.to_string())));
                     } else {
-                        parts.push(RawInterpPart::Hole(Rc::<str>::from(expr.to_string())));
+                        parts.push(RawInterpPart::Hole(Arc::<str>::from(expr.to_string())));
                     }
                 }
-            } else if (ch == Rc::<str>::from("}")) {
-                if self.match_char(Rc::<str>::from("}")) {
+            } else if (ch == Arc::<str>::from("}")) {
+                if self.match_char(Arc::<str>::from("}")) {
                     self.consume();
                 }
-                current_lit = Rc::<str>::from(format!("{}{}", current_lit, "}"));
-            } else if (ch == Rc::<str>::from("\\")) {
+                current_lit = Arc::<str>::from(format!("{}{}", current_lit, "}"));
+            } else if (ch == Arc::<str>::from("\\")) {
                 if self.at_end() {
-                    current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\\"));
+                    current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\\"));
                 } else {
                     let esc = self.consume();
-                    if (esc == Rc::<str>::from("n")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\n"));
-                    } else if (esc == Rc::<str>::from("t")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\t"));
-                    } else if (esc == Rc::<str>::from("r")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\r"));
-                    } else if (esc == Rc::<str>::from("0")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\0"));
-                    } else if (esc == Rc::<str>::from("\\")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\\"));
-                    } else if (esc == Rc::<str>::from("\"")) {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\""));
-                    } else if (esc == Rc::<str>::from("u")) {
-                        if self.match_char(Rc::<str>::from("{")) {
+                    if (esc == Arc::<str>::from("n")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\n"));
+                    } else if (esc == Arc::<str>::from("t")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\t"));
+                    } else if (esc == Arc::<str>::from("r")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\r"));
+                    } else if (esc == Arc::<str>::from("0")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\0"));
+                    } else if (esc == Arc::<str>::from("\\")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\\"));
+                    } else if (esc == Arc::<str>::from("\"")) {
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\""));
+                    } else if (esc == Arc::<str>::from("u")) {
+                        if self.match_char(Arc::<str>::from("{")) {
                             self.consume();
-                            let mut hex: Rc<str> = Rc::<str>::from("");
-                            while ((!self.at_end()) && (self.chars[(self.pos) as usize].clone() != Rc::<str>::from("}"))) {
-                                hex = Rc::<str>::from(format!("{}{}", hex, self.consume()));
+                            let mut hex: Arc<str> = Arc::<str>::from("");
+                            while ((!self.at_end()) && (self.chars[(self.pos) as usize].clone() != Arc::<str>::from("}"))) {
+                                hex = Arc::<str>::from(format!("{}{}", hex, self.consume()));
                             }
                             if (!self.at_end()) {
                                 self.consume();
                             }
-                            current_lit = Rc::<str>::from(format!("{}{}", current_lit, "hex}"));
+                            current_lit = Arc::<str>::from(format!("{}{}", current_lit, "hex}"));
                         } else {
-                            current_lit = Rc::<str>::from(format!("{}{}", current_lit, "u"));
+                            current_lit = Arc::<str>::from(format!("{}{}", current_lit, "u"));
                         }
                     } else {
-                        current_lit = Rc::<str>::from(format!("{}{}", current_lit, "\\"));
+                        current_lit = Arc::<str>::from(format!("{}{}", current_lit, "\\"));
                     }
                 }
             } else {
-                current_lit = Rc::<str>::from(format!("{}{}", current_lit, ch));
+                current_lit = Arc::<str>::from(format!("{}{}", current_lit, ch));
             }
         }
         if ((parts.len() as i64) == 0) {
@@ -2252,52 +2253,52 @@ impl Lexer {
         return Ok(TokenKind::StringInterp(parts));
     }
 
-    fn lex_number(&mut self, first: Rc<str>) -> Result<TokenKind, Box<dyn std::error::Error>> {
-        if ((first == Rc::<str>::from("0")) && (!self.at_end())) {
+    fn lex_number(&mut self, first: Arc<str>) -> Result<TokenKind, Box<dyn std::error::Error + Send + Sync>> {
+        if ((first == Arc::<str>::from("0")) && (!self.at_end())) {
             let prefix = self.chars[(self.pos) as usize].clone();
-            if ((prefix == Rc::<str>::from("x")) || (prefix == Rc::<str>::from("X"))) {
+            if ((prefix == Arc::<str>::from("x")) || (prefix == Arc::<str>::from("X"))) {
                 self.consume();
-                let mut hex: Rc<str> = Rc::<str>::from("");
+                let mut hex: Arc<str> = Arc::<str>::from("");
                 while (!self.at_end()) {
                     let c = self.chars[(self.pos) as usize].clone();
-                    if (c == Rc::<str>::from("_")) {
+                    if (c == Arc::<str>::from("_")) {
                         self.consume();
                         continue;
                     }
                     if (((((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater)) || (((&*c).cmp("a") != std::cmp::Ordering::Less) && ((&*c).cmp("f") != std::cmp::Ordering::Greater))) || (((&*c).cmp("A") != std::cmp::Ordering::Less) && ((&*c).cmp("F") != std::cmp::Ordering::Greater))) {
-                        hex = Rc::<str>::from(format!("{}{}", hex, self.consume()));
+                        hex = Arc::<str>::from(format!("{}{}", hex, self.consume()));
                     } else {
                         break;
                     }
                 }
                 return Ok(TokenKind::Int(hex.trim().parse::<i64>().unwrap_or(0)));
-            } else if ((prefix == Rc::<str>::from("b")) || (prefix == Rc::<str>::from("B"))) {
+            } else if ((prefix == Arc::<str>::from("b")) || (prefix == Arc::<str>::from("B"))) {
                 self.consume();
-                let mut bin: Rc<str> = Rc::<str>::from("");
+                let mut bin: Arc<str> = Arc::<str>::from("");
                 while (!self.at_end()) {
                     let c = self.chars[(self.pos) as usize].clone();
-                    if (c == Rc::<str>::from("_")) {
+                    if (c == Arc::<str>::from("_")) {
                         self.consume();
                         continue;
                     }
-                    if ((c == Rc::<str>::from("0")) || (c == Rc::<str>::from("1"))) {
-                        bin = Rc::<str>::from(format!("{}{}", bin, self.consume()));
+                    if ((c == Arc::<str>::from("0")) || (c == Arc::<str>::from("1"))) {
+                        bin = Arc::<str>::from(format!("{}{}", bin, self.consume()));
                     } else {
                         break;
                     }
                 }
                 return Ok(TokenKind::Int(bin.trim().parse::<i64>().unwrap_or(0)));
-            } else if ((prefix == Rc::<str>::from("o")) || (prefix == Rc::<str>::from("O"))) {
+            } else if ((prefix == Arc::<str>::from("o")) || (prefix == Arc::<str>::from("O"))) {
                 self.consume();
-                let mut oct: Rc<str> = Rc::<str>::from("");
+                let mut oct: Arc<str> = Arc::<str>::from("");
                 while (!self.at_end()) {
                     let c = self.chars[(self.pos) as usize].clone();
-                    if (c == Rc::<str>::from("_")) {
+                    if (c == Arc::<str>::from("_")) {
                         self.consume();
                         continue;
                     }
                     if (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("7") != std::cmp::Ordering::Greater)) {
-                        oct = Rc::<str>::from(format!("{}{}", oct, self.consume()));
+                        oct = Arc::<str>::from(format!("{}{}", oct, self.consume()));
                     } else {
                         break;
                     }
@@ -2305,48 +2306,48 @@ impl Lexer {
                 return Ok(TokenKind::Int(oct.trim().parse::<i64>().unwrap_or(0)));
             }
         }
-        let mut s: Rc<str> = first.clone().clone();
+        let mut s: Arc<str> = first.clone().clone();
         while (!self.at_end()) {
             let c = self.chars[(self.pos) as usize].clone();
-            if (c == Rc::<str>::from("_")) {
+            if (c == Arc::<str>::from("_")) {
                 self.consume();
                 continue;
             }
             if (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater)) {
-                s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                s = Arc::<str>::from(format!("{}{}", s, self.consume()));
             } else {
                 break;
             }
         }
-        if ((!self.at_end()) && (self.chars[(self.pos) as usize].clone() == Rc::<str>::from("."))) {
+        if ((!self.at_end()) && (self.chars[(self.pos) as usize].clone() == Arc::<str>::from("."))) {
             if ((self.pos + 1) < (self.chars.len() as i64)) {
                 let next = self.chars[((self.pos + 1)) as usize].clone();
                 if (((&*next).cmp("0") != std::cmp::Ordering::Less) && ((&*next).cmp("9") != std::cmp::Ordering::Greater)) {
-                    s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                    s = Arc::<str>::from(format!("{}{}", s, self.consume()));
                     while (!self.at_end()) {
                         let c = self.chars[(self.pos) as usize].clone();
-                        if (c == Rc::<str>::from("_")) {
+                        if (c == Arc::<str>::from("_")) {
                             self.consume();
                             continue;
                         }
                         if (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater)) {
-                            s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                            s = Arc::<str>::from(format!("{}{}", s, self.consume()));
                         } else {
                             break;
                         }
                     }
                     if (!self.at_end()) {
                         let e = self.chars[(self.pos) as usize].clone();
-                        if ((e == Rc::<str>::from("e")) || (e == Rc::<str>::from("E"))) {
-                            s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                        if ((e == Arc::<str>::from("e")) || (e == Arc::<str>::from("E"))) {
+                            s = Arc::<str>::from(format!("{}{}", s, self.consume()));
                             if (!self.at_end()) {
                                 let sign = self.chars[(self.pos) as usize].clone();
-                                if ((sign == Rc::<str>::from("+")) || (sign == Rc::<str>::from("-"))) {
-                                    s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                                if ((sign == Arc::<str>::from("+")) || (sign == Arc::<str>::from("-"))) {
+                                    s = Arc::<str>::from(format!("{}{}", s, self.consume()));
                                 }
                             }
                             while (((!self.at_end()) && ((&*self.chars[(self.pos) as usize].clone()).cmp("0") != std::cmp::Ordering::Less)) && ((&*self.chars[(self.pos) as usize].clone()).cmp("9") != std::cmp::Ordering::Greater)) {
-                                s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+                                s = Arc::<str>::from(format!("{}{}", s, self.consume()));
                             }
                         }
                     }
@@ -2357,12 +2358,12 @@ impl Lexer {
         return Ok(TokenKind::Int(s.trim().parse::<i64>().unwrap_or(0)));
     }
 
-    fn lex_ident(&mut self, first: Rc<str>) -> Rc<str> {
-        let mut s: Rc<str> = first.clone().clone();
+    fn lex_ident(&mut self, first: Arc<str>) -> Arc<str> {
+        let mut s: Arc<str> = first.clone().clone();
         while (!self.at_end()) {
             let c = self.chars[(self.pos) as usize].clone();
-            if ((((((&*c).cmp("a") != std::cmp::Ordering::Less) && ((&*c).cmp("z") != std::cmp::Ordering::Greater)) || (((&*c).cmp("A") != std::cmp::Ordering::Less) && ((&*c).cmp("Z") != std::cmp::Ordering::Greater))) || (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater))) || (c == Rc::<str>::from("_"))) {
-                s = Rc::<str>::from(format!("{}{}", s, self.consume()));
+            if ((((((&*c).cmp("a") != std::cmp::Ordering::Less) && ((&*c).cmp("z") != std::cmp::Ordering::Greater)) || (((&*c).cmp("A") != std::cmp::Ordering::Less) && ((&*c).cmp("Z") != std::cmp::Ordering::Greater))) || (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater))) || (c == Arc::<str>::from("_"))) {
+                s = Arc::<str>::from(format!("{}{}", s, self.consume()));
             } else {
                 break;
             }
@@ -2370,7 +2371,7 @@ impl Lexer {
         return s.clone();
     }
 
-    fn keyword_or_ident(&self, s: Rc<str>) -> TokenKind {
+    fn keyword_or_ident(&self, s: Arc<str>) -> TokenKind {
         match &*s {
             "let" => {
                 return TokenKind::Let;
@@ -2537,7 +2538,7 @@ impl Lexer {
         }
     }
 
-    fn lex_one_token(&mut self) -> Result<TokenKind, Box<dyn std::error::Error>> {
+    fn lex_one_token(&mut self) -> Result<TokenKind, Box<dyn std::error::Error + Send + Sync>> {
         let ch = self.consume();
         match &*ch {
             "(" => {
@@ -2577,87 +2578,87 @@ impl Lexer {
                 return Ok(TokenKind::Colon);
             }
             "+" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::PlusEq);
                 }
                 return Ok(TokenKind::Plus);
             }
             "-" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::MinusEq);
                 }
                 return Ok(TokenKind::Minus);
             }
             "*" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::StarEq);
                 }
                 return Ok(TokenKind::Star);
             }
             "/" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::SlashEq);
                 }
                 return Ok(TokenKind::Slash);
             }
             "%" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::PercentEq);
                 }
                 return Ok(TokenKind::Percent);
             }
             "&" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::AmpersandEq);
                 }
                 return Ok(TokenKind::Ampersand);
             }
             "|" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::PipeEq);
                 }
-                if self.match_char(Rc::<str>::from(">")) {
+                if self.match_char(Arc::<str>::from(">")) {
                     self.consume();
                     return Ok(TokenKind::PipeArrow);
                 }
                 return Ok(TokenKind::Pipe);
             }
             "^" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::CaretEq);
                 }
                 return Ok(TokenKind::Caret);
             }
             "?" => {
-                if self.match_char(Rc::<str>::from(".")) {
+                if self.match_char(Arc::<str>::from(".")) {
                     self.consume();
                     return Ok(TokenKind::QuestionDot);
                 }
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::QuestionEq);
                 }
                 return Ok(TokenKind::Question);
             }
             "!" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::BangEq);
                 }
                 return Ok(TokenKind::Bang);
             }
             "=" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
-                    if self.match_char(Rc::<str>::from("=")) {
+                    if self.match_char(Arc::<str>::from("=")) {
                         self.consume();
                         return Ok(TokenKind::EqEqEq);
                     }
@@ -2666,27 +2667,27 @@ impl Lexer {
                 return Ok(TokenKind::Eq);
             }
             "<" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::LtEq);
                 }
                 return Ok(TokenKind::Lt);
             }
             ">" => {
-                if self.match_char(Rc::<str>::from("=")) {
+                if self.match_char(Arc::<str>::from("=")) {
                     self.consume();
                     return Ok(TokenKind::GtEq);
                 }
                 return Ok(TokenKind::Gt);
             }
             "." => {
-                if self.match_char(Rc::<str>::from(".")) {
+                if self.match_char(Arc::<str>::from(".")) {
                     self.consume();
-                    if self.match_char(Rc::<str>::from(".")) {
+                    if self.match_char(Arc::<str>::from(".")) {
                         self.consume();
                         return Ok(TokenKind::DotDotDot);
                     }
-                    if self.match_char(Rc::<str>::from("=")) {
+                    if self.match_char(Arc::<str>::from("=")) {
                         self.consume();
                         return Ok(TokenKind::DotDotEq);
                     }
@@ -2701,46 +2702,45 @@ impl Lexer {
                 if (((&*ch).cmp("0") != std::cmp::Ordering::Less) && ((&*ch).cmp("9") != std::cmp::Ordering::Greater)) {
                     return Ok(self.lex_number(ch)?);
                 }
-                if (((((&*ch).cmp("a") != std::cmp::Ordering::Less) && ((&*ch).cmp("z") != std::cmp::Ordering::Greater)) || (((&*ch).cmp("A") != std::cmp::Ordering::Less) && ((&*ch).cmp("Z") != std::cmp::Ordering::Greater))) || (ch == Rc::<str>::from("_"))) {
+                if (((((&*ch).cmp("a") != std::cmp::Ordering::Less) && ((&*ch).cmp("z") != std::cmp::Ordering::Greater)) || (((&*ch).cmp("A") != std::cmp::Ordering::Less) && ((&*ch).cmp("Z") != std::cmp::Ordering::Greater))) || (ch == Arc::<str>::from("_"))) {
                     let ident = self.lex_ident(ch);
                     return Ok(self.keyword_or_ident(ident));
                 }
-                return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("line {}: unexpected character '{}'", self.line, ch).as_str())))));
+                return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("line {}: unexpected character '{}'", self.line, ch).as_str())))));
             }
         }
-        unreachable!()
     }
 
-    fn lex_line_tokens(&mut self, content: Rc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error>> {
-        let cut = self.find_comment_start(content.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>());
-        let line_chars = content.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>();
-        let mut trimmed_content: Rc<str> = Rc::<str>::from("");
+    fn lex_line_tokens(&mut self, content: Arc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error + Send + Sync>> {
+        let cut = self.find_comment_start(content.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>());
+        let line_chars = content.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>();
+        let mut trimmed_content: Arc<str> = Arc::<str>::from("");
         let mut ci: i64 = 0;
         while (ci < cut) {
-            trimmed_content = Rc::<str>::from(format!("{}{}", trimmed_content, line_chars[(ci) as usize].clone()));
+            trimmed_content = Arc::<str>::from(format!("{}{}", trimmed_content, line_chars[(ci) as usize].clone()));
             ci += 1;
         }
-        trimmed_content = Rc::<str>::from(Rc::<str>::from(trimmed_content.trim()).to_string());
+        trimmed_content = Arc::<str>::from(Arc::<str>::from(trimmed_content.trim()).to_string());
         let save_pos = self.pos;
         let save_line = self.line;
         let save_col = self.col;
-        self.chars = trimmed_content.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>();
+        self.chars = trimmed_content.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>();
         self.pos = 0;
         let mut line_tokens: Vec<Token> = vec![];
         while (self.pos < (self.chars.len() as i64)) {
             let c = self.chars[(self.pos) as usize].clone();
-            if ((c == Rc::<str>::from(" ")) || (c == Rc::<str>::from("\t"))) {
+            if ((c == Arc::<str>::from(" ")) || (c == Arc::<str>::from("\t"))) {
                 self.pos += 1;
                 continue;
             }
             let kind = self.lex_one_token()?;
-            line_tokens.push(Token { kind: kind, line: self.line });
+            line_tokens.push(Token { kind: kind.clone(), line: self.line });
         }
         return Ok(line_tokens);
     }
 
-    fn tokenize(&mut self, preprocessed: Rc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error>> {
-        let all_lines = preprocessed.split("\n").map(|p| Rc::<str>::from(p.to_string())).collect::<Vec<_>>();
+    fn tokenize(&mut self, preprocessed: Arc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error + Send + Sync>> {
+        let all_lines = preprocessed.split("\n").map(|p| Arc::<str>::from(p.to_string())).collect::<Vec<_>>();
         let mut i: i64 = 0;
         self.line = 1;
         self.indent_stack = vec![0];
@@ -2751,7 +2751,7 @@ impl Lexer {
         while (i < (all_lines.len() as i64)) {
             self.line = (i + 1);
             let raw = all_lines[(i) as usize].clone();
-            let trimmed = Rc::<str>::from(raw.trim());
+            let trimmed: Arc<str> = Arc::<str>::from(raw.trim().to_string());
             if ((trimmed.len() as i64) == 0) {
                 if (self.paren_depth == 0) {
                     self.push(TokenKind::Newline);
@@ -2761,7 +2761,7 @@ impl Lexer {
             }
             let apply_indent = ((self.paren_depth == 0) || (self.inner_colon_blocks > 0));
             if (trimmed.starts_with("#") && apply_indent) {
-                let comment_indent = measure_indent(raw.clone().clone());
+                let comment_indent = measure_indent(Arc::<str>::from(raw.to_string()));
                 let cur_indent = self.indent_stack[(((self.indent_stack.len() as i64) - 1)) as usize].clone();
                 if (comment_indent < cur_indent) {
                     while true {
@@ -2773,15 +2773,16 @@ impl Lexer {
                         self.push(TokenKind::Dedent);
                     }
                 }
-                let text = trimmed[(1) as usize..((trimmed.len() as i64)) as usize].to_string();
-                self.push(TokenKind::Comment(Rc::<str>::from(text.to_string())));
+                let text_raw = { let __start = (1) as usize; Arc::<str>::from(trimmed.chars().skip(__start).take(((trimmed.len() as i64)) as usize - __start).collect::<String>().as_str()) };
+                let text = text_raw.trim();
+                self.push(TokenKind::Comment(Arc::<str>::from(text.to_string())));
                 self.push(TokenKind::Newline);
                 i += 1;
                 continue;
             }
             let line_indent = {
             if apply_indent {
-                measure_indent(raw.clone().clone())
+                measure_indent(Arc::<str>::from(raw.to_string()))
             } else {
                 0
             }
@@ -2807,14 +2808,14 @@ impl Lexer {
                             break;
                         }
                         if (top < line_indent) {
-                            return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("line {}: dedent does not match any outer indentation level", self.line).as_str())))));
+                            return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("line {}: dedent does not match any outer indentation level", self.line).as_str())))));
                         }
                         self.indent_stack.pop().unwrap_or_default();
                         self.push(TokenKind::Dedent);
                     }
                 }
             }
-            let line_tokens = self.lex_line_tokens(Rc::<str>::from(Rc::<str>::from(raw.trim()).to_string()))?;
+            let line_tokens = self.lex_line_tokens(Arc::<str>::from(raw.trim().to_string()))?;
             let mut last_is_colon: bool = false;
             for t in line_tokens.iter().cloned() {
                 match t.kind {
@@ -2863,14 +2864,14 @@ impl Lexer {
             self.push(TokenKind::Dedent);
         }
         self.push(TokenKind::Eof);
-        return Ok(self.tokens.clone());
+        return Ok(std::mem::take(&mut self.tokens));
     }
 
 }
 
-fn lex(source: Rc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error>> {
+fn lex(source: Arc<str>) -> Result<Vec<Token>, Box<dyn std::error::Error + Send + Sync>> {
     let preprocessed = preprocess_triple_strings(source.clone().clone());
-    let mut lexer: Lexer = Lexer::new(preprocessed.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>());
+    let mut lexer: Lexer = Lexer::new(preprocessed.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>());
     return Ok(lexer.tokenize(preprocessed)?);
 }
 
@@ -2880,7 +2881,7 @@ enum Signal {
     BreakSignal(Value),
     ContinueSignal,
     ThrowSignal(Value),
-    ErrorSignal(Rc<str>, i64),
+    ErrorSignal(Arc<str>, i64),
     YieldSignal(Value, i64),
 }
 
@@ -2901,7 +2902,7 @@ impl Signal {
         None
     }
 
-    fn message(&self) -> Option<Rc<str>> {
+    fn message(&self) -> Option<Arc<str>> {
         if let Signal::ErrorSignal(__fv, _) = self { return Some(__fv.clone()); }
         None
     }
@@ -2916,7 +2917,7 @@ impl Signal {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Binding {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub value: Value,
 }
 
@@ -2931,8 +2932,8 @@ impl Binding {
 
 #[derive(Debug, Clone, PartialEq)]
 struct ObjectInner {
-    pub type_name: Rc<str>,
-    pub fields: Vec<(Rc<str>, Value)>,
+    pub type_name: Arc<str>,
+    fields: /* var */ Vec<(Arc<str>, Value)>,
 }
 
 impl std::fmt::Display for ObjectInner {
@@ -2942,21 +2943,34 @@ impl std::fmt::Display for ObjectInner {
 }
 
 impl ObjectInner {
-    fn get_field(&self, name: Rc<str>) -> Option<Value> {
-        self.fields.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone())
-    }
-    fn set_field(&mut self, name: Rc<str>, val: Value) {
-        if let Some(entry) = self.fields.iter_mut().find(|(k, _)| *k == name) {
-            entry.1 = val;
-        } else {
-            self.fields.push((name, val));
+    fn get_field(&self, name: Arc<str>) -> Option<Value> {
+        let mut i = 0;
+        while (i < (self.fields.len() as i64)) {
+            if (self.fields[(i) as usize].clone().0 == name) {
+                return Some(self.fields[(i) as usize].clone().1);
+            }
+            i += 1;
         }
+        None
     }
+
+    fn set_field(&mut self, name: Arc<str>, val: Value) -> () {
+        let mut i = 0;
+        while (i < (self.fields.len() as i64)) {
+            if (self.fields[(i) as usize].clone().0 == name) {
+                self.fields[(i) as usize] = (name.clone(), val);
+                return;
+            }
+            i += 1;
+        }
+        self.fields.push((name.clone(), val));
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct TypeRef {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
 }
 
 impl std::fmt::Display for TypeRef {
@@ -2976,80 +2990,80 @@ enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(Rc<str>),
+    Str(Arc<str>),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
     Dict(Vec<(Value, Value)>),
     Set(Vec<Value>),
-    Object(Rc<RefCell<ObjectInner>>),
-    EnumVariant(Rc<str>, Rc<str>, Vec<Value>),
-    Fn(Rc<str>, Option<Rc<RefCell<Env>>>),
-    Closure(Vec<Param>, ClosureBody, Option<Rc<RefCell<Env>>>),
-    NativeFn(Rc<str>, Box<Value>),
-    OverloadedFn(Rc<str>, Vec<Value>),
+    Object(Arc<std::sync::Mutex<ObjectInner>>),
+    EnumVariant(Arc<str>, Arc<str>, Vec<Value>),
+    Fn(Arc<str>, Option<Arc<std::sync::Mutex<Env>>>),
+    Closure(Vec<Param>, ClosureBody, Option<Arc<std::sync::Mutex<Env>>>),
+    NativeFn(Arc<str>, Box<Value>),
+    OverloadedFn(Arc<str>, Vec<Value>),
     Range(i64, i64, bool, i64),
-    Labeled(Rc<str>, Box<Value>),
+    Labeled(Arc<str>, Box<Value>),
 }
 
 impl Value {
-    fn type_name(&self) -> Rc<str> {
+    fn type_name(&self) -> Arc<str> {
         match self {
             Value::Nil => {
-                Rc::<str>::from("nil")
+                Arc::<str>::from("nil")
             }
             Value::Void => {
-                Rc::<str>::from("void")
+                Arc::<str>::from("void")
             }
             Value::Uninitialized => {
-                Rc::<str>::from("uninitialized")
+                Arc::<str>::from("uninitialized")
             }
             Value::Bool(_) => {
-                Rc::<str>::from("bool")
+                Arc::<str>::from("bool")
             }
             Value::Int(_) => {
-                Rc::<str>::from("int")
+                Arc::<str>::from("int")
             }
             Value::Float(_) => {
-                Rc::<str>::from("float")
+                Arc::<str>::from("float")
             }
             Value::Str(_) => {
-                Rc::<str>::from("string")
+                Arc::<str>::from("string")
             }
             Value::Array(_) => {
-                Rc::<str>::from("array")
+                Arc::<str>::from("array")
             }
             Value::Tuple(_) => {
-                Rc::<str>::from("tuple")
+                Arc::<str>::from("tuple")
             }
             Value::Dict(_) => {
-                Rc::<str>::from("dict")
+                Arc::<str>::from("dict")
             }
             Value::Set(_) => {
-                Rc::<str>::from("set")
+                Arc::<str>::from("set")
             }
             Value::Object(_) => {
-                Rc::<str>::from("object")
+                Arc::<str>::from("object")
             }
             Value::EnumVariant(typeName, _, _) => {
-                Rc::<str>::from(Rc::<str>::from(format!("{}", typeName).as_str()))
+                Arc::<str>::from(Arc::<str>::from(format!("{}", typeName).as_str()))
             }
             Value::Fn(_, _) => {
-                Rc::<str>::from("fn")
+                Arc::<str>::from("fn")
             }
             Value::Closure(_, _, _) => {
-                Rc::<str>::from("closure")
+                Arc::<str>::from("closure")
             }
             Value::NativeFn(_, _) => {
-                Rc::<str>::from("native-fn")
+                Arc::<str>::from("native-fn")
             }
             Value::OverloadedFn(_, _) => {
-                Rc::<str>::from("overloaded-fn")
+                Arc::<str>::from("overloaded-fn")
             }
             Value::Range(_, _, _, _) => {
-                Rc::<str>::from("range")
+                Arc::<str>::from("range")
             }
             Value::Labeled(_, _) => {
-                Rc::<str>::from("labeled")
+                Arc::<str>::from("labeled")
             }
         }
     }
@@ -3069,7 +3083,7 @@ impl Value {
         None
     }
 
-    fn s(&self) -> Option<Rc<str>> {
+    fn s(&self) -> Option<Arc<str>> {
         if let Value::Str(__fv) = self { return Some(__fv.clone()); }
         None
     }
@@ -3086,17 +3100,17 @@ impl Value {
         None
     }
 
-    fn inner(&self) -> Option<Rc<RefCell<ObjectInner>>> {
+    fn inner(&self) -> Option<Arc<std::sync::Mutex<ObjectInner>>> {
         if let Value::Object(__fv) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn typeName(&self) -> Option<Rc<str>> {
+    fn typeName(&self) -> Option<Arc<str>> {
         if let Value::EnumVariant(__fv, _, _) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn variant(&self) -> Option<Rc<str>> {
+    fn variant(&self) -> Option<Arc<str>> {
         if let Value::EnumVariant(_, __fv, _) = self { return Some(__fv.clone()); }
         None
     }
@@ -3106,14 +3120,14 @@ impl Value {
         None
     }
 
-    fn name(&self) -> Option<Rc<str>> {
+    fn name(&self) -> Option<Arc<str>> {
         if let Value::Fn(__fv, _) = self { return Some(__fv.clone()); }
         if let Value::NativeFn(__fv, _) = self { return Some(__fv.clone()); }
         if let Value::OverloadedFn(__fv, _) = self { return Some(__fv.clone()); }
         None
     }
 
-    fn captured(&self) -> Option<Option<Rc<RefCell<Env>>>> {
+    fn captured(&self) -> Option<Option<Arc<std::sync::Mutex<Env>>>> {
         if let Value::Fn(_, __fv) = self { return Some(__fv.clone()); }
         if let Value::Closure(_, _, __fv) = self { return Some(__fv.clone()); }
         None
@@ -3159,7 +3173,7 @@ impl Value {
         None
     }
 
-    fn label(&self) -> Option<Rc<str>> {
+    fn label(&self) -> Option<Arc<str>> {
         if let Value::Labeled(__fv, _) = self { return Some(__fv.clone()); }
         None
     }
@@ -3171,15 +3185,15 @@ impl Value {
 
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Env {
-    vars: /* var */ HashMap<Rc<str>, Value>,
-    pub mutable_vars: HashSet<Rc<str>>,
-    pub owned_collections: HashSet<Rc<str>>,
-    pub task_safe_vars: HashSet<Rc<str>>,
-    pub owned_vars: HashSet<Rc<str>>,
-    pub shared_bindings: HashSet<Rc<str>>,
-    pub parent: Option<Rc<RefCell<Env>>>,
+    vars: /* var */ HashMap<Arc<str>, Value>,
+    pub mutable_vars: HashSet<Arc<str>>,
+    pub owned_collections: HashSet<Arc<str>>,
+    pub task_safe_vars: HashSet<Arc<str>>,
+    pub owned_vars: HashSet<Arc<str>>,
+    pub shared_bindings: HashSet<Arc<str>>,
+    pub parent: Option<Arc<std::sync::Mutex<Env>>>,
 }
 
 impl std::fmt::Display for Env {
@@ -3189,19 +3203,19 @@ impl std::fmt::Display for Env {
 }
 
 impl Env {
-    fn get(&self, name: Rc<str>) -> Option<Value> {
+    fn get(&self, name: Arc<str>) -> Option<Value> {
         if self.vars.contains_key(&*name) {
             Some(self.vars.get(&*name).cloned().expect("dict key not found"))
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().get(name.clone())
+                p.lock().unwrap().get(name.clone())
             } else {
                 None
             }
         }
     }
 
-    fn set(&mut self, name: Rc<str>, value: Value) -> bool {
+    fn set(&mut self, name: Arc<str>, value: Value) -> bool {
         if self.vars.contains_key(&*name) {
             if (!self.mutable_vars.contains(&name.clone())) {
                 false
@@ -3211,91 +3225,91 @@ impl Env {
             }
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().set(name.clone(), value)
+                p.lock().unwrap().set(name.clone(), value)
             } else {
                 false
             }
         }
     }
 
-    fn define(&mut self, name: Rc<str>, value: Value) -> () {
+    fn define(&mut self, name: Arc<str>, value: Value) -> () {
         self.vars.insert(name.clone(), value);
         self.mutable_vars.remove(&name.clone());
     }
 
-    fn define_mut(&mut self, name: Rc<str>, value: Value) -> () {
+    fn define_mut(&mut self, name: Arc<str>, value: Value) -> () {
         self.vars.insert(name.clone(), value);
         self.mutable_vars.insert(name.clone());
     }
 
-    fn define_shared_mut(&mut self, name: Rc<str>, value: Value) -> () {
+    fn define_shared_mut(&mut self, name: Arc<str>, value: Value) -> () {
         self.vars.insert(name.clone(), value);
         self.mutable_vars.insert(name.clone());
         self.shared_bindings.insert(name.clone());
     }
 
-    fn force_set(&mut self, name: Rc<str>, value: Value) -> bool {
+    fn force_set(&mut self, name: Arc<str>, value: Value) -> bool {
         if self.vars.contains_key(&*name) {
             self.vars.insert(name.clone(), value);
             true
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().force_set(name.clone(), value)
+                p.lock().unwrap().force_set(name.clone(), value)
             } else {
                 false
             }
         }
     }
 
-    fn is_mutable(&self, name: Rc<str>) -> bool {
+    fn is_mutable(&self, name: Arc<str>) -> bool {
         if self.vars.contains_key(&*name) {
             self.mutable_vars.contains(&name.clone())
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().is_mutable(name.clone())
+                p.lock().unwrap().is_mutable(name.clone())
             } else {
                 true
             }
         }
     }
 
-    fn is_shared(&self, name: Rc<str>) -> bool {
+    fn is_shared(&self, name: Arc<str>) -> bool {
         if self.vars.contains_key(&*name) {
             self.shared_bindings.contains(&name.clone())
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().is_shared(name.clone())
+                p.lock().unwrap().is_shared(name.clone())
             } else {
                 false
             }
         }
     }
 
-    fn is_task_safe_var(&self, name: Rc<str>) -> bool {
+    fn is_task_safe_var(&self, name: Arc<str>) -> bool {
         if self.task_safe_vars.contains(&name.clone()) {
             true
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().is_task_safe_var(name.clone())
+                p.lock().unwrap().is_task_safe_var(name.clone())
             } else {
                 false
             }
         }
     }
 
-    fn is_owned_collection(&self, name: Rc<str>) -> bool {
+    fn is_owned_collection(&self, name: Arc<str>) -> bool {
         if self.owned_collections.contains(&name.clone()) {
             true
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().is_owned_collection(name.clone())
+                p.lock().unwrap().is_owned_collection(name.clone())
             } else {
                 false
             }
         }
     }
 
-    fn invalidate(&mut self, name: Rc<str>) -> () {
+    fn invalidate(&mut self, name: Arc<str>) -> () {
         if self.vars.contains_key(&*name) {
             self.vars.remove(&*name);
             self.mutable_vars.remove(&name.clone());
@@ -3305,15 +3319,23 @@ impl Env {
             self.shared_bindings.remove(&name.clone());
         } else {
             if let Some(p) = self.parent.clone() {
-                p.borrow_mut().invalidate(name.clone());
+                p.lock().unwrap().invalidate(name.clone());
             }
         }
     }
 
-    fn all_names(&self) -> Vec<Rc<str>> {
+    fn parent_opt(&self) -> Option<Arc<std::sync::Mutex<Env>>> {
+        if let Some(p) = self.parent.clone() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    fn all_names(&self) -> Vec<Arc<str>> {
         let mut names = self.vars.keys().cloned().collect::<Vec<_>>();
         if let Some(p) = self.parent.clone() {
-            for n in p.borrow_mut().all_names().into_iter() {
+            for n in p.lock().unwrap().all_names().into_iter() {
                 names.push(n);
             }
         }
@@ -3322,9 +3344,9 @@ impl Env {
 
 }
 
-fn new_env(parent: Option<Rc<RefCell<Env>>>) -> Rc<RefCell<Env>> {
-    let e: Env = Env { vars: HashMap::new(), mutable_vars: HashSet::<Rc<str>>::new(), owned_collections: HashSet::<Rc<str>>::new(), task_safe_vars: HashSet::<Rc<str>>::new(), owned_vars: HashSet::<Rc<str>>::new(), shared_bindings: HashSet::<Rc<str>>::new(), parent: parent };
-    Rc::new(RefCell::new(e))
+fn new_env(parent: Option<Arc<std::sync::Mutex<Env>>>) -> Arc<std::sync::Mutex<Env>> {
+    let e: Env = Env { vars: HashMap::new(), mutable_vars: HashSet::<Arc<str>>::new(), owned_collections: HashSet::<Arc<str>>::new(), task_safe_vars: HashSet::<Arc<str>>::new(), owned_vars: HashSet::<Arc<str>>::new(), shared_bindings: HashSet::<Arc<str>>::new(), parent: parent };
+    Arc::new(Mutex::new(e))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3370,13 +3392,11 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, k: TokenKind) -> Result<Token, Box<dyn std::error::Error>> {
-        if (self.peek() == k) {
-            self.advance();
-        } else {
-            return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected {}, got {}", token_kind_name(k), token_kind_name(self.peek())).as_str())))));
+    fn expect(&mut self, k: TokenKind) -> Result<Token, Box<dyn std::error::Error + Send + Sync>> {
+        if (token_kind_name(self.peek()) == token_kind_name(k.clone())) {
+            return Ok(self.advance());
         }
-        unreachable!()
+        return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected {}, got {}", token_kind_name(k.clone()), token_kind_name(self.peek())).as_str())))));
     }
 
     fn at_end(&self) -> bool {
@@ -3389,453 +3409,445 @@ impl Parser {
 
 }
 
-fn token_kind_name(k: TokenKind) -> Rc<str> {
+fn token_kind_name(k: TokenKind) -> Arc<str> {
     match k {
         TokenKind::Int(_) => {
-            Rc::<str>::from("Int")
+            Arc::<str>::from("Int")
         }
         TokenKind::Float(_) => {
-            Rc::<str>::from("Float")
+            Arc::<str>::from("Float")
         }
         TokenKind::Str(_) => {
-            Rc::<str>::from("Str")
+            Arc::<str>::from("Str")
         }
         TokenKind::StringInterp(_) => {
-            Rc::<str>::from("StringInterp")
+            Arc::<str>::from("StringInterp")
         }
         TokenKind::Bool(_) => {
-            Rc::<str>::from("Bool")
+            Arc::<str>::from("Bool")
         }
         TokenKind::Nil => {
-            Rc::<str>::from("Nil")
+            Arc::<str>::from("Nil")
         }
         TokenKind::Ident(_) => {
-            Rc::<str>::from("Ident")
+            Arc::<str>::from("Ident")
         }
         TokenKind::Let => {
-            Rc::<str>::from("Let")
+            Arc::<str>::from("Let")
         }
         TokenKind::Var => {
-            Rc::<str>::from("Var")
+            Arc::<str>::from("Var")
         }
         TokenKind::Def => {
-            Rc::<str>::from("Def")
+            Arc::<str>::from("Def")
         }
         TokenKind::Return => {
-            Rc::<str>::from("Return")
+            Arc::<str>::from("Return")
         }
         TokenKind::If => {
-            Rc::<str>::from("If")
+            Arc::<str>::from("If")
         }
         TokenKind::Elif => {
-            Rc::<str>::from("Elif")
+            Arc::<str>::from("Elif")
         }
         TokenKind::Else => {
-            Rc::<str>::from("Else")
+            Arc::<str>::from("Else")
         }
         TokenKind::Match => {
-            Rc::<str>::from("Match")
+            Arc::<str>::from("Match")
         }
         TokenKind::While => {
-            Rc::<str>::from("While")
+            Arc::<str>::from("While")
         }
         TokenKind::Do => {
-            Rc::<str>::from("Do")
+            Arc::<str>::from("Do")
         }
         TokenKind::Loop => {
-            Rc::<str>::from("Loop")
+            Arc::<str>::from("Loop")
         }
         TokenKind::Wait => {
-            Rc::<str>::from("Wait")
+            Arc::<str>::from("Wait")
         }
         TokenKind::For => {
-            Rc::<str>::from("For")
+            Arc::<str>::from("For")
         }
         TokenKind::In => {
-            Rc::<str>::from("In")
+            Arc::<str>::from("In")
         }
         TokenKind::Break => {
-            Rc::<str>::from("Break")
+            Arc::<str>::from("Break")
         }
         TokenKind::Continue => {
-            Rc::<str>::from("Continue")
+            Arc::<str>::from("Continue")
         }
         TokenKind::Struct => {
-            Rc::<str>::from("Struct")
+            Arc::<str>::from("Struct")
         }
         TokenKind::Enum => {
-            Rc::<str>::from("Enum")
+            Arc::<str>::from("Enum")
         }
         TokenKind::Trait => {
-            Rc::<str>::from("Trait")
+            Arc::<str>::from("Trait")
         }
         TokenKind::Use => {
-            Rc::<str>::from("Use")
+            Arc::<str>::from("Use")
         }
         TokenKind::Ext => {
-            Rc::<str>::from("Ext")
+            Arc::<str>::from("Ext")
         }
         TokenKind::As => {
-            Rc::<str>::from("As")
+            Arc::<str>::from("As")
         }
         TokenKind::And => {
-            Rc::<str>::from("And")
+            Arc::<str>::from("And")
         }
         TokenKind::Or => {
-            Rc::<str>::from("Or")
+            Arc::<str>::from("Or")
         }
         TokenKind::Not => {
-            Rc::<str>::from("Not")
+            Arc::<str>::from("Not")
         }
         TokenKind::Is => {
-            Rc::<str>::from("Is")
+            Arc::<str>::from("Is")
         }
         TokenKind::SelfKw => {
-            Rc::<str>::from("SelfKw")
+            Arc::<str>::from("SelfKw")
         }
         TokenKind::Throw => {
-            Rc::<str>::from("Throw")
+            Arc::<str>::from("Throw")
         }
         TokenKind::Throws => {
-            Rc::<str>::from("Throws")
+            Arc::<str>::from("Throws")
         }
         TokenKind::Try => {
-            Rc::<str>::from("Try")
+            Arc::<str>::from("Try")
         }
         TokenKind::Catch => {
-            Rc::<str>::from("Catch")
+            Arc::<str>::from("Catch")
         }
         TokenKind::Defer => {
-            Rc::<str>::from("Defer")
+            Arc::<str>::from("Defer")
         }
         TokenKind::Void => {
-            Rc::<str>::from("Void")
+            Arc::<str>::from("Void")
         }
         TokenKind::Pub => {
-            Rc::<str>::from("Pub")
+            Arc::<str>::from("Pub")
         }
         TokenKind::Guard => {
-            Rc::<str>::from("Guard")
+            Arc::<str>::from("Guard")
         }
         TokenKind::Task => {
-            Rc::<str>::from("Task")
+            Arc::<str>::from("Task")
         }
         TokenKind::Join => {
-            Rc::<str>::from("Join")
+            Arc::<str>::from("Join")
         }
         TokenKind::Stream => {
-            Rc::<str>::from("Stream")
+            Arc::<str>::from("Stream")
         }
         TokenKind::Yield => {
-            Rc::<str>::from("Yield")
+            Arc::<str>::from("Yield")
         }
         TokenKind::Static => {
-            Rc::<str>::from("Static")
+            Arc::<str>::from("Static")
         }
         TokenKind::Type => {
-            Rc::<str>::from("Type")
+            Arc::<str>::from("Type")
         }
         TokenKind::Req => {
-            Rc::<str>::from("Req")
+            Arc::<str>::from("Req")
         }
         TokenKind::Transient => {
-            Rc::<str>::from("Transient")
+            Arc::<str>::from("Transient")
         }
         TokenKind::With => {
-            Rc::<str>::from("With")
+            Arc::<str>::from("With")
         }
         TokenKind::Get => {
-            Rc::<str>::from("Get")
+            Arc::<str>::from("Get")
         }
         TokenKind::Set => {
-            Rc::<str>::from("Set")
+            Arc::<str>::from("Set")
         }
         TokenKind::Init => {
-            Rc::<str>::from("Init")
+            Arc::<str>::from("Init")
         }
         TokenKind::Pass => {
-            Rc::<str>::from("Pass")
+            Arc::<str>::from("Pass")
         }
         TokenKind::Native => {
-            Rc::<str>::from("Native")
+            Arc::<str>::from("Native")
         }
         TokenKind::Mod => {
-            Rc::<str>::from("Mod")
+            Arc::<str>::from("Mod")
         }
         TokenKind::Plus => {
-            Rc::<str>::from("Plus")
+            Arc::<str>::from("Plus")
         }
         TokenKind::Minus => {
-            Rc::<str>::from("Minus")
+            Arc::<str>::from("Minus")
         }
         TokenKind::Star => {
-            Rc::<str>::from("Star")
+            Arc::<str>::from("Star")
         }
         TokenKind::Slash => {
-            Rc::<str>::from("Slash")
+            Arc::<str>::from("Slash")
         }
         TokenKind::Percent => {
-            Rc::<str>::from("Percent")
+            Arc::<str>::from("Percent")
         }
         TokenKind::Eq => {
-            Rc::<str>::from("Eq")
+            Arc::<str>::from("Eq")
         }
         TokenKind::EqEq => {
-            Rc::<str>::from("EqEq")
+            Arc::<str>::from("EqEq")
         }
         TokenKind::EqEqEq => {
-            Rc::<str>::from("EqEqEq")
+            Arc::<str>::from("EqEqEq")
         }
         TokenKind::BangEq => {
-            Rc::<str>::from("BangEq")
+            Arc::<str>::from("BangEq")
         }
         TokenKind::Lt => {
-            Rc::<str>::from("Lt")
+            Arc::<str>::from("Lt")
         }
         TokenKind::Gt => {
-            Rc::<str>::from("Gt")
+            Arc::<str>::from("Gt")
         }
         TokenKind::LtEq => {
-            Rc::<str>::from("LtEq")
+            Arc::<str>::from("LtEq")
         }
         TokenKind::GtEq => {
-            Rc::<str>::from("GtEq")
+            Arc::<str>::from("GtEq")
         }
         TokenKind::Dot => {
-            Rc::<str>::from("Dot")
+            Arc::<str>::from("Dot")
         }
         TokenKind::DotDot => {
-            Rc::<str>::from("DotDot")
+            Arc::<str>::from("DotDot")
         }
         TokenKind::DotDotEq => {
-            Rc::<str>::from("DotDotEq")
+            Arc::<str>::from("DotDotEq")
         }
         TokenKind::DotDotDot => {
-            Rc::<str>::from("DotDotDot")
+            Arc::<str>::from("DotDotDot")
         }
         TokenKind::Question => {
-            Rc::<str>::from("Question")
+            Arc::<str>::from("Question")
         }
         TokenKind::QuestionDot => {
-            Rc::<str>::from("QuestionDot")
+            Arc::<str>::from("QuestionDot")
         }
         TokenKind::Bang => {
-            Rc::<str>::from("Bang")
+            Arc::<str>::from("Bang")
         }
         TokenKind::Tick => {
-            Rc::<str>::from("Tick")
+            Arc::<str>::from("Tick")
         }
         TokenKind::Ampersand => {
-            Rc::<str>::from("Ampersand")
+            Arc::<str>::from("Ampersand")
         }
         TokenKind::Pipe => {
-            Rc::<str>::from("Pipe")
+            Arc::<str>::from("Pipe")
         }
         TokenKind::Caret => {
-            Rc::<str>::from("Caret")
+            Arc::<str>::from("Caret")
         }
         TokenKind::Tilde => {
-            Rc::<str>::from("Tilde")
+            Arc::<str>::from("Tilde")
         }
         TokenKind::PlusEq => {
-            Rc::<str>::from("PlusEq")
+            Arc::<str>::from("PlusEq")
         }
         TokenKind::MinusEq => {
-            Rc::<str>::from("MinusEq")
+            Arc::<str>::from("MinusEq")
         }
         TokenKind::StarEq => {
-            Rc::<str>::from("StarEq")
+            Arc::<str>::from("StarEq")
         }
         TokenKind::SlashEq => {
-            Rc::<str>::from("SlashEq")
+            Arc::<str>::from("SlashEq")
         }
         TokenKind::PercentEq => {
-            Rc::<str>::from("PercentEq")
+            Arc::<str>::from("PercentEq")
         }
         TokenKind::AmpersandEq => {
-            Rc::<str>::from("AmpersandEq")
+            Arc::<str>::from("AmpersandEq")
         }
         TokenKind::PipeEq => {
-            Rc::<str>::from("PipeEq")
+            Arc::<str>::from("PipeEq")
         }
         TokenKind::CaretEq => {
-            Rc::<str>::from("CaretEq")
+            Arc::<str>::from("CaretEq")
         }
         TokenKind::QuestionEq => {
-            Rc::<str>::from("QuestionEq")
+            Arc::<str>::from("QuestionEq")
         }
         TokenKind::PipeArrow => {
-            Rc::<str>::from("PipeArrow")
+            Arc::<str>::from("PipeArrow")
         }
         TokenKind::LParen => {
-            Rc::<str>::from("LParen")
+            Arc::<str>::from("LParen")
         }
         TokenKind::RParen => {
-            Rc::<str>::from("RParen")
+            Arc::<str>::from("RParen")
         }
         TokenKind::LBracket => {
-            Rc::<str>::from("LBracket")
+            Arc::<str>::from("LBracket")
         }
         TokenKind::RBracket => {
-            Rc::<str>::from("RBracket")
+            Arc::<str>::from("RBracket")
         }
         TokenKind::LBrace => {
-            Rc::<str>::from("LBrace")
+            Arc::<str>::from("LBrace")
         }
         TokenKind::RBrace => {
-            Rc::<str>::from("RBrace")
+            Arc::<str>::from("RBrace")
         }
         TokenKind::Comma => {
-            Rc::<str>::from("Comma")
+            Arc::<str>::from("Comma")
         }
         TokenKind::Colon => {
-            Rc::<str>::from("Colon")
+            Arc::<str>::from("Colon")
         }
         TokenKind::At => {
-            Rc::<str>::from("At")
+            Arc::<str>::from("At")
         }
         TokenKind::Newline => {
-            Rc::<str>::from("Newline")
+            Arc::<str>::from("Newline")
         }
         TokenKind::Semicolon => {
-            Rc::<str>::from("Semicolon")
+            Arc::<str>::from("Semicolon")
         }
         TokenKind::Indent => {
-            Rc::<str>::from("Indent")
+            Arc::<str>::from("Indent")
         }
         TokenKind::Dedent => {
-            Rc::<str>::from("Dedent")
+            Arc::<str>::from("Dedent")
         }
         TokenKind::Eof => {
-            Rc::<str>::from("Eof")
+            Arc::<str>::from("Eof")
         }
         TokenKind::Comment(_) => {
-            Rc::<str>::from("Comment")
+            Arc::<str>::from("Comment")
         }
     }
 }
 
-fn parser_check(mut p: Rc<RefCell<Parser>>, name: Rc<str>) -> bool {
-    (token_kind_name(p.borrow_mut().peek()) == name)
+fn parser_check(mut p: &mut Parser, name: Arc<str>) -> bool {
+    (token_kind_name((*p).peek()) == name)
 }
 
-fn parser_check2(mut p: Rc<RefCell<Parser>>, name: Rc<str>) -> bool {
-    (token_kind_name(p.borrow_mut().peek2()) == name)
+fn parser_check2(mut p: &mut Parser, name: Arc<str>) -> bool {
+    (token_kind_name((*p).peek2()) == name)
 }
 
-fn parser_advance(mut p: Rc<RefCell<Parser>>) -> Result<Token, Box<dyn std::error::Error>> {
-    Ok(p.borrow_mut().advance())
+fn parser_advance(mut p: &mut Parser) -> Result<Token, Box<dyn std::error::Error + Send + Sync>> {
+    Ok((*p).advance())
 }
 
-fn parser_eat(mut p: Rc<RefCell<Parser>>, name: Rc<str>) -> Result<bool, Box<dyn std::error::Error>> {
-    if parser_check(Rc::clone(&p), name.clone().clone()) {
-        p.borrow_mut().advance();
-        true;
-    } else {
-        false;
+fn parser_eat(mut p: &mut Parser, name: Arc<str>) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_check(&mut (*p), name.clone().clone()) {
+        (*p).advance();
+        return Ok(true);
     }
-    unreachable!()
+    return Ok(false);
 }
 
-fn parser_expect(mut p: Rc<RefCell<Parser>>, name: Rc<str>) -> Result<Token, Box<dyn std::error::Error>> {
-    if parser_check(Rc::clone(&p), name.clone().clone()) {
-        p.borrow_mut().advance();
-    } else {
-        return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected {}, got {}", name, token_kind_name(p.borrow_mut().peek())).as_str())))));
+fn parser_expect(mut p: &mut Parser, name: Arc<str>) -> Result<Token, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_check(&mut (*p), name.clone().clone()) {
+        return Ok((*p).advance());
     }
-    unreachable!()
+    return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected {}, got {}", name, token_kind_name((*p).peek())).as_str())))));
 }
 
-fn parser_expect_ident(mut p: Rc<RefCell<Parser>>) -> Result<Rc<str>, Box<dyn std::error::Error>> {
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Ident").to_string())) {
-        p.borrow_mut().advance().text();
-    } else {
-        return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected identifier, got {}", token_kind_name(p.borrow_mut().peek())).as_str())))));
+fn parser_expect_ident(mut p: &mut Parser) -> Result<Arc<str>, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_check(&mut (*p), Arc::<str>::from("Ident")) {
+        return Ok((*p).advance().text());
     }
-    unreachable!()
+    return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected identifier, got {}", token_kind_name((*p).peek())).as_str())))));
 }
 
-fn parser_expect_ident_or_keyword(mut p: Rc<RefCell<Parser>>) -> Result<Rc<str>, Box<dyn std::error::Error>> {
-    let k = p.borrow_mut().peek();
-    let name = token_kind_name(k);
-    if ((((((((((name == Rc::<str>::from("Ident")) || (name == Rc::<str>::from("Let"))) || (name == Rc::<str>::from("Var"))) || (name == Rc::<str>::from("Def"))) || (name == Rc::<str>::from("Return"))) || (name == Rc::<str>::from("If"))) || (name == Rc::<str>::from("For"))) || (name == Rc::<str>::from("While"))) || (name == Rc::<str>::from("Match"))) || (name == Rc::<str>::from("Type"))) {
-        p.borrow_mut().advance().text();
-    } else {
-        return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected identifier or keyword, got {}", name).as_str())))));
+fn parser_expect_ident_or_keyword(mut p: &mut Parser) -> Result<Arc<str>, Box<dyn std::error::Error + Send + Sync>> {
+    let k = (*p).peek();
+    let name = token_kind_name(k.clone());
+    if ((((((((((name == Arc::<str>::from("Ident")) || (name == Arc::<str>::from("Let"))) || (name == Arc::<str>::from("Var"))) || (name == Arc::<str>::from("Def"))) || (name == Arc::<str>::from("Return"))) || (name == Arc::<str>::from("If"))) || (name == Arc::<str>::from("For"))) || (name == Arc::<str>::from("While"))) || (name == Arc::<str>::from("Match"))) || (name == Arc::<str>::from("Type"))) {
+        return Ok((*p).advance().text());
     }
-    unreachable!()
+    return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected identifier or keyword, got {}", name).as_str())))));
 }
 
-fn parser_peek_is_ident(mut p: Rc<RefCell<Parser>>) -> bool {
-    parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Ident").to_string()))
+fn parser_peek_is_ident(mut p: &mut Parser) -> bool {
+    parser_check(&mut (*p), Arc::<str>::from("Ident"))
 }
 
-fn parser_peek_is_int(mut p: Rc<RefCell<Parser>>) -> bool {
-    parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Int").to_string()))
+fn parser_peek_is_int(mut p: &mut Parser) -> bool {
+    parser_check(&mut (*p), Arc::<str>::from("Int"))
 }
 
-fn parser_is_newline(mut p: Rc<RefCell<Parser>>) -> bool {
-    (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string())))
+fn parser_is_newline(mut p: &mut Parser) -> bool {
+    (parser_check(&mut (*p), Arc::<str>::from("Newline")) || parser_check(&mut (*p), Arc::<str>::from("Semicolon")))
 }
 
-fn parser_line(mut p: Rc<RefCell<Parser>>) -> i64 {
-    p.borrow_mut().current_line()
+fn parser_line(mut p: &mut Parser) -> i64 {
+    (*p).current_line()
 }
 
-fn parser_pos(mut p: Rc<RefCell<Parser>>) -> i64 {
-    p.borrow().pos
+fn parser_pos(mut p: &mut Parser) -> i64 {
+    (*p).pos
 }
 
-fn parser_set_pos(mut p: Rc<RefCell<Parser>>, pos: i64) -> () {
-    { let mut __g = p.borrow_mut(); __g.pos = pos; };
+fn parser_set_pos(mut p: &mut Parser, pos: i64) -> () {
+    (*p).pos = pos;
 }
 
-fn parser_skip_newlines(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
-    while (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string()))) {
-        p.borrow_mut().advance();
+fn parser_skip_newlines(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    while (parser_check(&mut (*p), Arc::<str>::from("Newline")) || parser_check(&mut (*p), Arc::<str>::from("Semicolon"))) {
+        (*p).advance();
     }
     Ok(())
 }
 
-fn parser_skip_newlines_and_indent(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
-    while ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Indent").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string()))) {
-        p.borrow_mut().advance();
+fn parser_skip_newlines_and_indent(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    while ((parser_check(&mut (*p), Arc::<str>::from("Newline")) || parser_check(&mut (*p), Arc::<str>::from("Indent"))) || parser_check(&mut (*p), Arc::<str>::from("Semicolon"))) {
+        (*p).advance();
     }
     Ok(())
 }
 
-fn parser_expect_newline(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
-    if ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
-        if (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
-            p.borrow_mut().advance();
+fn parser_expect_newline(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if ((parser_check(&mut (*p), Arc::<str>::from("Newline")) || parser_check(&mut (*p), Arc::<str>::from("Semicolon"))) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
+        if (!parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
+            (*p).advance();
         }
+        Ok(())
     } else {
-        return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected newline, got {}", token_kind_name(p.borrow_mut().peek())).as_str())))));
+        return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected newline, got {}", token_kind_name((*p).peek())).as_str())))));
+    }
+}
+
+fn parser_expect_newline_soft(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if (parser_check(&mut (*p), Arc::<str>::from("Newline")) || parser_check(&mut (*p), Arc::<str>::from("Semicolon"))) {
+        (*p).advance();
     }
     Ok(())
 }
 
-fn parser_expect_newline_soft(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
-    if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string()))) {
-        p.borrow_mut().advance();
-    }
-    Ok(())
-}
-
-fn parser_peek_ident(mut p: Rc<RefCell<Parser>>) -> Rc<str> {
-    match p.borrow_mut().peek() {
-        TokenKind::Ident(name) => {
+fn parser_peek_ident(mut p: &mut Parser) -> Arc<str> {
+    match (*p).peek() {
+        TokenKind::Ident(mut name) => {
             name.clone()
         }
         _ => {
-            Rc::<str>::from("")
+            Arc::<str>::from("")
         }
     }
 }
 
-fn parser_peek_int(mut p: Rc<RefCell<Parser>>) -> i64 {
-    match p.borrow_mut().peek() {
-        TokenKind::Int(n) => {
+fn parser_peek_int(mut p: &mut Parser) -> i64 {
+    match (*p).peek() {
+        TokenKind::Int(mut n) => {
             n
         }
         _ => {
@@ -3844,9 +3856,9 @@ fn parser_peek_int(mut p: Rc<RefCell<Parser>>) -> i64 {
     }
 }
 
-fn parser_peek_float(mut p: Rc<RefCell<Parser>>) -> f64 {
-    match p.borrow_mut().peek() {
-        TokenKind::Float(f) => {
+fn parser_peek_float(mut p: &mut Parser) -> f64 {
+    match (*p).peek() {
+        TokenKind::Float(mut f) => {
             f
         }
         _ => {
@@ -3855,20 +3867,20 @@ fn parser_peek_float(mut p: Rc<RefCell<Parser>>) -> f64 {
     }
 }
 
-fn parser_peek_str(mut p: Rc<RefCell<Parser>>) -> Rc<str> {
-    match p.borrow_mut().peek() {
-        TokenKind::Str(s) => {
+fn parser_peek_str(mut p: &mut Parser) -> Arc<str> {
+    match (*p).peek() {
+        TokenKind::Str(mut s) => {
             s.clone()
         }
         _ => {
-            Rc::<str>::from("")
+            Arc::<str>::from("")
         }
     }
 }
 
-fn parser_peek_bool(mut p: Rc<RefCell<Parser>>) -> bool {
-    match p.borrow_mut().peek() {
-        TokenKind::Bool(b) => {
+fn parser_peek_bool(mut p: &mut Parser) -> bool {
+    match (*p).peek() {
+        TokenKind::Bool(mut b) => {
             b
         }
         _ => {
@@ -3877,9 +3889,9 @@ fn parser_peek_bool(mut p: Rc<RefCell<Parser>>) -> bool {
     }
 }
 
-fn parser_peek_interp_parts(mut p: Rc<RefCell<Parser>>) -> Vec<RawInterpPart> {
-    match p.borrow_mut().peek() {
-        TokenKind::StringInterp(parts) => {
+fn parser_peek_interp_parts(mut p: &mut Parser) -> Vec<RawInterpPart> {
+    match (*p).peek() {
+        TokenKind::StringInterp(mut parts) => {
             parts
         }
         _ => {
@@ -3888,227 +3900,225 @@ fn parser_peek_interp_parts(mut p: Rc<RefCell<Parser>>) -> Vec<RawInterpPart> {
     }
 }
 
-fn parser_peek_comment(mut p: Rc<RefCell<Parser>>) -> Rc<str> {
-    match p.borrow_mut().peek() {
-        TokenKind::Comment(text) => {
+fn parser_peek_comment(mut p: &mut Parser) -> Arc<str> {
+    match (*p).peek() {
+        TokenKind::Comment(mut text) => {
             text.clone()
         }
         _ => {
-            Rc::<str>::from("")
+            Arc::<str>::from("")
         }
     }
 }
 
-fn parser_peek_token_at(mut p: Rc<RefCell<Parser>>, offset: i64) -> Token {
-    let idx = (p.borrow().pos + offset);
-    if (idx < (p.borrow().tokens.len() as i64)) {
-        p.borrow().tokens[(idx) as usize].clone()
+fn parser_peek_token_at(mut p: &mut Parser, offset: i64) -> Token {
+    let idx = ((*p).pos + offset);
+    if (idx < ((*p).tokens.len() as i64)) {
+        (*p).tokens[(idx) as usize].clone()
     } else {
         Token { kind: TokenKind::Eof, line: 0 }
     }
 }
 
-fn parser_token_at_is_eq(mut p: Rc<RefCell<Parser>>, offset: i64) -> bool {
-    (token_kind_name(parser_peek_token_at(Rc::clone(&p), offset).kind) == Rc::<str>::from("Eq"))
+fn parser_token_at_is_eq(mut p: &mut Parser, offset: i64) -> bool {
+    (token_kind_name(parser_peek_token_at(&mut (*p), offset).kind) == Arc::<str>::from("Eq"))
 }
 
-fn parser_token_at_offset_is(mut p: Rc<RefCell<Parser>>, offset: i64, name: Rc<str>) -> bool {
-    (token_kind_name(parser_peek_token_at(Rc::clone(&p), offset).kind) == name)
+fn parser_token_at_offset_is(mut p: &mut Parser, offset: i64, name: Arc<str>) -> bool {
+    (token_kind_name(parser_peek_token_at(&mut (*p), offset).kind) == name)
 }
 
-fn parser_skip_to_offset(mut p: Rc<RefCell<Parser>>, offset: i64) -> Result<(), Box<dyn std::error::Error>> {
-    { let mut __g = p.borrow_mut(); __g.pos = (p.borrow().pos + offset); };
+fn parser_skip_to_offset(mut p: &mut Parser, offset: i64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    (*p).pos += offset;
     Ok(())
 }
 
-fn parser_peek_next_is(mut p: Rc<RefCell<Parser>>, name: Rc<str>) -> bool {
-    parser_check2(Rc::clone(&p), name.clone().clone())
+fn parser_peek_next_is(mut p: &mut Parser, name: Arc<str>) -> bool {
+    parser_check2(&mut (*p), name.clone().clone())
 }
 
-fn parser_peek_next_is_colon(mut p: Rc<RefCell<Parser>>) -> bool {
-    parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))
+fn parser_peek_next_is_colon(mut p: &mut Parser) -> bool {
+    parser_check2(&mut (*p), Arc::<str>::from("Colon"))
 }
 
-fn parser_peek_next_is_qualifier(mut p: Rc<RefCell<Parser>>) -> bool {
-    let n = token_kind_name(p.borrow_mut().peek2());
-    ((n == Rc::<str>::from("Tick")) || (n == Rc::<str>::from("Ampersand")))
+fn parser_peek_next_is_qualifier(mut p: &mut Parser) -> bool {
+    let n = token_kind_name((*p).peek2());
+    ((n == Arc::<str>::from("Tick")) || (n == Arc::<str>::from("Ampersand")))
 }
 
-fn parser_peek_is_macro_call(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_peek_is_macro_call(mut p: &mut Parser) -> bool {
     false
 }
 
-fn parser_peek_is_generic_call(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_peek_is_generic_call(mut p: &mut Parser) -> bool {
     false
 }
 
-fn parser_peek_is_trailing_closure(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_peek_is_trailing_closure(mut p: &mut Parser) -> bool {
     false
 }
 
-fn parser_peek_is_trailing_body_no_colon(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_peek_is_trailing_body_no_colon(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_peek_is_trailing_closure_no_paren(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_peek_is_trailing_closure_no_paren(mut p: &mut Parser) -> bool {
     false
 }
 
-fn parser_peek_is_typed_closure(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_peek_is_typed_closure(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_peek_starts_expr(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
-    let name = token_kind_name(p.borrow_mut().peek());
-    Ok(((((((((((((name == Rc::<str>::from("Int")) || (name == Rc::<str>::from("Float"))) || (name == Rc::<str>::from("Str"))) || (name == Rc::<str>::from("Bool"))) || (name == Rc::<str>::from("Nil"))) || (name == Rc::<str>::from("Ident"))) || (name == Rc::<str>::from("LParen"))) || (name == Rc::<str>::from("LBracket"))) || (name == Rc::<str>::from("LBrace"))) || (name == Rc::<str>::from("Not"))) || (name == Rc::<str>::from("Minus"))) || (name == Rc::<str>::from("SelfKw"))))
+fn parser_peek_starts_expr(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let name = token_kind_name((*p).peek());
+    Ok(((((((((((((name == Arc::<str>::from("Int")) || (name == Arc::<str>::from("Float"))) || (name == Arc::<str>::from("Str"))) || (name == Arc::<str>::from("Bool"))) || (name == Arc::<str>::from("Nil"))) || (name == Arc::<str>::from("Ident"))) || (name == Arc::<str>::from("LParen"))) || (name == Arc::<str>::from("LBracket"))) || (name == Arc::<str>::from("LBrace"))) || (name == Arc::<str>::from("Not"))) || (name == Arc::<str>::from("Minus"))) || (name == Arc::<str>::from("SelfKw"))))
 }
 
-fn parser_allow_noparen_closure(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_allow_noparen_closure(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(true)
 }
 
-fn parser_get_allow_noparen_closure(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_get_allow_noparen_closure(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(true)
 }
 
-fn parser_get_allow_trailing_closure(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_get_allow_trailing_closure(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(true)
 }
 
-fn parser_set_allow_noparen_closure(mut p: Rc<RefCell<Parser>>, v: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn parser_set_allow_noparen_closure(mut p: &mut Parser, v: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn parser_set_allow_trailing_closure(mut p: Rc<RefCell<Parser>>, v: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn parser_set_allow_trailing_closure(mut p: &mut Parser, v: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn parser_depth(mut p: Rc<RefCell<Parser>>) -> Result<i64, Box<dyn std::error::Error>> {
+fn parser_depth(mut p: &mut Parser) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     Ok(0)
 }
 
-fn parser_depth_inc(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
+fn parser_depth_inc(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn parser_depth_dec(mut p: Rc<RefCell<Parser>>) -> Result<(), Box<dyn std::error::Error>> {
+fn parser_depth_dec(mut p: &mut Parser) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn parser_is_type_start_before_ident(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_is_type_start_before_ident(mut p: &mut Parser) -> bool {
     false
 }
 
-fn parser_is_let_destructure(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_is_let_destructure(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_is_for_with_vars(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_is_for_with_vars(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_is_task_fn_shorthand(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_is_task_fn_shorthand(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_peek_dot_after_newlines(mut p: Rc<RefCell<Parser>>) -> Result<bool, Box<dyn std::error::Error>> {
+fn parser_peek_dot_after_newlines(mut p: &mut Parser) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     Ok(false)
 }
 
-fn parser_peek_debug(mut p: Rc<RefCell<Parser>>) -> Result<Rc<str>, Box<dyn std::error::Error>> {
-    Ok(token_kind_name(p.borrow_mut().peek()))
+fn parser_peek_debug(mut p: &mut Parser) -> Result<Arc<str>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(token_kind_name((*p).peek()))
 }
 
-fn parse_type(mut p: Rc<RefCell<Parser>>) -> Result<Type, Box<dyn std::error::Error>> {
-    let base = parse_type_base(Rc::clone(&p))?;
-    if p.borrow_mut().eat(TokenKind::Question) {
-        Type::Optional(Box::new(base));
+fn parse_type(mut p: &mut Parser) -> Result<Type, Box<dyn std::error::Error + Send + Sync>> {
+    let base = parse_type_base(&mut (*p))?;
+    if (*p).eat(TokenKind::Question) {
+        Ok(Type::Optional(Box::new(base.clone())))
     } else {
-        base;
+        Ok(base)
     }
-    unreachable!()
 }
 
-fn parse_type_base(mut p: Rc<RefCell<Parser>>) -> Result<Type, Box<dyn std::error::Error>> {
-    match p.borrow_mut().peek() {
-        TokenKind::Ident(s) => {
-            p.borrow_mut().advance();
+fn parse_type_base(mut p: &mut Parser) -> Result<Type, Box<dyn std::error::Error + Send + Sync>> {
+    match (*p).peek() {
+        TokenKind::Ident(mut s) => {
+            (*p).advance();
             match &*s {
                 "int" => {
-                    Type::Int;
+                    Ok(Type::Int)
                 }
                 "uint" => {
-                    Type::Uint;
+                    Ok(Type::Uint)
                 }
                 "float" => {
-                    Type::Float;
+                    Ok(Type::Float)
                 }
                 "string" => {
-                    Type::Str;
+                    Ok(Type::Str)
                 }
                 "bool" => {
-                    Type::Bool;
+                    Ok(Type::Bool)
                 }
                 "void" => {
-                    Type::Void;
+                    Ok(Type::Void)
                 }
                 _ => {
-                    Type::Named(Rc::<str>::from(s.clone().to_string()));
+                    Ok(Type::Named(Arc::<str>::from(s.clone().to_string())))
                 }
             }
         }
         TokenKind::Void => {
-            p.borrow_mut().advance();
-            Type::Void;
+            (*p).advance();
+            Ok(Type::Void)
         }
         TokenKind::LBracket => {
-            p.borrow_mut().advance();
-            let inner = parse_type(Rc::clone(&p))?;
-            p.borrow_mut().expect(TokenKind::RBracket)?;
-            Type::Array(Box::new(inner));
+            (*p).advance();
+            let inner = parse_type(&mut (*p))?;
+            (*p).expect(TokenKind::RBracket)?;
+            Ok(Type::Array(Box::new(inner.clone())))
         }
         TokenKind::LBrace => {
-            p.borrow_mut().advance();
-            let key = parse_type(Rc::clone(&p))?;
-            p.borrow_mut().expect(TokenKind::Eq)?;
-            let val = parse_type(Rc::clone(&p))?;
-            p.borrow_mut().expect(TokenKind::RBrace)?;
-            Type::Dict(Box::new(key), Box::new(val));
+            (*p).advance();
+            let key = parse_type(&mut (*p))?;
+            (*p).expect(TokenKind::Eq)?;
+            let val = parse_type(&mut (*p))?;
+            (*p).expect(TokenKind::RBrace)?;
+            Ok(Type::Dict(Box::new(key.clone()), Box::new(val.clone())))
         }
         TokenKind::LParen => {
-            p.borrow_mut().advance();
+            (*p).advance();
             let mut types = Vec::<Type>::new();
             HashSet::<i64>::new();
-            if (p.borrow_mut().peek() != TokenKind::RParen) {
-                types.push(parse_type(Rc::clone(&p))?);
-                while p.borrow_mut().eat(TokenKind::Comma) {
-                    if (p.borrow_mut().peek() == TokenKind::RParen) {
+            if ((*p).peek() != TokenKind::RParen) {
+                types.push(parse_type(&mut (*p))?);
+                while (*p).eat(TokenKind::Comma) {
+                    if ((*p).peek() == TokenKind::RParen) {
                         break;
                     }
-                    types.push(parse_type(Rc::clone(&p))?);
+                    types.push(parse_type(&mut (*p))?);
                 }
             }
-            p.borrow_mut().expect(TokenKind::RParen)?;
-            Type::Tuple(types);
+            (*p).expect(TokenKind::RParen)?;
+            Ok(Type::Tuple(types))
         }
         _ => {
-            return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("expected type, got {} at line {}", token_kind_name(p.borrow_mut().peek()), p.borrow_mut().current_line()).as_str())))));
+            return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("expected type, got {} at line {}", token_kind_name((*p).peek()), (*p).current_line()).as_str())))));
         }
     }
-    unreachable!()
 }
 
-fn parse_fn_decl(mut p: Rc<RefCell<Parser>>, is_pub: bool, is_def: bool) -> Result<FnDecl, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
+fn parse_fn_decl(mut p: &mut Parser, is_pub: bool, is_def: bool) -> Result<FnDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
     let mut mutating = true;
-    if p.borrow_mut().eat(TokenKind::Req) {
+    if (*p).eat(TokenKind::Req) {
         mutating = false;
     } else {
-        p.borrow_mut().expect(TokenKind::Def)?;
+        (*p).expect(TokenKind::Def)?;
     }
     let mut return_ty = Type::Void;
     let mut has_ret = false;
-    match p.borrow_mut().peek() {
+    match (*p).peek() {
         TokenKind::Ident(_) => {
             has_ret = true;
         }
@@ -4128,198 +4138,196 @@ fn parse_fn_decl(mut p: Rc<RefCell<Parser>>, is_pub: bool, is_def: bool) -> Resu
         }
     }
     if has_ret {
-        return_ty = parse_type(Rc::clone(&p))?;
+        return_ty = parse_type(&mut (*p))?;
     }
-    let name = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
+    let name = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
     let mut params: Vec<Param> = vec![];
-    p.borrow_mut().expect(TokenKind::LParen)?;
-    while (p.borrow_mut().peek() != TokenKind::RParen) {
-        params.push(parse_param(Rc::clone(&p))?);
-        if (p.borrow_mut().peek() != TokenKind::RParen) {
-            p.borrow_mut().expect(TokenKind::Comma)?;
+    (*p).expect(TokenKind::LParen)?;
+    while ((*p).peek() != TokenKind::RParen) {
+        params.push(parse_param(&mut (*p))?);
+        if ((*p).peek() != TokenKind::RParen) {
+            (*p).expect(TokenKind::Comma)?;
         }
     }
-    p.borrow_mut().expect(TokenKind::RParen)?;
-    let can_throw = p.borrow_mut().eat(TokenKind::Throws);
-    p.borrow_mut().expect(TokenKind::Colon)?;
-    let body = parse_block(Rc::clone(&p))?;
-    Ok(FnDecl { name: Rc::<str>::from(name.text().to_string()), params: params, return_ty: Some(return_ty), can_throw: can_throw, mutating: mutating, is_pub: is_pub, body: body, line: line, qualifier: None, is_task: false, is_stream: false, stream_capacity: None, is_native: false, throws_ty: None, type_params: vec![], where_clause: vec![], attrs: vec![] })
+    (*p).expect(TokenKind::RParen)?;
+    let can_throw = (*p).eat(TokenKind::Throws);
+    (*p).expect(TokenKind::Colon)?;
+    let body = parse_block(&mut (*p))?;
+    Ok(FnDecl { name: Arc::<str>::from(name.text().to_string()), params: params, return_ty: Some(return_ty), can_throw: can_throw, mutating: mutating, is_pub: is_pub, body: body, line: line, qualifier: None, is_task: false, is_stream: false, stream_capacity: None, is_native: false, throws_ty: None, type_params: vec![], where_clause: vec![], attrs: vec![] })
 }
 
-fn parse_param(mut p: Rc<RefCell<Parser>>) -> Result<Param, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    let mutable = p.borrow_mut().eat(TokenKind::Var);
-    let ty = parse_type(Rc::clone(&p))?;
-    let name_tok = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
-    Ok(Param { name: Rc::<str>::from(name_tok.text().to_string()), ty: Some(ty), mutable: mutable, owned: false, variadic: false, default: None, line: line })
+fn parse_param(mut p: &mut Parser) -> Result<Param, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    let mutable = (*p).eat(TokenKind::Var);
+    let ty = parse_type(&mut (*p))?;
+    let name_tok = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
+    Ok(Param { name: Arc::<str>::from(name_tok.text().to_string()), ty: Some(ty), mutable: mutable, owned: false, variadic: false, default: None, line: line })
 }
 
-fn parse_struct_decl(mut p: Rc<RefCell<Parser>>, is_pub: bool) -> Result<StructDecl, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    p.borrow_mut().expect(TokenKind::Struct)?;
-    let name_tok = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
+fn parse_struct_decl(mut p: &mut Parser, is_pub: bool) -> Result<StructDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    (*p).expect(TokenKind::Struct)?;
+    let name_tok = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
     let name = name_tok.text();
-    p.borrow_mut().expect(TokenKind::Colon)?;
-    p.borrow_mut().expect(TokenKind::Newline)?;
-    p.borrow_mut().expect(TokenKind::Indent)?;
+    (*p).expect(TokenKind::Colon)?;
+    (*p).expect(TokenKind::Newline)?;
+    (*p).expect(TokenKind::Indent)?;
     let mut fields = Vec::<FieldDecl>::new();
     HashSet::<i64>::new();
     let mut methods = Vec::<FnDecl>::new();
     HashSet::<i64>::new();
     let mut inits = Vec::<InitDecl>::new();
     HashSet::<i64>::new();
-    while (p.borrow_mut().peek() != TokenKind::Dedent) {
-        if (p.borrow_mut().peek() == TokenKind::Eof) {
+    while ((*p).peek() != TokenKind::Dedent) {
+        if ((*p).peek() == TokenKind::Eof) {
             break;
         }
-        match p.borrow_mut().peek() {
+        match (*p).peek() {
             TokenKind::Def => {
-                methods.push(parse_fn_decl(Rc::clone(&p), false, true)?);
+                methods.push(parse_fn_decl(&mut (*p), false, true)?);
             }
             TokenKind::Req => {
-                methods.push(parse_fn_decl(Rc::clone(&p), false, false)?);
+                methods.push(parse_fn_decl(&mut (*p), false, false)?);
             }
             TokenKind::Init => {
-                inits.push(parse_init_decl(Rc::clone(&p))?);
+                inits.push(parse_init_decl(&mut (*p))?);
             }
             _ => {
-                fields.push(parse_field_decl(Rc::clone(&p))?);
+                fields.push(parse_field_decl(&mut (*p))?);
             }
         }
     }
-    p.borrow_mut().eat(TokenKind::Dedent);
-    Ok(StructDecl { name: Rc::<str>::from(name.to_string()), fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: vec![], conversions: vec![], type_params: vec![], where_clause: vec![], setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs: vec![] })
+    (*p).eat(TokenKind::Dedent);
+    Ok(StructDecl { name: Arc::<str>::from(name.to_string()), fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: vec![], conversions: vec![], type_params: vec![], where_clause: vec![], setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs: vec![] })
 }
 
-fn parse_field_decl(mut p: Rc<RefCell<Parser>>) -> Result<FieldDecl, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    let mutable = p.borrow_mut().eat(TokenKind::Var);
-    let ty = parse_type(Rc::clone(&p))?;
-    let name_tok = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
+fn parse_field_decl(mut p: &mut Parser) -> Result<FieldDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    let mutable = (*p).eat(TokenKind::Var);
+    let ty = parse_type(&mut (*p))?;
+    let name_tok = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
     let mut default: Option<Expr> = None;
-    if p.borrow_mut().eat(TokenKind::Eq) {
-        default = Some(parse_expr(Rc::clone(&p))?);
+    if (*p).eat(TokenKind::Eq) {
+        default = Some(parse_expr(&mut (*p))?);
     }
-    while p.borrow_mut().eat(TokenKind::Newline) {
+    while (*p).eat(TokenKind::Newline) {
     }
-    Ok(FieldDecl { name: Rc::<str>::from(name_tok.text().to_string()), ty: ty, mutable: mutable, default: default, line: line, is_pub: false, is_transient: false })
+    Ok(FieldDecl { name: Arc::<str>::from(name_tok.text().to_string()), ty: ty.clone(), mutable: mutable, default: default, line: line, is_pub: false, is_transient: false })
 }
 
-fn parse_init_decl(mut p: Rc<RefCell<Parser>>) -> Result<InitDecl, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    p.borrow_mut().expect(TokenKind::Init)?;
-    p.borrow_mut().expect(TokenKind::LParen)?;
+fn parse_init_decl(mut p: &mut Parser) -> Result<InitDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    (*p).expect(TokenKind::Init)?;
+    (*p).expect(TokenKind::LParen)?;
     let mut params: Vec<InitParam> = vec![];
-    while (p.borrow_mut().peek() != TokenKind::RParen) {
-        let par = parse_param(Rc::clone(&p))?;
-        params.push(InitParam { is_pub: false, mutable: par.mutable, name: Rc::<str>::from(par.name.to_string()), ty: par.ty, default: par.default, line: par.line });
-        if (p.borrow_mut().peek() != TokenKind::RParen) {
-            p.borrow_mut().expect(TokenKind::Comma)?;
+    while ((*p).peek() != TokenKind::RParen) {
+        let par = parse_param(&mut (*p))?;
+        params.push(InitParam { is_pub: false, mutable: par.mutable, name: Arc::<str>::from(par.name.to_string()), ty: par.ty, default: par.default, line: par.line });
+        if ((*p).peek() != TokenKind::RParen) {
+            (*p).expect(TokenKind::Comma)?;
         }
     }
-    p.borrow_mut().expect(TokenKind::RParen)?;
+    (*p).expect(TokenKind::RParen)?;
     let mut body: Vec<Stmt> = vec![];
-    if p.borrow_mut().eat(TokenKind::Colon) {
-        body = parse_block(Rc::clone(&p))?;
+    if (*p).eat(TokenKind::Colon) {
+        body = parse_block(&mut (*p))?;
     } else {
-        while p.borrow_mut().eat(TokenKind::Newline) {
+        while (*p).eat(TokenKind::Newline) {
         }
-        InitDecl { params: params, body: body, line: line };
     }
-    unreachable!()
+    return Ok(InitDecl { params: params, body: body, line: line });
 }
 
-fn parse_enum_decl(mut p: Rc<RefCell<Parser>>, is_pub: bool) -> Result<EnumDecl, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    p.borrow_mut().expect(TokenKind::Enum)?;
-    let name_tok = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
+fn parse_enum_decl(mut p: &mut Parser, is_pub: bool) -> Result<EnumDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    (*p).expect(TokenKind::Enum)?;
+    let name_tok = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
     let name = name_tok.text();
-    p.borrow_mut().expect(TokenKind::Colon)?;
-    p.borrow_mut().expect(TokenKind::Newline)?;
-    p.borrow_mut().expect(TokenKind::Indent)?;
+    (*p).expect(TokenKind::Colon)?;
+    (*p).expect(TokenKind::Newline)?;
+    (*p).expect(TokenKind::Indent)?;
     let mut variants = Vec::<EnumVariant>::new();
     HashSet::<i64>::new();
     let mut methods = Vec::<FnDecl>::new();
     HashSet::<i64>::new();
-    while (p.borrow_mut().peek() != TokenKind::Dedent) {
-        if (p.borrow_mut().peek() == TokenKind::Eof) {
+    while ((*p).peek() != TokenKind::Dedent) {
+        if ((*p).peek() == TokenKind::Eof) {
             break;
         }
-        match p.borrow_mut().peek() {
+        match (*p).peek() {
             TokenKind::Def => {
-                methods.push(parse_fn_decl(Rc::clone(&p), false, true)?);
+                methods.push(parse_fn_decl(&mut (*p), false, true)?);
             }
             TokenKind::Req => {
-                methods.push(parse_fn_decl(Rc::clone(&p), false, false)?);
+                methods.push(parse_fn_decl(&mut (*p), false, false)?);
             }
             _ => {
-                variants.push(parse_enum_variant(Rc::clone(&p))?);
+                variants.push(parse_enum_variant(&mut (*p))?);
             }
         }
     }
-    p.borrow_mut().eat(TokenKind::Dedent);
-    Ok(EnumDecl { name: Rc::<str>::from(name.to_string()), variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: vec![], protocols: vec![], setters: vec![], conversions: vec![], attrs: vec![] })
+    (*p).eat(TokenKind::Dedent);
+    Ok(EnumDecl { name: Arc::<str>::from(name.to_string()), variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: vec![], protocols: vec![], setters: vec![], conversions: vec![], attrs: vec![] })
 }
 
-fn parse_enum_variant(mut p: Rc<RefCell<Parser>>) -> Result<EnumVariant, Box<dyn std::error::Error>> {
-    let line = p.borrow_mut().current_line();
-    let name_tok = p.borrow_mut().expect(TokenKind::Ident(Rc::<str>::from(Rc::<str>::from("").to_string())))?;
+fn parse_enum_variant(mut p: &mut Parser) -> Result<EnumVariant, Box<dyn std::error::Error + Send + Sync>> {
+    let line = (*p).current_line();
+    let name_tok = (*p).expect(TokenKind::Ident(Arc::<str>::from("")))?;
     let name = name_tok.text();
     let mut fields = Vec::<VariantField>::new();
     HashSet::<i64>::new();
-    if p.borrow_mut().eat(TokenKind::LParen) {
-        while (p.borrow_mut().peek() != TokenKind::RParen) {
-            let ty = parse_type(Rc::clone(&p))?;
-            fields.push(VariantField { name: None, ty: ty });
-            if (p.borrow_mut().peek() != TokenKind::RParen) {
-                p.borrow_mut().expect(TokenKind::Comma)?;
+    if (*p).eat(TokenKind::LParen) {
+        while ((*p).peek() != TokenKind::RParen) {
+            let ty = parse_type(&mut (*p))?;
+            fields.push(VariantField { name: None, ty: ty.clone() });
+            if ((*p).peek() != TokenKind::RParen) {
+                (*p).expect(TokenKind::Comma)?;
             }
         }
-        p.borrow_mut().expect(TokenKind::RParen)?;
+        (*p).expect(TokenKind::RParen)?;
     }
-    while p.borrow_mut().eat(TokenKind::Newline) {
+    while (*p).eat(TokenKind::Newline) {
     }
-    Ok(EnumVariant { name: Rc::<str>::from(name.to_string()), fields: fields, line: line, attrs: vec![] })
+    Ok(EnumVariant { name: Arc::<str>::from(name.to_string()), fields: fields, line: line, attrs: vec![] })
 }
 
-fn parse_item(mut p: Rc<RefCell<Parser>>) -> Result<Item, Box<dyn std::error::Error>> {
-    match p.borrow_mut().peek() {
+fn parse_item(mut p: &mut Parser) -> Result<Item, Box<dyn std::error::Error + Send + Sync>> {
+    match (*p).peek() {
         TokenKind::Def => {
-            Item::Fn(parse_fn_decl(Rc::clone(&p), false, true)?);
+            Ok(Item::Fn(parse_fn_decl(&mut (*p), false, true)?))
         }
         TokenKind::Req => {
-            Item::Fn(parse_fn_decl(Rc::clone(&p), false, false)?);
+            Ok(Item::Fn(parse_fn_decl(&mut (*p), false, false)?))
         }
         TokenKind::Struct => {
-            Item::Struct(parse_struct_decl(Rc::clone(&p), false)?);
+            Ok(Item::Struct(parse_struct_decl(&mut (*p), false)?))
         }
         TokenKind::Enum => {
-            Item::Enum(parse_enum_decl(Rc::clone(&p), false)?);
+            Ok(Item::Enum(parse_enum_decl(&mut (*p), false)?))
         }
         _ => {
-            Item::Stmt(parse_stmt(Rc::clone(&p))?);
+            Ok(Item::Stmt(parse_stmt(&mut (*p))?))
         }
     }
-    unreachable!()
 }
 
-fn parse_program(mut p: Rc<RefCell<Parser>>) -> Result<Program, Box<dyn std::error::Error>> {
+fn parse_program(mut p: &mut Parser) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
     let mut items = Vec::<Item>::new();
     HashSet::<i64>::new();
-    while p.borrow_mut().eat(TokenKind::Newline) {
+    while (*p).eat(TokenKind::Newline) {
     }
-    while (p.borrow_mut().peek() != TokenKind::Eof) {
-        items.push(parse_item(Rc::clone(&p))?);
-        while p.borrow_mut().eat(TokenKind::Newline) {
+    while ((*p).peek() != TokenKind::Eof) {
+        items.push(parse_item(&mut (*p))?);
+        while (*p).eat(TokenKind::Newline) {
         }
     }
     Ok(Program { items: items })
 }
 
-fn parse(source: Rc<str>) -> Result<Program, Box<dyn std::error::Error>> {
+fn parse(source: Arc<str>) -> Result<Program, Box<dyn std::error::Error + Send + Sync>> {
     let toks = lex(source.clone().clone())?;
-    let mut p = Rc::new(RefCell::new(Parser { tokens: toks, pos: 0 }));
-    Ok(parse_program(Rc::clone(&p))?)
+    let mut p: Parser = Parser { tokens: toks, pos: 0 };
+    Ok(parse_program(&mut p.clone())?)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4345,31 +4353,52 @@ fn stmt_fn(decl: FnDecl) -> Stmt {
     Stmt::Fn(decl.clone())
 }
 
-fn make_var_expr(name: Rc<str>, line: i64) -> Expr {
+fn make_var_expr(name: Arc<str>, line: i64) -> Expr {
     Expr { kind: ExprKind::Var(name.clone().clone()), line: line }
 }
 
-fn make_binop(op_name: Rc<str>, left: Expr, right: Expr, line: i64) -> Expr {
+fn make_binop(op_name: Arc<str>, left: Expr, right: Expr, line: i64) -> Expr {
     let op =     match &*op_name {
         "Add" => {
+            BinOp::Add
+        }
+        "Plus" => {
             BinOp::Add
         }
         "Sub" => {
             BinOp::Sub
         }
+        "Minus" => {
+            BinOp::Sub
+        }
         "Mul" => {
+            BinOp::Mul
+        }
+        "Star" => {
             BinOp::Mul
         }
         "Div" => {
             BinOp::Div
         }
+        "Slash" => {
+            BinOp::Div
+        }
         "Rem" => {
+            BinOp::Rem
+        }
+        "Percent" => {
             BinOp::Rem
         }
         "Eq" => {
             BinOp::Eq
         }
+        "EqEq" => {
+            BinOp::Eq
+        }
         "NotEq" => {
+            BinOp::NotEq
+        }
+        "BangEq" => {
             BinOp::NotEq
         }
         "Lt" => {
@@ -4393,26 +4422,41 @@ fn make_binop(op_name: Rc<str>, left: Expr, right: Expr, line: i64) -> Expr {
         "BitAnd" => {
             BinOp::BitAnd
         }
+        "Ampersand" => {
+            BinOp::BitAnd
+        }
         "BitOr" => {
+            BinOp::BitOr
+        }
+        "Pipe" => {
             BinOp::BitOr
         }
         "BitXor" => {
             BinOp::BitXor
         }
+        "Caret" => {
+            BinOp::BitXor
+        }
         "Shl" => {
+            BinOp::Shl
+        }
+        "LtLt" => {
             BinOp::Shl
         }
         "Shr" => {
             BinOp::Shr
         }
+        "GtGt" => {
+            BinOp::Shr
+        }
         _ => {
-            BinOp::Add
+            panic!("{}", Arc::<str>::from(format!("unknown binary operator: {}", op_name).as_str()));
         }
     };
-    Expr { kind: ExprKind::BinOp(op, Box::new(left.clone()), Box::new(right.clone())), line: line }
+    Expr { kind: ExprKind::BinOp(op.clone(), Box::new(left.clone()), Box::new(right.clone())), line: line }
 }
 
-fn make_unary(op_name: Rc<str>, expr: Expr, line: i64) -> Expr {
+fn make_unary(op_name: Arc<str>, expr: Expr, line: i64) -> Expr {
     let op =     match &*op_name {
         "Neg" => {
             UnaryOp::Neg
@@ -4424,14 +4468,14 @@ fn make_unary(op_name: Rc<str>, expr: Expr, line: i64) -> Expr {
             UnaryOp::BitNot
         }
     };
-    Expr { kind: ExprKind::UnaryOp(op, Box::new(expr.clone())), line: line }
+    Expr { kind: ExprKind::UnaryOp(op.clone(), Box::new(expr.clone())), line: line }
 }
 
 fn make_assign(target: Expr, value: Expr, line: i64) -> Expr {
     Expr { kind: ExprKind::Assign(Box::new(target.clone()), Box::new(value.clone())), line: line }
 }
 
-fn make_arg(label: Option<Rc<str>>, value: Expr, spread: bool) -> Arg {
+fn make_arg(label: Option<Arc<str>>, value: Expr, spread: bool) -> Arg {
     Arg { label: label, value: value.clone(), spread: spread }
 }
 
@@ -4439,12 +4483,12 @@ fn make_call(callee: Expr, args: Vec<Arg>, line: i64) -> Expr {
     Expr { kind: ExprKind::Call(Box::new(callee.clone()), args), line: line }
 }
 
-fn make_method_call(receiver: Expr, name: Rc<str>, args: Vec<Arg>, line: i64) -> Expr {
+fn make_method_call(receiver: Expr, name: Arc<str>, args: Vec<Arg>, line: i64) -> Expr {
     Expr { kind: ExprKind::MethodCall(Box::new(receiver.clone()), name.clone().clone(), args), line: line }
 }
 
 fn make_closure(params: Vec<Param>, return_ty: Option<Type>, body: ClosureBody, can_throw: bool, is_task: bool, line: i64) -> Expr {
-    Expr { kind: ExprKind::Closure(params, return_ty, Box::new(body), can_throw, is_task), line: line }
+    Expr { kind: ExprKind::Closure(params, return_ty, Box::new(body.clone()), can_throw, is_task), line: line }
 }
 
 fn closure_body_block(stmts: Vec<Stmt>) -> ClosureBody {
@@ -4457,10 +4501,10 @@ fn closure_body_expr(expr: Expr) -> ClosureBody {
 
 fn closure_body_is_block(body: ClosureBody) -> (bool, ClosureBody) {
     match body {
-        ClosureBody::Block(stmts) => {
+        ClosureBody::Block(mut stmts) => {
             (true, ClosureBody::Block(stmts))
         }
-        ClosureBody::Expr(e) => {
+        ClosureBody::Expr(mut e) => {
             let e = *e;
             (false, ClosureBody::Expr(Box::new(e.clone())))
         }
@@ -4475,23 +4519,23 @@ fn make_do_expr(stmts: Vec<Stmt>, line: i64) -> Expr {
     Expr { kind: ExprKind::Do(stmts), line: line }
 }
 
-fn make_let_stmt(mutable: bool, is_pub: bool, is_static: bool, name: Rc<str>, ty: Option<Type>, value: Option<Expr>, is_move: bool, line: i64) -> LetStmt {
+fn make_let_stmt(mutable: bool, is_pub: bool, is_static: bool, name: Arc<str>, ty: Option<Type>, value: Option<Expr>, is_move: bool, line: i64) -> LetStmt {
     LetStmt { mutable: mutable, is_pub: is_pub, is_static: is_static, name: name.clone().clone(), ty: ty, value: value, is_move: is_move, line: line }
 }
 
-fn make_param(name: Rc<str>, ty: Option<Type>, mutable: bool) -> Param {
+fn make_param(name: Arc<str>, ty: Option<Type>, mutable: bool) -> Param {
     Param { name: name.clone().clone(), ty: ty, mutable: mutable, owned: false, variadic: false, default: None, line: 0 }
 }
 
-fn make_field(name: Rc<str>, ty: Type, mutable: bool, default: Option<Expr>, line: i64) -> FieldDecl {
-    FieldDecl { name: name.clone().clone(), is_pub: false, ty: ty, mutable: mutable, is_transient: false, default: default, line: line }
+fn make_field(name: Arc<str>, ty: Type, mutable: bool, default: Option<Expr>, line: i64) -> FieldDecl {
+    FieldDecl { name: name.clone().clone(), is_pub: false, ty: ty.clone(), mutable: mutable, is_transient: false, default: default, line: line }
 }
 
 fn infer_throws_task(body: ClosureBody) -> (ThrowsTask, ClosureBody) {
     let mut can_throw: bool = false;
     let mut is_task: bool = false;
     let ret_body =     match body {
-        ClosureBody::Block(stmts) => {
+        ClosureBody::Block(mut stmts) => {
             for stmt in stmts.iter().cloned() {
                 match stmt {
                     Stmt::Throw(_) => {
@@ -4503,28 +4547,28 @@ fn infer_throws_task(body: ClosureBody) -> (ThrowsTask, ClosureBody) {
             }
             ClosureBody::Block(stmts)
         }
-        ClosureBody::Expr(e) => {
+        ClosureBody::Expr(mut e) => {
             let e = *e;
             ClosureBody::Expr(Box::new(e.clone()))
         }
     };
     let tt: ThrowsTask = ThrowsTask { can_throw: can_throw, is_task: is_task };
-    return (tt.clone(), ret_body);
+    return (tt.clone(), ret_body.clone());
 }
 
 fn make_try_else_block(try_stmts: Vec<Stmt>, else_stmts: Vec<Stmt>, line: i64) -> Expr {
     Expr { kind: ExprKind::TryElseBlock(try_stmts, else_stmts), line: line }
 }
 
-fn segment_lit(text: Rc<str>) -> StringSegment {
+fn segment_lit(text: Arc<str>) -> StringSegment {
     StringSegment::Lit(text.clone().clone())
 }
 
-fn check_no_return(stmts: Vec<Stmt>, context: Rc<str>) -> () {
+fn check_no_return(stmts: Vec<Stmt>, context: Arc<str>) -> () {
     for stmt in stmts.iter().cloned() {
         match stmt {
             Stmt::Return(_) => {
-                panic!("{}", Rc::<str>::from(format!("return not allowed in {}", context).as_str()));
+                panic!("{}", Arc::<str>::from(format!("return not allowed in {}", context).as_str()));
             }
             _ => {
             }
@@ -4536,7 +4580,7 @@ fn make_block_expr(stmts: Vec<Stmt>, line: i64) -> Expr {
     Expr { kind: ExprKind::Block(stmts), line: line }
 }
 
-fn make_field_expr(expr: Expr, name: Rc<str>, line: i64) -> Expr {
+fn make_field_expr(expr: Expr, name: Arc<str>, line: i64) -> Expr {
     Expr { kind: ExprKind::Field(Box::new(expr.clone()), name.clone().clone()), line: line }
 }
 
@@ -4627,7 +4671,7 @@ fn stmt_alias(decl: AliasDecl) -> Stmt {
     Stmt::Alias(decl.clone())
 }
 
-fn stmt_comment(text: Rc<str>) -> Stmt {
+fn stmt_comment(text: Arc<str>) -> Stmt {
     Stmt::Comment(text.clone().clone())
 }
 
@@ -4663,7 +4707,7 @@ fn make_while_stmt(condition: Expr, body: Vec<Stmt>, line: i64) -> WhileStmt {
     WhileStmt { condition: condition.clone(), body: body, line: line }
 }
 
-fn make_for_stmt(vars: Vec<Rc<str>>, iterable: Expr, body: Vec<Stmt>, line: i64) -> ForStmt {
+fn make_for_stmt(vars: Vec<Arc<str>>, iterable: Expr, body: Vec<Stmt>, line: i64) -> ForStmt {
     ForStmt { vars: vars, iterable: iterable.clone(), body: body, line: line }
 }
 
@@ -4695,7 +4739,7 @@ fn make_nil_expr(line: i64) -> Expr {
     Expr { kind: ExprKind::Nil, line: line }
 }
 
-fn make_str_expr(s: Rc<str>, line: i64) -> Expr {
+fn make_str_expr(s: Arc<str>, line: i64) -> Expr {
     Expr { kind: ExprKind::Str(s.clone().clone()), line: line }
 }
 
@@ -4728,14 +4772,14 @@ fn make_index(expr: Expr, index: Expr, line: i64) -> Expr {
 }
 
 fn make_cast(expr: Expr, ty: Type, line: i64) -> Expr {
-    Expr { kind: ExprKind::Cast(Box::new(expr.clone()), ty), line: line }
+    Expr { kind: ExprKind::Cast(Box::new(expr.clone()), ty.clone()), line: line }
 }
 
-fn make_pipe(left: Expr, name: Rc<str>, args: Vec<Arg>, line: i64) -> Expr {
+fn make_pipe(left: Expr, name: Arc<str>, args: Vec<Arg>, line: i64) -> Expr {
     Expr { kind: ExprKind::Pipe(Box::new(left.clone()), name.clone().clone(), args), line: line }
 }
 
-fn make_dot_ident(name: Rc<str>, line: i64) -> Expr {
+fn make_dot_ident(name: Arc<str>, line: i64) -> Expr {
     Expr { kind: ExprKind::DotIdent(name.clone().clone()), line: line }
 }
 
@@ -4743,11 +4787,11 @@ fn make_string_interp(segments: Vec<StringSegment>, line: i64) -> Expr {
     Expr { kind: ExprKind::StringInterp(segments), line: line }
 }
 
-fn make_optional_field(expr: Expr, name: Rc<str>, line: i64) -> Expr {
+fn make_optional_field(expr: Expr, name: Arc<str>, line: i64) -> Expr {
     Expr { kind: ExprKind::OptionalField(Box::new(expr.clone()), name.clone().clone()), line: line }
 }
 
-fn make_optional_method_call(expr: Expr, name: Rc<str>, args: Vec<Arg>, line: i64) -> Expr {
+fn make_optional_method_call(expr: Expr, name: Arc<str>, args: Vec<Arg>, line: i64) -> Expr {
     Expr { kind: ExprKind::OptionalMethodCall(Box::new(expr.clone()), name.clone().clone(), args), line: line }
 }
 
@@ -4755,7 +4799,7 @@ fn make_generic_call(callee: Expr, type_args: Vec<Type>, args: Vec<Arg>, line: i
     Expr { kind: ExprKind::GenericCall(Box::new(callee.clone()), type_args, args), line: line }
 }
 
-fn make_macro_call(name: Rc<str>, args: Vec<Expr>, line: i64) -> Expr {
+fn make_macro_call(name: Arc<str>, args: Vec<Expr>, line: i64) -> Expr {
     Expr { kind: ExprKind::MacroCall(name.clone().clone(), args), line: line }
 }
 
@@ -4791,39 +4835,39 @@ fn segment_expr(expr: Expr) -> StringSegment {
     StringSegment::Expr(expr.clone())
 }
 
-fn segment_formatted_expr(expr: Expr, fmt: Rc<str>) -> StringSegment {
+fn segment_formatted_expr(expr: Expr, fmt: Arc<str>) -> StringSegment {
     StringSegment::FormattedExpr(expr.clone(), fmt.clone().clone())
 }
 
-fn make_destructure_binding(name: Rc<str>, ty: Option<Type>) -> DestructureBinding {
+fn make_destructure_binding(name: Arc<str>, ty: Option<Type>) -> DestructureBinding {
     DestructureBinding { name: name.clone().clone(), ty: ty }
 }
 
-fn make_catch_clause(types: Vec<Rc<str>>, variant: Option<Rc<str>>, body: Vec<Stmt>, line: i64) -> CatchClause {
+fn make_catch_clause(types: Vec<Arc<str>>, variant: Option<Arc<str>>, body: Vec<Stmt>, line: i64) -> CatchClause {
     CatchClause { types: types, variant: variant, body: body, line: line }
 }
 
 fn make_match_arm(patterns: Vec<Pattern>, match_guard: Option<Expr>, body: MatchBody, line: i64) -> MatchArm {
-    MatchArm { patterns: patterns, match_guard: match_guard, body: body, line: line }
+    MatchArm { patterns: patterns, match_guard: match_guard, body: body.clone(), line: line }
 }
 
-fn make_param_at(name: Rc<str>, ty: Option<Type>, mutable: bool, line: i64) -> Param {
+fn make_param_at(name: Arc<str>, ty: Option<Type>, mutable: bool, line: i64) -> Param {
     Param { name: name.clone().clone(), ty: ty, mutable: mutable, owned: false, variadic: false, default: None, line: line }
 }
 
-fn int_to_string(n: i64) -> Rc<str> {
-    Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str()))
+fn int_to_string(n: i64) -> Arc<str> {
+    Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str()))
 }
 
-fn string_trim(s: Rc<str>) -> Rc<str> {
-    Rc::<str>::from(Rc::<str>::from(s.trim()).to_string())
+fn string_trim(s: Arc<str>) -> Arc<str> {
+    Arc::<str>::from(Arc::<str>::from(s.trim()).to_string())
 }
 
-fn string(v: Value) -> Rc<str> {
-    val_to_string(v)
+fn string(v: Value) -> Arc<str> {
+    val_to_string(v.clone())
 }
 
-fn type_named(name: Rc<str>) -> Type {
+fn type_named(name: Arc<str>) -> Type {
     Type::Named(name.clone().clone())
 }
 
@@ -4851,18 +4895,18 @@ fn elems_to_params(elems: Vec<Expr>, line: i64) -> Vec<Param> {
 
 fn expr_to_param(expr: Expr, line: i64) -> Param {
     match expr.kind {
-        ExprKind::Var(name) => {
-            make_param(Rc::<str>::from(name.clone().to_string()), None, false)
+        ExprKind::Var(mut name) => {
+            make_param(Arc::<str>::from(name.clone().to_string()), None, false)
         }
         _ => {
-            make_param(Rc::<str>::from(Rc::<str>::from("_").to_string()), None, false)
+            make_param(Arc::<str>::from("_"), None, false)
         }
     }
 }
 
 fn unwrap_block_or_wrap(expr: Expr) -> Vec<Stmt> {
     match expr.kind {
-        ExprKind::Block(stmts) => {
+        ExprKind::Block(mut stmts) => {
             stmts
         }
         _ => {
@@ -4871,32 +4915,32 @@ fn unwrap_block_or_wrap(expr: Expr) -> Vec<Stmt> {
     }
 }
 
-fn shorthand_binop_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
-    let k = parser_peek_kind(Rc::clone(&p));
+fn shorthand_binop_from_peek(mut p: &mut Parser) -> Option<Arc<str>> {
+    let k = parser_peek_kind(&mut (*p));
     match &*k {
         "PlusEq" => {
-            Some(Rc::<str>::from("Plus"))
+            Some(Arc::<str>::from("Plus"))
         }
         "MinusEq" => {
-            Some(Rc::<str>::from("Minus"))
+            Some(Arc::<str>::from("Minus"))
         }
         "StarEq" => {
-            Some(Rc::<str>::from("Star"))
+            Some(Arc::<str>::from("Star"))
         }
         "SlashEq" => {
-            Some(Rc::<str>::from("Slash"))
+            Some(Arc::<str>::from("Slash"))
         }
         "PercentEq" => {
-            Some(Rc::<str>::from("Percent"))
+            Some(Arc::<str>::from("Percent"))
         }
         "AmpersandEq" => {
-            Some(Rc::<str>::from("Ampersand"))
+            Some(Arc::<str>::from("Ampersand"))
         }
         "PipeEq" => {
-            Some(Rc::<str>::from("Pipe"))
+            Some(Arc::<str>::from("Pipe"))
         }
         "CaretEq" => {
-            Some(Rc::<str>::from("Caret"))
+            Some(Arc::<str>::from("Caret"))
         }
         _ => {
             None
@@ -4904,9 +4948,9 @@ fn shorthand_binop_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
     }
 }
 
-fn parser_is_newline2(mut p: Rc<RefCell<Parser>>) -> bool {
-    let k = parser_peek_kind(Rc::clone(&p));
-    ((k == Rc::<str>::from("Newline")) || (k == Rc::<str>::from("Eof")))
+fn parser_is_newline2(mut p: &mut Parser) -> bool {
+    let k = parser_peek_kind(&mut (*p));
+    ((k == Arc::<str>::from("Newline")) || (k == Arc::<str>::from("Eof")))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4924,110 +4968,114 @@ impl std::fmt::Display for SkipResult {
 impl SkipResult {
 }
 
-fn peek_pipe_after_newlines(mut p: Rc<RefCell<Parser>>) -> Option<SkipResult> {
+fn peek_pipe_after_newlines(mut p: &mut Parser) -> Option<SkipResult> {
     None
 }
 
-fn peek_dot_after_newlines_and_indents(mut p: Rc<RefCell<Parser>>) -> Option<SkipResult> {
+fn peek_dot_after_newlines_and_indents(mut p: &mut Parser) -> Option<SkipResult> {
     None
 }
 
-fn make_parser(tokens: Vec<Token>) -> Rc<RefCell<Parser>> {
-    let mut par = Rc::new(RefCell::new(Parser { tokens: tokens, pos: 0 }));
-    par
+fn make_parser(tokens: Vec<Token>) -> Parser {
+    let mut par: Parser = Parser { tokens: tokens, pos: 0 };
+    par.clone()
 }
 
-fn parse_loop_stmt(mut p: Rc<RefCell<Parser>>) -> Result<LoopStmt, Box<dyn std::error::Error>> {
-    let body = parse_block(Rc::clone(&p))?;
-    Ok(LoopStmt { body: body, line: p.borrow().pos })
+fn parse_loop_stmt(mut p: &mut Parser) -> Result<LoopStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let body = parse_block(&mut (*p))?;
+    Ok(LoopStmt { body: body, line: (*p).pos })
 }
 
-fn parse_pattern(mut p: Rc<RefCell<Parser>>) -> Result<Pattern, Box<dyn std::error::Error>> {
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    Ok(Pattern::Bind(Rc::<str>::from(name.to_string())))
+fn parse_pattern(mut p: &mut Parser) -> Result<Pattern, Box<dyn std::error::Error + Send + Sync>> {
+    let name = parser_expect_ident(&mut (*p))?;
+    Ok(Pattern::Bind(Arc::<str>::from(name.to_string())))
 }
 
-fn parse_inline_match_arms(mut p: Rc<RefCell<Parser>>) -> Result<Vec<MatchArm>, Box<dyn std::error::Error>> {
+fn parse_inline_match_arms(mut p: &mut Parser) -> Result<Vec<MatchArm>, Box<dyn std::error::Error + Send + Sync>> {
     let mut arms = vec![];
-    while ((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        let arm = parse_match_arm(Rc::clone(&p))?;
+    while ((!parser_check(&mut (*p), Arc::<str>::from("Newline"))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        let arm = parse_match_arm(&mut (*p))?;
         arms.push(arm);
     }
     Ok(arms)
 }
 
-fn parse_match_arm(mut p: Rc<RefCell<Parser>>) -> Result<MatchArm, Box<dyn std::error::Error>> {
-    let pat = parse_pattern(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    let body = parse_expr(Rc::clone(&p))?;
+fn parse_match_arm(mut p: &mut Parser) -> Result<MatchArm, Box<dyn std::error::Error + Send + Sync>> {
+    let pat = parse_pattern(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    let body = parse_expr(&mut (*p))?;
     let body_line = body.line;
     let stmt = stmt_expr(body.clone(), body_line);
-    Ok(make_match_arm(vec![pat], None, MatchBody::Block(vec![stmt]), p.borrow().pos))
+    Ok(make_match_arm(vec![pat], None, MatchBody::Block(vec![stmt]), (*p).pos))
 }
 
-fn parse_mod_decl(mut p: Rc<RefCell<Parser>>, is_pub: bool) -> Result<ModDecl, Box<dyn std::error::Error>> {
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    parser_expect_newline(Rc::clone(&p))?;
-    Ok(ModDecl { name: Rc::<str>::from(name.to_string()), items: vec![], line: p.borrow().pos })
+fn parse_mod_decl(mut p: &mut Parser, is_pub: bool) -> Result<ModDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let name = parser_expect_ident(&mut (*p))?;
+    parser_expect_newline(&mut (*p))?;
+    Ok(ModDecl { name: Arc::<str>::from(name.to_string()), items: vec![], line: (*p).pos })
 }
 
-fn parse_alias_decl(mut p: Rc<RefCell<Parser>>) -> Result<AliasDecl, Box<dyn std::error::Error>> {
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("As").to_string()))?;
-    let ty = parse_type(Rc::clone(&p))?;
-    Ok(AliasDecl { name: Rc::<str>::from(name.to_string()), ty: ty, type_params: vec![], newtype: false, line: p.borrow().pos })
+fn parse_alias_decl(mut p: &mut Parser) -> Result<AliasDecl, Box<dyn std::error::Error + Send + Sync>> {
+    let name = parser_expect_ident(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("As"))?;
+    let ty = parse_type(&mut (*p))?;
+    Ok(AliasDecl { name: Arc::<str>::from(name.to_string()), ty: ty.clone(), type_params: vec![], newtype: false, line: (*p).pos })
 }
 
-fn parse_guard_stmt(mut p: Rc<RefCell<Parser>>) -> Result<GuardStmt, Box<dyn std::error::Error>> {
-    let cond = parse_expr(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string()))?;
-    let body = parse_block(Rc::clone(&p))?;
-    Ok(GuardStmt { cond: GuardCond::Expr(cond.clone()), else_body: body, line: p.borrow().pos })
+fn parse_guard_stmt(mut p: &mut Parser) -> Result<GuardStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let cond = parse_expr(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Else"))?;
+    let body = parse_block(&mut (*p))?;
+    Ok(GuardStmt { cond: GuardCond::Expr(cond.clone()), else_body: body, line: (*p).pos })
 }
 
-fn parse_defer_stmt(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
-    Ok(parse_block(Rc::clone(&p))?)
+fn parse_defer_stmt(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_block(&mut (*p))?)
 }
 
-fn parse_if_let_stmt(mut p: Rc<RefCell<Parser>>) -> Result<IfLetStmt, Box<dyn std::error::Error>> {
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-    let expr = parse_expr(Rc::clone(&p))?;
-    let then_body = parse_block(Rc::clone(&p))?;
-    Ok(IfLetStmt { clauses: vec![CondClause::Let(Rc::<str>::from(name.to_string()), expr.clone())], then_body: then_body, else_body: None, line: p.borrow().pos })
+fn parse_if_let_stmt(mut p: &mut Parser) -> Result<IfLetStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let name = parser_expect_ident(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+    let expr = parse_expr(&mut (*p))?;
+    let then_body = parse_block(&mut (*p))?;
+    Ok(IfLetStmt { clauses: vec![CondClause::Let(Arc::<str>::from(name.to_string()), expr.clone())], then_body: then_body, else_body: None, line: (*p).pos })
 }
 
-fn parse_while_let_stmt(mut p: Rc<RefCell<Parser>>) -> Result<WhileLetStmt, Box<dyn std::error::Error>> {
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-    let expr = parse_expr(Rc::clone(&p))?;
-    let body = parse_block(Rc::clone(&p))?;
-    Ok(WhileLetStmt { name: Rc::<str>::from(name.to_string()), pattern: None, value: expr.clone(), body: body, line: p.borrow().pos })
+fn parse_while_let_stmt(mut p: &mut Parser) -> Result<WhileLetStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let name = parser_expect_ident(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+    let expr = parse_expr(&mut (*p))?;
+    let body = parse_block(&mut (*p))?;
+    Ok(WhileLetStmt { name: Arc::<str>::from(name.to_string()), pattern: None, value: expr.clone(), body: body, line: (*p).pos })
 }
 
-fn parse_macro_args(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Expr>, Box<dyn std::error::Error>> {
+fn parse_macro_args(mut p: &mut Parser) -> Result<Vec<Expr>, Box<dyn std::error::Error + Send + Sync>> {
     let mut args = vec![];
-    while (((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        let e = parse_expr(Rc::clone(&p))?;
+    while (((!parser_check(&mut (*p), Arc::<str>::from("RParen"))) && (!parser_check(&mut (*p), Arc::<str>::from("Newline")))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        let e = parse_expr(&mut (*p))?;
         args.push(e);
-        parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?;
+        parser_eat(&mut (*p), Arc::<str>::from("Comma"))?;
     }
     Ok(args)
 }
 
 fn apply_var_to_borrow(ty: Type) -> Type {
-    Type::Qualified(Box::new(ty), OwnerQual::BorrowMut)
+    Type::Qualified(Box::new(ty.clone()), OwnerQual::BorrowMut)
 }
 
 fn infer_type_from_constructor(qualified: Type, value: Expr) -> Type {
     qualified
 }
 
-fn lookup_fn_decl(mut interp: Rc<RefCell<Interpreter>>, name: Rc<str>) -> FnDecl {
-    panic!("{}", Rc::<str>::from(format!("lookup_fn_decl: function '{}' not found", name).as_str()));
+fn lookup_fn_decl(mut interp: Arc<std::sync::Mutex<Interpreter>>, name: Arc<str>) -> FnDecl {
+    let decl_opt = interp.lock().unwrap().get_fn_decl(name.clone());
+    if let Some(decl) = decl_opt {
+        return decl;
+    }
+    panic!("{}", Arc::<str>::from(format!("lookup_fn_decl: function '{}' not found", name).as_str()));
 }
 
-fn resolve_overload(mut interp: Rc<RefCell<Interpreter>>, variants: Vec<Value>, args: Vec<Value>) -> Value {
+fn resolve_overload(mut interp: Arc<std::sync::Mutex<Interpreter>>, variants: Vec<Value>, args: Vec<Value>) -> Value {
     match (variants.len() as i64) {
         0 => {
             panic!("no overloads for call");
@@ -5038,25 +5086,40 @@ fn resolve_overload(mut interp: Rc<RefCell<Interpreter>>, variants: Vec<Value>, 
     }
 }
 
-fn call_native(mut interp: Rc<RefCell<Interpreter>>, name: Rc<str>, func: Value, args: Vec<Value>) -> Value {
-    panic!("{}", Rc::<str>::from(format!("call_native: native function '{}' not supported", name).as_str()));
+fn call_native(mut interp: Arc<std::sync::Mutex<Interpreter>>, name: Arc<str>, func: Value, args: Vec<Value>) -> Value {
+    if ((name == Arc::<str>::from("print")) || (name == Arc::<str>::from("println"))) {
+        let mut i: i64 = 0;
+        while (i < (args.len() as i64)) {
+            if (i > 0) {
+                println!(" ");
+            }
+            println!("{}", value_to_string(args[(i) as usize].clone()));
+            i += 1;
+        }
+        println!("\n");
+        return Value::Void;
+    }
+    if (name == Arc::<str>::from("read_line")) {
+        return Value::Str(Arc::<str>::from({ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect("failed to read from stdin"); Arc::<str>::from(__line.trim_end()) }.to_string()));
+    }
+    panic!("{}", Arc::<str>::from(format!("call_native: native function '{}' not supported", name).as_str()));
 }
 
-fn parse_closure_modifiers(mut p: Rc<RefCell<Parser>>) -> Result<ThrowsTask, Box<dyn std::error::Error>> {
-    let can_throw = p.borrow_mut().eat(TokenKind::Throws);
-    let is_task = p.borrow_mut().eat(TokenKind::Task);
+fn parse_closure_modifiers(mut p: &mut Parser) -> Result<ThrowsTask, Box<dyn std::error::Error + Send + Sync>> {
+    let can_throw = (*p).eat(TokenKind::Throws);
+    let is_task = (*p).eat(TokenKind::Task);
     Ok(ThrowsTask { can_throw: can_throw, is_task: is_task })
 }
 
-fn parser_allow_trailing_closure(mut p: Rc<RefCell<Parser>>) -> bool {
+fn parser_allow_trailing_closure(mut p: &mut Parser) -> bool {
     true
 }
 
-fn parse_type_qualifier(mut p: Rc<RefCell<Parser>>, base: Type) -> Result<Type, Box<dyn std::error::Error>> {
-    if (!p.borrow_mut().eat(TokenKind::Tick)) {
+fn parse_type_qualifier(mut p: &mut Parser, base: Type) -> Result<Type, Box<dyn std::error::Error + Send + Sync>> {
+    if (!(*p).eat(TokenKind::Tick)) {
         return Ok(base);
     }
-    let qual_name = parser_expect_ident(Rc::clone(&p))?;
+    let qual_name = parser_expect_ident(&mut (*p))?;
     let qual =     match &*qual_name {
         "actor" => {
             OwnerQual::Actor
@@ -5080,75 +5143,75 @@ fn parse_type_qualifier(mut p: Rc<RefCell<Parser>>, base: Type) -> Result<Type, 
             OwnerQual::Actor
         }
     };
-    Ok(Type::Qualified(Box::new(base), qual))
+    Ok(Type::Qualified(Box::new(base.clone()), qual.clone()))
 }
 
-fn parse_expr(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    Ok(parse_else_expr(Rc::clone(&p))?)
+fn parse_expr(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_else_expr(&mut (*p))?)
 }
 
-fn parse_inline_stmt(mut p: Rc<RefCell<Parser>>) -> Result<Stmt, Box<dyn std::error::Error>> {
-    Ok(parse_inline_stmt_impl(Rc::clone(&p), false)?)
+fn parse_inline_stmt(mut p: &mut Parser) -> Result<Stmt, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_inline_stmt_impl(&mut (*p), false)?)
 }
 
-fn parse_inline_if_body(mut p: Rc<RefCell<Parser>>) -> Result<Stmt, Box<dyn std::error::Error>> {
-    Ok(parse_inline_stmt_impl(Rc::clone(&p), true)?)
+fn parse_inline_if_body(mut p: &mut Parser) -> Result<Stmt, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_inline_stmt_impl(&mut (*p), true)?)
 }
 
-fn parse_inline_stmts(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
-    let mut stmts = vec![parse_inline_stmt(Rc::clone(&p))?];
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+fn parse_inline_stmts(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stmts = vec![parse_inline_stmt(&mut (*p))?];
+    while parser_check(&mut (*p), Arc::<str>::from("Semicolon")) {
+        parser_advance(&mut (*p))?;
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
             break;
         }
-        stmts.push(parse_inline_stmt(Rc::clone(&p))?);
+        stmts.push(parse_inline_stmt(&mut (*p))?);
     }
     Ok(stmts)
 }
 
-fn parse_inline_stmts_if_body(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
-    let mut stmts = vec![parse_inline_if_body(Rc::clone(&p))?];
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        if (((parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Elif").to_string()))) {
+fn parse_inline_stmts_if_body(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stmts = vec![parse_inline_if_body(&mut (*p))?];
+    while parser_check(&mut (*p), Arc::<str>::from("Semicolon")) {
+        parser_advance(&mut (*p))?;
+        if (((parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) || parser_check(&mut (*p), Arc::<str>::from("Else"))) || parser_check(&mut (*p), Arc::<str>::from("Elif"))) {
             break;
         }
-        stmts.push(parse_inline_if_body(Rc::clone(&p))?);
+        stmts.push(parse_inline_if_body(&mut (*p))?);
     }
     Ok(stmts)
 }
 
-fn parser_peek_kind(mut p: Rc<RefCell<Parser>>) -> Rc<str> {
-    token_kind_name(p.borrow_mut().peek())
+fn parser_peek_kind(mut p: &mut Parser) -> Arc<str> {
+    token_kind_name((*p).peek())
 }
 
-fn compound_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
-    let k = parser_peek_kind(Rc::clone(&p));
+fn compound_op_from_peek(mut p: &mut Parser) -> Option<Arc<str>> {
+    let k = parser_peek_kind(&mut (*p));
     match &*k {
         "PlusEq" => {
-            Some(Rc::<str>::from("Plus"))
+            Some(Arc::<str>::from("Plus"))
         }
         "MinusEq" => {
-            Some(Rc::<str>::from("Minus"))
+            Some(Arc::<str>::from("Minus"))
         }
         "StarEq" => {
-            Some(Rc::<str>::from("Star"))
+            Some(Arc::<str>::from("Star"))
         }
         "SlashEq" => {
-            Some(Rc::<str>::from("Slash"))
+            Some(Arc::<str>::from("Slash"))
         }
         "PercentEq" => {
-            Some(Rc::<str>::from("Percent"))
+            Some(Arc::<str>::from("Percent"))
         }
         "AmpersandEq" => {
-            Some(Rc::<str>::from("Ampersand"))
+            Some(Arc::<str>::from("Ampersand"))
         }
         "PipeEq" => {
-            Some(Rc::<str>::from("Pipe"))
+            Some(Arc::<str>::from("Pipe"))
         }
         "CaretEq" => {
-            Some(Rc::<str>::from("Caret"))
+            Some(Arc::<str>::from("Caret"))
         }
         _ => {
             None
@@ -5156,26 +5219,26 @@ fn compound_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
     }
 }
 
-fn comparison_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
-    let k = parser_peek_kind(Rc::clone(&p));
+fn comparison_op_from_peek(mut p: &mut Parser) -> Option<Arc<str>> {
+    let k = parser_peek_kind(&mut (*p));
     match &*k {
         "Lt" => {
-            Some(Rc::<str>::from("Lt"))
+            Some(Arc::<str>::from("Lt"))
         }
         "Gt" => {
-            Some(Rc::<str>::from("Gt"))
+            Some(Arc::<str>::from("Gt"))
         }
         "LtEq" => {
-            Some(Rc::<str>::from("LtEq"))
+            Some(Arc::<str>::from("LtEq"))
         }
         "GtEq" => {
-            Some(Rc::<str>::from("GtEq"))
+            Some(Arc::<str>::from("GtEq"))
         }
         "EqEq" => {
-            Some(Rc::<str>::from("EqEq"))
+            Some(Arc::<str>::from("EqEq"))
         }
         "BangEq" => {
-            Some(Rc::<str>::from("BangEq"))
+            Some(Arc::<str>::from("BangEq"))
         }
         _ => {
             None
@@ -5183,14 +5246,14 @@ fn comparison_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
     }
 }
 
-fn additive_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
-    let k = parser_peek_kind(Rc::clone(&p));
+fn additive_op_from_peek(mut p: &mut Parser) -> Option<Arc<str>> {
+    let k = parser_peek_kind(&mut (*p));
     match &*k {
         "Plus" => {
-            Some(Rc::<str>::from("Plus"))
+            Some(Arc::<str>::from("Plus"))
         }
         "Minus" => {
-            Some(Rc::<str>::from("Minus"))
+            Some(Arc::<str>::from("Minus"))
         }
         _ => {
             None
@@ -5198,17 +5261,17 @@ fn additive_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
     }
 }
 
-fn multiplicative_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
-    let k = parser_peek_kind(Rc::clone(&p));
+fn multiplicative_op_from_peek(mut p: &mut Parser) -> Option<Arc<str>> {
+    let k = parser_peek_kind(&mut (*p));
     match &*k {
         "Star" => {
-            Some(Rc::<str>::from("Star"))
+            Some(Arc::<str>::from("Star"))
         }
         "Slash" => {
-            Some(Rc::<str>::from("Slash"))
+            Some(Arc::<str>::from("Slash"))
         }
         "Percent" => {
-            Some(Rc::<str>::from("Percent"))
+            Some(Arc::<str>::from("Percent"))
         }
         _ => {
             None
@@ -5216,76 +5279,76 @@ fn multiplicative_op_from_peek(mut p: Rc<RefCell<Parser>>) -> Option<Rc<str>> {
     }
 }
 
-fn parse_inline_stmt_impl(mut p: Rc<RefCell<Parser>>, stop_at_else: bool) -> Result<Stmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Return").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+fn parse_inline_stmt_impl(mut p: &mut Parser, stop_at_else: bool) -> Result<Stmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    if parser_check(&mut (*p), Arc::<str>::from("Return")) {
+        parser_advance(&mut (*p))?;
         let value: Option<Expr> = {
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
             None
         } else {
-            Some(parse_or(Rc::clone(&p))?)
+            Some(parse_or(&mut (*p))?)
         }
 };
         return Ok(Stmt::Return(make_return_stmt(value, line)));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Throw").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Throw")) {
+        parser_advance(&mut (*p))?;
         let value: Option<Expr> = {
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
             None
         } else {
-            Some(parse_or(Rc::clone(&p))?)
+            Some(parse_or(&mut (*p))?)
         }
 };
         return Ok(Stmt::Throw(make_throw_stmt(value, line)));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Break").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Break")) {
+        parser_advance(&mut (*p))?;
         let value: Option<Expr> = {
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
             None
         } else {
-            Some(parse_or(Rc::clone(&p))?)
+            Some(parse_or(&mut (*p))?)
         }
 };
         return Ok(make_break_stmt(line, value));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Continue").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Continue")) {
+        parser_advance(&mut (*p))?;
         return Ok(make_continue_stmt(line));
     }
     let lhs = {
     if stop_at_else {
-        parse_or(Rc::clone(&p))?
+        parse_or(&mut (*p))?
     } else {
-        parse_else_expr(Rc::clone(&p))?
+        parse_else_expr(&mut (*p))?
     }
 };
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))? {
-        let rhs = parse_or(Rc::clone(&p))?;
+    if parser_eat(&mut (*p), Arc::<str>::from("Eq"))? {
+        let rhs = parse_or(&mut (*p))?;
         return Ok(stmt_expr(make_assign(lhs, rhs.clone(), line), line));
     }
-    let op = compound_op_from_peek(Rc::clone(&p));
+    let op = compound_op_from_peek(&mut (*p));
     if let Some(op_val) = op {
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_or(Rc::clone(&p))?;
-        let binop = make_binop(Rc::<str>::from(op_val.to_string()), lhs.clone(), rhs.clone(), line);
+        parser_advance(&mut (*p))?;
+        let rhs = parse_or(&mut (*p))?;
+        let binop = make_binop(Arc::<str>::from(op_val.to_string()), lhs.clone(), rhs.clone(), line);
         return Ok(stmt_expr(make_assign(lhs, binop.clone(), line), line));
     }
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("QuestionEq").to_string()))? {
-        let rhs = parse_or(Rc::clone(&p))?;
+    if parser_eat(&mut (*p), Arc::<str>::from("QuestionEq"))? {
+        let rhs = parse_or(&mut (*p))?;
         let else_expr = make_else_expr(lhs.clone(), rhs.clone(), line);
         return Ok(stmt_expr(make_assign(lhs, else_expr.clone(), line), line));
     }
     let expr = {
     if expr_is_var(lhs.clone()) {
-        if parser_peek_starts_expr(Rc::clone(&p))? {
+        if parser_peek_starts_expr(&mut (*p))? {
             let mut args = vec![];
             while true {
-                let arg = parse_or(Rc::clone(&p))?;
+                let arg = parse_or(&mut (*p))?;
                 args.push(make_arg(None, arg.clone(), false));
-                if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+                if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
                     break;
                 }
             }
@@ -5300,147 +5363,147 @@ fn parse_inline_stmt_impl(mut p: Rc<RefCell<Parser>>, stop_at_else: bool) -> Res
     Ok(stmt_expr(expr, line))
 }
 
-fn parse_else_expr(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Try").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string())) && (parser_is_newline2(Rc::clone(&p)) || parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-            parser_advance(Rc::clone(&p))?;
-            parser_expect_newline(Rc::clone(&p))?;
-            let try_stmts = parse_block(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string()))?;
-            let else_stmts = parse_else_body_stmts(Rc::clone(&p))?;
+fn parse_else_expr(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    if parser_check(&mut (*p), Arc::<str>::from("Try")) {
+        parser_advance(&mut (*p))?;
+        if (parser_check(&mut (*p), Arc::<str>::from("Colon")) && (parser_is_newline2(&mut (*p)) || parser_check2(&mut (*p), Arc::<str>::from("Eof")))) {
+            parser_advance(&mut (*p))?;
+            parser_expect_newline(&mut (*p))?;
+            let try_stmts = parse_block(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("Else"))?;
+            let else_stmts = parse_else_body_stmts(&mut (*p))?;
             return Ok(make_try_else_block(try_stmts, else_stmts, line));
         }
-        if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Question").to_string()))? {
-            let inner = parse_pipe(Rc::clone(&p))?;
+        if parser_eat(&mut (*p), Arc::<str>::from("Question"))? {
+            let inner = parse_pipe(&mut (*p))?;
             return Ok(make_try_else(inner.clone(), make_nil_expr(line), line));
         }
-        let inner = parse_pipe(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let else_expr = parse_else_body_expr(Rc::clone(&p))?;
+        let inner = parse_pipe(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Else")) {
+            parser_advance(&mut (*p))?;
+            let else_expr = parse_else_body_expr(&mut (*p))?;
             let else_stmts = unwrap_block_or_wrap(else_expr.clone());
             return Ok(make_try_else_block(vec![stmt_expr(inner.clone(), line)], else_stmts, line));
         }
         return Err(Box::new(BoringError::Str("try expr requires an else clause or '?' — use_val: \n  try f() else default\n  try? f()\n  try: … catch: …")));
     }
-    let expr = parse_pipe(Rc::clone(&p))?;
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let default = parse_else_body_expr(Rc::clone(&p))?;
+    let expr = parse_pipe(&mut (*p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Else")) {
+        parser_advance(&mut (*p))?;
+        let default = parse_else_body_expr(&mut (*p))?;
         return Ok(make_else_expr(expr.clone(), default.clone(), expr.line));
     }
     Ok(expr.clone())
 }
 
-fn parse_pipe(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_or(Rc::clone(&p))?;
+fn parse_pipe(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_or(&mut (*p))?;
     let mut indent_depth = 0;
     while true {
         let skipped = {
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) {
-            peek_pipe_after_newlines(Rc::clone(&p))
+        if parser_check(&mut (*p), Arc::<str>::from("Newline")) {
+            peek_pipe_after_newlines(&mut (*p))
         } else {
             None
         }
 };
         if let Some(sk) = skipped {
-            parser_skip_to_offset(Rc::clone(&p), sk.offset)?;
+            parser_skip_to_offset(&mut (*p), sk.offset)?;
             indent_depth += sk.indents;
         }
-        if (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("PipeArrow").to_string()))) {
+        if (!parser_check(&mut (*p), Arc::<str>::from("PipeArrow"))) {
             break;
         }
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let name = parser_expect_ident(Rc::clone(&p))?;
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let name = parser_expect_ident(&mut (*p))?;
         let args = {
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-            parse_call_args(Rc::clone(&p))?
+        if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+            parse_call_args(&mut (*p))?
         } else {
             vec![]
         }
 };
-        lhs = make_pipe(lhs.clone(), Rc::<str>::from(name.to_string()), args, line);
+        lhs = make_pipe(lhs.clone(), Arc::<str>::from(name.to_string()), args, line);
     }
     if (indent_depth > 0) {
-        let saved = parser_pos(Rc::clone(&p));
-        parser_skip_newlines(Rc::clone(&p))?;
+        let saved = parser_pos(&mut (*p));
+        parser_skip_newlines(&mut (*p))?;
         let mut consumed = 0;
-        while ((consumed < indent_depth) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string()))) {
-            parser_advance(Rc::clone(&p))?;
+        while ((consumed < indent_depth) && parser_check(&mut (*p), Arc::<str>::from("Dedent"))) {
+            parser_advance(&mut (*p))?;
             consumed += 1;
         }
         if (consumed < indent_depth) {
-            parser_set_pos(Rc::clone(&p), saved);
+            parser_set_pos(&mut (*p), saved);
         }
     }
     Ok(lhs.clone())
 }
 
-fn parse_or(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_and(Rc::clone(&p))?;
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Or").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_and(Rc::clone(&p))?;
-        lhs = make_binop(Rc::<str>::from(Rc::<str>::from("Or").to_string()), lhs.clone(), rhs.clone(), line);
+fn parse_or(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_and(&mut (*p))?;
+    while parser_check(&mut (*p), Arc::<str>::from("Or")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let rhs = parse_and(&mut (*p))?;
+        lhs = make_binop(Arc::<str>::from("Or"), lhs.clone(), rhs.clone(), line);
     }
     Ok(lhs.clone())
 }
 
-fn parse_and(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_not(Rc::clone(&p))?;
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("And").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_not(Rc::clone(&p))?;
-        lhs = make_binop(Rc::<str>::from(Rc::<str>::from("And").to_string()), lhs.clone(), rhs.clone(), line);
+fn parse_and(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_not(&mut (*p))?;
+    while parser_check(&mut (*p), Arc::<str>::from("And")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let rhs = parse_not(&mut (*p))?;
+        lhs = make_binop(Arc::<str>::from("And"), lhs.clone(), rhs.clone(), line);
     }
     Ok(lhs.clone())
 }
 
-fn parse_not(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Not").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        parser_depth_inc(Rc::clone(&p))?;
-        if (parser_depth(Rc::clone(&p))? > MAX_EXPR_DEPTH) {
-            parser_depth_dec(Rc::clone(&p))?;
+fn parse_not(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_check(&mut (*p), Arc::<str>::from("Not")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        parser_depth_inc(&mut (*p))?;
+        if (parser_depth(&mut (*p))? > MAX_EXPR_DEPTH) {
+            parser_depth_dec(&mut (*p))?;
             return Err(Box::new(BoringError::Str("expression nested too deeply")));
         }
-        let result = parse_not(Rc::clone(&p))?;
-        parser_depth_dec(Rc::clone(&p))?;
-        return Ok(make_unary(Rc::<str>::from(Rc::<str>::from("Not").to_string()), result.clone(), line));
+        let result = parse_not(&mut (*p))?;
+        parser_depth_dec(&mut (*p))?;
+        return Ok(make_unary(Arc::<str>::from("Not"), result.clone(), line));
     }
-    Ok(parse_comparison(Rc::clone(&p))?)
+    Ok(parse_comparison(&mut (*p))?)
 }
 
-fn parse_comparison(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_bitor(Rc::clone(&p))?;
+fn parse_comparison(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_bitor(&mut (*p))?;
     while true {
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Is").to_string())) {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Is")) {
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
             let op = {
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Not").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                Rc::<str>::from("IsNot")
+            if parser_check(&mut (*p), Arc::<str>::from("Not")) {
+                parser_advance(&mut (*p))?;
+                Arc::<str>::from("IsNot")
             } else {
-                Rc::<str>::from("Is")
+                Arc::<str>::from("Is")
             }
 };
-            let rhs = parse_bitor(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(op.to_string()), lhs.clone(), rhs.clone(), line);
+            let rhs = parse_bitor(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from(op.to_string()), lhs.clone(), rhs.clone(), line);
             continue;
         }
-        let op = comparison_op_from_peek(Rc::clone(&p));
+        let op = comparison_op_from_peek(&mut (*p));
         if let Some(o) = op {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_bitor(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
+            let rhs = parse_bitor(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
         } else {
             break;
         }
@@ -5448,54 +5511,54 @@ fn parse_comparison(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::err
     Ok(lhs.clone())
 }
 
-fn parse_bitor(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_bitxor(Rc::clone(&p))?;
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Pipe").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_bitxor(Rc::clone(&p))?;
-        lhs = make_binop(Rc::<str>::from(Rc::<str>::from("BitOr").to_string()), lhs.clone(), rhs.clone(), line);
+fn parse_bitor(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_bitxor(&mut (*p))?;
+    while parser_check(&mut (*p), Arc::<str>::from("Pipe")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let rhs = parse_bitxor(&mut (*p))?;
+        lhs = make_binop(Arc::<str>::from("BitOr"), lhs.clone(), rhs.clone(), line);
     }
     Ok(lhs.clone())
 }
 
-fn parse_bitxor(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_bitand(Rc::clone(&p))?;
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Caret").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_bitand(Rc::clone(&p))?;
-        lhs = make_binop(Rc::<str>::from(Rc::<str>::from("BitXor").to_string()), lhs.clone(), rhs.clone(), line);
+fn parse_bitxor(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_bitand(&mut (*p))?;
+    while parser_check(&mut (*p), Arc::<str>::from("Caret")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let rhs = parse_bitand(&mut (*p))?;
+        lhs = make_binop(Arc::<str>::from("BitXor"), lhs.clone(), rhs.clone(), line);
     }
     Ok(lhs.clone())
 }
 
-fn parse_bitand(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_shift(Rc::clone(&p))?;
-    while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Ampersand").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_shift(Rc::clone(&p))?;
-        lhs = make_binop(Rc::<str>::from(Rc::<str>::from("BitAnd").to_string()), lhs.clone(), rhs.clone(), line);
+fn parse_bitand(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_shift(&mut (*p))?;
+    while parser_check(&mut (*p), Arc::<str>::from("Ampersand")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let rhs = parse_shift(&mut (*p))?;
+        lhs = make_binop(Arc::<str>::from("BitAnd"), lhs.clone(), rhs.clone(), line);
     }
     Ok(lhs.clone())
 }
 
-fn parse_shift(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_additive(Rc::clone(&p))?;
+fn parse_shift(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_additive(&mut (*p))?;
     while true {
-        if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Lt").to_string())) && parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Lt").to_string()))) {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_additive(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(Rc::<str>::from("Shl").to_string()), lhs.clone(), rhs.clone(), line);
-        } else if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Gt").to_string())) && parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Gt").to_string()))) {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_additive(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(Rc::<str>::from("Shr").to_string()), lhs.clone(), rhs.clone(), line);
+        if (parser_check(&mut (*p), Arc::<str>::from("Lt")) && parser_check2(&mut (*p), Arc::<str>::from("Lt"))) {
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let rhs = parse_additive(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from("Shl"), lhs.clone(), rhs.clone(), line);
+        } else if (parser_check(&mut (*p), Arc::<str>::from("Gt")) && parser_check2(&mut (*p), Arc::<str>::from("Gt"))) {
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let rhs = parse_additive(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from("Shr"), lhs.clone(), rhs.clone(), line);
         } else {
             break;
         }
@@ -5503,15 +5566,15 @@ fn parse_shift(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::E
     Ok(lhs.clone())
 }
 
-fn parse_additive(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_multiplicative(Rc::clone(&p))?;
+fn parse_additive(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_multiplicative(&mut (*p))?;
     while true {
-        let op = additive_op_from_peek(Rc::clone(&p));
+        let op = additive_op_from_peek(&mut (*p));
         if let Some(o) = op {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_multiplicative(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
+            let rhs = parse_multiplicative(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
         } else {
             break;
         }
@@ -5519,15 +5582,15 @@ fn parse_additive(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error
     Ok(lhs.clone())
 }
 
-fn parse_multiplicative(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut lhs = parse_unary(Rc::clone(&p))?;
+fn parse_multiplicative(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut lhs = parse_unary(&mut (*p))?;
     while true {
-        let op = multiplicative_op_from_peek(Rc::clone(&p));
+        let op = multiplicative_op_from_peek(&mut (*p));
         if let Some(o) = op {
-            let line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_unary(Rc::clone(&p))?;
-            lhs = make_binop(Rc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
+            let line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
+            let rhs = parse_unary(&mut (*p))?;
+            lhs = make_binop(Arc::<str>::from(o.to_string()), lhs.clone(), rhs.clone(), line);
         } else {
             break;
         }
@@ -5535,137 +5598,137 @@ fn parse_multiplicative(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std:
     Ok(lhs.clone())
 }
 
-fn parse_unary(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Minus").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let expr = parse_unary(Rc::clone(&p))?;
-        return Ok(make_unary(Rc::<str>::from(Rc::<str>::from("Neg").to_string()), expr.clone(), line));
+fn parse_unary(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    if parser_check(&mut (*p), Arc::<str>::from("Minus")) {
+        parser_advance(&mut (*p))?;
+        let expr = parse_unary(&mut (*p))?;
+        return Ok(make_unary(Arc::<str>::from("Neg"), expr.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Bang").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let expr = parse_unary(Rc::clone(&p))?;
-        return Ok(make_unary(Rc::<str>::from(Rc::<str>::from("Not").to_string()), expr.clone(), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Bang")) {
+        parser_advance(&mut (*p))?;
+        let expr = parse_unary(&mut (*p))?;
+        return Ok(make_unary(Arc::<str>::from("Not"), expr.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Tilde").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let expr = parse_unary(Rc::clone(&p))?;
-        return Ok(make_unary(Rc::<str>::from(Rc::<str>::from("BitNot").to_string()), expr.clone(), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Tilde")) {
+        parser_advance(&mut (*p))?;
+        let expr = parse_unary(&mut (*p))?;
+        return Ok(make_unary(Arc::<str>::from("BitNot"), expr.clone(), line));
     }
-    Ok(parse_postfix(Rc::clone(&p))?)
+    Ok(parse_postfix(&mut (*p))?)
 }
 
-fn parse_postfix(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    Ok(parse_postfix_inner(Rc::clone(&p), true)?)
+fn parse_postfix(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_postfix_inner(&mut (*p), true)?)
 }
 
-fn parse_postfix_inner(mut p: Rc<RefCell<Parser>>, allow_chain: bool) -> Result<Expr, Box<dyn std::error::Error>> {
-    let mut expr = parse_primary(Rc::clone(&p))?;
+fn parse_postfix_inner(mut p: &mut Parser, allow_chain: bool) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let mut expr = parse_primary(&mut (*p))?;
     let mut continuation_indent_depth = 0;
     let mut seen_trailing_closure = false;
     while true {
-        if ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string())) && allow_chain) && seen_trailing_closure) {
-            let skipped = peek_dot_after_newlines_and_indents(Rc::clone(&p));
+        if ((parser_check(&mut (*p), Arc::<str>::from("Newline")) && allow_chain) && seen_trailing_closure) {
+            let skipped = peek_dot_after_newlines_and_indents(&mut (*p));
             if let Some(sk) = skipped {
-                parser_skip_to_offset(Rc::clone(&p), sk.offset)?;
+                parser_skip_to_offset(&mut (*p), sk.offset)?;
                 continuation_indent_depth += sk.indents;
             } else {
                 break;
             }
-        } else if parser_is_newline(Rc::clone(&p)) {
+        } else if parser_is_newline(&mut (*p)) {
             break;
         }
-        let line = parser_line(Rc::clone(&p));
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dot").to_string())) {
-            parser_advance(Rc::clone(&p))?;
+        let line = parser_line(&mut (*p));
+        if parser_check(&mut (*p), Arc::<str>::from("Dot")) {
+            parser_advance(&mut (*p))?;
             let field = {
-            if parser_peek_is_int(Rc::clone(&p)) {
-                let n = parser_peek_int(Rc::clone(&p));
-                parser_advance(Rc::clone(&p))?;
+            if parser_peek_is_int(&mut (*p)) {
+                let n = parser_peek_int(&mut (*p));
+                parser_advance(&mut (*p))?;
                 int_to_string(n)
             } else {
-                parser_expect_ident_or_keyword(Rc::clone(&p))?
+                parser_expect_ident_or_keyword(&mut (*p))?
             }
 };
-            if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                let args = parse_trailing_closure(Rc::clone(&p), vec![])?;
+            if parser_peek_is_trailing_closure(&mut (*p)) {
+                let args = parse_trailing_closure(&mut (*p), vec![])?;
                 seen_trailing_closure = true;
-                expr = make_method_call(expr.clone(), Rc::<str>::from(field.to_string()), args, line);
-            } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-                let mut args = parse_call_args(Rc::clone(&p))?;
-                if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                    args = parse_trailing_closure(Rc::clone(&p), args)?;
+                expr = make_method_call(expr.clone(), Arc::<str>::from(field.to_string()), args, line);
+            } else if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+                let mut args = parse_call_args(&mut (*p))?;
+                if parser_peek_is_trailing_closure(&mut (*p)) {
+                    args = parse_trailing_closure(&mut (*p), args)?;
                     seen_trailing_closure = true;
-                } else if parser_peek_is_trailing_closure_no_paren(Rc::clone(&p)) {
-                    args = parse_trailing_closure_no_paren(Rc::clone(&p), args)?;
+                } else if parser_peek_is_trailing_closure_no_paren(&mut (*p)) {
+                    args = parse_trailing_closure_no_paren(&mut (*p), args)?;
                     seen_trailing_closure = true;
-                } else if (parser_allow_trailing_closure(Rc::clone(&p)) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))) {
-                    args = parse_trailing_body(Rc::clone(&p), args)?;
+                } else if (parser_allow_trailing_closure(&mut (*p)) && parser_check(&mut (*p), Arc::<str>::from("Colon"))) {
+                    args = parse_trailing_body(&mut (*p), args)?;
                     seen_trailing_closure = true;
-                } else if parser_peek_is_trailing_body_no_colon(Rc::clone(&p))? {
-                    args = parse_trailing_body_no_colon(Rc::clone(&p), args)?;
+                } else if parser_peek_is_trailing_body_no_colon(&mut (*p))? {
+                    args = parse_trailing_body_no_colon(&mut (*p), args)?;
                     seen_trailing_closure = true;
                 }
-                expr = make_method_call(expr.clone(), Rc::<str>::from(field.to_string()), args, line);
-            } else if parser_peek_is_trailing_closure_no_paren(Rc::clone(&p)) {
-                let args = parse_trailing_closure_no_paren(Rc::clone(&p), vec![])?;
+                expr = make_method_call(expr.clone(), Arc::<str>::from(field.to_string()), args, line);
+            } else if parser_peek_is_trailing_closure_no_paren(&mut (*p)) {
+                let args = parse_trailing_closure_no_paren(&mut (*p), vec![])?;
                 seen_trailing_closure = true;
-                expr = make_method_call(expr.clone(), Rc::<str>::from(field.to_string()), args, line);
+                expr = make_method_call(expr.clone(), Arc::<str>::from(field.to_string()), args, line);
             } else {
-                expr = make_field_expr(expr.clone(), Rc::<str>::from(field.to_string()), line);
+                expr = make_field_expr(expr.clone(), Arc::<str>::from(field.to_string()), line);
             }
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("QuestionDot").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let field = parser_expect_ident_or_keyword(Rc::clone(&p))?;
-            if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                let args = parse_trailing_closure(Rc::clone(&p), vec![])?;
+        } else if parser_check(&mut (*p), Arc::<str>::from("QuestionDot")) {
+            parser_advance(&mut (*p))?;
+            let field = parser_expect_ident_or_keyword(&mut (*p))?;
+            if parser_peek_is_trailing_closure(&mut (*p)) {
+                let args = parse_trailing_closure(&mut (*p), vec![])?;
                 seen_trailing_closure = true;
-                expr = make_optional_method_call(expr.clone(), Rc::<str>::from(field.to_string()), args, line);
-            } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-                let mut args = parse_call_args(Rc::clone(&p))?;
-                if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                    args = parse_trailing_closure(Rc::clone(&p), args)?;
+                expr = make_optional_method_call(expr.clone(), Arc::<str>::from(field.to_string()), args, line);
+            } else if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+                let mut args = parse_call_args(&mut (*p))?;
+                if parser_peek_is_trailing_closure(&mut (*p)) {
+                    args = parse_trailing_closure(&mut (*p), args)?;
                     seen_trailing_closure = true;
                 }
-                expr = make_optional_method_call(expr.clone(), Rc::<str>::from(field.to_string()), args, line);
+                expr = make_optional_method_call(expr.clone(), Arc::<str>::from(field.to_string()), args, line);
             } else {
-                expr = make_optional_field(expr.clone(), Rc::<str>::from(field.to_string()), line);
+                expr = make_optional_field(expr.clone(), Arc::<str>::from(field.to_string()), line);
             }
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LBracket").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let idx = parse_expr(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBracket").to_string()))?;
+        } else if parser_check(&mut (*p), Arc::<str>::from("LBracket")) {
+            parser_advance(&mut (*p))?;
+            let idx = parse_expr(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("RBracket"))?;
             expr = make_index(expr.clone(), idx.clone(), line);
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-            if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                let args = parse_trailing_closure(Rc::clone(&p), vec![])?;
+        } else if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+            if parser_peek_is_trailing_closure(&mut (*p)) {
+                let args = parse_trailing_closure(&mut (*p), vec![])?;
                 seen_trailing_closure = true;
                 expr = make_call(expr.clone(), args, line);
             } else {
-                let mut args = parse_call_args(Rc::clone(&p))?;
-                if parser_peek_is_trailing_closure(Rc::clone(&p)) {
-                    args = parse_trailing_closure(Rc::clone(&p), args)?;
+                let mut args = parse_call_args(&mut (*p))?;
+                if parser_peek_is_trailing_closure(&mut (*p)) {
+                    args = parse_trailing_closure(&mut (*p), args)?;
                     seen_trailing_closure = true;
-                } else if (parser_allow_trailing_closure(Rc::clone(&p)) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))) {
-                    args = parse_trailing_body(Rc::clone(&p), args)?;
+                } else if (parser_allow_trailing_closure(&mut (*p)) && parser_check(&mut (*p), Arc::<str>::from("Colon"))) {
+                    args = parse_trailing_body(&mut (*p), args)?;
                     seen_trailing_closure = true;
-                } else if parser_peek_is_trailing_body_no_colon(Rc::clone(&p))? {
-                    args = parse_trailing_body_no_colon(Rc::clone(&p), args)?;
+                } else if parser_peek_is_trailing_body_no_colon(&mut (*p))? {
+                    args = parse_trailing_body_no_colon(&mut (*p), args)?;
                     seen_trailing_closure = true;
                 }
                 expr = make_call(expr.clone(), args, line);
             }
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("As").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let ty = parse_type(Rc::clone(&p))?;
-            expr = make_cast(expr.clone(), ty, line);
-        } else if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("DotDot").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("DotDotEq").to_string()))) {
-            let inclusive = parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("DotDotEq").to_string()));
-            parser_advance(Rc::clone(&p))?;
-            let end = parse_primary(Rc::clone(&p))?;
+        } else if parser_check(&mut (*p), Arc::<str>::from("As")) {
+            parser_advance(&mut (*p))?;
+            let ty = parse_type(&mut (*p))?;
+            expr = make_cast(expr.clone(), ty.clone(), line);
+        } else if (parser_check(&mut (*p), Arc::<str>::from("DotDot")) || parser_check(&mut (*p), Arc::<str>::from("DotDotEq"))) {
+            let inclusive = parser_check(&mut (*p), Arc::<str>::from("DotDotEq"));
+            parser_advance(&mut (*p))?;
+            let end = parse_primary(&mut (*p))?;
             expr = make_range(expr.clone(), end.clone(), inclusive, line);
-        } else if (parser_peek_is_ident(Rc::clone(&p)) && parser_peek_is_trailing_closure_no_paren(Rc::clone(&p))) {
-            let args = parse_trailing_closure_no_paren(Rc::clone(&p), vec![])?;
+        } else if (parser_peek_is_ident(&mut (*p)) && parser_peek_is_trailing_closure_no_paren(&mut (*p))) {
+            let args = parse_trailing_closure_no_paren(&mut (*p), vec![])?;
             seen_trailing_closure = true;
             expr = make_call(expr.clone(), args, line);
         } else {
@@ -5673,384 +5736,383 @@ fn parse_postfix_inner(mut p: Rc<RefCell<Parser>>, allow_chain: bool) -> Result<
         }
     }
     if (continuation_indent_depth > 0) {
-        let saved_pos = parser_pos(Rc::clone(&p));
-        parser_skip_newlines(Rc::clone(&p))?;
+        let saved_pos = parser_pos(&mut (*p));
+        parser_skip_newlines(&mut (*p))?;
         let mut consumed = 0;
-        while ((consumed < continuation_indent_depth) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string()))) {
-            parser_advance(Rc::clone(&p))?;
+        while ((consumed < continuation_indent_depth) && parser_check(&mut (*p), Arc::<str>::from("Dedent"))) {
+            parser_advance(&mut (*p))?;
             consumed += 1;
         }
         if (consumed < continuation_indent_depth) {
-            parser_set_pos(Rc::clone(&p), saved_pos);
+            parser_set_pos(&mut (*p), saved_pos);
         }
     }
     Ok(expr.clone())
 }
 
-fn parse_primary(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Int").to_string())) {
-        let n = parser_peek_int(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
+fn parse_primary(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    if parser_check(&mut (*p), Arc::<str>::from("Int")) {
+        let n = parser_peek_int(&mut (*p));
+        parser_advance(&mut (*p))?;
         return Ok(make_int_expr(n, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Float").to_string())) {
-        let f = parser_peek_float(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Float")) {
+        let f = parser_peek_float(&mut (*p));
+        parser_advance(&mut (*p))?;
         return Ok(make_float_expr(f, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Str").to_string())) {
-        let s = parser_peek_str(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_str_expr(Rc::<str>::from(s.to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Str")) {
+        let s = parser_peek_str(&mut (*p));
+        parser_advance(&mut (*p))?;
+        return Ok(make_str_expr(Arc::<str>::from(s.to_string()), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("StringInterp").to_string())) {
-        let parts = parser_peek_interp_parts(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let segments = resolve_interp(Rc::clone(&p), parts, line)?;
+    if parser_check(&mut (*p), Arc::<str>::from("StringInterp")) {
+        let parts = parser_peek_interp_parts(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let segments = resolve_interp(&mut (*p), parts, line)?;
         return Ok(make_string_interp(segments, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Bool").to_string())) {
-        let b = parser_peek_bool(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Bool")) {
+        let b = parser_peek_bool(&mut (*p));
+        parser_advance(&mut (*p))?;
         return Ok(make_bool_expr(b, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Nil").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Nil")) {
+        parser_advance(&mut (*p))?;
         return Ok(make_nil_expr(line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Void").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Void")) {
+        parser_advance(&mut (*p))?;
         return Ok(make_void_expr(line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("SelfKw").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_var_expr(Rc::<str>::from(Rc::<str>::from("self").to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("SelfKw")) {
+        parser_advance(&mut (*p))?;
+        return Ok(make_var_expr(Arc::<str>::from("self"), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Ident").to_string())) {
-        let name = parser_peek_ident(Rc::clone(&p));
-        if parser_peek_is_macro_call(Rc::clone(&p)) {
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let args = parse_macro_args(Rc::clone(&p))?;
-            return Ok(make_macro_call(Rc::<str>::from(name.to_string()), args, line));
+    if parser_check(&mut (*p), Arc::<str>::from("Ident")) {
+        let name = parser_peek_ident(&mut (*p));
+        if parser_peek_is_macro_call(&mut (*p)) {
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let args = parse_macro_args(&mut (*p))?;
+            return Ok(make_macro_call(Arc::<str>::from(name.to_string()), args, line));
         }
-        if parser_peek_is_generic_call(Rc::clone(&p)) {
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let mut type_args = vec![parse_type(Rc::clone(&p))?];
-            while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-                if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Gt").to_string())) {
+        if parser_peek_is_generic_call(&mut (*p)) {
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let mut type_args = vec![parse_type(&mut (*p))?];
+            while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+                if parser_check(&mut (*p), Arc::<str>::from("Gt")) {
                     break;
                 }
-                type_args.push(parse_type(Rc::clone(&p))?);
+                type_args.push(parse_type(&mut (*p))?);
             }
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Gt").to_string()))?;
-            let callee = make_var_expr(Rc::<str>::from(name.to_string()), line);
+            parser_expect(&mut (*p), Arc::<str>::from("Gt"))?;
+            let callee = make_var_expr(Arc::<str>::from(name.to_string()), line);
             let args = {
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-                parse_call_args(Rc::clone(&p))?
+            if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+                parse_call_args(&mut (*p))?
             } else {
                 vec![]
             }
 };
             return Ok(make_generic_call(callee.clone(), type_args, args, line));
         }
-        if (parser_allow_noparen_closure(Rc::clone(&p))? && parser_peek_next_is_colon(Rc::clone(&p))) {
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let param = make_param(Rc::<str>::from(name.to_string()), None, false);
-            let body = parse_closure_body(Rc::clone(&p))?;
-            let (throws_task, body) = infer_throws_task(body);
-            return Ok(make_closure(vec![param], None, body, throws_task.can_throw, throws_task.is_task, line));
+        if (parser_allow_noparen_closure(&mut (*p))? && parser_peek_next_is_colon(&mut (*p))) {
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let param = make_param(Arc::<str>::from(name.to_string()), None, false);
+            let body = parse_closure_body(&mut (*p))?;
+            let (throws_task, body) = infer_throws_task(body.clone());
+            return Ok(make_closure(vec![param], None, body.clone(), throws_task.can_throw, throws_task.is_task, line));
         }
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_var_expr(Rc::<str>::from(name.to_string()), line));
+        parser_advance(&mut (*p))?;
+        return Ok(make_var_expr(Arc::<str>::from(name.to_string()), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let param = make_param(Rc::<str>::from(Rc::<str>::from("__x").to_string()), None, false);
-        let base = make_var_expr(Rc::<str>::from(Rc::<str>::from("__x").to_string()), line);
-        let member = parser_expect_ident(Rc::clone(&p))?;
-        let mut acc = make_field_expr(base.clone(), Rc::<str>::from(member.to_string()), line);
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-            let args = parse_call_args(Rc::clone(&p))?;
-            acc = make_method_call(base.clone(), Rc::<str>::from(member.to_string()), args, line);
+    if parser_check(&mut (*p), Arc::<str>::from("Colon")) {
+        parser_advance(&mut (*p))?;
+        let param = make_param(Arc::<str>::from("__x"), None, false);
+        let base = make_var_expr(Arc::<str>::from("__x"), line);
+        let member = parser_expect_ident(&mut (*p))?;
+        let mut acc = make_field_expr(base.clone(), Arc::<str>::from(member.to_string()), line);
+        if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+            let args = parse_call_args(&mut (*p))?;
+            acc = make_method_call(base.clone(), Arc::<str>::from(member.to_string()), args, line);
         }
-        while parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dot").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let next = parser_expect_ident(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-                let args = parse_call_args(Rc::clone(&p))?;
-                acc = make_method_call(acc.clone(), Rc::<str>::from(next.to_string()), args, line);
+        while parser_check(&mut (*p), Arc::<str>::from("Dot")) {
+            parser_advance(&mut (*p))?;
+            let next = parser_expect_ident(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+                let args = parse_call_args(&mut (*p))?;
+                acc = make_method_call(acc.clone(), Arc::<str>::from(next.to_string()), args, line);
             } else {
-                acc = make_field_expr(acc.clone(), Rc::<str>::from(next.to_string()), line);
+                acc = make_field_expr(acc.clone(), Arc::<str>::from(next.to_string()), line);
             }
         }
-        let body_op = shorthand_binop_from_peek(Rc::clone(&p));
+        let body_op = shorthand_binop_from_peek(&mut (*p));
         let mut body_expr = acc.clone();
         if let Some(op) = body_op {
-            parser_advance(Rc::clone(&p))?;
-            let rhs = parse_or(Rc::clone(&p))?;
-            body_expr = make_binop(Rc::<str>::from(op.to_string()), acc.clone(), rhs.clone(), line);
+            parser_advance(&mut (*p))?;
+            let rhs = parse_or(&mut (*p))?;
+            body_expr = make_binop(Arc::<str>::from(op.to_string()), acc.clone(), rhs.clone(), line);
         }
         let body = closure_body_expr(body_expr);
-        let (throws_task, body) = infer_throws_task(body);
-        return Ok(make_closure(vec![param], None, body, throws_task.can_throw, throws_task.is_task, line));
+        let (throws_task, body) = infer_throws_task(body.clone());
+        return Ok(make_closure(vec![param], None, body.clone(), throws_task.can_throw, throws_task.is_task, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dot").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let name = parser_expect_ident(Rc::clone(&p))?;
-        return Ok(make_dot_ident(Rc::<str>::from(name.to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Dot")) {
+        parser_advance(&mut (*p))?;
+        let name = parser_expect_ident(&mut (*p))?;
+        return Ok(make_dot_ident(Arc::<str>::from(name.to_string()), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let ex = parse_closure_modifiers(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                let body = parse_closure_body(Rc::clone(&p))?;
-                let (inf, body) = infer_throws_task(body);
-                return Ok(make_closure(vec![], None, body, (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
+    if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+        parser_advance(&mut (*p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("RParen")) {
+            parser_advance(&mut (*p))?;
+            let ex = parse_closure_modifiers(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("Colon")) {
+                parser_advance(&mut (*p))?;
+                let body = parse_closure_body(&mut (*p))?;
+                let (inf, body) = infer_throws_task(body.clone());
+                return Ok(make_closure(vec![], None, body.clone(), (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
             }
             return Ok(make_tuple(vec![], line));
         }
-        if parser_peek_is_typed_closure(Rc::clone(&p))? {
-            let mut params = vec![parse_param(Rc::clone(&p))?];
-            while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-                parser_skip_newlines_and_indent(Rc::clone(&p))?;
-                if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string())) {
+        if parser_peek_is_typed_closure(&mut (*p))? {
+            let mut params = vec![parse_param(&mut (*p))?];
+            while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+                parser_skip_newlines_and_indent(&mut (*p))?;
+                if parser_check(&mut (*p), Arc::<str>::from("RParen")) {
                     break;
                 }
-                params.push(parse_param(Rc::clone(&p))?);
+                params.push(parse_param(&mut (*p))?);
             }
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
-            let ex = parse_closure_modifiers(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-            let body = parse_closure_body(Rc::clone(&p))?;
-            let (inf, body) = infer_throws_task(body);
-            return Ok(make_closure(params, None, body, (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
+            parser_skip_newlines_and_indent(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
+            let ex = parse_closure_modifiers(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+            let body = parse_closure_body(&mut (*p))?;
+            let (inf, body) = infer_throws_task(body.clone());
+            return Ok(make_closure(params, None, body.clone(), (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
         }
-        let first_expr = parse_expr(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string())) {
+        let first_expr = parse_expr(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Comma")) {
             let mut elems = vec![first_expr];
-            while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-                parser_skip_newlines_and_indent(Rc::clone(&p))?;
-                if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string())) {
+            while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+                parser_skip_newlines_and_indent(&mut (*p))?;
+                if parser_check(&mut (*p), Arc::<str>::from("RParen")) {
                     break;
                 }
-                elems.push(parse_expr(Rc::clone(&p))?);
+                elems.push(parse_expr(&mut (*p))?);
             }
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
-            let ex = parse_closure_modifiers(Rc::clone(&p))?;
-            if (parser_allow_trailing_closure(Rc::clone(&p)) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))) {
-                parser_advance(Rc::clone(&p))?;
+            parser_skip_newlines_and_indent(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
+            let ex = parse_closure_modifiers(&mut (*p))?;
+            if (parser_allow_trailing_closure(&mut (*p)) && parser_check(&mut (*p), Arc::<str>::from("Colon"))) {
+                parser_advance(&mut (*p))?;
                 let params = elems_to_params(elems, line);
-                let body = parse_closure_body(Rc::clone(&p))?;
-                let (inf, body) = infer_throws_task(body);
-                return Ok(make_closure(params, None, body, (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
+                let body = parse_closure_body(&mut (*p))?;
+                let (inf, body) = infer_throws_task(body.clone());
+                return Ok(make_closure(params, None, body.clone(), (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
             }
             return Ok(make_tuple(elems, line));
         } else {
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
-            let ex = parse_closure_modifiers(Rc::clone(&p))?;
-            if (parser_allow_trailing_closure(Rc::clone(&p)) && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))) {
-                parser_advance(Rc::clone(&p))?;
+            parser_skip_newlines_and_indent(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
+            let ex = parse_closure_modifiers(&mut (*p))?;
+            if (parser_allow_trailing_closure(&mut (*p)) && parser_check(&mut (*p), Arc::<str>::from("Colon"))) {
+                parser_advance(&mut (*p))?;
                 let params = vec![expr_to_param(first_expr.clone(), line)];
-                let body = parse_closure_body(Rc::clone(&p))?;
-                let (inf, body) = infer_throws_task(body);
-                return Ok(make_closure(params, None, body, (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
+                let body = parse_closure_body(&mut (*p))?;
+                let (inf, body) = infer_throws_task(body.clone());
+                return Ok(make_closure(params, None, body.clone(), (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line));
             }
             return Ok(first_expr.clone());
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LBracket").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("LBracket")) {
+        parser_advance(&mut (*p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
         let mut elems = vec![];
-        while ((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBracket").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-            elems.push(parse_expr(Rc::clone(&p))?);
-            if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+        while ((!parser_check(&mut (*p), Arc::<str>::from("RBracket"))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+            elems.push(parse_expr(&mut (*p))?);
+            if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
                 break;
             }
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
+            parser_skip_newlines_and_indent(&mut (*p))?;
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBracket").to_string()))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RBracket"))?;
         return Ok(make_array(elems, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LBrace").to_string())) {
-        return Ok(parse_brace_expr(Rc::clone(&p), line)?);
+    if parser_check(&mut (*p), Arc::<str>::from("LBrace")) {
+        return Ok(parse_brace_expr(&mut (*p), line)?);
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("If").to_string())) {
-        let if_stmt = parse_if_stmt(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("If")) {
+        let if_stmt = parse_if_stmt(&mut (*p))?;
         return Ok(make_if_expr(if_stmt.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Match").to_string())) {
-        let match_stmt = parse_match_stmt(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Match")) {
+        let match_stmt = parse_match_stmt(&mut (*p))?;
         return Ok(make_match_expr(match_stmt.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Do").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-        parser_expect_newline(Rc::clone(&p))?;
-        let stmts = parse_block(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Do")) {
+        parser_advance(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+        parser_expect_newline(&mut (*p))?;
+        let stmts = parse_block(&mut (*p))?;
         return Ok(make_do_expr(stmts, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Loop").to_string())) {
-        let s = parse_loop_stmt(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Loop")) {
+        let s = parse_loop_stmt(&mut (*p))?;
         return Ok(make_loop_expr(s.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Task").to_string())) {
-        return Ok(parse_task_expr(Rc::clone(&p))?);
+    if parser_check(&mut (*p), Arc::<str>::from("Task")) {
+        return Ok(parse_task_expr(&mut (*p))?);
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Join").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string()))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Join")) {
+        parser_advance(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("LParen"))?;
         let mut exprs = vec![];
-        while ((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-            exprs.push(parse_expr(Rc::clone(&p))?);
-            if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+        while ((!parser_check(&mut (*p), Arc::<str>::from("RParen"))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+            exprs.push(parse_expr(&mut (*p))?);
+            if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
                 break;
             }
         }
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
         return Ok(make_join_all(exprs, line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Get").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_var_expr(Rc::<str>::from(Rc::<str>::from("get").to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Get")) {
+        parser_advance(&mut (*p))?;
+        return Ok(make_var_expr(Arc::<str>::from("get"), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Set").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_var_expr(Rc::<str>::from(Rc::<str>::from("set").to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Set")) {
+        parser_advance(&mut (*p))?;
+        return Ok(make_var_expr(Arc::<str>::from("set"), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Wait").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        return Ok(make_var_expr(Rc::<str>::from(Rc::<str>::from("wait").to_string()), line));
+    if parser_check(&mut (*p), Arc::<str>::from("Wait")) {
+        parser_advance(&mut (*p))?;
+        return Ok(make_var_expr(Arc::<str>::from("wait"), line));
     }
-    return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("unexpected token in expression: {}", parser_peek_debug(Rc::clone(&p))?).as_str())))));
+    return Err(Box::new(BoringError::String(Arc::<str>::from(Arc::<str>::from(format!("unexpected token in expression: {}", parser_peek_debug(&mut (*p))?).as_str())))));
 }
 
-fn parse_arg_list(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    Ok(parse_call_args(Rc::clone(&p))?)
+fn parse_arg_list(mut p: &mut Parser) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_call_args(&mut (*p))?)
 }
 
-fn parse_call_args(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string()))?;
-    parser_skip_newlines_and_indent(Rc::clone(&p))?;
-    let saved_tc = parser_get_allow_trailing_closure(Rc::clone(&p))?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
+fn parse_call_args(mut p: &mut Parser) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    parser_expect(&mut (*p), Arc::<str>::from("LParen"))?;
+    parser_skip_newlines_and_indent(&mut (*p))?;
+    let saved_tc = parser_get_allow_trailing_closure(&mut (*p))?;
+    parser_set_allow_trailing_closure(&mut (*p), true)?;
     let mut args = vec![];
-    while ((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        args.push(parse_arg(Rc::clone(&p))?);
-        if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+    while ((!parser_check(&mut (*p), Arc::<str>::from("RParen"))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        args.push(parse_arg(&mut (*p))?);
+        if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
             break;
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
     }
-    parser_skip_newlines_and_indent(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), saved_tc)?;
+    parser_skip_newlines_and_indent(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
+    parser_set_allow_trailing_closure(&mut (*p), saved_tc)?;
     Ok(args)
 }
 
-fn parse_arg(mut p: Rc<RefCell<Parser>>) -> Result<Arg, Box<dyn std::error::Error>> {
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("DotDot").to_string()))? {
-        let value = parse_or(Rc::clone(&p))?;
+fn parse_arg(mut p: &mut Parser) -> Result<Arg, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_eat(&mut (*p), Arc::<str>::from("DotDot"))? {
+        let value = parse_or(&mut (*p))?;
         return Ok(make_arg(None, value.clone(), true));
     }
-    if (parser_peek_is_ident(Rc::clone(&p)) && parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))) {
-        let after_eq_pos = (parser_pos(Rc::clone(&p)) + 2);
-        let is_double_eq = parser_token_at_is_eq(Rc::clone(&p), after_eq_pos);
+    if (parser_peek_is_ident(&mut (*p)) && parser_check2(&mut (*p), Arc::<str>::from("Eq"))) {
+        let after_eq_pos = (parser_pos(&mut (*p)) + 2);
+        let is_double_eq = parser_token_at_is_eq(&mut (*p), after_eq_pos);
         if (!is_double_eq) {
-            let label = parser_expect_ident(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            let value = parse_or(Rc::clone(&p))?;
+            let label = parser_expect_ident(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            let value = parse_or(&mut (*p))?;
             return Ok(make_arg(Some(label), value.clone(), false));
         }
     }
-    let value = parse_expr(Rc::clone(&p))?;
+    let value = parse_expr(&mut (*p))?;
     Ok(make_arg(None, value.clone(), false))
 }
 
-fn parse_brace_expr(mut p: Rc<RefCell<Parser>>, line: i64) -> Result<Expr, Box<dyn std::error::Error>> {
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LBrace").to_string()))?;
-    parser_skip_newlines_and_indent(Rc::clone(&p))?;
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+fn parse_brace_expr(mut p: &mut Parser, line: i64) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    parser_expect(&mut (*p), Arc::<str>::from("LBrace"))?;
+    parser_skip_newlines_and_indent(&mut (*p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("RBrace")) {
+        parser_advance(&mut (*p))?;
         return Ok(make_set(vec![], line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string()))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Eq")) {
+        parser_advance(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RBrace"))?;
         return Ok(make_dict(vec![], line));
     }
-    let first_expr = parse_expr(Rc::clone(&p))?;
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))? {
-        let first_val = parse_expr(Rc::clone(&p))?;
+    let first_expr = parse_expr(&mut (*p))?;
+    if parser_eat(&mut (*p), Arc::<str>::from("Eq"))? {
+        let first_val = parse_expr(&mut (*p))?;
         let mut pairs = vec![(first_expr.clone(), first_val.clone())];
-        while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string())) {
+        while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+            parser_skip_newlines_and_indent(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("RBrace")) {
                 break;
             }
-            let k = parse_expr(Rc::clone(&p))?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-            let v = parse_expr(Rc::clone(&p))?;
+            let k = parse_expr(&mut (*p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+            let v = parse_expr(&mut (*p))?;
             pairs.push((k.clone(), v.clone()));
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string()))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RBrace"))?;
         return Ok(make_dict(pairs, line));
     } else {
         let mut elems = vec![first_expr];
-        while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-            parser_skip_newlines_and_indent(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string())) {
+        while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+            parser_skip_newlines_and_indent(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("RBrace")) {
                 break;
             }
-            elems.push(parse_expr(Rc::clone(&p))?);
+            elems.push(parse_expr(&mut (*p))?);
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string()))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RBrace"))?;
         return Ok(make_set(elems, line));
     }
-    unreachable!()
 }
 
-fn resolve_interp(mut p: Rc<RefCell<Parser>>, parts: Vec<RawInterpPart>, line: i64) -> Result<Vec<StringSegment>, Box<dyn std::error::Error>> {
+fn resolve_interp(mut p: &mut Parser, parts: Vec<RawInterpPart>, line: i64) -> Result<Vec<StringSegment>, Box<dyn std::error::Error + Send + Sync>> {
     let mut segments = vec![];
     for part in parts.iter().cloned() {
         match part {
-            RawInterpPart::Lit(s) => {
-                segments.push(segment_lit(Rc::<str>::from(s.to_string())));
+            RawInterpPart::Lit(mut s) => {
+                segments.push(segment_lit(Arc::<str>::from(s.to_string())));
             }
-            RawInterpPart::Hole(code) => {
-                if (string_trim(Rc::<str>::from(code.clone().to_string())) == Rc::<str>::from("")) {
-                    segments.push(segment_lit(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from("{{}}")).to_string())));
+            RawInterpPart::Hole(mut code) => {
+                if (string_trim(Arc::<str>::from(code.clone().to_string())) == Arc::<str>::from("")) {
+                    segments.push(segment_lit(Arc::<str>::from(Arc::<str>::from("{{}}"))));
                 } else {
-                    let hole_tokens = lex(Rc::<str>::from(code.clone().to_string()))?;
+                    let hole_tokens = lex(Arc::<str>::from(code.clone().to_string()))?;
                     let sub_parser = make_parser(hole_tokens);
-                    parser_skip_newlines(Rc::clone(&sub_parser))?;
-                    let expr = parse_expr(Rc::clone(&sub_parser))?;
+                    parser_skip_newlines(&mut sub_parser.clone())?;
+                    let expr = parse_expr(&mut sub_parser.clone())?;
                     segments.push(segment_expr(expr.clone()));
                 }
             }
-            RawInterpPart::HoleFormatted(code, fmt) => {
-                if (string_trim(Rc::<str>::from(code.clone().to_string())) == Rc::<str>::from("")) {
-                    segments.push(segment_lit(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from("{{:{{fmt}}}}")).to_string())));
+            RawInterpPart::HoleFormatted(mut code, mut fmt) => {
+                if (string_trim(Arc::<str>::from(code.clone().to_string())) == Arc::<str>::from("")) {
+                    segments.push(segment_lit(Arc::<str>::from(Arc::<str>::from("{{:{{fmt}}}}"))));
                 } else {
-                    let hole_tokens = lex(Rc::<str>::from(code.clone().to_string()))?;
+                    let hole_tokens = lex(Arc::<str>::from(code.clone().to_string()))?;
                     let sub_parser = make_parser(hole_tokens);
-                    parser_skip_newlines(Rc::clone(&sub_parser))?;
-                    let expr = parse_expr(Rc::clone(&sub_parser))?;
-                    segments.push(segment_formatted_expr(expr.clone(), Rc::<str>::from(fmt.clone().to_string())));
+                    parser_skip_newlines(&mut sub_parser.clone())?;
+                    let expr = parse_expr(&mut sub_parser.clone())?;
+                    segments.push(segment_formatted_expr(expr.clone(), Arc::<str>::from(fmt.clone().to_string())));
                 }
             }
         }
@@ -6058,150 +6120,150 @@ fn resolve_interp(mut p: Rc<RefCell<Parser>>, parts: Vec<RawInterpPart>, line: i
     Ok(segments)
 }
 
-fn parse_closure_body(mut p: Rc<RefCell<Parser>>) -> Result<ClosureBody, Box<dyn std::error::Error>> {
-    if parser_is_newline(Rc::clone(&p)) {
-        parser_expect_newline(Rc::clone(&p))?;
-        let stmts = parse_block(Rc::clone(&p))?;
-        check_no_return(stmts.clone(), Rc::<str>::from(Rc::<str>::from("closure").to_string()));
+fn parse_closure_body(mut p: &mut Parser) -> Result<ClosureBody, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_is_newline(&mut (*p)) {
+        parser_expect_newline(&mut (*p))?;
+        let stmts = parse_block(&mut (*p))?;
+        check_no_return(stmts.clone(), Arc::<str>::from("closure"));
         return Ok(closure_body_block(stmts));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Return").to_string())) {
+    if parser_check(&mut (*p), Arc::<str>::from("Return")) {
         return Err(Box::new(BoringError::Str("last expression (no 'return' allowed in closure)")));
     }
-    let expr = parse_or(Rc::clone(&p))?;
+    let expr = parse_or(&mut (*p))?;
     Ok(closure_body_expr(expr.clone()))
 }
 
-fn parse_trailing_closure(mut p: Rc<RefCell<Parser>>, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    let params = parse_closure_params(Rc::clone(&p))?;
-    let ex = parse_closure_modifiers(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    let body = parse_closure_body(Rc::clone(&p))?;
-    let (is_block, body) = closure_body_is_block(body);
+fn parse_trailing_closure(mut p: &mut Parser, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    let params = parse_closure_params(&mut (*p))?;
+    let ex = parse_closure_modifiers(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    let body = parse_closure_body(&mut (*p))?;
+    let (is_block, body) = closure_body_is_block(body.clone());
     if is_block {
-        if parser_peek_dot_after_newlines(Rc::clone(&p))? {
+        if parser_peek_dot_after_newlines(&mut (*p))? {
             return Err(Box::new(BoringError::Str("multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()")));
         }
     }
-    let (inf, body) = infer_throws_task(body);
-    let closure_expr = make_closure(params, None, body, (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line);
+    let (inf, body) = infer_throws_task(body.clone());
+    let closure_expr = make_closure(params, None, body.clone(), (ex.can_throw || inf.can_throw), (ex.is_task || inf.is_task), line);
     let mut args = existing_args;
     args.push(make_arg(None, closure_expr.clone(), false));
     Ok(args)
 }
 
-fn parse_trailing_body(mut p: Rc<RefCell<Parser>>, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    let body = parse_closure_body(Rc::clone(&p))?;
-    let (is_block, body) = closure_body_is_block(body);
+fn parse_trailing_body(mut p: &mut Parser, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    let body = parse_closure_body(&mut (*p))?;
+    let (is_block, body) = closure_body_is_block(body.clone());
     if is_block {
-        if parser_peek_dot_after_newlines(Rc::clone(&p))? {
+        if parser_peek_dot_after_newlines(&mut (*p))? {
             return Err(Box::new(BoringError::Str("multiline trailing body cannot be chained — use parentheses: f(args, ():\n    body).next()")));
         }
     }
-    let (inf, body) = infer_throws_task(body);
-    let closure_expr = make_closure(vec![], None, body, inf.can_throw, inf.is_task, line);
+    let (inf, body) = infer_throws_task(body.clone());
+    let closure_expr = make_closure(vec![], None, body.clone(), inf.can_throw, inf.is_task, line);
     let mut args = existing_args;
     args.push(make_arg(None, closure_expr.clone(), false));
     Ok(args)
 }
 
-fn parse_trailing_body_no_colon(mut p: Rc<RefCell<Parser>>, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    let body_expr = parse_or(Rc::clone(&p))?;
+fn parse_trailing_body_no_colon(mut p: &mut Parser, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    let body_expr = parse_or(&mut (*p))?;
     let body = closure_body_expr(body_expr.clone());
-    let (inf, body) = infer_throws_task(body);
-    let closure_expr = make_closure(vec![], None, body, inf.can_throw, inf.is_task, line);
+    let (inf, body) = infer_throws_task(body.clone());
+    let closure_expr = make_closure(vec![], None, body.clone(), inf.can_throw, inf.is_task, line);
     let mut args = existing_args;
     args.push(make_arg(None, closure_expr.clone(), false));
     Ok(args)
 }
 
-fn parse_trailing_closure_no_paren(mut p: Rc<RefCell<Parser>>, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    let name = parser_expect_ident(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    let param = make_param(Rc::<str>::from(name.to_string()), None, false);
-    let body = parse_closure_body(Rc::clone(&p))?;
-    let (is_block, body) = closure_body_is_block(body);
-    if (is_block && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dot").to_string()))) {
+fn parse_trailing_closure_no_paren(mut p: &mut Parser, existing_args: Vec<Arg>) -> Result<Vec<Arg>, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    let name = parser_expect_ident(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    let param = make_param(Arc::<str>::from(name.to_string()), None, false);
+    let body = parse_closure_body(&mut (*p))?;
+    let (is_block, body) = closure_body_is_block(body.clone());
+    if (is_block && parser_check(&mut (*p), Arc::<str>::from("Dot"))) {
         return Err(Box::new(BoringError::Str("multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()")));
     }
-    let (throws_task, body) = infer_throws_task(body);
-    let closure_expr = make_closure(vec![param], None, body, throws_task.can_throw, throws_task.is_task, line);
+    let (throws_task, body) = infer_throws_task(body.clone());
+    let closure_expr = make_closure(vec![param], None, body.clone(), throws_task.can_throw, throws_task.is_task, line);
     let mut args = existing_args;
     args.push(make_arg(None, closure_expr.clone(), false));
     Ok(args)
 }
 
-fn parse_closure_params(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Param>, Box<dyn std::error::Error>> {
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string()))?;
-    parser_skip_newlines_and_indent(Rc::clone(&p))?;
+fn parse_closure_params(mut p: &mut Parser) -> Result<Vec<Param>, Box<dyn std::error::Error + Send + Sync>> {
+    parser_expect(&mut (*p), Arc::<str>::from("LParen"))?;
+    parser_skip_newlines_and_indent(&mut (*p))?;
     let mut params = vec![];
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("RParen")) {
+        parser_advance(&mut (*p))?;
         return Ok(params);
     }
-    while ((!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        if parser_is_type_start_before_ident(Rc::clone(&p)) {
-            params.push(parse_param(Rc::clone(&p))?);
+    while ((!parser_check(&mut (*p), Arc::<str>::from("RParen"))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        if parser_is_type_start_before_ident(&mut (*p)) {
+            params.push(parse_param(&mut (*p))?);
         } else {
-            let line = parser_line(Rc::clone(&p));
-            let name = parser_expect_ident(Rc::clone(&p))?;
-            params.push(make_param_at(Rc::<str>::from(name.to_string()), None, false, line));
+            let line = parser_line(&mut (*p));
+            let name = parser_expect_ident(&mut (*p))?;
+            params.push(make_param_at(Arc::<str>::from(name.to_string()), None, false, line));
         }
-        if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+        if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
             break;
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
     }
-    parser_skip_newlines_and_indent(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
+    parser_skip_newlines_and_indent(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
     Ok(params)
 }
 
-fn parse_task_expr(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Task").to_string()))?;
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+fn parse_task_expr(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Task"))?;
+    if parser_check(&mut (*p), Arc::<str>::from("LParen")) {
+        parser_advance(&mut (*p))?;
         let dur_expr = {
-        if ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Ident").to_string())) && (parser_peek_ident(Rc::clone(&p)) == Rc::<str>::from("timeout"))) && parser_check2(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))) {
-            parser_advance(Rc::clone(&p))?;
-            parser_advance(Rc::clone(&p))?;
-            parse_expr(Rc::clone(&p))?
+        if ((parser_check(&mut (*p), Arc::<str>::from("Ident")) && (parser_peek_ident(&mut (*p)) == Arc::<str>::from("timeout"))) && parser_check2(&mut (*p), Arc::<str>::from("Eq"))) {
+            parser_advance(&mut (*p))?;
+            parser_advance(&mut (*p))?;
+            parse_expr(&mut (*p))?
         } else {
-            parse_expr(Rc::clone(&p))?
+            parse_expr(&mut (*p))?
         }
 };
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
-        parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
+        parser_eat(&mut (*p), Arc::<str>::from("Colon"))?;
         let body = {
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
-            parser_expect_newline(Rc::clone(&p))?;
-            let stmts = parse_block(Rc::clone(&p))?;
-            check_no_return(stmts.clone(), Rc::<str>::from(Rc::<str>::from("task block").to_string()));
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
+            parser_expect_newline(&mut (*p))?;
+            let stmts = parse_block(&mut (*p))?;
+            check_no_return(stmts.clone(), Arc::<str>::from("task block"));
             make_block_expr(stmts, line)
         } else {
-            parse_or(Rc::clone(&p))?
+            parse_or(&mut (*p))?
         }
 };
         return Ok(make_task_with_timeout(dur_expr, body, line));
     }
-    parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+    parser_eat(&mut (*p), Arc::<str>::from("Colon"))?;
     let inner = {
-    if parser_is_newline(Rc::clone(&p)) {
-        parser_expect_newline(Rc::clone(&p))?;
-        let stmts = parse_block(Rc::clone(&p))?;
-        check_no_return(stmts.clone(), Rc::<str>::from(Rc::<str>::from("task block").to_string()));
+    if parser_is_newline(&mut (*p)) {
+        parser_expect_newline(&mut (*p))?;
+        let stmts = parse_block(&mut (*p))?;
+        check_no_return(stmts.clone(), Arc::<str>::from("task block"));
         make_block_expr(stmts, line)
     } else {
-        let expr = parse_or(Rc::clone(&p))?;
-        if (expr_is_var(expr.clone()) && parser_peek_starts_expr(Rc::clone(&p))?) {
+        let expr = parse_or(&mut (*p))?;
+        if (expr_is_var(expr.clone()) && parser_peek_starts_expr(&mut (*p))?) {
             let arg_line = expr.line;
-            let arg = parse_expr(Rc::clone(&p))?;
+            let arg = parse_expr(&mut (*p))?;
             make_call(expr.clone(), vec![make_arg(None, arg.clone(), false)], arg_line)
         } else {
             expr.clone()
@@ -6211,234 +6273,234 @@ fn parse_task_expr(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::erro
     Ok(make_task_expr(inner, line))
 }
 
-fn parse_block(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
-    while ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comment").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Newline").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Semicolon").to_string()))) {
-        parser_advance(Rc::clone(&p))?;
+fn parse_block(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
+    while ((parser_check(&mut (*p), Arc::<str>::from("Comment")) || parser_check(&mut (*p), Arc::<str>::from("Newline"))) || parser_check(&mut (*p), Arc::<str>::from("Semicolon"))) {
+        parser_advance(&mut (*p))?;
     }
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Indent").to_string()))?;
-    let stmts = parse_stmts_until_dedent(Rc::clone(&p))?;
-    parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string()))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Indent"))?;
+    let stmts = parse_stmts_until_dedent(&mut (*p))?;
+    parser_eat(&mut (*p), Arc::<str>::from("Dedent"))?;
     Ok(stmts)
 }
 
-fn parse_stmts_until_dedent(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
+fn parse_stmts_until_dedent(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
     let mut stmts = vec![];
     while true {
-        parser_skip_newlines(Rc::clone(&p))?;
-        if ((((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBracket").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string()))) {
+        parser_skip_newlines(&mut (*p))?;
+        if ((((parser_check(&mut (*p), Arc::<str>::from("Dedent")) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) || parser_check(&mut (*p), Arc::<str>::from("RParen"))) || parser_check(&mut (*p), Arc::<str>::from("RBracket"))) || parser_check(&mut (*p), Arc::<str>::from("RBrace"))) {
             break;
         }
-        stmts.push(parse_stmt(Rc::clone(&p))?);
+        stmts.push(parse_stmt(&mut (*p))?);
     }
     Ok(stmts)
 }
 
-fn parse_stmt(mut p: Rc<RefCell<Parser>>) -> Result<Stmt, Box<dyn std::error::Error>> {
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comment").to_string())) {
-        let text = parser_peek_comment(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        while parser_is_newline(Rc::clone(&p)) {
-            parser_advance(Rc::clone(&p))?;
+fn parse_stmt(mut p: &mut Parser) -> Result<Stmt, Box<dyn std::error::Error + Send + Sync>> {
+    if parser_check(&mut (*p), Arc::<str>::from("Comment")) {
+        let text = parser_peek_comment(&mut (*p));
+        parser_advance(&mut (*p))?;
+        while parser_is_newline(&mut (*p)) {
+            parser_advance(&mut (*p))?;
         }
-        return Ok(stmt_comment(Rc::<str>::from(text.to_string())));
+        return Ok(stmt_comment(Arc::<str>::from(text.to_string())));
     }
-    if ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Let").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Var").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Static").to_string()))) {
-        if parser_is_let_destructure(Rc::clone(&p))? {
-            let line = parser_line(Rc::clone(&p));
-            parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Static").to_string()))?;
-            let mutable = parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Var").to_string()));
-            parser_advance(Rc::clone(&p))?;
-            return Ok(stmt_let_destructure(parse_let_destructure(Rc::clone(&p), mutable, line)?));
+    if ((parser_check(&mut (*p), Arc::<str>::from("Let")) || parser_check(&mut (*p), Arc::<str>::from("Var"))) || parser_check(&mut (*p), Arc::<str>::from("Static"))) {
+        if parser_is_let_destructure(&mut (*p))? {
+            let line = parser_line(&mut (*p));
+            parser_eat(&mut (*p), Arc::<str>::from("Static"))?;
+            let mutable = parser_check(&mut (*p), Arc::<str>::from("Var"));
+            parser_advance(&mut (*p))?;
+            return Ok(stmt_let_destructure(parse_let_destructure(&mut (*p), mutable, line)?));
         } else {
-            return Ok(stmt_let(parse_let_stmt(Rc::clone(&p))?));
+            return Ok(stmt_let(parse_let_stmt(&mut (*p))?));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Return").to_string())) {
-        return Ok(stmt_return(parse_return_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Return")) {
+        return Ok(stmt_return(parse_return_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Yield").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let expr = parse_expr(Rc::clone(&p))?;
-        parser_expect_newline_soft(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Yield")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let expr = parse_expr(&mut (*p))?;
+        parser_expect_newline_soft(&mut (*p))?;
         return Ok(stmt_yield(expr.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Break").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Break")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
         let value = {
-        if ((parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+        if ((parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Dedent"))) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
             None
         } else {
-            Some(parse_expr(Rc::clone(&p))?)
+            Some(parse_expr(&mut (*p))?)
         }
 };
-        parser_expect_newline_soft(Rc::clone(&p))?;
+        parser_expect_newline_soft(&mut (*p))?;
         return Ok(make_break_stmt(line, value));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Continue").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        parser_expect_newline(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Continue")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        parser_expect_newline(&mut (*p))?;
         return Ok(make_continue_stmt(line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Throw").to_string())) {
-        return Ok(stmt_throw(parse_throw_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Throw")) {
+        return Ok(stmt_throw(parse_throw_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("If").to_string())) {
-        if parser_peek_next_is(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Let").to_string())) {
-            return Ok(stmt_if_let(parse_if_let_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("If")) {
+        if parser_peek_next_is(&mut (*p), Arc::<str>::from("Let")) {
+            return Ok(stmt_if_let(parse_if_let_stmt(&mut (*p))?));
         } else {
-            return Ok(stmt_if(parse_if_stmt(Rc::clone(&p))?));
+            return Ok(stmt_if(parse_if_stmt(&mut (*p))?));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Match").to_string())) {
-        return Ok(stmt_match(parse_match_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Match")) {
+        return Ok(stmt_match(parse_match_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("While").to_string())) {
-        if parser_peek_next_is(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Let").to_string())) {
-            return Ok(stmt_while_let(parse_while_let_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("While")) {
+        if parser_peek_next_is(&mut (*p), Arc::<str>::from("Let")) {
+            return Ok(stmt_while_let(parse_while_let_stmt(&mut (*p))?));
         } else {
-            return Ok(stmt_while(parse_while_stmt(Rc::clone(&p))?));
+            return Ok(stmt_while(parse_while_stmt(&mut (*p))?));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Do").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-        if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-            let body = parse_inline_stmts(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("While").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                let condition = parse_expr(Rc::clone(&p))?;
-                parser_expect_newline_soft(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Do")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+        if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+            let body = parse_inline_stmts(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("While")) {
+                parser_advance(&mut (*p))?;
+                let condition = parse_expr(&mut (*p))?;
+                parser_expect_newline_soft(&mut (*p))?;
                 return Ok(stmt_do_while(body, condition.clone(), line));
             } else {
-                parser_expect_newline_soft(Rc::clone(&p))?;
+                parser_expect_newline_soft(&mut (*p))?;
                 return Ok(stmt_expr(make_do_expr(body, line), line));
             }
         } else {
-            parser_expect_newline(Rc::clone(&p))?;
-            let body = parse_block(Rc::clone(&p))?;
-            parser_skip_newlines(Rc::clone(&p))?;
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("While").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                let condition = parse_expr(Rc::clone(&p))?;
-                parser_expect_newline(Rc::clone(&p))?;
+            parser_expect_newline(&mut (*p))?;
+            let body = parse_block(&mut (*p))?;
+            parser_skip_newlines(&mut (*p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("While")) {
+                parser_advance(&mut (*p))?;
+                let condition = parse_expr(&mut (*p))?;
+                parser_expect_newline(&mut (*p))?;
                 return Ok(stmt_do_while(body, condition.clone(), line));
             } else {
                 return Ok(stmt_expr(make_do_expr(body, line), line));
             }
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Loop").to_string())) {
-        return Ok(stmt_loop(parse_loop_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Loop")) {
+        return Ok(stmt_loop(parse_loop_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Wait").to_string())) {
-        let line = parser_line(Rc::clone(&p));
-        parser_advance(Rc::clone(&p))?;
-        let dur = parse_expr(Rc::clone(&p))?;
-        parser_expect_newline_soft(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Wait")) {
+        let line = parser_line(&mut (*p));
+        parser_advance(&mut (*p))?;
+        let dur = parse_expr(&mut (*p))?;
+        parser_expect_newline_soft(&mut (*p))?;
         return Ok(stmt_wait(dur.clone(), line));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("For").to_string())) {
-        return Ok(stmt_for(parse_for_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("For")) {
+        return Ok(stmt_for(parse_for_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Guard").to_string())) {
-        return Ok(stmt_guard(parse_guard_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Guard")) {
+        return Ok(stmt_guard(parse_guard_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Try").to_string())) {
-        if parser_peek_next_is(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string())) {
-            return Ok(stmt_try(parse_try_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Try")) {
+        if parser_peek_next_is(&mut (*p), Arc::<str>::from("Colon")) {
+            return Ok(stmt_try(parse_try_stmt(&mut (*p))?));
         } else {
-            let expr = parse_expr(Rc::clone(&p))?;
-            parser_expect_newline_soft(Rc::clone(&p))?;
-            return Ok(stmt_expr(expr.clone(), parser_line(Rc::clone(&p))));
+            let expr = parse_expr(&mut (*p))?;
+            parser_expect_newline_soft(&mut (*p))?;
+            return Ok(stmt_expr(expr.clone(), parser_line(&mut (*p))));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Defer").to_string())) {
-        return Ok(stmt_defer(parse_defer_stmt(Rc::clone(&p))?));
+    if parser_check(&mut (*p), Arc::<str>::from("Defer")) {
+        return Ok(stmt_defer(parse_defer_stmt(&mut (*p))?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Def").to_string())) {
-        return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), false, true)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Def")) {
+        return Ok(stmt_fn(parse_fn_decl(&mut (*p), false, true)?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Req").to_string())) {
-        return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), false, false)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Req")) {
+        return Ok(stmt_fn(parse_fn_decl(&mut (*p), false, false)?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Struct").to_string())) {
-        return Ok(stmt_struct(parse_struct_decl(Rc::clone(&p), false)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Struct")) {
+        return Ok(stmt_struct(parse_struct_decl(&mut (*p), false)?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Enum").to_string())) {
-        return Ok(stmt_enum(parse_enum_decl(Rc::clone(&p), false)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Enum")) {
+        return Ok(stmt_enum(parse_enum_decl(&mut (*p), false)?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Mod").to_string())) {
-        return Ok(stmt_mod(parse_mod_decl(Rc::clone(&p), false)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Mod")) {
+        return Ok(stmt_mod(parse_mod_decl(&mut (*p), false)?));
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Use").to_string())) {
-        let after_ident = parser_token_at_offset_is(Rc::clone(&p), 2, Rc::<str>::from(Rc::<str>::from("As").to_string()));
+    if parser_check(&mut (*p), Arc::<str>::from("Use")) {
+        let after_ident = parser_token_at_offset_is(&mut (*p), 2, Arc::<str>::from("As"));
         if after_ident {
-            return Ok(stmt_alias(parse_alias_decl(Rc::clone(&p))?));
+            return Ok(stmt_alias(parse_alias_decl(&mut (*p))?));
         } else {
             return Err(Box::new(BoringError::Str("use inside a function body must be a type alias: `use Name as Type`")));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Pub").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        if ((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Static").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Let").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Var").to_string()))) {
-            return Ok(stmt_let(parse_let_stmt_pub(Rc::clone(&p), true)?));
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Req").to_string())) {
-            return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), true, false)?));
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Struct").to_string())) {
-            return Ok(stmt_struct(parse_struct_decl(Rc::clone(&p), true)?));
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Enum").to_string())) {
-            return Ok(stmt_enum(parse_enum_decl(Rc::clone(&p), true)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Pub")) {
+        parser_advance(&mut (*p))?;
+        if ((parser_check(&mut (*p), Arc::<str>::from("Static")) || parser_check(&mut (*p), Arc::<str>::from("Let"))) || parser_check(&mut (*p), Arc::<str>::from("Var"))) {
+            return Ok(stmt_let(parse_let_stmt_pub(&mut (*p), true)?));
+        } else if parser_check(&mut (*p), Arc::<str>::from("Req")) {
+            return Ok(stmt_fn(parse_fn_decl(&mut (*p), true, false)?));
+        } else if parser_check(&mut (*p), Arc::<str>::from("Struct")) {
+            return Ok(stmt_struct(parse_struct_decl(&mut (*p), true)?));
+        } else if parser_check(&mut (*p), Arc::<str>::from("Enum")) {
+            return Ok(stmt_enum(parse_enum_decl(&mut (*p), true)?));
         } else {
-            return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), true, true)?));
+            return Ok(stmt_fn(parse_fn_decl(&mut (*p), true, true)?));
         }
     }
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Task").to_string())) {
-        if parser_peek_next_is(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Def").to_string())) {
-            return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), false, true)?));
-        } else if parser_peek_next_is(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Req").to_string())) {
-            return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), false, false)?));
-        } else if parser_is_task_fn_shorthand(Rc::clone(&p))? {
-            return Ok(stmt_fn(parse_fn_decl(Rc::clone(&p), false, true)?));
+    if parser_check(&mut (*p), Arc::<str>::from("Task")) {
+        if parser_peek_next_is(&mut (*p), Arc::<str>::from("Def")) {
+            return Ok(stmt_fn(parse_fn_decl(&mut (*p), false, true)?));
+        } else if parser_peek_next_is(&mut (*p), Arc::<str>::from("Req")) {
+            return Ok(stmt_fn(parse_fn_decl(&mut (*p), false, false)?));
+        } else if parser_is_task_fn_shorthand(&mut (*p))? {
+            return Ok(stmt_fn(parse_fn_decl(&mut (*p), false, true)?));
         }
-        let task_expr = parse_task_expr(Rc::clone(&p))?;
-        if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
-            parser_skip_newlines(Rc::clone(&p))?;
+        let task_expr = parse_task_expr(&mut (*p))?;
+        if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
+            parser_skip_newlines(&mut (*p))?;
         }
         return Ok(stmt_expr(task_expr.clone(), task_expr.line));
     }
-    let line = parser_line(Rc::clone(&p));
-    let lhs = parse_expr(Rc::clone(&p))?;
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))? {
-        let rhs = parse_else_expr(Rc::clone(&p))?;
-        parser_expect_newline(Rc::clone(&p))?;
+    let line = parser_line(&mut (*p));
+    let lhs = parse_expr(&mut (*p))?;
+    if parser_eat(&mut (*p), Arc::<str>::from("Eq"))? {
+        let rhs = parse_else_expr(&mut (*p))?;
+        parser_expect_newline(&mut (*p))?;
         return Ok(stmt_expr(make_assign(lhs.clone(), rhs.clone(), line), line));
     }
-    let compound_op = compound_op_from_peek(Rc::clone(&p));
+    let compound_op = compound_op_from_peek(&mut (*p));
     if let Some(op) = compound_op {
-        parser_advance(Rc::clone(&p))?;
-        let rhs = parse_else_expr(Rc::clone(&p))?;
-        let binop = make_binop(Rc::<str>::from(op.to_string()), lhs.clone(), rhs.clone(), line);
-        parser_expect_newline(Rc::clone(&p))?;
+        parser_advance(&mut (*p))?;
+        let rhs = parse_else_expr(&mut (*p))?;
+        let binop = make_binop(Arc::<str>::from(op.to_string()), lhs.clone(), rhs.clone(), line);
+        parser_expect_newline(&mut (*p))?;
         return Ok(stmt_expr(make_assign(lhs.clone(), binop.clone(), line), line));
     }
-    if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("QuestionEq").to_string()))? {
-        let rhs = parse_else_expr(Rc::clone(&p))?;
+    if parser_eat(&mut (*p), Arc::<str>::from("QuestionEq"))? {
+        let rhs = parse_else_expr(&mut (*p))?;
         let else_expr = make_else_expr(lhs.clone(), rhs.clone(), line);
-        parser_expect_newline(Rc::clone(&p))?;
+        parser_expect_newline(&mut (*p))?;
         return Ok(stmt_expr(make_assign(lhs.clone(), else_expr.clone(), line), line));
     }
     let expr = {
     if expr_is_var(lhs.clone()) {
-        if parser_peek_starts_expr(Rc::clone(&p))? {
+        if parser_peek_starts_expr(&mut (*p))? {
             let mut args = vec![];
             while true {
-                let arg = parse_or(Rc::clone(&p))?;
+                let arg = parse_or(&mut (*p))?;
                 args.push(make_arg(None, arg.clone(), false));
-                if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+                if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
                     break;
                 }
             }
@@ -6450,41 +6512,41 @@ fn parse_stmt(mut p: Rc<RefCell<Parser>>) -> Result<Stmt, Box<dyn std::error::Er
         lhs.clone()
     }
 };
-    parser_expect_newline(Rc::clone(&p))?;
+    parser_expect_newline(&mut (*p))?;
     Ok(stmt_expr(expr, line))
 }
 
-fn parse_let_stmt(mut p: Rc<RefCell<Parser>>) -> Result<LetStmt, Box<dyn std::error::Error>> {
-    Ok(parse_let_stmt_pub(Rc::clone(&p), false)?)
+fn parse_let_stmt(mut p: &mut Parser) -> Result<LetStmt, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(parse_let_stmt_pub(&mut (*p), false)?)
 }
 
-fn parse_let_stmt_pub(mut p: Rc<RefCell<Parser>>, is_pub: bool) -> Result<LetStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    let is_static = parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Static").to_string()))?;
+fn parse_let_stmt_pub(mut p: &mut Parser, is_pub: bool) -> Result<LetStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    let is_static = parser_eat(&mut (*p), Arc::<str>::from("Static"))?;
     let mutable = {
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Var").to_string())) {
-        parser_advance(Rc::clone(&p))?;
+    if parser_check(&mut (*p), Arc::<str>::from("Var")) {
+        parser_advance(&mut (*p))?;
         true
     } else {
-        parser_advance(Rc::clone(&p))?;
+        parser_advance(&mut (*p))?;
         false
     }
 };
     let name_ty = {
-    if parser_is_type_start_before_ident(Rc::clone(&p)) {
-        let base = parse_type(Rc::clone(&p))?;
-        let ty = parse_type_qualifier(Rc::clone(&p), base)?;
+    if parser_is_type_start_before_ident(&mut (*p)) {
+        let base = parse_type(&mut (*p))?;
+        let ty = parse_type_qualifier(&mut (*p), base.clone())?;
         let ty2 = {
         if mutable {
-            apply_var_to_borrow(ty)
+            apply_var_to_borrow(ty.clone())
         } else {
             ty
         }
 };
-        let name = parser_expect_ident(Rc::clone(&p))?;
+        let name = parser_expect_ident(&mut (*p))?;
         let ty3 = {
-        if (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Tick").to_string())) && parser_peek_next_is_qualifier(Rc::clone(&p))) {
-            parse_type_qualifier(Rc::clone(&p), ty2)?
+        if (parser_check(&mut (*p), Arc::<str>::from("Tick")) && parser_peek_next_is_qualifier(&mut (*p))) {
+            parse_type_qualifier(&mut (*p), ty2.clone())?
         } else {
             ty2
         }
@@ -6492,205 +6554,205 @@ fn parse_let_stmt_pub(mut p: Rc<RefCell<Parser>>, is_pub: bool) -> Result<LetStm
         let pair = (name, Some(ty3));
         pair
     } else {
-        let name = parser_expect_ident(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Tick").to_string())) {
-            let next_kind = token_kind_name(parser_peek_token_at(Rc::clone(&p), 1).kind);
-            if (next_kind == Rc::<str>::from("Eq")) {
-                parser_advance(Rc::clone(&p))?;
-                parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-                let value = parse_expr(Rc::clone(&p))?;
-                parser_expect_newline_soft(Rc::clone(&p))?;
-                return Ok(make_let_stmt(mutable, is_pub, is_static, Rc::<str>::from(name.to_string()), None, Some(value.clone()), true, line));
-            } else if (((next_kind == Rc::<str>::from("Ident")) || (next_kind == Rc::<str>::from("Task"))) || (next_kind == Rc::<str>::from("Guard"))) {
-                let placeholder = type_named(Rc::<str>::from(Rc::<str>::from("_").to_string()));
-                let qualified = parse_type_qualifier(Rc::clone(&p), placeholder)?;
-                parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-                let value = parse_expr(Rc::clone(&p))?;
-                parser_expect_newline_soft(Rc::clone(&p))?;
-                let ty = infer_type_from_constructor(qualified, value.clone());
-                return Ok(make_let_stmt(mutable, is_pub, is_static, Rc::<str>::from(name.to_string()), Some(ty), Some(value.clone()), false, line));
+        let name = parser_expect_ident(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Tick")) {
+            let next_kind = token_kind_name(parser_peek_token_at(&mut (*p), 1).kind);
+            if (next_kind == Arc::<str>::from("Eq")) {
+                parser_advance(&mut (*p))?;
+                parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+                let value = parse_expr(&mut (*p))?;
+                parser_expect_newline_soft(&mut (*p))?;
+                return Ok(make_let_stmt(mutable, is_pub, is_static, Arc::<str>::from(name.to_string()), None, Some(value.clone()), true, line));
+            } else if (((next_kind == Arc::<str>::from("Ident")) || (next_kind == Arc::<str>::from("Task"))) || (next_kind == Arc::<str>::from("Guard"))) {
+                let placeholder = type_named(Arc::<str>::from("_"));
+                let qualified = parse_type_qualifier(&mut (*p), placeholder.clone())?;
+                parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+                let value = parse_expr(&mut (*p))?;
+                parser_expect_newline_soft(&mut (*p))?;
+                let ty = infer_type_from_constructor(qualified.clone(), value.clone());
+                return Ok(make_let_stmt(mutable, is_pub, is_static, Arc::<str>::from(name.to_string()), Some(ty), Some(value.clone()), false, line));
             }
         }
         (name, None)
     }
 };
     let (nt_name, nt_ty) = name_ty;
-    if (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))) {
-        parser_expect_newline_soft(Rc::clone(&p))?;
-        return Ok(make_let_stmt(mutable, is_pub, is_static, Rc::<str>::from(nt_name.to_string()), nt_ty, None, false, line));
+    if (!parser_check(&mut (*p), Arc::<str>::from("Eq"))) {
+        parser_expect_newline_soft(&mut (*p))?;
+        return Ok(make_let_stmt(mutable, is_pub, is_static, Arc::<str>::from(nt_name.to_string()), nt_ty, None, false, line));
     }
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-    let value = parse_expr(Rc::clone(&p))?;
-    parser_expect_newline_soft(Rc::clone(&p))?;
-    Ok(make_let_stmt(mutable, is_pub, is_static, Rc::<str>::from(nt_name.to_string()), nt_ty, Some(value.clone()), false, line))
+    parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+    let value = parse_expr(&mut (*p))?;
+    parser_expect_newline_soft(&mut (*p))?;
+    Ok(make_let_stmt(mutable, is_pub, is_static, Arc::<str>::from(nt_name.to_string()), nt_ty, Some(value.clone()), false, line))
 }
 
-fn parse_let_destructure(mut p: Rc<RefCell<Parser>>, mutable: bool, line: i64) -> Result<LetDestructureStmt, Box<dyn std::error::Error>> {
-    let parens = parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("LParen").to_string()))?;
+fn parse_let_destructure(mut p: &mut Parser, mutable: bool, line: i64) -> Result<LetDestructureStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let parens = parser_eat(&mut (*p), Arc::<str>::from("LParen"))?;
     if parens {
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
     }
     let mut bindings = vec![];
     while true {
-        if (parens && parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) {
+        if (parens && parser_check(&mut (*p), Arc::<str>::from("RParen"))) {
             break;
         }
-        if ((!parens) && (parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
+        if ((!parens) && (parser_check(&mut (*p), Arc::<str>::from("Eq")) || parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
             break;
         }
         let name_ty = {
-        if (parser_peek_ident(Rc::clone(&p)) == Rc::<str>::from("_")) {
-            parser_advance(Rc::clone(&p))?;
-            (Rc::<str>::from("_"), None)
-        } else if parser_is_type_start_before_ident(Rc::clone(&p)) {
-            let ty = parse_type(Rc::clone(&p))?;
-            let name = parser_expect_ident(Rc::clone(&p))?;
+        if (parser_peek_ident(&mut (*p)) == Arc::<str>::from("_")) {
+            parser_advance(&mut (*p))?;
+            (Arc::<str>::from("_"), None)
+        } else if parser_is_type_start_before_ident(&mut (*p)) {
+            let ty = parse_type(&mut (*p))?;
+            let name = parser_expect_ident(&mut (*p))?;
             (name, Some(ty))
         } else {
-            (parser_expect_ident(Rc::clone(&p))?, None)
+            (parser_expect_ident(&mut (*p))?, None)
         }
 };
         let (dt_name, dt_ty) = name_ty;
-        bindings.push(make_destructure_binding(Rc::<str>::from(dt_name.to_string()), dt_ty));
-        if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+        bindings.push(make_destructure_binding(Arc::<str>::from(dt_name.to_string()), dt_ty));
+        if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
             break;
         }
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
     }
     if parens {
-        parser_skip_newlines_and_indent(Rc::clone(&p))?;
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))?;
+        parser_skip_newlines_and_indent(&mut (*p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("RParen"))?;
     }
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eq").to_string()))?;
-    let value = parse_expr(Rc::clone(&p))?;
-    parser_expect_newline_soft(Rc::clone(&p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Eq"))?;
+    let value = parse_expr(&mut (*p))?;
+    parser_expect_newline_soft(&mut (*p))?;
     Ok(make_let_destructure_stmt(mutable, bindings, value.clone(), line))
 }
 
-fn parse_return_stmt(mut p: Rc<RefCell<Parser>>) -> Result<ReturnStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Return").to_string()))?;
+fn parse_return_stmt(mut p: &mut Parser) -> Result<ReturnStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Return"))?;
     let value = {
-    if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+    if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
         None
     } else {
-        Some(parse_expr(Rc::clone(&p))?)
+        Some(parse_expr(&mut (*p))?)
     }
 };
-    parser_expect_newline(Rc::clone(&p))?;
+    parser_expect_newline(&mut (*p))?;
     Ok(make_return_stmt(value, line))
 }
 
-fn parse_throw_stmt(mut p: Rc<RefCell<Parser>>) -> Result<ThrowStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Throw").to_string()))?;
+fn parse_throw_stmt(mut p: &mut Parser) -> Result<ThrowStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Throw"))?;
     let value = {
-    if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
+    if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
         None
     } else {
-        Some(parse_expr(Rc::clone(&p))?)
+        Some(parse_expr(&mut (*p))?)
     }
 };
-    parser_expect_newline(Rc::clone(&p))?;
+    parser_expect_newline(&mut (*p))?;
     Ok(make_throw_stmt(value, line))
 }
 
-fn parse_if_stmt(mut p: Rc<RefCell<Parser>>) -> Result<IfStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("If").to_string()))?;
-    let saved_np = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-    let cond = parse_expr(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), saved_np)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        let then_stmts = parse_inline_stmts_if_body(Rc::clone(&p))?;
+fn parse_if_stmt(mut p: &mut Parser) -> Result<IfStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("If"))?;
+    let saved_np = parser_get_allow_noparen_closure(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), false)?;
+    parser_set_allow_trailing_closure(&mut (*p), false)?;
+    let cond = parse_expr(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), saved_np)?;
+    parser_set_allow_trailing_closure(&mut (*p), true)?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        let then_stmts = parse_inline_stmts_if_body(&mut (*p))?;
         let mut branches = vec![IfBranch { cond: cond.clone(), body: then_stmts }];
         let mut else_body: Option<Vec<Stmt>> = None;
         while true {
-            if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Elif").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-                parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-                parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-                let elif_cond = parse_expr(Rc::clone(&p))?;
-                parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-                parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-                parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-                let elif_stmts = parse_inline_stmts_if_body(Rc::clone(&p))?;
+            if parser_check(&mut (*p), Arc::<str>::from("Elif")) {
+                parser_advance(&mut (*p))?;
+                let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+                parser_set_allow_noparen_closure(&mut (*p), false)?;
+                parser_set_allow_trailing_closure(&mut (*p), false)?;
+                let elif_cond = parse_expr(&mut (*p))?;
+                parser_set_allow_noparen_closure(&mut (*p), saved)?;
+                parser_set_allow_trailing_closure(&mut (*p), true)?;
+                parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+                let elif_stmts = parse_inline_stmts_if_body(&mut (*p))?;
                 branches.push(IfBranch { cond: elif_cond.clone(), body: elif_stmts });
-            } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string())) {
-                parser_advance(Rc::clone(&p))?;
-                else_body = Some(parse_else_body_stmts(Rc::clone(&p))?);
+            } else if parser_check(&mut (*p), Arc::<str>::from("Else")) {
+                parser_advance(&mut (*p))?;
+                else_body = Some(parse_else_body_stmts(&mut (*p))?);
                 break;
             } else {
                 break;
             }
         }
         if (else_body == None) {
-            parser_expect_newline(Rc::clone(&p))?;
+            parser_expect_newline(&mut (*p))?;
             while true {
-                parser_skip_newlines(Rc::clone(&p))?;
-                if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Elif").to_string())) {
-                    parser_advance(Rc::clone(&p))?;
-                    let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-                    parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-                    parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-                    let elif_cond = parse_expr(Rc::clone(&p))?;
-                    parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-                    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-                    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+                parser_skip_newlines(&mut (*p))?;
+                if parser_check(&mut (*p), Arc::<str>::from("Elif")) {
+                    parser_advance(&mut (*p))?;
+                    let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+                    parser_set_allow_noparen_closure(&mut (*p), false)?;
+                    parser_set_allow_trailing_closure(&mut (*p), false)?;
+                    let elif_cond = parse_expr(&mut (*p))?;
+                    parser_set_allow_noparen_closure(&mut (*p), saved)?;
+                    parser_set_allow_trailing_closure(&mut (*p), true)?;
+                    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
                     let elif_body = {
-                    if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-                        parse_inline_stmts_if_body(Rc::clone(&p))?
+                    if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+                        parse_inline_stmts_if_body(&mut (*p))?
                     } else {
-                        parser_expect_newline(Rc::clone(&p))?;
-                        parse_block(Rc::clone(&p))?
+                        parser_expect_newline(&mut (*p))?;
+                        parse_block(&mut (*p))?
                     }
 };
                     branches.push(IfBranch { cond: elif_cond.clone(), body: elif_body });
-                } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string())) {
-                    parser_advance(Rc::clone(&p))?;
-                    else_body = Some(parse_else_body_stmts(Rc::clone(&p))?);
+                } else if parser_check(&mut (*p), Arc::<str>::from("Else")) {
+                    parser_advance(&mut (*p))?;
+                    else_body = Some(parse_else_body_stmts(&mut (*p))?);
                     break;
                 } else {
                     break;
                 }
             }
-        } else if (parser_is_newline(Rc::clone(&p)) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) {
-            parser_expect_newline_soft(Rc::clone(&p))?;
+        } else if (parser_is_newline(&mut (*p)) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) {
+            parser_expect_newline_soft(&mut (*p))?;
         }
         return Ok(make_if_stmt(branches, else_body, line));
     }
-    parser_expect_newline(Rc::clone(&p))?;
-    let body = parse_block(Rc::clone(&p))?;
+    parser_expect_newline(&mut (*p))?;
+    let body = parse_block(&mut (*p))?;
     let mut branches = vec![IfBranch { cond: cond.clone(), body: body }];
     let mut else_body: Option<Vec<Stmt>> = None;
     while true {
-        parser_skip_newlines(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Elif").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-            parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-            parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-            let elif_cond = parse_expr(Rc::clone(&p))?;
-            parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-            parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+        parser_skip_newlines(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Elif")) {
+            parser_advance(&mut (*p))?;
+            let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+            parser_set_allow_noparen_closure(&mut (*p), false)?;
+            parser_set_allow_trailing_closure(&mut (*p), false)?;
+            let elif_cond = parse_expr(&mut (*p))?;
+            parser_set_allow_noparen_closure(&mut (*p), saved)?;
+            parser_set_allow_trailing_closure(&mut (*p), true)?;
+            parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
             let elif_body = {
-            if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-                parse_inline_stmts_if_body(Rc::clone(&p))?
+            if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+                parse_inline_stmts_if_body(&mut (*p))?
             } else {
-                parser_expect_newline(Rc::clone(&p))?;
-                parse_block(Rc::clone(&p))?
+                parser_expect_newline(&mut (*p))?;
+                parse_block(&mut (*p))?
             }
 };
             branches.push(IfBranch { cond: elif_cond.clone(), body: elif_body });
-        } else if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Else").to_string())) {
-            parser_advance(Rc::clone(&p))?;
-            else_body = Some(parse_else_body_stmts(Rc::clone(&p))?);
+        } else if parser_check(&mut (*p), Arc::<str>::from("Else")) {
+            parser_advance(&mut (*p))?;
+            else_body = Some(parse_else_body_stmts(&mut (*p))?);
             break;
         } else {
             break;
@@ -6699,123 +6761,123 @@ fn parse_if_stmt(mut p: Rc<RefCell<Parser>>) -> Result<IfStmt, Box<dyn std::erro
     Ok(make_if_stmt(branches, else_body, line))
 }
 
-fn parse_while_stmt(mut p: Rc<RefCell<Parser>>) -> Result<WhileStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("While").to_string()))?;
-    let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-    let condition = parse_expr(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+fn parse_while_stmt(mut p: &mut Parser) -> Result<WhileStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("While"))?;
+    let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), false)?;
+    parser_set_allow_trailing_closure(&mut (*p), false)?;
+    let condition = parse_expr(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), saved)?;
+    parser_set_allow_trailing_closure(&mut (*p), true)?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
     let body = {
-    if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        let stmts = parse_inline_stmts(Rc::clone(&p))?;
-        parser_expect_newline_soft(Rc::clone(&p))?;
+    if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        let stmts = parse_inline_stmts(&mut (*p))?;
+        parser_expect_newline_soft(&mut (*p))?;
         stmts
     } else {
-        parser_expect_newline(Rc::clone(&p))?;
-        parse_block(Rc::clone(&p))?
+        parser_expect_newline(&mut (*p))?;
+        parse_block(&mut (*p))?
     }
 };
     Ok(make_while_stmt(condition.clone(), body, line))
 }
 
-fn parse_for_stmt(mut p: Rc<RefCell<Parser>>) -> Result<ForStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("For").to_string()))?;
-    let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
+fn parse_for_stmt(mut p: &mut Parser) -> Result<ForStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("For"))?;
+    let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), false)?;
+    parser_set_allow_trailing_closure(&mut (*p), false)?;
     let vars_iterable = {
-    if parser_is_for_with_vars(Rc::clone(&p))? {
-        let mut vars = vec![parser_expect_ident(Rc::clone(&p))?];
-        while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-            vars.push(parser_expect_ident(Rc::clone(&p))?);
+    if parser_is_for_with_vars(&mut (*p))? {
+        let mut vars = vec![parser_expect_ident(&mut (*p))?];
+        while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+            vars.push(parser_expect_ident(&mut (*p))?);
         }
-        parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("In").to_string()))?;
-        let iterable = parse_expr(Rc::clone(&p))?;
+        parser_expect(&mut (*p), Arc::<str>::from("In"))?;
+        let iterable = parse_expr(&mut (*p))?;
         (vars, iterable.clone())
     } else {
-        let iterable = parse_expr(Rc::clone(&p))?;
-        (vec![Rc::<str>::from("_")], iterable.clone())
+        let iterable = parse_expr(&mut (*p))?;
+        (vec![Arc::<str>::from("_")], iterable.clone())
     }
 };
-    parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
+    parser_set_allow_noparen_closure(&mut (*p), saved)?;
+    parser_set_allow_trailing_closure(&mut (*p), true)?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
     let body = {
-    if ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        let stmts = parse_inline_stmts(Rc::clone(&p))?;
-        parser_expect_newline_soft(Rc::clone(&p))?;
+    if ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        let stmts = parse_inline_stmts(&mut (*p))?;
+        parser_expect_newline_soft(&mut (*p))?;
         stmts
     } else {
-        parser_expect_newline(Rc::clone(&p))?;
-        parse_block(Rc::clone(&p))?
+        parser_expect_newline(&mut (*p))?;
+        parse_block(&mut (*p))?
     }
 };
     Ok(make_for_stmt(vars_iterable.0, vars_iterable.1, body, line))
 }
 
-fn parse_match_stmt(mut p: Rc<RefCell<Parser>>) -> Result<MatchStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Match").to_string()))?;
-    let saved = parser_get_allow_noparen_closure(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), false)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), false)?;
-    let subject = parse_expr(Rc::clone(&p))?;
-    parser_set_allow_noparen_closure(Rc::clone(&p), saved)?;
-    parser_set_allow_trailing_closure(Rc::clone(&p), true)?;
-    if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("With").to_string())) {
-        parser_advance(Rc::clone(&p))?;
-        let arms = parse_inline_match_arms(Rc::clone(&p))?;
+fn parse_match_stmt(mut p: &mut Parser) -> Result<MatchStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Match"))?;
+    let saved = parser_get_allow_noparen_closure(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), false)?;
+    parser_set_allow_trailing_closure(&mut (*p), false)?;
+    let subject = parse_expr(&mut (*p))?;
+    parser_set_allow_noparen_closure(&mut (*p), saved)?;
+    parser_set_allow_trailing_closure(&mut (*p), true)?;
+    if parser_check(&mut (*p), Arc::<str>::from("With")) {
+        parser_advance(&mut (*p))?;
+        let arms = parse_inline_match_arms(&mut (*p))?;
         return Ok(make_match_stmt(subject.clone(), arms, line));
     }
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    parser_expect_newline(Rc::clone(&p))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Indent").to_string()))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    parser_expect_newline(&mut (*p))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Indent"))?;
     let mut arms = vec![];
     while true {
-        parser_skip_newlines(Rc::clone(&p))?;
-        if ((((parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string())) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RParen").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBracket").to_string()))) || parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("RBrace").to_string()))) {
+        parser_skip_newlines(&mut (*p))?;
+        if ((((parser_check(&mut (*p), Arc::<str>::from("Dedent")) || parser_check(&mut (*p), Arc::<str>::from("Eof"))) || parser_check(&mut (*p), Arc::<str>::from("RParen"))) || parser_check(&mut (*p), Arc::<str>::from("RBracket"))) || parser_check(&mut (*p), Arc::<str>::from("RBrace"))) {
             break;
         }
-        arms.push(parse_match_arm(Rc::clone(&p))?);
+        arms.push(parse_match_arm(&mut (*p))?);
     }
-    parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dedent").to_string()))?;
+    parser_eat(&mut (*p), Arc::<str>::from("Dedent"))?;
     Ok(make_match_stmt(subject.clone(), arms, line))
 }
 
-fn parse_try_stmt(mut p: Rc<RefCell<Parser>>) -> Result<TryStmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Try").to_string()))?;
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    parser_expect_newline(Rc::clone(&p))?;
-    let body = parse_block(Rc::clone(&p))?;
+fn parse_try_stmt(mut p: &mut Parser) -> Result<TryStmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Try"))?;
+    parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+    parser_expect_newline(&mut (*p))?;
+    let body = parse_block(&mut (*p))?;
     let mut catch_clauses = vec![];
     while true {
-        parser_skip_newlines(Rc::clone(&p))?;
-        if parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Catch").to_string())) {
-            let catch_line = parser_line(Rc::clone(&p));
-            parser_advance(Rc::clone(&p))?;
+        parser_skip_newlines(&mut (*p))?;
+        if parser_check(&mut (*p), Arc::<str>::from("Catch")) {
+            let catch_line = parser_line(&mut (*p));
+            parser_advance(&mut (*p))?;
             let mut types = vec![];
-            let mut variant: Option<Rc<str>> = None;
-            if parser_peek_is_ident(Rc::clone(&p)) {
-                let first_type = parser_expect_ident(Rc::clone(&p))?;
-                if parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Dot").to_string()))? {
-                    variant = Some(parser_expect_ident(Rc::clone(&p))?);
+            let mut variant: Option<Arc<str>> = None;
+            if parser_peek_is_ident(&mut (*p)) {
+                let first_type = parser_expect_ident(&mut (*p))?;
+                if parser_eat(&mut (*p), Arc::<str>::from("Dot"))? {
+                    variant = Some(parser_expect_ident(&mut (*p))?);
                     types.push(first_type);
                 } else {
                     types.push(first_type);
-                    while parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))? {
-                        types.push(parser_expect_ident(Rc::clone(&p))?);
+                    while parser_eat(&mut (*p), Arc::<str>::from("Comma"))? {
+                        types.push(parser_expect_ident(&mut (*p))?);
                     }
                 }
             }
-            parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-            parser_expect_newline(Rc::clone(&p))?;
-            let catch_body = parse_block(Rc::clone(&p))?;
+            parser_expect(&mut (*p), Arc::<str>::from("Colon"))?;
+            parser_expect_newline(&mut (*p))?;
+            let catch_body = parse_block(&mut (*p))?;
             catch_clauses.push(make_catch_clause(types, variant, catch_body, catch_line));
         } else {
             break;
@@ -6824,97 +6886,95 @@ fn parse_try_stmt(mut p: Rc<RefCell<Parser>>) -> Result<TryStmt, Box<dyn std::er
     Ok(make_try_stmt(body, catch_clauses, line))
 }
 
-fn parse_print_stmt(mut p: Rc<RefCell<Parser>>) -> Result<Stmt, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_expect(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Print").to_string()))?;
+fn parse_print_stmt(mut p: &mut Parser) -> Result<Stmt, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_expect(&mut (*p), Arc::<str>::from("Print"))?;
     let mut args = vec![];
-    while ((!parser_is_newline(Rc::clone(&p))) && (!parser_check(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Eof").to_string())))) {
-        args.push(parse_or(Rc::clone(&p))?);
-        if (!parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Comma").to_string()))?) {
+    while ((!parser_is_newline(&mut (*p))) && (!parser_check(&mut (*p), Arc::<str>::from("Eof")))) {
+        args.push(parse_or(&mut (*p))?);
+        if (!parser_eat(&mut (*p), Arc::<str>::from("Comma"))?) {
             break;
         }
     }
-    parser_expect_newline_soft(Rc::clone(&p))?;
-    Ok(stmt_expr(make_call(make_var_expr(Rc::<str>::from(Rc::<str>::from("print").to_string()), line), map_args(args), line), line))
+    parser_expect_newline_soft(&mut (*p))?;
+    Ok(stmt_expr(make_call(make_var_expr(Arc::<str>::from("print"), line), map_args(args), line), line))
 }
 
-fn parse_else_body_stmts(mut p: Rc<RefCell<Parser>>) -> Result<Vec<Stmt>, Box<dyn std::error::Error>> {
-    parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    if parser_is_newline(Rc::clone(&p)) {
-        parser_expect_newline(Rc::clone(&p))?;
-        parse_block(Rc::clone(&p))?;
+fn parse_else_body_stmts(mut p: &mut Parser) -> Result<Vec<Stmt>, Box<dyn std::error::Error + Send + Sync>> {
+    parser_eat(&mut (*p), Arc::<str>::from("Colon"))?;
+    if parser_is_newline(&mut (*p)) {
+        parser_expect_newline(&mut (*p))?;
+        Ok(parse_block(&mut (*p))?)
     } else {
-        let stmts = parse_inline_stmts(Rc::clone(&p))?;
-        parser_expect_newline_soft(Rc::clone(&p))?;
-        stmts;
+        let stmts = parse_inline_stmts(&mut (*p))?;
+        parser_expect_newline_soft(&mut (*p))?;
+        Ok(stmts)
     }
-    unreachable!()
 }
 
-fn parse_else_body_expr(mut p: Rc<RefCell<Parser>>) -> Result<Expr, Box<dyn std::error::Error>> {
-    let line = parser_line(Rc::clone(&p));
-    parser_eat(Rc::clone(&p), Rc::<str>::from(Rc::<str>::from("Colon").to_string()))?;
-    if parser_is_newline(Rc::clone(&p)) {
-        parser_expect_newline(Rc::clone(&p))?;
-        let stmts = parse_block(Rc::clone(&p))?;
-        make_block_expr(stmts, line);
+fn parse_else_body_expr(mut p: &mut Parser) -> Result<Expr, Box<dyn std::error::Error + Send + Sync>> {
+    let line = parser_line(&mut (*p));
+    parser_eat(&mut (*p), Arc::<str>::from("Colon"))?;
+    if parser_is_newline(&mut (*p)) {
+        parser_expect_newline(&mut (*p))?;
+        let stmts = parse_block(&mut (*p))?;
+        Ok(make_block_expr(stmts, line))
     } else {
-        parse_or(Rc::clone(&p))?;
+        Ok(parse_or(&mut (*p))?)
     }
-    unreachable!()
 }
 
-fn val_type_name(v: Value) -> Rc<str> {
+fn val_type_name(v: Value) -> Arc<str> {
     match v {
         Value::Int(_) => {
-            Rc::<str>::from("int")
+            Arc::<str>::from("int")
         }
         Value::Float(_) => {
-            Rc::<str>::from("float")
+            Arc::<str>::from("float")
         }
         Value::Str(_) => {
-            Rc::<str>::from("string")
+            Arc::<str>::from("string")
         }
         Value::Bool(_) => {
-            Rc::<str>::from("bool")
+            Arc::<str>::from("bool")
         }
         Value::Array(_) => {
-            Rc::<str>::from("array")
+            Arc::<str>::from("array")
         }
         Value::Dict(_) => {
-            Rc::<str>::from("dict")
+            Arc::<str>::from("dict")
         }
         Value::Set(_) => {
-            Rc::<str>::from("set")
+            Arc::<str>::from("set")
         }
         Value::Nil => {
-            Rc::<str>::from("nil")
+            Arc::<str>::from("nil")
         }
         Value::Void => {
-            Rc::<str>::from("void")
+            Arc::<str>::from("void")
         }
         Value::Tuple(_) => {
-            Rc::<str>::from("tuple")
+            Arc::<str>::from("tuple")
         }
         Value::Range(_, _, _, _) => {
-            Rc::<str>::from("range")
+            Arc::<str>::from("range")
         }
-        Value::Object(inner) => {
-            inner.borrow().type_name.clone()
+        Value::Object(mut inner) => {
+            inner.lock().unwrap().type_name.clone()
         }
-        Value::EnumVariant(type_name, _, _) => {
+        Value::EnumVariant(mut type_name, _, _) => {
             type_name.clone()
         }
         _ => {
-            Rc::<str>::from("unknown")
+            Arc::<str>::from("unknown")
         }
     }
 }
 
-fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: Rc<str>, args: Vec<Value>) -> Value {
-    let recv_type_name = val_type_name(recv.clone());
+fn call_method(mut interp: Arc<std::sync::Mutex<Interpreter>>, recv: Value, method_name: Arc<str>, args: Vec<Value>) -> Value {
+    let recv_type = recv.type_name();
     match recv {
-        Value::Str(s) => {
+        Value::Str(mut s) => {
             match &*method_name {
                 "length" => {
                     Value::Int((s.len() as i64))
@@ -6923,10 +6983,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Int((s.len() as i64))
                 }
                 "split" => {
-                    let sep = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let sep = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match sep {
-                        Value::Str(sv) => {
-                            Value::Array(s.split(sv.as_ref()).map(|p| Rc::<str>::from(p.to_string())).collect::<Vec<_>>().iter().cloned().map(|part| Value::Str(Rc::<str>::from(part.to_string()))).collect::<Vec<_>>())
+                        Value::Str(mut sv) => {
+                            Value::Array(s.split(sv.as_ref()).map(|p| Arc::<str>::from(p.to_string())).collect::<Vec<_>>().iter().cloned().map(|part| Value::Str(Arc::<str>::from(part.to_string()))).collect::<Vec<_>>())
                         }
                         _ => {
                             panic!("split: expected string separator");
@@ -6934,18 +6994,18 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "trim" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(s.trim()).to_string()).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(s.trim()).to_string()))
                 }
                 "trimStart" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(s.trim_start()).to_string()))
+                    Value::Str(Arc::<str>::from(s.trim_start()))
                 }
                 "trimEnd" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(s.trim_end()).to_string()))
+                    Value::Str(Arc::<str>::from(s.trim_end()))
                 }
                 "startsWith" => {
-                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match arg {
-                        Value::Str(sv) => {
+                        Value::Str(mut sv) => {
                             Value::Bool(s.starts_with(sv.as_ref()))
                         }
                         _ => {
@@ -6954,9 +7014,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "endsWith" => {
-                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match arg {
-                        Value::Str(sv) => {
+                        Value::Str(mut sv) => {
                             Value::Bool(s.ends_with(sv.as_ref()))
                         }
                         _ => {
@@ -6965,9 +7025,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "contains" => {
-                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match arg {
-                        Value::Str(sv) => {
+                        Value::Str(mut sv) => {
                             Value::Bool(s.contains(sv.as_ref()))
                         }
                         _ => {
@@ -6976,13 +7036,13 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "replace" => {
-                    let from_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
-                    let to_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let from_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
+                    let to_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match from_val {
-                        Value::Str(from_s) => {
+                        Value::Str(mut from_s) => {
                             match to_val {
-                                Value::Str(to_s) => {
-                                    Value::Str(Rc::<str>::from(Rc::<str>::from(s.replace(from_s.as_ref(), to_s.as_ref()).as_str()).to_string()))
+                                Value::Str(mut to_s) => {
+                                    Value::Str(Arc::<str>::from(s.replace(from_s.as_ref(), to_s.as_ref()).as_str()))
                                 }
                                 _ => {
                                     panic!("replace: expected string arguments");
@@ -6995,25 +7055,25 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "toUpper" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(s.to_uppercase().as_str()).to_string()))
+                    Value::Str(Arc::<str>::from(s.to_uppercase().as_str()))
                 }
                 "toLower" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(s.to_lowercase().as_str()).to_string()))
+                    Value::Str(Arc::<str>::from(s.to_lowercase().as_str()))
                 }
                 "chars" => {
-                    Value::Array(s.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().iter().cloned().map(|c| Value::Str(Rc::<str>::from(c.to_string()))).collect::<Vec<_>>())
+                    Value::Array(s.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().iter().cloned().map(|c| Value::Str(Arc::<str>::from(c.to_string()))).collect::<Vec<_>>())
                 }
                 "lines" => {
-                    Value::Array(s.split("\n").map(|p| Rc::<str>::from(p.to_string())).collect::<Vec<_>>().iter().cloned().map(|l| Value::Str(Rc::<str>::from(l.to_string()))).collect::<Vec<_>>())
+                    Value::Array(s.split("\n").map(|p| Arc::<str>::from(p.to_string())).collect::<Vec<_>>().iter().cloned().map(|l| Value::Str(Arc::<str>::from(l.to_string()))).collect::<Vec<_>>())
                 }
                 "slice" => {
                     let start_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     let end_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Int((s.len() as i64)));
                     match start_val {
-                        Value::Int(start) => {
+                        Value::Int(mut start) => {
                             match end_val {
-                                Value::Int(end) => {
-                                    Value::Str(Rc::<str>::from({ let __start = (start) as usize; Rc::<str>::from(s.chars().skip(__start).take((end) as usize - __start).collect::<String>().as_str()) }.to_string()))
+                                Value::Int(mut end) => {
+                                    Value::Str(Arc::<str>::from({ let __start = (start) as usize; Arc::<str>::from(s.chars().skip(__start).take((end) as usize - __start).collect::<String>().as_str()) }.to_string()))
                                 }
                                 _ => {
                                     panic!("slice: expected int end");
@@ -7026,9 +7086,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "indexOf" => {
-                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match arg {
-                        Value::Str(sv) => {
+                        Value::Str(mut sv) => {
                             let idx = s.find(&*sv).map(|i| i as i64);
                             if let Some(idx_val) = idx {
                                 Value::Int(idx_val)
@@ -7044,8 +7104,8 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "repeat" => {
                     let arg = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     match arg {
-                        Value::Int(n) => {
-                            Value::Str(Rc::<str>::from(Rc::<str>::from(s.repeat(((n as i64)) as usize).as_str()).to_string()))
+                        Value::Int(mut n) => {
+                            Value::Str(Arc::<str>::from(s.repeat(((n as i64)) as usize).as_str()))
                         }
                         _ => {
                             panic!("repeat: expected int argument");
@@ -7054,17 +7114,17 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 }
                 "padLeft" => {
                     let width_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
-                    let pad_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from(" ").to_string())));
+                    let pad_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from(" ")));
                     match width_val {
-                        Value::Int(w) => {
+                        Value::Int(mut w) => {
                             match pad_val {
-                                Value::Str(p) => {
+                                Value::Str(mut p) => {
                                     let cur_len = (s.len() as i64);
                                     if (cur_len >= w) {
-                                        Value::Str(Rc::<str>::from(s.clone().to_string()))
+                                        Value::Str(Arc::<str>::from(s.clone().to_string()))
                                     } else {
-                                        let padding = Rc::<str>::from(p.repeat((((w - cur_len) as i64)) as usize).as_str());
-                                        Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}{}", padding, s).as_str())).to_string()))
+                                        let padding = Arc::<str>::from(p.repeat((((w - cur_len) as i64)) as usize).as_str());
+                                        Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}{}", padding, s).as_str())))
                                     }
                                 }
                                 _ => {
@@ -7079,17 +7139,17 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 }
                 "padRight" => {
                     let width_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
-                    let pad_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from(" ").to_string())));
+                    let pad_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from(" ")));
                     match width_val {
-                        Value::Int(w) => {
+                        Value::Int(mut w) => {
                             match pad_val {
-                                Value::Str(p) => {
+                                Value::Str(mut p) => {
                                     let cur_len = (s.len() as i64);
                                     if (cur_len >= w) {
-                                        Value::Str(Rc::<str>::from(s.clone().to_string()))
+                                        Value::Str(Arc::<str>::from(s.clone().to_string()))
                                     } else {
-                                        let padding = Rc::<str>::from(p.repeat((((w - cur_len) as i64)) as usize).as_str());
-                                        Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}{}", s, padding).as_str())).to_string()))
+                                        let padding = Arc::<str>::from(p.repeat((((w - cur_len) as i64)) as usize).as_str());
+                                        Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}{}", s, padding).as_str())))
                                     }
                                 }
                                 _ => {
@@ -7119,7 +7179,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 "isDigit" => {
-                    Value::Bool((((s.len() as i64) == 1) && s.chars().map(|c| Rc::<str>::from(c.to_string())).collect::<Vec<Rc<str>>>().iter().cloned().all(|c| { let c = c.clone(); (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater)) })))
+                    Value::Bool((((s.len() as i64) == 1) && s.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().iter().cloned().all(|c| { let c = c.clone(); (((&*c).cmp("0") != std::cmp::Ordering::Less) && ((&*c).cmp("9") != std::cmp::Ordering::Greater)) })))
                 }
                 "isAlpha" => {
                     Value::Bool((((s.len() as i64) == 1) && ((((&*s).cmp("a") != std::cmp::Ordering::Less) && ((&*s).cmp("z") != std::cmp::Ordering::Greater)) || (((&*s).cmp("A") != std::cmp::Ordering::Less) && ((&*s).cmp("Z") != std::cmp::Ordering::Greater)))))
@@ -7128,11 +7188,11 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Bool(((s.len() as i64) == 0))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Array(arr) => {
+        Value::Array(mut arr) => {
             match &*method_name {
                 "length" => {
                     Value::Int((arr.len() as i64))
@@ -7143,7 +7203,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "append" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     match other_val {
-                        Value::Array(other) => {
+                        Value::Array(mut other) => {
                             let mut result = arr;
                             let mut i = 0;
                             while (i < (other.len() as i64)) {
@@ -7175,7 +7235,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "remove" => {
                     let idx_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     match idx_val {
-                        Value::Int(idx) => {
+                        Value::Int(mut idx) => {
                             let mut result = arr;
                             result.remove({ let __boring_idx = idx as i64; if __boring_idx < 0 { (result.len() as i64 + __boring_idx) as usize } else { __boring_idx as usize } });
                             Value::Array(result)
@@ -7189,7 +7249,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let idx_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     let val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     match idx_val {
-                        Value::Int(idx) => {
+                        Value::Int(mut idx) => {
                             let mut result = arr;
                             result.insert((idx as usize), val);
                             Value::Array(result)
@@ -7222,7 +7282,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut result = vec![];
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
-                        let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         result.push(r);
                         i += 1;
                     }
@@ -7233,9 +7293,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut result = vec![];
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
-                        let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         match r {
-                            Value::Bool(b) => {
+                            Value::Bool(mut b) => {
                                 if b {
                                     result.push(arr[(i) as usize].clone());
                                 }
@@ -7254,22 +7314,37 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut acc = init_val;
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
-                        acc = call_value(Rc::clone(&interp), closure.clone(), vec![acc, arr[(i) as usize].clone()]);
+                        acc = call_value(Arc::clone(&interp), closure.clone(), vec![acc, arr[(i) as usize].clone()]);
                         i += 1;
                     }
                     acc
                 }
                 "sorted" => {
-                    let mut result = arr;
-                    result = { let mut __boring_v = result.clone(); __boring_v.sort_by(|__a, __b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal)); __boring_v.iter().cloned().collect::<Vec<_>>() };
-                    Value::Array(result)
+                    let n = (arr.len() as i64);
+                    let mut sorted = arr;
+                    let mut i = 0;
+                    while (i < n) {
+                        let mut j = (i + 1);
+                        while (j < n) {
+                            let si = val_to_string(sorted[(i) as usize].clone());
+                            let sj = val_to_string(sorted[(j) as usize].clone());
+                            if string_gt(Arc::<str>::from(si.to_string()), Arc::<str>::from(sj.to_string())) {
+                                let tmp = sorted[(i) as usize].clone();
+                                sorted[(i) as usize] = sorted[(j) as usize].clone();
+                                sorted[(j) as usize] = tmp;
+                            }
+                            j += 1;
+                        }
+                        i += 1;
+                    }
+                    Value::Array(sorted)
                 }
                 "sortedBy" => {
                     let closure = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     let mut keys = vec![];
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
-                        let k = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let k = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         keys.push(k);
                         i += 1;
                     }
@@ -7284,7 +7359,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut k = 0;
                     while (k < (sorted_indices.len() as i64)) {
                         match sorted_indices[(k) as usize].clone() {
-                            Value::Int(idx) => {
+                            Value::Int(mut idx) => {
                                 result.push(arr[(idx) as usize].clone());
                             }
                             _ => {
@@ -7305,9 +7380,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut found = false;
                     let mut i = 0;
                     while ((i < (arr.len() as i64)) && (!found)) {
-                        let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         match r {
-                            Value::Bool(b) => {
+                            Value::Bool(mut b) => {
                                 if b {
                                     found = true;
                                 }
@@ -7325,9 +7400,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut all_pass = true;
                     let mut i = 0;
                     while ((i < (arr.len() as i64)) && all_pass) {
-                        let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         match r {
-                            Value::Bool(b) => {
+                            Value::Bool(mut b) => {
                                 if (!b) {
                                     all_pass = false;
                                 }
@@ -7348,9 +7423,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                         let mut n = 0;
                         let mut i = 0;
                         while (i < (arr.len() as i64)) {
-                            let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                            let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                             match r {
-                                Value::Bool(b) => {
+                                Value::Bool(mut b) => {
                                     if b {
                                         n += 1;
                                     }
@@ -7367,7 +7442,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "take" => {
                     let n_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     match n_val {
-                        Value::Int(n) => {
+                        Value::Int(mut n) => {
                             let end = {
                             if (n < (arr.len() as i64)) {
                                 n
@@ -7385,7 +7460,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "drop" => {
                     let n_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     match n_val {
-                        Value::Int(n) => {
+                        Value::Int(mut n) => {
                             let start = {
                             if (n < (arr.len() as i64)) {
                                 n
@@ -7404,9 +7479,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let start_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(0));
                     let end_val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Int((arr.len() as i64)));
                     match start_val {
-                        Value::Int(start) => {
+                        Value::Int(mut start) => {
                             match end_val {
-                                Value::Int(end) => {
+                                Value::Int(mut end) => {
                                     let s = {
                                     if (start < (arr.len() as i64)) {
                                         start
@@ -7436,7 +7511,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "zip" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Array(vec![]));
                     match other_val {
-                        Value::Array(other) => {
+                        Value::Array(mut other) => {
                             let mut result = vec![];
                             let len = {
                             if ((arr.len() as i64) < (other.len() as i64)) {
@@ -7483,14 +7558,14 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
                         match arr[(i) as usize].clone() {
-                            Value::Array(inner) => {
+                            Value::Array(mut inner) => {
                                 let mut j = 0;
                                 while (j < (inner.len() as i64)) {
                                     result.push(inner[(j) as usize].clone());
                                     j += 1;
                                 }
                             }
-                            other => {
+                            mut other => {
                                 result.push(other);
                             }
                         }
@@ -7503,16 +7578,16 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut result = vec![];
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
-                        let r = call_value(Rc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
+                        let r = call_value(Arc::clone(&interp), closure.clone(), vec![arr[(i) as usize].clone()]);
                         match r {
-                            Value::Array(inner) => {
+                            Value::Array(mut inner) => {
                                 let mut j = 0;
                                 while (j < (inner.len() as i64)) {
                                     result.push(inner[(j) as usize].clone());
                                     j += 1;
                                 }
                             }
-                            other => {
+                            mut other => {
                                 result.push(other);
                             }
                         }
@@ -7521,32 +7596,32 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Array(result)
                 }
                 "join" => {
-                    let sep_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Rc::<str>::from(Rc::<str>::from("").to_string())));
+                    let sep_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Str(Arc::<str>::from("")));
                     match sep_val {
-                        Value::Str(sep) => {
-                            let mut parts: Vec<Rc<str>> = vec![];
+                        Value::Str(mut sep) => {
+                            let mut parts: Vec<Arc<str>> = vec![];
                             let mut i = 0;
                             while (i < (arr.len() as i64)) {
                                 match arr[(i) as usize].clone() {
-                                    Value::Str(sv) => {
+                                    Value::Str(mut sv) => {
                                         parts.push(sv.clone());
                                     }
-                                    Value::Int(n) => {
-                                        parts.push(Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str())));
+                                    Value::Int(mut n) => {
+                                        parts.push(Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str())));
                                     }
-                                    Value::Float(f) => {
-                                        parts.push(Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str())));
+                                    Value::Float(mut f) => {
+                                        parts.push(Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str())));
                                     }
-                                    Value::Bool(b) => {
-                                        parts.push(Rc::<str>::from(Rc::<str>::from(format!("{}", b).as_str())));
+                                    Value::Bool(mut b) => {
+                                        parts.push(Arc::<str>::from(Arc::<str>::from(format!("{}", b).as_str())));
                                     }
                                     _ => {
-                                        parts.push(Rc::<str>::from("nil"));
+                                        parts.push(Arc::<str>::from("nil"));
                                     }
                                 }
                                 i += 1;
                             }
-                            Value::Str(Rc::<str>::from(parts.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*sep.clone()).to_string()))
+                            Value::Str(Arc::<str>::from(parts.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*sep.clone()).to_string()))
                         }
                         _ => {
                             panic!("join_val: expected string separator");
@@ -7560,10 +7635,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let mut i = 0;
                     while (i < (arr.len() as i64)) {
                         match arr[(i) as usize].clone() {
-                            Value::Int(n) => {
+                            Value::Int(mut n) => {
                                 int_sum += n;
                             }
-                            Value::Float(f) => {
+                            Value::Float(mut f) => {
                                 float_sum += f;
                                 has_float = true;
                             }
@@ -7587,9 +7662,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                         let mut i = 1;
                         while (i < (arr.len() as i64)) {
                             match arr[(i) as usize].clone() {
-                                Value::Int(n) => {
+                                Value::Int(mut n) => {
                                     match min_val {
-                                        Value::Int(m) => {
+                                        Value::Int(mut m) => {
                                             if (n < m) {
                                                 min_val = arr[(i) as usize].clone();
                                             }
@@ -7599,9 +7674,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                                         }
                                     }
                                 }
-                                Value::Float(f) => {
+                                Value::Float(mut f) => {
                                     match min_val {
-                                        Value::Float(m) => {
+                                        Value::Float(mut m) => {
                                             if (f < m) {
                                                 min_val = arr[(i) as usize].clone();
                                             }
@@ -7628,9 +7703,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                         let mut i = 1;
                         while (i < (arr.len() as i64)) {
                             match arr[(i) as usize].clone() {
-                                Value::Int(n) => {
+                                Value::Int(mut n) => {
                                     match max_val {
-                                        Value::Int(m) => {
+                                        Value::Int(mut m) => {
                                             if (n > m) {
                                                 max_val = arr[(i) as usize].clone();
                                             }
@@ -7640,9 +7715,9 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                                         }
                                     }
                                 }
-                                Value::Float(f) => {
+                                Value::Float(mut f) => {
                                     match max_val {
-                                        Value::Float(m) => {
+                                        Value::Float(mut m) => {
                                             if (f > m) {
                                                 max_val = arr[(i) as usize].clone();
                                             }
@@ -7679,11 +7754,11 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Bool(((arr.len() as i64) == 0))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Dict(pairs) => {
+        Value::Dict(mut pairs) => {
             match &*method_name {
                 "length" => {
                     Value::Int((pairs.len() as i64))
@@ -7709,17 +7784,18 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     let key = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     let val = args.get((1) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     let mut new_pairs = pairs;
-                    let mut updated = false;
+                    let mut update_idx = (-1);
                     let mut i = 0;
                     while (i < (new_pairs.len() as i64)) {
                         let pair = new_pairs[(i) as usize].clone();
                         if (pair.0 == key) {
-                            new_pairs[(i) as usize] = (key.clone(), val.clone());
-                            updated = true;
+                            update_idx = i;
                         }
                         i += 1;
                     }
-                    if (!updated) {
+                    if (update_idx >= 0) {
+                        new_pairs[(update_idx) as usize] = (key, val);
+                    } else {
                         new_pairs.push((key, val));
                     }
                     Value::Dict(new_pairs)
@@ -7779,21 +7855,22 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "merge" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Dict(vec![]));
                     match other_val {
-                        Value::Dict(other) => {
+                        Value::Dict(mut other) => {
                             let mut result = pairs;
                             let mut i = 0;
                             while (i < (other.len() as i64)) {
                                 let oe = other[(i) as usize].clone();
-                                let mut found = false;
+                                let mut update_j = (-1);
                                 let mut j = 0;
                                 while (j < (result.len() as i64)) {
                                     if (result[(j) as usize].clone().0 == oe.0) {
-                                        result[(j) as usize] = (oe.0.clone(), oe.1.clone());
-                                        found = true;
+                                        update_j = j;
                                     }
                                     j += 1;
                                 }
-                                if (!found) {
+                                if (update_j >= 0) {
+                                    result[(update_j) as usize] = oe;
+                                } else {
                                     result.push(oe);
                                 }
                                 i += 1;
@@ -7809,11 +7886,11 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Bool(((pairs.len() as i64) == 0))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Set(elements) => {
+        Value::Set(mut elements) => {
             match &*method_name {
                 "length" => {
                     Value::Int((elements.len() as i64))
@@ -7853,10 +7930,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "union" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Set(vec![]));
                     let other =                     match other_val {
-                        Value::Set(s) => {
+                        Value::Set(mut s) => {
                             s
                         }
-                        Value::Array(a) => {
+                        Value::Array(mut a) => {
                             a
                         }
                         _ => {
@@ -7876,10 +7953,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "intersection" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Set(vec![]));
                     let other =                     match other_val {
-                        Value::Set(s) => {
+                        Value::Set(mut s) => {
                             s
                         }
-                        Value::Array(a) => {
+                        Value::Array(mut a) => {
                             a
                         }
                         _ => {
@@ -7899,10 +7976,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "difference" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Set(vec![]));
                     let other =                     match other_val {
-                        Value::Set(s) => {
+                        Value::Set(mut s) => {
                             s
                         }
-                        Value::Array(a) => {
+                        Value::Array(mut a) => {
                             a
                         }
                         _ => {
@@ -7922,10 +7999,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "isSubset" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Set(vec![]));
                     let other =                     match other_val {
-                        Value::Set(s) => {
+                        Value::Set(mut s) => {
                             s
                         }
-                        Value::Array(a) => {
+                        Value::Array(mut a) => {
                             a
                         }
                         _ => {
@@ -7945,10 +8022,10 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "isSuperset" => {
                     let other_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Set(vec![]));
                     let other =                     match other_val {
-                        Value::Set(s) => {
+                        Value::Set(mut s) => {
                             s
                         }
-                        Value::Array(a) => {
+                        Value::Array(mut a) => {
                             a
                         }
                         _ => {
@@ -7969,11 +8046,11 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Bool(((elements.len() as i64) == 0))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Int(n) => {
+        Value::Int(mut n) => {
             match &*method_name {
                 "abs" => {
                     if (n < 0) {
@@ -7995,20 +8072,20 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Int(n)
                 }
                 "toStr" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str())))
                 }
                 "toBin" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{:b}", n).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{:b}", n).as_str())))
                 }
                 "toHex" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{:x}", n).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{:x}", n).as_str())))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Float(f) => {
+        Value::Float(mut f) => {
             match &*method_name {
                 "abs" => {
                     if (f < 0.0) {
@@ -8030,22 +8107,22 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     Value::Int((f.round() as i64))
                 }
                 "toStr" => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str())))
                 }
                 "toBin" => {
                     let fi = (f.floor() as i64);
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{:b}", fi).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{:b}", fi).as_str())))
                 }
                 "toHex" => {
                     let fi = (f.floor() as i64);
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{:x}", fi).as_str())).to_string()))
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{:x}", fi).as_str())))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
-        Value::Range(start, end, inclusive, step) => {
+        Value::Range(mut start, mut end, mut inclusive, mut step) => {
             match &*method_name {
                 "toArray" => {
                     let mut result = vec![];
@@ -8066,7 +8143,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "contains" => {
                     let val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Nil);
                     match val {
-                        Value::Int(n) => {
+                        Value::Int(mut n) => {
                             let lim = {
                             if inclusive {
                                 (end + 1)
@@ -8109,7 +8186,7 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                 "step" => {
                     let s_val = args.get((0) as usize).cloned().unwrap_or_else(|| Value::Int(1));
                     match s_val {
-                        Value::Int(sv) => {
+                        Value::Int(mut sv) => {
                             Value::Range(start, end, inclusive, sv)
                         }
                         _ => {
@@ -8118,19 +8195,19 @@ fn call_method(mut interp: Rc<RefCell<Interpreter>>, recv: Value, method_name: R
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
                 }
             }
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("unknown method {} on {}", method_name, recv_type_name).as_str()));
+            panic!("{}", Arc::<str>::from(format!("unknown method {} on {}", method_name, recv_type).as_str()));
         }
     }
 }
 
-fn exec_block(mut interp: Rc<RefCell<Interpreter>>, stmts: Vec<Stmt>) -> Option<Signal> {
+fn exec_block(mut interp: Arc<std::sync::Mutex<Interpreter>>, stmts: Vec<Stmt>) -> Option<Signal> {
     for stmt in stmts.iter().cloned() {
-        let sig: Option<Signal> = exec_stmt(Rc::clone(&interp), stmt);
+        let sig: Option<Signal> = exec_stmt(Arc::clone(&interp), stmt.clone());
         if (sig != None) {
             return sig;
         }
@@ -8138,36 +8215,36 @@ fn exec_block(mut interp: Rc<RefCell<Interpreter>>, stmts: Vec<Stmt>) -> Option<
     None
 }
 
-fn exec_stmt(mut interp: Rc<RefCell<Interpreter>>, stmt: Stmt) -> Option<Signal> {
+fn exec_stmt(mut interp: Arc<std::sync::Mutex<Interpreter>>, stmt: Stmt) -> Option<Signal> {
     match stmt {
-        Stmt::Let(s) => {
+        Stmt::Let(mut s) => {
             let mut val = Value::Uninitialized;
             if let Some(expr) = s.value {
-                val = eval_expr(Rc::clone(&interp), expr);
+                val = eval_expr(Arc::clone(&interp), expr);
             }
             if s.mutable {
-                Rc::clone(&interp.borrow().current_env).borrow_mut().define_mut(s.name, val);
+                Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().define_mut(s.name, val);
             } else {
-                Rc::clone(&interp.borrow().current_env).borrow_mut().define(s.name, val);
+                Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().define(s.name, val);
             }
             None
         }
-        Stmt::If(s) => {
-            exec_if(Rc::clone(&interp), s.clone())
+        Stmt::If(mut s) => {
+            exec_if(Arc::clone(&interp), s.clone())
         }
-        Stmt::While(s) => {
-            exec_while(Rc::clone(&interp), s.clone())
+        Stmt::While(mut s) => {
+            exec_while(Arc::clone(&interp), s.clone())
         }
-        Stmt::For(s) => {
-            exec_for(Rc::clone(&interp), s.clone())
+        Stmt::For(mut s) => {
+            exec_for(Arc::clone(&interp), s.clone())
         }
-        Stmt::Match(s) => {
-            exec_match_stmt(Rc::clone(&interp), s.clone())
+        Stmt::Match(mut s) => {
+            exec_match_stmt(Arc::clone(&interp), s.clone())
         }
-        Stmt::Return(s) => {
+        Stmt::Return(mut s) => {
             let mut val = Value::Nil;
             if let Some(expr) = s.value {
-                val = eval_expr(Rc::clone(&interp), expr);
+                val = eval_expr(Arc::clone(&interp), expr);
             }
             Some(Signal::ReturnSignal(val))
         }
@@ -8177,21 +8254,21 @@ fn exec_stmt(mut interp: Rc<RefCell<Interpreter>>, stmt: Stmt) -> Option<Signal>
         Stmt::Continue (..) => {
             Some(Signal::ContinueSignal)
         }
-        Stmt::Throw(s) => {
+        Stmt::Throw(mut s) => {
             let mut val = Value::Nil;
             if let Some(expr) = s.value {
-                val = eval_expr(Rc::clone(&interp), expr);
+                val = eval_expr(Arc::clone(&interp), expr);
             } else {
-                let err = Rc::clone(&interp.borrow().current_env).borrow_mut().get(Rc::<str>::from("error"));
+                let err = Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().get(Arc::<str>::from("error"));
                 val = err.unwrap_or_else(|| Value::Nil);
             }
             Some(Signal::ThrowSignal(val))
         }
-        Stmt::Try(s) => {
-            exec_try(Rc::clone(&interp), s.clone())
+        Stmt::Try(mut s) => {
+            exec_try(Arc::clone(&interp), s.clone())
         }
-        Stmt::Expr(expr) => {
-            eval_expr(Rc::clone(&interp), expr.clone());
+        Stmt::Expr(mut expr) => {
+            eval_expr(Arc::clone(&interp), expr.clone());
             None
         }
         _ => {
@@ -8200,44 +8277,44 @@ fn exec_stmt(mut interp: Rc<RefCell<Interpreter>>, stmt: Stmt) -> Option<Signal>
     }
 }
 
-fn exec_if(mut interp: Rc<RefCell<Interpreter>>, s: IfStmt) -> Option<Signal> {
+fn exec_if(mut interp: Arc<std::sync::Mutex<Interpreter>>, s: IfStmt) -> Option<Signal> {
     for branch in s.branches.into_iter() {
-        let cond_val = eval_expr(Rc::clone(&interp), branch.cond);
-        let b = expect_bool(cond_val);
+        let cond_val = eval_expr(Arc::clone(&interp), branch.cond);
+        let b = expect_bool(cond_val.clone());
         if b {
-            let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-            let prev = Rc::clone(&interp.borrow().current_env);
-            { let mut __g = interp.borrow_mut(); __g.current_env = child; };
-            let sig = exec_block(Rc::clone(&interp), branch.body);
-            { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+            let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+            let prev = Arc::clone(&interp.lock().unwrap().current_env);
+            { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
+            let sig = exec_block(Arc::clone(&interp), branch.body);
+            { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
             return sig;
         }
     }
     if let Some(else_body) = s.else_body {
-        let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-        let prev = Rc::clone(&interp.borrow().current_env);
-        { let mut __g = interp.borrow_mut(); __g.current_env = child; };
-        let sig = exec_block(Rc::clone(&interp), else_body);
-        { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+        let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+        let prev = Arc::clone(&interp.lock().unwrap().current_env);
+        { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
+        let sig = exec_block(Arc::clone(&interp), else_body);
+        { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
         return sig;
     }
     None
 }
 
-fn exec_while(mut interp: Rc<RefCell<Interpreter>>, s: WhileStmt) -> Option<Signal> {
+fn exec_while(mut interp: Arc<std::sync::Mutex<Interpreter>>, s: WhileStmt) -> Option<Signal> {
     let mut running = true;
     let mut result: Option<Signal> = None;
     while running {
-        let cond_val = eval_expr(Rc::clone(&interp), s.condition.clone());
-        let b = expect_bool(cond_val);
+        let cond_val = eval_expr(Arc::clone(&interp), s.condition.clone());
+        let b = expect_bool(cond_val.clone());
         if (!b) {
             running = false;
         } else {
-            let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-            let prev = Rc::clone(&interp.borrow().current_env);
-            { let mut __g = interp.borrow_mut(); __g.current_env = child; };
-            let sig = exec_block(Rc::clone(&interp), s.body.clone());
-            { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+            let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+            let prev = Arc::clone(&interp.lock().unwrap().current_env);
+            { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
+            let sig = exec_block(Arc::clone(&interp), s.body.clone());
+            { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
             match sig {
                 None => {
                 }
@@ -8256,22 +8333,22 @@ fn exec_while(mut interp: Rc<RefCell<Interpreter>>, s: WhileStmt) -> Option<Sign
     result
 }
 
-fn exec_for(mut interp: Rc<RefCell<Interpreter>>, s: ForStmt) -> Option<Signal> {
-    let iterable = eval_expr(Rc::clone(&interp), s.iterable);
-    let items = collect_iterable(iterable);
+fn exec_for(mut interp: Arc<std::sync::Mutex<Interpreter>>, s: ForStmt) -> Option<Signal> {
+    let iterable = eval_expr(Arc::clone(&interp), s.iterable);
+    let items = collect_iterable(iterable.clone());
     let mut result: Option<Signal> = None;
     let mut idx = 0;
     let mut done = false;
     while ((!done) && (idx < (items.len() as i64))) {
         let item = items[(idx) as usize].clone();
         idx += 1;
-        let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
+        let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
         let vars = s.vars.clone();
         if ((vars.len() as i64) == 1) {
-            child.borrow_mut().define(vars[(0) as usize].clone(), item);
+            child.lock().unwrap().define(vars[(0) as usize].clone(), item);
         } else {
             match item {
-                Value::Tuple(elems) => {
+                Value::Tuple(mut elems) => {
                     let mut i = 0;
                     for v in vars.iter().cloned() {
                         let val = {
@@ -8281,22 +8358,22 @@ fn exec_for(mut interp: Rc<RefCell<Interpreter>>, s: ForStmt) -> Option<Signal> 
                             Value::Nil
                         }
 };
-                        child.borrow_mut().define(v, val);
+                        child.lock().unwrap().define(v, val);
                         i += 1;
                     }
                 }
                 _ => {
-                    child.borrow_mut().define(vars[(0) as usize].clone(), Value::Int((idx - 1)));
+                    child.lock().unwrap().define(vars[(0) as usize].clone(), Value::Int((idx - 1)));
                     if ((vars.len() as i64) >= 2) {
-                        child.borrow_mut().define(vars[(1) as usize].clone(), item);
+                        child.lock().unwrap().define(vars[(1) as usize].clone(), item);
                     }
                 }
             }
         }
-        let prev = Rc::clone(&interp.borrow().current_env);
-        { let mut __g = interp.borrow_mut(); __g.current_env = child; };
-        let sig = exec_block(Rc::clone(&interp), s.body.clone());
-        { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+        let prev = Arc::clone(&interp.lock().unwrap().current_env);
+        { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
+        let sig = exec_block(Arc::clone(&interp), s.body.clone());
+        { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
         match sig {
             None => {
             }
@@ -8316,23 +8393,23 @@ fn exec_for(mut interp: Rc<RefCell<Interpreter>>, s: ForStmt) -> Option<Signal> 
 
 fn collect_iterable(val: Value) -> Vec<Value> {
     match val {
-        Value::Array(elems) => {
+        Value::Array(mut elems) => {
             elems
         }
-        Value::Set(elems) => {
+        Value::Set(mut elems) => {
             elems
         }
-        Value::Tuple(elems) => {
+        Value::Tuple(mut elems) => {
             elems
         }
-        Value::Dict(pairs) => {
+        Value::Dict(mut pairs) => {
             let mut out = vec![];
             for p in pairs.iter().cloned() {
                 out.push(Value::Tuple(vec![p.0, p.1]));
             }
             out
         }
-        Value::Range(start, end, inclusive, _) => {
+        Value::Range(mut start, mut end, mut inclusive, _) => {
             let mut out = vec![];
             let mut i = start;
             let limit = {
@@ -8348,10 +8425,10 @@ fn collect_iterable(val: Value) -> Vec<Value> {
             }
             out
         }
-        Value::Str(s) => {
+        Value::Str(mut s) => {
             let mut out = vec![];
-            for c in s.chars() {
-                out.push(Value::Str(Rc::<str>::from(c.to_string().as_str())));
+            for c in s.chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>().into_iter() {
+                out.push(Value::Str(Arc::<str>::from(c.to_string())));
             }
             out
         }
@@ -8361,8 +8438,8 @@ fn collect_iterable(val: Value) -> Vec<Value> {
     }
 }
 
-fn exec_match_stmt(mut interp: Rc<RefCell<Interpreter>>, s: MatchStmt) -> Option<Signal> {
-    let subject = eval_expr(Rc::clone(&interp), s.subject);
+fn exec_match_stmt(mut interp: Arc<std::sync::Mutex<Interpreter>>, s: MatchStmt) -> Option<Signal> {
+    let subject = eval_expr(Arc::clone(&interp), s.subject);
     let mut matched = false;
     let mut result: Option<Signal> = None;
     let mut arm_idx = 0;
@@ -8373,31 +8450,31 @@ fn exec_match_stmt(mut interp: Rc<RefCell<Interpreter>>, s: MatchStmt) -> Option
         while ((!matched) && (pat_idx < (arm.patterns.len() as i64))) {
             let pattern = arm.patterns[(pat_idx) as usize].clone();
             pat_idx += 1;
-            let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-            let did_match = match_pattern(subject.clone(), pattern, Rc::clone(&child));
+            let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+            let did_match = match_pattern(subject.clone(), pattern.clone(), Arc::clone(&child.clone()));
             if did_match {
                 let mut guard_ok = true;
                 if let Some(guard_expr) = arm.match_guard.clone() {
-                    let gprev = Rc::clone(&interp.borrow().current_env);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = child.clone(); };
-                    let gv = eval_expr(Rc::clone(&interp), guard_expr);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = gprev; };
-                    guard_ok = expect_bool(gv);
+                    let gprev = Arc::clone(&interp.lock().unwrap().current_env);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = child.clone(); };
+                    let gv = eval_expr(Arc::clone(&interp), guard_expr);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = gprev; };
+                    guard_ok = expect_bool(gv.clone());
                 }
                 if guard_ok {
                     matched = true;
-                    let prev = Rc::clone(&interp.borrow().current_env);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = child; };
+                    let prev = Arc::clone(&interp.lock().unwrap().current_env);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
                     let sig =                     match arm.body.clone() {
-                        MatchBody::Expr(e) => {
-                            eval_expr(Rc::clone(&interp), e.clone());
+                        MatchBody::Expr(mut e) => {
+                            eval_expr(Arc::clone(&interp), e.clone());
                             None
                         }
-                        MatchBody::Block(stmts) => {
-                            exec_block(Rc::clone(&interp), stmts)
+                        MatchBody::Block(mut stmts) => {
+                            exec_block(Arc::clone(&interp), stmts)
                         }
                     };
-                    { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
                     result = sig;
                 }
             }
@@ -8408,16 +8485,16 @@ fn exec_match_stmt(mut interp: Rc<RefCell<Interpreter>>, s: MatchStmt) -> Option
 
 fn expr_to_value_literal(expr: Expr) -> Value {
     match expr.kind {
-        ExprKind::Int(n) => {
+        ExprKind::Int(mut n) => {
             Value::Int(n)
         }
-        ExprKind::Float(f) => {
+        ExprKind::Float(mut f) => {
             Value::Float(f)
         }
-        ExprKind::Str(s) => {
-            Value::Str(Rc::<str>::from(s.clone().to_string()))
+        ExprKind::Str(mut s) => {
+            Value::Str(Arc::<str>::from(s.clone().to_string()))
         }
-        ExprKind::Bool(b) => {
+        ExprKind::Bool(mut b) => {
             Value::Bool(b)
         }
         ExprKind::Nil => {
@@ -8429,13 +8506,13 @@ fn expr_to_value_literal(expr: Expr) -> Value {
     }
 }
 
-fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> bool {
+fn match_pattern(val: Value, pattern: Pattern, mut env: Arc<std::sync::Mutex<Env>>) -> bool {
     match pattern {
         Pattern::Wildcard => {
             true
         }
-        Pattern::Bind(name) => {
-            env.borrow_mut().define(name.clone(), val);
+        Pattern::Bind(mut name) => {
+            env.lock().unwrap().define(name.clone(), val);
             true
         }
         Pattern::None => {
@@ -8448,22 +8525,22 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                 }
             }
         }
-        Pattern::Some(inner) => {
+        Pattern::Some(mut inner) => {
             let inner = *inner;
             match val {
                 Value::Nil => {
                     false
                 }
                 _ => {
-                    match_pattern(val, inner, Rc::clone(&env))
+                    match_pattern(val.clone(), inner.clone(), Arc::clone(&env))
                 }
             }
         }
-        Pattern::Lit(lit) => {
+        Pattern::Lit(mut lit) => {
             match lit {
-                LitPattern::Int(n) => {
+                LitPattern::Int(mut n) => {
                     match val {
-                        Value::Int(v) => {
+                        Value::Int(mut v) => {
                             (v == n)
                         }
                         _ => {
@@ -8471,9 +8548,9 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                         }
                     }
                 }
-                LitPattern::Float(f) => {
+                LitPattern::Float(mut f) => {
                     match val {
-                        Value::Float(v) => {
+                        Value::Float(mut v) => {
                             (v == f)
                         }
                         _ => {
@@ -8481,9 +8558,9 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                         }
                     }
                 }
-                LitPattern::Str(s) => {
+                LitPattern::Str(mut s) => {
                     match val {
-                        Value::Str(v) => {
+                        Value::Str(mut v) => {
                             (v == s)
                         }
                         _ => {
@@ -8491,9 +8568,9 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                         }
                     }
                 }
-                LitPattern::Bool(b) => {
+                LitPattern::Bool(mut b) => {
                     match val {
-                        Value::Bool(v) => {
+                        Value::Bool(mut v) => {
                             (v == b)
                         }
                         _ => {
@@ -8513,16 +8590,16 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                 }
             }
         }
-        Pattern::Tuple(pats) => {
+        Pattern::Tuple(mut pats) => {
             match val {
-                Value::Tuple(elems) => {
+                Value::Tuple(mut elems) => {
                     if ((elems.len() as i64) != (pats.len() as i64)) {
                         false
                     } else {
                         let mut ok = true;
                         let mut i = 0;
                         while (ok && (i < (pats.len() as i64))) {
-                            ok = match_pattern(elems[(i) as usize].clone(), pats[(i) as usize].clone(), Rc::clone(&env));
+                            ok = match_pattern(elems[(i) as usize].clone(), pats[(i) as usize].clone(), Arc::clone(&env));
                             i += 1;
                         }
                         ok
@@ -8533,12 +8610,12 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                 }
             }
         }
-        Pattern::Variant(variant_name, field_pats) => {
+        Pattern::Variant(mut variant_name, mut field_pats) => {
             match val {
-                Value::EnumVariant(vtype, vvariant, vfields) => {
+                Value::EnumVariant(mut vtype, mut vvariant, mut vfields) => {
                     let full = {
                     if ((vtype.len() as i64) > 0) {
-                        Rc::<str>::from(Rc::<str>::from(format!("{}.{}", vtype, vvariant).as_str()))
+                        Arc::<str>::from(Arc::<str>::from(format!("{}.{}", vtype, vvariant).as_str()))
                     } else {
                         vvariant.clone()
                     }
@@ -8556,7 +8633,7 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
                                 Value::Nil
                             }
 };
-                            ok = match_pattern(fval, field_pats[(i) as usize].clone(), Rc::clone(&env));
+                            ok = match_pattern(fval.clone(), field_pats[(i) as usize].clone(), Arc::clone(&env));
                             i += 1;
                         }
                         ok
@@ -8570,14 +8647,14 @@ fn match_pattern(val: Value, pattern: Pattern, mut env: Rc<RefCell<Env>>) -> boo
     }
 }
 
-fn exec_try(mut interp: Rc<RefCell<Interpreter>>, s: TryStmt) -> Option<Signal> {
-    let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-    let prev = Rc::clone(&interp.borrow().current_env);
-    { let mut __g = interp.borrow_mut(); __g.current_env = child; };
-    let body_sig = exec_block(Rc::clone(&interp), s.body);
-    { let mut __g = interp.borrow_mut(); __g.current_env = prev; };
+fn exec_try(mut interp: Arc<std::sync::Mutex<Interpreter>>, s: TryStmt) -> Option<Signal> {
+    let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+    let prev = Arc::clone(&interp.lock().unwrap().current_env);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = child; };
+    let body_sig = exec_block(Arc::clone(&interp), s.body);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = prev; };
     match body_sig {
-        Some(Signal::ThrowSignal(exc_val)) => {
+        Some(Signal::ThrowSignal(mut exc_val)) => {
             let exc_type = value_type_name(exc_val.clone());
             let mut handled = false;
             let mut clause_idx = 0;
@@ -8587,12 +8664,12 @@ fn exec_try(mut interp: Rc<RefCell<Interpreter>>, s: TryStmt) -> Option<Signal> 
                 let matches = (((clause.types.len() as i64) == 0) || clause.types.contains(&exc_type));
                 if matches {
                     handled = true;
-                    let cenv = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-                    cenv.borrow_mut().define(Rc::<str>::from("error"), exc_val.clone());
-                    let cprev = Rc::clone(&interp.borrow().current_env);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = cenv; };
-                    let csig = exec_block(Rc::clone(&interp), clause.body);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = cprev; };
+                    let cenv = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+                    cenv.lock().unwrap().define(Arc::<str>::from("error"), exc_val.clone());
+                    let cprev = Arc::clone(&interp.lock().unwrap().current_env);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = cenv; };
+                    let csig = exec_block(Arc::clone(&interp), clause.body);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = cprev; };
                     return csig;
                 }
             }
@@ -8608,14 +8685,14 @@ fn exec_try(mut interp: Rc<RefCell<Interpreter>>, s: TryStmt) -> Option<Signal> 
     }
 }
 
-fn call_fn__interpreter__fndecl__arr_value__opt_env(mut interp: Rc<RefCell<Interpreter>>, decl: FnDecl, args: Vec<Value>, captured: Option<Rc<RefCell<Env>>>) -> Value {
-    let base_env = captured.unwrap_or_else(|| Rc::clone(&interp.borrow().global_env));
+fn call_fn__interpreter__fndecl__arr_value__opt_env(mut interp: Arc<std::sync::Mutex<Interpreter>>, decl: FnDecl, args: Vec<Value>, captured: Option<Arc<std::sync::Mutex<Env>>>) -> Value {
+    let base_env = captured.unwrap_or_else(|| Arc::clone(&interp.lock().unwrap().global_env));
     let fn_env = new_env(Some(base_env.clone()));
-    let mut labeled: HashMap<Rc<str>, Value> = HashMap::new();
+    let mut labeled: HashMap<Arc<str>, Value> = HashMap::new();
     let mut positional = vec![];
     for val in args.iter().cloned() {
         match val {
-            Value::Labeled(label, v) => {
+            Value::Labeled(mut label, mut v) => {
                 let v = *v;
                 labeled.insert(label.clone(), v);
             }
@@ -8635,32 +8712,32 @@ fn call_fn__interpreter__fndecl__arr_value__opt_env(mut interp: Rc<RefCell<Inter
                 pos_idx += 1;
             } else {
                 if let Some(default_expr) = param.default {
-                    let dprev = Rc::clone(&interp.borrow().current_env);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = base_env.clone(); };
-                    val = eval_expr(Rc::clone(&interp), default_expr);
-                    { let mut __g = interp.borrow_mut(); __g.current_env = dprev; };
+                    let dprev = Arc::clone(&interp.lock().unwrap().current_env);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = base_env.clone(); };
+                    val = eval_expr(Arc::clone(&interp), default_expr);
+                    { let mut __g = interp.lock().unwrap(); __g.current_env = dprev; };
                 }
             }
         }
         if param.mutable {
-            fn_env.borrow_mut().define_mut(param.name, val);
+            fn_env.lock().unwrap().define_mut(param.name, val);
         } else {
-            fn_env.borrow_mut().define(param.name, val);
+            fn_env.lock().unwrap().define(param.name, val);
         }
     }
-    let prev_env = Rc::clone(&interp.borrow().current_env);
-    { let mut __g = interp.borrow_mut(); __g.current_env = fn_env; };
-    let sig = exec_block(Rc::clone(&interp), decl.body);
-    { let mut __g = interp.borrow_mut(); __g.current_env = prev_env; };
+    let prev_env = Arc::clone(&interp.lock().unwrap().current_env);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = fn_env; };
+    let sig = exec_block(Arc::clone(&interp), decl.body);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = prev_env; };
     match sig {
         None => {
             Value::Nil
         }
-        Some(Signal::ReturnSignal(v)) => {
+        Some(Signal::ReturnSignal(mut v)) => {
             v
         }
-        Some(Signal::ThrowSignal(v)) => {
-            panic!("{}", value_to_string(v));
+        Some(Signal::ThrowSignal(mut v)) => {
+            panic!("{}", value_to_string(v.clone()));
         }
         _ => {
             Value::Nil
@@ -8668,7 +8745,7 @@ fn call_fn__interpreter__fndecl__arr_value__opt_env(mut interp: Rc<RefCell<Inter
     }
 }
 
-fn call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(mut interp: Rc<RefCell<Interpreter>>, params: Vec<Param>, body: ClosureBody, args: Vec<Value>, captured: Option<Rc<RefCell<Env>>>) -> Value {
+fn call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(mut interp: Arc<std::sync::Mutex<Interpreter>>, params: Vec<Param>, body: ClosureBody, args: Vec<Value>, captured: Option<Arc<std::sync::Mutex<Env>>>) -> Value {
     let fn_env = new_env(captured);
     let mut i = 0;
     for param in params.iter().cloned() {
@@ -8679,36 +8756,37 @@ fn call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(mut int
             Value::Nil
         }
 };
-        fn_env.borrow_mut().define(param.name, val);
+        fn_env.lock().unwrap().define(param.name, val);
         i += 1;
     }
-    let prev_env = Rc::clone(&interp.borrow().current_env);
-    { let mut __g = interp.borrow_mut(); __g.current_env = fn_env; };
-    let sig =     match body {
-        ClosureBody::Block(stmts) => {
-            exec_block(Rc::clone(&interp), stmts)
+    let prev_env = Arc::clone(&interp.lock().unwrap().current_env);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = fn_env; };
+    let mut sig: Option<Signal> = None;
+    match body {
+        ClosureBody::Block(mut stmts) => {
+            sig = exec_block(Arc::clone(&interp), stmts);
         }
-        ClosureBody::Expr(e) => {
+        ClosureBody::Expr(mut e) => {
             let e = *e;
-            Some(Signal::ReturnSignal(eval_expr(Rc::clone(&interp), e.clone())))
+            sig = Some(Signal::ReturnSignal(eval_expr(Arc::clone(&interp), e.clone())));
         }
-    };
-    { let mut __g = interp.borrow_mut(); __g.current_env = prev_env; };
+    }
+    { let mut __g = interp.lock().unwrap(); __g.current_env = prev_env; };
     match sig {
         None => {
             Value::Nil
         }
-        Some(Signal::ReturnSignal(v)) => {
+        Some(Signal::ReturnSignal(mut v)) => {
             v
         }
-        Some(Signal::BreakSignal(v)) => {
+        Some(Signal::BreakSignal(mut v)) => {
             v
         }
         Some(Signal::ContinueSignal) => {
             Value::Nil
         }
-        Some(Signal::ThrowSignal(v)) => {
-            panic!("{}", value_to_string(v));
+        Some(Signal::ThrowSignal(mut v)) => {
+            panic!("{}", value_to_string(v.clone()));
         }
         _ => {
             Value::Nil
@@ -8716,22 +8794,22 @@ fn call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(mut int
     }
 }
 
-fn call_value(mut interp: Rc<RefCell<Interpreter>>, callee: Value, args: Vec<Value>) -> Value {
+fn call_value(mut interp: Arc<std::sync::Mutex<Interpreter>>, callee: Value, args: Vec<Value>) -> Value {
     match callee {
-        Value::Fn(name, captured) => {
-            let decl = lookup_fn_decl(Rc::clone(&interp), Rc::<str>::from(name.clone().to_string()));
-            call_fn__interpreter__fndecl__arr_value__opt_env(Rc::clone(&interp), decl.clone(), args, captured)
+        Value::Fn(mut name, mut captured) => {
+            let decl = lookup_fn_decl(Arc::clone(&interp), Arc::<str>::from(name.clone().to_string()));
+            call_fn__interpreter__fndecl__arr_value__opt_env(Arc::clone(&interp), decl.clone(), args, captured)
         }
-        Value::Closure(params, body_stmts, captured) => {
-            call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(Rc::clone(&interp), params, body_stmts, args, captured)
+        Value::Closure(mut params, mut body_stmts, mut captured) => {
+            call_closure__interpreter__arr_param__closurebody__arr_value__opt_env(Arc::clone(&interp), params, body_stmts.clone(), args, captured)
         }
-        Value::NativeFn(name, func) => {
+        Value::NativeFn(mut name, mut func) => {
             let func = *func;
-            call_native(Rc::clone(&interp), Rc::<str>::from(name.clone().to_string()), func, args)
+            call_native(Arc::clone(&interp), Arc::<str>::from(name.clone().to_string()), func.clone(), args)
         }
-        Value::OverloadedFn(name, variants) => {
-            let best = resolve_overload(Rc::clone(&interp), variants, args.clone());
-            call_value(Rc::clone(&interp), best, args)
+        Value::OverloadedFn(mut name, mut variants) => {
+            let best = resolve_overload(Arc::clone(&interp), variants, args.clone());
+            call_value(Arc::clone(&interp), best.clone(), args)
         }
         _ => {
             panic!("value is not callable");
@@ -8741,7 +8819,7 @@ fn call_value(mut interp: Rc<RefCell<Interpreter>>, callee: Value, args: Vec<Val
 
 fn expect_bool(val: Value) -> bool {
     match val {
-        Value::Bool(b) => {
+        Value::Bool(mut b) => {
             b
         }
         _ => {
@@ -8750,96 +8828,96 @@ fn expect_bool(val: Value) -> bool {
     }
 }
 
-fn value_type_name(val: Value) -> Rc<str> {
+fn value_type_name(val: Value) -> Arc<str> {
     match val {
         Value::Nil => {
-            Rc::<str>::from("nil")
+            Arc::<str>::from("nil")
         }
         Value::Void => {
-            Rc::<str>::from("void")
+            Arc::<str>::from("void")
         }
         Value::Uninitialized => {
-            Rc::<str>::from("uninitialized")
+            Arc::<str>::from("uninitialized")
         }
         Value::Bool(_) => {
-            Rc::<str>::from("bool")
+            Arc::<str>::from("bool")
         }
         Value::Int(_) => {
-            Rc::<str>::from("int")
+            Arc::<str>::from("int")
         }
         Value::Float(_) => {
-            Rc::<str>::from("float")
+            Arc::<str>::from("float")
         }
         Value::Str(_) => {
-            Rc::<str>::from("string")
+            Arc::<str>::from("string")
         }
         Value::Array(_) => {
-            Rc::<str>::from("array")
+            Arc::<str>::from("array")
         }
         Value::Tuple(_) => {
-            Rc::<str>::from("tuple")
+            Arc::<str>::from("tuple")
         }
         Value::Dict(_) => {
-            Rc::<str>::from("dict")
+            Arc::<str>::from("dict")
         }
         Value::Set(_) => {
-            Rc::<str>::from("set")
+            Arc::<str>::from("set")
         }
-        Value::Object(inner) => {
-            inner.borrow().type_name.clone()
+        Value::Object(mut inner) => {
+            inner.lock().unwrap().type_name.clone()
         }
-        Value::EnumVariant(t, _, _) => {
+        Value::EnumVariant(mut t, _, _) => {
             t.clone()
         }
-        Value::Fn(n, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("fn({})", n).as_str()))
+        Value::Fn(mut n, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("fn({})", n).as_str()))
         }
         Value::Closure(_, _, _) => {
-            Rc::<str>::from("closure")
+            Arc::<str>::from("closure")
         }
-        Value::NativeFn(n, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("native({})", n).as_str()))
+        Value::NativeFn(mut n, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("native({})", n).as_str()))
         }
-        Value::OverloadedFn(n, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("fn({})", n).as_str()))
+        Value::OverloadedFn(mut n, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("fn({})", n).as_str()))
         }
         Value::Range(_, _, _, _) => {
-            Rc::<str>::from("range")
+            Arc::<str>::from("range")
         }
         Value::Labeled(_, _) => {
-            Rc::<str>::from("labeled")
+            Arc::<str>::from("labeled")
         }
     }
 }
 
-fn value_to_string(val: Value) -> Rc<str> {
+fn value_to_string(val: Value) -> Arc<str> {
     match val {
         Value::Nil => {
-            Rc::<str>::from("nil")
+            Arc::<str>::from("nil")
         }
         Value::Void => {
-            Rc::<str>::from("")
+            Arc::<str>::from("")
         }
-        Value::Bool(b) => {
+        Value::Bool(mut b) => {
             {
             if b {
-                Rc::<str>::from("true")
+                Arc::<str>::from("true")
             } else {
-                Rc::<str>::from("false")
+                Arc::<str>::from("false")
             }
 }
         }
-        Value::Int(n) => {
-            Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str()))
+        Value::Int(mut n) => {
+            Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str()))
         }
-        Value::Float(f) => {
-            Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str()))
+        Value::Float(mut f) => {
+            Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str()))
         }
-        Value::Str(s) => {
+        Value::Str(mut s) => {
             s.clone()
         }
         _ => {
-            value_type_name(val)
+            value_type_name(val.clone())
         }
     }
 }
@@ -8856,9 +8934,9 @@ fn value_equals(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Bool(x) => {
+        Value::Bool(mut x) => {
             match b {
-                Value::Bool(y) => {
+                Value::Bool(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -8866,9 +8944,9 @@ fn value_equals(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -8876,9 +8954,9 @@ fn value_equals(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -8886,9 +8964,9 @@ fn value_equals(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Str(x) => {
+        Value::Str(mut x) => {
             match b {
-                Value::Str(y) => {
+                Value::Str(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -8904,9 +8982,9 @@ fn value_equals(a: Value, b: Value) -> bool {
 
 fn value_add(a: Value, b: Value) -> Value {
     match a {
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     Value::Int((x + y))
                 }
                 _ => {
@@ -8914,9 +8992,9 @@ fn value_add(a: Value, b: Value) -> Value {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     Value::Float((x + y))
                 }
                 _ => {
@@ -8924,10 +9002,10 @@ fn value_add(a: Value, b: Value) -> Value {
                 }
             }
         }
-        Value::Str(x) => {
+        Value::Str(mut x) => {
             match b {
-                Value::Str(y) => {
-                    Value::Str(Rc::<str>::from(Rc::<str>::from(format!("{}{}", x, y).as_str())))
+                Value::Str(mut y) => {
+                    Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}{}", x, y).as_str())))
                 }
                 _ => {
                     panic!("type error in +=");
@@ -8942,9 +9020,9 @@ fn value_add(a: Value, b: Value) -> Value {
 
 fn value_sub(a: Value, b: Value) -> Value {
     match a {
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     Value::Int((x - y))
                 }
                 _ => {
@@ -8952,9 +9030,9 @@ fn value_sub(a: Value, b: Value) -> Value {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     Value::Float((x - y))
                 }
                 _ => {
@@ -8970,9 +9048,9 @@ fn value_sub(a: Value, b: Value) -> Value {
 
 fn value_mul(a: Value, b: Value) -> Value {
     match a {
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     Value::Int((x * y))
                 }
                 _ => {
@@ -8980,9 +9058,9 @@ fn value_mul(a: Value, b: Value) -> Value {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     Value::Float((x * y))
                 }
                 _ => {
@@ -8998,9 +9076,9 @@ fn value_mul(a: Value, b: Value) -> Value {
 
 fn value_div(a: Value, b: Value) -> Value {
     match a {
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     Value::Int((x / y))
                 }
                 _ => {
@@ -9008,9 +9086,9 @@ fn value_div(a: Value, b: Value) -> Value {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     Value::Float((x / y))
                 }
                 _ => {
@@ -9026,9 +9104,9 @@ fn value_div(a: Value, b: Value) -> Value {
 
 fn value_mod(a: Value, b: Value) -> Value {
     match a {
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     Value::Int((x % y))
                 }
                 _ => {
@@ -9042,123 +9120,124 @@ fn value_mod(a: Value, b: Value) -> Value {
     }
 }
 
-fn env_get(mut interp: Rc<RefCell<Interpreter>>, name: Rc<str>) -> Value {
-    let env = Rc::clone(&interp.borrow().current_env);
-    let result = env.borrow_mut().get(name.clone());
+fn env_get(mut interp: Arc<std::sync::Mutex<Interpreter>>, name: Arc<str>) -> Value {
+    let env = Arc::clone(&interp.lock().unwrap().current_env);
+    let result = env.lock().unwrap().get(name.clone());
     if let Some(val) = result {
         val
     } else {
-        panic!("{}", Rc::<str>::from(format!("undefined variable '{}'", name).as_str()));
+        panic!("{}", Arc::<str>::from(format!("undefined variable '{}'", name).as_str()));
     }
 }
 
-fn env_set(mut interp: Rc<RefCell<Interpreter>>, name: Rc<str>, val: Value) -> () {
-    let env = Rc::clone(&interp.borrow().current_env);
-    let ok = env.borrow_mut().set(name.clone(), val);
+fn env_set(mut interp: Arc<std::sync::Mutex<Interpreter>>, name: Arc<str>, val: Value) -> () {
+    let env = Arc::clone(&interp.lock().unwrap().current_env);
+    let ok = env.lock().unwrap().set(name.clone(), val);
     if (!ok) {
-        panic!("{}", Rc::<str>::from(format!("cannot assign to undefined variable '{}'", name).as_str()));
+        panic!("{}", Arc::<str>::from(format!("cannot assign to undefined variable '{}'", name).as_str()));
     }
 }
 
-fn env_define__interpreter__string__value__bool(mut interp: Rc<RefCell<Interpreter>>, name: Rc<str>, val: Value, is_mutable: bool) -> () {
+fn env_define__interpreter__string__value__bool(mut interp: Arc<std::sync::Mutex<Interpreter>>, name: Arc<str>, val: Value, is_mutable: bool) -> () {
     if is_mutable {
-        Rc::clone(&interp.borrow().current_env).borrow_mut().define_mut(name.clone(), val);
+        Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().define_mut(name.clone(), val);
     } else {
-        Rc::clone(&interp.borrow().current_env).borrow_mut().define(name.clone(), val);
+        Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().define(name.clone(), val);
     }
 }
 
-fn push_scope(mut interp: Rc<RefCell<Interpreter>>) -> Rc<RefCell<Env>> {
-    let child = new_env(Some(Rc::clone(&interp.borrow().current_env)));
-    { let mut __g = interp.borrow_mut(); __g.current_env = child.clone(); };
+fn push_scope(mut interp: Arc<std::sync::Mutex<Interpreter>>) -> Arc<std::sync::Mutex<Env>> {
+    let child = new_env(Some(Arc::clone(&interp.lock().unwrap().current_env)));
+    { let mut __g = interp.lock().unwrap(); __g.current_env = child.clone(); };
     child
 }
 
-fn pop_scope(mut interp: Rc<RefCell<Interpreter>>) -> () {
-    let parent = interp.borrow().current_env.borrow().parent.clone();
-    if let Some(p) = parent {
-        { let mut __g = interp.borrow_mut(); __g.current_env = p; };
+fn pop_scope(mut interp: Arc<std::sync::Mutex<Interpreter>>) -> () {
+    let cur = Arc::clone(&interp.lock().unwrap().current_env);
+    let p_opt = cur.lock().unwrap().parent_opt();
+    if let Some(p) = p_opt {
+        { let mut __g = interp.lock().unwrap(); __g.current_env = p; };
     }
 }
 
-fn eval_expr(mut interp: Rc<RefCell<Interpreter>>, expr: Expr) -> Value {
+fn eval_expr(mut interp: Arc<std::sync::Mutex<Interpreter>>, expr: Expr) -> Value {
     match expr.kind {
-        ExprKind::Int(n) => {
+        ExprKind::Int(mut n) => {
             Value::Int(n)
         }
-        ExprKind::Float(f) => {
+        ExprKind::Float(mut f) => {
             Value::Float(f)
         }
-        ExprKind::Str(s) => {
-            Value::Str(Rc::<str>::from(s.clone().to_string()))
+        ExprKind::Str(mut s) => {
+            Value::Str(Arc::<str>::from(s.clone().to_string()))
         }
-        ExprKind::Bool(b) => {
+        ExprKind::Bool(mut b) => {
             Value::Bool(b)
         }
         ExprKind::Nil => {
             Value::Nil
         }
-        ExprKind::Var(name) => {
-            let result = Rc::clone(&interp.borrow().current_env).borrow_mut().get(name.clone());
+        ExprKind::Var(mut name) => {
+            let result = Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().get(name.clone());
             if let Some(val) = result {
                 match val {
                     Value::Uninitialized => {
-                        panic!("{}", Rc::<str>::from(format!("variable '{}' used before being assigned", name).as_str()));
+                        panic!("{}", Arc::<str>::from(format!("variable '{}' used before being assigned", name).as_str()));
                     }
                     _ => {
                         val
                     }
                 }
             } else {
-                let self_opt = Rc::clone(&interp.borrow().current_env).borrow_mut().get(Rc::<str>::from("self"));
+                let self_opt = Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().get(Arc::<str>::from("self"));
                 if let Some(self_val) = self_opt {
                     match self_val {
-                        Value::Object(obj) => {
-                            let field_opt = obj.borrow_mut().get_field(name.clone());
+                        Value::Object(mut obj) => {
+                            let field_opt = obj.lock().unwrap().get_field(name.clone());
                             if let Some(fval) = field_opt {
                                 fval
                             } else {
-                                panic!("{}", Rc::<str>::from(format!("undefined variable '{}'", name).as_str()));
+                                panic!("{}", Arc::<str>::from(format!("undefined variable '{}'", name).as_str()));
                             }
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("undefined variable '{}'", name).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("undefined variable '{}'", name).as_str()));
                         }
                     }
                 } else {
-                    panic!("{}", Rc::<str>::from(format!("undefined variable '{}'", name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("undefined variable '{}'", name).as_str()));
                 }
             }
         }
-        ExprKind::BinOp(op, left, right) => {
+        ExprKind::BinOp(mut op, mut left, mut right) => {
             let left = *left;
             let right = *right;
-            eval_binop(Rc::clone(&interp), op, left.clone(), right.clone())
+            eval_binop(Arc::clone(&interp), op.clone(), left.clone(), right.clone())
         }
-        ExprKind::UnaryOp(op, inner) => {
+        ExprKind::UnaryOp(mut op, mut inner) => {
             let inner = *inner;
-            let val = eval_expr(Rc::clone(&interp), inner.clone());
+            let val = eval_expr(Arc::clone(&interp), inner.clone());
             match op {
                 UnaryOp::Neg => {
                     match val {
-                        Value::Int(n) => {
+                        Value::Int(mut n) => {
                             Value::Int((0 - n))
                         }
-                        Value::Float(f) => {
+                        Value::Float(mut f) => {
                             Value::Float((0.0 - f))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot negate {}", val.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot negate {}", val.type_name()).as_str()));
                         }
                     }
                 }
                 UnaryOp::Not => {
                     match val {
-                        Value::Bool(b) => {
+                        Value::Bool(mut b) => {
                             Value::Bool((!b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("expected bool for 'not', got {}", val.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("expected bool for 'not', got {}", val.type_name()).as_str()));
                         }
                     }
                 }
@@ -9167,117 +9246,117 @@ fn eval_expr(mut interp: Rc<RefCell<Interpreter>>, expr: Expr) -> Value {
                 }
             }
         }
-        ExprKind::Call(callee_expr, args) => {
+        ExprKind::Call(mut callee_expr, mut args) => {
             let callee_expr = *callee_expr;
-            let callee = eval_expr(Rc::clone(&interp), callee_expr.clone());
-            let arg_vals = eval_args(Rc::clone(&interp), args);
-            call_value(Rc::clone(&interp), callee, arg_vals)
+            let callee = eval_expr(Arc::clone(&interp), callee_expr.clone());
+            let arg_vals = eval_args(Arc::clone(&interp), args);
+            call_value(Arc::clone(&interp), callee.clone(), arg_vals)
         }
-        ExprKind::MethodCall(recv_expr, method, args) => {
+        ExprKind::MethodCall(mut recv_expr, mut method, mut args) => {
             let recv_expr = *recv_expr;
-            let recv = eval_expr(Rc::clone(&interp), recv_expr.clone());
-            let arg_vals = eval_args(Rc::clone(&interp), args);
-            call_method(Rc::clone(&interp), recv, Rc::<str>::from(method.clone().to_string()), arg_vals)
+            let recv = eval_expr(Arc::clone(&interp), recv_expr.clone());
+            let arg_vals = eval_args(Arc::clone(&interp), args);
+            call_method(Arc::clone(&interp), recv.clone(), Arc::<str>::from(method.clone().to_string()), arg_vals)
         }
-        ExprKind::Field(obj_expr, field_name) => {
+        ExprKind::Field(mut obj_expr, mut field_name) => {
             let obj_expr = *obj_expr;
-            let obj = eval_expr(Rc::clone(&interp), obj_expr.clone());
-            get_field(Rc::clone(&interp), obj, Rc::<str>::from(field_name.clone().to_string()))
+            let obj = eval_expr(Arc::clone(&interp), obj_expr.clone());
+            get_field(Arc::clone(&interp), obj.clone(), Arc::<str>::from(field_name.clone().to_string()))
         }
-        ExprKind::Index(obj_expr, idx_expr) => {
+        ExprKind::Index(mut obj_expr, mut idx_expr) => {
             let obj_expr = *obj_expr;
             let idx_expr = *idx_expr;
-            let obj = eval_expr(Rc::clone(&interp), obj_expr.clone());
-            let idx = eval_expr(Rc::clone(&interp), idx_expr.clone());
-            get_index(Rc::clone(&interp), obj, idx)
+            let obj = eval_expr(Arc::clone(&interp), obj_expr.clone());
+            let idx = eval_expr(Arc::clone(&interp), idx_expr.clone());
+            get_index(Arc::clone(&interp), obj.clone(), idx.clone())
         }
-        ExprKind::Array(elems) => {
+        ExprKind::Array(mut elems) => {
             let mut vals = vec![];
             for item in elems.iter().cloned() {
-                vals.push(eval_expr(Rc::clone(&interp), item));
+                vals.push(eval_expr(Arc::clone(&interp), item));
             }
             Value::Array(vals)
         }
-        ExprKind::Dict(pairs) => {
+        ExprKind::Dict(mut pairs) => {
             let mut entries = vec![];
             for pair in pairs.iter().cloned() {
-                let k = eval_expr(Rc::clone(&interp), pair.0);
-                let v = eval_expr(Rc::clone(&interp), pair.1);
+                let k = eval_expr(Arc::clone(&interp), pair.0);
+                let v = eval_expr(Arc::clone(&interp), pair.1);
                 entries.push((k, v));
             }
             Value::Dict(entries)
         }
-        ExprKind::Set(elems) => {
+        ExprKind::Set(mut elems) => {
             let mut vals = vec![];
             for item in elems.iter().cloned() {
-                let v = eval_expr(Rc::clone(&interp), item);
+                let v = eval_expr(Arc::clone(&interp), item);
                 if (!vals.contains(&v)) {
                     vals.push(v);
                 }
             }
             Value::Set(vals)
         }
-        ExprKind::StringInterp(segments) => {
-            let mut result: Rc<str> = Rc::<str>::from("");
+        ExprKind::StringInterp(mut segments) => {
+            let mut result: Arc<str> = Arc::<str>::from("");
             for seg in segments.iter().cloned() {
                 match seg {
-                    StringSegment::Lit(text) => {
-                        result = Rc::<str>::from(format!("{}{}", result, text));
+                    StringSegment::Lit(mut text) => {
+                        result = Arc::<str>::from(format!("{}{}", result, text));
                     }
-                    StringSegment::Expr(e) => {
-                        let v = eval_expr(Rc::clone(&interp), e.clone());
-                        result = Rc::<str>::from(format!("{}{}", result, display_value(Rc::clone(&interp), v)));
+                    StringSegment::Expr(mut e) => {
+                        let v = eval_expr(Arc::clone(&interp), e.clone());
+                        result = Arc::<str>::from(format!("{}{}", result, display_value(Arc::clone(&interp), v.clone())));
                     }
-                    StringSegment::FormattedExpr(e, _) => {
-                        let v = eval_expr(Rc::clone(&interp), e.clone());
-                        result = Rc::<str>::from(format!("{}{}", result, display_value(Rc::clone(&interp), v)));
+                    StringSegment::FormattedExpr(mut e, _) => {
+                        let v = eval_expr(Arc::clone(&interp), e.clone());
+                        result = Arc::<str>::from(format!("{}{}", result, display_value(Arc::clone(&interp), v.clone())));
                     }
                 }
             }
             Value::Str(result.clone().clone())
         }
-        ExprKind::Closure(params, _, body, _, _) => {
+        ExprKind::Closure(mut params, _, mut body, _, _) => {
             let body = *body;
-            Value::Closure(params, body, Some(Rc::clone(&interp.borrow().current_env)))
+            Value::Closure(params, body.clone(), Some(Arc::clone(&interp.lock().unwrap().current_env)))
         }
-        ExprKind::Cast(inner_expr, ty) => {
+        ExprKind::Cast(mut inner_expr, mut ty) => {
             let inner_expr = *inner_expr;
-            let val = eval_expr(Rc::clone(&interp), inner_expr.clone());
-            cast_value(Rc::clone(&interp), val, ty)
+            let val = eval_expr(Arc::clone(&interp), inner_expr.clone());
+            cast_value(Arc::clone(&interp), val.clone(), ty.clone())
         }
-        ExprKind::Range(start_expr, end_expr, inclusive) => {
+        ExprKind::Range(mut start_expr, mut end_expr, mut inclusive) => {
             let start_expr = *start_expr;
             let end_expr = *end_expr;
-            let s = eval_expr(Rc::clone(&interp), start_expr.clone());
-            let e = eval_expr(Rc::clone(&interp), end_expr.clone());
+            let s = eval_expr(Arc::clone(&interp), start_expr.clone());
+            let e = eval_expr(Arc::clone(&interp), end_expr.clone());
             match s {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match e {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Range(a, b, inclusive, 1)
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("range end must be Int, got {}", e.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("range end must be Int, got {}", e.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("range start must be Int, got {}", s.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("range start must be Int, got {}", s.type_name()).as_str()));
                 }
             }
         }
-        ExprKind::If(s) => {
+        ExprKind::If(mut s) => {
             let mut result_val = Value::Nil;
             let mut handled = false;
             for branch in s.branches.into_iter() {
                 if (!handled) {
-                    let cond_val = eval_expr(Rc::clone(&interp), branch.cond);
+                    let cond_val = eval_expr(Arc::clone(&interp), branch.cond);
                     match cond_val {
-                        Value::Bool(b) => {
+                        Value::Bool(mut b) => {
                             if b {
-                                let child = push_scope(Rc::clone(&interp));
-                                result_val = eval_block(Rc::clone(&interp), branch.body);
-                                pop_scope(Rc::clone(&interp));
+                                let child = push_scope(Arc::clone(&interp));
+                                result_val = eval_block(Arc::clone(&interp), branch.body);
+                                pop_scope(Arc::clone(&interp));
                                 handled = true;
                             }
                         }
@@ -9289,9 +9368,9 @@ fn eval_expr(mut interp: Rc<RefCell<Interpreter>>, expr: Expr) -> Value {
             }
             if (!handled) {
                 if let Some(else_body) = s.else_body {
-                    let child = push_scope(Rc::clone(&interp));
-                    result_val = eval_block(Rc::clone(&interp), else_body);
-                    pop_scope(Rc::clone(&interp));
+                    let child = push_scope(Arc::clone(&interp));
+                    result_val = eval_block(Arc::clone(&interp), else_body);
+                    pop_scope(Arc::clone(&interp));
                 }
             }
             result_val
@@ -9302,26 +9381,26 @@ fn eval_expr(mut interp: Rc<RefCell<Interpreter>>, expr: Expr) -> Value {
     }
 }
 
-fn eval_args(mut interp: Rc<RefCell<Interpreter>>, args: Vec<Arg>) -> Vec<Value> {
+fn eval_args(mut interp: Arc<std::sync::Mutex<Interpreter>>, args: Vec<Arg>) -> Vec<Value> {
     let mut vals = vec![];
     for arg in args.iter().cloned() {
-        vals.push(eval_expr(Rc::clone(&interp), arg.value));
+        vals.push(eval_expr(Arc::clone(&interp), arg.value));
     }
     vals
 }
 
-fn eval_binop(mut interp: Rc<RefCell<Interpreter>>, op: BinOp, lhs: Expr, rhs: Expr) -> Value {
+fn eval_binop(mut interp: Arc<std::sync::Mutex<Interpreter>>, op: BinOp, lhs: Expr, rhs: Expr) -> Value {
     match op {
         BinOp::And => {
-            let l = eval_expr(Rc::clone(&interp), lhs.clone());
+            let l = eval_expr(Arc::clone(&interp), lhs.clone());
             match l {
                 Value::Bool(false) => {
                     Value::Bool(false)
                 }
                 Value::Bool(true) => {
-                    let r = eval_expr(Rc::clone(&interp), rhs.clone());
+                    let r = eval_expr(Arc::clone(&interp), rhs.clone());
                     match r {
-                        Value::Bool(b) => {
+                        Value::Bool(mut b) => {
                             Value::Bool(b)
                         }
                         _ => {
@@ -9335,15 +9414,15 @@ fn eval_binop(mut interp: Rc<RefCell<Interpreter>>, op: BinOp, lhs: Expr, rhs: E
             }
         }
         BinOp::Or => {
-            let l = eval_expr(Rc::clone(&interp), lhs.clone());
+            let l = eval_expr(Arc::clone(&interp), lhs.clone());
             match l {
                 Value::Bool(true) => {
                     Value::Bool(true)
                 }
                 Value::Bool(false) => {
-                    let r = eval_expr(Rc::clone(&interp), rhs.clone());
+                    let r = eval_expr(Arc::clone(&interp), rhs.clone());
                     match r {
-                        Value::Bool(b) => {
+                        Value::Bool(mut b) => {
                             Value::Bool(b)
                         }
                         _ => {
@@ -9357,9 +9436,9 @@ fn eval_binop(mut interp: Rc<RefCell<Interpreter>>, op: BinOp, lhs: Expr, rhs: E
             }
         }
         _ => {
-            let l = eval_expr(Rc::clone(&interp), lhs.clone());
-            let r = eval_expr(Rc::clone(&interp), rhs.clone());
-            apply_binop(op, l, r)
+            let l = eval_expr(Arc::clone(&interp), lhs.clone());
+            let r = eval_expr(Arc::clone(&interp), rhs.clone());
+            apply_binop(op.clone(), l.clone(), r.clone())
         }
     }
 }
@@ -9368,45 +9447,45 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
     match op {
         BinOp::Add => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a + b))
                         }
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float(((a as f64) + b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot add Int and {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot add Int and {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Float(a) => {
+                Value::Float(mut a) => {
                     match r {
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float((a + b))
                         }
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Float((a + (b as f64)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot add Float and {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot add Float and {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Str(a) => {
+                Value::Str(mut a) => {
                     match r {
-                        Value::Str(b) => {
-                            Value::Str(Rc::<str>::from(format!("{}{}", a, b)))
+                        Value::Str(mut b) => {
+                            Value::Str(Arc::<str>::from(format!("{}{}", a, b)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot add String and {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot add String and {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Array(a) => {
+                Value::Array(mut a) => {
                     match r {
-                        Value::Array(b) => {
+                        Value::Array(mut b) => {
                             let mut merged = a;
                             for item in b.iter().cloned() {
                                 merged.push(item);
@@ -9414,147 +9493,147 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
                             Value::Array(merged)
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot add Array and {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot add Array and {}", r.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot add {} and {}", l.type_name(), r.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot add {} and {}", l.type_name(), r.type_name()).as_str()));
                 }
             }
         }
         BinOp::Sub => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a - b))
                         }
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float(((a as f64) - b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot subtract {} from Int", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot subtract {} from Int", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Float(a) => {
+                Value::Float(mut a) => {
                     match r {
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float((a - b))
                         }
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Float((a - (b as f64)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot subtract {} from Float", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot subtract {} from Float", r.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot subtract {} from {}", r.type_name(), l.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot subtract {} from {}", r.type_name(), l.type_name()).as_str()));
                 }
             }
         }
         BinOp::Mul => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a * b))
                         }
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float(((a as f64) * b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot multiply Int by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot multiply Int by {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Float(a) => {
+                Value::Float(mut a) => {
                     match r {
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float((a * b))
                         }
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Float((a * (b as f64)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot multiply Float by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot multiply Float by {}", r.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot multiply {} and {}", l.type_name(), r.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot multiply {} and {}", l.type_name(), r.type_name()).as_str()));
                 }
             }
         }
         BinOp::Div => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             if (b == 0) {
                                 panic!("division by zero");
                             }
                             Value::Int((a / b))
                         }
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float(((a as f64) / b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot divide Int by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot divide Int by {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Float(a) => {
+                Value::Float(mut a) => {
                     match r {
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float((a / b))
                         }
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Float((a / (b as f64)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot divide Float by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot divide Float by {}", r.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot divide {} by {}", l.type_name(), r.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot divide {} by {}", l.type_name(), r.type_name()).as_str()));
                 }
             }
         }
         BinOp::Rem => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             if (b == 0) {
                                 panic!("remainder by zero");
                             }
                             Value::Int((a % b))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot remainder Int by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot remainder Int by {}", r.type_name()).as_str()));
                         }
                     }
                 }
-                Value::Float(a) => {
+                Value::Float(mut a) => {
                     match r {
-                        Value::Float(b) => {
+                        Value::Float(mut b) => {
                             Value::Float((a % b))
                         }
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Float((a % (b as f64)))
                         }
                         _ => {
-                            panic!("{}", Rc::<str>::from(format!("cannot remainder Float by {}", r.type_name()).as_str()));
+                            panic!("{}", Arc::<str>::from(format!("cannot remainder Float by {}", r.type_name()).as_str()));
                         }
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot remainder {} by {}", l.type_name(), r.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot remainder {} by {}", l.type_name(), r.type_name()).as_str()));
                 }
             }
         }
@@ -9565,22 +9644,22 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
             Value::Bool((l != r))
         }
         BinOp::Lt => {
-            Value::Bool((compare_values(l, r).unwrap_or(0) < 0))
+            Value::Bool((compare_values(l.clone(), r.clone()) < 0))
         }
         BinOp::Gt => {
-            Value::Bool((compare_values(l, r).unwrap_or(0) > 0))
+            Value::Bool((compare_values(l.clone(), r.clone()) > 0))
         }
         BinOp::LtEq => {
-            Value::Bool((compare_values(l, r).unwrap_or(0) <= 0))
+            Value::Bool((compare_values(l.clone(), r.clone()) <= 0))
         }
         BinOp::GtEq => {
-            Value::Bool((compare_values(l, r).unwrap_or(0) >= 0))
+            Value::Bool((compare_values(l.clone(), r.clone()) >= 0))
         }
         BinOp::BitAnd => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a & b))
                         }
                         _ => {
@@ -9595,9 +9674,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         }
         BinOp::BitOr => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a | b))
                         }
                         _ => {
@@ -9612,9 +9691,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         }
         BinOp::BitXor => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             Value::Int((a ^ b))
                         }
                         _ => {
@@ -9629,9 +9708,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         }
         BinOp::Shl => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             if (b < 0) {
                                 panic!("shift amount cannot be negative");
                             }
@@ -9649,9 +9728,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
         }
         BinOp::Shr => {
             match l {
-                Value::Int(a) => {
+                Value::Int(mut a) => {
                     match r {
-                        Value::Int(b) => {
+                        Value::Int(mut b) => {
                             if (b < 0) {
                                 panic!("shift amount cannot be negative");
                             }
@@ -9677,28 +9756,35 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Value {
                 }
             }
         }
+        BinOp::IsNot => {
+            match r {
+                Value::Nil => {
+                    Value::Bool((l != Value::Nil))
+                }
+                _ => {
+                    Value::Bool((l.type_name() != r.type_name()))
+                }
+            }
+        }
+        BinOp::RefEq => {
+            Value::Bool((l == r))
+        }
         BinOp::And => {
             panic!("And handled by short-circuit path");
         }
         BinOp::Or => {
             panic!("Or handled by short-circuit path");
         }
-        BinOp::RefEq => {
-            Value::Bool(std::ptr::eq(&l as *const _, &r as *const _))
-        }
-        BinOp::IsNot => {
-            Value::Bool(!value_equals(l, r))
-        }
     }
 }
 
-fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>> {
+fn compare_values(l: Value, r: Value) -> i64 {
     match l {
         Value::Int(a) => {
             match r {
                 Value::Int(b) => {
                     if (a < b) {
-                        (-1);
+                        (-1)
                     } else {
                         {
                         if (a > b) {
@@ -9706,13 +9792,13 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
                         } else {
                             0
                         }
-};
+}
                     }
                 }
                 Value::Float(b) => {
                     let af = (a as f64);
                     if (af < b) {
-                        (-1);
+                        (-1)
                     } else {
                         {
                         if (af > b) {
@@ -9720,11 +9806,11 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
                         } else {
                             0
                         }
-};
+}
                     }
                 }
                 _ => {
-                    return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("cannot compare Int and {}", r.type_name()).as_str())))));
+                    panic!("{}", Arc::<str>::from(format!("cannot compare Int and {}", r.type_name()).as_str()));
                 }
             }
         }
@@ -9732,7 +9818,7 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
             match r {
                 Value::Float(b) => {
                     if (a < b) {
-                        (-1);
+                        (-1)
                     } else {
                         {
                         if (a > b) {
@@ -9740,13 +9826,13 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
                         } else {
                             0
                         }
-};
+}
                     }
                 }
                 Value::Int(b) => {
                     let bf = (b as f64);
                     if (a < bf) {
-                        (-1);
+                        (-1)
                     } else {
                         {
                         if (a > bf) {
@@ -9754,11 +9840,11 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
                         } else {
                             0
                         }
-};
+}
                     }
                 }
                 _ => {
-                    return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("cannot compare Float and {}", r.type_name()).as_str())))));
+                    panic!("{}", Arc::<str>::from(format!("cannot compare Float and {}", r.type_name()).as_str()));
                 }
             }
         }
@@ -9766,7 +9852,7 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
             match r {
                 Value::Str(b) => {
                     if ((&*a).cmp((&*b)) < std::cmp::Ordering::Equal) {
-                        (-1);
+                        (-1)
                     } else {
                         {
                         if ((&*a).cmp((&*b)) > std::cmp::Ordering::Equal) {
@@ -9774,40 +9860,39 @@ fn compare_values(l: Value, r: Value) -> Result<i64, Box<dyn std::error::Error>>
                         } else {
                             0
                         }
-};
+}
                     }
                 }
                 _ => {
-                    return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("cannot compare String and {}", r.type_name()).as_str())))));
+                    panic!("{}", Arc::<str>::from(format!("cannot compare String and {}", r.type_name()).as_str()));
                 }
             }
         }
         _ => {
-            return Err(Box::new(BoringError::String(Rc::<str>::from(Rc::<str>::from(format!("cannot compare {} and {}", l.type_name(), r.type_name()).as_str())))));
+            panic!("{}", Arc::<str>::from(format!("cannot compare {} and {}", l.type_name(), r.type_name()).as_str()));
         }
     }
-    unreachable!()
 }
 
-fn get_field(mut interp: Rc<RefCell<Interpreter>>, obj: Value, field_name: Rc<str>) -> Value {
+fn get_field(mut interp: Arc<std::sync::Mutex<Interpreter>>, obj: Value, field_name: Arc<str>) -> Value {
     match obj {
-        Value::Object(inner) => {
-            let val_opt = inner.borrow_mut().get_field(field_name.clone());
+        Value::Object(mut inner) => {
+            let val_opt = inner.lock().unwrap().get_field(field_name.clone());
             if let Some(v) = val_opt {
                 v
             } else {
-                panic!("{}", Rc::<str>::from(format!("no field '{}' on object of type {}", field_name, inner.borrow().type_name).as_str()));
+                panic!("{}", Arc::<str>::from(format!("no field '{}' on object of type {}", field_name, inner.lock().unwrap().type_name).as_str()));
             }
         }
-        Value::EnumVariant(type_name, variant, fields) => {
-            if (field_name == Rc::<str>::from("type")) {
-                Value::Str(Rc::<str>::from(type_name.clone().to_string()))
+        Value::EnumVariant(mut type_name, mut variant, mut fields) => {
+            if (field_name == Arc::<str>::from("type")) {
+                Value::Str(Arc::<str>::from(type_name.clone().to_string()))
             } else {
                 {
-                if (field_name == Rc::<str>::from("variant")) {
-                    Value::Str(Rc::<str>::from(variant.clone().to_string()))
+                if (field_name == Arc::<str>::from("variant")) {
+                    Value::Str(Arc::<str>::from(variant.clone().to_string()))
                 } else {
-                    panic!("{}", Rc::<str>::from(format!("cannot access field '{}' on enum variant", field_name).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot access field '{}' on enum variant", field_name).as_str()));
                 }
 }
             }
@@ -9816,27 +9901,27 @@ fn get_field(mut interp: Rc<RefCell<Interpreter>>, obj: Value, field_name: Rc<st
             panic!("field access on nil");
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("cannot access field '{}' on {}", field_name, obj.type_name()).as_str()));
+            panic!("{}", Arc::<str>::from(format!("cannot access field '{}' on {}", field_name, obj.type_name()).as_str()));
         }
     }
 }
 
-fn get_index(mut interp: Rc<RefCell<Interpreter>>, obj: Value, idx: Value) -> Value {
+fn get_index(mut interp: Arc<std::sync::Mutex<Interpreter>>, obj: Value, idx: Value) -> Value {
     match obj {
-        Value::Array(items) => {
+        Value::Array(mut items) => {
             match idx {
-                Value::Int(i) => {
+                Value::Int(mut i) => {
                     if ((i < 0) || (i >= (items.len() as i64))) {
-                        panic!("{}", Rc::<str>::from(format!("array index {} out of bounds (length {})", i, (items.len() as i64)).as_str()));
+                        panic!("{}", Arc::<str>::from(format!("array index {} out of bounds (length {})", i, (items.len() as i64)).as_str()));
                     }
                     items[(i) as usize].clone()
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("array index must be Int, got {}", idx.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("array index must be Int, got {}", idx.type_name()).as_str()));
                 }
             }
         }
-        Value::Dict(entries) => {
+        Value::Dict(mut entries) => {
             for entry in entries.iter().cloned() {
                 if (entry.0 == idx) {
                     entry.1;
@@ -9844,22 +9929,22 @@ fn get_index(mut interp: Rc<RefCell<Interpreter>>, obj: Value, idx: Value) -> Va
             }
             panic!("key not found in dict");
         }
-        Value::Str(s) => {
+        Value::Str(mut s) => {
             match idx {
-                Value::Int(i) => {
+                Value::Int(mut i) => {
                     if ((i < 0) || (i >= (s.len() as i64))) {
-                        panic!("{}", Rc::<str>::from(format!("string index {} out of bounds", i).as_str()));
+                        panic!("{}", Arc::<str>::from(format!("string index {} out of bounds", i).as_str()));
                     }
-                    Value::Str(Rc::<str>::from(s.chars().nth(i as usize).unwrap().to_string().as_str()))
+                    Value::Str(Arc::<str>::from({ let __start = (i) as usize; Arc::<str>::from(s.chars().skip(__start).take(((i + 1)) as usize - __start).collect::<String>().as_str()) }.to_string()))
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("string index must be Int, got {}", idx.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("string index must be Int, got {}", idx.type_name()).as_str()));
                 }
             }
         }
-        Value::Range(start, end, inclusive, _) => {
+        Value::Range(mut start, mut end, mut inclusive, _) => {
             match idx {
-                Value::Int(i) => {
+                Value::Int(mut i) => {
                     let actual = (start + i);
                     let limit = {
                     if inclusive {
@@ -9869,7 +9954,7 @@ fn get_index(mut interp: Rc<RefCell<Interpreter>>, obj: Value, idx: Value) -> Va
                     }
 };
                     if (actual >= limit) {
-                        panic!("{}", Rc::<str>::from(format!("range index {} out of bounds", i).as_str()));
+                        panic!("{}", Arc::<str>::from(format!("range index {} out of bounds", i).as_str()));
                     }
                     Value::Int(actual)
                 }
@@ -9879,39 +9964,46 @@ fn get_index(mut interp: Rc<RefCell<Interpreter>>, obj: Value, idx: Value) -> Va
             }
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("cannot index into {}", obj.type_name()).as_str()));
+            panic!("{}", Arc::<str>::from(format!("cannot index into {}", obj.type_name()).as_str()));
         }
     }
 }
 
-fn call_array_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>, method: Rc<str>, args: Vec<Value>) -> Value {
+fn string_gt(a: Arc<str>, b: Arc<str>) -> bool {
+    ((&*a).cmp((&*b)) > std::cmp::Ordering::Equal)
+}
+
+fn call_array_method(mut interp: Arc<std::sync::Mutex<Interpreter>>, mut items: &mut Vec<Value>, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "length" => {
-            Value::Int((items.len() as i64))
+            Value::Int(((*items).len() as i64))
         }
         "append" => {
             if ((args.len() as i64) != 1) {
                 panic!("append takes 1 argument");
             }
-            items.push(args[(0) as usize].clone());
+            (*items).push(args[(0) as usize].clone());
             Value::Nil
         }
         "pop" => {
-            if ((items.len() as i64) == 0) {
+            if (((*items).len() as i64) == 0) {
                 panic!("pop on empty array");
             }
-            items.pop().unwrap_or_default()
+            let last_idx = (((*items).len() as i64) - 1);
+            let last_val = (*items)[(last_idx) as usize].clone();
+            (*items).remove({ let __boring_idx = last_idx as i64; if __boring_idx < 0 { ((*items).len() as i64 + __boring_idx) as usize } else { __boring_idx as usize } });
+            last_val
         }
         "get" => {
             if ((args.len() as i64) == 0) {
                 panic!("get requires index argument");
             }
             match args[(0) as usize].clone() {
-                Value::Int(i) => {
-                    if ((i < 0) || (i >= (items.len() as i64))) {
+                Value::Int(mut i) => {
+                    if ((i < 0) || (i >= ((*items).len() as i64))) {
                         Value::Nil
                     } else {
-                        items[(i) as usize].clone()
+                        (*items)[(i) as usize].clone()
                     }
                 }
                 _ => {
@@ -9923,27 +10015,27 @@ fn call_array_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>
             if ((args.len() as i64) != 1) {
                 panic!("contains takes 1 argument");
             }
-            Value::Bool(items.contains(&args[(0) as usize].clone()))
+            Value::Bool((*items).contains(&args[(0) as usize].clone()))
         }
         "first" => {
-            if ((items.len() as i64) == 0) {
+            if (((*items).len() as i64) == 0) {
                 Value::Nil
             } else {
-                items[(0) as usize].clone()
+                (*items)[(0) as usize].clone()
             }
         }
         "last" => {
-            if ((items.len() as i64) == 0) {
+            if (((*items).len() as i64) == 0) {
                 Value::Nil
             } else {
-                items[(((items.len() as i64) - 1)) as usize].clone()
+                (*items)[((((*items).len() as i64) - 1)) as usize].clone()
             }
         }
         "reverse" => {
             let mut rev = vec![];
-            let mut i = ((items.len() as i64) - 1);
+            let mut i = (((*items).len() as i64) - 1);
             while (i >= 0) {
-                rev.push(items[(i) as usize].clone());
+                rev.push((*items)[(i) as usize].clone());
                 i -= 1;
             }
             Value::Array(rev)
@@ -9952,29 +10044,29 @@ fn call_array_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>
             let sep = {
             if ((args.len() as i64) > 0) {
                 match args[(0) as usize].clone() {
-                    Value::Str(s) => {
+                    Value::Str(mut s) => {
                         s.clone()
                     }
                     _ => {
-                        Rc::<str>::from("")
+                        Arc::<str>::from("")
                     }
                 }
             } else {
-                Rc::<str>::from("")
+                Arc::<str>::from("")
             }
 };
-            let mut result: Rc<str> = Rc::<str>::from("");
+            let mut result: Arc<str> = Arc::<str>::from("");
             let mut idx = 0;
-            while (idx < (items.len() as i64)) {
+            while (idx < ((*items).len() as i64)) {
                 if (idx > 0) {
-                    result = Rc::<str>::from(format!("{}{}", result, sep));
+                    result = Arc::<str>::from(format!("{}{}", result, sep));
                 }
-                match items[(idx) as usize].clone() {
-                    Value::Str(s) => {
-                        result = Rc::<str>::from(format!("{}{}", result, s));
+                match (*items)[(idx) as usize].clone() {
+                    Value::Str(mut s) => {
+                        result = Arc::<str>::from(format!("{}{}", result, s));
                     }
-                    other => {
-                        result = Rc::<str>::from(format!("{}{}", result, display_value(Rc::clone(&interp), other)));
+                    mut other => {
+                        result = Arc::<str>::from(format!("{}{}", result, display_value(Arc::clone(&interp), other.clone())));
                     }
                 }
                 idx += 1;
@@ -9982,12 +10074,12 @@ fn call_array_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>
             Value::Str(result.clone().clone())
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on Array", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on Array", method).as_str()));
         }
     }
 }
 
-fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
+fn call_string_method(s: Arc<str>, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "length" => {
             Value::Int((s.len() as i64))
@@ -9997,7 +10089,7 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
                 panic!("contains takes 1 argument");
             }
             match args[(0) as usize].clone() {
-                Value::Str(sub) => {
+                Value::Str(mut sub) => {
                     Value::Bool(s.contains(sub.as_ref()))
                 }
                 _ => {
@@ -10010,7 +10102,7 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
                 panic!("starts_with takes 1 argument");
             }
             match args[(0) as usize].clone() {
-                Value::Str(prefix) => {
+                Value::Str(mut prefix) => {
                     Value::Bool(s.starts_with(prefix.as_ref()))
                 }
                 _ => {
@@ -10023,7 +10115,7 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
                 panic!("ends_with takes 1 argument");
             }
             match args[(0) as usize].clone() {
-                Value::Str(suffix) => {
+                Value::Str(mut suffix) => {
                     Value::Bool(s.ends_with(suffix.as_ref()))
                 }
                 _ => {
@@ -10032,21 +10124,21 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
             }
         }
         "to_upper" => {
-            Value::Str(Rc::<str>::from(Rc::<str>::from(s.to_uppercase().as_str()).to_string()))
+            Value::Str(Arc::<str>::from(s.to_uppercase().as_str()))
         }
         "to_lower" => {
-            Value::Str(Rc::<str>::from(Rc::<str>::from(s.to_lowercase().as_str()).to_string()))
+            Value::Str(Arc::<str>::from(s.to_lowercase().as_str()))
         }
         "trim" => {
-            Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(s.trim()).to_string()).to_string()))
+            Value::Str(Arc::<str>::from(Arc::<str>::from(s.trim()).to_string()))
         }
         "split" => {
             if ((args.len() as i64) != 1) {
                 panic!("split takes 1 argument");
             }
             match args[(0) as usize].clone() {
-                Value::Str(sep) => {
-                    let parts = s.split(sep.as_ref()).map(|p| Rc::<str>::from(p.to_string())).collect::<Vec<_>>();
+                Value::Str(mut sep) => {
+                    let parts = s.split(sep.as_ref()).map(|p| Arc::<str>::from(p.to_string())).collect::<Vec<_>>();
                     let mut result = vec![];
                     for p in parts.iter().cloned() {
                         result.push(Value::Str(p.clone().clone()));
@@ -10063,10 +10155,10 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
                 panic!("replace takes 2 arguments");
             }
             match args[(0) as usize].clone() {
-                Value::Str(from) => {
+                Value::Str(mut from) => {
                     match args[(1) as usize].clone() {
-                        Value::Str(to) => {
-                            Value::Str(Rc::<str>::from(Rc::<str>::from(s.replace(from.as_ref(), to.as_ref()).as_str()).to_string()))
+                        Value::Str(mut to) => {
+                            Value::Str(Arc::<str>::from(s.replace(from.as_ref(), to.as_ref()).as_str()))
                         }
                         _ => {
                             panic!("replace second argument must be string");
@@ -10095,12 +10187,12 @@ fn call_string_method(s: Rc<str>, method: Rc<str>, args: Vec<Value>) -> Value {
             }
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on String", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on String", method).as_str()));
         }
     }
 }
 
-fn call_dict_method(mut interp: Rc<RefCell<Interpreter>>, mut entries: Vec<(Value, Value)>, method: Rc<str>, args: Vec<Value>) -> Value {
+fn call_dict_method(mut interp: Arc<std::sync::Mutex<Interpreter>>, mut entries: &mut Vec<(Value, Value)>, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "get" => {
             if ((args.len() as i64) < 1) {
@@ -10114,7 +10206,7 @@ fn call_dict_method(mut interp: Rc<RefCell<Interpreter>>, mut entries: Vec<(Valu
                 Value::Nil
             }
 };
-            for entry in entries.iter().cloned() {
+            for entry in (*entries).iter().cloned() {
                 if (entry.0 == key) {
                     entry.1;
                 }
@@ -10129,15 +10221,15 @@ fn call_dict_method(mut interp: Rc<RefCell<Interpreter>>, mut entries: Vec<(Valu
             let val = args[(1) as usize].clone();
             let mut found = false;
             let mut i = 0;
-            while ((i < (entries.len() as i64)) && (!found)) {
-                if (entries[(i) as usize].clone().0 == key) {
+            while ((i < ((*entries).len() as i64)) && (!found)) {
+                if ((*entries)[(i) as usize].clone().0 == key) {
                     entries[(i) as usize] = (key.clone(), val.clone());
                     found = true;
                 }
                 i += 1;
             }
             if (!found) {
-                entries.push((key, val));
+                (*entries).push((key, val));
             }
             Value::Nil
         }
@@ -10147,7 +10239,7 @@ fn call_dict_method(mut interp: Rc<RefCell<Interpreter>>, mut entries: Vec<(Valu
             }
             let key = args[(0) as usize].clone();
             let mut result = false;
-            for entry in entries.iter().cloned() {
+            for entry in (*entries).iter().cloned() {
                 if (entry.0 == key) {
                     result = true;
                 }
@@ -10156,41 +10248,41 @@ fn call_dict_method(mut interp: Rc<RefCell<Interpreter>>, mut entries: Vec<(Valu
         }
         "keys" => {
             let mut result = vec![];
-            for entry in entries.iter().cloned() {
+            for entry in (*entries).iter().cloned() {
                 result.push(entry.0);
             }
             Value::Array(result)
         }
         "values" => {
             let mut result = vec![];
-            for entry in entries.iter().cloned() {
+            for entry in (*entries).iter().cloned() {
                 result.push(entry.1);
             }
             Value::Array(result)
         }
         "length" => {
-            Value::Int((entries.len() as i64))
+            Value::Int(((*entries).len() as i64))
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on Dict", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on Dict", method).as_str()));
         }
     }
 }
 
-fn call_set_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>, method: Rc<str>, args: Vec<Value>) -> Value {
+fn call_set_method(mut interp: Arc<std::sync::Mutex<Interpreter>>, mut items: &mut Vec<Value>, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "contains" => {
             if ((args.len() as i64) != 1) {
                 panic!("contains takes 1 argument");
             }
-            Value::Bool(items.contains(&args[(0) as usize].clone()))
+            Value::Bool((*items).contains(&args[(0) as usize].clone()))
         }
         "insert" => {
             if ((args.len() as i64) != 1) {
                 panic!("insert takes 1 argument");
             }
-            if (!items.contains(&args[(0) as usize].clone())) {
-                items.push(args[(0) as usize].clone());
+            if (!(*items).contains(&args[(0) as usize].clone())) {
+                (*items).push(args[(0) as usize].clone());
             }
             Value::Nil
         }
@@ -10199,24 +10291,24 @@ fn call_set_method(mut interp: Rc<RefCell<Interpreter>>, mut items: Vec<Value>, 
                 panic!("remove takes 1 argument");
             }
             let mut result = vec![];
-            for item in items.iter().cloned() {
+            for item in (*items).iter().cloned() {
                 if (item != args[(0) as usize].clone()) {
                     result.push(item);
                 }
             }
-            items = result.clone();
+            *items = result;
             Value::Nil
         }
         "length" => {
-            Value::Int((items.len() as i64))
+            Value::Int(((*items).len() as i64))
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on Set", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on Set", method).as_str()));
         }
     }
 }
 
-fn call_int_method(n: i64, method: Rc<str>, args: Vec<Value>) -> Value {
+fn call_int_method(n: i64, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "abs" => {
             if (n < 0) {
@@ -10226,18 +10318,18 @@ fn call_int_method(n: i64, method: Rc<str>, args: Vec<Value>) -> Value {
             }
         }
         "to_string" => {
-            Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str())).to_string()))
+            Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str())))
         }
         "as_float" => {
             Value::Float((n as f64))
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on Int", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on Int", method).as_str()));
         }
     }
 }
 
-fn call_float_method(f: f64, method: Rc<str>, args: Vec<Value>) -> Value {
+fn call_float_method(f: f64, method: Arc<str>, args: Vec<Value>) -> Value {
     match &*method {
         "abs" => {
             if (f < 0.0) {
@@ -10256,51 +10348,51 @@ fn call_float_method(f: f64, method: Rc<str>, args: Vec<Value>) -> Value {
             Value::Int((f.round() as i64))
         }
         "to_string" => {
-            Value::Str(Rc::<str>::from(Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str())).to_string()))
+            Value::Str(Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str())))
         }
         "sqrt" => {
             Value::Float(f.sqrt())
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("no method '{}' on Float", method).as_str()));
+            panic!("{}", Arc::<str>::from(format!("no method '{}' on Float", method).as_str()));
         }
     }
 }
 
-fn cast_value(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: Type) -> Value {
+fn cast_value(mut interp: Arc<std::sync::Mutex<Interpreter>>, val: Value, ty: Type) -> Value {
     let type_name =     match ty {
-        Type::Named(name) => {
+        Type::Named(mut name) => {
             name.clone()
         }
         Type::Int => {
-            Rc::<str>::from("int")
+            Arc::<str>::from("int")
         }
         Type::Float => {
-            Rc::<str>::from("float")
+            Arc::<str>::from("float")
         }
         Type::Bool => {
-            Rc::<str>::from("bool")
+            Arc::<str>::from("bool")
         }
         Type::Str => {
-            Rc::<str>::from("string")
+            Arc::<str>::from("string")
         }
         Type::Uint => {
-            Rc::<str>::from("uint")
+            Arc::<str>::from("uint")
         }
         _ => {
-            Rc::<str>::from("unknown")
+            Arc::<str>::from("unknown")
         }
     };
     match &*type_name {
         "int" => {
             match val {
-                Value::Int(n) => {
+                Value::Int(mut n) => {
                     Value::Int(n)
                 }
-                Value::Float(f) => {
+                Value::Float(mut f) => {
                     Value::Int((f as i64))
                 }
-                Value::Bool(b) => {
+                Value::Bool(mut b) => {
                     {
                     if b {
                         Value::Int(1)
@@ -10309,7 +10401,7 @@ fn cast_value(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: Type) -> Val
                     }
 }
                 }
-                Value::Str(s) => {
+                Value::Str(mut s) => {
                     let n = s.parse::<i64>().ok();
                     if let Some(v) = n {
                         Value::Int(v)
@@ -10318,19 +10410,19 @@ fn cast_value(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: Type) -> Val
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot cast {} to int", val.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot cast {} to int", val.type_name()).as_str()));
                 }
             }
         }
         "float" => {
             match val {
-                Value::Float(f) => {
+                Value::Float(mut f) => {
                     Value::Float(f)
                 }
-                Value::Int(n) => {
+                Value::Int(mut n) => {
                     Value::Float((n as f64))
                 }
-                Value::Str(s) => {
+                Value::Str(mut s) => {
                     let f = s.parse::<f64>().ok();
                     if let Some(v) = f {
                         Value::Float(v)
@@ -10339,19 +10431,19 @@ fn cast_value(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: Type) -> Val
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot cast {} to float", val.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot cast {} to float", val.type_name()).as_str()));
                 }
             }
         }
         "string" => {
-            Value::Str(Rc::<str>::from(display_value(Rc::clone(&interp), val).to_string()))
+            Value::Str(Arc::<str>::from(display_value(Arc::clone(&interp), val.clone()).to_string()))
         }
         "bool" => {
             match val {
-                Value::Bool(b) => {
+                Value::Bool(mut b) => {
                     Value::Bool(b)
                 }
-                Value::Int(n) => {
+                Value::Int(mut n) => {
                     Value::Bool((n != 0))
                 }
                 Value::Nil => {
@@ -10363,255 +10455,254 @@ fn cast_value(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: Type) -> Val
             }
         }
         _ => {
-            panic!("{}", Rc::<str>::from(format!("unknown cast target type '{}'", type_name).as_str()));
+            panic!("{}", Arc::<str>::from(format!("unknown cast target type '{}'", type_name).as_str()));
         }
     }
 }
 
-fn value_is_type(mut interp: Rc<RefCell<Interpreter>>, val: Value, ty: TypeRef) -> Result<bool, Box<dyn std::error::Error>> {
-    let type_name = ty.name;
+fn value_is_type(mut interp: Arc<std::sync::Mutex<Interpreter>>, val: Value, ty: TypeRef) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let type_name = ty.name.clone();
     match &*type_name {
         "int" => {
             match val {
                 Value::Int(_) => {
-                    true;
+                    Ok(true)
                 }
                 _ => {
-                    false;
+                    Ok(false)
                 }
             }
         }
         "float" => {
             match val {
                 Value::Float(_) => {
-                    true;
+                    Ok(true)
                 }
                 _ => {
-                    false;
+                    Ok(false)
                 }
             }
         }
         "string" => {
             match val {
                 Value::Str(_) => {
-                    true;
+                    Ok(true)
                 }
                 _ => {
-                    false;
+                    Ok(false)
                 }
             }
         }
         "bool" => {
             match val {
                 Value::Bool(_) => {
-                    true;
+                    Ok(true)
                 }
                 _ => {
-                    false;
+                    Ok(false)
                 }
             }
         }
         "nil" => {
             match val {
                 Value::Nil => {
-                    true;
+                    Ok(true)
                 }
                 _ => {
-                    false;
+                    Ok(false)
                 }
             }
         }
         _ => {
-            (val.type_name() == type_name);
+            Ok((val.type_name() == type_name))
         }
     }
-    unreachable!()
 }
 
-fn display_value(mut interp: Rc<RefCell<Interpreter>>, val: Value) -> Rc<str> {
+fn display_value(mut interp: Arc<std::sync::Mutex<Interpreter>>, val: Value) -> Arc<str> {
     match val {
         Value::Nil => {
-            Rc::<str>::from("nil")
+            Arc::<str>::from("nil")
         }
         Value::Bool(b) => {
             {
             if b {
-                Rc::<str>::from("true")
+                Arc::<str>::from("true")
             } else {
-                Rc::<str>::from("false")
+                Arc::<str>::from("false")
             }
 }
         }
         Value::Int(n) => {
-            Rc::<str>::from(Rc::<str>::from(format!("{}", n).as_str()))
+            Arc::<str>::from(Arc::<str>::from(format!("{}", n).as_str()))
         }
         Value::Float(f) => {
-            Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str()))
+            Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str()))
         }
         Value::Str(s) => {
             s.clone()
         }
         Value::Array(items) => {
-            let mut result: Rc<str> = Rc::<str>::from("[");
+            let mut result: Arc<str> = Arc::<str>::from("[");
             let mut i = 0;
             while (i < (items.len() as i64)) {
                 if (i > 0) {
-                    result = Rc::<str>::from(format!("{}{}", result, ", "));
+                    result = Arc::<str>::from(format!("{}{}", result, ", "));
                 }
-                result = Rc::<str>::from(format!("{}{}", result, display_value(Rc::clone(&interp), items[(i) as usize].clone())));
+                result = Arc::<str>::from(format!("{}{}", result, display_value(Arc::clone(&interp), items[(i) as usize].clone())));
                 i += 1;
             }
-            Rc::<str>::from(format!("{}{}", result, "]"))
+            Arc::<str>::from(format!("{}{}", result, "]"))
         }
         Value::Dict(entries) => {
-            let mut result: Rc<str> = Rc::<str>::from("{");
+            let mut result: Arc<str> = Arc::<str>::from("{");
             let mut i = 0;
             while (i < (entries.len() as i64)) {
                 if (i > 0) {
-                    result = Rc::<str>::from(format!("{}{}", result, ", "));
+                    result = Arc::<str>::from(format!("{}{}", result, ", "));
                 }
-                result = Rc::<str>::from(format!("{}{}{}{}", result, display_value(Rc::clone(&interp), entries[(i) as usize].clone().0), ": ", display_value(Rc::clone(&interp), entries[(i) as usize].clone().1)));
+                result = Arc::<str>::from(format!("{}{}{}{}", result, display_value(Arc::clone(&interp), entries[(i) as usize].clone().0), ": ", display_value(Arc::clone(&interp), entries[(i) as usize].clone().1)));
                 i += 1;
             }
-            Rc::<str>::from(format!("{}{}", result, "}"))
+            Arc::<str>::from(format!("{}{}", result, "}"))
         }
         Value::Object(obj) => {
-            obj.borrow().type_name.clone()
+            obj.lock().unwrap().type_name.clone()
         }
         Value::EnumVariant(type_name, variant, fields) => {
             if ((fields.len() as i64) == 0) {
-                Rc::<str>::from(Rc::<str>::from(format!("{}.{}", type_name, variant).as_str()))
+                Arc::<str>::from(Arc::<str>::from(format!("{}.{}", type_name, variant).as_str()))
             } else {
-                let mut result: Rc<str> = Rc::<str>::from(Rc::<str>::from(format!("{}.{}(", type_name, variant).as_str()));
+                let mut result: Arc<str> = Arc::<str>::from(Arc::<str>::from(format!("{}.{}(", type_name, variant).as_str()));
                 let mut i = 0;
                 while (i < (fields.len() as i64)) {
                     if (i > 0) {
-                        result = Rc::<str>::from(format!("{}{}", result, ", "));
+                        result = Arc::<str>::from(format!("{}{}", result, ", "));
                     }
-                    result = Rc::<str>::from(format!("{}{}", result, display_value(Rc::clone(&interp), fields[(i) as usize].clone())));
+                    result = Arc::<str>::from(format!("{}{}", result, display_value(Arc::clone(&interp), fields[(i) as usize].clone())));
                     i += 1;
                 }
-                Rc::<str>::from(format!("{}{}", result, ")"))
+                Arc::<str>::from(format!("{}{}", result, ")"))
             }
         }
         _ => {
-            Rc::<str>::from("<value>")
+            Arc::<str>::from("<value>")
         }
     }
 }
 
-fn call_object_method(mut interp: Rc<RefCell<Interpreter>>, obj: Rc<RefCell<ObjectInner>>, method: Rc<str>, args: Vec<Value>) -> Value {
-    let type_name = obj.borrow().type_name.clone();
-    let method_decl_opt = interp.borrow_mut().find_method(type_name, method.clone());
+fn call_object_method(mut interp: Arc<std::sync::Mutex<Interpreter>>, obj: Arc<std::sync::Mutex<ObjectInner>>, method: Arc<str>, args: Vec<Value>) -> Value {
+    let type_name = obj.lock().unwrap().type_name.clone();
+    let method_decl_opt = interp.lock().unwrap().find_method(type_name.clone(), method.clone());
     if let Some(method_decl) = method_decl_opt {
-        let child_env = push_scope(Rc::clone(&interp));
-        env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(Rc::<str>::from("self").to_string()), Value::Object(Rc::clone(&obj)), false);
+        let child_env = push_scope(Arc::clone(&interp));
+        env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from("self"), Value::Object(Arc::clone(&obj)), false);
         let mut i = 0;
         while ((i < (method_decl.params.len() as i64)) && (i < (args.len() as i64))) {
             let param = method_decl.params[(i) as usize].clone();
-            env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(param.name.to_string()), args[(i) as usize].clone(), param.mutable);
+            env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(param.name.to_string()), args[(i) as usize].clone(), param.mutable);
             i += 1;
         }
-        let result = eval_block(Rc::clone(&interp), method_decl.body);
-        pop_scope(Rc::clone(&interp));
-        result.clone()
+        let result = eval_block(Arc::clone(&interp), method_decl.body);
+        pop_scope(Arc::clone(&interp));
+        result
     } else {
-        panic!("{}", Rc::<str>::from(format!("no method '{}' on type '{}'", method, obj.borrow().type_name.clone()).as_str()));
+        panic!("{}", Arc::<str>::from(format!("no method '{}' on type '{}'", method, type_name).as_str()));
     }
 }
 
-fn call_fn__interpreter__fndecl__env__arr_value(mut interp: Rc<RefCell<Interpreter>>, decl: FnDecl, captured_env: Rc<RefCell<Env>>, args: Vec<Value>) -> Value {
-    let saved_env = Rc::clone(&interp.borrow().current_env);
-    { let mut __g = interp.borrow_mut(); __g.current_env = new_env(Some(captured_env)); };
+fn call_fn__interpreter__fndecl__env__arr_value(mut interp: Arc<std::sync::Mutex<Interpreter>>, decl: FnDecl, captured_env: Arc<std::sync::Mutex<Env>>, args: Vec<Value>) -> Value {
+    let saved_env = Arc::clone(&interp.lock().unwrap().current_env);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = new_env(Some(captured_env)); };
     let mut i = 0;
     while ((i < (decl.params.len() as i64)) && (i < (args.len() as i64))) {
         let param = decl.params[(i) as usize].clone();
-        env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(param.name.to_string()), args[(i) as usize].clone(), param.mutable);
+        env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(param.name.to_string()), args[(i) as usize].clone(), param.mutable);
         i += 1;
     }
-    let result = eval_block(Rc::clone(&interp), decl.body);
-    { let mut __g = interp.borrow_mut(); __g.current_env = saved_env; };
-    result.clone()
+    let result = eval_block(Arc::clone(&interp), decl.body);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = saved_env; };
+    result
 }
 
-fn call_closure__interpreter__arr_string__arr_stmt__env__arr_value(mut interp: Rc<RefCell<Interpreter>>, params: Vec<Rc<str>>, body: Vec<Stmt>, captured_env: Rc<RefCell<Env>>, args: Vec<Value>) -> Value {
-    let saved_env = Rc::clone(&interp.borrow().current_env);
-    { let mut __g = interp.borrow_mut(); __g.current_env = new_env(Some(captured_env)); };
+fn call_closure__interpreter__arr_string__arr_stmt__env__arr_value(mut interp: Arc<std::sync::Mutex<Interpreter>>, params: Vec<Arc<str>>, body: Vec<Stmt>, captured_env: Arc<std::sync::Mutex<Env>>, args: Vec<Value>) -> Value {
+    let saved_env = Arc::clone(&interp.lock().unwrap().current_env);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = new_env(Some(captured_env)); };
     let mut i = 0;
     while ((i < (params.len() as i64)) && (i < (args.len() as i64))) {
-        env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(params[(i) as usize].clone().to_string()), args[(i) as usize].clone(), false);
+        env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(params[(i) as usize].clone().to_string()), args[(i) as usize].clone(), false);
         i += 1;
     }
-    let result = eval_block(Rc::clone(&interp), body);
-    { let mut __g = interp.borrow_mut(); __g.current_env = saved_env; };
-    result.clone()
+    let result = eval_block(Arc::clone(&interp), body);
+    { let mut __g = interp.lock().unwrap(); __g.current_env = saved_env; };
+    result
 }
 
-fn eval_block(mut interp: Rc<RefCell<Interpreter>>, stmts: Vec<Stmt>) -> Value {
+fn eval_block(mut interp: Arc<std::sync::Mutex<Interpreter>>, stmts: Vec<Stmt>) -> Value {
     let mut last = Value::Nil;
     let mut i = 0;
     while (i < (stmts.len() as i64)) {
         let stmt = stmts[(i) as usize].clone();
         if (i == ((stmts.len() as i64) - 1)) {
-            last = eval_stmt_as_expr(Rc::clone(&interp), stmt);
+            last = eval_stmt_as_expr(Arc::clone(&interp), stmt.clone());
         } else {
-            exec_stmt(Rc::clone(&interp), stmt);
+            exec_stmt(Arc::clone(&interp), stmt.clone());
         }
         i += 1;
     }
     last
 }
 
-fn eval_stmt_as_expr(mut interp: Rc<RefCell<Interpreter>>, stmt: Stmt) -> Value {
+fn eval_stmt_as_expr(mut interp: Arc<std::sync::Mutex<Interpreter>>, stmt: Stmt) -> Value {
     match stmt {
-        Stmt::Expr(e) => {
-            eval_expr(Rc::clone(&interp), e.clone())
+        Stmt::Expr(mut e) => {
+            eval_expr(Arc::clone(&interp), e.clone())
         }
-        Stmt::If(s) => {
-            exec_stmt(Rc::clone(&interp), Stmt::If(s.clone()));
+        Stmt::If(mut s) => {
+            exec_stmt(Arc::clone(&interp), Stmt::If(s.clone()));
             Value::Nil
         }
-        Stmt::Match(s) => {
-            let subject = eval_expr(Rc::clone(&interp), s.subject);
-            eval_match(Rc::clone(&interp), subject, s.arms)
+        Stmt::Match(mut s) => {
+            let subject = eval_expr(Arc::clone(&interp), s.subject);
+            eval_match(Arc::clone(&interp), subject.clone(), s.arms)
         }
         _ => {
-            exec_stmt(Rc::clone(&interp), stmt);
+            exec_stmt(Arc::clone(&interp), stmt.clone());
             Value::Nil
         }
     }
 }
 
-fn eval_match_body(mut interp: Rc<RefCell<Interpreter>>, body: MatchBody) -> Value {
+fn eval_match_body(mut interp: Arc<std::sync::Mutex<Interpreter>>, body: MatchBody) -> Value {
     match body {
-        MatchBody::Expr(e) => {
-            eval_expr(Rc::clone(&interp), e.clone())
+        MatchBody::Expr(mut e) => {
+            eval_expr(Arc::clone(&interp), e.clone())
         }
-        MatchBody::Block(stmts) => {
-            eval_block(Rc::clone(&interp), stmts)
+        MatchBody::Block(mut stmts) => {
+            eval_block(Arc::clone(&interp), stmts)
         }
     }
 }
 
-fn eval_match(mut interp: Rc<RefCell<Interpreter>>, subject: Value, arms: Vec<MatchArm>) -> Value {
+fn eval_match(mut interp: Arc<std::sync::Mutex<Interpreter>>, subject: Value, arms: Vec<MatchArm>) -> Value {
     for arm in arms.iter().cloned() {
-        let matched: Option<Vec<Binding>> = try_match_pattern(Rc::clone(&interp), subject.clone(), arm.patterns[(0) as usize].clone());
+        let matched: Option<Vec<Binding>> = try_match_pattern(Arc::clone(&interp), subject.clone(), arm.patterns[(0) as usize].clone());
         if let Some(bindings) = matched {
             if let Some(guard_cond) = arm.match_guard {
-                let child = push_scope(Rc::clone(&interp));
+                let child = push_scope(Arc::clone(&interp));
                 for binding in bindings.iter().cloned() {
-                    env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(binding.name.to_string()), binding.value, false);
+                    env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(binding.name.to_string()), binding.value, false);
                 }
-                let guard_val = eval_expr(Rc::clone(&interp), guard_cond);
-                pop_scope(Rc::clone(&interp));
+                let guard_val = eval_expr(Arc::clone(&interp), guard_cond);
+                pop_scope(Arc::clone(&interp));
                 match guard_val {
                     Value::Bool(true) => {
-                        let child2 = push_scope(Rc::clone(&interp));
+                        let child2 = push_scope(Arc::clone(&interp));
                         for binding in bindings.iter().cloned() {
-                            env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(binding.name.to_string()), binding.value, false);
+                            env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(binding.name.to_string()), binding.value, false);
                         }
-                        let result = eval_match_body(Rc::clone(&interp), arm.body);
-                        pop_scope(Rc::clone(&interp));
+                        let result = eval_match_body(Arc::clone(&interp), arm.body);
+                        pop_scope(Arc::clone(&interp));
                         result;
                     }
                     _ => {
@@ -10619,12 +10710,12 @@ fn eval_match(mut interp: Rc<RefCell<Interpreter>>, subject: Value, arms: Vec<Ma
                     }
                 }
             } else {
-                let child = push_scope(Rc::clone(&interp));
+                let child = push_scope(Arc::clone(&interp));
                 for binding in bindings.iter().cloned() {
-                    env_define__interpreter__string__value__bool(Rc::clone(&interp), Rc::<str>::from(binding.name.to_string()), binding.value, false);
+                    env_define__interpreter__string__value__bool(Arc::clone(&interp), Arc::<str>::from(binding.name.to_string()), binding.value, false);
                 }
-                let result = eval_match_body(Rc::clone(&interp), arm.body);
-                pop_scope(Rc::clone(&interp));
+                let result = eval_match_body(Arc::clone(&interp), arm.body);
+                pop_scope(Arc::clone(&interp));
                 result;
             }
         }
@@ -10632,7 +10723,7 @@ fn eval_match(mut interp: Rc<RefCell<Interpreter>>, subject: Value, arms: Vec<Ma
     Value::Nil
 }
 
-fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: Pattern) -> Option<Vec<Binding>> {
+fn try_match_pattern(mut interp: Arc<std::sync::Mutex<Interpreter>>, subject: Value, pat: Pattern) -> Option<Vec<Binding>> {
     match pat {
         Pattern::Wildcard => {
             Some(vec![])
@@ -10646,7 +10737,7 @@ fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: 
                     Value::Float(f)
                 }
                 LitPattern::Str(s) => {
-                    Value::Str(Rc::<str>::from(s.clone().to_string()))
+                    Value::Str(Arc::<str>::from(s.clone().to_string()))
                 }
                 LitPattern::Bool(b) => {
                     Value::Bool(b)
@@ -10655,14 +10746,14 @@ fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: 
                     Value::Nil
                 }
             };
-            if value_equals(subject, lit_val) {
+            if value_equals(subject.clone(), lit_val.clone()) {
                 Some(vec![])
             } else {
                 None
             }
         }
         Pattern::Bind(name) => {
-            Some(vec![Binding { name: Rc::<str>::from(name.clone().to_string()), value: subject }])
+            Some(vec![Binding { name: Arc::<str>::from(name.clone().to_string()), value: subject.clone() }])
         }
         Pattern::Variant(variant, sub_patterns) => {
             match subject {
@@ -10677,7 +10768,7 @@ fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: 
                                 let mut ok = true;
                                 let mut i = 0;
                                 while (i < (sub_patterns.len() as i64)) {
-                                    let sub_match: Option<Vec<Binding>> = try_match_pattern(Rc::clone(&interp), sfields[(i) as usize].clone(), sub_patterns[(i) as usize].clone());
+                                    let sub_match: Option<Vec<Binding>> = try_match_pattern(Arc::clone(&interp), sfields[(i) as usize].clone(), sub_patterns[(i) as usize].clone());
                                     if let Some(sb) = sub_match {
                                         for b in sb.iter().cloned() {
                                             all_bindings.push(b);
@@ -10714,7 +10805,7 @@ fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: 
                         let mut ok = true;
                         let mut i = 0;
                         while (i < (sub_patterns.len() as i64)) {
-                            let sub_match: Option<Vec<Binding>> = try_match_pattern(Rc::clone(&interp), items[(i) as usize].clone(), sub_patterns[(i) as usize].clone());
+                            let sub_match: Option<Vec<Binding>> = try_match_pattern(Arc::clone(&interp), items[(i) as usize].clone(), sub_patterns[(i) as usize].clone());
                             if let Some(sb) = sub_match {
                                 for b in sb.iter().cloned() {
                                     all_bindings.push(b);
@@ -10744,37 +10835,37 @@ fn try_match_pattern(mut interp: Rc<RefCell<Interpreter>>, subject: Value, pat: 
     }
 }
 
-fn assign_target(mut interp: Rc<RefCell<Interpreter>>, target: Expr, val: Value) -> () {
+fn assign_target(mut interp: Arc<std::sync::Mutex<Interpreter>>, target: Expr, val: Value) -> () {
     match target.kind {
-        ExprKind::Var(name) => {
-            let ok = Rc::clone(&interp.borrow().current_env).borrow_mut().set(name.clone(), val);
+        ExprKind::Var(mut name) => {
+            let ok = Arc::clone(&interp.lock().unwrap().current_env).lock().unwrap().set(name.clone(), val);
             if (!ok) {
-                panic!("{}", Rc::<str>::from(format!("cannot assign to undefined variable '{}'", name).as_str()));
+                panic!("{}", Arc::<str>::from(format!("cannot assign to undefined variable '{}'", name).as_str()));
             }
         }
-        ExprKind::Field(obj_expr, field_name) => {
+        ExprKind::Field(mut obj_expr, mut field_name) => {
             let obj_expr = *obj_expr;
-            let obj = eval_expr(Rc::clone(&interp), obj_expr.clone());
+            let obj = eval_expr(Arc::clone(&interp), obj_expr.clone());
             match obj {
-                Value::Object(inner) => {
-                    inner.borrow_mut().set_field(field_name.clone(), val);
+                Value::Object(mut inner) => {
+                    inner.lock().unwrap().set_field(field_name.clone(), val);
                 }
                 _ => {
                     panic!("cannot assign field on non-object");
                 }
             }
         }
-        ExprKind::Index(obj_expr, idx_expr) => {
+        ExprKind::Index(mut obj_expr, mut idx_expr) => {
             let obj_expr = *obj_expr;
             let idx_expr = *idx_expr;
-            let obj = eval_expr(Rc::clone(&interp), obj_expr.clone());
-            let idx = eval_expr(Rc::clone(&interp), idx_expr.clone());
+            let obj = eval_expr(Arc::clone(&interp), obj_expr.clone());
+            let idx = eval_expr(Arc::clone(&interp), idx_expr.clone());
             match obj {
                 Value::Array(mut items) => {
                     match idx {
-                        Value::Int(i) => {
+                        Value::Int(mut i) => {
                             if ((i < 0) || (i >= (items.len() as i64))) {
-                                panic!("{}", Rc::<str>::from(format!("array index {} out of bounds", i).as_str()));
+                                panic!("{}", Arc::<str>::from(format!("array index {} out of bounds", i).as_str()));
                             }
                             items[(i) as usize] = val;
                         }
@@ -10784,7 +10875,7 @@ fn assign_target(mut interp: Rc<RefCell<Interpreter>>, target: Expr, val: Value)
                     }
                 }
                 _ => {
-                    panic!("{}", Rc::<str>::from(format!("cannot index-assign into {}", obj.type_name()).as_str()));
+                    panic!("{}", Arc::<str>::from(format!("cannot index-assign into {}", obj.type_name()).as_str()));
                 }
             }
         }
@@ -10794,7 +10885,7 @@ fn assign_target(mut interp: Rc<RefCell<Interpreter>>, target: Expr, val: Value)
     }
 }
 
-fn instantiate_struct(mut interp: Rc<RefCell<Interpreter>>, decl: StructDecl, args: Vec<Value>) -> Value {
+fn instantiate_struct(mut interp: Arc<std::sync::Mutex<Interpreter>>, decl: StructDecl, args: Vec<Value>) -> Value {
     let mut fields = vec![];
     let mut i = 0;
     while ((i < (decl.fields.len() as i64)) && (i < (args.len() as i64))) {
@@ -10805,21 +10896,23 @@ fn instantiate_struct(mut interp: Rc<RefCell<Interpreter>>, decl: StructDecl, ar
     while (i < (decl.fields.len() as i64)) {
         let field = decl.fields[(i) as usize].clone();
         if let Some(default_expr) = field.default {
-            let dval = eval_expr(Rc::clone(&interp), default_expr);
+            let dval = eval_expr(Arc::clone(&interp), default_expr);
             fields.push((field.name, dval));
         } else {
             fields.push((field.name, Value::Nil));
         }
         i += 1;
     }
-    let obj: ObjectInner = ObjectInner { type_name: Rc::<str>::from(decl.name.to_string()), fields: fields };
-    Value::Object(Rc::new(RefCell::new(obj)))
+    let obj: ObjectInner = ObjectInner { type_name: Arc::<str>::from(decl.name.to_string()), fields: fields };
+    Value::Object(Arc::new(Mutex::new(obj.clone())))
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Interpreter {
-    global_env: Rc<RefCell<Env>>,
-    pub current_env: Rc<RefCell<Env>>,
+    global_env: Arc<std::sync::Mutex<Env>>,
+    pub current_env: Arc<std::sync::Mutex<Env>>,
+    struct_methods: /* var */ HashMap<Arc<str>, Vec<FnDecl>>,
+    fn_decls: /* var */ HashMap<Arc<str>, FnDecl>,
 }
 
 impl std::fmt::Display for Interpreter {
@@ -10829,159 +10922,184 @@ impl std::fmt::Display for Interpreter {
 }
 
 impl Interpreter {
-    fn find_method(&self, _type_name: Rc<str>, _method: Rc<str>) -> Option<FnDecl> {
+    fn find_method(&self, type_name: Arc<str>, method_name: Arc<str>) -> Option<FnDecl> {
+        let methods_opt = self.struct_methods.get(&*type_name).cloned();
+        if let Some(methods) = methods_opt {
+            for m in methods.iter().cloned() {
+                if (m.name == method_name) {
+                    return Some(m);
+                }
+            }
+        }
         None
     }
+
+    fn set_method_decls(&mut self, name: Arc<str>, methods: Vec<FnDecl>) -> () {
+        self.struct_methods.insert(name.clone(), methods);
+    }
+
+    fn set_fn_decl(&mut self, name: Arc<str>, decl: FnDecl) -> () {
+        self.fn_decls.insert(name.clone(), decl.clone());
+    }
+
+    fn get_fn_decl(&self, name: Arc<str>) -> Option<FnDecl> {
+        let result = self.fn_decls.get(&*name).cloned();
+        if let Some(decl) = result {
+            return Some(decl);
+        }
+        None
+    }
+
 }
 
-fn val_to_string(v: Value) -> Rc<str> {
+fn val_to_string(v: Value) -> Arc<str> {
     match v {
         Value::Nil => {
-            Rc::<str>::from("nil")
+            Arc::<str>::from("nil")
         }
         Value::Void => {
-            Rc::<str>::from("void")
+            Arc::<str>::from("void")
         }
         Value::Uninitialized => {
-            Rc::<str>::from("<uninitialized>")
+            Arc::<str>::from("<uninitialized>")
         }
-        Value::Bool(b) => {
+        Value::Bool(mut b) => {
             {
             if b {
-                Rc::<str>::from("true")
+                Arc::<str>::from("true")
             } else {
-                Rc::<str>::from("false")
+                Arc::<str>::from("false")
             }
 }
         }
-        Value::Int(n) => {
+        Value::Int(mut n) => {
             int_to_string(n)
         }
-        Value::Float(f) => {
-            Rc::<str>::from(Rc::<str>::from(format!("{}", f).as_str()))
+        Value::Float(mut f) => {
+            Arc::<str>::from(Arc::<str>::from(format!("{}", f).as_str()))
         }
-        Value::Str(s) => {
+        Value::Str(mut s) => {
             s.clone()
         }
-        Value::Array(elems) => {
-            let mut parts = vec![Rc::<str>::from("[")];
+        Value::Array(mut elems) => {
+            let mut parts = vec![Arc::<str>::from("[")];
             let mut first = true;
             for e in elems.iter().cloned() {
                 if (!first) {
-                    parts.push(Rc::<str>::from(", "));
+                    parts.push(Arc::<str>::from(", "));
                 }
-                parts.push(val_to_string(e));
+                parts.push(val_to_string(e.clone()));
                 first = false;
             }
-            parts.push(Rc::<str>::from("]"));
-            let mut result: Rc<str> = Rc::<str>::from("");
+            parts.push(Arc::<str>::from("]"));
+            let mut result: Arc<str> = Arc::<str>::from("");
             for p in parts.iter().cloned() {
-                result = Rc::<str>::from(Rc::<str>::from(format!("{}{}", result.as_ref(), p).as_str()));
+                result = Arc::<str>::from(Arc::<str>::from(format!("{}{}", result, p).as_str()));
             }
             result.clone()
         }
-        Value::Tuple(elems) => {
-            let mut parts = vec![Rc::<str>::from("(")];
+        Value::Tuple(mut elems) => {
+            let mut parts = vec![Arc::<str>::from("(")];
             let mut first = true;
             for e in elems.iter().cloned() {
                 if (!first) {
-                    parts.push(Rc::<str>::from(", "));
+                    parts.push(Arc::<str>::from(", "));
                 }
-                parts.push(val_to_string(e));
+                parts.push(val_to_string(e.clone()));
                 first = false;
             }
-            parts.push(Rc::<str>::from(")"));
-            let mut result: Rc<str> = Rc::<str>::from("");
+            parts.push(Arc::<str>::from(")"));
+            let mut result: Arc<str> = Arc::<str>::from("");
             for p in parts.iter().cloned() {
-                result = Rc::<str>::from(Rc::<str>::from(format!("{}{}", result.as_ref(), p).as_str()));
+                result = Arc::<str>::from(Arc::<str>::from(format!("{}{}", result, p).as_str()));
             }
             result.clone()
         }
-        Value::Dict(pairs) => {
-            let mut parts = vec![Rc::<str>::from("{")];
+        Value::Dict(mut pairs) => {
+            let mut parts = vec![Arc::<str>::from("{")];
             let mut first = true;
             for pair in pairs.iter().cloned() {
                 if (!first) {
-                    parts.push(Rc::<str>::from(", "));
+                    parts.push(Arc::<str>::from(", "));
                 }
                 parts.push(val_to_string(pair.0));
-                parts.push(Rc::<str>::from(": "));
+                parts.push(Arc::<str>::from(": "));
                 parts.push(val_to_string(pair.1));
                 first = false;
             }
-            parts.push(Rc::<str>::from("}"));
-            let mut result: Rc<str> = Rc::<str>::from("");
+            parts.push(Arc::<str>::from("}"));
+            let mut result: Arc<str> = Arc::<str>::from("");
             for p in parts.iter().cloned() {
-                result = Rc::<str>::from(Rc::<str>::from(format!("{}{}", result.as_ref(), p).as_str()));
+                result = Arc::<str>::from(Arc::<str>::from(format!("{}{}", result, p).as_str()));
             }
             result.clone()
         }
-        Value::Set(elems) => {
-            let mut parts = vec![Rc::<str>::from("{")];
+        Value::Set(mut elems) => {
+            let mut parts = vec![Arc::<str>::from("{")];
             let mut first = true;
             for e in elems.iter().cloned() {
                 if (!first) {
-                    parts.push(Rc::<str>::from(", "));
+                    parts.push(Arc::<str>::from(", "));
                 }
-                parts.push(val_to_string(e));
+                parts.push(val_to_string(e.clone()));
                 first = false;
             }
-            parts.push(Rc::<str>::from("}"));
-            let mut result: Rc<str> = Rc::<str>::from("");
+            parts.push(Arc::<str>::from("}"));
+            let mut result: Arc<str> = Arc::<str>::from("");
             for p in parts.iter().cloned() {
-                result = Rc::<str>::from(Rc::<str>::from(format!("{}{}", result.as_ref(), p).as_str()));
+                result = Arc::<str>::from(Arc::<str>::from(format!("{}{}", result, p).as_str()));
             }
             result.clone()
         }
-        Value::EnumVariant(typeName, variant, fields) => {
+        Value::EnumVariant(mut typeName, mut variant, mut fields) => {
             if ((fields.len() as i64) == 0) {
                 variant.clone()
             } else {
-                let mut parts = vec![Rc::<str>::from(Rc::<str>::from(format!("{}(", variant).as_str()))];
+                let mut parts = vec![Arc::<str>::from(Arc::<str>::from(format!("{}(", variant).as_str()))];
                 let mut first = true;
                 for f in fields.iter().cloned() {
                     if (!first) {
-                        parts.push(Rc::<str>::from(", "));
+                        parts.push(Arc::<str>::from(", "));
                     }
-                    parts.push(val_to_string(f));
+                    parts.push(val_to_string(f.clone()));
                     first = false;
                 }
-                parts.push(Rc::<str>::from(")"));
-                let mut result: Rc<str> = Rc::<str>::from("");
+                parts.push(Arc::<str>::from(")"));
+                let mut result: Arc<str> = Arc::<str>::from("");
                 for p in parts.iter().cloned() {
-                    result = Rc::<str>::from(Rc::<str>::from(format!("{}{}", result.as_ref(), p).as_str()));
+                    result = Arc::<str>::from(Arc::<str>::from(format!("{}{}", result, p).as_str()));
                 }
                 result.clone()
             }
         }
-        Value::NativeFn(name, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("<fn {}>", name).as_str()))
+        Value::NativeFn(mut name, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("<fn {}>", name).as_str()))
         }
-        Value::Fn(name, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("<fn {}>", name).as_str()))
+        Value::Fn(mut name, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("<fn {}>", name).as_str()))
         }
-        Value::OverloadedFn(name, _) => {
-            Rc::<str>::from(Rc::<str>::from(format!("<overloaded fn {}>", name).as_str()))
+        Value::OverloadedFn(mut name, _) => {
+            Arc::<str>::from(Arc::<str>::from(format!("<overloaded fn {}>", name).as_str()))
         }
         Value::Closure(_, _, _) => {
-            Rc::<str>::from("<closure>")
+            Arc::<str>::from("<closure>")
         }
-        Value::Range(start, end, inclusive, _) => {
+        Value::Range(mut start, mut end, mut inclusive, _) => {
             if inclusive {
-                Rc::<str>::from(Rc::<str>::from(format!("{}..{}", start, end).as_str()))
+                Arc::<str>::from(Arc::<str>::from(format!("{}..{}", start, end).as_str()))
             } else {
-                Rc::<str>::from(Rc::<str>::from(format!("{}..<{}", start, end).as_str()))
+                Arc::<str>::from(Arc::<str>::from(format!("{}..<{}", start, end).as_str()))
             }
         }
-        Value::Labeled(label, val) => {
+        Value::Labeled(mut label, mut val) => {
             let val = *val;
-            Rc::<str>::from(Rc::<str>::from(format!("{}={}", label, val_to_string(val)).as_str()))
+            Arc::<str>::from(Arc::<str>::from(format!("{}={}", label, val_to_string(val.clone())).as_str()))
         }
-        Value::Object(inner) => {
-            Rc::<str>::from("<object>")
+        Value::Object(mut inner) => {
+            Arc::<str>::from("<object>")
         }
         _ => {
-            Rc::<str>::from("<value>")
+            Arc::<str>::from("<value>")
         }
     }
 }
@@ -10997,28 +11115,28 @@ fn val_to_bool(v: Value) -> bool {
         Value::Uninitialized => {
             false
         }
-        Value::Bool(b) => {
+        Value::Bool(mut b) => {
             b
         }
-        Value::Int(n) => {
+        Value::Int(mut n) => {
             (n != 0)
         }
-        Value::Float(f) => {
+        Value::Float(mut f) => {
             (f != 0.0)
         }
-        Value::Str(s) => {
-            (s != Rc::<str>::from(""))
+        Value::Str(mut s) => {
+            (s != Arc::<str>::from(""))
         }
-        Value::Array(elems) => {
+        Value::Array(mut elems) => {
             ((elems.len() as i64) != 0)
         }
-        Value::Dict(pairs) => {
+        Value::Dict(mut pairs) => {
             ((pairs.len() as i64) != 0)
         }
-        Value::Set(elems) => {
+        Value::Set(mut elems) => {
             ((elems.len() as i64) != 0)
         }
-        Value::Tuple(elems) => {
+        Value::Tuple(mut elems) => {
             ((elems.len() as i64) != 0)
         }
         _ => {
@@ -11049,9 +11167,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Bool(x) => {
+        Value::Bool(mut x) => {
             match b {
-                Value::Bool(y) => {
+                Value::Bool(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -11059,12 +11177,12 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Int(x) => {
+        Value::Int(mut x) => {
             match b {
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     (x == y)
                 }
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     ((x as f64) == y)
                 }
                 _ => {
@@ -11072,12 +11190,12 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Float(x) => {
+        Value::Float(mut x) => {
             match b {
-                Value::Float(y) => {
+                Value::Float(mut y) => {
                     (x == y)
                 }
-                Value::Int(y) => {
+                Value::Int(mut y) => {
                     (x == (y as f64))
                 }
                 _ => {
@@ -11085,9 +11203,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Str(x) => {
+        Value::Str(mut x) => {
             match b {
-                Value::Str(y) => {
+                Value::Str(mut y) => {
                     (x == y)
                 }
                 _ => {
@@ -11095,9 +11213,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Array(xs) => {
+        Value::Array(mut xs) => {
             match b {
-                Value::Array(ys) => {
+                Value::Array(mut ys) => {
                     if ((xs.len() as i64) != (ys.len() as i64)) {
                         false
                     } else {
@@ -11117,9 +11235,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Tuple(xs) => {
+        Value::Tuple(mut xs) => {
             match b {
-                Value::Tuple(ys) => {
+                Value::Tuple(mut ys) => {
                     if ((xs.len() as i64) != (ys.len() as i64)) {
                         false
                     } else {
@@ -11139,9 +11257,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::EnumVariant(tn1, v1, f1) => {
+        Value::EnumVariant(mut tn1, mut v1, mut f1) => {
             match b {
-                Value::EnumVariant(tn2, v2, f2) => {
+                Value::EnumVariant(mut tn2, mut v2, mut f2) => {
                     if (((tn1 != tn2) || (v1 != v2)) || ((f1.len() as i64) != (f2.len() as i64))) {
                         false
                     } else {
@@ -11161,9 +11279,9 @@ fn values_equal(a: Value, b: Value) -> bool {
                 }
             }
         }
-        Value::Range(s1, e1, inc1, _) => {
+        Value::Range(mut s1, mut e1, mut inc1, _) => {
             match b {
-                Value::Range(s2, e2, inc2, _) => {
+                Value::Range(mut s2, mut e2, mut inc2, _) => {
                     (((s1 == s2) && (e1 == e2)) && (inc1 == inc2))
                 }
                 _ => {
@@ -11177,188 +11295,178 @@ fn values_equal(a: Value, b: Value) -> bool {
     }
 }
 
-fn env_define__env__string__value__bool(mut env: Rc<RefCell<Env>>, name: Rc<str>, val: Value, mutable: bool) -> () {
+fn env_define__env__string__value__bool(mut env: Arc<std::sync::Mutex<Env>>, name: Arc<str>, val: Value, mutable: bool) -> () {
     if mutable {
-        env.borrow_mut().define_mut(name.clone(), val);
+        env.lock().unwrap().define_mut(name.clone(), val);
     } else {
-        env.borrow_mut().define(name.clone(), val);
+        env.lock().unwrap().define(name.clone(), val);
     }
 }
 
-fn register_stdlib(mut interp: Rc<RefCell<Interpreter>>) -> () {
-    let env = Rc::clone(&interp.borrow().global_env);
-    let print_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("print").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("print").to_string()), print_fn, false);
-    let println_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("println").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("println").to_string()), println_fn, false);
-    let write_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("write").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("write").to_string()), write_fn, false);
-    let len_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("len").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("len").to_string()), len_fn, false);
-    let int_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("int").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("int").to_string()), int_fn, false);
-    let float_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("float").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("float").to_string()), float_fn, false);
-    let string_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("string").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("string").to_string()), string_fn, false);
-    let bool_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("bool").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("bool").to_string()), bool_fn, false);
-    let type_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("type").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("type").to_string()), type_fn, false);
-    let sqrt_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("sqrt").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("sqrt").to_string()), sqrt_fn, false);
-    let abs_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("abs").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("abs").to_string()), abs_fn, false);
-    let floor_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("floor").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("floor").to_string()), floor_fn, false);
-    let ceil_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("ceil").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("ceil").to_string()), ceil_fn, false);
-    let round_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("round").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("round").to_string()), round_fn, false);
-    let sin_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("sin").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("sin").to_string()), sin_fn, false);
-    let cos_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("cos").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("cos").to_string()), cos_fn, false);
-    let tan_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("tan").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("tan").to_string()), tan_fn, false);
-    let log_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("log").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("log").to_string()), log_fn, false);
-    let log2_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("log2").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("log2").to_string()), log2_fn, false);
-    let exp_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("exp").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("exp").to_string()), exp_fn, false);
-    let pow_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("pow").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("pow").to_string()), pow_fn, false);
-    let min_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("min").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("min").to_string()), min_fn, false);
-    let max_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("max").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("max").to_string()), max_fn, false);
-    let range_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("range").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("range").to_string()), range_fn, false);
-    let assert_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("assert").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("assert").to_string()), assert_fn, false);
-    let read_line_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("read_line").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("read_line").to_string()), read_line_fn, false);
-    let exit_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("exit").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("exit").to_string()), exit_fn, false);
-    let input_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("input").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("input").to_string()), input_fn, false);
-    let error_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("error").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("error").to_string()), error_fn, false);
-    let ord_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("ord").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("ord").to_string()), ord_fn, false);
-    let chr_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("chr").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("chr").to_string()), chr_fn, false);
-    let zip_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("zip").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("zip").to_string()), zip_fn, false);
-    let enumerate_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("enumerate").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("enumerate").to_string()), enumerate_fn, false);
-    let map_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("map").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("map").to_string()), map_fn, false);
-    let filter_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("filter").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("filter").to_string()), filter_fn, false);
-    let reduce_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("reduce").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("reduce").to_string()), reduce_fn, false);
-    let sorted_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("sorted").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("sorted").to_string()), sorted_fn, false);
-    let reversed_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("reversed").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("reversed").to_string()), reversed_fn, false);
-    let sum_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("sum").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("sum").to_string()), sum_fn, false);
-    let any_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("any").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("any").to_string()), any_fn, false);
-    let all_fn = Value::NativeFn(Rc::<str>::from(Rc::<str>::from("all").to_string()), Box::new(Value::Nil));
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("all").to_string()), all_fn, false);
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("PI").to_string()), Value::Float(3.141592653589793), false);
-    env_define__env__string__value__bool(Rc::clone(&env), Rc::<str>::from(Rc::<str>::from("E").to_string()), Value::Float(2.718281828459045), false);
+fn register_stdlib(mut interp: Arc<std::sync::Mutex<Interpreter>>) -> () {
+    let env = Arc::clone(&interp.lock().unwrap().global_env);
+    let print_fn = Value::NativeFn(Arc::<str>::from("print"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("print"), print_fn.clone(), false);
+    let println_fn = Value::NativeFn(Arc::<str>::from("println"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("println"), println_fn.clone(), false);
+    let write_fn = Value::NativeFn(Arc::<str>::from("write"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("write"), write_fn.clone(), false);
+    let len_fn = Value::NativeFn(Arc::<str>::from("len"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("len"), len_fn.clone(), false);
+    let int_fn = Value::NativeFn(Arc::<str>::from("int"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("int"), int_fn.clone(), false);
+    let float_fn = Value::NativeFn(Arc::<str>::from("float"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("float"), float_fn.clone(), false);
+    let string_fn = Value::NativeFn(Arc::<str>::from("string"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("string"), string_fn.clone(), false);
+    let bool_fn = Value::NativeFn(Arc::<str>::from("bool"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("bool"), bool_fn.clone(), false);
+    let type_fn = Value::NativeFn(Arc::<str>::from("type"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("type"), type_fn.clone(), false);
+    let sqrt_fn = Value::NativeFn(Arc::<str>::from("sqrt"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("sqrt"), sqrt_fn.clone(), false);
+    let abs_fn = Value::NativeFn(Arc::<str>::from("abs"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("abs"), abs_fn.clone(), false);
+    let floor_fn = Value::NativeFn(Arc::<str>::from("floor"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("floor"), floor_fn.clone(), false);
+    let ceil_fn = Value::NativeFn(Arc::<str>::from("ceil"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("ceil"), ceil_fn.clone(), false);
+    let round_fn = Value::NativeFn(Arc::<str>::from("round"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("round"), round_fn.clone(), false);
+    let sin_fn = Value::NativeFn(Arc::<str>::from("sin"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("sin"), sin_fn.clone(), false);
+    let cos_fn = Value::NativeFn(Arc::<str>::from("cos"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("cos"), cos_fn.clone(), false);
+    let tan_fn = Value::NativeFn(Arc::<str>::from("tan"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("tan"), tan_fn.clone(), false);
+    let log_fn = Value::NativeFn(Arc::<str>::from("log"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("log"), log_fn.clone(), false);
+    let log2_fn = Value::NativeFn(Arc::<str>::from("log2"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("log2"), log2_fn.clone(), false);
+    let exp_fn = Value::NativeFn(Arc::<str>::from("exp"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("exp"), exp_fn.clone(), false);
+    let pow_fn = Value::NativeFn(Arc::<str>::from("pow"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("pow"), pow_fn.clone(), false);
+    let min_fn = Value::NativeFn(Arc::<str>::from("min"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("min"), min_fn.clone(), false);
+    let max_fn = Value::NativeFn(Arc::<str>::from("max"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("max"), max_fn.clone(), false);
+    let range_fn = Value::NativeFn(Arc::<str>::from("range"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("range"), range_fn.clone(), false);
+    let assert_fn = Value::NativeFn(Arc::<str>::from("assert"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("assert"), assert_fn.clone(), false);
+    let read_line_fn = Value::NativeFn(Arc::<str>::from("read_line"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("read_line"), read_line_fn.clone(), false);
+    let exit_fn = Value::NativeFn(Arc::<str>::from("exit"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("exit"), exit_fn.clone(), false);
+    let input_fn = Value::NativeFn(Arc::<str>::from("input"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("input"), input_fn.clone(), false);
+    let error_fn = Value::NativeFn(Arc::<str>::from("error"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("error"), error_fn.clone(), false);
+    let ord_fn = Value::NativeFn(Arc::<str>::from("ord"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("ord"), ord_fn.clone(), false);
+    let chr_fn = Value::NativeFn(Arc::<str>::from("chr"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("chr"), chr_fn.clone(), false);
+    let zip_fn = Value::NativeFn(Arc::<str>::from("zip"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("zip"), zip_fn.clone(), false);
+    let enumerate_fn = Value::NativeFn(Arc::<str>::from("enumerate"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("enumerate"), enumerate_fn.clone(), false);
+    let map_fn = Value::NativeFn(Arc::<str>::from("map"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("map"), map_fn.clone(), false);
+    let filter_fn = Value::NativeFn(Arc::<str>::from("filter"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("filter"), filter_fn.clone(), false);
+    let reduce_fn = Value::NativeFn(Arc::<str>::from("reduce"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("reduce"), reduce_fn.clone(), false);
+    let sorted_fn = Value::NativeFn(Arc::<str>::from("sorted"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("sorted"), sorted_fn.clone(), false);
+    let reversed_fn = Value::NativeFn(Arc::<str>::from("reversed"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("reversed"), reversed_fn.clone(), false);
+    let sum_fn = Value::NativeFn(Arc::<str>::from("sum"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("sum"), sum_fn.clone(), false);
+    let any_fn = Value::NativeFn(Arc::<str>::from("any"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("any"), any_fn.clone(), false);
+    let all_fn = Value::NativeFn(Arc::<str>::from("all"), Box::new(Value::Nil));
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("all"), all_fn.clone(), false);
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("PI"), Value::Float(3.141592653589793), false);
+    env_define__env__string__value__bool(Arc::clone(&env), Arc::<str>::from("E"), Value::Float(2.718281828459045), false);
 }
 
-fn new_interpreter() -> Rc<RefCell<Interpreter>> {
+fn new_interpreter() -> Arc<std::sync::Mutex<Interpreter>> {
     let global = new_env(None);
-    let interp: Interpreter = Interpreter { global_env: Rc::clone(&global), current_env: Rc::clone(&global) };
-    let interp_actor = Rc::new(RefCell::new(interp));
-    register_stdlib(Rc::clone(&interp_actor));
+    let interp: Interpreter = Interpreter { global_env: Arc::clone(&global), current_env: Arc::clone(&global), struct_methods: HashMap::new(), fn_decls: HashMap::new() };
+    let interp_actor = Arc::new(Mutex::new(interp));
+    register_stdlib(Arc::clone(&interp_actor));
     interp_actor
 }
 
-fn exec_item(mut interp: Rc<RefCell<Interpreter>>, item: Item) -> () {
+fn exec_item(mut interp: Arc<std::sync::Mutex<Interpreter>>, item: Item) -> () {
     match item {
-        Item::Fn(decl) => {
-            let fn_val = Value::Fn(Rc::<str>::from(decl.name.to_string()), Some(Rc::clone(&interp.borrow().global_env)));
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.name.to_string()), fn_val, false);
+        Item::Fn(mut decl) => {
+            let fn_name = decl.name.clone();
+            interp.lock().unwrap().set_fn_decl(fn_name.clone(), decl.clone());
+            let fn_val = Value::Fn(Arc::<str>::from(fn_name.clone().to_string()), Some(Arc::clone(&interp.lock().unwrap().global_env)));
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(fn_name.clone().to_string()), fn_val.clone(), false);
         }
-        Item::Struct(decl) => {
+        Item::Struct(mut decl) => {
             let struct_val = Value::Nil;
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.name.to_string()), struct_val, false);
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(decl.name.to_string()), struct_val.clone(), false);
+            interp.lock().unwrap().set_method_decls(decl.name, decl.methods);
         }
-        Item::Enum(decl) => {
+        Item::Enum(mut decl) => {
             let enum_val = Value::Nil;
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.name.to_string()), enum_val, false);
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(decl.name.to_string()), enum_val.clone(), false);
         }
-        Item::Trait(decl) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.name.to_string()), Value::Nil, false);
+        Item::Trait(mut decl) => {
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(decl.name.to_string()), Value::Nil, false);
         }
-        Item::Let(stmt) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().current_env), Rc::<str>::from(stmt.name.to_string()), Value::Uninitialized, true);
+        Item::Let(mut stmt) => {
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().current_env), Arc::<str>::from(stmt.name.to_string()), Value::Uninitialized, true);
         }
-        Item::Alias(decl) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.name.to_string()), Value::Nil, false);
+        Item::Alias(mut decl) => {
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(decl.name.to_string()), Value::Nil, false);
         }
-        Item::Stmt(stmt) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().current_env), Rc::<str>::from(Rc::<str>::from("__stmt__").to_string()), Value::Nil, true);
+        Item::Stmt(mut stmt) => {
+            exec_stmt(Arc::clone(&interp), stmt.clone());
         }
-        Item::Use(decl) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().current_env), Rc::<str>::from(Rc::<str>::from("__use__").to_string()), Value::Nil, true);
+        Item::Use(mut decl) => {
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().current_env), Arc::<str>::from("__use__"), Value::Nil, true);
         }
-        Item::Ext(decl) => {
-            env_define__env__string__value__bool(Rc::clone(&interp.borrow().global_env), Rc::<str>::from(decl.type_name.to_string()), Value::Nil, false);
+        Item::Ext(mut decl) => {
+            env_define__env__string__value__bool(Arc::clone(&interp.lock().unwrap().global_env), Arc::<str>::from(decl.type_name.to_string()), Value::Nil, false);
         }
-        Item::Mod(decl) => {
+        Item::Mod(mut decl) => {
             for sub_item in decl.items.into_iter() {
-                exec_item(Rc::clone(&interp), sub_item);
+                exec_item(Arc::clone(&interp), sub_item.clone());
             }
         }
     }
 }
 
-fn run_program(mut interp: Rc<RefCell<Interpreter>>, prog: Program) -> () {
+fn run_program(mut interp: Arc<std::sync::Mutex<Interpreter>>, prog: Program) -> () {
     for item in prog.items.into_iter() {
-        exec_item(Rc::clone(&interp), item);
+        exec_item(Arc::clone(&interp), item.clone());
     }
 }
 
-fn main() -> () {
-    let mut source: Rc<str> = Rc::<str>::from("");
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut source: Arc<str> = Arc::<str>::from("");
     let mut done = false;
     while (!done) {
-        let ln = { let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect("failed to read from stdin"); Rc::<str>::from(__line.trim()) };
-        if (ln == Rc::<str>::from("")) {
+        let ln = { let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect("failed to read from stdin"); Arc::<str>::from(__line.trim_end()) };
+        if (ln == Arc::<str>::from("")) {
             done = true;
         } else {
-            source = Rc::<str>::from(format!("{}{}{}", source, ln, "\n"));
+            source = Arc::<str>::from(format!("{}{}{}", source, ln, "\n"));
         }
     }
-    let prog = parse(source.clone().clone()).expect("parse error");
+    let prog = parse(source.clone().clone())?;
     let mut interp = new_interpreter();
-    run_program(Rc::clone(&interp), prog);
+    run_program(Arc::clone(&interp), prog.clone());
+    Ok(())
 }
 
-
-impl Default for Value {
-    fn default() -> Self { Value::Nil }
-}
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool { value_equals(self.clone(), other.clone()) }
-}
-
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        compare_values(self.clone(), other.clone()).ok().map(|n| {
-            if n < 0 { std::cmp::Ordering::Less }
-            else if n > 0 { std::cmp::Ordering::Greater }
-            else { std::cmp::Ordering::Equal }
-        })
-    }
 }
 impl Eq for Value {}

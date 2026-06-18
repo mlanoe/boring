@@ -266,11 +266,11 @@ if condition {
 
 | Boring         | Alias for        | Rust            | Notes                              |
 |----------------|------------------|-----------------|------------------------------------|
-| `int`          | `Int'copy`       | `i64`           | 64-bit signed integer, copy        |
-| `uint`         | `Uint'copy`      | `u64`           | 64-bit unsigned integer, copy      |
-| `float`        | `Float'copy`     | `f64`           | 64-bit floating-point, copy        |
-| `bool`         | `Bool'copy`      | `bool`          | `true` / `false`, copy             |
-| `string`   | `String'shared` | `Arc<str>` | String — reference-counted; the compiler infers `&str` for string literals in strict mode |
+| `int`          | `Int'stack`       | `i64`           | 64-bit signed integer, stack (read only)        |
+| `uint`         | `Uint'stack`      | `u64`           | 64-bit unsigned integer, stack (read only)      |
+| `float`        | `Float'stack`     | `f64`           | 64-bit floating-point, stack (read only)        |
+| `bool`         | `Bool'stack`      | `bool`          | `true` / `false`, stack (read only)             |
+| `string`   | `String'stack` or `String'shared` | `&'static str` or `Arc<str>` / `Rc<str>` | Inferred: `'stack` (read only) for compile-time literals, `'shared` for computed/stored values; `'shared` maps to `Arc` (multi-thread) or `Rc` (single-thread) |
 
 ### Integer literals
 
@@ -766,31 +766,28 @@ greet("Bob".into(), "Hi".into())   // reordered to declaration order
 
 ### Mutable parameters — `var`
 
-Prefix a parameter with `var` to make the local binding mutable inside the function body.
-
-**For copy types** (`int`, `float`, `bool`, `T'copy`), the value is copied — reassigning or modifying `n` has no effect on the caller:
+Prefix a parameter with `var` to allow the callee to modify the caller's variable. The transpiler passes the argument by `&mut` — changes to the parameter are visible at the call site.
 
 ```boring
-int countdown(var int n):
-    var total = 0
-    while n > 0:
-        total += n
-        n -= 1
-    total
+def add_one(var int x):
+    x += 1
+
+var n = 5
+add_one(n)
+print n    # 6
 ```
 
 **Rust equivalent**
 ```rust
-fn countdown(mut n: i64) -> i64 {
-    let mut total = 0;
-    while n > 0 { total += n; n -= 1; }
-    total
-}
+fn add_one(x: &mut i64) { *x += 1; }
+let mut n = 5i64;
+add_one(&mut n);
+println!("{}", n); // 6
 ```
 
-**For reference-counted types** (`T'shared`), `var` only makes the local binding reassignable — the object itself is immutable through a shared reference. Field mutation and mutating methods are forbidden.
+**For reference-counted types** (`T'shared`), `var` makes the local pointer reassignable — the object itself remains immutable through a shared reference. Field mutation and mutating methods are still forbidden.
 
-- For `T'shared` (single-thread, `Rc<T>`): mutation goes through `var` + regular ownership — there is no need for a mutable `Rc`. If you need to mutate, hold the value directly with `var` instead of sharing it via `T'shared`.
+- For `T'shared` (single-thread, `Rc<T>`): if you need to mutate, hold the value directly with `var` instead of sharing it via `T'shared`.
 - For `T'shared` (multi-thread, `Arc<T>`): use `T'actor` when shared state needs to be written.
 
 ```boring
@@ -801,20 +798,6 @@ def show(var Counter'shared c):
     print c.value          # OK — reading is always allowed
     c = Counter()          # OK — var lets you rebind the Arc/Rc pointer
     # c.value = c.value + 1  # ERROR — cannot mutate through T'shared; use T'actor
-```
-
-To make this intent explicit, prefer `var T&` (mutable borrow) when you need to mutate a stack object without sharing it:
-
-For mutable borrow parameters, combine `var` with `&`:
-
-```boring
-def add_one(var int& x):
-    x += 1
-```
-
-**Rust equivalent**
-```rust
-fn add_one(x: &mut i64) { *x += 1; }
 ```
 
 > For variadic parameters (`values...`), see [Advanced — Variadic parameters](#advanced--variadic-parameters).
@@ -3606,10 +3589,10 @@ type Parser     = fn(&str) -> Result<Arc<str>, Box<dyn std::error::Error>>;
 Built-in primitive aliases use this same mechanism:
 
 ```boring
-use int   as Int'copy    # i64
-use uint  as Uint'copy   # u64
-use float as Float'copy  # f64
-use bool  as Bool'copy   # bool
+use int   as Int'stack    # i64
+use uint  as Uint'stack   # u64
+use float as Float'stack  # f64
+use bool  as Bool'stack   # bool
 ```
 
 > `String'shared` is inferred automatically when a string is stored or computed — you rarely need to write it explicitly. See [Advanced — Strings](#advanced--strings-string-and-stringshared).
@@ -4501,9 +4484,8 @@ All ownership qualifiers:
 
 | Boring type   | `--threading multi`              | `--threading single`  | Semantics                             |
 |---------------|----------------------------------|-----------------------|---------------------------------------|
-| `T'stack`     | `T`                              | `T`                   | Stack allocation (Rust default)       |
+| `T'stack`     | `T`                              | `T`                   | Stack allocation — copied on pass for primitives |
 | `T'heap`      | `Box<T>`                         | `Box<T>`              | Exclusive heap ownership              |
-| `T'copy`      | `T` (Copy)                       | `T` (Copy)            | Plain copy semantics                  |
 | `T'shared`    | `Arc<T>`                         | `Rc<T>`               | Shared ref-counted — threading-aware  |
 | `T'actor`     | `Arc<tokio::sync::Mutex<T>>`     | `RefCell<T>`          | Shared mutable — all accesses auto-locked |
 | `T'guard`     | `Arc<tokio::sync::RwLock<T>>`    | `RefCell<T>`          | Shared mutable — concurrent reads, exclusive writes |
@@ -4558,8 +4540,8 @@ Qualifiers carry three kinds of information: Rust mapping, passing semantics, an
 | Qualifier | Passing semantics | Mutability |
 |---|---|---|
 | `'shared` | pointer shared | forbidden — immutable shared ref |
-| `'actor` | pointer shared | allowed |
-| `'guard` | pointer shared | under lock only |
+| `'actor` | pointer shared | interior mutability — exclusive lock (Mutex) |
+| `'guard` | pointer shared | interior mutability — shared reads / exclusive writes (RwLock) |
 | `'stack` | move | determined by `let`/`mut`/`var` |
 | `'heap` | move | determined by `let`/`mut`/`var` |
 
@@ -4600,9 +4582,7 @@ Borrows are written with `&` directly after the type name. The binding keyword d
 |---|---|---|
 | `T& m` / `let T& m` | `&T` | read-only — callee cannot modify content or binding |
 | `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
-| `var T& m` | `&mut Box<T>` | callee can rebind the caller's variable (rare) |
-
-`var T&` is the only way for a callee to replace what the caller's variable points to. In most cases, returning a value is preferred.
+| `var T m` | `&mut T` | callee can modify the caller's variable — equivalent to `mut T& m` without the explicit borrow syntax |
 
 | Form          | Rust type     | Notes                                                  |
 |---------------|---------------|--------------------------------------------------------|
@@ -4639,10 +4619,10 @@ Borrow forms with lifetime:
 The primitive types are defined as aliases with an explicit qualifier:
 
 ```boring
-use int   as Int'copy    # i64  — copy semantics
-use uint  as Uint'copy   # u64  — copy semantics
-use float as Float'copy  # f64  — copy semantics
-use bool  as Bool'copy   # bool — copy semantics
+use int   as Int'stack    # i64  — stack (read only)
+use uint  as Uint'stack   # u64  — stack (read only)
+use float as Float'stack  # f64  — stack (read only)
+use bool  as Bool'stack   # bool — stack (read only)
 ```
 
 These aliases have no runtime cost. The qualifier only affects the transpiled Rust output — the interpreter ignores it.
@@ -5578,7 +5558,7 @@ async fn fetch_user(url: &str) -> Result<User, Box<dyn Error>> {
 Outside a `throws` context use `try? fromJson<T>(s)` to get `Option<T>`:
 
 ```boring
-let user? = try? fromJson<User>(raw)
+let user = try? fromJson<User>(raw)
 if let user:
     print "got {user.name}"
 ```
@@ -5686,10 +5666,10 @@ unreachable("variant {v} should have been handled above")
 
 | Boring            | Alias for       | Rust                                  |
 |-------------------|-----------------|---------------------------------------|
-| `int`             | `Int'copy`      | `i64`                                 |
-| `uint`            | `Uint'copy`     | `u64`                                 |
-| `float`           | `Float'copy`    | `f64`                                 |
-| `bool`            | `Bool'copy`     | `bool`                                |
+| `int`             | `Int'stack`     | `i64`                                 |
+| `uint`            | `Uint'stack`    | `u64`                                 |
+| `float`           | `Float'stack`   | `f64`                                 |
+| `bool`            | `Bool'stack`    | `bool`                                |
 | `string` (param)           | —               | `&str` — accepts both literals and heap strings   |
 | `string` (literal)         | —               | `&'static str` — zero allocation, `Copy` (strict mode) |
 | `string` (heap / stored)   | `String'shared` | `Arc<str>` — reference-counted, single allocation    |
@@ -5701,7 +5681,7 @@ unreachable("variant {v} should have been handled above")
 | `{K=V}` | `Dict<K,V>` | `HashMap<K, V>`                       |
 | `{T}`   | `Set<T>`    | `HashSet<T>`                          |
 | `(T1, T2)`         | —           | `(T1, T2)`                            |
-| `T'copy`           | —           | `T` (requires `Copy`)                 |
+| `T'stack`          | —           | `T` — stack (read only), copied on pass |
 | `T'shared`         | —           | `Arc<T>` (multi) / `Rc<T>` (single)  |
 | `T'actor`          | —           | `Arc<tokio::sync::Mutex<T>>` — shared mutable, all accesses auto-locked |
 | `T'guard`          | —           | `Arc<tokio::sync::RwLock<T>>` — concurrent reads, exclusive writes |
@@ -6599,7 +6579,7 @@ Every `task def` returns a `KernelFuture<T>` instead of a `JoinHandle`:
 #### `join`
 
 ```boring
-let a, b = join [task f1(), task f2()]
+let a, b = join (task f1(), task f2())
 ```
 
 Both work items are enqueued concurrently; `.wait()` is called on each in turn. Wall time is `max(t1, t2)`.

@@ -565,6 +565,7 @@ impl Transpiler {
         self.line(&format!("{} {{", sig));
         self.indent += 1;
         let prev_throws   = self.in_throws;
+        let prev_req_fn   = self.in_req_fn;
         let prev_async         = self.in_async;
         let prev_fn_returns_void = self.fn_returns_void;
         let prev_fn_declared_void = self.fn_declared_void;
@@ -598,6 +599,10 @@ impl Transpiler {
         let prev_optional_vars    = std::mem::take(&mut self.optional_vars);
         let prev_var_types        = std::mem::take(&mut self.var_types);
         let prev_string_vars      = std::mem::take(&mut self.string_vars);
+        let prev_string_arc_vars  = std::mem::take(&mut self.string_arc_vars);
+        let prev_vec_vars         = std::mem::take(&mut self.vec_vars);
+        let prev_collection_vars  = std::mem::take(&mut self.collection_vars);
+        let prev_dict_vars        = std::mem::take(&mut self.dict_vars);
         let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
         let prev_managed_mutex_vars   = std::mem::take(&mut self.managed_mutex_vars);
         // Pre-seed known_local_vars, var_struct_types, var_types, and var_mutex_types from params.
@@ -682,6 +687,7 @@ impl Transpiler {
             }
         }
         self.in_throws = f.throws;
+        self.in_req_fn = !f.mutating;
         self.in_async  = is_async;
         let prev_fn_return_ty = self.fn_return_ty.clone();
         self.fn_return_ty = f.return_ty.clone();
@@ -694,6 +700,13 @@ impl Transpiler {
             .filter(|p| matches!(&p.ty,
                 Some(Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
                 if !matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
+            ))
+            .map(|p| p.name.clone())
+            .collect();
+        let prev_var_primitive_params = std::mem::take(&mut self.var_primitive_params);
+        self.var_primitive_params = f.params.iter()
+            .filter(|p| p.rebindable && !matches!(&p.ty,
+                Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
             ))
             .map(|p| p.name.clone())
             .collect();
@@ -754,12 +767,14 @@ impl Transpiler {
         self.managed_param_shadows = prev_managed_param_shadows;
         self.in_cancellable_fn = prev_in_cancellable_fn;
         self.in_throws         = prev_throws;
+        self.in_req_fn         = prev_req_fn;
         self.fn_returns_void   = prev_fn_returns_void;
         self.fn_declared_void  = prev_fn_declared_void;
         self.fn_return_ty      = prev_fn_return_ty;
         self.fn_current_params = prev_fn_current_params;
-        self.auto_ref_params   = prev_auto_ref_params;
-        self.task_vars         = prev_task_vars;
+        self.auto_ref_params       = prev_auto_ref_params;
+        self.var_primitive_params  = prev_var_primitive_params;
+        self.task_vars             = prev_task_vars;
         self.arc_vars          = prev_arc_vars;
         self.rc_vars           = prev_rc_vars;
         self.shared_ref_params = prev_shared_ref_params;
@@ -771,6 +786,10 @@ impl Transpiler {
         self.optional_vars     = prev_optional_vars;
         self.var_types         = prev_var_types;
         self.string_vars       = prev_string_vars;
+        self.string_arc_vars   = prev_string_arc_vars;
+        self.vec_vars          = prev_vec_vars;
+        self.collection_vars   = prev_collection_vars;
+        self.dict_vars         = prev_dict_vars;
         self.managed_refcell_vars = prev_managed_refcell_vars;
         self.managed_mutex_vars   = prev_managed_mutex_vars;
         self.in_async          = prev_async;
@@ -976,16 +995,12 @@ impl Transpiler {
                 } else {
                     self.emit_type(effective_ty)
                 };
-                // `var` on 'stack/'heap/'owned (out-param) emits `&mut T`.
-                // Qualified smart-pointer params ('shared/'actor/'guard/'weak) are passed by
-                // owned value (clone at call site) — passing by reference creates temporaries.
+                // `var` on any stack/primitive/heap param → out-param `&mut T`.
+                // Smart-pointer params ('shared/'actor/'guard/'weak) are passed by owned value.
                 let ty_s = match effective_ty {
                     Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) |
                     Type::Qualified(_, OwnerQual::Weak) => ty_s,
-                    // var + explicit 'stack/'heap/'owned qualifier on a user type → out-param.
-                    // Primitives (var int x) remain mutable locals, no &mut.
-                    Type::Qualified(_, OwnerQual::Stack | OwnerQual::Owned)
-                        if p.rebindable => format!("&mut {}", ty_s),
+                    _ if p.rebindable => format!("&mut {}", ty_s),
                     _ => ty_s,
                 };
                 format!("{}: {}", name, ty_s)
@@ -1055,10 +1070,9 @@ impl Transpiler {
                 if let ExprKind::Var(v) = &obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) {
                         let access = self.actor_read_access(v);
-                        // If the field itself is an actor (Rc<RefCell<T>>), we must clone the Rc
-                        // to avoid moving out of a temporary borrow guard.
-                        let needs_clone = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single)
-                            && self.struct_fields.get(
+                        // If the field itself is an actor (Rc/Arc<RefCell/Mutex<T>>), clone it
+                        // to avoid moving out of a temporary borrow/lock guard.
+                        let field_is_shared = self.struct_fields.get(
                                 self.var_types.get(v.as_str())
                                     .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
                                     .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
@@ -1066,8 +1080,13 @@ impl Transpiler {
                             ).and_then(|fields| fields.iter().find(|(fname,_)| fname == field))
                             .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
                             .unwrap_or(false);
-                        return if needs_clone {
-                            format!("Rc::clone(&{}.{})", access, field)
+                        return if field_is_shared {
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Single =>
+                                    format!("Rc::clone(&{}.{})", access, field),
+                                crate::transpiler::ThreadingMode::Multi =>
+                                    format!("Arc::clone(&{}.{})", access, field),
+                            }
                         } else {
                             format!("{}.{}", access, field)
                         };
@@ -1085,13 +1104,18 @@ impl Transpiler {
                         return format!("{}.borrow().{}", v, field);
                     }
                 }
-                // RwLock var access (owned context): c.field → c.read().await.field
+                // RwLock var access (owned context): c.field → c.read().await.field (async) or c.read().unwrap().field (sync)
                 if let ExprKind::Var(v) = &obj.kind {
                     if self.var_rwlock_types.contains(v.as_str()) {
-                        return format!("{}.read().await.{}", v, field);
+                        let guard = if self.use_async_actors() && self.in_async {
+                            format!("{}.read().await", v)
+                        } else {
+                            format!("{}.read().unwrap()", v)
+                        };
+                        return format!("{}.{}", guard, field);
                     }
                 }
-                // Mutex struct field (owned context): self.worker.field → self.worker.lock().await.field
+                // Mutex struct field (owned context): self.worker.field → self.worker.lock().[await|unwrap()].field
                 if let ExprKind::Field(inner_obj, mutex_field) = &obj.kind {
                     if let ExprKind::Var(v) = &inner_obj.kind {
                         if v == "self" {
@@ -1099,13 +1123,14 @@ impl Transpiler {
                                 .map(|t| format!("{}::{}", t, mutex_field));
                             if let Some(k) = key {
                                 if self.struct_mutex_fields.contains(&k) {
-                                    return format!("self.{}.lock().await.{}", mutex_field, field);
+                                    let guard = self.actor_write_guard(&format!("self.{}", mutex_field));
+                                    return format!("{}.{}", guard, field);
                                 }
                             }
                         }
                     }
                 }
-                // RwLock struct field (owned context): self.data.field → self.data.read().await.field
+                // RwLock struct field (owned context): self.data.field → self.data.read().[await|unwrap()].field
                 if let ExprKind::Field(inner_obj, rwlock_field) = &obj.kind {
                     if let ExprKind::Var(v) = &inner_obj.kind {
                         if v == "self" {
@@ -1113,7 +1138,8 @@ impl Transpiler {
                                 .map(|t| format!("{}::{}", t, rwlock_field));
                             if let Some(k) = key {
                                 if self.struct_rwlock_fields.contains(&k) {
-                                    return format!("self.{}.read().await.{}", rwlock_field, field);
+                                    let guard = self.guard_write_guard(&format!("self.{}", rwlock_field));
+                                    return format!("{}.{}", guard, field);
                                 }
                             }
                         }
@@ -1162,9 +1188,11 @@ impl Transpiler {
             }
             // Struct variable in owned position: clone to avoid moving out.
             // In Boring, structs are copy-by-value semantics; Rust requires explicit .clone().
+            // Exception: `var` params are `&mut T` — emit as-is (the &mut is already the reference).
             ExprKind::Var(v) if self.var_struct_types.contains_key(v.as_str())
                 && !self.arc_vars.contains(v.as_str())
-                && !self.var_mutex_types.contains(v.as_str()) =>
+                && !self.var_mutex_types.contains(v.as_str())
+                && !self.var_primitive_params.contains(v.as_str()) =>
             {
                 format!("{}.clone()", self.emit_expr(expr))
             }
@@ -1208,6 +1236,9 @@ impl Transpiler {
                 let last_stmt = non_defers.last();
                 let needs_ok = match last_stmt {
                     Some(Stmt::Expr(_)) | Some(Stmt::Return(_)) | Some(Stmt::Throw(_)) => false,
+                    // A complete if/else or match covers all paths — no unreachable!() needed.
+                    Some(Stmt::If(s)) if s.else_body.is_some() => false,
+                    Some(Stmt::Match(_)) => false,
                     _ => true,
                 };
                 if needs_ok {
@@ -1367,14 +1398,53 @@ impl Transpiler {
         }
     }
 
-    /// Emit `Arc<tokio::sync::Mutex<T>>` for the inner type.
-    /// Emit the actor type respecting --threading:
-    /// multi → `Arc<tokio::sync::Mutex<T>>`, single → `Rc<RefCell<T>>`.
-    /// `T'actor` means "shared mutable ownership": Arc<Mutex> in multi, Rc<RefCell> in single.
+    /// Returns true if the program uses async actors (tokio::sync::Mutex/RwLock).
+    /// When no task or stream functions exist, all actor access is synchronous and
+    /// std::sync::Mutex is used instead, avoiding the need for async fn and .await.
+    pub(crate) fn use_async_actors(&self) -> bool {
+        matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+            && (!self.task_fns.is_empty() || !self.stream_fns.is_empty())
+    }
+
+    /// Wrap `inner_expr` in the appropriate actor constructor for the current threading mode.
+    /// multi + async fns → `Arc::new(tokio::sync::Mutex::new(v))`, multi + no async → `Arc::new(Mutex::new(v))`,
+    /// single → `Rc::new(RefCell::new(v))`.
+    pub(crate) fn emit_actor_new(&self, inner_expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors()
+                => format!("Arc::new(tokio::sync::Mutex::new({}))", inner_expr),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("Arc::new(Mutex::new({}))", inner_expr),
+            crate::transpiler::ThreadingMode::Single
+                => format!("Rc::new(RefCell::new({}))", inner_expr),
+        }
+    }
+
+    /// Wrap `inner_expr` in the appropriate guard constructor for the current threading mode.
+    /// multi + async fns → `Arc::new(tokio::sync::RwLock::new(v))`, multi + no async → `Arc::new(RwLock::new(v))`,
+    /// single → `Rc::new(RefCell::new(v))`.
+    pub(crate) fn emit_guard_new(&self, inner_expr: &str) -> String {
+        match self.config.threading {
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors()
+                => format!("Arc::new(tokio::sync::RwLock::new({}))", inner_expr),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("Arc::new(RwLock::new({}))", inner_expr),
+            crate::transpiler::ThreadingMode::Single
+                => format!("Rc::new(RefCell::new({}))", inner_expr),
+        }
+    }
+
+    /// Emit the actor type respecting --threading and async usage:
+    /// multi + async fns → `Arc<tokio::sync::Mutex<T>>`, multi + no async → `Arc<std::sync::Mutex<T>>`,
+    /// single → `Rc<RefCell<T>>`.
     pub(crate) fn emit_actor_type(&self, inner: &Type) -> String {
         match self.config.threading {
-            crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner)),
-            crate::transpiler::ThreadingMode::Single => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors()
+                => format!("Arc<tokio::sync::Mutex<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("Arc<std::sync::Mutex<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single
+                => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
         }
     }
 
@@ -1384,14 +1454,17 @@ impl Transpiler {
         self.emit_actor_type(inner)
     }
 
-    /// Emit the guard type respecting --threading:
-    /// multi → `Arc<tokio::sync::RwLock<T>>`, single → `Rc<RefCell<T>>`.
-    /// `T'guard` means "shared read/write ownership": Arc<RwLock> in multi, Rc<RefCell> in single
-    /// (single-thread has no real distinction between exclusive and shared locks).
+    /// Emit the guard type respecting --threading and async usage:
+    /// multi + async fns → `Arc<tokio::sync::RwLock<T>>`, multi + no async → `Arc<std::sync::RwLock<T>>`,
+    /// single → `Rc<RefCell<T>>`.
     pub(crate) fn emit_guard_type(&self, inner: &Type) -> String {
         match self.config.threading {
-            crate::transpiler::ThreadingMode::Multi  => format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner)),
-            crate::transpiler::ThreadingMode::Single => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors()
+                => format!("Arc<tokio::sync::RwLock<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("Arc<std::sync::RwLock<{}>>", self.emit_type(inner)),
+            crate::transpiler::ThreadingMode::Single
+                => format!("Rc<RefCell<{}>>", self.emit_type(inner)),
         }
     }
 
@@ -1403,27 +1476,36 @@ impl Transpiler {
     /// actor read: `expr.lock().await` (multi-async), `expr.lock().unwrap()` (multi-sync), `expr.borrow()` (single).
     pub(crate) fn actor_read_access(&self, expr: &str) -> String {
         match self.config.threading {
-            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.lock().await", expr),
-            crate::transpiler::ThreadingMode::Multi                   => format!("{}.lock().unwrap()", expr),
-            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow()", expr),
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors() && self.in_async
+                => format!("{}.lock().await", expr),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("{}.lock().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single
+                => format!("{}.borrow()", expr),
         }
     }
 
     /// actor write guard: `expr.lock().await` (multi-async), `expr.lock().unwrap()` (multi-sync), `expr.borrow_mut()` (single).
     pub(crate) fn actor_write_guard(&self, expr: &str) -> String {
         match self.config.threading {
-            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.lock().await", expr),
-            crate::transpiler::ThreadingMode::Multi                   => format!("{}.lock().unwrap()", expr),
-            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow_mut()", expr),
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors() && self.in_async
+                => format!("{}.lock().await", expr),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("{}.lock().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single
+                => format!("{}.borrow_mut()", expr),
         }
     }
 
     /// guard (rwlock) write guard: `expr.write().await` (multi-async), `expr.write().unwrap()` (multi-sync), `expr.borrow_mut()` (single).
     pub(crate) fn guard_write_guard(&self, expr: &str) -> String {
         match self.config.threading {
-            crate::transpiler::ThreadingMode::Multi  if self.in_async => format!("{}.write().await", expr),
-            crate::transpiler::ThreadingMode::Multi                   => format!("{}.write().unwrap()", expr),
-            crate::transpiler::ThreadingMode::Single                  => format!("{}.borrow_mut()", expr),
+            crate::transpiler::ThreadingMode::Multi if self.use_async_actors() && self.in_async
+                => format!("{}.write().await", expr),
+            crate::transpiler::ThreadingMode::Multi
+                => format!("{}.write().unwrap()", expr),
+            crate::transpiler::ThreadingMode::Single
+                => format!("{}.borrow_mut()", expr),
         }
     }
 

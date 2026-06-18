@@ -247,12 +247,7 @@ impl Transpiler {
                 if let Some(inner) = Self::mutex_inner(ty) {
                     let mutex_ty = self.emit_mutex_type(inner);
                     let raw_val = self.emit_let_value(Some(inner), s_value);
-                    let init = match self.config.threading {
-                        crate::transpiler::ThreadingMode::Multi =>
-                            format!("Arc::new(tokio::sync::Mutex::new({}))", raw_val),
-                        crate::transpiler::ThreadingMode::Single =>
-                            format!("Rc::new(RefCell::new({}))", raw_val),
-                    };
+                    let init = self.emit_actor_new(&raw_val);
                     self.var_mutex_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     // In single-thread mode, T'actor = Rc<RefCell<T>> → use Rc::clone, not Arc::clone.
@@ -280,7 +275,7 @@ impl Transpiler {
                     let raw_val = self.emit_let_value(Some(inner), s_value);
                     let init = match self.config.threading {
                         crate::transpiler::ThreadingMode::Multi =>
-                            format!("Arc::new(tokio::sync::RwLock::new({}))", raw_val),
+                            self.emit_guard_new(&raw_val),
                         crate::transpiler::ThreadingMode::Single =>
                             format!("Rc::new(RefCell::new({}))", raw_val),
                     };
@@ -320,15 +315,6 @@ impl Transpiler {
                         }
                     }
                     self.line(&format!("{} {}: {} = {};", kw, s.name, managed_ty, init));
-                    // Shadow the mutex guard immediately so multiple field accesses in the same
-                    // expression don't deadlock (std::sync::Mutex is non-reentrant).
-                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
-                        let shadow = format!("__{}_mg", s.name);
-                        self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
-                            shadow = shadow, name = s.name));
-                        self.managed_mutex_vars.remove(&s.name);
-                        self.managed_param_shadows.insert(s.name.clone(), shadow);
-                    }
                     return;
                 }
             }
@@ -363,9 +349,13 @@ impl Transpiler {
         let is_mutable_string_ty = s.binding.is_mutable()
             && matches!(&s.ty, Some(Type::Named(n)) if n == "string" || n == "str")
             && matches!(&s_value.kind, ExprKind::Str(_) | ExprKind::StringInterp(_));
+        let str_ty_annotation = match self.config.threading {
+            crate::transpiler::ThreadingMode::Single => ": Rc<str>",
+            crate::transpiler::ThreadingMode::Multi  => ": Arc<str>",
+        };
         let (ty, val) = if is_mutable_string_lit || is_mutable_string_ty {
             (
-                ": Arc<str>".to_string(),
+                str_ty_annotation.to_string(),
                 self.emit_expr_owned(s_value),
             )
         } else {
@@ -439,6 +429,9 @@ impl Transpiler {
         if is_mutable_string_lit || is_mutable_string_ty {
             self.string_arc_vars.insert(s.name.clone());
             self.string_vars.insert(s.name.clone());
+            // A redeclaration of a var as string overrides any prior array/collection tracking.
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
         }
         // Also track immutable string literal vars so string methods (parseInt, indexOf, slice…)
         // can dispatch correctly even without an explicit type annotation.
@@ -450,6 +443,8 @@ impl Transpiler {
             if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "readLine"));
         if is_immutable_string_lit || is_readline_call {
             self.string_vars.insert(s.name.clone());
+            self.vec_vars.remove(s.name.as_str());
+            self.collection_vars.remove(s.name.as_str());
         }
         // Track variables that hold collections (for {:?} formatting later)
         if looks_like_collection(&val) || is_collection_type(s.ty.as_ref()) {
@@ -857,6 +852,24 @@ impl Transpiler {
                             }
                         }
                     }
+                    // Track string vars when initialized from a string field of any struct.
+                    let struct_ty_name = self.var_struct_types.get(v.as_str())
+                        .cloned()
+                        .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                            Type::Named(n) => Some(n.clone()),
+                            Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
+                            _ => None,
+                        }));
+                    if let Some(ty_name) = struct_ty_name {
+                        let field_is_string = self.struct_fields.get(ty_name.as_str())
+                            .and_then(|fields| fields.iter().find(|(fname, _)| fname == field_name))
+                            .map(|(_, fty)| Self::is_string_type(fty))
+                            .unwrap_or(false);
+                        if field_is_string {
+                            self.string_vars.insert(s.name.clone());
+                        }
+                    }
                 }
             }
         }
@@ -895,20 +908,6 @@ impl Transpiler {
             self.line(&format!("{}static {}: {} = {};", vis, s.name, ty.trim_start_matches(": ").trim(), val));
         } else {
             self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, val));
-            // Shadow non-optional managed mutex locals immediately to avoid double-lock deadlock.
-            // Optional managed vars (T'?) stay in managed_mutex_vars but must NOT be shadowed
-            // here because they are Option<Arc<Mutex<T>>> and lock() is not on Option.
-            let is_optional_ty = s.ty.as_ref().map_or(false, |t| matches!(t, Type::Optional(_)));
-            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-                && !is_optional_ty
-                && self.managed_mutex_vars.contains(&s.name)
-            {
-                let shadow = format!("__{}_mg", s.name);
-                self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
-                    shadow = shadow, name = s.name));
-                self.managed_mutex_vars.remove(&s.name);
-                self.managed_param_shadows.insert(s.name.clone(), shadow);
-            }
         }
     }
 
@@ -1544,24 +1543,29 @@ impl Transpiler {
                 // If the value is an existing Arc variable, clone it instead of moving.
                 let is_existing_arc =
                     (is_actor && matches!(&value.kind, ExprKind::Var(v) if self.var_mutex_types.contains(v.as_str())))
-                    || matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
+                    || matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()))
+                    // MethodCall(obj, "clone", []) on a known arc_var — already Arc<Mutex<T>>
+                    || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
+                        if m == "clone" && args.is_empty()
+                        && matches!(&obj.kind, ExprKind::Var(v)
+                            if self.var_mutex_types.contains(v.as_str()) || self.arc_vars.contains(v.as_str())));
                 if is_existing_arc {
                     format!("Arc::clone(&{})", inner)
                 } else if is_heap {
                     // Unbox before wrapping in the appropriate lock type.
                     if is_actor {
-                        format!("Arc::new(tokio::sync::Mutex::new(*{}))", inner)
+                        self.emit_actor_new(&format!("*{}", inner))
                     } else if is_guard {
-                        format!("Arc::new(tokio::sync::RwLock::new(*{}))", inner)
+                        self.emit_guard_new(&format!("*{}", inner))
                     } else {
                         format!("Arc::new(*{})", inner)
                     }
                 } else if matches!(&value.kind, ExprKind::Var(_)) {
                     // 'stack source: wrap with lock + .clone() to preserve the original binding.
                     if is_actor {
-                        format!("Arc::new(tokio::sync::Mutex::new({}.clone()))", inner)
+                        self.emit_actor_new(&format!("{}.clone()", inner))
                     } else if is_guard {
-                        format!("Arc::new(tokio::sync::RwLock::new({}.clone()))", inner)
+                        self.emit_guard_new(&format!("{}.clone()", inner))
                     } else {
                         format!("Arc::new({}.clone())", inner)
                     }
@@ -1603,13 +1607,41 @@ impl Transpiler {
                 let s = self.emit_expr(value);
                 // If the value is a variable that holds a struct (non-Arc) type, clone it
                 // to avoid a move. In Boring, assignment always copies; Rust structs need .clone().
+                // Exception: `var` params are `&mut T` — don't clone, pass the reference directly.
                 if let ExprKind::Var(v) = &value.kind {
                     if self.var_struct_types.contains_key(v.as_str())
                         && !self.arc_vars.contains(v.as_str())
                         && !self.var_mutex_types.contains(v.as_str())
+                        && !self.var_primitive_params.contains(v.as_str())
                         && !s.ends_with(".clone()")
                     {
                         return format!("{}.clone()", s);
+                    }
+                    // If the param type is a user-defined enum, clone to avoid moves.
+                    // Enum values are Clone but not Copy; re-use in loops requires cloning.
+                    if let Some(Type::Named(type_name)) = declared_ty {
+                        let is_user_enum = self.enum_variant_fields.keys()
+                            .any(|k| k.starts_with(&format!("{}::", type_name)));
+                        if is_user_enum && !s.ends_with(".clone()") {
+                            return format!("{}.clone()", s);
+                        }
+                    }
+                }
+                // If the value is a field access on a local struct variable, and the field type
+                // is `string` (Rc<str>/Arc<str>), add .clone() to avoid a partial struct move.
+                // In Boring, string is a reference-counted type — cloning is cheap and required.
+                if let ExprKind::Field(obj, field_name) = &value.kind {
+                    if let ExprKind::Var(obj_var) = &obj.kind {
+                        let struct_type_name = self.var_struct_types.get(obj_var.as_str())
+                            .or_else(|| self.var_struct_type.get(obj_var.as_str()));
+                        let field_is_string = struct_type_name
+                            .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                            .and_then(|fs| fs.iter().find(|(n, _)| n == field_name.as_str()))
+                            .map(|(_, ty)| Self::is_string_type(ty))
+                            .unwrap_or(false);
+                        if field_is_string && !s.ends_with(".clone()") {
+                            return format!("{}.clone()", s);
+                        }
                     }
                 }
                 s
@@ -1844,6 +1876,18 @@ impl Transpiler {
                                         .unwrap_or(false)
                                 }).unwrap_or(false)));
                     if already_opt { inner } else { format!("Some({})", inner) }
+                } else if matches!(&self.fn_return_ty, Some(Type::Array(_)))
+                    && !self.in_req_fn
+                    && self.self_type.is_some()
+                    && matches!(&e.kind, ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(v) if v == "self"))
+                {
+                    // `def` method returning `self.field` where field is Vec<T>: moving out of
+                    // `&mut self` is rejected by Rust. Use std::mem::take to drain the field.
+                    if let ExprKind::Field(_, field_name) = &e.kind {
+                        format!("std::mem::take(&mut self.{})", field_name)
+                    } else {
+                        self.emit_let_value(self.fn_return_ty.as_ref(), e)
+                    }
                 } else if matches!(&self.fn_return_ty,
                     Some(Type::Tuple(_)) | Some(Type::Array(_)) | Some(Type::Dict(_, _)))
                 {
@@ -2034,13 +2078,17 @@ impl Transpiler {
     pub(crate) fn emit_if(&mut self, s: &IfStmt, is_last: bool) {
         // When this if/else is the last statement in a value-returning function,
         // use emit_body so branch tails are returned without semicolons.
+        // use_value_body: emit branch tails as Rust tail expressions (non-throws).
+        // use_throws_tail: in a throws function, emit branch tails as `return Ok(expr)`.
         let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
+        let use_throws_tail = is_last && self.in_throws && !self.suppress_ok_wrap
+            && !self.fn_returns_void && s.else_body.is_some();
         for (i, (cond, body)) in s.branches.iter().enumerate() {
             let kw = if i == 0 { "if" } else { "} else if" };
             let cond_s = self.emit_expr(cond);
             self.line(&format!("{} {} {{", kw, cond_s));
             self.indent += 1;
-            if use_value_body {
+            if use_value_body || use_throws_tail {
                 self.emit_body(body);
             } else {
                 // Use emit_loop_body so nested if-branches never get Ok()/Ok(()) wrapping.
@@ -2052,7 +2100,7 @@ impl Transpiler {
         if let Some(else_body) = &s.else_body {
             self.line("} else {");
             self.indent += 1;
-            if use_value_body {
+            if use_value_body || use_throws_tail {
                 self.emit_body(else_body);
             } else {
                 self.emit_loop_body(else_body);
@@ -2237,7 +2285,7 @@ impl Transpiler {
                     }).collect();
 
                     // Emit the transformed match against __boring_error_typed
-                    let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
+                    let use_value_body = is_last && !self.fn_returns_void;
                     self.line("match __boring_error_typed {");
                     self.indent += 1;
                     for arm in &arms_transformed {
@@ -2285,7 +2333,8 @@ impl Transpiler {
 
         // When the whole match is the last stmt in a value-returning function,
         // each arm body also returns its value — use emit_body instead of emit_loop_body.
-        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
+        // For throws functions, emit_body produces `return Ok(expr)` for arm tails.
+        let use_value_body = is_last && !self.fn_returns_void;
 
         // Detect if the match subject is a function type parameter being matched against
         // concrete struct types. Rust cannot match `S` (a type param) against struct patterns,
@@ -2773,7 +2822,7 @@ impl Transpiler {
     pub(crate) fn emit_pattern(&self, pat: &Pattern) -> String {
         match pat {
             Pattern::Wildcard   => "_".into(),
-            Pattern::Bind(n)    => n.clone(),
+            Pattern::Bind(n)    => if self.in_req_fn { n.clone() } else { format!("mut {}", n) },
             Pattern::None       => {
                 // If the match subject is a user-defined enum with a `None` variant, qualify it.
                 if let Some(enum_name) = &self.match_subject_enum {
@@ -3043,14 +3092,18 @@ impl Transpiler {
         // Detect `for item in actor_var:` — actor (Arc<Mutex<Vec<T>>>) iteration.
         // Lock the mutex, iterate with `.iter().cloned()` to keep items as owned values.
         if let ExprKind::Var(actor_name) = &s.iterable.kind {
-            if self.var_mutex_types.contains(actor_name.as_str()) && self.in_async {
+            let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+            if self.var_mutex_types.contains(actor_name.as_str())
+                && (self.in_async || is_multi)
+            {
                 let vars = if s.vars.is_empty() {
                     "_".into()
                 } else {
                     s.vars.iter().map(|v| escape_rust_keyword(v)).collect::<Vec<_>>().join(", ")
                 };
                 let guard = format!("__guard_{}", actor_name);
-                self.line(&format!("let {} = {}.lock().await;", guard, actor_name));
+                let lock_expr = self.actor_write_guard(actor_name);
+                self.line(&format!("let {} = {};", guard, lock_expr));
                 self.line(&format!("for {} in {}.iter().cloned() {{", vars, guard));
                 self.indent += 1;
                 self.emit_loop_body(&s.body);
@@ -3063,14 +3116,22 @@ impl Transpiler {
         // Detect `for item in guard_var:` — guard (Arc<RwLock<Vec<T>>>) iteration.
         // Acquire a read lock, iterate with `.iter().cloned()`.
         if let ExprKind::Var(guard_name) = &s.iterable.kind {
-            if self.var_rwlock_types.contains(guard_name.as_str()) && self.in_async {
+            let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
+            if self.var_rwlock_types.contains(guard_name.as_str())
+                && (self.in_async || is_multi)
+            {
                 let vars = if s.vars.is_empty() {
                     "_".into()
                 } else {
                     s.vars.iter().map(|v| escape_rust_keyword(v)).collect::<Vec<_>>().join(", ")
                 };
                 let rguard = format!("__rguard_{}", guard_name);
-                self.line(&format!("let {} = {}.read().await;", rguard, guard_name));
+                let read_expr = if self.use_async_actors() && self.in_async {
+                    format!("{}.read().await", guard_name)
+                } else {
+                    format!("{}.read().unwrap()", guard_name)
+                };
+                self.line(&format!("let {} = {};", rguard, read_expr));
                 self.line(&format!("for {} in {}.iter().cloned() {{", vars, rguard));
                 self.indent += 1;
                 self.emit_loop_body(&s.body);

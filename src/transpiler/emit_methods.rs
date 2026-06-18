@@ -264,14 +264,26 @@ impl Transpiler {
                 // Use emit_expr_owned so string interpolations/trim results get Arc<str> wrapping.
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
-                    // Single-thread: T'actor = Rc<RefCell<T>> → .borrow_mut().method()
-                    let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
+                    // Single-thread: T'actor = Rc<RefCell<T>>.
+                    // Use borrow() for req (read-only) methods, borrow_mut() for def methods.
+                    let borrow_kind = {
+                        let struct_name = self.fn_current_params.get(v.as_str())
+                            .and_then(|ty| if let crate::ast::Type::Qualified(inner, _) = ty {
+                                if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
+                            } else { None });
+                        let is_req = struct_name.map_or(false, |sn| {
+                            self.struct_req_methods.contains(&format!("{}::{}", sn, method))
+                        });
+                        if is_req { "borrow" } else { "borrow_mut" }
+                    };
+                    let call = format!("{}.{}().{}({})", v, borrow_kind, rust_method, args_s.join(", "));
                     let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                     let throws = (self.in_throws || self.in_try_body)
                         && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
                     return if throws { format!("{}?", call) } else { call };
                 }
-                let call = format!("{}.lock().await.{}({})", v, rust_method, args_s.join(", "));
+                let guard_expr = self.actor_write_guard(v);
+                let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 // Add .await for user task methods AND known tokio async instance methods (recv, etc.)
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
@@ -313,7 +325,8 @@ impl Transpiler {
                         if self.struct_mutex_fields.contains(&k) {
                             let (rust_method, extra_wrap) = map_method(method, args.len());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                            let call = format!("self.{}.lock().await.{}({})", mutex_field, rust_method, args_s.join(", "));
+                            let guard_expr = self.actor_write_guard(&format!("self.{}", mutex_field));
+                            let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
@@ -364,7 +377,7 @@ impl Transpiler {
                         let call = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                             format!("{}.borrow_mut().{}({})", obj_s, rust_method, args_s.join(", "))
                         } else {
-                            format!("{}.lock().await.{}({})", obj_s, rust_method, args_s.join(", "))
+                            { let g = self.actor_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         };
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                         return call;
@@ -586,6 +599,15 @@ impl Transpiler {
                 "parseFloat" => {
                     return format!("{}.trim().parse::<f64>().ok()", obj_s);
                 }
+                "chars" => {
+                    // Use threading-mode-aware string type (Rc<str> in single-thread, Arc<str> in multi).
+                    let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
+                    let vec_ty = if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" };
+                    return format!(
+                        "{}.chars().map(|c| {}::from(c.to_string())).collect::<Vec<{}>>()",
+                        obj_s, str_ty, vec_ty
+                    );
+                }
                 "indexOf" => {
                     let sub_s = args.first().map(|a| self.emit_expr(&a.value))
                         .unwrap_or_else(|| "\"\"".to_string());
@@ -596,10 +618,12 @@ impl Transpiler {
                     let start_s = self.emit_expr(&args[0].value);
                     let end_s   = self.emit_expr(&args[1].value);
                     // Bind start to a local so it is not double-evaluated (fix #23).
-                    // Wrap in Arc<str> so the result type is `string`, not `String`.
+                    // Wrap in Rc<str>/Arc<str> (threading-mode aware) so the result type is `string`.
+                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
                     return format!(
-                        "{{ let __start = ({}) as usize; Arc::<str>::from({}.chars().skip(__start).take(({}) as usize - __start).collect::<String>().as_str()) }}",
-                        start_s, obj_s, end_s
+                        "{{ let __start = ({}) as usize; {}::from({}.chars().skip(__start).take(({}) as usize - __start).collect::<String>().as_str()) }}",
+                        start_s, str_ty, obj_s, end_s
                     );
                 }
                 // Pattern methods: Rc<str>/Arc<str> doesn't implement Pattern, need .as_ref().
@@ -694,6 +718,10 @@ impl Transpiler {
                     let key_s = self.emit_dict_key_borrow(&args[0].value);
                     let def_s = self.emit_expr(&args[1].value);
                     return format!("{}.get({}).cloned().unwrap_or({})", obj_s, key_s, def_s);
+                }
+                "get" if args.len() == 1 => {
+                    let key_s = self.emit_dict_key_borrow(&args[0].value);
+                    return format!("{}.get({}).cloned()", obj_s, key_s);
                 }
                 "set" | "put" if args.len() >= 2 => {
                     let key_s = self.emit_expr_owned(&args[0].value);
@@ -996,7 +1024,15 @@ impl Transpiler {
             ExprKind::Var(v) => {
                 if v == "self" { false }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
-                else { !self.known_local_vars.contains(v.as_str()) }
+                else if self.known_local_vars.contains(v.as_str()) { false }
+                else {
+                    // Struct fields accessed without `self.` in method bodies are NOT path receivers.
+                    let is_struct_field = self.self_type.as_ref()
+                        .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                        .map(|fields| fields.iter().any(|(f, _)| f == v.as_str()))
+                        .unwrap_or(false);
+                    !is_struct_field
+                }
             }
             _ => obj_s.contains("::") && !obj_s.ends_with(')') && !obj_s.ends_with('}'),
         };
@@ -1402,10 +1438,9 @@ impl Transpiler {
                 // by value (unsized coercion requires an owned value anyway).
                 } else if is_auto_ref_param(param_ty) {
                     emitted
-                // var (rebindable) 'stack/'heap param: out-parameter, pass &mut.
-                // Only applies to qualified user types — primitives (var int x) are mutable locals.
-                } else if param_rebindable && matches!(param_ty,
-                    Some(Type::Qualified(_, OwnerQual::Stack | OwnerQual::Owned))
+                // var (rebindable) param: out-parameter, pass &mut for all stack/primitive types.
+                } else if param_rebindable && !matches!(param_ty,
+                    Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
                 ) {
                     format!("&mut {}", emitted)
                 } else {
@@ -1623,7 +1658,15 @@ impl Transpiler {
     ///      `fn_return_types`
     fn expr_is_dict(&self, expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::Var(v) => self.dict_vars.contains(v.as_str()),
+            ExprKind::Var(v) => {
+                if self.dict_vars.contains(v.as_str()) { return true; }
+                // Struct fields accessed as bare vars inside method bodies.
+                self.self_type.as_ref()
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == v.as_str()))
+                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Dict(..)))
+                    .unwrap_or(false)
+            }
             ExprKind::Dict(_) => true,
             // Field access: look up the field type in struct_fields
             ExprKind::Field(obj, field_name) => {
@@ -1860,6 +1903,7 @@ impl Transpiler {
             uses_local_broadcast: std::rc::Rc::clone(&self.uses_local_broadcast),
             rc_vars: self.rc_vars.clone(),
             shared_ref_params: self.shared_ref_params.clone(),
+            var_primitive_params: self.var_primitive_params.clone(),
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
@@ -1868,6 +1912,7 @@ impl Transpiler {
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             fn_current_params: std::collections::HashMap::new(),
             auto_ref_params: self.auto_ref_params.clone(),
+            in_req_fn: self.in_req_fn,
         }
     }
 

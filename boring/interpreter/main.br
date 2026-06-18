@@ -136,7 +136,8 @@ struct Token:
     int line
 
     req string text():
-        match self.kind:
+        let kind = self.kind.clone()
+        match kind:
             TokenKind.Ident(s): s
             _: ""
 
@@ -827,7 +828,8 @@ def [string] split_hole_fmt(string s):
             depth -= 1
         elif ch == ":" and depth == 0:
             let expr = s.slice(0, idx)
-            let rest = s.slice(idx + 1, s.length).trim()
+            let rest_raw = s.slice(idx + 1, s.length)
+            let rest = rest_raw.trim()
             if rest.length == 0:
                 return [s, ""]
             return [expr, rest]
@@ -968,7 +970,8 @@ struct Lexer:
                         else:
                             inner = inner + ic
                     let split = split_hole_fmt(inner)
-                    let expr = split[0].trim()
+                    let expr_raw = split[0]
+                    let expr = expr_raw.trim()
                     let fmt = split[1]
                     if fmt.length > 0:
                         parts.append(RawInterpPart.HoleFormatted(expr, fmt))
@@ -1314,7 +1317,7 @@ struct Lexer:
         while i < all_lines.length:
             self.line = i + 1
             let raw = all_lines[i]
-            let trimmed = raw.trim()
+            let string trimmed = raw.trim()
             if trimmed.length == 0:
                 if self.paren_depth == 0:
                     self.push(TokenKind.Newline)
@@ -1331,7 +1334,8 @@ struct Lexer:
                             break
                         self.indent_stack.pop()
                         self.push(TokenKind.Dedent)
-                let text = trimmed.slice(1, trimmed.length).trim()
+                let text_raw = trimmed.slice(1, trimmed.length)
+                let text = text_raw.trim()
                 self.push(TokenKind.Comment(text))
                 self.push(TokenKind.Newline)
                 i += 1
@@ -1413,7 +1417,24 @@ struct Binding:
 
 struct ObjectInner:
     string type_name
-    [(string, Value)] fields
+    var [(string, Value)] fields
+
+    req Value? get_field(string name):
+        var i = 0
+        while i < self.fields.length:
+            if self.fields[i].0 == name:
+                return self.fields[i].1
+            i = i + 1
+        nil
+
+    def void set_field(string name, Value val):
+        var i = 0
+        while i < self.fields.length:
+            if self.fields[i].0 == name:
+                self.fields[i] = (name, val)
+                return
+            i = i + 1
+        self.fields.append((name, val))
 
 struct TypeRef:
     string name
@@ -1567,6 +1588,12 @@ struct Env:
             if let p = self.parent:
                 p.invalidate(name)
 
+    req Env'actor? parent_opt():
+        if let p = self.parent:
+            p
+        else:
+            nil
+
     req [string] all_names():
         var names = self.vars.keys()
         if let p = self.parent:
@@ -1620,10 +1647,9 @@ struct Parser:
             false
 
     def Token expect(TokenKind k) throws:
-        if self.peek() == k:
-            self.advance()
-        else:
-            throw "expected {token_kind_name(k)}, got {token_kind_name(self.peek())}"
+        if token_kind_name(self.peek()) == token_kind_name(k):
+            return self.advance()
+        throw "expected {token_kind_name(k)}, got {token_kind_name(self.peek())}"
 
     req bool at_end():
         self.peek() == TokenKind.Eof
@@ -1743,217 +1769,213 @@ def string token_kind_name(TokenKind k):
         TokenKind.Eof: "Eof"
         TokenKind.Comment(_): "Comment"
 
-def bool parser_check(var Parser'actor p, string name):
+def bool parser_check(var Parser p, string name):
     token_kind_name(p.peek()) == name
 
-def bool parser_check2(var Parser'actor p, string name):
+def bool parser_check2(var Parser p, string name):
     token_kind_name(p.peek2()) == name
 
-def Token parser_advance(var Parser'actor p) throws:
+def Token parser_advance(var Parser p) throws:
     p.advance()
 
-def bool parser_eat(var Parser'actor p, string name) throws:
+def bool parser_eat(var Parser p, string name) throws:
     if parser_check(p, name):
         p.advance()
-        true
-    else:
-        false
+        return true
+    return false
 
-def Token parser_expect(var Parser'actor p, string name) throws:
+def Token parser_expect(var Parser p, string name) throws:
     if parser_check(p, name):
-        p.advance()
-    else:
-        throw "expected {name}, got {token_kind_name(p.peek())}"
+        return p.advance()
+    throw "expected {name}, got {token_kind_name(p.peek())}"
 
-def string parser_expect_ident(var Parser'actor p) throws:
+def string parser_expect_ident(var Parser p) throws:
     if parser_check(p, "Ident"):
-        p.advance().text()
-    else:
-        throw "expected identifier, got {token_kind_name(p.peek())}"
+        return p.advance().text()
+    throw "expected identifier, got {token_kind_name(p.peek())}"
 
-def string parser_expect_ident_or_keyword(var Parser'actor p) throws:
+def string parser_expect_ident_or_keyword(var Parser p) throws:
     let k = p.peek()
     let name = token_kind_name(k)
     if name == "Ident" or name == "Let" or name == "Var" or name == "Def" or name == "Return" or name == "If" or name == "For" or name == "While" or name == "Match" or name == "Type":
-        p.advance().text()
-    else:
-        throw "expected identifier or keyword, got {name}"
+        return p.advance().text()
+    throw "expected identifier or keyword, got {name}"
 
-def bool parser_peek_is_ident(var Parser'actor p):
+def bool parser_peek_is_ident(var Parser p):
     parser_check(p, "Ident")
 
-def bool parser_peek_is_int(var Parser'actor p):
+def bool parser_peek_is_int(var Parser p):
     parser_check(p, "Int")
 
-def bool parser_is_newline(var Parser'actor p):
+def bool parser_is_newline(var Parser p):
     parser_check(p, "Newline") or parser_check(p, "Semicolon")
 
-def int parser_line(var Parser'actor p):
+def int parser_line(var Parser p):
     p.current_line()
 
-def int parser_pos(var Parser'actor p):
+def int parser_pos(var Parser p):
     p.pos
 
-def void parser_set_pos(var Parser'actor p, int pos):
+def void parser_set_pos(var Parser p, int pos):
     p.pos = pos
 
-def void parser_skip_newlines(var Parser'actor p) throws:
+def void parser_skip_newlines(var Parser p) throws:
     while parser_check(p, "Newline") or parser_check(p, "Semicolon"):
         p.advance()
         nil
 
-def void parser_skip_newlines_and_indent(var Parser'actor p) throws:
+def void parser_skip_newlines_and_indent(var Parser p) throws:
     while parser_check(p, "Newline") or parser_check(p, "Indent") or parser_check(p, "Semicolon"):
         p.advance()
         nil
 
-def void parser_expect_newline(var Parser'actor p) throws:
+def void parser_expect_newline(var Parser p) throws:
     if parser_check(p, "Newline") or parser_check(p, "Semicolon") or parser_check(p, "Eof"):
         if not parser_check(p, "Eof"):
             p.advance()
     else:
         throw "expected newline, got {token_kind_name(p.peek())}"
 
-def void parser_expect_newline_soft(var Parser'actor p) throws:
+def void parser_expect_newline_soft(var Parser p) throws:
     if parser_check(p, "Newline") or parser_check(p, "Semicolon"):
         p.advance()
         nil
 
-def string parser_peek_ident(var Parser'actor p):
+def string parser_peek_ident(var Parser p):
     match p.peek():
         TokenKind.Ident(name): name
         _: ""
 
-def int parser_peek_int(var Parser'actor p):
+def int parser_peek_int(var Parser p):
     match p.peek():
         TokenKind.Int(n): n
         _: 0
 
-def float parser_peek_float(var Parser'actor p):
+def float parser_peek_float(var Parser p):
     match p.peek():
         TokenKind.Float(f): f
         _: 0.0
 
-def string parser_peek_str(var Parser'actor p):
+def string parser_peek_str(var Parser p):
     match p.peek():
         TokenKind.Str(s): s
         _: ""
 
-def bool parser_peek_bool(var Parser'actor p):
+def bool parser_peek_bool(var Parser p):
     match p.peek():
         TokenKind.Bool(b): b
         _: false
 
-def [RawInterpPart] parser_peek_interp_parts(var Parser'actor p):
+def [RawInterpPart] parser_peek_interp_parts(var Parser p):
     match p.peek():
         TokenKind.StringInterp(parts): parts
         _: []
 
-def string parser_peek_comment(var Parser'actor p):
+def string parser_peek_comment(var Parser p):
     match p.peek():
         TokenKind.Comment(text): text
         _: ""
 
-def Token parser_peek_token_at(var Parser'actor p, int offset):
+def Token parser_peek_token_at(var Parser p, int offset):
     let idx = p.pos + offset
     if idx < p.tokens.length:
         p.tokens[idx]
     else:
         Token(kind: TokenKind.Eof, line: 0)
 
-def bool parser_token_at_is_eq(var Parser'actor p, int offset):
+def bool parser_token_at_is_eq(var Parser p, int offset):
     token_kind_name(parser_peek_token_at(p, offset).kind) == "Eq"
 
-def bool parser_token_at_offset_is(var Parser'actor p, int offset, string name):
+def bool parser_token_at_offset_is(var Parser p, int offset, string name):
     token_kind_name(parser_peek_token_at(p, offset).kind) == name
 
-def void parser_skip_to_offset(var Parser'actor p, int offset) throws:
+def void parser_skip_to_offset(var Parser p, int offset) throws:
     p.pos = p.pos + offset
 
-def bool parser_peek_next_is(var Parser'actor p, string name):
+def bool parser_peek_next_is(var Parser p, string name):
     parser_check2(p, name)
 
-def bool parser_peek_next_is_colon(var Parser'actor p):
+def bool parser_peek_next_is_colon(var Parser p):
     parser_check2(p, "Colon")
 
-def bool parser_peek_next_is_qualifier(var Parser'actor p):
+def bool parser_peek_next_is_qualifier(var Parser p):
     let n = token_kind_name(p.peek2())
     n == "Tick" or n == "Ampersand"
 
-def bool parser_peek_is_macro_call(var Parser'actor p):
+def bool parser_peek_is_macro_call(var Parser p):
     false
 
-def bool parser_peek_is_generic_call(var Parser'actor p):
+def bool parser_peek_is_generic_call(var Parser p):
     false
 
-def bool parser_peek_is_trailing_closure(var Parser'actor p):
+def bool parser_peek_is_trailing_closure(var Parser p):
     false
 
-def bool parser_peek_is_trailing_body_no_colon(var Parser'actor p) throws:
+def bool parser_peek_is_trailing_body_no_colon(var Parser p) throws:
     false
 
-def bool parser_peek_is_trailing_closure_no_paren(var Parser'actor p):
+def bool parser_peek_is_trailing_closure_no_paren(var Parser p):
     false
 
-def bool parser_peek_is_typed_closure(var Parser'actor p) throws:
+def bool parser_peek_is_typed_closure(var Parser p) throws:
     false
 
-def bool parser_peek_starts_expr(var Parser'actor p) throws:
+def bool parser_peek_starts_expr(var Parser p) throws:
     let name = token_kind_name(p.peek())
     name == "Int" or name == "Float" or name == "Str" or name == "Bool" or name == "Nil" or name == "Ident" or name == "LParen" or name == "LBracket" or name == "LBrace" or name == "Not" or name == "Minus" or name == "SelfKw"
 
-def bool parser_allow_noparen_closure(var Parser'actor p) throws:
+def bool parser_allow_noparen_closure(var Parser p) throws:
     true
 
-def bool parser_get_allow_noparen_closure(var Parser'actor p) throws:
+def bool parser_get_allow_noparen_closure(var Parser p) throws:
     true
 
-def bool parser_get_allow_trailing_closure(var Parser'actor p) throws:
+def bool parser_get_allow_trailing_closure(var Parser p) throws:
     true
 
-def void parser_set_allow_noparen_closure(var Parser'actor p, bool v) throws:
+def void parser_set_allow_noparen_closure(var Parser p, bool v) throws:
     nil
 
-def void parser_set_allow_trailing_closure(var Parser'actor p, bool v) throws:
+def void parser_set_allow_trailing_closure(var Parser p, bool v) throws:
     nil
 
-def int parser_depth(var Parser'actor p) throws:
+def int parser_depth(var Parser p) throws:
     0
 
-def void parser_depth_inc(var Parser'actor p) throws:
+def void parser_depth_inc(var Parser p) throws:
     nil
 
-def void parser_depth_dec(var Parser'actor p) throws:
+def void parser_depth_dec(var Parser p) throws:
     nil
 
-def bool parser_is_type_start_before_ident(var Parser'actor p):
+def bool parser_is_type_start_before_ident(var Parser p):
     false
 
-def bool parser_is_let_destructure(var Parser'actor p) throws:
+def bool parser_is_let_destructure(var Parser p) throws:
     false
 
-def bool parser_is_for_with_vars(var Parser'actor p) throws:
+def bool parser_is_for_with_vars(var Parser p) throws:
     false
 
-def bool parser_is_task_fn_shorthand(var Parser'actor p) throws:
+def bool parser_is_task_fn_shorthand(var Parser p) throws:
     false
 
-def bool parser_peek_dot_after_newlines(var Parser'actor p) throws:
+def bool parser_peek_dot_after_newlines(var Parser p) throws:
     false
 
-def string parser_peek_debug(var Parser'actor p) throws:
+def string parser_peek_debug(var Parser p) throws:
     token_kind_name(p.peek())
 
 # ── Type parsing ──────────────────────────────────────────────────────────────
 
-def Type parse_type(var Parser'actor p) throws:
+def Type parse_type(var Parser p) throws:
     let base = parse_type_base(p)
     if p.eat(TokenKind.Question):
         Type.Optional(base)
     else:
         base
 
-def Type parse_type_base(var Parser'actor p) throws:
+def Type parse_type_base(var Parser p) throws:
     match p.peek():
         TokenKind.Ident(s):
             p.advance()
@@ -1996,7 +2018,7 @@ def Type parse_type_base(var Parser'actor p) throws:
 
 # ── Fn / struct / enum / program parsing ─────────────────────────────────────
 
-def FnDecl parse_fn_decl(var Parser'actor p, bool is_pub, bool is_def) throws:
+def FnDecl parse_fn_decl(var Parser p, bool is_pub, bool is_def) throws:
     let line = p.current_line()
     var mutating = true
     if p.eat(TokenKind.Req):
@@ -2027,14 +2049,14 @@ def FnDecl parse_fn_decl(var Parser'actor p, bool is_pub, bool is_def) throws:
     let body = parse_block(p)
     FnDecl(name: name.text(), params: params, return_ty: return_ty, can_throw: can_throw, mutating: mutating, is_pub: is_pub, body: body, line: line, qualifier: nil, is_task: false, is_stream: false, stream_capacity: nil, is_native: false, throws_ty: nil, type_params: [], where_clause: [], attrs: [])
 
-def Param parse_param(var Parser'actor p) throws:
+def Param parse_param(var Parser p) throws:
     let line = p.current_line()
     let mutable = p.eat(TokenKind.Var)
     let ty = parse_type(p)
     let name_tok = p.expect(TokenKind.Ident(""))
     Param(name: name_tok.text(), ty: ty, mutable: mutable, owned: false, variadic: false, default: nil, line: line)
 
-def StructDecl parse_struct_decl(var Parser'actor p, bool is_pub) throws:
+def StructDecl parse_struct_decl(var Parser p, bool is_pub) throws:
     let line = p.current_line()
     p.expect(TokenKind.Struct)
     let name_tok = p.expect(TokenKind.Ident(""))
@@ -2060,7 +2082,7 @@ def StructDecl parse_struct_decl(var Parser'actor p, bool is_pub) throws:
     p.eat(TokenKind.Dedent)
     StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: [], type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
 
-def FieldDecl parse_field_decl(var Parser'actor p) throws:
+def FieldDecl parse_field_decl(var Parser p) throws:
     let line = p.current_line()
     let mutable = p.eat(TokenKind.Var)
     let ty = parse_type(p)
@@ -2072,7 +2094,7 @@ def FieldDecl parse_field_decl(var Parser'actor p) throws:
         nil
     FieldDecl(name: name_tok.text(), ty: ty, mutable: mutable, default: default, line: line, is_pub: false, is_transient: false)
 
-def InitDecl parse_init_decl(var Parser'actor p) throws:
+def InitDecl parse_init_decl(var Parser p) throws:
     let line = p.current_line()
     p.expect(TokenKind.Init)
     p.expect(TokenKind.LParen)
@@ -2089,9 +2111,9 @@ def InitDecl parse_init_decl(var Parser'actor p) throws:
     else:
         while p.eat(TokenKind.Newline):
             nil
-        InitDecl(params: params, body: body, line: line)
+    return InitDecl(params: params, body: body, line: line)
 
-def EnumDecl parse_enum_decl(var Parser'actor p, bool is_pub) throws:
+def EnumDecl parse_enum_decl(var Parser p, bool is_pub) throws:
     let line = p.current_line()
     p.expect(TokenKind.Enum)
     let name_tok = p.expect(TokenKind.Ident(""))
@@ -2114,7 +2136,7 @@ def EnumDecl parse_enum_decl(var Parser'actor p, bool is_pub) throws:
     p.eat(TokenKind.Dedent)
     EnumDecl(name: name, variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: [], protocols: [], setters: [], conversions: [], attrs: [])
 
-def EnumVariant parse_enum_variant(var Parser'actor p) throws:
+def EnumVariant parse_enum_variant(var Parser p) throws:
     let line = p.current_line()
     let name_tok = p.expect(TokenKind.Ident(""))
     let name = name_tok.text()
@@ -2130,7 +2152,7 @@ def EnumVariant parse_enum_variant(var Parser'actor p) throws:
         nil
     EnumVariant(name: name, fields: fields, line: line, attrs: [])
 
-def Item parse_item(var Parser'actor p) throws:
+def Item parse_item(var Parser p) throws:
     match p.peek():
         TokenKind.Def:
             Item.Fn(parse_fn_decl(p, false, true))
@@ -2143,7 +2165,7 @@ def Item parse_item(var Parser'actor p) throws:
         _:
             Item.Stmt(parse_stmt(p))
 
-def Program parse_program(var Parser'actor p) throws:
+def Program parse_program(var Parser p) throws:
     var items = [Item]{}
     while p.eat(TokenKind.Newline):
         nil
@@ -2157,7 +2179,7 @@ def Program parse_program(var Parser'actor p) throws:
 
 def Program parse(string source) throws:
     let toks = lex(source)
-    var p = Parser(tokens: toks, pos: 0) as Parser'actor
+    var p = Parser(tokens: toks, pos: 0)
     parse_program(p)
 # ── AST builder helpers ────────────────────────────────────────────────────────
 
@@ -2177,12 +2199,19 @@ def Expr make_var_expr(string name, int line):
 def Expr make_binop(string op_name, Expr left, Expr right, int line):
     let op = match op_name:
         "Add": BinOp.Add
+        "Plus": BinOp.Add
         "Sub": BinOp.Sub
+        "Minus": BinOp.Sub
         "Mul": BinOp.Mul
+        "Star": BinOp.Mul
         "Div": BinOp.Div
+        "Slash": BinOp.Div
         "Rem": BinOp.Rem
+        "Percent": BinOp.Rem
         "Eq": BinOp.Eq
+        "EqEq": BinOp.Eq
         "NotEq": BinOp.NotEq
+        "BangEq": BinOp.NotEq
         "Lt": BinOp.Lt
         "Gt": BinOp.Gt
         "LtEq": BinOp.LtEq
@@ -2190,11 +2219,16 @@ def Expr make_binop(string op_name, Expr left, Expr right, int line):
         "And": BinOp.And
         "Or": BinOp.Or
         "BitAnd": BinOp.BitAnd
+        "Ampersand": BinOp.BitAnd
         "BitOr": BinOp.BitOr
+        "Pipe": BinOp.BitOr
         "BitXor": BinOp.BitXor
+        "Caret": BinOp.BitXor
         "Shl": BinOp.Shl
+        "LtLt": BinOp.Shl
         "Shr": BinOp.Shr
-        _: BinOp.Add
+        "GtGt": BinOp.Shr
+        _: throw "unknown binary operator: {op_name}"
     Expr(kind: ExprKind.BinOp(op, left, right), line: line)
 
 def Expr make_unary(string op_name, Expr expr, int line):
@@ -2503,7 +2537,7 @@ def string string_trim(string s):
     s.trim()
 
 def string string(Value v):
-    v.to_string()
+    val_to_string(v)
 
 def Type type_named(string name):
     Type.Named(name)
@@ -2535,7 +2569,7 @@ def [Stmt] unwrap_block_or_wrap(Expr expr):
         ExprKind.Block(stmts): stmts
         _: [stmt_expr(expr, expr.line)]
 
-def string? shorthand_binop_from_peek(var Parser'actor p):
+def string? shorthand_binop_from_peek(var Parser p):
     let k = parser_peek_kind(p)
     match k:
         "PlusEq": some("Plus")
@@ -2548,7 +2582,7 @@ def string? shorthand_binop_from_peek(var Parser'actor p):
         "CaretEq": some("Caret")
         _: nil
 
-def bool parser_is_newline2(var Parser'actor p):
+def bool parser_is_newline2(var Parser p):
     let k = parser_peek_kind(p)
     k == "Newline" or k == "Eof"
 
@@ -2556,32 +2590,32 @@ struct SkipResult:
     int offset
     int indents
 
-def SkipResult? peek_pipe_after_newlines(var Parser'actor p):
+def SkipResult? peek_pipe_after_newlines(var Parser p):
     nil
 
-def SkipResult? peek_dot_after_newlines_and_indents(var Parser'actor p):
+def SkipResult? peek_dot_after_newlines_and_indents(var Parser p):
     nil
 
-def Parser'actor make_parser([Token] tokens):
-    var par = Parser(tokens: tokens, pos: 0) as Parser'actor
+def Parser make_parser([Token] tokens):
+    var par = Parser(tokens: tokens, pos: 0)
     par
 
-def LoopStmt parse_loop_stmt(var Parser'actor p) throws:
+def LoopStmt parse_loop_stmt(var Parser p) throws:
     let body = parse_block(p)
     LoopStmt(body: body, line: p.pos)
 
-def Pattern parse_pattern(var Parser'actor p) throws:
+def Pattern parse_pattern(var Parser p) throws:
     let name = parser_expect_ident(p)
     Pattern.Bind(name)
 
-def [MatchArm] parse_inline_match_arms(var Parser'actor p) throws:
+def [MatchArm] parse_inline_match_arms(var Parser p) throws:
     var arms = []
     while not parser_check(p, "Newline") and not parser_check(p, "Eof"):
         let arm = parse_match_arm(p)
         arms.append(arm)
     arms
 
-def MatchArm parse_match_arm(var Parser'actor p) throws:
+def MatchArm parse_match_arm(var Parser p) throws:
     let pat = parse_pattern(p)
     parser_expect(p, "Colon")
     let body = parse_expr(p)
@@ -2589,41 +2623,41 @@ def MatchArm parse_match_arm(var Parser'actor p) throws:
     let stmt = stmt_expr(body, body_line)
     make_match_arm([pat], nil, MatchBody.Block([stmt]), p.pos)
 
-def ModDecl parse_mod_decl(var Parser'actor p, bool is_pub) throws:
+def ModDecl parse_mod_decl(var Parser p, bool is_pub) throws:
     let name = parser_expect_ident(p)
     parser_expect_newline(p)
     ModDecl(name: name, items: [], line: p.pos)
 
-def AliasDecl parse_alias_decl(var Parser'actor p) throws:
+def AliasDecl parse_alias_decl(var Parser p) throws:
     let name = parser_expect_ident(p)
     parser_expect(p, "As")
     let ty = parse_type(p)
     AliasDecl(name: name, ty: ty, type_params: [], newtype: false, line: p.pos)
 
-def GuardStmt parse_guard_stmt(var Parser'actor p) throws:
+def GuardStmt parse_guard_stmt(var Parser p) throws:
     let cond = parse_expr(p)
     parser_expect(p, "Else")
     let body = parse_block(p)
     GuardStmt(cond: GuardCond.Expr(cond), else_body: body, line: p.pos)
 
-def [Stmt] parse_defer_stmt(var Parser'actor p) throws:
+def [Stmt] parse_defer_stmt(var Parser p) throws:
     parse_block(p)
 
-def IfLetStmt parse_if_let_stmt(var Parser'actor p) throws:
+def IfLetStmt parse_if_let_stmt(var Parser p) throws:
     let name = parser_expect_ident(p)
     parser_expect(p, "Eq")
     let expr = parse_expr(p)
     let then_body = parse_block(p)
     IfLetStmt(clauses: [CondClause.Let(name, expr)], then_body: then_body, else_body: nil, line: p.pos)
 
-def WhileLetStmt parse_while_let_stmt(var Parser'actor p) throws:
+def WhileLetStmt parse_while_let_stmt(var Parser p) throws:
     let name = parser_expect_ident(p)
     parser_expect(p, "Eq")
     let expr = parse_expr(p)
     let body = parse_block(p)
     WhileLetStmt(name: name, pattern: nil, value: expr, body: body, line: p.pos)
 
-def [Expr] parse_macro_args(var Parser'actor p) throws:
+def [Expr] parse_macro_args(var Parser p) throws:
     var args = []
     while not parser_check(p, "RParen") and not parser_check(p, "Newline") and not parser_check(p, "Eof"):
         let e = parse_expr(p)
@@ -2638,6 +2672,9 @@ def Type infer_type_from_constructor(Type qualified, Expr value):
     qualified
 
 def FnDecl lookup_fn_decl(var Interpreter'actor interp, string name):
+    let decl_opt = interp.get_fn_decl(name)
+    if let decl = decl_opt:
+        return decl
     throw "lookup_fn_decl: function '{name}' not found"
 
 def Value resolve_overload(var Interpreter'actor interp, [Value] variants, [Value] args):
@@ -2646,17 +2683,28 @@ def Value resolve_overload(var Interpreter'actor interp, [Value] variants, [Valu
         _: variants[0]
 
 def Value call_native(var Interpreter'actor interp, string name, Value func, [Value] args):
+    if name == "print" or name == "println":
+        var int i = 0
+        while i < args.length:
+            if i > 0:
+                print " "
+            print value_to_string(args[i])
+            i += 1
+        print "\n"
+        return Value.Void
+    if name == "read_line":
+        return Value.Str(readLine())
     throw "call_native: native function '{name}' not supported"
 
-def ThrowsTask parse_closure_modifiers(var Parser'actor p) throws:
+def ThrowsTask parse_closure_modifiers(var Parser p) throws:
     let can_throw = p.eat(TokenKind.Throws)
     let is_task = p.eat(TokenKind.Task)
     ThrowsTask(can_throw: can_throw, is_task: is_task)
 
-def bool parser_allow_trailing_closure(var Parser'actor p):
+def bool parser_allow_trailing_closure(var Parser p):
     true
 
-def Type parse_type_qualifier(var Parser'actor p, Type base) throws:
+def Type parse_type_qualifier(var Parser p, Type base) throws:
     if not p.eat(TokenKind.Tick):
         return base
     let qual_name = parser_expect_ident(p)
@@ -2674,16 +2722,16 @@ def Type parse_type_qualifier(var Parser'actor p, Type base) throws:
 
 # ─── Expression Parsing ─────────────────────────────────────────────────────
 
-def Expr parse_expr(var Parser'actor p) throws:
+def Expr parse_expr(var Parser p) throws:
     parse_else_expr(p)
 
-def Stmt parse_inline_stmt(var Parser'actor p) throws:
+def Stmt parse_inline_stmt(var Parser p) throws:
     parse_inline_stmt_impl(p, false)
 
-def Stmt parse_inline_if_body(var Parser'actor p) throws:
+def Stmt parse_inline_if_body(var Parser p) throws:
     parse_inline_stmt_impl(p, true)
 
-def [Stmt] parse_inline_stmts(var Parser'actor p) throws:
+def [Stmt] parse_inline_stmts(var Parser p) throws:
     var stmts = [parse_inline_stmt(p)]
     while parser_check(p, "Semicolon"):
         parser_advance(p)
@@ -2692,7 +2740,7 @@ def [Stmt] parse_inline_stmts(var Parser'actor p) throws:
         stmts.append(parse_inline_stmt(p))
     stmts
 
-def [Stmt] parse_inline_stmts_if_body(var Parser'actor p) throws:
+def [Stmt] parse_inline_stmts_if_body(var Parser p) throws:
     var stmts = [parse_inline_if_body(p)]
     while parser_check(p, "Semicolon"):
         parser_advance(p)
@@ -2701,10 +2749,10 @@ def [Stmt] parse_inline_stmts_if_body(var Parser'actor p) throws:
         stmts.append(parse_inline_if_body(p))
     stmts
 
-def string parser_peek_kind(var Parser'actor p):
+def string parser_peek_kind(var Parser p):
     token_kind_name(p.peek())
 
-def string? compound_op_from_peek(var Parser'actor p):
+def string? compound_op_from_peek(var Parser p):
     let k = parser_peek_kind(p)
     match k:
         "PlusEq": some("Plus")
@@ -2717,7 +2765,7 @@ def string? compound_op_from_peek(var Parser'actor p):
         "CaretEq": some("Caret")
         _: nil
 
-def string? comparison_op_from_peek(var Parser'actor p):
+def string? comparison_op_from_peek(var Parser p):
     let k = parser_peek_kind(p)
     match k:
         "Lt": some("Lt")
@@ -2728,14 +2776,14 @@ def string? comparison_op_from_peek(var Parser'actor p):
         "BangEq": some("BangEq")
         _: nil
 
-def string? additive_op_from_peek(var Parser'actor p):
+def string? additive_op_from_peek(var Parser p):
     let k = parser_peek_kind(p)
     match k:
         "Plus": some("Plus")
         "Minus": some("Minus")
         _: nil
 
-def string? multiplicative_op_from_peek(var Parser'actor p):
+def string? multiplicative_op_from_peek(var Parser p):
     let k = parser_peek_kind(p)
     match k:
         "Star": some("Star")
@@ -2743,7 +2791,7 @@ def string? multiplicative_op_from_peek(var Parser'actor p):
         "Percent": some("Percent")
         _: nil
 
-def Stmt parse_inline_stmt_impl(var Parser'actor p, bool stop_at_else) throws:
+def Stmt parse_inline_stmt_impl(var Parser p, bool stop_at_else) throws:
     let line = parser_line(p)
     if parser_check(p, "Return"):
         parser_advance(p)
@@ -2798,7 +2846,7 @@ def Stmt parse_inline_stmt_impl(var Parser'actor p, bool stop_at_else) throws:
         lhs
     stmt_expr(expr, line)
 
-def Expr parse_else_expr(var Parser'actor p) throws:
+def Expr parse_else_expr(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Try"):
         parser_advance(p)
@@ -2826,7 +2874,7 @@ def Expr parse_else_expr(var Parser'actor p) throws:
         return make_else_expr(expr, default, expr.line)
     expr
 
-def Expr parse_pipe(var Parser'actor p) throws:
+def Expr parse_pipe(var Parser p) throws:
     var lhs = parse_or(p)
     var indent_depth = 0
     while true:
@@ -2858,7 +2906,7 @@ def Expr parse_pipe(var Parser'actor p) throws:
             parser_set_pos(p, saved)
     lhs
 
-def Expr parse_or(var Parser'actor p) throws:
+def Expr parse_or(var Parser p) throws:
     var lhs = parse_and(p)
     while parser_check(p, "Or"):
         let line = parser_line(p)
@@ -2867,7 +2915,7 @@ def Expr parse_or(var Parser'actor p) throws:
         lhs = make_binop("Or", lhs, rhs, line)
     lhs
 
-def Expr parse_and(var Parser'actor p) throws:
+def Expr parse_and(var Parser p) throws:
     var lhs = parse_not(p)
     while parser_check(p, "And"):
         let line = parser_line(p)
@@ -2876,7 +2924,7 @@ def Expr parse_and(var Parser'actor p) throws:
         lhs = make_binop("And", lhs, rhs, line)
     lhs
 
-def Expr parse_not(var Parser'actor p) throws:
+def Expr parse_not(var Parser p) throws:
     if parser_check(p, "Not"):
         let line = parser_line(p)
         parser_advance(p)
@@ -2889,7 +2937,7 @@ def Expr parse_not(var Parser'actor p) throws:
         return make_unary("Not", result, line)
     parse_comparison(p)
 
-def Expr parse_comparison(var Parser'actor p) throws:
+def Expr parse_comparison(var Parser p) throws:
     var lhs = parse_bitor(p)
     while true:
         if parser_check(p, "Is"):
@@ -2913,7 +2961,7 @@ def Expr parse_comparison(var Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_bitor(var Parser'actor p) throws:
+def Expr parse_bitor(var Parser p) throws:
     var lhs = parse_bitxor(p)
     while parser_check(p, "Pipe"):
         let line = parser_line(p)
@@ -2922,7 +2970,7 @@ def Expr parse_bitor(var Parser'actor p) throws:
         lhs = make_binop("BitOr", lhs, rhs, line)
     lhs
 
-def Expr parse_bitxor(var Parser'actor p) throws:
+def Expr parse_bitxor(var Parser p) throws:
     var lhs = parse_bitand(p)
     while parser_check(p, "Caret"):
         let line = parser_line(p)
@@ -2931,7 +2979,7 @@ def Expr parse_bitxor(var Parser'actor p) throws:
         lhs = make_binop("BitXor", lhs, rhs, line)
     lhs
 
-def Expr parse_bitand(var Parser'actor p) throws:
+def Expr parse_bitand(var Parser p) throws:
     var lhs = parse_shift(p)
     while parser_check(p, "Ampersand"):
         let line = parser_line(p)
@@ -2940,7 +2988,7 @@ def Expr parse_bitand(var Parser'actor p) throws:
         lhs = make_binop("BitAnd", lhs, rhs, line)
     lhs
 
-def Expr parse_shift(var Parser'actor p) throws:
+def Expr parse_shift(var Parser p) throws:
     var lhs = parse_additive(p)
     while true:
         if parser_check(p, "Lt") and parser_check2(p, "Lt"):
@@ -2959,7 +3007,7 @@ def Expr parse_shift(var Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_additive(var Parser'actor p) throws:
+def Expr parse_additive(var Parser p) throws:
     var lhs = parse_multiplicative(p)
     while true:
         let op = additive_op_from_peek(p)
@@ -2972,7 +3020,7 @@ def Expr parse_additive(var Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_multiplicative(var Parser'actor p) throws:
+def Expr parse_multiplicative(var Parser p) throws:
     var lhs = parse_unary(p)
     while true:
         let op = multiplicative_op_from_peek(p)
@@ -2985,7 +3033,7 @@ def Expr parse_multiplicative(var Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_unary(var Parser'actor p) throws:
+def Expr parse_unary(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Minus"):
         parser_advance(p)
@@ -3001,10 +3049,10 @@ def Expr parse_unary(var Parser'actor p) throws:
         return make_unary("BitNot", expr, line)
     parse_postfix(p)
 
-def Expr parse_postfix(var Parser'actor p) throws:
+def Expr parse_postfix(var Parser p) throws:
     parse_postfix_inner(p, true)
 
-def Expr parse_postfix_inner(var Parser'actor p, bool allow_chain) throws:
+def Expr parse_postfix_inner(var Parser p, bool allow_chain) throws:
     var expr = parse_primary(p)
     var continuation_indent_depth = 0
     var seen_trailing_closure = false
@@ -3115,7 +3163,7 @@ def Expr parse_postfix_inner(var Parser'actor p, bool allow_chain) throws:
             parser_set_pos(p, saved_pos)
     expr
 
-def Expr parse_primary(var Parser'actor p) throws:
+def Expr parse_primary(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Int"):
         let n = parser_peek_int(p)
@@ -3312,10 +3360,10 @@ def Expr parse_primary(var Parser'actor p) throws:
         return make_var_expr("wait", line)
     throw "unexpected token in expression: {parser_peek_debug(p)}"
 
-def [Arg] parse_arg_list(var Parser'actor p) throws:
+def [Arg] parse_arg_list(var Parser p) throws:
     parse_call_args(p)
 
-def [Arg] parse_call_args(var Parser'actor p) throws:
+def [Arg] parse_call_args(var Parser p) throws:
     parser_expect(p, "LParen")
     parser_skip_newlines_and_indent(p)
     let saved_tc = parser_get_allow_trailing_closure(p)
@@ -3331,7 +3379,7 @@ def [Arg] parse_call_args(var Parser'actor p) throws:
     parser_set_allow_trailing_closure(p, saved_tc)
     args
 
-def Arg parse_arg(var Parser'actor p) throws:
+def Arg parse_arg(var Parser p) throws:
     if parser_eat(p, "DotDot"):
         let value = parse_or(p)
         return make_arg(nil, value, true)
@@ -3346,7 +3394,7 @@ def Arg parse_arg(var Parser'actor p) throws:
     let value = parse_expr(p)
     make_arg(nil, value, false)
 
-def Expr parse_brace_expr(var Parser'actor p, int line) throws:
+def Expr parse_brace_expr(var Parser p, int line) throws:
     parser_expect(p, "LBrace")
     parser_skip_newlines_and_indent(p)
     if parser_check(p, "RBrace"):
@@ -3382,7 +3430,7 @@ def Expr parse_brace_expr(var Parser'actor p, int line) throws:
         parser_expect(p, "RBrace")
         return make_set(elems, line)
 
-def [StringSegment] resolve_interp(var Parser'actor p, [RawInterpPart] parts, int line) throws:
+def [StringSegment] resolve_interp(var Parser p, [RawInterpPart] parts, int line) throws:
     var segments = []
     for part in parts:
         match part:
@@ -3408,7 +3456,7 @@ def [StringSegment] resolve_interp(var Parser'actor p, [RawInterpPart] parts, in
                     segments.append(segment_formatted_expr(expr, fmt))
     segments
 
-def ClosureBody parse_closure_body(var Parser'actor p) throws:
+def ClosureBody parse_closure_body(var Parser p) throws:
     if parser_is_newline(p):
         parser_expect_newline(p)
         let stmts = parse_block(p)
@@ -3419,7 +3467,7 @@ def ClosureBody parse_closure_body(var Parser'actor p) throws:
     let expr = parse_or(p)
     closure_body_expr(expr)
 
-def [Arg] parse_trailing_closure(var Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_closure(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let params = parse_closure_params(p)
     let ex = parse_closure_modifiers(p)
@@ -3435,7 +3483,7 @@ def [Arg] parse_trailing_closure(var Parser'actor p, [Arg] existing_args) throws
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_body(var Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_body(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     parser_expect(p, "Colon")
     let body = parse_closure_body(p)
@@ -3449,7 +3497,7 @@ def [Arg] parse_trailing_body(var Parser'actor p, [Arg] existing_args) throws:
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_body_no_colon(var Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_body_no_colon(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let body_expr = parse_or(p)
     let body = closure_body_expr(body_expr)
@@ -3459,7 +3507,7 @@ def [Arg] parse_trailing_body_no_colon(var Parser'actor p, [Arg] existing_args) 
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_closure_no_paren(var Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_closure_no_paren(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let name = parser_expect_ident(p)
     parser_expect(p, "Colon")
@@ -3474,7 +3522,7 @@ def [Arg] parse_trailing_closure_no_paren(var Parser'actor p, [Arg] existing_arg
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Param] parse_closure_params(var Parser'actor p) throws:
+def [Param] parse_closure_params(var Parser p) throws:
     parser_expect(p, "LParen")
     parser_skip_newlines_and_indent(p)
     var params = []
@@ -3495,7 +3543,7 @@ def [Param] parse_closure_params(var Parser'actor p) throws:
     parser_expect(p, "RParen")
     params
 
-def Expr parse_task_expr(var Parser'actor p) throws:
+def Expr parse_task_expr(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Task")
     if parser_check(p, "LParen"):
@@ -3534,7 +3582,7 @@ def Expr parse_task_expr(var Parser'actor p) throws:
 
 # ─── Statement Parsing ────────────────────────────────────────────────────────
 
-def [Stmt] parse_block(var Parser'actor p) throws:
+def [Stmt] parse_block(var Parser p) throws:
     while parser_check(p, "Comment") or parser_check(p, "Newline") or parser_check(p, "Semicolon"):
         parser_advance(p)
     parser_expect(p, "Indent")
@@ -3542,7 +3590,7 @@ def [Stmt] parse_block(var Parser'actor p) throws:
     parser_eat(p, "Dedent")
     stmts
 
-def [Stmt] parse_stmts_until_dedent(var Parser'actor p) throws:
+def [Stmt] parse_stmts_until_dedent(var Parser p) throws:
     var stmts = []
     while true:
         parser_skip_newlines(p)
@@ -3551,7 +3599,7 @@ def [Stmt] parse_stmts_until_dedent(var Parser'actor p) throws:
         stmts.append(parse_stmt(p))
     stmts
 
-def Stmt parse_stmt(var Parser'actor p) throws:
+def Stmt parse_stmt(var Parser p) throws:
     if parser_check(p, "Comment"):
         let text = parser_peek_comment(p)
         parser_advance(p)
@@ -3722,10 +3770,10 @@ def Stmt parse_stmt(var Parser'actor p) throws:
     parser_expect_newline(p)
     stmt_expr(expr, line)
 
-def LetStmt parse_let_stmt(var Parser'actor p) throws:
+def LetStmt parse_let_stmt(var Parser p) throws:
     parse_let_stmt_pub(p, false)
 
-def LetStmt parse_let_stmt_pub(var Parser'actor p, bool is_pub) throws:
+def LetStmt parse_let_stmt_pub(var Parser p, bool is_pub) throws:
     let line = parser_line(p)
     let is_static = parser_eat(p, "Static")
     let mutable = if parser_check(p, "Var"):
@@ -3773,7 +3821,7 @@ def LetStmt parse_let_stmt_pub(var Parser'actor p, bool is_pub) throws:
     parser_expect_newline_soft(p)
     make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, some(value), false, line)
 
-def LetDestructureStmt parse_let_destructure(var Parser'actor p, bool mutable, int line) throws:
+def LetDestructureStmt parse_let_destructure(var Parser p, bool mutable, int line) throws:
     let parens = parser_eat(p, "LParen")
     if parens:
         parser_skip_newlines_and_indent(p)
@@ -3805,7 +3853,7 @@ def LetDestructureStmt parse_let_destructure(var Parser'actor p, bool mutable, i
     parser_expect_newline_soft(p)
     make_let_destructure_stmt(mutable, bindings, value, line)
 
-def ReturnStmt parse_return_stmt(var Parser'actor p) throws:
+def ReturnStmt parse_return_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Return")
     let value = if parser_is_newline(p) or parser_check(p, "Eof"):
@@ -3815,7 +3863,7 @@ def ReturnStmt parse_return_stmt(var Parser'actor p) throws:
     parser_expect_newline(p)
     make_return_stmt(value, line)
 
-def ThrowStmt parse_throw_stmt(var Parser'actor p) throws:
+def ThrowStmt parse_throw_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Throw")
     let value = if parser_is_newline(p) or parser_check(p, "Eof"):
@@ -3825,7 +3873,7 @@ def ThrowStmt parse_throw_stmt(var Parser'actor p) throws:
     parser_expect_newline(p)
     make_throw_stmt(value, line)
 
-def IfStmt parse_if_stmt(var Parser'actor p) throws:
+def IfStmt parse_if_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "If")
     let saved_np = parser_get_allow_noparen_closure(p)
@@ -3914,7 +3962,7 @@ def IfStmt parse_if_stmt(var Parser'actor p) throws:
             break
     make_if_stmt(branches, else_body, line)
 
-def WhileStmt parse_while_stmt(var Parser'actor p) throws:
+def WhileStmt parse_while_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "While")
     let saved = parser_get_allow_noparen_closure(p)
@@ -3933,7 +3981,7 @@ def WhileStmt parse_while_stmt(var Parser'actor p) throws:
         parse_block(p)
     make_while_stmt(condition, body, line)
 
-def ForStmt parse_for_stmt(var Parser'actor p) throws:
+def ForStmt parse_for_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "For")
     let saved = parser_get_allow_noparen_closure(p)
@@ -3961,7 +4009,7 @@ def ForStmt parse_for_stmt(var Parser'actor p) throws:
         parse_block(p)
     make_for_stmt(vars_iterable.0, vars_iterable.1, body, line)
 
-def MatchStmt parse_match_stmt(var Parser'actor p) throws:
+def MatchStmt parse_match_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Match")
     let saved = parser_get_allow_noparen_closure(p)
@@ -3986,7 +4034,7 @@ def MatchStmt parse_match_stmt(var Parser'actor p) throws:
     parser_eat(p, "Dedent")
     make_match_stmt(subject, arms, line)
 
-def TryStmt parse_try_stmt(var Parser'actor p) throws:
+def TryStmt parse_try_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Try")
     parser_expect(p, "Colon")
@@ -4017,7 +4065,7 @@ def TryStmt parse_try_stmt(var Parser'actor p) throws:
             break
     make_try_stmt(body, catch_clauses, line)
 
-def Stmt parse_print_stmt(var Parser'actor p) throws:
+def Stmt parse_print_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Print")
     var args = []
@@ -4028,7 +4076,7 @@ def Stmt parse_print_stmt(var Parser'actor p) throws:
     parser_expect_newline_soft(p)
     stmt_expr(make_call(make_var_expr("print", line), map_args(args), line), line)
 
-def [Stmt] parse_else_body_stmts(var Parser'actor p) throws:
+def [Stmt] parse_else_body_stmts(var Parser p) throws:
     parser_eat(p, "Colon")
     if parser_is_newline(p):
         parser_expect_newline(p)
@@ -4038,7 +4086,7 @@ def [Stmt] parse_else_body_stmts(var Parser'actor p) throws:
         parser_expect_newline_soft(p)
         stmts
 
-def Expr parse_else_body_expr(var Parser'actor p) throws:
+def Expr parse_else_body_expr(var Parser p) throws:
     let line = parser_line(p)
     parser_eat(p, "Colon")
     if parser_is_newline(p):
@@ -4062,11 +4110,12 @@ def string val_type_name(Value v):
         Value.Void: "void"
         Value.Tuple(_): "tuple"
         Value.Range(_, _, _, _): "range"
-        Value.Object(inner): inner.type_name
+        Value.Object(inner): inner.type_name.clone()
         Value.EnumVariant(type_name, _, _): type_name
         _: "unknown"
 
 def Value call_method(var Interpreter'actor interp, Value recv, string method_name, [Value] args):
+    let recv_type = recv.type_name()
     match recv:
         Value.Str(s):
             match method_name:
@@ -4191,7 +4240,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "isEmpty":
                     Value.Bool(s.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Array(arr):
             match method_name:
@@ -4285,9 +4334,21 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                         i = i + 1
                     acc
                 "sorted":
-                    var result = arr
-                    result = result.sorted()
-                    Value.Array(result)
+                    let n = arr.length
+                    var sorted = arr
+                    var i = 0
+                    while i < n:
+                        var j = i + 1
+                        while j < n:
+                            let si = val_to_string(sorted[i])
+                            let sj = val_to_string(sorted[j])
+                            if string_gt(si, sj):
+                                let tmp = sorted[i]
+                                sorted[i] = sorted[j]
+                                sorted[j] = tmp
+                            j = j + 1
+                        i = i + 1
+                    Value.Array(sorted)
                 "sortedBy":
                     let closure = args[0] else Value.Nil
                     var keys = []
@@ -4536,7 +4597,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "isEmpty":
                     Value.Bool(arr.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Dict(pairs):
             match method_name:
@@ -4559,15 +4620,16 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                     let key = args[0] else Value.Nil
                     let val = args[1] else Value.Nil
                     var new_pairs = pairs
-                    var updated = false
+                    var update_idx = -1
                     var i = 0
                     while i < new_pairs.length:
                         let pair = new_pairs[i]
                         if pair.0 == key:
-                            new_pairs[i] = (key, val)
-                            updated = true
+                            update_idx = i
                         i = i + 1
-                    if not updated:
+                    if update_idx >= 0:
+                        new_pairs[update_idx] = (key, val)
+                    else:
                         new_pairs.append((key, val))
                     Value.Dict(new_pairs)
                 "contains":
@@ -4618,14 +4680,15 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                             var i = 0
                             while i < other.length:
                                 let oe = other[i]
-                                var found = false
+                                var update_j = -1
                                 var j = 0
                                 while j < result.length:
                                     if result[j].0 == oe.0:
-                                        result[j] = (oe.0, oe.1)
-                                        found = true
+                                        update_j = j
                                     j = j + 1
-                                if not found:
+                                if update_j >= 0:
+                                    result[update_j] = oe
+                                else:
                                     result.append(oe)
                                 i = i + 1
                             Value.Dict(result)
@@ -4633,7 +4696,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "isEmpty":
                     Value.Bool(pairs.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Set(elements):
             match method_name:
@@ -4731,7 +4794,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "isEmpty":
                     Value.Bool(elements.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Int(n):
             match method_name:
@@ -4755,7 +4818,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "toHex":
                     Value.Str("{n:x}")
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Float(f):
             match method_name:
@@ -4781,7 +4844,7 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                     let fi = f.floor() as int
                     Value.Str("{fi:x}")
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Range(start, end, inclusive, step):
             match method_name:
@@ -4816,10 +4879,10 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                         Value.Int(sv): Value.Range(start, end, inclusive, sv)
                         _: throw "step: expected int argument"
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         _:
-            throw "unknown method {method_name} on {val_type_name(recv)}"
+            throw "unknown method {method_name} on {recv_type}"
 # == EXEC AND CALL ==
 
 # ─── exec_block ───────────────────────────────────────────────────────────────
@@ -4996,8 +5059,8 @@ def [Value] collect_iterable(Value val):
             out
         Str(s):
             var out = []
-            for c in s:
-                out.append(Str(c))
+            for c in s.chars():
+                out.append(Value.Str(c))
             out
         _: throw "value is not iterable"
 
@@ -5019,7 +5082,7 @@ def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
             let did_match = match_pattern(subject.clone(), pattern, child.clone())
             if did_match:
                 var guard_ok = true
-                if let guard_expr = arm.match_guard:
+                if let guard_expr = arm.match_guard.clone():
                     let gprev = interp.current_env
                     interp.current_env = child.clone()
                     let gv = eval_expr(interp, guard_expr)
@@ -5029,7 +5092,7 @@ def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
                     matched = true
                     let prev = interp.current_env
                     interp.current_env = child
-                    let sig = match arm.body:
+                    let sig = match arm.body.clone():
                         MatchBody.Expr(e):
                             eval_expr(interp, e)
                             nil
@@ -5201,9 +5264,12 @@ def Value call_closure(var Interpreter'actor interp, [Param] params, ClosureBody
         i = i + 1
     let prev_env = interp.current_env
     interp.current_env = fn_env
-    let sig = match body:
-        ClosureBody.Block(stmts): exec_block(interp, stmts)
-        ClosureBody.Expr(e): some(Signal.ReturnSignal(eval_expr(interp, e)))
+    var Signal? sig = nil
+    match body:
+        ClosureBody.Block(stmts):
+            sig = exec_block(interp, stmts)
+        ClosureBody.Expr(e):
+            sig = some(Signal.ReturnSignal(eval_expr(interp, e)))
     interp.current_env = prev_env
     match sig:
         nil: Nil
@@ -5244,6 +5310,7 @@ def string value_type_name(Value val):
     match val:
         Nil: "nil"
         Void: "void"
+        Uninitialized: "uninitialized"
         Bool(_): "bool"
         Int(_): "int"
         Float(_): "float"
@@ -5252,7 +5319,7 @@ def string value_type_name(Value val):
         Tuple(_): "tuple"
         Dict(_): "dict"
         Set(_): "set"
-        Object(inner): inner.type_name
+        Object(inner): inner.type_name.clone()
         EnumVariant(t, _, _): t
         Fn(n, _): "fn({n})"
         Closure(_, _, _): "closure"
@@ -5384,8 +5451,9 @@ def Env'actor push_scope(var Interpreter'actor interp):
     child
 
 def void pop_scope(var Interpreter'actor interp):
-    let parent = interp.current_env.parent
-    if let p = parent:
+    let cur = interp.current_env
+    let p_opt = cur.parent_opt()
+    if let p = p_opt:
         interp.current_env = p
 
 # Main expression evaluator
@@ -5802,13 +5870,21 @@ def Value apply_binop(BinOp op, Value l, Value r):
                     Value.Bool(l == Value.Nil)
                 _:
                     Value.Bool(l.type_name() == r.type_name())
+        BinOp.IsNot:
+            match r:
+                Value.Nil:
+                    Value.Bool(l != Value.Nil)
+                _:
+                    Value.Bool(l.type_name() != r.type_name())
+        BinOp.RefEq:
+            Value.Bool(l == r)
         BinOp.And:
             throw "And handled by short-circuit path"
         BinOp.Or:
             throw "Or handled by short-circuit path"
 
 # Compare two values: returns negative/zero/positive
-req int compare_values(Value l, Value r) throws:
+req int compare_values(Value l, Value r):
     match l:
         Value.Int(a):
             match r:
@@ -5889,7 +5965,7 @@ def Value get_index(var Interpreter'actor interp, Value obj, Value idx):
                 Value.Int(i):
                     if i < 0 or i >= s.length:
                         throw "string index {i} out of bounds"
-                    Value.Str(s.char_at(i))
+                    Value.Str(s.slice(i, i + 1))
                 _:
                     throw "string index must be Int, got {idx.type_name()}"
         Value.Range(start, end, inclusive, _):
@@ -5923,6 +5999,7 @@ def Value call_value(var Interpreter'actor interp, Value callee, [Value] args):
 
 # Call a method on a receiver value
 def Value call_method(var Interpreter'actor interp, Value recv, string method, [Value] args):
+    let recv_type2 = recv.type_name()
     match recv:
         Value.Object(obj):
             call_object_method(interp, obj, method, args)
@@ -5939,7 +6016,10 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method, [
         Value.Float(f):
             call_float_method(f, method, args)
         _:
-            throw "no method '{method}' on {recv.type_name()}"
+            throw "no method '{method}' on {recv_type2}"
+
+def bool string_gt(string a, string b):
+    a > b
 
 # Call built-in array methods
 def Value call_array_method(var Interpreter'actor interp, var [Value] items, string method, [Value] args):
@@ -5954,7 +6034,10 @@ def Value call_array_method(var Interpreter'actor interp, var [Value] items, str
         "pop":
             if items.length == 0:
                 throw "pop on empty array"
-            items.pop()
+            let last_idx = items.length - 1
+            let last_val = items[last_idx]
+            items.remove(last_idx)
+            last_val
         "get":
             if args.length == 0:
                 throw "get requires index argument"
@@ -6027,7 +6110,7 @@ def Value call_string_method(string s, string method, [Value] args):
                 throw "starts_with takes 1 argument"
             match args[0]:
                 Value.Str(prefix):
-                    Value.Bool(s.starts_with(prefix))
+                    Value.Bool(s.startsWith(prefix))
                 _:
                     throw "starts_with argument must be string"
         "ends_with":
@@ -6035,7 +6118,7 @@ def Value call_string_method(string s, string method, [Value] args):
                 throw "ends_with takes 1 argument"
             match args[0]:
                 Value.Str(suffix):
-                    Value.Bool(s.ends_with(suffix))
+                    Value.Bool(s.endsWith(suffix))
                 _:
                     throw "ends_with argument must be string"
         "to_upper":
@@ -6296,7 +6379,7 @@ req string display_value(var Interpreter'actor interp, Value val):
                 i = i + 1
             result + "}}"
         Value.Object(obj):
-            obj.type_name
+            obj.type_name.clone()
         Value.EnumVariant(type_name, variant, fields):
             if fields.length == 0:
                 "{type_name}.{variant}"
@@ -6314,8 +6397,8 @@ req string display_value(var Interpreter'actor interp, Value val):
 
 # Call a method on a struct object
 def Value call_object_method(var Interpreter'actor interp, ObjectInner'actor obj, string method, [Value] args):
-    let type_name = obj.type_name
-    let method_decl_opt = interp.find_method(type_name, method)
+    let type_name = obj.type_name.clone()
+    let method_decl_opt = interp.find_method(type_name.clone(), method)
     if let method_decl = method_decl_opt:
         let child_env = push_scope(interp)
         env_define(interp, "self", Value.Object(obj), false)
@@ -6598,6 +6681,28 @@ def Value instantiate_struct(var Interpreter'actor interp, StructDecl decl, [Val
 struct Interpreter:
     var Env'actor global_env
     Env'actor current_env
+    var {string=[FnDecl]} struct_methods
+    var {string=FnDecl} fn_decls
+
+    req FnDecl? find_method(string type_name, string method_name):
+        let methods_opt = struct_methods.get(type_name)
+        if let methods = methods_opt:
+            for m in methods:
+                if m.name == method_name:
+                    return m
+        nil
+
+    def void set_method_decls(string name, [FnDecl] methods):
+        struct_methods.set(name, methods)
+
+    def void set_fn_decl(string name, FnDecl decl):
+        fn_decls.set(name, decl)
+
+    req FnDecl? get_fn_decl(string name):
+        let result = fn_decls.get(name)
+        if let decl = result:
+            return decl
+        nil
 
 # ─── val_to_string ────────────────────────────────────────────────────────────
 
@@ -6933,7 +7038,9 @@ def Interpreter'actor new_interpreter():
     let global = new_env(nil)
     let interp = Interpreter(
         global_env = global,
-        current_env = global
+        current_env = global,
+        struct_methods = {},
+        fn_decls = {}
     )
     let interp_actor = interp as Interpreter'actor
     register_stdlib(interp_actor)
@@ -6944,11 +7051,14 @@ def Interpreter'actor new_interpreter():
 def void exec_item(var Interpreter'actor interp, Item item):
     match item:
         Item.Fn(decl):
-            let fn_val = Value.Fn(decl.name, interp.global_env)
-            env_define(interp.global_env, decl.name, fn_val, false)
+            let fn_name = decl.name
+            interp.set_fn_decl(fn_name, decl)
+            let fn_val = Value.Fn(fn_name, interp.global_env)
+            env_define(interp.global_env, fn_name, fn_val, false)
         Item.Struct(decl):
             let struct_val = Value.Nil
             env_define(interp.global_env, decl.name, struct_val, false)
+            interp.set_method_decls(decl.name, decl.methods)
         Item.Enum(decl):
             let enum_val = Value.Nil
             env_define(interp.global_env, decl.name, enum_val, false)
@@ -6959,7 +7069,7 @@ def void exec_item(var Interpreter'actor interp, Item item):
         Item.Alias(decl):
             env_define(interp.global_env, decl.name, Value.Nil, false)
         Item.Stmt(stmt):
-            env_define(interp.current_env, "__stmt__", Value.Nil, true)
+            exec_stmt(interp, stmt)
         Item.Use(decl):
             env_define(interp.current_env, "__use__", Value.Nil, true)
         Item.Ext(decl):
@@ -6976,7 +7086,7 @@ def void run_program(var Interpreter'actor interp, Program prog):
 
 # == MAIN ==
 
-def void main():
+def void main() throws:
     var source = ""
     var done = false
     while not done:
