@@ -16,8 +16,14 @@ item            ::= attr* "pub"? use_decl
                   | attr* "pub"? trait_decl
                   | ext_decl
                   | mod_decl
+                  | alias_decl       # top-level type alias: `use Name as Type`
                   | let_stmt
                   | stmt             # scripting mode: bare statements at top level
+
+# Top-level type alias (distinct from `use mod.path.Item` which is an import).
+# `use Name as Type'qual` — registers a named alias for a qualified type.
+# `use Name<T> as Type'qual` — generic alias.
+alias_decl      ::= "use" IDENT ("as" | "<" IDENT ("," IDENT)* ">" "as") type NEWLINE
 
 # ─── Attributes ──────────────────────────────────────────────────────────────
 #
@@ -42,18 +48,18 @@ attr_arg        ::= IDENT ("=" (IDENT | STRING | INT))?
 
 # ─── Imports ─────────────────────────────────────────────────────────────────
 
-use_decl        ::= "use" mod_path ".*" NEWLINE                          # glob — all pub items
-                  | "use" mod_path "." IDENT ("," IDENT)* NEWLINE        # selective import
-                  | "use" IDENT "as" type NEWLINE                         # type alias
-                  | "use" IDENT "<" IDENT ("," IDENT)* ">" "as" type NEWLINE  # generic type alias
+use_decl        ::= "use" mod_path ".*" NEWLINE                                       # glob — all pub items
+                  | "use" mod_path "(" IDENT ("," IDENT)* ")" NEWLINE                # selective import
+                  | "use" IDENT "as" type NEWLINE                                     # type alias
+                  | "use" IDENT "<" IDENT ("," IDENT)* ">" "as" type NEWLINE         # generic type alias
 
 mod_path        ::= IDENT ("." IDENT)*
 # The last dot-segment is always an item name, never a module name.
 #
-# Three uniform forms, all using dots:
+# Three import forms:
 #   use a.b.c.*              — glob: all pub items from module a.b.c
-#   use a.b.c.X              — single item X from module a.b.c
-#   use a.b.c.X, Y, Z        — multiple items from module a.b.c
+#   use a.b.c(X)             — single item X from module a.b.c
+#   use a.b.c(X, Y, Z)       — multiple items from module a.b.c
 #
 # ── boring stdlib ─────────────────────────────────────────────────────────────
 #   use boring.collections.*            — all collections (Stack, Queue, …)
@@ -150,7 +156,8 @@ param_list      ::= param ("," param)* ","?   # trailing comma allowed
 
 # Type comes before the parameter name.
 # A function-typed parameter has param types after the name: `int f(int, int)`.
-param           ::= "var"? type IDENT "(" type_list? ")"   # function-typed parameter
+param           ::= "var"? type "..." IDENT                # variadic: int... args → collects into Vec<T>
+                  | "var"? type IDENT "(" type_list? ")"   # function-typed parameter
                   | "var"? type IDENT ("=" expr)?           # typed parameter, optional default
                   | "var"? IDENT                            # untyped, inferred
 
@@ -186,6 +193,8 @@ struct_member   ::= field_decl
                   | "pub"? set_decl
                   | conformance_decl
                   | as_decl
+                  | assoc_type_decl   # associated type (e.g. `type Output = int`)
+                  | type_method_sig   # type-level method signature (e.g. `type def name():`)
 
 # No keyword → public immutable field.
 # `let` → private immutable. `var` → private mutable. `pub var` → public mutable.
@@ -262,8 +271,18 @@ trait_decl      ::= "trait" IDENT type_params? ("as" type_list)? ":" NEWLINE IND
 
 trait_member    ::= fn_signature           # abstract method (no body)
                   | fn_decl               # default method (with body)
-                  | type_method_sig        # type-level method
+                  | type_method_sig        # type-level method signature
                   | assoc_type_decl        # associated type
+
+# Type-level method signature — used for class-method / static-method requirements in traits.
+# `type def name(params): body`  or  `type req name(params): body`
+type_method_sig ::= "type" ("def" | "req") type? IDENT "(" param_list? ")" modifier* (":" fn_body | NEWLINE)
+
+# Associated type declaration inside a trait or struct.
+# `type Output`          — abstract (no default, to be specified by impl)
+# `type Output = int`    — concrete default
+# `type Display as string` — associated type with an explicit alias name
+assoc_type_decl ::= "type" IDENT ("=" type | "as" type)? NEWLINE
 
 fn_signature    ::= ("def" | "req") type? IDENT "(" param_list? ")" modifier* NEWLINE
 
@@ -274,6 +293,8 @@ ext_decl        ::= "ext" IDENT type_params? ("as" type_list)? ":" NEWLINE INDEN
 ext_member      ::= "pub"? fn_decl
                   | "pub"? set_decl
                   | as_decl
+                  | assoc_type_decl   # associated type definition
+                  | type_method_sig   # type-level method signature
 
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
 mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
@@ -288,6 +309,9 @@ block           ::= NEWLINE INDENT stmt+ DEDENT
 stmt            ::= let_stmt
                   | return_stmt
                   | throw_stmt
+                  | break_stmt
+                  | continue_stmt
+                  | yield_stmt
                   | defer_stmt
                   | if_stmt
                   | match_stmt
@@ -305,6 +329,10 @@ stmt            ::= let_stmt
                   | mod_decl       # local module — flat scoping, same as top-level mod
                   | alias_stmt     # local type alias
                   | expr NEWLINE
+
+break_stmt      ::= "break" expr? NEWLINE       # optional value when used in `loop:` as expression
+continue_stmt   ::= "continue" NEWLINE
+yield_stmt      ::= "yield" expr NEWLINE        # inside `stream def`/`stream req` bodies
 
 # Local type alias — `use` inside a function/method body.
 alias_stmt      ::= "use" IDENT "as" type NEWLINE
@@ -325,8 +353,11 @@ wait_stmt       ::= "wait" expr NEWLINE
 # Move syntax: appending `'` to the binding name requests ownership transfer.
 #   `let b = a`   — borrow by default: `b` is a reference, `a` remains valid
 #   `let b' = a`  — move: `b` takes ownership, `a` is invalidated
-let_stmt        ::= "pub"? "static"? ("let" | "mut" | "var") type? IDENT "'"? "=" expr NEWLINE
+let_stmt        ::= "pub"? "static"? ("let" | "mut" | "var") type? IDENT "'"? ("=" expr)? NEWLINE
                   | "pub"? "static"? ("let" | "mut" | "var") destructure "=" expr NEWLINE
+                  # No initialiser: deferred binding — variable declared but not yet assigned.
+                  # A deferred binding must be assigned before first use (Rust enforces this).
+                  # Example:  var int x       (later:  x = compute())
 
 destructure     ::= "(" binding ("," binding)* ")"   # parenthesised form
                   | binding ("," binding)+             # bare form (two bindings minimum)
@@ -398,7 +429,8 @@ try_stmt        ::= "try" ":" block
 # Named enum: `error: &MyEnum` — typed value for variant dispatch.
 catch_clause    ::= "catch" catch_type_list? ":" block
 
-catch_type_list ::= IDENT ("," IDENT)*    # one or more type names
+catch_type_list ::= catch_type ("," catch_type)*
+catch_type      ::= IDENT ("." IDENT)?   # type name, optionally dotted for enum variant: Error.Expired
 
 guard_stmt      ::= "guard" guard_cond "else" ":"? (stmt | block)
 guard_cond      ::= cond_clause ("," cond_clause)*   # let-bindings bind in ENCLOSING scope
@@ -498,17 +530,19 @@ trailing_closure ::= "(" param_list? ")" modifier* ":" fn_body   # (p, q): body
                    | "do" ":" fn_body                                  # do: body
                    | "do" expr                                         # do expr (same-line)
 
-postfix         ::= "(" arg_list? ")" trailing_closure?  # call with optional trailing closure
-                  | trailing_closure                      # trailing closure, no regular args
-                  | "." IDENT                            # field access
-                  | "?." IDENT                           # optional chaining — field
-                  | "." IDENT "(" arg_list? ")"          # method call
-                  | "?." IDENT "(" arg_list? ")"         # optional chaining — method
-                  | "[" expr "]"                         # index
-                  | "as" type                            # cast
+postfix         ::= "(" arg_list? ")" trailing_closure?          # call with optional trailing closure
+                  | "<" type_list ">" "(" arg_list? ")" trailing_closure?  # generic call: f<T>(args)
+                  | trailing_closure                                         # trailing closure, no regular args
+                  | "." IDENT                                                # field access
+                  | "?." IDENT                                               # optional chaining — field
+                  | "." IDENT "(" arg_list? ")"                             # method call
+                  | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
+                  | "[" expr "]"                                             # index
+                  | "as" type                                                # cast
 
 arg_list        ::= arg ("," arg)* ","?    # trailing comma allowed
 arg             ::= (IDENT "=")? expr      # labeled or positional
+                  | ".." expr              # spread argument — expands into the variadic slot
 
 primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | IDENT
@@ -526,9 +560,15 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | if_expr
                   | match_expr
                   | task_expr
+                  | join_expr                            # join all tasks in a list
                   | do_expr                              # scoped block with own defer frame
                   | block_expr
                   | macro_call
+
+# `join` — await all tasks in a list concurrently and return a list of results.
+#   let results = join [f1, f2, f3]   → await all three futures in parallel
+# Each element of the list must be a `Future<T>`; the result type is `[T]`.
+join_expr       ::= "join" "[" expr ("," expr)* "]"
 
 range_expr      ::= expr ".." expr      # exclusive range  [start, end)
                   | expr "..=" expr     # inclusive range  [start, end]
@@ -670,8 +710,9 @@ type            ::= primitive_type
 #   float  →  Float'copy    →  f64
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "heap" | "copy" | "const" | "auto" | "task" | "actor" | "guard" | "weak" | "stack"
-                  | ε          # bare tick → same as 'heap (Box<T>)
+owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "weak"
+                  | owner_qual "|" owner_qual   # qualifier union: T'stack|heap (resolved at inference time)
+                  | ε                           # bare tick → same as 'heap (Box<T>)
 
 # ─── Borrow qualifiers ────────────────────────────────────────────────────────
 #
@@ -695,11 +736,13 @@ owner_qual      ::= "heap" | "copy" | "const" | "auto" | "task" | "actor" | "gua
 # Declared automatically from usage — no explicit `<&a>` needed in function signatures.
 # `<&a>` is only written explicitly in struct/enum type params.
 #
-borrow_qual     ::= "heap" | "auto" | "task" | "actor" | "guard" | "option" | "weak"
+borrow_qual     ::= "heap" | "stack" | "shared" | "actor" | "guard" | "option" | "weak"
                   | LOWERCASE_IDENT    # single lowercase letter → lifetime: &a, &b, …
                   | ε                  # plain borrow &T
 
-primitive_type  ::= "Int" | "Float" | "String" | "Bool" | "Nil" | "Never"
+primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "never"
+                  # Capitalised aliases (Int, Float, …) are accepted by the parser for
+                  # compatibility but normalised to lowercase in the AST.
 
 # Precise numeric type aliases — same runtime semantics as the primitive, but the name is
 # preserved in the AST for the Rust transpiler to emit the exact integer/float width.

@@ -5,6 +5,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.7.0] — 2026-06-18
+
+### Added
+
+- **Boring interpreter written in Boring** — `boring/interpreter/main.br` is a working self-hosted interpreter skeleton that compiles via `boring build`. It supports function declaration lookup (`fn_decls` map, `set_fn_decl` / `get_fn_decl` / `lookup_fn_decl`) and executes `Item.Fn` nodes.
+- **Non-async multi-thread mode for `'actor` / `'guard` types** — programs that use `'actor` or `'guard` qualifiers but contain no `task` / `stream` functions now emit `std::sync::Mutex` / `std::sync::RwLock` (blocking) instead of `tokio::sync::Mutex` / `tokio::sync::RwLock` (async). This allows the boring interpreter and other CPU-bound programs to build in `--threading multi` mode without depending on the async runtime for locking.
+
+  Technical details:
+  - New `use_async_actors()` predicate: returns `true` only when the program contains at least one `task` or `stream` function.
+  - All actor/guard construction sites (`emit_actor_new`, `emit_guard_new`) and access sites branch on this predicate.
+  - `std::sync::{Mutex, RwLock}` are injected into the generated `use` block only when needed.
+  - Structs with `std::sync::Mutex` fields skip `#[derive(PartialEq)]` (`Mutex` does not implement `PartialEq`).
+  - Local actor `let` bindings no longer generate a spurious `let mut __x_mg = x.lock().unwrap()` shadow guard (only function parameters need one).
+
+### Changed
+
+- **`spec/grammar.bnf`** — comprehensive update to bring the grammar in sync with the parser:
+  - `owner_qual`: removed deprecated `"auto"` and `"task"`; added `"shared"`; added qualifier union syntax `T'stack|heap` (resolved at inference time).
+  - `borrow_qual`: aligned with `owner_qual` (`"shared"` replaces `"auto"` / `"task"`).
+  - `primitive_type`: corrected to lowercase (`int`, `uint`, `float`, `bool`, `string`, `nil`, `never`).
+  - `use_decl` selective import: corrected to parenthesised form `use a.b(X, Y)` (was incorrectly shown as `use a.b.X, Y`).
+  - Added `join_expr` to `primary_expr`: `join [f1, f2, f3]` — await all tasks concurrently.
+  - Added `alias_decl` to top-level `item` rule.
+  - Added variadic parameter form: `type "..." IDENT`.
+  - Added `assoc_type_decl` and `type_method_sig` to `struct_member` and `ext_member`.
+  - Added `break_stmt`, `continue_stmt`, `yield_stmt` to `stmt`.
+  - Made `let_stmt` initializer optional (`("=" expr)?`).
+  - Fixed `catch_type_list` to support dotted catch variants (`catch Mod.Error:`).
+  - Added spread arg `".." expr` to `arg`.
+  - Added generic call postfix form `expr<Type, …>(args)`.
+- **`linguist/Boring.tmLanguage.json`** — `ownership-qualifier` pattern updated to match the current qualifier vocabulary: removed `'auto` and `'task`; retained `heap`, `stack`, `shared`, `actor`, `guard`, `weak`, `copy`.
+
+### Fixed
+
+- `Arc::clone` emitted correctly in both `emit_expr` and `emit_expr_owned` for actor struct fields in multi-thread mode (was missing from the owned path, causing a move-out-of-`MutexGuard` error).
+- `child.clone()` as `ExprKind::MethodCall` is now recognized by `is_existing_arc` in `emit_let_value`, preventing a double `Arc::new(Arc::new(...))` wrap.
+
+---
+
 ## [0.6.0] — 2026-06-14
 
 ### Added
@@ -262,6 +301,9 @@ Initial public release.
 
 ---
 
+[0.7.0]: https://github.com/mlanoe/boring/releases/tag/v0.7.0
+[0.6.0]: https://github.com/mlanoe/boring/releases/tag/v0.6.0
+[0.5.0]: https://github.com/mlanoe/boring/releases/tag/v0.5.0
 [0.4.0]: https://github.com/mlanoe/boring/releases/tag/v0.4.0
 [0.3.0]: https://github.com/mlanoe/boring/releases/tag/v0.3.0
 [0.2.1]: https://github.com/mlanoe/boring/releases/tag/v0.2.1
