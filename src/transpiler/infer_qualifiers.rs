@@ -48,8 +48,12 @@ impl Transpiler {
                     anonymous_vars.insert(name.clone());
                     // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
                     var_struct_types.insert(name.clone(), n.clone());
-                    // Eligible for universal borrow inference.
-                    auto_ref_param_vars.insert(name.clone());
+                    // Eligible for universal borrow inference — free functions only.
+                    // Struct/enum method params are excluded: call sites emit arguments by value
+                    // and cannot automatically add `&` for method arguments.
+                    if !self.in_struct_method {
+                        auto_ref_param_vars.insert(name.clone());
+                    }
                 }
                 // T' parameter — indirection-only candidate set.
                 Type::Qualified(_, OwnerQual::Owned) => {
@@ -219,6 +223,14 @@ impl Transpiler {
                 }
             }
             Stmt::Match(s) => {
+                // A param used as a match subject must be owned (taken by value) so that
+                // bound variables in arm patterns have their concrete field types, not references.
+                // Suppress auto-ref inference for such params.
+                if let ExprKind::Var(vname) = &s.subject.kind {
+                    if auto_ref_param_vars.contains(vname.as_str()) {
+                        has_qualifier_constraint.insert(vname.clone());
+                    }
+                }
                 self.walk_expr_for_qualifiers(&s.subject, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 for arm in &s.arms {
                     if let Some(guard) = &arm.guard {
@@ -233,6 +245,42 @@ impl Transpiler {
                                 self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates, auto_ref_param_vars, has_qualifier_constraint);
                             }
                         }
+                    }
+                }
+            }
+            // Destructuring `let Some(x) = param.field else { ... }` requires moving out of
+            // `param.field`. If `param` is auto-ref inferred as `&T`, this fails (can't move
+            // out of a shared reference). Suppress auto-ref for the param.
+            Stmt::LetDestructure(s) => {
+                if let ExprKind::Field(obj, _) = &s.value.kind {
+                    if let ExprKind::Var(vname) = &obj.kind {
+                        if auto_ref_param_vars.contains(vname.as_str()) {
+                            has_qualifier_constraint.insert(vname.clone());
+                        }
+                    }
+                }
+                self.walk_expr_for_qualifiers(&s.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            // if-let patterns: `let Some(x) = param.field` in a CondClause moves out of
+            // `param.field` — suppress auto-ref on the root param variable.
+            Stmt::IfLet(s) => {
+                for clause in &s.clauses {
+                    self.walk_cond_clause_for_qualifiers(clause, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                for st in &s.then_body {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                if let Some(else_body) = &s.else_body {
+                    for st in else_body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                }
+            }
+            // guard let Some(x) = param.field else: — same ownership constraint as IfLet/LetDestructure.
+            Stmt::Guard(s) => {
+                if let crate::ast::GuardCond::Clauses(clauses) = &s.cond {
+                    for clause in clauses {
+                        self.walk_cond_clause_for_qualifiers(clause, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                     }
                 }
             }
@@ -393,8 +441,62 @@ impl Transpiler {
                     }
                 }
             }
+            // Match expression: a param used as match subject must be taken by value.
+            ExprKind::Match(s) => {
+                if let ExprKind::Var(vname) = &s.subject.kind {
+                    if auto_ref_param_vars.contains(vname.as_str()) {
+                        has_qualifier_constraint.insert(vname.clone());
+                    }
+                }
+                self.walk_expr_for_qualifiers(&s.subject, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                for arm in &s.arms {
+                    if let Some(guard) = &arm.guard {
+                        self.walk_expr_for_qualifiers(guard, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                    match &arm.body {
+                        crate::ast::MatchBody::Expr(e) => {
+                            self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                        }
+                        crate::ast::MatchBody::Block(stmts) => {
+                            for st in stmts {
+                                self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Walk a CondClause for qualifier constraints.
+    /// Moving-out patterns (`let Some(x) = param.field`) suppress auto-ref on the root param.
+    fn walk_cond_clause_for_qualifiers(
+        &mut self,
+        clause: &crate::ast::CondClause,
+        anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+        candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+        auto_ref_param_vars: &std::collections::HashSet<String>,
+        has_qualifier_constraint: &mut std::collections::HashSet<String>,
+    ) {
+        let expr = match clause {
+            crate::ast::CondClause::Let(_, e) | crate::ast::CondClause::LetPat(_, e) => e,
+            crate::ast::CondClause::Expr(e) => {
+                self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                return;
+            }
+        };
+        // Suppress auto-ref if the source is a field of an auto-ref param (moving-out pattern).
+        if let ExprKind::Field(obj, _) = &expr.kind {
+            if let ExprKind::Var(vname) = &obj.kind {
+                if auto_ref_param_vars.contains(vname.as_str()) {
+                    has_qualifier_constraint.insert(vname.clone());
+                }
+            }
+        }
+        self.walk_expr_for_qualifiers(expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
     }
 
     /// Constrain qualifiers for variables captured by a task body.

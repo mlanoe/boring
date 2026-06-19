@@ -45,6 +45,8 @@ The idea: Boring could express this pattern natively. A function that takes a **
 
 In struct fields and local bindings all qualifiers remain owned. A reference in a struct field would require a lifetime annotation on the struct — exactly what Boring's qualifier system is designed to avoid.
 
+**Struct and enum method parameters are excluded from automatic `Counter&` inference.** The call-site coercion that injects `&` applies only to free-function call sites; method calls (`p.distance(q)`) are not rewritten. Use the explicit `Counter& n` form to get universal borrowing in a method parameter.
+
 ---
 
 ## `Counter&` — universal borrow

@@ -6360,7 +6360,7 @@ Callers can pass any qualifier. The transpiler acquires the lock at the call sit
 
 **Mutability is declared, not inferred.** `mut` on a parameter is always written explicitly; it is not inferred from the body. A `def` method call on an immutable parameter is a compile error (`declare mut Counter n`).
 
-A storage signal (field assignment, task capture, return with ownership qualifier) or a qualifier demand signal (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.
+A **storage signal** (field assignment, task capture, return with ownership qualifier, or field-destructuring pattern such as `guard let Some(x) = n.field` / `if let Some(x) = n.field` / `let x = n.field`) or a **qualifier demand signal** (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.
 
 | Parameter | Signals | Emitted form |
 |---|---|---|
@@ -6369,7 +6369,7 @@ A storage signal (field assignment, task capture, return with ownership qualifie
 | `Counter c` | qualifier demand | concrete qualifier |
 | `Counter c` | storage | concrete qualifier |
 
-The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), tick parameters (`Counter' c`), `var` parameters, and explicit qualifier groups are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes.
+The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), tick parameters (`Counter' c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a method parameter.
 
 ### Cross-function propagation
 

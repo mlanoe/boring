@@ -315,6 +315,14 @@ impl Transpiler {
                         }
                     }
                     self.line(&format!("{} {}: {} = {};", kw, s.name, managed_ty, init));
+                    // Emit a lock guard so multi-field accesses in a single expression
+                    // don't deadlock (two separate .lock().unwrap() on the same Mutex).
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+                        let shadow = format!("__{}_mg", s.name);
+                        self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, s.name));
+                        self.managed_mutex_vars.remove(&s.name);
+                        self.managed_param_shadows.insert(s.name.clone(), shadow);
+                    }
                     return;
                 }
             }
@@ -908,6 +916,19 @@ impl Transpiler {
             self.line(&format!("{}static {}: {} = {};", vis, s.name, ty.trim_start_matches(": ").trim(), val));
         } else {
             self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, val));
+            // Emit a lock guard shadow for managed mutex locals in multi-thread mode to
+            // avoid deadlock when multiple fields are accessed in the same expression
+            // (two separate .lock().unwrap() calls hold the guard simultaneously).
+            if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                && self.managed_mutex_vars.contains(&s.name)
+                && !self.managed_param_shadows.contains_key(&s.name)
+                && !self.optional_vars.contains(&s.name)
+            {
+                let shadow = format!("__{}_mg", s.name);
+                self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, s.name));
+                self.managed_mutex_vars.remove(&s.name);
+                self.managed_param_shadows.insert(s.name.clone(), shadow);
+            }
         }
     }
 
@@ -2810,7 +2831,7 @@ impl Transpiler {
     pub(crate) fn emit_pattern(&self, pat: &Pattern) -> String {
         match pat {
             Pattern::Wildcard   => "_".into(),
-            Pattern::Bind(n)    => if self.in_req_fn { n.clone() } else { format!("mut {}", n) },
+            Pattern::Bind(n)    => n.clone(),
             Pattern::None       => {
                 // If the match subject is a user-defined enum with a `None` variant, qualify it.
                 if let Some(enum_name) = &self.match_subject_enum {

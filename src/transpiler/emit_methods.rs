@@ -1379,7 +1379,7 @@ impl Transpiler {
                     }
                 }
                 let emitted = coerced.unwrap_or_else(|| self.emit_let_value(param_ty, &a.value));
-                // Counter& coercion: parameter expects &T (Borrow/BorrowMut), caller may hold
+// Counter& coercion: parameter expects &T (Borrow/BorrowMut), caller may hold
                 // any qualifier. Wrap the emitted argument with the appropriate deref.
                 let emitted = if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) {
                     let mutable = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
@@ -1961,6 +1961,7 @@ impl Transpiler {
             fn_current_params_mut: std::collections::HashSet::new(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,
+            in_struct_method: self.in_struct_method,
         }
     }
 

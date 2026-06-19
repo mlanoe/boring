@@ -215,6 +215,7 @@ A parameter resolves to a universal borrow if it triggers neither a **storage si
 - assigned to a struct field (`self.x = n`, `field = n`)
 - returned with an ownership qualifier
 - captured by a closure or task
+- destructured through a field access (`guard let Some(x) = n.field`, `if let Some(x) = n.field`, `let x = n.field`)
 
 **Qualifier demand signals** — `n` is never:
 - passed to a function parameter with an explicit qualifier (e.g. `Counter'actor`)
@@ -232,7 +233,7 @@ Passes to `Counter&` or `mut Counter&` parameters do not count as qualifier dema
 
 `'shared` is excluded from `mut Counter n` by construction — it cannot produce `&mut Counter`.
 
-**Not applicable to:** `Counter' n` (tick — stays on the indirection path), `Counter? n` (optional — excluded from auto-ref inference), `var Counter n` (out-parameter), and explicit qualifier groups (`Counter'mut n`).
+**Not applicable to:** `Counter' n` (tick — stays on the indirection path), `Counter? n` (optional — excluded from auto-ref inference), `var Counter n` (out-parameter), explicit qualifier groups (`Counter'mut n`), and **struct or enum method parameters** (see below).
 
 ### Examples
 
@@ -314,17 +315,29 @@ def reset(mut T n):     # no storage, mut declared
 
 The lock acquisition rule at call sites applies identically: if the concrete type instantiated for `T` is `'actor` or `'guard`, the transpiler inserts the lock at the call site.
 
+### Struct and enum method parameters
+
+Universal borrow inference is **disabled** for parameters of `req` and `def` methods defined on a struct or enum. The call-site coercion that injects `&` or `&mut` is only available for free functions — method calls (`p.distance(q)`) are not rewritten by the transpiler, so the argument `q` would never receive the implicit `&`. Applying auto-ref to method params would cause a type mismatch between the emitted parameter type (`&Counter`) and the unannotated argument at every call site.
+
+```boring
+struct Point:
+    float x
+    float y
+
+    req distance(Point other):   # auto-ref NOT applied — other stays Point, not &Point
+        ...
+```
+
+If a method parameter needs universal borrowing, use the explicit `Counter& n` form.
+
 ### Explicit form
 
 `Counter& n` and `mut Counter& n` remain valid as explicit forms. Use them to:
 - Document intent — make universal borrowing visible in the signature.
 - Lock in the behavior regardless of future body changes that might introduce a storage signal.
+- Enable universal borrowing in struct/enum method parameters (where inference is disabled).
 
 When a bare `Counter n` inference resolves to `Counter&`, the emitted signature is identical to an explicit `Counter& n`.
-
-### Implementation status
-
-> Not implemented. This section describes the intended extension to the inference algorithm.
 
 ---
 
@@ -510,6 +523,10 @@ The transpiler also verifies that callers do not pass a qualifier outside the de
 | Mutation + sharing conflict → conflict error | ✅ implemented |
 | Qualifier union validation | ✅ implemented |
 | Parameter qualifier auto-apply | ✅ implemented |
+| Universal borrow inference (free functions only) | ✅ implemented |
+| Universal borrow — field-destructuring suppression (`guard let`, `if let`, `let`) | ✅ implemented |
+| Universal borrow — disabled for struct/enum method params | ✅ implemented |
+| Universal borrow — task capture suppresses auto-ref | ✅ implemented |
 | Cross-function propagation | ✅ implemented (single forward pass) |
 | Struct field inference (all fields, single-file) | ✅ implemented |
 | Optional (`T?`, `T'?`) inner-type inference | ✅ implemented |

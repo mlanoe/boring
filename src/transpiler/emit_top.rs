@@ -414,6 +414,11 @@ impl Transpiler {
         // Pre-inference pass: run qualifier inference before emitting params so that
         // unqualified parameters can be emitted with their inferred qualifier.
         // emit_body will re-run it (it clears first), so there is no double-application.
+        // We also snapshot the param-level inferred qualifiers here so that the fn_sigs
+        // update (below) uses the correct result. emit_body may call infer_qualifiers
+        // recursively for nested arm/block bodies (with fn_current_params still set),
+        // which would overwrite inferred_qualifiers before the fn_sigs update runs.
+        let pre_inferred_param_quals: std::collections::HashMap<String, crate::ast::OwnerQual>;
         {
             let prev = std::mem::take(&mut self.fn_current_params);
             let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
@@ -424,7 +429,17 @@ impl Transpiler {
                 .filter(|p| p.mutable)
                 .map(|p| p.name.clone())
                 .collect();
+            let prev_in_struct_method = self.in_struct_method;
+            self.in_struct_method = self_ty.is_some();
             self.infer_qualifiers(&f.body);
+            self.in_struct_method = prev_in_struct_method;
+            // Snapshot only the qualifiers for THIS function's params.
+            pre_inferred_param_quals = f.params.iter()
+                .filter_map(|p| {
+                    self.inferred_qualifiers.get(&p.name)
+                        .map(|q| (p.name.clone(), q.clone()))
+                })
+                .collect();
             self.fn_current_params = prev;
             self.fn_current_params_mut = prev_mut;
         }
@@ -694,6 +709,7 @@ impl Transpiler {
         }
         self.in_throws = f.throws;
         self.in_req_fn = !f.mutating;
+        self.in_struct_method = self_ty.is_some();
         self.in_async  = is_async;
         let prev_fn_return_ty = self.fn_return_ty.clone();
         self.fn_return_ty = f.return_ty.clone();
@@ -757,10 +773,13 @@ impl Transpiler {
         // Cross-function propagation: update fn_sigs with inferred param qualifiers so that
         // callers defined after this function see the qualified signature and can propagate
         // the constraint to their own anonymous variables.
+        // Use pre_inferred_param_quals (snapshotted before emit_body) rather than
+        // self.inferred_qualifiers, which may have been overwritten by nested infer_qualifiers
+        // calls made during arm/block body emission.
         if self_ty.is_none() {
             if let Some(sig) = self.fn_sigs.get_mut(&f.name) {
                 for (i, param) in f.params.iter().enumerate() {
-                    if let Some(inferred_qual) = self.inferred_qualifiers.get(&param.name).cloned() {
+                    if let Some(inferred_qual) = pre_inferred_param_quals.get(&param.name).cloned() {
                         if let Some(param_ty) = sig.get_mut(i) {
                             let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
                                 && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))

@@ -157,6 +157,9 @@ struct Transpiler {
     pub(crate) in_throws: bool,
     /// Are we inside a `req` (non-mutating, &self) function body?
     pub(crate) in_req_fn: bool,
+    /// Are we emitting a struct/enum method (self_ty.is_some())?
+    /// Auto-ref inference is disabled for method params: call sites can't add `&` automatically.
+    pub(crate) in_struct_method: bool,
     /// Are we inside a `task` (async) function body?
     pub(crate) in_async: bool,
     /// Are we inside a sequential `stream` body? (`yield` → `__items.push(...)`)
@@ -514,6 +517,7 @@ impl Transpiler {
             indent: 0,
             in_throws: false,
             in_req_fn: false,
+            in_struct_method: false,
             in_async: false,
             in_iter_stream: false,
             self_type: None,
