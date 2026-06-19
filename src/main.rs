@@ -387,7 +387,7 @@ fn parse_build_command(build_args: &[String]) {
         process::exit(1);
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize };
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new() };
 
     if emit_rust {
         match file {
@@ -567,7 +567,9 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
         }
     };
 
-    let transpile_out = transpiler::transpile_with_config(&program, config);
+    let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let config_with_dir = transpiler::TranspileConfig { source_dir, ..config.clone() };
+    let transpile_out = transpiler::transpile_with_config(&program, config_with_dir);
     let rust_code = transpile_out.code;
     let has_streams = transpile_out.has_streams;
     let uses_log = transpile_out.uses_log;

@@ -12,12 +12,13 @@ def string val_type_name(Value v):
         Value.Nil: "nil"
         Value.Void: "void"
         Value.Tuple(_): "tuple"
-        Value.Range(_, _, _): "range"
-        Value.Object(name, _): name
+        Value.Range(_, _, _, _): "range"
+        Value.Object(inner): inner.type_name.clone()
         Value.EnumVariant(type_name, _, _): type_name
         _: "unknown"
 
-def Value call_method(Interpreter'actor interp, Value recv, string method_name, [Value] args) throws:
+def Value call_method(var Interpreter'actor interp, Value recv, string method_name, [Value] args):
+    let recv_type = recv.type_name()
     match recv:
         Value.Str(s):
             match method_name:
@@ -83,15 +84,15 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     match arg:
                         Value.Str(sv):
                             let idx = s.indexOf(sv)
-                            if idx == -1:
-                                Value.Nil
+                            if let idx_val = idx:
+                                Value.Int(idx_val)
                             else:
-                                Value.Int(idx)
+                                Value.Nil
                         _: throw "indexOf: expected string argument"
                 "repeat":
                     let arg = args[0] else Value.Int(0)
                     match arg:
-                        Value.Int(n): Value.Str(s.repeat(n))
+                        Value.Int(n): Value.Str(s.repeat(n as uint))
                         _: throw "repeat: expected int argument"
                 "padLeft":
                     let width_val = args[0] else Value.Int(0)
@@ -99,7 +100,13 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     match width_val:
                         Value.Int(w):
                             match pad_val:
-                                Value.Str(p): Value.Str(s.padLeft(w, p))
+                                Value.Str(p):
+                                    let cur_len = s.length
+                                    if cur_len >= w:
+                                        Value.Str(s)
+                                    else:
+                                        let padding = p.repeat((w - cur_len) as uint)
+                                        Value.Str("{padding}{s}")
                                 _: throw "padLeft: expected string pad"
                         _: throw "padLeft: expected int width"
                 "padRight":
@@ -108,7 +115,13 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     match width_val:
                         Value.Int(w):
                             match pad_val:
-                                Value.Str(p): Value.Str(s.padRight(w, p))
+                                Value.Str(p):
+                                    let cur_len = s.length
+                                    if cur_len >= w:
+                                        Value.Str(s)
+                                    else:
+                                        let padding = p.repeat((w - cur_len) as uint)
+                                        Value.Str("{s}{padding}")
                                 _: throw "padRight: expected string pad"
                         _: throw "padRight: expected int width"
                 "parseInt":
@@ -116,13 +129,13 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     if parsed == nil:
                         Value.Nil
                     else:
-                        Value.Int(parsed!)
+                        Value.Int(parsed else 0)
                 "parseFloat":
                     let parsed = s.parseFloat()
                     if parsed == nil:
                         Value.Nil
                     else:
-                        Value.Float(parsed!)
+                        Value.Float(parsed else 0.0)
                 "isDigit":
                     Value.Bool(s.length == 1 and s.chars().all((c): c >= "0" and c <= "9"))
                 "isAlpha":
@@ -130,7 +143,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                 "isEmpty":
                     Value.Bool(s.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Array(arr):
             match method_name:
@@ -197,7 +210,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var result = []
                     var i = 0
                     while i < arr.length:
-                        let r = interp.callValue(closure, [arr[i]])
+                        let r = call_value(interp, closure, [arr[i]])
                         result.append(r)
                         i = i + 1
                     Value.Array(result)
@@ -206,7 +219,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var result = []
                     var i = 0
                     while i < arr.length:
-                        let r = interp.callValue(closure, [arr[i]])
+                        let r = call_value(interp, closure, [arr[i]])
                         match r:
                             Value.Bool(b):
                                 if b:
@@ -215,24 +228,36 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                         i = i + 1
                     Value.Array(result)
                 "reduce":
-                    let init = args[0] else Value.Nil
+                    let init_val = args[0] else Value.Nil
                     let closure = args[1] else Value.Nil
-                    var acc = init
+                    var acc = init_val
                     var i = 0
                     while i < arr.length:
-                        acc = interp.callValue(closure, [acc, arr[i]])
+                        acc = call_value(interp, closure, [acc, arr[i]])
                         i = i + 1
                     acc
                 "sorted":
-                    var result = arr
-                    result = result.sorted()
-                    Value.Array(result)
+                    let n = arr.length
+                    var sorted = arr
+                    var i = 0
+                    while i < n:
+                        var j = i + 1
+                        while j < n:
+                            let si = val_to_string(sorted[i])
+                            let sj = val_to_string(sorted[j])
+                            if string_gt(si, sj):
+                                let tmp = sorted[i]
+                                sorted[i] = sorted[j]
+                                sorted[j] = tmp
+                            j = j + 1
+                        i = i + 1
+                    Value.Array(sorted)
                 "sortedBy":
                     let closure = args[0] else Value.Nil
                     var keys = []
                     var i = 0
                     while i < arr.length:
-                        let k = interp.callValue(closure, [arr[i]])
+                        let k = call_value(interp, closure, [arr[i]])
                         keys.append(k)
                         i = i + 1
                     var indices = []
@@ -262,7 +287,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var found = false
                     var i = 0
                     while i < arr.length and not found:
-                        let r = interp.callValue(closure, [arr[i]])
+                        let r = call_value(interp, closure, [arr[i]])
                         match r:
                             Value.Bool(b):
                                 if b:
@@ -275,7 +300,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var all_pass = true
                     var i = 0
                     while i < arr.length and all_pass:
-                        let r = interp.callValue(closure, [arr[i]])
+                        let r = call_value(interp, closure, [arr[i]])
                         match r:
                             Value.Bool(b):
                                 if not b:
@@ -291,7 +316,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                         var n = 0
                         var i = 0
                         while i < arr.length:
-                            let r = interp.callValue(closure, [arr[i]])
+                            let r = call_value(interp, closure, [arr[i]])
                             match r:
                                 Value.Bool(b):
                                     if b:
@@ -348,7 +373,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     let target = args[0] else Value.Nil
                     var found_idx = Value.Nil
                     var i = 0
-                    while i < arr.length and found_idx == nil:
+                    while i < arr.length and found_idx == Value.Nil:
                         if arr[i] == target:
                             found_idx = Value.Int(i)
                         i = i + 1
@@ -372,7 +397,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var result = []
                     var i = 0
                     while i < arr.length:
-                        let r = interp.callValue(closure, [arr[i]])
+                        let r = call_value(interp, closure, [arr[i]])
                         match r:
                             Value.Array(inner):
                                 var j = 0
@@ -387,7 +412,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     let sep_val = args[0] else Value.Str("")
                     match sep_val:
                         Value.Str(sep):
-                            var parts = []
+                            var [string] parts = []
                             var i = 0
                             while i < arr.length:
                                 match arr[i]:
@@ -397,8 +422,8 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                                     Value.Bool(b): parts.append("{b}")
                                     _: parts.append("nil")
                                 i = i + 1
-                            Value.Str(parts.join(sep))
-                        _: throw "join: expected string separator"
+                            Value.Str(parts.joined(sep))
+                        _: throw "join_val: expected string separator"
                 "sum":
                     var int_sum = 0
                     var float_sum = 0.0
@@ -413,7 +438,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                             _: throw "sum: non-numeric element"
                         i = i + 1
                     if has_float:
-                        Value.Float(float_sum + int_sum)
+                        Value.Float(float_sum + int_sum as float)
                     else:
                         Value.Int(int_sum)
                 "min":
@@ -475,7 +500,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                 "isEmpty":
                     Value.Bool(arr.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Dict(pairs):
             match method_name:
@@ -490,41 +515,33 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var i = 0
                     while i < pairs.length:
                         let pair = pairs[i]
-                        match pair:
-                            Value.Tuple(kv):
-                                if kv[0] == key:
-                                    found = kv[1]
-                            _: throw "dict: corrupt entry"
+                        if pair.0 == key:
+                            found = pair.1
                         i = i + 1
                     found
                 "set":
                     let key = args[0] else Value.Nil
                     let val = args[1] else Value.Nil
                     var new_pairs = pairs
-                    var updated = false
+                    var update_idx = -1
                     var i = 0
                     while i < new_pairs.length:
                         let pair = new_pairs[i]
-                        match pair:
-                            Value.Tuple(kv):
-                                if kv[0] == key:
-                                    new_pairs[i] = Value.Tuple([key, val])
-                                    updated = true
-                            _: throw "dict: corrupt entry"
+                        if pair.0 == key:
+                            update_idx = i
                         i = i + 1
-                    if not updated:
-                        new_pairs.append(Value.Tuple([key, val]))
+                    if update_idx >= 0:
+                        new_pairs[update_idx] = (key, val)
+                    else:
+                        new_pairs.append((key, val))
                     Value.Dict(new_pairs)
                 "contains":
                     let key = args[0] else Value.Nil
                     var found = false
                     var i = 0
                     while i < pairs.length:
-                        match pairs[i]:
-                            Value.Tuple(kv):
-                                if kv[0] == key:
-                                    found = true
-                            _: throw "dict: corrupt entry"
+                        if pairs[i].0 == key:
+                            found = true
                         i = i + 1
                     Value.Bool(found)
                 "remove":
@@ -532,33 +549,32 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     var result = []
                     var i = 0
                     while i < pairs.length:
-                        match pairs[i]:
-                            Value.Tuple(kv):
-                                if kv[0] != key:
-                                    result.append(pairs[i])
-                            _: throw "dict: corrupt entry"
+                        if pairs[i].0 != key:
+                            result.append(pairs[i])
                         i = i + 1
                     Value.Dict(result)
                 "keys":
                     var result = []
                     var i = 0
                     while i < pairs.length:
-                        match pairs[i]:
-                            Value.Tuple(kv): result.append(kv[0])
-                            _: throw "dict: corrupt entry"
+                        result.append(pairs[i].0)
                         i = i + 1
                     Value.Array(result)
                 "values":
                     var result = []
                     var i = 0
                     while i < pairs.length:
-                        match pairs[i]:
-                            Value.Tuple(kv): result.append(kv[1])
-                            _: throw "dict: corrupt entry"
+                        result.append(pairs[i].1)
                         i = i + 1
                     Value.Array(result)
                 "entries":
-                    Value.Array(pairs)
+                    var result = []
+                    var i = 0
+                    while i < pairs.length:
+                        let (ek, ev) = pairs[i]
+                        result.append(Value.Array([ek, ev]))
+                        i = i + 1
+                    Value.Array(result)
                 "merge":
                     let other_val = args[0] else Value.Dict([])
                     match other_val:
@@ -566,28 +582,24 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                             var result = pairs
                             var i = 0
                             while i < other.length:
-                                match other[i]:
-                                    Value.Tuple(kv):
-                                        var found = false
-                                        var j = 0
-                                        while j < result.length:
-                                            match result[j]:
-                                                Value.Tuple(rkv):
-                                                    if rkv[0] == kv[0]:
-                                                        result[j] = Value.Tuple([kv[0], kv[1]])
-                                                        found = true
-                                                _: throw "dict: corrupt entry"
-                                            j = j + 1
-                                        if not found:
-                                            result.append(other[i])
-                                    _: throw "dict: corrupt entry"
+                                let oe = other[i]
+                                var update_j = -1
+                                var j = 0
+                                while j < result.length:
+                                    if result[j].0 == oe.0:
+                                        update_j = j
+                                    j = j + 1
+                                if update_j >= 0:
+                                    result[update_j] = oe
+                                else:
+                                    result.append(oe)
                                 i = i + 1
                             Value.Dict(result)
                         _: throw "merge: expected dict argument"
                 "isEmpty":
                     Value.Bool(pairs.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Set(elements):
             match method_name:
@@ -685,7 +697,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                 "isEmpty":
                     Value.Bool(elements.length == 0)
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Int(n):
             match method_name:
@@ -695,7 +707,7 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                     else:
                         Value.Int(n)
                 "sqrt":
-                    Value.Float(n.sqrt())
+                    Value.Float((n as float).sqrt())
                 "floor":
                     Value.Int(n)
                 "ceil":
@@ -705,11 +717,11 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                 "toStr":
                     Value.Str("{n}")
                 "toBin":
-                    Value.Str(n.toBin())
+                    Value.Str("{n:b}")
                 "toHex":
-                    Value.Str(n.toHex())
+                    Value.Str("{n:x}")
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         Value.Float(f):
             match method_name:
@@ -721,54 +733,56 @@ def Value call_method(Interpreter'actor interp, Value recv, string method_name, 
                 "sqrt":
                     Value.Float(f.sqrt())
                 "floor":
-                    Value.Int(f.floor())
+                    Value.Int(f.floor() as int)
                 "ceil":
-                    Value.Int(f.ceil())
+                    Value.Int(f.ceil() as int)
                 "round":
-                    Value.Int(f.round())
+                    Value.Int(f.round() as int)
                 "toStr":
                     Value.Str("{f}")
                 "toBin":
-                    Value.Str(f.floor().toBin())
+                    let fi = f.floor() as int
+                    Value.Str("{fi:b}")
                 "toHex":
-                    Value.Str(f.floor().toHex())
+                    let fi = f.floor() as int
+                    Value.Str("{fi:x}")
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
-        Value.Range(start, end, step):
+        Value.Range(start, end, inclusive, step):
             match method_name:
                 "toArray":
                     var result = []
                     var i = start
-                    let s = if step == nil: 1 else: step!
-                    while i < end:
+                    let lim = if inclusive: end + 1 else: end
+                    while i < lim:
                         result.append(Value.Int(i))
-                        i = i + s
+                        i = i + step
                     Value.Array(result)
                 "contains":
                     let val = args[0] else Value.Nil
                     match val:
                         Value.Int(n):
-                            let s = if step == nil: 1 else: step!
+                            let lim = if inclusive: end + 1 else: end
                             var found = false
                             var i = start
-                            while i < end and not found:
+                            while i < lim and not found:
                                 if i == n:
                                     found = true
-                                i = i + s
+                                i = i + step
                             Value.Bool(found)
                         _: Value.Bool(false)
                 "length":
-                    let s = if step == nil: 1 else: step!
-                    let len = (end - start + s - 1) / s
+                    let lim = if inclusive: end + 1 else: end
+                    let len = (lim - start + step - 1) / step
                     Value.Int(if len < 0: 0 else: len)
                 "step":
                     let s_val = args[0] else Value.Int(1)
                     match s_val:
-                        Value.Int(sv): Value.Range(start, end, sv)
+                        Value.Int(sv): Value.Range(start, end, inclusive, sv)
                         _: throw "step: expected int argument"
                 _:
-                    throw "unknown method {method_name} on {val_type_name(recv)}"
+                    throw "unknown method {method_name} on {recv_type}"
 
         _:
-            throw "unknown method {method_name} on {val_type_name(recv)}"
+            throw "unknown method {method_name} on {recv_type}"

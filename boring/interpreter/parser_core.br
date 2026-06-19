@@ -1,0 +1,1102 @@
+# == PARSER CORE ==
+
+# ── Parser struct ─────────────────────────────────────────────────────────────
+
+struct Parser:
+    [Token] tokens
+    int pos
+
+    req TokenKind peek():
+        self.tokens[self.pos].kind
+
+    req TokenKind peek2():
+        let next = self.pos + 1
+        if next < self.tokens.length:
+            self.tokens[next].kind
+        else:
+            TokenKind.Eof
+
+    def Token advance():
+        let t = self.tokens[self.pos]
+        if self.pos + 1 < self.tokens.length:
+            self.pos = self.pos + 1
+        t
+
+    def bool eat(TokenKind k):
+        if self.peek() == k:
+            self.advance()
+            true
+        else:
+            false
+
+    def Token expect(TokenKind k) throws:
+        if token_kind_name(self.peek()) == token_kind_name(k):
+            return self.advance()
+        throw "expected {token_kind_name(k)}, got {token_kind_name(self.peek())}"
+
+    req bool at_end():
+        self.peek() == TokenKind.Eof
+
+    req int current_line():
+        self.tokens[self.pos].line
+
+# ── Parser helpers ────────────────────────────────────────────────────────────
+
+def string token_kind_name(TokenKind k):
+    match k:
+        TokenKind.Int(_): "Int"
+        TokenKind.Float(_): "Float"
+        TokenKind.Str(_): "Str"
+        TokenKind.StringInterp(_): "StringInterp"
+        TokenKind.Bool(_): "Bool"
+        TokenKind.Nil: "Nil"
+        TokenKind.Ident(_): "Ident"
+        TokenKind.Let: "Let"
+        TokenKind.Var: "Var"
+        TokenKind.Def: "Def"
+        TokenKind.Return: "Return"
+        TokenKind.If: "If"
+        TokenKind.Elif: "Elif"
+        TokenKind.Else: "Else"
+        TokenKind.Match: "Match"
+        TokenKind.While: "While"
+        TokenKind.Do: "Do"
+        TokenKind.Loop: "Loop"
+        TokenKind.Wait: "Wait"
+        TokenKind.For: "For"
+        TokenKind.In: "In"
+        TokenKind.Break: "Break"
+        TokenKind.Continue: "Continue"
+        TokenKind.Struct: "Struct"
+        TokenKind.Enum: "Enum"
+        TokenKind.Trait: "Trait"
+        TokenKind.Use: "Use"
+        TokenKind.Ext: "Ext"
+        TokenKind.As: "As"
+        TokenKind.And: "And"
+        TokenKind.Or: "Or"
+        TokenKind.Not: "Not"
+        TokenKind.Is: "Is"
+        TokenKind.SelfKw: "SelfKw"
+        TokenKind.Throw: "Throw"
+        TokenKind.Throws: "Throws"
+        TokenKind.Try: "Try"
+        TokenKind.Catch: "Catch"
+        TokenKind.Defer: "Defer"
+        TokenKind.Void: "Void"
+        TokenKind.Pub: "Pub"
+        TokenKind.Guard: "Guard"
+        TokenKind.Task: "Task"
+        TokenKind.Join: "Join"
+        TokenKind.Stream: "Stream"
+        TokenKind.Yield: "Yield"
+        TokenKind.Static: "Static"
+        TokenKind.Type: "Type"
+        TokenKind.Req: "Req"
+        TokenKind.Transient: "Transient"
+        TokenKind.With: "With"
+        TokenKind.Get: "Get"
+        TokenKind.Set: "Set"
+        TokenKind.Init: "Init"
+        TokenKind.Pass: "Pass"
+        TokenKind.Native: "Native"
+        TokenKind.Mod: "Mod"
+        TokenKind.Plus: "Plus"
+        TokenKind.Minus: "Minus"
+        TokenKind.Star: "Star"
+        TokenKind.Slash: "Slash"
+        TokenKind.Percent: "Percent"
+        TokenKind.Eq: "Eq"
+        TokenKind.EqEq: "EqEq"
+        TokenKind.EqEqEq: "EqEqEq"
+        TokenKind.BangEq: "BangEq"
+        TokenKind.Lt: "Lt"
+        TokenKind.Gt: "Gt"
+        TokenKind.LtEq: "LtEq"
+        TokenKind.GtEq: "GtEq"
+        TokenKind.Dot: "Dot"
+        TokenKind.DotDot: "DotDot"
+        TokenKind.DotDotEq: "DotDotEq"
+        TokenKind.DotDotDot: "DotDotDot"
+        TokenKind.Question: "Question"
+        TokenKind.QuestionDot: "QuestionDot"
+        TokenKind.Bang: "Bang"
+        TokenKind.Tick: "Tick"
+        TokenKind.Ampersand: "Ampersand"
+        TokenKind.Pipe: "Pipe"
+        TokenKind.Caret: "Caret"
+        TokenKind.Tilde: "Tilde"
+        TokenKind.PlusEq: "PlusEq"
+        TokenKind.MinusEq: "MinusEq"
+        TokenKind.StarEq: "StarEq"
+        TokenKind.SlashEq: "SlashEq"
+        TokenKind.PercentEq: "PercentEq"
+        TokenKind.AmpersandEq: "AmpersandEq"
+        TokenKind.PipeEq: "PipeEq"
+        TokenKind.CaretEq: "CaretEq"
+        TokenKind.QuestionEq: "QuestionEq"
+        TokenKind.PipeArrow: "PipeArrow"
+        TokenKind.LParen: "LParen"
+        TokenKind.RParen: "RParen"
+        TokenKind.LBracket: "LBracket"
+        TokenKind.RBracket: "RBracket"
+        TokenKind.LBrace: "LBrace"
+        TokenKind.RBrace: "RBrace"
+        TokenKind.Comma: "Comma"
+        TokenKind.Colon: "Colon"
+        TokenKind.At: "At"
+        TokenKind.Newline: "Newline"
+        TokenKind.Semicolon: "Semicolon"
+        TokenKind.Indent: "Indent"
+        TokenKind.Dedent: "Dedent"
+        TokenKind.Eof: "Eof"
+        TokenKind.Comment(_): "Comment"
+
+def bool parser_check(var Parser p, string name):
+    token_kind_name(p.peek()) == name
+
+def bool parser_check2(var Parser p, string name):
+    token_kind_name(p.peek2()) == name
+
+def Token parser_advance(var Parser p) throws:
+    p.advance()
+
+def bool parser_eat(var Parser p, string name) throws:
+    if parser_check(p, name):
+        p.advance()
+        return true
+    return false
+
+def Token parser_expect(var Parser p, string name) throws:
+    if parser_check(p, name):
+        return p.advance()
+    throw "expected {name}, got {token_kind_name(p.peek())}"
+
+def string parser_expect_ident(var Parser p) throws:
+    if parser_check(p, "Ident"):
+        return p.advance().text()
+    throw "expected identifier, got {token_kind_name(p.peek())}"
+
+def string parser_expect_ident_or_keyword(var Parser p) throws:
+    let k = p.peek()
+    let name = token_kind_name(k)
+    if name == "Ident" or name == "Let" or name == "Var" or name == "Def" or name == "Return" or name == "If" or name == "For" or name == "While" or name == "Match" or name == "Type":
+        return p.advance().text()
+    throw "expected identifier or keyword, got {name}"
+
+def bool parser_peek_is_ident(var Parser p):
+    parser_check(p, "Ident")
+
+def bool parser_peek_is_int(var Parser p):
+    parser_check(p, "Int")
+
+def bool parser_is_newline(var Parser p):
+    parser_check(p, "Newline") or parser_check(p, "Semicolon")
+
+def int parser_line(var Parser p):
+    p.current_line()
+
+def int parser_pos(var Parser p):
+    p.pos
+
+def void parser_set_pos(var Parser p, int pos):
+    p.pos = pos
+
+def void parser_skip_newlines(var Parser p) throws:
+    while parser_check(p, "Newline") or parser_check(p, "Semicolon"):
+        p.advance()
+        nil
+
+def void parser_skip_newlines_and_indent(var Parser p) throws:
+    while parser_check(p, "Newline") or parser_check(p, "Indent") or parser_check(p, "Semicolon"):
+        p.advance()
+        nil
+
+def void parser_expect_newline(var Parser p) throws:
+    if parser_check(p, "Newline") or parser_check(p, "Semicolon") or parser_check(p, "Eof"):
+        if not parser_check(p, "Eof"):
+            p.advance()
+    else:
+        throw "expected newline, got {token_kind_name(p.peek())}"
+
+def void parser_expect_newline_soft(var Parser p) throws:
+    if parser_check(p, "Newline") or parser_check(p, "Semicolon"):
+        p.advance()
+        nil
+
+def string parser_peek_ident(var Parser p):
+    match p.peek():
+        TokenKind.Ident(name): name
+        _: ""
+
+def int parser_peek_int(var Parser p):
+    match p.peek():
+        TokenKind.Int(n): n
+        _: 0
+
+def float parser_peek_float(var Parser p):
+    match p.peek():
+        TokenKind.Float(f): f
+        _: 0.0
+
+def string parser_peek_str(var Parser p):
+    match p.peek():
+        TokenKind.Str(s): s
+        _: ""
+
+def bool parser_peek_bool(var Parser p):
+    match p.peek():
+        TokenKind.Bool(b): b
+        _: false
+
+def [RawInterpPart] parser_peek_interp_parts(var Parser p):
+    match p.peek():
+        TokenKind.StringInterp(parts): parts
+        _: []
+
+def string parser_peek_comment(var Parser p):
+    match p.peek():
+        TokenKind.Comment(text): text
+        _: ""
+
+def Token parser_peek_token_at(var Parser p, int offset):
+    let idx = p.pos + offset
+    if idx < p.tokens.length:
+        p.tokens[idx]
+    else:
+        Token(kind: TokenKind.Eof, line: 0)
+
+def bool parser_token_at_is_eq(var Parser p, int offset):
+    token_kind_name(parser_peek_token_at(p, offset).kind) == "Eq"
+
+def bool parser_token_at_offset_is(var Parser p, int offset, string name):
+    token_kind_name(parser_peek_token_at(p, offset).kind) == name
+
+def void parser_skip_to_offset(var Parser p, int offset) throws:
+    p.pos = p.pos + offset
+
+def bool parser_peek_next_is(var Parser p, string name):
+    parser_check2(p, name)
+
+def bool parser_peek_next_is_colon(var Parser p):
+    parser_check2(p, "Colon")
+
+def bool parser_peek_next_is_qualifier(var Parser p):
+    let n = token_kind_name(p.peek2())
+    n == "Tick" or n == "Ampersand"
+
+def bool parser_peek_is_macro_call(var Parser p):
+    false
+
+def bool parser_peek_is_generic_call(var Parser p):
+    false
+
+def bool parser_peek_is_trailing_closure(var Parser p):
+    false
+
+def bool parser_peek_is_trailing_body_no_colon(var Parser p) throws:
+    false
+
+def bool parser_peek_is_trailing_closure_no_paren(var Parser p):
+    false
+
+def bool parser_peek_is_typed_closure(var Parser p) throws:
+    false
+
+def bool parser_peek_starts_expr(var Parser p) throws:
+    let name = token_kind_name(p.peek())
+    name == "Int" or name == "Float" or name == "Str" or name == "Bool" or name == "Nil" or name == "Ident" or name == "LParen" or name == "LBracket" or name == "LBrace" or name == "Not" or name == "Minus" or name == "SelfKw"
+
+def bool parser_allow_noparen_closure(var Parser p) throws:
+    true
+
+def bool parser_get_allow_noparen_closure(var Parser p) throws:
+    true
+
+def bool parser_get_allow_trailing_closure(var Parser p) throws:
+    true
+
+def void parser_set_allow_noparen_closure(var Parser p, bool v) throws:
+    nil
+
+def void parser_set_allow_trailing_closure(var Parser p, bool v) throws:
+    nil
+
+def int parser_depth(var Parser p) throws:
+    0
+
+def void parser_depth_inc(var Parser p) throws:
+    nil
+
+def void parser_depth_dec(var Parser p) throws:
+    nil
+
+def bool parser_is_type_start_before_ident(var Parser p):
+    false
+
+def bool parser_is_let_destructure(var Parser p) throws:
+    false
+
+def bool parser_is_for_with_vars(var Parser p) throws:
+    false
+
+def bool parser_is_task_fn_shorthand(var Parser p) throws:
+    false
+
+def bool parser_peek_dot_after_newlines(var Parser p) throws:
+    false
+
+def string parser_peek_debug(var Parser p) throws:
+    token_kind_name(p.peek())
+
+# ── Type parsing ──────────────────────────────────────────────────────────────
+
+def Type parse_type(var Parser p) throws:
+    let base = parse_type_base(p)
+    if p.eat(TokenKind.Question):
+        Type.Optional(base)
+    else:
+        base
+
+def Type parse_type_base(var Parser p) throws:
+    match p.peek():
+        TokenKind.Ident(s):
+            p.advance()
+            match s:
+                "int":   Type.Int
+                "uint":  Type.Uint
+                "float": Type.Float
+                "string": Type.Str
+                "bool":  Type.Bool
+                "void":  Type.Void
+                _:       Type.Named(s)
+        TokenKind.Void:
+            p.advance()
+            Type.Void
+        TokenKind.LBracket:
+            p.advance()
+            let inner = parse_type(p)
+            p.expect(TokenKind.RBracket)
+            Type.Array(inner)
+        TokenKind.LBrace:
+            p.advance()
+            let key = parse_type(p)
+            p.expect(TokenKind.Eq)
+            let val = parse_type(p)
+            p.expect(TokenKind.RBrace)
+            Type.Dict(key, val)
+        TokenKind.LParen:
+            p.advance()
+            var types = [Type]{}
+            if p.peek() != TokenKind.RParen:
+                types.append(parse_type(p))
+                while p.eat(TokenKind.Comma):
+                    if p.peek() == TokenKind.RParen:
+                        break
+                    types.append(parse_type(p))
+            p.expect(TokenKind.RParen)
+            Type.Tuple(types)
+        _:
+            throw "expected type, got {token_kind_name(p.peek())} at line {p.current_line()}"
+
+# ── Fn / struct / enum / program parsing ─────────────────────────────────────
+
+def FnDecl parse_fn_decl(var Parser p, bool is_pub, bool is_def) throws:
+    let line = p.current_line()
+    var mutating = true
+    if p.eat(TokenKind.Req):
+        mutating = false
+    else:
+        p.expect(TokenKind.Def)
+    var return_ty = Type.Void
+    var has_ret = false
+    match p.peek():
+        TokenKind.Ident(_): has_ret = true
+        TokenKind.Void:     has_ret = true
+        TokenKind.LBracket: has_ret = true
+        TokenKind.LBrace:   has_ret = true
+        TokenKind.LParen:   has_ret = true
+        _: nil
+    if has_ret:
+        return_ty = parse_type(p)
+    let name = p.expect(TokenKind.Ident(""))
+    var [Param] params = []
+    p.expect(TokenKind.LParen)
+    while p.peek() != TokenKind.RParen:
+        params.append(parse_param(p))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    let can_throw = p.eat(TokenKind.Throws)
+    p.expect(TokenKind.Colon)
+    let body = parse_block(p)
+    FnDecl(name: name.text(), params: params, return_ty: return_ty, can_throw: can_throw, mutating: mutating, is_pub: is_pub, body: body, line: line, qualifier: nil, is_task: false, is_stream: false, stream_capacity: nil, is_native: false, throws_ty: nil, type_params: [], where_clause: [], attrs: [])
+
+def Param parse_param(var Parser p) throws:
+    let line = p.current_line()
+    let mutable = p.eat(TokenKind.Var)
+    let ty = parse_type(p)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    Param(name: name_tok.text(), ty: ty, mutable: mutable, owned: false, variadic: false, default: nil, line: line)
+
+def StructDecl parse_struct_decl(var Parser p, bool is_pub) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Struct)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text()
+    p.expect(TokenKind.Colon)
+    p.expect(TokenKind.Newline)
+    p.expect(TokenKind.Indent)
+    var fields = [FieldDecl]{}
+    var methods = [FnDecl]{}
+    var inits = [InitDecl]{}
+    while p.peek() != TokenKind.Dedent:
+        if p.peek() == TokenKind.Eof:
+            break
+        match p.peek():
+            TokenKind.Def:
+                methods.append(parse_fn_decl(p, false, true))
+            TokenKind.Req:
+                methods.append(parse_fn_decl(p, false, false))
+            TokenKind.Init:
+                inits.append(parse_init_decl(p))
+            _:
+                fields.append(parse_field_decl(p))
+    p.eat(TokenKind.Dedent)
+    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: [], type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
+
+def FieldDecl parse_field_decl(var Parser p) throws:
+    let line = p.current_line()
+    let mutable = p.eat(TokenKind.Var)
+    let ty = parse_type(p)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    var Expr? default = nil
+    if p.eat(TokenKind.Eq):
+        default = some(parse_expr(p))
+    while p.eat(TokenKind.Newline):
+        nil
+    FieldDecl(name: name_tok.text(), ty: ty, mutable: mutable, default: default, line: line, is_pub: false, is_transient: false)
+
+def InitDecl parse_init_decl(var Parser p) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Init)
+    p.expect(TokenKind.LParen)
+    var [InitParam] params = []
+    while p.peek() != TokenKind.RParen:
+        let par = parse_param(p)
+        params.append(InitParam(is_pub: false, mutable: par.mutable, name: par.name, ty: par.ty, default: par.default, line: par.line))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    var [Stmt] body = []
+    if p.eat(TokenKind.Colon):
+        body = parse_block(p)
+    else:
+        while p.eat(TokenKind.Newline):
+            nil
+    return InitDecl(params: params, body: body, line: line)
+
+def EnumDecl parse_enum_decl(var Parser p, bool is_pub) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Enum)
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text()
+    p.expect(TokenKind.Colon)
+    p.expect(TokenKind.Newline)
+    p.expect(TokenKind.Indent)
+    var variants = [EnumVariant]{}
+    var methods = [FnDecl]{}
+    while p.peek() != TokenKind.Dedent:
+        if p.peek() == TokenKind.Eof:
+            break
+        match p.peek():
+            TokenKind.Def:
+                methods.append(parse_fn_decl(p, false, true))
+            TokenKind.Req:
+                methods.append(parse_fn_decl(p, false, false))
+            _:
+                variants.append(parse_enum_variant(p))
+    p.eat(TokenKind.Dedent)
+    EnumDecl(name: name, variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: [], protocols: [], setters: [], conversions: [], attrs: [])
+
+def EnumVariant parse_enum_variant(var Parser p) throws:
+    let line = p.current_line()
+    let name_tok = p.expect(TokenKind.Ident(""))
+    let name = name_tok.text()
+    var fields = [VariantField]{}
+    if p.eat(TokenKind.LParen):
+        while p.peek() != TokenKind.RParen:
+            let ty = parse_type(p)
+            fields.append(VariantField(name: nil, ty: ty))
+            if p.peek() != TokenKind.RParen:
+                p.expect(TokenKind.Comma)
+        p.expect(TokenKind.RParen)
+    while p.eat(TokenKind.Newline):
+        nil
+    EnumVariant(name: name, fields: fields, line: line, attrs: [])
+
+def Item parse_item(var Parser p) throws:
+    match p.peek():
+        TokenKind.Def:
+            Item.Fn(parse_fn_decl(p, false, true))
+        TokenKind.Req:
+            Item.Fn(parse_fn_decl(p, false, false))
+        TokenKind.Struct:
+            Item.Struct(parse_struct_decl(p, false))
+        TokenKind.Enum:
+            Item.Enum(parse_enum_decl(p, false))
+        _:
+            Item.Stmt(parse_stmt(p))
+
+def Program parse_program(var Parser p) throws:
+    var items = [Item]{}
+    while p.eat(TokenKind.Newline):
+        nil
+    while p.peek() != TokenKind.Eof:
+        items.append(parse_item(p))
+        while p.eat(TokenKind.Newline):
+            nil
+    Program(items: items)
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def Program parse(string source) throws:
+    let toks = lex(source)
+    var p = Parser(tokens: toks, pos: 0)
+    parse_program(p)
+# ── AST builder helpers ────────────────────────────────────────────────────────
+
+struct ThrowsTask:
+    bool can_throw
+    bool is_task
+
+def Stmt stmt_expr(Expr expr, int line):
+    Stmt.Expr(expr)
+
+def Stmt stmt_fn(FnDecl decl):
+    Stmt.Fn(decl)
+
+def Expr make_var_expr(string name, int line):
+    Expr(kind: ExprKind.Var(name), line: line)
+
+def Expr make_binop(string op_name, Expr left, Expr right, int line):
+    let op = match op_name:
+        "Add": BinOp.Add
+        "Plus": BinOp.Add
+        "Sub": BinOp.Sub
+        "Minus": BinOp.Sub
+        "Mul": BinOp.Mul
+        "Star": BinOp.Mul
+        "Div": BinOp.Div
+        "Slash": BinOp.Div
+        "Rem": BinOp.Rem
+        "Percent": BinOp.Rem
+        "Eq": BinOp.Eq
+        "EqEq": BinOp.Eq
+        "NotEq": BinOp.NotEq
+        "BangEq": BinOp.NotEq
+        "Lt": BinOp.Lt
+        "Gt": BinOp.Gt
+        "LtEq": BinOp.LtEq
+        "GtEq": BinOp.GtEq
+        "And": BinOp.And
+        "Or": BinOp.Or
+        "BitAnd": BinOp.BitAnd
+        "Ampersand": BinOp.BitAnd
+        "BitOr": BinOp.BitOr
+        "Pipe": BinOp.BitOr
+        "BitXor": BinOp.BitXor
+        "Caret": BinOp.BitXor
+        "Shl": BinOp.Shl
+        "LtLt": BinOp.Shl
+        "Shr": BinOp.Shr
+        "GtGt": BinOp.Shr
+        _: throw "unknown binary operator: {op_name}"
+    Expr(kind: ExprKind.BinOp(op, left, right), line: line)
+
+def Expr make_unary(string op_name, Expr expr, int line):
+    let op = match op_name:
+        "Neg": UnaryOp.Neg
+        "Not": UnaryOp.Not
+        _: UnaryOp.BitNot
+    Expr(kind: ExprKind.UnaryOp(op, expr), line: line)
+
+def Expr make_assign(Expr target, Expr value, int line):
+    Expr(kind: ExprKind.Assign(target, value), line: line)
+
+def Arg make_arg(string? label, Expr value, bool spread):
+    Arg(label: label, value: value, spread: spread)
+
+def Expr make_call(Expr callee, [Arg] args, int line):
+    Expr(kind: ExprKind.Call(callee, args), line: line)
+
+def Expr make_method_call(Expr receiver, string name, [Arg] args, int line):
+    Expr(kind: ExprKind.MethodCall(receiver, name, args), line: line)
+
+def Expr make_closure([Param] params, Type? return_ty, ClosureBody body, bool can_throw, bool is_task, int line):
+    Expr(kind: ExprKind.Closure(params, return_ty, body, can_throw, is_task), line: line)
+
+def ClosureBody closure_body_block([Stmt] stmts):
+    ClosureBody.Block(stmts)
+
+def ClosureBody closure_body_expr(Expr expr):
+    ClosureBody.Expr(expr)
+
+def (bool, ClosureBody) closure_body_is_block(ClosureBody body):
+    match body:
+        ClosureBody.Block(stmts): (true, ClosureBody.Block(stmts))
+        ClosureBody.Expr(e): (false, ClosureBody.Expr(e))
+
+def Expr make_else_expr(Expr expr, Expr default, int line):
+    Expr(kind: ExprKind.Else(expr, default), line: line)
+
+def Expr make_do_expr([Stmt] stmts, int line):
+    Expr(kind: ExprKind.Do(stmts), line: line)
+
+def LetStmt make_let_stmt(bool mutable, bool is_pub, bool is_static, string name, Type? ty, Expr? value, bool is_move, int line):
+    LetStmt(
+        mutable: mutable,
+        is_pub: is_pub,
+        is_static: is_static,
+        name: name,
+        ty: ty,
+        value: value,
+        is_move: is_move,
+        line: line
+    )
+
+def Param make_param(string name, Type? ty, bool mutable):
+    Param(name: name, ty: ty, mutable: mutable, owned: false, variadic: false, default: nil, line: 0)
+
+def FieldDecl make_field(string name, Type ty, bool mutable, Expr? default, int line):
+    FieldDecl(name: name, is_pub: false, ty: ty, mutable: mutable, is_transient: false, default: default, line: line)
+
+def (ThrowsTask, ClosureBody) infer_throws_task(ClosureBody body):
+    var bool can_throw = false
+    var bool is_task = false
+    let ret_body = match body:
+        ClosureBody.Block(stmts):
+            for stmt in stmts:
+                match stmt:
+                    Stmt.Throw(_): can_throw = true
+                    _: nil
+            ClosureBody.Block(stmts)
+        ClosureBody.Expr(e):
+            ClosureBody.Expr(e)
+    let tt = ThrowsTask(can_throw: can_throw, is_task: is_task)
+    return (tt, ret_body)
+
+def Expr make_try_else_block([Stmt] try_stmts, [Stmt] else_stmts, int line):
+    Expr(kind: ExprKind.TryElseBlock(try_stmts, else_stmts), line: line)
+
+def StringSegment segment_lit(string text):
+    StringSegment.Lit(text)
+
+def void check_no_return([Stmt] stmts, string context):
+    for stmt in stmts:
+        match stmt:
+            Stmt.Return(_):
+                throw "return not allowed in {context}"
+            _: nil
+
+def Expr make_block_expr([Stmt] stmts, int line):
+    Expr(kind: ExprKind.Block(stmts), line: line)
+
+def Expr make_field_expr(Expr expr, string name, int line):
+    Expr(kind: ExprKind.Field(expr, name), line: line)
+
+def bool expr_is_var(Expr expr):
+    match expr.kind:
+        ExprKind.Var(_): true
+        _: false
+
+# ─── Missing Stmt constructors ───────────────────────────────────────────────
+
+def Stmt stmt_let(LetStmt stmt):
+    Stmt.Let(stmt)
+
+def Stmt stmt_let_destructure(LetDestructureStmt stmt):
+    Stmt.LetDestructure(stmt)
+
+def Stmt stmt_return(ReturnStmt stmt):
+    Stmt.Return(stmt)
+
+def Stmt stmt_throw(ThrowStmt stmt):
+    Stmt.Throw(stmt)
+
+def Stmt stmt_if(IfStmt stmt):
+    Stmt.If(stmt)
+
+def Stmt stmt_if_let(IfLetStmt stmt):
+    Stmt.IfLet(stmt)
+
+def Stmt stmt_while(WhileStmt stmt):
+    Stmt.While(stmt)
+
+def Stmt stmt_while_let(WhileLetStmt stmt):
+    Stmt.WhileLet(stmt)
+
+def Stmt stmt_do_while([Stmt] body, Expr condition, int line):
+    Stmt.DoWhile(DoWhileStmt(body: body, condition: condition, line: line))
+
+def Stmt stmt_loop(LoopStmt stmt):
+    Stmt.Loop(stmt)
+
+def Stmt stmt_for(ForStmt stmt):
+    Stmt.For(stmt)
+
+def Stmt stmt_match(MatchStmt stmt):
+    Stmt.Match(stmt)
+
+def Stmt stmt_try(TryStmt stmt):
+    Stmt.Try(stmt)
+
+def Stmt stmt_guard(GuardStmt stmt):
+    Stmt.Guard(stmt)
+
+def Stmt stmt_defer([Stmt] body):
+    Stmt.Defer(body)
+
+def Stmt stmt_struct(StructDecl decl):
+    Stmt.Struct(decl)
+
+def Stmt stmt_enum(EnumDecl decl):
+    Stmt.Enum(decl)
+
+def Stmt stmt_mod(ModDecl decl):
+    Stmt.Mod(decl)
+
+def Stmt stmt_alias(AliasDecl decl):
+    Stmt.Alias(decl)
+
+def Stmt stmt_comment(string text):
+    Stmt.Comment(text)
+
+def Stmt stmt_yield(Expr expr, int line):
+    Stmt.Yield(expr, line)
+
+def Stmt stmt_wait(Expr expr, int line):
+    Stmt.Wait(expr, line)
+
+# ─── Missing Stmt make-helpers ────────────────────────────────────────────────
+
+def Stmt make_break_stmt(int line, Expr? value):
+    Stmt.Break(line, value)
+
+def Stmt make_continue_stmt(int line):
+    Stmt.Continue(line)
+
+def ReturnStmt make_return_stmt(Expr? value, int line):
+    ReturnStmt(value: value, line: line)
+
+def ThrowStmt make_throw_stmt(Expr? value, int line):
+    ThrowStmt(value: value, line: line)
+
+def IfStmt make_if_stmt([IfBranch] branches, [Stmt]? else_body, int line):
+    IfStmt(branches: branches, else_body: else_body, line: line)
+
+def WhileStmt make_while_stmt(Expr condition, [Stmt] body, int line):
+    WhileStmt(condition: condition, body: body, line: line)
+
+def ForStmt make_for_stmt([string] vars, Expr iterable, [Stmt] body, int line):
+    ForStmt(vars: vars, iterable: iterable, body: body, line: line)
+
+def MatchStmt make_match_stmt(Expr subject, [MatchArm] arms, int line):
+    MatchStmt(subject: subject, arms: arms, line: line)
+
+def LoopStmt make_loop_stmt([Stmt] body, int line):
+    LoopStmt(body: body, line: line)
+
+def LetDestructureStmt make_let_destructure_stmt(bool mutable, [DestructureBinding] bindings, Expr value, int line):
+    LetDestructureStmt(mutable: mutable, bindings: bindings, value: value, line: line)
+
+# ─── Missing Expr make-helpers ────────────────────────────────────────────────
+
+def Expr make_bool_expr(bool b, int line):
+    Expr(kind: ExprKind.Bool(b), line: line)
+
+def Expr make_int_expr(int n, int line):
+    Expr(kind: ExprKind.Int(n), line: line)
+
+def Expr make_float_expr(float f, int line):
+    Expr(kind: ExprKind.Float(f), line: line)
+
+def Expr make_nil_expr(int line):
+    Expr(kind: ExprKind.Nil, line: line)
+
+def Expr make_str_expr(string s, int line):
+    Expr(kind: ExprKind.Str(s), line: line)
+
+def Expr make_void_expr(int line):
+    Expr(kind: ExprKind.Void, line: line)
+
+def Expr make_array([Expr] elems, int line):
+    Expr(kind: ExprKind.Array(elems), line: line)
+
+def Expr make_dict([(Expr, Expr)] pairs, int line):
+    Expr(kind: ExprKind.Dict(pairs), line: line)
+
+def Expr make_set([Expr] elems, int line):
+    Expr(kind: ExprKind.Set(elems), line: line)
+
+def Expr make_tuple([Expr] elems, int line):
+    Expr(kind: ExprKind.Tuple(elems), line: line)
+
+def Expr make_range(Expr start, Expr end, bool inclusive, int line):
+    Expr(kind: ExprKind.Range(start, end, inclusive), line: line)
+
+def Expr make_index(Expr expr, Expr index, int line):
+    Expr(kind: ExprKind.Index(expr, index), line: line)
+
+def Expr make_cast(Expr expr, Type ty, int line):
+    Expr(kind: ExprKind.Cast(expr, ty), line: line)
+
+def Expr make_pipe(Expr left, string name, [Arg] args, int line):
+    Expr(kind: ExprKind.Pipe(left, name, args), line: line)
+
+def Expr make_dot_ident(string name, int line):
+    Expr(kind: ExprKind.DotIdent(name), line: line)
+
+def Expr make_string_interp([StringSegment] segments, int line):
+    Expr(kind: ExprKind.StringInterp(segments), line: line)
+
+def Expr make_optional_field(Expr expr, string name, int line):
+    Expr(kind: ExprKind.OptionalField(expr, name), line: line)
+
+def Expr make_optional_method_call(Expr expr, string name, [Arg] args, int line):
+    Expr(kind: ExprKind.OptionalMethodCall(expr, name, args), line: line)
+
+def Expr make_generic_call(Expr callee, [Type] type_args, [Arg] args, int line):
+    Expr(kind: ExprKind.GenericCall(callee, type_args, args), line: line)
+
+def Expr make_macro_call(string name, [Expr] args, int line):
+    Expr(kind: ExprKind.MacroCall(name, args), line: line)
+
+def Expr make_task_expr(Expr expr, int line):
+    Expr(kind: ExprKind.Task(expr), line: line)
+
+def Expr make_task_with_timeout(Expr timeout, Expr expr, int line):
+    Expr(kind: ExprKind.TaskWithTimeout(timeout, expr), line: line)
+
+def Expr make_join_all([Expr] exprs, int line):
+    Expr(kind: ExprKind.JoinAll(exprs), line: line)
+
+def Expr make_if_expr(IfStmt stmt, int line):
+    Expr(kind: ExprKind.If(stmt), line: line)
+
+def Expr make_loop_expr(LoopStmt stmt, int line):
+    Expr(kind: ExprKind.Loop(stmt), line: line)
+
+def Expr make_match_expr(MatchStmt stmt, int line):
+    Expr(kind: ExprKind.Match(stmt), line: line)
+
+def Expr make_try_else(Expr expr, Expr default, int line):
+    Expr(kind: ExprKind.TryElse(expr, default), line: line)
+
+# ─── Other missing helpers ─────────────────────────────────────────────────────
+
+def StringSegment segment_expr(Expr expr):
+    StringSegment.Expr(expr)
+
+def StringSegment segment_formatted_expr(Expr expr, string fmt):
+    StringSegment.FormattedExpr(expr, fmt)
+
+def DestructureBinding make_destructure_binding(string name, Type? ty):
+    DestructureBinding(name: name, ty: ty)
+
+def CatchClause make_catch_clause([string] types, string? variant, [Stmt] body, int line):
+    CatchClause(types: types, variant: variant, body: body, line: line)
+
+def MatchArm make_match_arm([Pattern] patterns, Expr? match_guard, MatchBody body, int line):
+    MatchArm(patterns: patterns, match_guard: match_guard, body: body, line: line)
+
+def Param make_param_at(string name, Type? ty, bool mutable, int line):
+    Param(name: name, ty: ty, mutable: mutable, owned: false, variadic: false, default: nil, line: line)
+
+def string int_to_string(int n):
+    "{n}"
+
+def string string_trim(string s):
+    s.trim()
+
+def string string(Value v):
+    val_to_string(v)
+
+def Type type_named(string name):
+    Type.Named(name)
+
+static let int MAX_EXPR_DEPTH = 200
+
+def TryStmt make_try_stmt([Stmt] body, [CatchClause] catch_clauses, int line):
+    TryStmt(body: body, catch_clauses: catch_clauses, line: line)
+
+def [Arg] map_args([Expr] exprs):
+    var result = []
+    for e in exprs:
+        result.append(make_arg(nil, e, false))
+    result
+
+def [Param] elems_to_params([Expr] elems, int line):
+    var result = []
+    for e in elems:
+        result.append(expr_to_param(e, line))
+    result
+
+def Param expr_to_param(Expr expr, int line):
+    match expr.kind:
+        ExprKind.Var(name): make_param(name, nil, false)
+        _: make_param("_", nil, false)
+
+def [Stmt] unwrap_block_or_wrap(Expr expr):
+    match expr.kind:
+        ExprKind.Block(stmts): stmts
+        _: [stmt_expr(expr, expr.line)]
+
+def string? shorthand_binop_from_peek(var Parser p):
+    let k = parser_peek_kind(p)
+    match k:
+        "PlusEq": some("Plus")
+        "MinusEq": some("Minus")
+        "StarEq": some("Star")
+        "SlashEq": some("Slash")
+        "PercentEq": some("Percent")
+        "AmpersandEq": some("Ampersand")
+        "PipeEq": some("Pipe")
+        "CaretEq": some("Caret")
+        _: nil
+
+def bool parser_is_newline2(var Parser p):
+    let k = parser_peek_kind(p)
+    k == "Newline" or k == "Eof"
+
+struct SkipResult:
+    int offset
+    int indents
+
+def SkipResult? peek_pipe_after_newlines(var Parser p):
+    nil
+
+def SkipResult? peek_dot_after_newlines_and_indents(var Parser p):
+    nil
+
+def Parser make_parser([Token] tokens):
+    var par = Parser(tokens: tokens, pos: 0)
+    par
+
+def LoopStmt parse_loop_stmt(var Parser p) throws:
+    let body = parse_block(p)
+    LoopStmt(body: body, line: p.pos)
+
+def Pattern parse_pattern(var Parser p) throws:
+    let name = parser_expect_ident(p)
+    Pattern.Bind(name)
+
+def [MatchArm] parse_inline_match_arms(var Parser p) throws:
+    var arms = []
+    while not parser_check(p, "Newline") and not parser_check(p, "Eof"):
+        let arm = parse_match_arm(p)
+        arms.append(arm)
+    arms
+
+def MatchArm parse_match_arm(var Parser p) throws:
+    let pat = parse_pattern(p)
+    parser_expect(p, "Colon")
+    let body = parse_expr(p)
+    let body_line = body.line
+    let stmt = stmt_expr(body, body_line)
+    make_match_arm([pat], nil, MatchBody.Block([stmt]), p.pos)
+
+def ModDecl parse_mod_decl(var Parser p, bool is_pub) throws:
+    let name = parser_expect_ident(p)
+    parser_expect_newline(p)
+    ModDecl(name: name, items: [], line: p.pos)
+
+def AliasDecl parse_alias_decl(var Parser p) throws:
+    let name = parser_expect_ident(p)
+    parser_expect(p, "As")
+    let ty = parse_type(p)
+    AliasDecl(name: name, ty: ty, type_params: [], newtype: false, line: p.pos)
+
+def GuardStmt parse_guard_stmt(var Parser p) throws:
+    let cond = parse_expr(p)
+    parser_expect(p, "Else")
+    let body = parse_block(p)
+    GuardStmt(cond: GuardCond.Expr(cond), else_body: body, line: p.pos)
+
+def [Stmt] parse_defer_stmt(var Parser p) throws:
+    parse_block(p)
+
+def IfLetStmt parse_if_let_stmt(var Parser p) throws:
+    let name = parser_expect_ident(p)
+    parser_expect(p, "Eq")
+    let expr = parse_expr(p)
+    let then_body = parse_block(p)
+    IfLetStmt(clauses: [CondClause.Let(name, expr)], then_body: then_body, else_body: nil, line: p.pos)
+
+def WhileLetStmt parse_while_let_stmt(var Parser p) throws:
+    let name = parser_expect_ident(p)
+    parser_expect(p, "Eq")
+    let expr = parse_expr(p)
+    let body = parse_block(p)
+    WhileLetStmt(name: name, pattern: nil, value: expr, body: body, line: p.pos)
+
+def [Expr] parse_macro_args(var Parser p) throws:
+    var args = []
+    while not parser_check(p, "RParen") and not parser_check(p, "Newline") and not parser_check(p, "Eof"):
+        let e = parse_expr(p)
+        args.append(e)
+        parser_eat(p, "Comma")
+    args
+
+def Type apply_var_to_borrow(Type ty):
+    Type.Qualified(ty, OwnerQual.BorrowMut)
+
+def Type infer_type_from_constructor(Type qualified, Expr value):
+    qualified
+
+def FnDecl lookup_fn_decl(var Interpreter'actor interp, string name):
+    let decl_opt = interp.get_fn_decl(name)
+    if let decl = decl_opt:
+        return decl
+    throw "lookup_fn_decl: function '{name}' not found"
+
+def Value resolve_overload(var Interpreter'actor interp, [Value] variants, [Value] args):
+    match variants.length:
+        0: throw "no overloads for call"
+        _: variants[0]
+
+def Value call_native(var Interpreter'actor interp, string name, Value func, [Value] args):
+    if name == "print" or name == "println":
+        var int i = 0
+        while i < args.length:
+            if i > 0:
+                print " "
+            print value_to_string(args[i])
+            i += 1
+        print "\n"
+        return Value.Void
+    if name == "read_line":
+        return Value.Str(readLine())
+    throw "call_native: native function '{name}' not supported"
+
+def ThrowsTask parse_closure_modifiers(var Parser p) throws:
+    let can_throw = p.eat(TokenKind.Throws)
+    let is_task = p.eat(TokenKind.Task)
+    ThrowsTask(can_throw: can_throw, is_task: is_task)
+
+def bool parser_allow_trailing_closure(var Parser p):
+    true
+
+def Type parse_type_qualifier(var Parser p, Type base) throws:
+    if not p.eat(TokenKind.Tick):
+        return base
+    let qual_name = parser_expect_ident(p)
+    let qual = match qual_name:
+        "actor": OwnerQual.Actor
+        "shared": OwnerQual.Shared
+        "guard": OwnerQual.Guard
+        "stack": OwnerQual.Stack
+        "heap": OwnerQual.Owned
+        "weak": OwnerQual.Weak
+        _: OwnerQual.Actor
+    Type.Qualified(base, qual)

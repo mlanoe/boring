@@ -10,39 +10,87 @@ enum Signal:
     ErrorSignal(string message, int line)
     YieldSignal(Value val, int line)
 
+# ─── Binding ──────────────────────────────────────────────────────────────────
+
+struct Binding:
+    string name
+    Value value
+
 # ─── ObjectInner ──────────────────────────────────────────────────────────────
 
 struct ObjectInner:
     string type_name
-    [(string, Value)] fields
+    var [(string, Value)] fields
+
+    req Value? get_field(string name):
+        var i = 0
+        while i < self.fields.length:
+            if self.fields[i].0 == name:
+                return self.fields[i].1
+            i = i + 1
+        nil
+
+    def void set_field(string name, Value val):
+        var i = 0
+        while i < self.fields.length:
+            if self.fields[i].0 == name:
+                self.fields[i] = (name, val)
+                return
+            i = i + 1
+        self.fields.append((name, val))
+
+struct TypeRef:
+    string name
 
 # ─── Value ────────────────────────────────────────────────────────────────────
 
 enum Value:
-    NilVal
-    VoidVal
-    UninitializedVal
-    BoolVal(bool v)
-    IntVal(int n)
-    FloatVal(float f)
-    StrVal(string s)
-    ArrayVal([Value] elems)
-    TupleVal([Value] elems)
-    DictVal([(Value, Value)] pairs)
-    SetVal([Value] elems)
-    ObjectVal(ObjectInner'actor inner)
-    EnumVariantVal(string typeName, string variant, [Value] fields)
-    FnVal(string name, Env'actor captured)
-    ClosureVal([Value] params, [Value] body, Env'actor captured)
-    NativeFnVal(string name, Value func)
-    OverloadedFnVal(string name, [Value] variants)
-    RangeVal(int start, int end, bool inclusive)
-    LabeledVal(string label, Value val)
+    Nil
+    Void
+    Uninitialized
+    Bool(bool v)
+    Int(int n)
+    Float(float f)
+    Str(string s)
+    Array([Value] elems)
+    Tuple([Value] elems)
+    Dict([(Value, Value)] pairs)
+    Set([Value] elems)
+    Object(ObjectInner'actor inner)
+    EnumVariant(string typeName, string variant, [Value] fields)
+    Fn(string name, Env'actor? captured)
+    Closure([Param] params, ClosureBody body, Env'actor? captured)
+    NativeFn(string name, Value func)
+    OverloadedFn(string name, [Value] variants)
+    Range(int start, int end, bool inclusive, int step)
+    Labeled(string label, Value val)
+
+    req string type_name():
+        match self:
+            Value.Nil: "nil"
+            Value.Void: "void"
+            Value.Uninitialized: "uninitialized"
+            Value.Bool(_): "bool"
+            Value.Int(_): "int"
+            Value.Float(_): "float"
+            Value.Str(_): "string"
+            Value.Array(_): "array"
+            Value.Tuple(_): "tuple"
+            Value.Dict(_): "dict"
+            Value.Set(_): "set"
+            Value.Object(_): "object"
+            Value.EnumVariant(typeName, _, _): "{typeName}"
+            Value.Fn(_, _): "fn"
+            Value.Closure(_, _, _): "closure"
+            Value.NativeFn(_, _): "native-fn"
+            Value.OverloadedFn(_, _): "overloaded-fn"
+            Value.Range(_, _, _, _): "range"
+            Value.Labeled(_, _): "labeled"
 
 # ─── Env ──────────────────────────────────────────────────────────────────────
 
 struct Env:
-    {string=Value} vars
+    var {string=Value} vars
     {string} mutable_vars
     {string} owned_collections
     {string} task_safe_vars
@@ -51,25 +99,26 @@ struct Env:
     Env'actor? parent
 
     req Value? get(string name):
-        let found = self.vars.get(name, nil)
-        if found != nil:
-            found
-        elif let p = self.parent:
-            p.get(name)
+        if self.vars.has(name):
+            self.vars[name]
         else:
-            nil
+            if let p = self.parent:
+                p.get(name)
+            else:
+                nil
 
     def bool set(string name, Value value):
-        if self.vars.get(name, nil) != nil:
+        if self.vars.has(name):
             if not self.mutable_vars.contains(name):
                 false
             else:
                 self.vars.set(name, value)
                 true
-        elif let p = self.parent:
-            p.set(name, value)
         else:
-            false
+            if let p = self.parent:
+                p.set(name, value)
+            else:
+                false
 
     def void define(string name, Value value):
         self.vars.set(name, value)
@@ -85,56 +134,68 @@ struct Env:
         self.shared_bindings.add(name)
 
     def bool force_set(string name, Value value):
-        if self.vars.get(name, nil) != nil:
+        if self.vars.has(name):
             self.vars.set(name, value)
             true
-        elif let p = self.parent:
-            p.force_set(name, value)
         else:
-            false
+            if let p = self.parent:
+                p.force_set(name, value)
+            else:
+                false
 
     req bool is_mutable(string name):
-        if self.vars.get(name, nil) != nil:
+        if self.vars.has(name):
             self.mutable_vars.contains(name)
-        elif let p = self.parent:
-            p.is_mutable(name)
         else:
-            true
+            if let p = self.parent:
+                p.is_mutable(name)
+            else:
+                true
 
     req bool is_shared(string name):
-        if self.vars.get(name, nil) != nil:
+        if self.vars.has(name):
             self.shared_bindings.contains(name)
-        elif let p = self.parent:
-            p.is_shared(name)
         else:
-            false
+            if let p = self.parent:
+                p.is_shared(name)
+            else:
+                false
 
     req bool is_task_safe_var(string name):
         if self.task_safe_vars.contains(name):
             true
-        elif let p = self.parent:
-            p.is_task_safe_var(name)
         else:
-            false
+            if let p = self.parent:
+                p.is_task_safe_var(name)
+            else:
+                false
 
     req bool is_owned_collection(string name):
         if self.owned_collections.contains(name):
             true
-        elif let p = self.parent:
-            p.is_owned_collection(name)
         else:
-            false
+            if let p = self.parent:
+                p.is_owned_collection(name)
+            else:
+                false
 
     def void invalidate(string name):
-        if self.vars.get(name, nil) != nil:
+        if self.vars.has(name):
             self.vars.remove(name)
             self.mutable_vars.remove(name)
             self.owned_collections.remove(name)
             self.task_safe_vars.remove(name)
             self.owned_vars.remove(name)
             self.shared_bindings.remove(name)
-        elif let p = self.parent:
-            p.invalidate(name)
+        else:
+            if let p = self.parent:
+                p.invalidate(name)
+
+    req Env'actor? parent_opt():
+        if let p = self.parent:
+            p
+        else:
+            nil
 
     req [string] all_names():
         var names = self.vars.keys()
@@ -147,7 +208,7 @@ struct Env:
 
 def Env'actor new_env(Env'actor? parent):
     let e = Env(
-        vars = {},
+        vars = {=},
         mutable_vars = {},
         owned_collections = {},
         task_safe_vars = {},
@@ -156,9 +217,3 @@ def Env'actor new_env(Env'actor? parent):
         parent = parent
     )
     e as Env'actor
-
-# ─── Interpreter ──────────────────────────────────────────────────────────────
-
-struct Interpreter:
-    Env'actor env
-    Env'actor global_env

@@ -912,10 +912,14 @@ impl Transpiler {
             if qual_of_type(param_ty).is_some() { continue; }
             if matches!(param_ty, Type::Qualified(_, OwnerQual::Union(_))) { continue; }
             if let Some(inferred) = self.inferred_qualifiers.get(param_name.as_str()) {
+                // Auto-ref (Borrow / BorrowMut) is resolved silently — no annotation needed.
+                if matches!(inferred, OwnerQual::Borrow | OwnerQual::BorrowMut) { continue; }
+                let line = self.fn_current_param_lines.get(param_name.as_str()).copied().unwrap_or(0);
                 eprintln!(
                     "hint: parameter `{}` is always used as '{}' in this body\n  \
-                     → consider annotating it explicitly to make the contract clear at call sites",
-                    param_name, qual_name(inferred)
+                     → consider annotating it explicitly to make the contract clear at call sites\n \
+                     --> line {}",
+                    param_name, qual_name(inferred), line
                 );
             }
         }
@@ -1165,12 +1169,16 @@ fn quals_equal(a: &OwnerQual, b: &OwnerQual) -> bool {
 
 fn qual_name(q: &OwnerQual) -> &'static str {
     match q {
-        OwnerQual::Stack  => "stack",
-        OwnerQual::Owned  => "heap",
-        OwnerQual::Shared => "shared",
-        OwnerQual::Actor  => "actor",
-        OwnerQual::Guard  => "guard",
-        _                 => "?",
+        OwnerQual::Stack     => "stack",
+        OwnerQual::Owned     => "heap",
+        OwnerQual::Shared    => "shared",
+        OwnerQual::Actor     => "actor",
+        OwnerQual::Guard     => "guard",
+        OwnerQual::Weak      => "weak",
+        OwnerQual::Copy      => "copy",
+        OwnerQual::Borrow    => "T&",
+        OwnerQual::BorrowMut => "mut T&",
+        _                    => "unknown",
     }
 }
 

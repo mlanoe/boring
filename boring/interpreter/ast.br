@@ -1,3 +1,4 @@
+
 # == AST TYPES ==
 
 # ─── Attributes ───────────────────────────────────────────────────────────────
@@ -63,9 +64,9 @@ struct FnDecl:
     Type? return_ty
     [Stmt] body
     bool is_pub
-    bool throws
-    bool task
-    bool stream
+    bool can_throw
+    bool is_task
+    bool is_stream
     int? stream_capacity
     bool mutating
     bool is_native
@@ -89,8 +90,8 @@ struct SetDecl:
     string param_name
     Type param_ty
     bool is_pub
-    bool throws
-    bool task
+    bool can_throw
+    bool is_task
     [Stmt] body
     int line
 
@@ -124,8 +125,8 @@ struct TypeMethod:
     Type? return_ty
     [Stmt] body
     bool is_pub
-    bool throws
-    bool task
+    bool can_throw
+    bool is_task
     int line
 
 struct TypeVar:
@@ -139,8 +140,8 @@ struct TypeVar:
 struct AsDecl:
     bool is_pub
     Type ty
-    bool throws
-    bool task
+    bool can_throw
+    bool is_task
     [Stmt] body
     int line
 
@@ -148,7 +149,7 @@ struct FieldDecl:
     string name
     bool is_pub
     bool mutable
-    bool transient
+    bool is_transient
     Type ty
     Expr? default
     int line
@@ -214,9 +215,9 @@ struct FnSignature:
     string name
     [Param] params
     Type? return_ty
-    bool throws
-    bool task
-    bool stream
+    bool can_throw
+    bool is_task
+    bool is_stream
     bool mutating
     [string] type_params
     int line
@@ -286,8 +287,12 @@ struct ReturnStmt:
     Expr? value
     int line
 
+struct IfBranch:
+    Expr cond
+    [Stmt] body
+
 struct IfStmt:
-    [{Expr=[Stmt]}] branches
+    [IfBranch] branches
     [Stmt]? else_body
     int line
 
@@ -298,7 +303,7 @@ struct MatchStmt:
 
 struct MatchArm:
     [Pattern] patterns
-    Expr? guard
+    Expr? match_guard
     MatchBody body
     int line
 
@@ -351,6 +356,10 @@ struct ForStmt:
 struct GuardStmt:
     GuardCond cond
     [Stmt] else_body
+    int line
+
+struct DeferStmt:
+    [Stmt] body
     int line
 
 enum GuardCond:
@@ -427,7 +436,7 @@ enum ExprKind:
     Else(Expr expr, Expr default)
     OptionalField(Expr expr, string name)
     OptionalMethodCall(Expr expr, string name, [Arg] args)
-    Closure([Param] params, Type? return_ty, ClosureBody body, bool throws, bool task)
+    Closure([Param] params, Type? return_ty, ClosureBody body, bool can_throw, bool is_task)
     If(IfStmt stmt)
     Match(MatchStmt stmt)
     Block([Stmt] stmts)
@@ -437,6 +446,11 @@ enum ExprKind:
     TaskWithTimeout(Expr timeout, Expr expr)
     JoinAll([Expr] exprs)
     MacroCall(string name, [Expr] args)
+    WildcardPat
+    LiteralPat(Expr lit)
+    VarPat(string name)
+    TuplePat([Expr] pats)
+    EnumPat(string type_name, string variant, [Expr] field_pats)
 
 # ─── Operators ────────────────────────────────────────────────────────────────
 
@@ -504,7 +518,7 @@ enum Type:
     Tuple([Type] elems)
     Dict(Type key, Type value)
     Set(Type elem)
-    Fn(Type? return_ty, [Type] params, bool throws, bool task, bool req)
+    Fn(Type? return_ty, [Type] params, bool can_throw, bool is_task, bool is_req)
     Qualified(Type ty, OwnerQual qual)
     Dyn(Type inner)
     Impl(Type inner)

@@ -58,11 +58,23 @@ impl Transpiler {
             if root == "super" {
                 return;
             }
-            // Track external crate dependencies for Cargo.toml generation.
+        }
+
+        // Check if this resolves to a Boring source file — if so, inline it.
+        let rel: std::path::PathBuf = u.path.iter().collect::<std::path::PathBuf>().with_extension("br");
+        let candidate = self.source_dir.join(&rel);
+        if candidate.exists() {
+            self.inline_boring_use(&candidate, u.line);
+            return;
+        }
+
+        // Track external crate dependencies for Cargo.toml generation.
+        if let Some(root) = u.path.first() {
             if root == "reqwest" {
                 self.uses_reqwest = true;
             }
         }
+
         let path = u.path.join("::");
         // Filter out items already imported by the standard prelude to avoid
         // "defined multiple times" errors (e.g. `use std.collections.HashMap`).
@@ -81,7 +93,6 @@ impl Transpiler {
         let s = if u.glob {
             format!("use {}::*;", path)
         } else if filtered_items.is_empty() {
-            // All items were already in prelude — skip entirely
             return;
         } else if filtered_items.len() == 1 {
             format!("use {}::{};", path, filtered_items[0])
@@ -89,6 +100,50 @@ impl Transpiler {
             format!("use {}::{{{}}};", path, filtered_items.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
         };
         self.line(&s);
+    }
+
+    fn inline_boring_use(&mut self, path: &std::path::Path, use_line: usize) {
+        let canonical = match path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: cannot resolve '{}': {}", path.display(), e);
+                return;
+            }
+        };
+        // Circular / duplicate import guard.
+        if self.loaded.contains(&canonical) {
+            return;
+        }
+        self.loaded.insert(canonical.clone());
+
+        let source = match std::fs::read_to_string(&canonical) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read '{}': {}", canonical.display(), e);
+                return;
+            }
+        };
+        let tokens = match crate::lexer::lex(&source) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("error: lex error in '{}' (imported at line {}): {}", canonical.display(), use_line, e);
+                return;
+            }
+        };
+        let program = match crate::parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: parse error in '{}' (imported at line {}): {}", canonical.display(), use_line, e);
+                return;
+            }
+        };
+        // Update source_dir for transitive imports resolved relative to the imported file.
+        let prev_source_dir = self.source_dir.clone();
+        if let Some(dir) = canonical.parent() {
+            self.source_dir = dir.to_path_buf();
+        }
+        self.emit_program(&program);
+        self.source_dir = prev_source_dir;
     }
 
     // ── type aliases ──────────────────────────────────────────────────────────
@@ -421,9 +476,13 @@ impl Transpiler {
         let pre_inferred_param_quals: std::collections::HashMap<String, crate::ast::OwnerQual>;
         {
             let prev = std::mem::take(&mut self.fn_current_params);
+            let prev_param_lines = std::mem::take(&mut self.fn_current_param_lines);
             let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
             self.fn_current_params = f.params.iter()
                 .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+                .collect();
+            self.fn_current_param_lines = f.params.iter()
+                .map(|p| (p.name.clone(), p.line))
                 .collect();
             self.fn_current_params_mut = f.params.iter()
                 .filter(|p| p.mutable)
@@ -441,6 +500,7 @@ impl Transpiler {
                 })
                 .collect();
             self.fn_current_params = prev;
+            self.fn_current_param_lines = prev_param_lines;
             self.fn_current_params_mut = prev_mut;
         }
         let params_s: Vec<String> = f.params.iter().map(|p| self.emit_param(p)).collect();
@@ -717,6 +777,10 @@ impl Transpiler {
         self.fn_current_params = f.params.iter()
             .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
             .collect();
+        let prev_fn_current_param_lines = std::mem::take(&mut self.fn_current_param_lines);
+        self.fn_current_param_lines = f.params.iter()
+            .map(|p| (p.name.clone(), p.line))
+            .collect();
         let prev_fn_current_params_mut = std::mem::take(&mut self.fn_current_params_mut);
         self.fn_current_params_mut = f.params.iter()
             .filter(|p| p.mutable)
@@ -801,8 +865,9 @@ impl Transpiler {
         self.fn_returns_void   = prev_fn_returns_void;
         self.fn_declared_void  = prev_fn_declared_void;
         self.fn_return_ty      = prev_fn_return_ty;
-        self.fn_current_params     = prev_fn_current_params;
-        self.fn_current_params_mut = prev_fn_current_params_mut;
+        self.fn_current_params      = prev_fn_current_params;
+        self.fn_current_param_lines = prev_fn_current_param_lines;
+        self.fn_current_params_mut  = prev_fn_current_params_mut;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
         self.task_vars             = prev_task_vars;

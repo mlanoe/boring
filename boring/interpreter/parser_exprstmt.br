@@ -2,16 +2,16 @@
 
 # ─── Expression Parsing ─────────────────────────────────────────────────────
 
-def Expr parse_expr(Parser'actor p) throws:
+def Expr parse_expr(var Parser p) throws:
     parse_else_expr(p)
 
-def Stmt parse_inline_stmt(Parser'actor p) throws:
+def Stmt parse_inline_stmt(var Parser p) throws:
     parse_inline_stmt_impl(p, false)
 
-def Stmt parse_inline_if_body(Parser'actor p) throws:
+def Stmt parse_inline_if_body(var Parser p) throws:
     parse_inline_stmt_impl(p, true)
 
-def [Stmt] parse_inline_stmts(Parser'actor p) throws:
+def [Stmt] parse_inline_stmts(var Parser p) throws:
     var stmts = [parse_inline_stmt(p)]
     while parser_check(p, "Semicolon"):
         parser_advance(p)
@@ -20,7 +20,7 @@ def [Stmt] parse_inline_stmts(Parser'actor p) throws:
         stmts.append(parse_inline_stmt(p))
     stmts
 
-def [Stmt] parse_inline_stmts_if_body(Parser'actor p) throws:
+def [Stmt] parse_inline_stmts_if_body(var Parser p) throws:
     var stmts = [parse_inline_if_body(p)]
     while parser_check(p, "Semicolon"):
         parser_advance(p)
@@ -29,25 +29,67 @@ def [Stmt] parse_inline_stmts_if_body(Parser'actor p) throws:
         stmts.append(parse_inline_if_body(p))
     stmts
 
-def Stmt parse_inline_stmt_impl(Parser'actor p, bool stop_at_else) throws:
+def string parser_peek_kind(var Parser p):
+    token_kind_name(p.peek())
+
+def string? compound_op_from_peek(var Parser p):
+    let k = parser_peek_kind(p)
+    match k:
+        "PlusEq": some("Plus")
+        "MinusEq": some("Minus")
+        "StarEq": some("Star")
+        "SlashEq": some("Slash")
+        "PercentEq": some("Percent")
+        "AmpersandEq": some("Ampersand")
+        "PipeEq": some("Pipe")
+        "CaretEq": some("Caret")
+        _: nil
+
+def string? comparison_op_from_peek(var Parser p):
+    let k = parser_peek_kind(p)
+    match k:
+        "Lt": some("Lt")
+        "Gt": some("Gt")
+        "LtEq": some("LtEq")
+        "GtEq": some("GtEq")
+        "EqEq": some("EqEq")
+        "BangEq": some("BangEq")
+        _: nil
+
+def string? additive_op_from_peek(var Parser p):
+    let k = parser_peek_kind(p)
+    match k:
+        "Plus": some("Plus")
+        "Minus": some("Minus")
+        _: nil
+
+def string? multiplicative_op_from_peek(var Parser p):
+    let k = parser_peek_kind(p)
+    match k:
+        "Star": some("Star")
+        "Slash": some("Slash")
+        "Percent": some("Percent")
+        _: nil
+
+def Stmt parse_inline_stmt_impl(var Parser p, bool stop_at_else) throws:
     let line = parser_line(p)
     if parser_check(p, "Return"):
         parser_advance(p)
-        let value = if parser_is_newline(p) or parser_check(p, "Eof"):
+        let Expr? value = if parser_is_newline(p) or parser_check(p, "Eof"):
             nil
         else:
             some(parse_or(p))
-        return make_return_stmt(value, line)
+        return Stmt.Return(make_return_stmt(value, line))
     if parser_check(p, "Throw"):
         parser_advance(p)
-        let value = if parser_is_newline(p) or parser_check(p, "Eof"):
+        let Expr? value = if parser_is_newline(p) or parser_check(p, "Eof"):
             nil
         else:
             some(parse_or(p))
-        return make_throw_stmt(value, line)
+        return Stmt.Throw(make_throw_stmt(value, line))
     if parser_check(p, "Break"):
         parser_advance(p)
-        let value = if parser_is_newline(p) or parser_check(p, "Eof"):
+        let Expr? value = if parser_is_newline(p) or parser_check(p, "Eof"):
             nil
         else:
             some(parse_or(p))
@@ -63,16 +105,16 @@ def Stmt parse_inline_stmt_impl(Parser'actor p, bool stop_at_else) throws:
     if let op_val = op:
         parser_advance(p)
         let rhs = parse_or(p)
-        let binop = make_binop(op_val, lhs, rhs, line)
+        let binop = make_binop(op_val, lhs.clone(), rhs, line)
         return stmt_expr(make_assign(lhs, binop, line), line)
     if parser_eat(p, "QuestionEq"):
         let rhs = parse_or(p)
-        let else_expr = make_else_expr(lhs, rhs, line)
+        let else_expr = make_else_expr(lhs.clone(), rhs, line)
         return stmt_expr(make_assign(lhs, else_expr, line), line)
-    let expr = if expr_is_var(lhs):
+    let expr = if expr_is_var(lhs.clone()):
         if parser_peek_starts_expr(p):
             var args = []
-            loop:
+            while true:
                 let arg = parse_or(p)
                 args.append(make_arg(nil, arg, false))
                 if not parser_eat(p, "Comma"):
@@ -84,7 +126,7 @@ def Stmt parse_inline_stmt_impl(Parser'actor p, bool stop_at_else) throws:
         lhs
     stmt_expr(expr, line)
 
-def Expr parse_else_expr(Parser'actor p) throws:
+def Expr parse_else_expr(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Try"):
         parser_advance(p)
@@ -104,7 +146,7 @@ def Expr parse_else_expr(Parser'actor p) throws:
             let else_expr = parse_else_body_expr(p)
             let else_stmts = unwrap_block_or_wrap(else_expr)
             return make_try_else_block([stmt_expr(inner, line)], else_stmts, line)
-        throw "try expr requires an else clause or '?' — use:\n  try f() else default\n  try? f()\n  try: … catch: …"
+        throw "try expr requires an else clause or '?' — use_val: \n  try f() else default\n  try? f()\n  try: … catch: …"
     let expr = parse_pipe(p)
     if parser_check(p, "Else"):
         parser_advance(p)
@@ -112,10 +154,10 @@ def Expr parse_else_expr(Parser'actor p) throws:
         return make_else_expr(expr, default, expr.line)
     expr
 
-def Expr parse_pipe(Parser'actor p) throws:
+def Expr parse_pipe(var Parser p) throws:
     var lhs = parse_or(p)
     var indent_depth = 0
-    loop:
+    while true:
         let skipped = if parser_check(p, "Newline"):
             peek_pipe_after_newlines(p)
         else:
@@ -144,7 +186,7 @@ def Expr parse_pipe(Parser'actor p) throws:
             parser_set_pos(p, saved)
     lhs
 
-def Expr parse_or(Parser'actor p) throws:
+def Expr parse_or(var Parser p) throws:
     var lhs = parse_and(p)
     while parser_check(p, "Or"):
         let line = parser_line(p)
@@ -153,7 +195,7 @@ def Expr parse_or(Parser'actor p) throws:
         lhs = make_binop("Or", lhs, rhs, line)
     lhs
 
-def Expr parse_and(Parser'actor p) throws:
+def Expr parse_and(var Parser p) throws:
     var lhs = parse_not(p)
     while parser_check(p, "And"):
         let line = parser_line(p)
@@ -162,7 +204,7 @@ def Expr parse_and(Parser'actor p) throws:
         lhs = make_binop("And", lhs, rhs, line)
     lhs
 
-def Expr parse_not(Parser'actor p) throws:
+def Expr parse_not(var Parser p) throws:
     if parser_check(p, "Not"):
         let line = parser_line(p)
         parser_advance(p)
@@ -175,9 +217,9 @@ def Expr parse_not(Parser'actor p) throws:
         return make_unary("Not", result, line)
     parse_comparison(p)
 
-def Expr parse_comparison(Parser'actor p) throws:
+def Expr parse_comparison(var Parser p) throws:
     var lhs = parse_bitor(p)
-    loop:
+    while true:
         if parser_check(p, "Is"):
             let line = parser_line(p)
             parser_advance(p)
@@ -199,7 +241,7 @@ def Expr parse_comparison(Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_bitor(Parser'actor p) throws:
+def Expr parse_bitor(var Parser p) throws:
     var lhs = parse_bitxor(p)
     while parser_check(p, "Pipe"):
         let line = parser_line(p)
@@ -208,7 +250,7 @@ def Expr parse_bitor(Parser'actor p) throws:
         lhs = make_binop("BitOr", lhs, rhs, line)
     lhs
 
-def Expr parse_bitxor(Parser'actor p) throws:
+def Expr parse_bitxor(var Parser p) throws:
     var lhs = parse_bitand(p)
     while parser_check(p, "Caret"):
         let line = parser_line(p)
@@ -217,7 +259,7 @@ def Expr parse_bitxor(Parser'actor p) throws:
         lhs = make_binop("BitXor", lhs, rhs, line)
     lhs
 
-def Expr parse_bitand(Parser'actor p) throws:
+def Expr parse_bitand(var Parser p) throws:
     var lhs = parse_shift(p)
     while parser_check(p, "Ampersand"):
         let line = parser_line(p)
@@ -226,9 +268,9 @@ def Expr parse_bitand(Parser'actor p) throws:
         lhs = make_binop("BitAnd", lhs, rhs, line)
     lhs
 
-def Expr parse_shift(Parser'actor p) throws:
+def Expr parse_shift(var Parser p) throws:
     var lhs = parse_additive(p)
-    loop:
+    while true:
         if parser_check(p, "Lt") and parser_check2(p, "Lt"):
             let line = parser_line(p)
             parser_advance(p)
@@ -245,9 +287,9 @@ def Expr parse_shift(Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_additive(Parser'actor p) throws:
+def Expr parse_additive(var Parser p) throws:
     var lhs = parse_multiplicative(p)
-    loop:
+    while true:
         let op = additive_op_from_peek(p)
         if let o = op:
             let line = parser_line(p)
@@ -258,9 +300,9 @@ def Expr parse_additive(Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_multiplicative(Parser'actor p) throws:
+def Expr parse_multiplicative(var Parser p) throws:
     var lhs = parse_unary(p)
-    loop:
+    while true:
         let op = multiplicative_op_from_peek(p)
         if let o = op:
             let line = parser_line(p)
@@ -271,7 +313,7 @@ def Expr parse_multiplicative(Parser'actor p) throws:
             break
     lhs
 
-def Expr parse_unary(Parser'actor p) throws:
+def Expr parse_unary(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Minus"):
         parser_advance(p)
@@ -287,14 +329,14 @@ def Expr parse_unary(Parser'actor p) throws:
         return make_unary("BitNot", expr, line)
     parse_postfix(p)
 
-def Expr parse_postfix(Parser'actor p) throws:
+def Expr parse_postfix(var Parser p) throws:
     parse_postfix_inner(p, true)
 
-def Expr parse_postfix_inner(Parser'actor p, bool allow_chain) throws:
+def Expr parse_postfix_inner(var Parser p, bool allow_chain) throws:
     var expr = parse_primary(p)
     var continuation_indent_depth = 0
     var seen_trailing_closure = false
-    loop:
+    while true:
         if parser_check(p, "Newline") and allow_chain and seen_trailing_closure:
             let skipped = peek_dot_after_newlines_and_indents(p)
             if let sk = skipped:
@@ -337,7 +379,7 @@ def Expr parse_postfix_inner(Parser'actor p, bool allow_chain) throws:
                 seen_trailing_closure = true
                 expr = make_method_call(expr, field, args, line)
             else:
-                expr = make_field(expr, field, line)
+                expr = make_field_expr(expr, field, line)
         elif parser_check(p, "QuestionDot"):
             parser_advance(p)
             let field = parser_expect_ident_or_keyword(p)
@@ -401,7 +443,7 @@ def Expr parse_postfix_inner(Parser'actor p, bool allow_chain) throws:
             parser_set_pos(p, saved_pos)
     expr
 
-def Expr parse_primary(Parser'actor p) throws:
+def Expr parse_primary(var Parser p) throws:
     let line = parser_line(p)
     if parser_check(p, "Int"):
         let n = parser_peek_int(p)
@@ -457,8 +499,8 @@ def Expr parse_primary(Parser'actor p) throws:
             parser_advance(p)
             let param = make_param(name, nil, false)
             let body = parse_closure_body(p)
-            let throws_task = infer_throws_task(body)
-            return make_closure([param], nil, body, throws_task.throws, throws_task.task, line)
+            let (throws_task, body) = infer_throws_task(body)
+            return make_closure([param], nil, body, throws_task.can_throw, throws_task.is_task, line)
         parser_advance(p)
         return make_var_expr(name, line)
     if parser_check(p, "Colon"):
@@ -466,29 +508,27 @@ def Expr parse_primary(Parser'actor p) throws:
         let param = make_param("__x", nil, false)
         let base = make_var_expr("__x", line)
         let member = parser_expect_ident(p)
-        var acc = if parser_check(p, "LParen"):
+        var acc = make_field_expr(base, member, line)
+        if parser_check(p, "LParen"):
             let args = parse_call_args(p)
-            make_method_call(base, member, args, line)
-        else:
-            make_field(base, member, line)
+            acc = make_method_call(base, member, args, line)
         while parser_check(p, "Dot"):
             parser_advance(p)
             let next = parser_expect_ident(p)
-            acc = if parser_check(p, "LParen"):
+            if parser_check(p, "LParen"):
                 let args = parse_call_args(p)
-                make_method_call(acc, next, args, line)
+                acc = make_method_call(acc, next, args, line)
             else:
-                make_field(acc, next, line)
+                acc = make_field_expr(acc, next, line)
         let body_op = shorthand_binop_from_peek(p)
-        let body_expr = if let op = body_op:
+        var body_expr = acc
+        if let op = body_op:
             parser_advance(p)
             let rhs = parse_or(p)
-            make_binop(op, acc, rhs, line)
-        else:
-            acc
+            body_expr = make_binop(op, acc, rhs, line)
         let body = closure_body_expr(body_expr)
-        let throws_task = infer_throws_task(body)
-        return make_closure([param], nil, body, throws_task.throws, throws_task.task, line)
+        let (throws_task, body) = infer_throws_task(body)
+        return make_closure([param], nil, body, throws_task.can_throw, throws_task.is_task, line)
     if parser_check(p, "Dot"):
         parser_advance(p)
         let name = parser_expect_ident(p)
@@ -502,8 +542,8 @@ def Expr parse_primary(Parser'actor p) throws:
             if parser_check(p, "Colon"):
                 parser_advance(p)
                 let body = parse_closure_body(p)
-                let inf = infer_throws_task(body)
-                return make_closure([], nil, body, ex.throws or inf.throws, ex.task or inf.task, line)
+                let (inf, body) = infer_throws_task(body)
+                return make_closure([], nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
             return make_tuple([], line)
         if parser_peek_is_typed_closure(p):
             var params = [parse_param(p)]
@@ -517,8 +557,8 @@ def Expr parse_primary(Parser'actor p) throws:
             let ex = parse_closure_modifiers(p)
             parser_expect(p, "Colon")
             let body = parse_closure_body(p)
-            let inf = infer_throws_task(body)
-            return make_closure(params, nil, body, ex.throws or inf.throws, ex.task or inf.task, line)
+            let (inf, body) = infer_throws_task(body)
+            return make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
         let first_expr = parse_expr(p)
         if parser_check(p, "Comma"):
             var elems = [first_expr]
@@ -534,8 +574,8 @@ def Expr parse_primary(Parser'actor p) throws:
                 parser_advance(p)
                 let params = elems_to_params(elems, line)
                 let body = parse_closure_body(p)
-                let inf = infer_throws_task(body)
-                return make_closure(params, nil, body, ex.throws or inf.throws, ex.task or inf.task, line)
+                let (inf, body) = infer_throws_task(body)
+                return make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
             return make_tuple(elems, line)
         else:
             parser_skip_newlines_and_indent(p)
@@ -545,8 +585,8 @@ def Expr parse_primary(Parser'actor p) throws:
                 parser_advance(p)
                 let params = [expr_to_param(first_expr, line)]
                 let body = parse_closure_body(p)
-                let inf = infer_throws_task(body)
-                return make_closure(params, nil, body, ex.throws or inf.throws, ex.task or inf.task, line)
+                let (inf, body) = infer_throws_task(body)
+                return make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
             return first_expr
     if parser_check(p, "LBracket"):
         parser_advance(p)
@@ -600,10 +640,10 @@ def Expr parse_primary(Parser'actor p) throws:
         return make_var_expr("wait", line)
     throw "unexpected token in expression: {parser_peek_debug(p)}"
 
-def [Expr] parse_arg_list(Parser'actor p) throws:
+def [Arg] parse_arg_list(var Parser p) throws:
     parse_call_args(p)
 
-def [Arg] parse_call_args(Parser'actor p) throws:
+def [Arg] parse_call_args(var Parser p) throws:
     parser_expect(p, "LParen")
     parser_skip_newlines_and_indent(p)
     let saved_tc = parser_get_allow_trailing_closure(p)
@@ -619,7 +659,7 @@ def [Arg] parse_call_args(Parser'actor p) throws:
     parser_set_allow_trailing_closure(p, saved_tc)
     args
 
-def Arg parse_arg(Parser'actor p) throws:
+def Arg parse_arg(var Parser p) throws:
     if parser_eat(p, "DotDot"):
         let value = parse_or(p)
         return make_arg(nil, value, true)
@@ -634,7 +674,7 @@ def Arg parse_arg(Parser'actor p) throws:
     let value = parse_expr(p)
     make_arg(nil, value, false)
 
-def Expr parse_brace_expr(Parser'actor p, int line) throws:
+def Expr parse_brace_expr(var Parser p, int line) throws:
     parser_expect(p, "LBrace")
     parser_skip_newlines_and_indent(p)
     if parser_check(p, "RBrace"):
@@ -670,7 +710,7 @@ def Expr parse_brace_expr(Parser'actor p, int line) throws:
         parser_expect(p, "RBrace")
         return make_set(elems, line)
 
-def [StringSegment] resolve_interp(Parser'actor p, [RawInterpPart] parts, int line) throws:
+def [StringSegment] resolve_interp(var Parser p, [RawInterpPart] parts, int line) throws:
     var segments = []
     for part in parts:
         match part:
@@ -696,70 +736,73 @@ def [StringSegment] resolve_interp(Parser'actor p, [RawInterpPart] parts, int li
                     segments.append(segment_formatted_expr(expr, fmt))
     segments
 
-def ClosureBody parse_closure_body(Parser'actor p) throws:
+def ClosureBody parse_closure_body(var Parser p) throws:
     if parser_is_newline(p):
         parser_expect_newline(p)
         let stmts = parse_block(p)
-        check_no_return(stmts, "closure")
+        check_no_return(stmts.clone(), "closure")
         return closure_body_block(stmts)
     if parser_check(p, "Return"):
         throw "last expression (no 'return' allowed in closure)"
     let expr = parse_or(p)
     closure_body_expr(expr)
 
-def [Arg] parse_trailing_closure(Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_closure(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let params = parse_closure_params(p)
     let ex = parse_closure_modifiers(p)
     parser_expect(p, "Colon")
     let body = parse_closure_body(p)
-    if closure_body_is_block(body):
+    let (is_block, body) = closure_body_is_block(body)
+    if is_block:
         if parser_peek_dot_after_newlines(p):
             throw "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()"
-    let inf = infer_throws_task(body)
-    let closure_expr = make_closure(params, nil, body, ex.throws or inf.throws, ex.task or inf.task, line)
+    let (inf, body) = infer_throws_task(body)
+    let closure_expr = make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
     var args = existing_args
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_body(Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_body(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     parser_expect(p, "Colon")
     let body = parse_closure_body(p)
-    if closure_body_is_block(body):
+    let (is_block, body) = closure_body_is_block(body)
+    if is_block:
         if parser_peek_dot_after_newlines(p):
             throw "multiline trailing body cannot be chained — use parentheses: f(args, ():\n    body).next()"
-    let inf = infer_throws_task(body)
-    let closure_expr = make_closure([], nil, body, inf.throws, inf.task, line)
+    let (inf, body) = infer_throws_task(body)
+    let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_body_no_colon(Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_body_no_colon(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let body_expr = parse_or(p)
     let body = closure_body_expr(body_expr)
-    let inf = infer_throws_task(body)
-    let closure_expr = make_closure([], nil, body, inf.throws, inf.task, line)
+    let (inf, body) = infer_throws_task(body)
+    let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Arg] parse_trailing_closure_no_paren(Parser'actor p, [Arg] existing_args) throws:
+def [Arg] parse_trailing_closure_no_paren(var Parser p, [Arg] existing_args) throws:
     let line = parser_line(p)
     let name = parser_expect_ident(p)
     parser_expect(p, "Colon")
     let param = make_param(name, nil, false)
     let body = parse_closure_body(p)
-    if closure_body_is_block(body) and parser_check(p, "Dot"):
+    let (is_block, body) = closure_body_is_block(body)
+    if is_block and parser_check(p, "Dot"):
         throw "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()"
-    let throws_task = infer_throws_task(body)
-    let closure_expr = make_closure([param], nil, body, throws_task.throws, throws_task.task, line)
+    let (throws_task, body) = infer_throws_task(body)
+    let closure_expr = make_closure([param], nil, body, throws_task.can_throw, throws_task.is_task, line)
     var args = existing_args
     args.append(make_arg(nil, closure_expr, false))
     args
 
-def [Param] parse_closure_params(Parser'actor p) throws:
+def [Param] parse_closure_params(var Parser p) throws:
     parser_expect(p, "LParen")
     parser_skip_newlines_and_indent(p)
     var params = []
@@ -780,7 +823,7 @@ def [Param] parse_closure_params(Parser'actor p) throws:
     parser_expect(p, "RParen")
     params
 
-def Expr parse_task_expr(Parser'actor p) throws:
+def Expr parse_task_expr(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Task")
     if parser_check(p, "LParen"):
@@ -796,7 +839,7 @@ def Expr parse_task_expr(Parser'actor p) throws:
         let body = if parser_is_newline(p) or parser_check(p, "Eof"):
             parser_expect_newline(p)
             let stmts = parse_block(p)
-            check_no_return(stmts, "task block")
+            check_no_return(stmts.clone(), "task block")
             make_block_expr(stmts, line)
         else:
             parse_or(p)
@@ -805,7 +848,7 @@ def Expr parse_task_expr(Parser'actor p) throws:
     let inner = if parser_is_newline(p):
         parser_expect_newline(p)
         let stmts = parse_block(p)
-        check_no_return(stmts, "task block")
+        check_no_return(stmts.clone(), "task block")
         make_block_expr(stmts, line)
     else:
         let expr = parse_or(p)
@@ -819,7 +862,7 @@ def Expr parse_task_expr(Parser'actor p) throws:
 
 # ─── Statement Parsing ────────────────────────────────────────────────────────
 
-def [Stmt] parse_block(Parser'actor p) throws:
+def [Stmt] parse_block(var Parser p) throws:
     while parser_check(p, "Comment") or parser_check(p, "Newline") or parser_check(p, "Semicolon"):
         parser_advance(p)
     parser_expect(p, "Indent")
@@ -827,16 +870,16 @@ def [Stmt] parse_block(Parser'actor p) throws:
     parser_eat(p, "Dedent")
     stmts
 
-def [Stmt] parse_stmts_until_dedent(Parser'actor p) throws:
+def [Stmt] parse_stmts_until_dedent(var Parser p) throws:
     var stmts = []
-    loop:
+    while true:
         parser_skip_newlines(p)
         if parser_check(p, "Dedent") or parser_check(p, "Eof") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace"):
             break
         stmts.append(parse_stmt(p))
     stmts
 
-def Stmt parse_stmt(Parser'actor p) throws:
+def Stmt parse_stmt(var Parser p) throws:
     if parser_check(p, "Comment"):
         let text = parser_peek_comment(p)
         parser_advance(p)
@@ -994,7 +1037,7 @@ def Stmt parse_stmt(Parser'actor p) throws:
     let expr = if expr_is_var(lhs):
         if parser_peek_starts_expr(p):
             var args = []
-            loop:
+            while true:
                 let arg = parse_or(p)
                 args.append(make_arg(nil, arg, false))
                 if not parser_eat(p, "Comma"):
@@ -1007,10 +1050,10 @@ def Stmt parse_stmt(Parser'actor p) throws:
     parser_expect_newline(p)
     stmt_expr(expr, line)
 
-def Stmt parse_let_stmt(Parser'actor p) throws:
+def LetStmt parse_let_stmt(var Parser p) throws:
     parse_let_stmt_pub(p, false)
 
-def Stmt parse_let_stmt_pub(Parser'actor p, bool is_pub) throws:
+def LetStmt parse_let_stmt_pub(var Parser p, bool is_pub) throws:
     let line = parser_line(p)
     let is_static = parser_eat(p, "Static")
     let mutable = if parser_check(p, "Var"):
@@ -1028,11 +1071,12 @@ def Stmt parse_let_stmt_pub(Parser'actor p, bool is_pub) throws:
             parse_type_qualifier(p, ty2)
         else:
             ty2
-        (name, some(ty3))
+        let pair = (name, some(ty3))
+        pair
     else:
         let name = parser_expect_ident(p)
         if parser_check(p, "Tick"):
-            let next_kind = parser_peek_token_at(p, 1)
+            let next_kind = token_kind_name(parser_peek_token_at(p, 1).kind)
             if next_kind == "Eq":
                 parser_advance(p)
                 parser_expect(p, "Eq")
@@ -1048,20 +1092,21 @@ def Stmt parse_let_stmt_pub(Parser'actor p, bool is_pub) throws:
                 let ty = infer_type_from_constructor(qualified, value)
                 return make_let_stmt(mutable, is_pub, is_static, name, ty, some(value), false, line)
         (name, nil)
+    let (string nt_name, Type? nt_ty) = name_ty
     if not parser_check(p, "Eq"):
         parser_expect_newline_soft(p)
-        return make_let_stmt(mutable, is_pub, is_static, name_ty.0, name_ty.1, nil, false, line)
+        return make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, nil, false, line)
     parser_expect(p, "Eq")
     let value = parse_expr(p)
     parser_expect_newline_soft(p)
-    make_let_stmt(mutable, is_pub, is_static, name_ty.0, name_ty.1, some(value), false, line)
+    make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, some(value), false, line)
 
-def LetDestructureStmt parse_let_destructure(Parser'actor p, bool mutable, int line) throws:
+def LetDestructureStmt parse_let_destructure(var Parser p, bool mutable, int line) throws:
     let parens = parser_eat(p, "LParen")
     if parens:
         parser_skip_newlines_and_indent(p)
     var bindings = []
-    loop:
+    while true:
         if parens and parser_check(p, "RParen"):
             break
         if not parens and (parser_check(p, "Eq") or parser_check(p, "Eof")):
@@ -1075,7 +1120,8 @@ def LetDestructureStmt parse_let_destructure(Parser'actor p, bool mutable, int l
             (name, some(ty))
         else:
             (parser_expect_ident(p), nil)
-        bindings.append(make_destructure_binding(name_ty.0, name_ty.1))
+        let (string dt_name, Type? dt_ty) = name_ty
+        bindings.append(make_destructure_binding(dt_name, dt_ty))
         if not parser_eat(p, "Comma"):
             break
         parser_skip_newlines_and_indent(p)
@@ -1087,7 +1133,7 @@ def LetDestructureStmt parse_let_destructure(Parser'actor p, bool mutable, int l
     parser_expect_newline_soft(p)
     make_let_destructure_stmt(mutable, bindings, value, line)
 
-def Stmt parse_return_stmt(Parser'actor p) throws:
+def ReturnStmt parse_return_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Return")
     let value = if parser_is_newline(p) or parser_check(p, "Eof"):
@@ -1097,7 +1143,7 @@ def Stmt parse_return_stmt(Parser'actor p) throws:
     parser_expect_newline(p)
     make_return_stmt(value, line)
 
-def Stmt parse_throw_stmt(Parser'actor p) throws:
+def ThrowStmt parse_throw_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Throw")
     let value = if parser_is_newline(p) or parser_check(p, "Eof"):
@@ -1107,7 +1153,7 @@ def Stmt parse_throw_stmt(Parser'actor p) throws:
     parser_expect_newline(p)
     make_throw_stmt(value, line)
 
-def Stmt parse_if_stmt(Parser'actor p) throws:
+def IfStmt parse_if_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "If")
     let saved_np = parser_get_allow_noparen_closure(p)
@@ -1119,9 +1165,9 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
     parser_expect(p, "Colon")
     if not parser_is_newline(p) and not parser_check(p, "Eof"):
         let then_stmts = parse_inline_stmts_if_body(p)
-        var branches = [(cond, then_stmts)]
-        var else_body = nil
-        loop:
+        var branches = [IfBranch(cond: cond, body: then_stmts)]
+        var [Stmt]? else_body = nil
+        while true:
             if parser_check(p, "Elif"):
                 parser_advance(p)
                 let saved = parser_get_allow_noparen_closure(p)
@@ -1132,7 +1178,7 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
                 parser_set_allow_trailing_closure(p, true)
                 parser_expect(p, "Colon")
                 let elif_stmts = parse_inline_stmts_if_body(p)
-                branches.append((elif_cond, elif_stmts))
+                branches.append(IfBranch(cond: elif_cond, body: elif_stmts))
             elif parser_check(p, "Else"):
                 parser_advance(p)
                 else_body = some(parse_else_body_stmts(p))
@@ -1141,7 +1187,7 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
                 break
         if else_body == nil:
             parser_expect_newline(p)
-            loop:
+            while true:
                 parser_skip_newlines(p)
                 if parser_check(p, "Elif"):
                     parser_advance(p)
@@ -1157,7 +1203,7 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
                     else:
                         parser_expect_newline(p)
                         parse_block(p)
-                    branches.append((elif_cond, elif_body))
+                    branches.append(IfBranch(cond: elif_cond, body: elif_body))
                 elif parser_check(p, "Else"):
                     parser_advance(p)
                     else_body = some(parse_else_body_stmts(p))
@@ -1169,9 +1215,9 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
         return make_if_stmt(branches, else_body, line)
     parser_expect_newline(p)
     let body = parse_block(p)
-    var branches = [(cond, body)]
-    var else_body = nil
-    loop:
+    var branches = [IfBranch(cond: cond, body: body)]
+    var [Stmt]? else_body = nil
+    while true:
         parser_skip_newlines(p)
         if parser_check(p, "Elif"):
             parser_advance(p)
@@ -1187,7 +1233,7 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
             else:
                 parser_expect_newline(p)
                 parse_block(p)
-            branches.append((elif_cond, elif_body))
+            branches.append(IfBranch(cond: elif_cond, body: elif_body))
         elif parser_check(p, "Else"):
             parser_advance(p)
             else_body = some(parse_else_body_stmts(p))
@@ -1196,7 +1242,7 @@ def Stmt parse_if_stmt(Parser'actor p) throws:
             break
     make_if_stmt(branches, else_body, line)
 
-def Stmt parse_while_stmt(Parser'actor p) throws:
+def WhileStmt parse_while_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "While")
     let saved = parser_get_allow_noparen_closure(p)
@@ -1215,7 +1261,7 @@ def Stmt parse_while_stmt(Parser'actor p) throws:
         parse_block(p)
     make_while_stmt(condition, body, line)
 
-def Stmt parse_for_stmt(Parser'actor p) throws:
+def ForStmt parse_for_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "For")
     let saved = parser_get_allow_noparen_closure(p)
@@ -1243,7 +1289,7 @@ def Stmt parse_for_stmt(Parser'actor p) throws:
         parse_block(p)
     make_for_stmt(vars_iterable.0, vars_iterable.1, body, line)
 
-def Stmt parse_match_stmt(Parser'actor p) throws:
+def MatchStmt parse_match_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Match")
     let saved = parser_get_allow_noparen_closure(p)
@@ -1260,7 +1306,7 @@ def Stmt parse_match_stmt(Parser'actor p) throws:
     parser_expect_newline(p)
     parser_expect(p, "Indent")
     var arms = []
-    loop:
+    while true:
         parser_skip_newlines(p)
         if parser_check(p, "Dedent") or parser_check(p, "Eof") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace"):
             break
@@ -1268,40 +1314,20 @@ def Stmt parse_match_stmt(Parser'actor p) throws:
     parser_eat(p, "Dedent")
     make_match_stmt(subject, arms, line)
 
-def Stmt parse_return_stmt(Parser'actor p) throws:
-    let line = parser_line(p)
-    parser_expect(p, "Return")
-    let value = if parser_is_newline(p) or parser_check(p, "Eof"):
-        nil
-    else:
-        some(parse_expr(p))
-    parser_expect_newline(p)
-    make_return_stmt(value, line)
-
-def Stmt parse_throw_stmt(Parser'actor p) throws:
-    let line = parser_line(p)
-    parser_expect(p, "Throw")
-    let value = if parser_is_newline(p) or parser_check(p, "Eof"):
-        nil
-    else:
-        some(parse_expr(p))
-    parser_expect_newline(p)
-    make_throw_stmt(value, line)
-
-def Stmt parse_try_stmt(Parser'actor p) throws:
+def TryStmt parse_try_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Try")
     parser_expect(p, "Colon")
     parser_expect_newline(p)
     let body = parse_block(p)
     var catch_clauses = []
-    loop:
+    while true:
         parser_skip_newlines(p)
         if parser_check(p, "Catch"):
             let catch_line = parser_line(p)
             parser_advance(p)
             var types = []
-            var variant = nil
+            var string? variant = nil
             if parser_peek_is_ident(p):
                 let first_type = parser_expect_ident(p)
                 if parser_eat(p, "Dot"):
@@ -1319,7 +1345,7 @@ def Stmt parse_try_stmt(Parser'actor p) throws:
             break
     make_try_stmt(body, catch_clauses, line)
 
-def Stmt parse_print_stmt(Parser'actor p) throws:
+def Stmt parse_print_stmt(var Parser p) throws:
     let line = parser_line(p)
     parser_expect(p, "Print")
     var args = []
@@ -1330,7 +1356,7 @@ def Stmt parse_print_stmt(Parser'actor p) throws:
     parser_expect_newline_soft(p)
     stmt_expr(make_call(make_var_expr("print", line), map_args(args), line), line)
 
-def [Stmt] parse_else_body_stmts(Parser'actor p) throws:
+def [Stmt] parse_else_body_stmts(var Parser p) throws:
     parser_eat(p, "Colon")
     if parser_is_newline(p):
         parser_expect_newline(p)
@@ -1340,7 +1366,7 @@ def [Stmt] parse_else_body_stmts(Parser'actor p) throws:
         parser_expect_newline_soft(p)
         stmts
 
-def Expr parse_else_body_expr(Parser'actor p) throws:
+def Expr parse_else_body_expr(var Parser p) throws:
     let line = parser_line(p)
     parser_eat(p, "Colon")
     if parser_is_newline(p):

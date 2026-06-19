@@ -134,3 +134,9 @@ enum TokenKind:
 struct Token:
     TokenKind kind
     int line
+
+    req string text():
+        let kind = self.kind.clone()
+        match kind:
+            TokenKind.Ident(s): s
+            _: ""

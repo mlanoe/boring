@@ -1821,7 +1821,7 @@ impl Transpiler {
 
     pub(crate) fn make_sub(&self) -> Transpiler {
         Transpiler {
-            config: self.config,
+            config: self.config.clone(),
             out: String::new(),
             indent: self.indent,
             in_throws: self.in_throws,
@@ -1957,7 +1957,10 @@ impl Transpiler {
             struct_method_return_types: self.struct_method_return_types.clone(),
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
+            source_dir: self.source_dir.clone(),
+            loaded: self.loaded.clone(),
             fn_current_params: std::collections::HashMap::new(),
+            fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,

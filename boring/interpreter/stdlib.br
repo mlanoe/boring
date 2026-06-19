@@ -3,21 +3,43 @@
 # ─── Interpreter struct ────────────────────────────────────────────────────────
 
 struct Interpreter:
-    Env'actor global_env
+    var Env'actor global_env
     Env'actor current_env
+    var {string=[FnDecl]} struct_methods
+    var {string=FnDecl} fn_decls
+
+    req FnDecl? find_method(string type_name, string method_name):
+        let methods_opt = struct_methods.get(type_name)
+        if let methods = methods_opt:
+            for m in methods:
+                if m.name == method_name:
+                    return m
+        nil
+
+    def void set_method_decls(string name, [FnDecl] methods):
+        struct_methods.set(name, methods)
+
+    def void set_fn_decl(string name, FnDecl decl):
+        fn_decls.set(name, decl)
+
+    req FnDecl? get_fn_decl(string name):
+        let result = fn_decls.get(name)
+        if let decl = result:
+            return decl
+        nil
 
 # ─── val_to_string ────────────────────────────────────────────────────────────
 
 def string val_to_string(Value v):
     match v:
-        Value.NilVal: "nil"
-        Value.VoidVal: "void"
-        Value.UninitializedVal: "<uninitialized>"
-        Value.BoolVal(b): if b: "true" else "false"
-        Value.IntVal(n): string(n)
-        Value.FloatVal(f): string(f)
-        Value.StrVal(s): s
-        Value.ArrayVal(elems):
+        Value.Nil: "nil"
+        Value.Void: "void"
+        Value.Uninitialized: "<uninitialized>"
+        Value.Bool(b): if b: "true" else "false"
+        Value.Int(n): int_to_string(n)
+        Value.Float(f): "{f}"
+        Value.Str(s): s
+        Value.Array(elems):
             var parts = ["["]
             var first = true
             for e in elems:
@@ -26,11 +48,11 @@ def string val_to_string(Value v):
                 parts.append(val_to_string(e))
                 first = false
             parts.append("]")
-            var result = ""
+            var string result = ""
             for p in parts:
                 result = "{result}{p}"
             result
-        Value.TupleVal(elems):
+        Value.Tuple(elems):
             var parts = ["("]
             var first = true
             for e in elems:
@@ -39,11 +61,11 @@ def string val_to_string(Value v):
                 parts.append(val_to_string(e))
                 first = false
             parts.append(")")
-            var result = ""
+            var string result = ""
             for p in parts:
                 result = "{result}{p}"
             result
-        Value.DictVal(pairs):
+        Value.Dict(pairs):
             var parts = ["{{"]
             var first = true
             for pair in pairs:
@@ -54,11 +76,11 @@ def string val_to_string(Value v):
                 parts.append(val_to_string(pair.1))
                 first = false
             parts.append("}}")
-            var result = ""
+            var string result = ""
             for p in parts:
                 result = "{result}{p}"
             result
-        Value.SetVal(elems):
+        Value.Set(elems):
             var parts = ["{{"]
             var first = true
             for e in elems:
@@ -67,11 +89,11 @@ def string val_to_string(Value v):
                 parts.append(val_to_string(e))
                 first = false
             parts.append("}}")
-            var result = ""
+            var string result = ""
             for p in parts:
                 result = "{result}{p}"
             result
-        Value.EnumVariantVal(typeName, variant, fields):
+        Value.EnumVariant(typeName, variant, fields):
             if fields.length == 0:
                 variant
             else:
@@ -87,69 +109,69 @@ def string val_to_string(Value v):
                 for p in parts:
                     result = "{result}{p}"
                 result
-        Value.NativeFnVal(name, _): "<fn {name}>"
-        Value.FnVal(name, _): "<fn {name}>"
-        Value.OverloadedFnVal(name, _): "<overloaded fn {name}>"
-        Value.ClosureVal(_, _, _): "<closure>"
-        Value.RangeVal(start, end, inclusive):
+        Value.NativeFn(name, _): "<fn {name}>"
+        Value.Fn(name, _): "<fn {name}>"
+        Value.OverloadedFn(name, _): "<overloaded fn {name}>"
+        Value.Closure(_, _, _): "<closure>"
+        Value.Range(start, end, inclusive, _):
             if inclusive:
                 "{start}..{end}"
             else:
                 "{start}..<{end}"
-        Value.LabeledVal(label, val): "{label}={val_to_string(val)}"
-        Value.ObjectVal(inner): "<object>"
+        Value.Labeled(label, val): "{label}={val_to_string(val)}"
+        Value.Object(inner): "<object>"
         _: "<value>"
 
 # ─── val_to_bool ──────────────────────────────────────────────────────────────
 
 def bool val_to_bool(Value v):
     match v:
-        Value.NilVal: false
-        Value.VoidVal: false
-        Value.UninitializedVal: false
-        Value.BoolVal(b): b
-        Value.IntVal(n): n != 0
-        Value.FloatVal(f): f != 0.0
-        Value.StrVal(s): s != ""
-        Value.ArrayVal(elems): elems.length != 0
-        Value.DictVal(pairs): pairs.length != 0
-        Value.SetVal(elems): elems.length != 0
-        Value.TupleVal(elems): elems.length != 0
+        Value.Nil: false
+        Value.Void: false
+        Value.Uninitialized: false
+        Value.Bool(b): b
+        Value.Int(n): n != 0
+        Value.Float(f): f != 0.0
+        Value.Str(s): s != ""
+        Value.Array(elems): elems.length != 0
+        Value.Dict(pairs): pairs.length != 0
+        Value.Set(elems): elems.length != 0
+        Value.Tuple(elems): elems.length != 0
         _: true
 
 # ─── values_equal ─────────────────────────────────────────────────────────────
 
 def bool values_equal(Value a, Value b):
     match a:
-        Value.NilVal:
+        Value.Nil:
             match b:
-                Value.NilVal: true
+                Value.Nil: true
                 _: false
-        Value.VoidVal:
+        Value.Void:
             match b:
-                Value.VoidVal: true
+                Value.Void: true
                 _: false
-        Value.BoolVal(x):
+        Value.Bool(x):
             match b:
-                Value.BoolVal(y): x == y
+                Value.Bool(y): x == y
                 _: false
-        Value.IntVal(x):
+        Value.Int(x):
             match b:
-                Value.IntVal(y): x == y
-                Value.FloatVal(y): float(x) == y
+                Value.Int(y): x == y
+                Value.Float(y): float(x) == y
                 _: false
-        Value.FloatVal(x):
+        Value.Float(x):
             match b:
-                Value.FloatVal(y): x == y
-                Value.IntVal(y): x == float(y)
+                Value.Float(y): x == y
+                Value.Int(y): x == float(y)
                 _: false
-        Value.StrVal(x):
+        Value.Str(x):
             match b:
-                Value.StrVal(y): x == y
+                Value.Str(y): x == y
                 _: false
-        Value.ArrayVal(xs):
+        Value.Array(xs):
             match b:
-                Value.ArrayVal(ys):
+                Value.Array(ys):
                     if xs.length != ys.length:
                         false
                     else:
@@ -161,9 +183,9 @@ def bool values_equal(Value a, Value b):
                             i = i + 1
                         eq
                 _: false
-        Value.TupleVal(xs):
+        Value.Tuple(xs):
             match b:
-                Value.TupleVal(ys):
+                Value.Tuple(ys):
                     if xs.length != ys.length:
                         false
                     else:
@@ -175,9 +197,9 @@ def bool values_equal(Value a, Value b):
                             i = i + 1
                         eq
                 _: false
-        Value.EnumVariantVal(tn1, v1, f1):
+        Value.EnumVariant(tn1, v1, f1):
             match b:
-                Value.EnumVariantVal(tn2, v2, f2):
+                Value.EnumVariant(tn2, v2, f2):
                     if tn1 != tn2 or v1 != v2 or f1.length != f2.length:
                         false
                     else:
@@ -189,15 +211,15 @@ def bool values_equal(Value a, Value b):
                             i = i + 1
                         eq
                 _: false
-        Value.RangeVal(s1, e1, inc1):
+        Value.Range(s1, e1, inc1, _):
             match b:
-                Value.RangeVal(s2, e2, inc2): s1 == s2 and e1 == e2 and inc1 == inc2
+                Value.Range(s2, e2, inc2, _): s1 == s2 and e1 == e2 and inc1 == inc2
                 _: false
         _: false
 
 # ─── env_define ───────────────────────────────────────────────────────────────
 
-def void env_define(Env'actor env, string name, Value val, bool mutable):
+def void env_define(var Env'actor env, string name, Value val, bool mutable):
     if mutable:
         env.define_mut(name, val)
     else:
@@ -205,134 +227,134 @@ def void env_define(Env'actor env, string name, Value val, bool mutable):
 
 # ─── register_stdlib ──────────────────────────────────────────────────────────
 
-def void register_stdlib(Interpreter'actor interp):
+def void register_stdlib(var Interpreter'actor interp):
     let env = interp.global_env
 
-    let print_fn = Value.NativeFnVal("print", Value.NilVal)
+    let print_fn = Value.NativeFn("print", Value.Nil)
     env_define(env, "print", print_fn, false)
 
-    let println_fn = Value.NativeFnVal("println", Value.NilVal)
+    let println_fn = Value.NativeFn("println", Value.Nil)
     env_define(env, "println", println_fn, false)
 
-    let write_fn = Value.NativeFnVal("write", Value.NilVal)
+    let write_fn = Value.NativeFn("write", Value.Nil)
     env_define(env, "write", write_fn, false)
 
-    let len_fn = Value.NativeFnVal("len", Value.NilVal)
+    let len_fn = Value.NativeFn("len", Value.Nil)
     env_define(env, "len", len_fn, false)
 
-    let int_fn = Value.NativeFnVal("int", Value.NilVal)
+    let int_fn = Value.NativeFn("int", Value.Nil)
     env_define(env, "int", int_fn, false)
 
-    let float_fn = Value.NativeFnVal("float", Value.NilVal)
+    let float_fn = Value.NativeFn("float", Value.Nil)
     env_define(env, "float", float_fn, false)
 
-    let string_fn = Value.NativeFnVal("string", Value.NilVal)
+    let string_fn = Value.NativeFn("string", Value.Nil)
     env_define(env, "string", string_fn, false)
 
-    let bool_fn = Value.NativeFnVal("bool", Value.NilVal)
+    let bool_fn = Value.NativeFn("bool", Value.Nil)
     env_define(env, "bool", bool_fn, false)
 
-    let type_fn = Value.NativeFnVal("type", Value.NilVal)
+    let type_fn = Value.NativeFn("type", Value.Nil)
     env_define(env, "type", type_fn, false)
 
-    let sqrt_fn = Value.NativeFnVal("sqrt", Value.NilVal)
+    let sqrt_fn = Value.NativeFn("sqrt", Value.Nil)
     env_define(env, "sqrt", sqrt_fn, false)
 
-    let abs_fn = Value.NativeFnVal("abs", Value.NilVal)
+    let abs_fn = Value.NativeFn("abs", Value.Nil)
     env_define(env, "abs", abs_fn, false)
 
-    let floor_fn = Value.NativeFnVal("floor", Value.NilVal)
+    let floor_fn = Value.NativeFn("floor", Value.Nil)
     env_define(env, "floor", floor_fn, false)
 
-    let ceil_fn = Value.NativeFnVal("ceil", Value.NilVal)
+    let ceil_fn = Value.NativeFn("ceil", Value.Nil)
     env_define(env, "ceil", ceil_fn, false)
 
-    let round_fn = Value.NativeFnVal("round", Value.NilVal)
+    let round_fn = Value.NativeFn("round", Value.Nil)
     env_define(env, "round", round_fn, false)
 
-    let sin_fn = Value.NativeFnVal("sin", Value.NilVal)
+    let sin_fn = Value.NativeFn("sin", Value.Nil)
     env_define(env, "sin", sin_fn, false)
 
-    let cos_fn = Value.NativeFnVal("cos", Value.NilVal)
+    let cos_fn = Value.NativeFn("cos", Value.Nil)
     env_define(env, "cos", cos_fn, false)
 
-    let tan_fn = Value.NativeFnVal("tan", Value.NilVal)
+    let tan_fn = Value.NativeFn("tan", Value.Nil)
     env_define(env, "tan", tan_fn, false)
 
-    let log_fn = Value.NativeFnVal("log", Value.NilVal)
+    let log_fn = Value.NativeFn("log", Value.Nil)
     env_define(env, "log", log_fn, false)
 
-    let log2_fn = Value.NativeFnVal("log2", Value.NilVal)
+    let log2_fn = Value.NativeFn("log2", Value.Nil)
     env_define(env, "log2", log2_fn, false)
 
-    let exp_fn = Value.NativeFnVal("exp", Value.NilVal)
+    let exp_fn = Value.NativeFn("exp", Value.Nil)
     env_define(env, "exp", exp_fn, false)
 
-    let pow_fn = Value.NativeFnVal("pow", Value.NilVal)
+    let pow_fn = Value.NativeFn("pow", Value.Nil)
     env_define(env, "pow", pow_fn, false)
 
-    let min_fn = Value.NativeFnVal("min", Value.NilVal)
+    let min_fn = Value.NativeFn("min", Value.Nil)
     env_define(env, "min", min_fn, false)
 
-    let max_fn = Value.NativeFnVal("max", Value.NilVal)
+    let max_fn = Value.NativeFn("max", Value.Nil)
     env_define(env, "max", max_fn, false)
 
-    let range_fn = Value.NativeFnVal("range", Value.NilVal)
+    let range_fn = Value.NativeFn("range", Value.Nil)
     env_define(env, "range", range_fn, false)
 
-    let assert_fn = Value.NativeFnVal("assert", Value.NilVal)
+    let assert_fn = Value.NativeFn("assert", Value.Nil)
     env_define(env, "assert", assert_fn, false)
 
-    let read_line_fn = Value.NativeFnVal("read_line", Value.NilVal)
+    let read_line_fn = Value.NativeFn("read_line", Value.Nil)
     env_define(env, "read_line", read_line_fn, false)
 
-    let exit_fn = Value.NativeFnVal("exit", Value.NilVal)
+    let exit_fn = Value.NativeFn("exit", Value.Nil)
     env_define(env, "exit", exit_fn, false)
 
-    let input_fn = Value.NativeFnVal("input", Value.NilVal)
+    let input_fn = Value.NativeFn("input", Value.Nil)
     env_define(env, "input", input_fn, false)
 
-    let error_fn = Value.NativeFnVal("error", Value.NilVal)
+    let error_fn = Value.NativeFn("error", Value.Nil)
     env_define(env, "error", error_fn, false)
 
-    let ord_fn = Value.NativeFnVal("ord", Value.NilVal)
+    let ord_fn = Value.NativeFn("ord", Value.Nil)
     env_define(env, "ord", ord_fn, false)
 
-    let chr_fn = Value.NativeFnVal("chr", Value.NilVal)
+    let chr_fn = Value.NativeFn("chr", Value.Nil)
     env_define(env, "chr", chr_fn, false)
 
-    let zip_fn = Value.NativeFnVal("zip", Value.NilVal)
+    let zip_fn = Value.NativeFn("zip", Value.Nil)
     env_define(env, "zip", zip_fn, false)
 
-    let enumerate_fn = Value.NativeFnVal("enumerate", Value.NilVal)
+    let enumerate_fn = Value.NativeFn("enumerate", Value.Nil)
     env_define(env, "enumerate", enumerate_fn, false)
 
-    let map_fn = Value.NativeFnVal("map", Value.NilVal)
+    let map_fn = Value.NativeFn("map", Value.Nil)
     env_define(env, "map", map_fn, false)
 
-    let filter_fn = Value.NativeFnVal("filter", Value.NilVal)
+    let filter_fn = Value.NativeFn("filter", Value.Nil)
     env_define(env, "filter", filter_fn, false)
 
-    let reduce_fn = Value.NativeFnVal("reduce", Value.NilVal)
+    let reduce_fn = Value.NativeFn("reduce", Value.Nil)
     env_define(env, "reduce", reduce_fn, false)
 
-    let sorted_fn = Value.NativeFnVal("sorted", Value.NilVal)
+    let sorted_fn = Value.NativeFn("sorted", Value.Nil)
     env_define(env, "sorted", sorted_fn, false)
 
-    let reversed_fn = Value.NativeFnVal("reversed", Value.NilVal)
+    let reversed_fn = Value.NativeFn("reversed", Value.Nil)
     env_define(env, "reversed", reversed_fn, false)
 
-    let sum_fn = Value.NativeFnVal("sum", Value.NilVal)
+    let sum_fn = Value.NativeFn("sum", Value.Nil)
     env_define(env, "sum", sum_fn, false)
 
-    let any_fn = Value.NativeFnVal("any", Value.NilVal)
+    let any_fn = Value.NativeFn("any", Value.Nil)
     env_define(env, "any", any_fn, false)
 
-    let all_fn = Value.NativeFnVal("all", Value.NilVal)
+    let all_fn = Value.NativeFn("all", Value.Nil)
     env_define(env, "all", all_fn, false)
 
-    env_define(env, "PI", Value.FloatVal(3.141592653589793), false)
-    env_define(env, "E", Value.FloatVal(2.718281828459045), false)
+    env_define(env, "PI", Value.Float(3.141592653589793), false)
+    env_define(env, "E", Value.Float(2.718281828459045), false)
 
 # ─── new_interpreter ──────────────────────────────────────────────────────────
 
@@ -340,7 +362,9 @@ def Interpreter'actor new_interpreter():
     let global = new_env(nil)
     let interp = Interpreter(
         global_env = global,
-        current_env = global
+        current_env = global,
+        struct_methods = {},
+        fn_decls = {}
     )
     let interp_actor = interp as Interpreter'actor
     register_stdlib(interp_actor)
@@ -348,35 +372,39 @@ def Interpreter'actor new_interpreter():
 
 # ─── exec_item ────────────────────────────────────────────────────────────────
 
-def void exec_item(Interpreter'actor interp, Item item) throws:
+def void exec_item(var Interpreter'actor interp, Item item):
     match item:
         Item.Fn(decl):
-            let fn_val = Value.FnVal(decl.name, interp.global_env)
-            env_define(interp.global_env, decl.name, fn_val, false)
+            let fn_name = decl.name
+            interp.set_fn_decl(fn_name, decl)
+            let fn_val = Value.Fn(fn_name, interp.global_env)
+            env_define(interp.global_env, fn_name, fn_val, false)
         Item.Struct(decl):
-            let struct_val = Value.NilVal
+            let struct_val = Value.Nil
             env_define(interp.global_env, decl.name, struct_val, false)
+            interp.set_method_decls(decl.name, decl.methods)
         Item.Enum(decl):
-            let enum_val = Value.NilVal
+            let enum_val = Value.Nil
             env_define(interp.global_env, decl.name, enum_val, false)
         Item.Trait(decl):
-            env_define(interp.global_env, decl.name, Value.NilVal, false)
+            env_define(interp.global_env, decl.name, Value.Nil, false)
         Item.Let(stmt):
-            env_define(interp.current_env, stmt.name, Value.UninitializedVal, true)
+            env_define(interp.current_env, stmt.name, Value.Uninitialized, true)
         Item.Alias(decl):
-            env_define(interp.global_env, decl.name, Value.NilVal, false)
+            env_define(interp.global_env, decl.name, Value.Nil, false)
         Item.Stmt(stmt):
-            env_define(interp.current_env, "__stmt__", Value.NilVal, true)
+            exec_stmt(interp, stmt)
         Item.Use(decl):
-            env_define(interp.current_env, "__use__", Value.NilVal, true)
+            env_define(interp.current_env, "__use__", Value.Nil, true)
         Item.Ext(decl):
-            env_define(interp.global_env, decl.type_name, Value.NilVal, false)
+            env_define(interp.global_env, decl.type_name, Value.Nil, false)
         Item.Mod(decl):
             for sub_item in decl.items:
                 exec_item(interp, sub_item)
 
 # ─── run_program ──────────────────────────────────────────────────────────────
 
-def void run_program(Interpreter'actor interp, Program prog) throws:
+def void run_program(var Interpreter'actor interp, Program prog):
     for item in prog.items:
         exec_item(interp, item)
+

@@ -1,0 +1,538 @@
+# == EXEC AND CALL ==
+
+# ─── exec_block ───────────────────────────────────────────────────────────────
+
+def Signal? exec_block(var Interpreter'actor interp, [Stmt] stmts):
+    for stmt in stmts:
+        let Signal? sig = exec_stmt(interp, stmt)
+        if sig != nil:
+            return sig
+    nil
+
+# ─── exec_stmt ────────────────────────────────────────────────────────────────
+
+def Signal? exec_stmt(var Interpreter'actor interp, Stmt stmt):
+    match stmt:
+        Let(s):
+            var val = Uninitialized
+            if let expr = s.value:
+                val = eval_expr(interp, expr)
+            if s.mutable:
+                interp.current_env.define_mut(s.name, val)
+            else:
+                interp.current_env.define(s.name, val)
+            nil
+
+        If(s):
+            exec_if(interp, s)
+
+        While(s):
+            exec_while(interp, s)
+
+        For(s):
+            exec_for(interp, s)
+
+        Match(s):
+            exec_match_stmt(interp, s)
+
+        Return(s):
+            var val = Nil
+            if let expr = s.value:
+                val = eval_expr(interp, expr)
+            ReturnSignal(val)
+
+        Break:
+            BreakSignal(Void)
+
+        Continue:
+            ContinueSignal
+
+        Throw(s):
+            var val = Nil
+            if let expr = s.value:
+                val = eval_expr(interp, expr)
+            else:
+                let err = interp.current_env.get("error")
+                val = err else Nil
+            ThrowSignal(val)
+
+        Try(s):
+            exec_try(interp, s)
+
+        Expr(expr):
+            eval_expr(interp, expr)
+            nil
+
+        _: nil
+
+# ─── exec_if ──────────────────────────────────────────────────────────────────
+
+def Signal? exec_if(var Interpreter'actor interp, IfStmt s):
+    for branch in s.branches:
+        let cond_val = eval_expr(interp, branch.cond)
+        let b = expect_bool(cond_val)
+        if b:
+            let child = new_env(interp.current_env)
+            let prev = interp.current_env
+            interp.current_env = child
+            let sig = exec_block(interp, branch.body)
+            interp.current_env = prev
+            return sig
+    if let else_body = s.else_body:
+        let child = new_env(interp.current_env)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block(interp, else_body)
+        interp.current_env = prev
+        return sig
+    nil
+
+# ─── exec_while ───────────────────────────────────────────────────────────────
+
+def Signal? exec_while(var Interpreter'actor interp, WhileStmt s):
+    var running = true
+    var Signal? result = nil
+    while running:
+        let cond_val = eval_expr(interp, s.condition.clone())
+        let b = expect_bool(cond_val)
+        if not b:
+            running = false
+        else:
+            let child = new_env(interp.current_env)
+            let prev = interp.current_env
+            interp.current_env = child
+            let sig = exec_block(interp, s.body.clone())
+            interp.current_env = prev
+            match sig:
+                nil: nil
+                BreakSignal(_): running = false
+                ContinueSignal: nil
+                _:
+                    running = false
+                    result = sig
+    result
+
+# ─── exec_for ─────────────────────────────────────────────────────────────────
+
+def Signal? exec_for(var Interpreter'actor interp, ForStmt s):
+    let iterable = eval_expr(interp, s.iterable)
+    let items = collect_iterable(iterable)
+    var Signal? result = nil
+    var idx = 0
+    var done = false
+    while not done and idx < items.length:
+        let item = items[idx]
+        idx = idx + 1
+        let child = new_env(interp.current_env)
+        let vars = s.vars.clone()
+        if vars.length == 1:
+            child.define(vars[0], item)
+        else:
+            match item:
+                Tuple(elems):
+                    var i = 0
+                    for v in vars:
+                        let val = if i < elems.length: elems[i] else: Value.Nil
+                        child.define(v, val)
+                        i = i + 1
+                _:
+                    child.define(vars[0], Int(idx - 1))
+                    if vars.length >= 2:
+                        child.define(vars[1], item)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block(interp, s.body.clone())
+        interp.current_env = prev
+        match sig:
+            nil: nil
+            BreakSignal(_): done = true
+            ContinueSignal: nil
+            _:
+                done = true
+                result = sig
+    result
+
+# ─── collect_iterable ─────────────────────────────────────────────────────────
+
+def [Value] collect_iterable(Value val):
+    match val:
+        Array(elems): elems
+        Set(elems): elems
+        Tuple(elems): elems
+        Value.Dict(pairs):
+            var out = []
+            for p in pairs:
+                out.append(Tuple([p.0, p.1]))
+            out
+        Range(start, end, inclusive, _):
+            var out = []
+            var i = start
+            let limit = if inclusive: end + 1 else: end
+            while i < limit:
+                out.append(Int(i))
+                i = i + 1
+            out
+        Str(s):
+            var out = []
+            for c in s.chars():
+                out.append(Value.Str(c))
+            out
+        _: throw "value is not iterable"
+
+# ─── exec_match_stmt ──────────────────────────────────────────────────────────
+
+def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
+    let subject = eval_expr(interp, s.subject)
+    var matched = false
+    var Signal? result = nil
+    var arm_idx = 0
+    while not matched and arm_idx < s.arms.length:
+        let arm = s.arms[arm_idx]
+        arm_idx = arm_idx + 1
+        var pat_idx = 0
+        while not matched and pat_idx < arm.patterns.length:
+            let pattern = arm.patterns[pat_idx]
+            pat_idx = pat_idx + 1
+            let child = new_env(interp.current_env)
+            let did_match = match_pattern(subject.clone(), pattern, child.clone())
+            if did_match:
+                var guard_ok = true
+                if let guard_expr = arm.match_guard.clone():
+                    let gprev = interp.current_env
+                    interp.current_env = child.clone()
+                    let gv = eval_expr(interp, guard_expr)
+                    interp.current_env = gprev
+                    guard_ok = expect_bool(gv)
+                if guard_ok:
+                    matched = true
+                    let prev = interp.current_env
+                    interp.current_env = child
+                    let sig = match arm.body.clone():
+                        MatchBody.Expr(e):
+                            eval_expr(interp, e)
+                            nil
+                        MatchBody.Block(stmts):
+                            exec_block(interp, stmts)
+                    interp.current_env = prev
+                    result = sig
+    result
+
+# ─── match_pattern ────────────────────────────────────────────────────────────
+
+def Value expr_to_value_literal(Expr expr):
+    match expr.kind:
+        ExprKind.Int(n): Value.Int(n)
+        ExprKind.Float(f): Value.Float(f)
+        ExprKind.Str(s): Value.Str(s)
+        ExprKind.Bool(b): Value.Bool(b)
+        ExprKind.Nil: Value.Nil
+        _: Value.Nil
+
+def bool match_pattern(Value val, Pattern pattern, var Env'actor env):
+    match pattern:
+        Pattern.Wildcard:
+            true
+        Pattern.Bind(name):
+            env.define(name, val)
+            true
+        Pattern.None:
+            match val:
+                Value.Nil: true
+                _: false
+        Pattern.Some(inner):
+            match val:
+                Value.Nil: false
+                _: match_pattern(val, inner, env)
+        Pattern.Lit(lit):
+            match lit:
+                LitPattern.Int(n):
+                    match val:
+                        Value.Int(v): v == n
+                        _: false
+                LitPattern.Float(f):
+                    match val:
+                        Value.Float(v): v == f
+                        _: false
+                LitPattern.Str(s):
+                    match val:
+                        Value.Str(v): v == s
+                        _: false
+                LitPattern.Bool(b):
+                    match val:
+                        Value.Bool(v): v == b
+                        _: false
+                LitPattern.Nil:
+                    match val:
+                        Value.Nil: true
+                        _: false
+        Pattern.Tuple(pats):
+            match val:
+                Value.Tuple(elems):
+                    if elems.length != pats.length:
+                        false
+                    else:
+                        var ok = true
+                        var i = 0
+                        while ok and i < pats.length:
+                            ok = match_pattern(elems[i], pats[i], env)
+                            i = i + 1
+                        ok
+                _: false
+        Pattern.Variant(variant_name, field_pats):
+            match val:
+                Value.EnumVariant(vtype, vvariant, vfields):
+                    let full = if vtype.length > 0: "{vtype}.{vvariant}" else: vvariant
+                    if full != variant_name and vvariant != variant_name:
+                        false
+                    else:
+                        var ok = true
+                        var i = 0
+                        while ok and i < field_pats.length:
+                            let fval = if i < vfields.length: vfields[i] else: Value.Nil
+                            ok = match_pattern(fval, field_pats[i], env)
+                            i = i + 1
+                        ok
+                _: false
+
+# ─── exec_try ─────────────────────────────────────────────────────────────────
+
+def Signal? exec_try(var Interpreter'actor interp, TryStmt s):
+    let child = new_env(interp.current_env)
+    let prev = interp.current_env
+    interp.current_env = child
+    let body_sig = exec_block(interp, s.body)
+    interp.current_env = prev
+    match body_sig:
+        ThrowSignal(exc_val):
+            let exc_type = value_type_name(exc_val.clone())
+            var handled = false
+            var clause_idx = 0
+            while not handled and clause_idx < s.catch_clauses.length:
+                let clause = s.catch_clauses[clause_idx]
+                clause_idx = clause_idx + 1
+                let matches = clause.types.length == 0 or clause.types.contains(exc_type)
+                if matches:
+                    handled = true
+                    let cenv = new_env(interp.current_env)
+                    cenv.define("error", exc_val.clone())
+                    let cprev = interp.current_env
+                    interp.current_env = cenv
+                    let csig = exec_block(interp, clause.body)
+                    interp.current_env = cprev
+                    return csig
+            if not handled:
+                ThrowSignal(exc_val)
+            else:
+                nil
+        _: body_sig
+
+# ─── call_fn ──────────────────────────────────────────────────────────────────
+
+def Value call_fn(var Interpreter'actor interp, FnDecl decl, [Value] args, Env'actor? captured):
+    let base_env = captured else interp.global_env
+    let fn_env = new_env(base_env.clone())
+    var {string=Value} labeled = {}
+    var positional = []
+    for val in args:
+        match val:
+            Labeled(label, v):
+                labeled.set(label, v)
+            _:
+                positional.append(val)
+    var pos_idx = 0
+    for param in decl.params:
+        var val = Nil
+        if labeled.has(param.name):
+            val = labeled[param.name]
+        else:
+            if pos_idx < positional.length:
+                val = positional[pos_idx]
+                pos_idx = pos_idx + 1
+            else:
+                if let default_expr = param.default:
+                    let dprev = interp.current_env
+                    interp.current_env = base_env.clone()
+                    val = eval_expr(interp, default_expr)
+                    interp.current_env = dprev
+        if param.mutable:
+            fn_env.define_mut(param.name, val)
+        else:
+            fn_env.define(param.name, val)
+    let prev_env = interp.current_env
+    interp.current_env = fn_env
+    let sig = exec_block(interp, decl.body)
+    interp.current_env = prev_env
+    match sig:
+        nil: Nil
+        ReturnSignal(v): v
+        ThrowSignal(v): throw value_to_string(v)
+        _: Nil
+
+# ─── call_closure ─────────────────────────────────────────────────────────────
+
+def Value call_closure(var Interpreter'actor interp, [Param] params, ClosureBody body, [Value] args, Env'actor? captured):
+    let fn_env = new_env(captured)
+    var i = 0
+    for param in params:
+        let val = if i < args.length: args[i] else: Nil
+        fn_env.define(param.name, val)
+        i = i + 1
+    let prev_env = interp.current_env
+    interp.current_env = fn_env
+    var Signal? sig = nil
+    match body:
+        ClosureBody.Block(stmts):
+            sig = exec_block(interp, stmts)
+        ClosureBody.Expr(e):
+            sig = some(Signal.ReturnSignal(eval_expr(interp, e)))
+    interp.current_env = prev_env
+    match sig:
+        nil: Nil
+        ReturnSignal(v): v
+        BreakSignal(v): v
+        ContinueSignal: Nil
+        ThrowSignal(v): throw value_to_string(v)
+        _: Nil
+
+# ─── call_value ───────────────────────────────────────────────────────────────
+
+def Value call_value(var Interpreter'actor interp, Value callee, [Value] args):
+    match callee:
+        Value.Fn(name, captured):
+            let decl = lookup_fn_decl(interp, name)
+            call_fn(interp, decl, args, captured)
+
+        Value.Closure(params, body_stmts, captured):
+            call_closure(interp, params, body_stmts, args, captured)
+
+        Value.NativeFn(name, func):
+            call_native(interp, name, func, args)
+
+        Value.OverloadedFn(name, variants):
+            let best = resolve_overload(interp, variants, args.clone())
+            call_value(interp, best, args)
+
+        _: throw "value is not callable"
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+def bool expect_bool(Value val):
+    match val:
+        Bool(b): b
+        _: throw "expected bool"
+
+def string value_type_name(Value val):
+    match val:
+        Nil: "nil"
+        Void: "void"
+        Uninitialized: "uninitialized"
+        Bool(_): "bool"
+        Int(_): "int"
+        Float(_): "float"
+        Str(_): "string"
+        Array(_): "array"
+        Tuple(_): "tuple"
+        Dict(_): "dict"
+        Set(_): "set"
+        Object(inner): inner.type_name.clone()
+        EnumVariant(t, _, _): t
+        Fn(n, _): "fn({n})"
+        Closure(_, _, _): "closure"
+        NativeFn(n, _): "native({n})"
+        OverloadedFn(n, _): "fn({n})"
+        Range(_, _, _, _): "range"
+        Labeled(_, _): "labeled"
+
+def string value_to_string(Value val):
+    match val:
+        Nil: "nil"
+        Void: ""
+        Bool(b): if b: "true" else: "false"
+        Int(n): "{n}"
+        Float(f): "{f}"
+        Str(s): s
+        _: value_type_name(val)
+
+def bool value_equals(Value a, Value b):
+    match a:
+        Nil:
+            match b:
+                Nil: true
+                _: false
+        Bool(x):
+            match b:
+                Bool(y): x == y
+                _: false
+        Int(x):
+            match b:
+                Int(y): x == y
+                _: false
+        Float(x):
+            match b:
+                Float(y): x == y
+                _: false
+        Str(x):
+            match b:
+                Str(y): x == y
+                _: false
+        _: false
+
+def Value value_add(Value a, Value b):
+    match a:
+        Int(x):
+            match b:
+                Int(y): Int(x + y)
+                _: throw "type error in +="
+        Float(x):
+            match b:
+                Float(y): Float(x + y)
+                _: throw "type error in +="
+        Str(x):
+            match b:
+                Str(y): Str("{x}{y}")
+                _: throw "type error in +="
+        _: throw "type error in +="
+
+def Value value_sub(Value a, Value b):
+    match a:
+        Int(x):
+            match b:
+                Int(y): Int(x - y)
+                _: throw "type error in -="
+        Float(x):
+            match b:
+                Float(y): Float(x - y)
+                _: throw "type error in -="
+        _: throw "type error in -="
+
+def Value value_mul(Value a, Value b):
+    match a:
+        Int(x):
+            match b:
+                Int(y): Int(x * y)
+                _: throw "type error in *="
+        Float(x):
+            match b:
+                Float(y): Float(x * y)
+                _: throw "type error in *="
+        _: throw "type error in *="
+
+def Value value_div(Value a, Value b):
+    match a:
+        Int(x):
+            match b:
+                Int(y): Int(x / y)
+                _: throw "type error in /="
+        Float(x):
+            match b:
+                Float(y): Float(x / y)
+                _: throw "type error in /="
+        _: throw "type error in /="
+
+def Value value_mod(Value a, Value b):
+    match a:
+        Int(x):
+            match b:
+                Int(y): Int(x % y)
+                _: throw "type error in %="
+        _: throw "type error in %="

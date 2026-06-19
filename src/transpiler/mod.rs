@@ -47,7 +47,7 @@ pub enum ThreadingMode {
     Single,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TranspileConfig {
     pub mode: TranspileMode,
     pub threading: ThreadingMode,
@@ -61,6 +61,8 @@ pub struct TranspileConfig {
     /// Sanitizer to enable in the generated Cargo project (`address`, `thread`, or `memory`).
     /// Requires a nightly toolchain.  Handled by the CLI — the transpiler itself is unaffected.
     pub sanitize: Option<&'static str>,
+    /// Directory of the root source file — used to resolve `use` imports at transpile time.
+    pub source_dir: std::path::PathBuf,
 }
 
 impl Default for TranspileConfig {
@@ -71,6 +73,7 @@ impl Default for TranspileConfig {
             stack_auto_bytes: 256,
             instrument: false,
             sanitize: None::<&'static str>,
+            source_dir: std::path::PathBuf::new(),
         }
     }
 }
@@ -116,6 +119,7 @@ pub fn transpile_full(program: &Program) -> TranspileOutput {
 
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
     let mut t = Transpiler::new(config);
+    t.source_dir = t.config.source_dir.clone();
     t.emit_program(program);
     let code = if matches!(t.config.threading, ThreadingMode::Single) {
         t.out
@@ -144,7 +148,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     } else {
         code
     };
-    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: config.instrument }
+    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -317,6 +321,8 @@ struct Transpiler {
     /// Set before emit_body; used by the qualifier inference pass for annotation hints
     /// and body-compatibility checks on union-qualified parameters.
     pub(crate) fn_current_params: std::collections::HashMap<String, Type>,
+    /// Source line of each parameter in the current function (name → line).
+    pub(crate) fn_current_param_lines: std::collections::HashMap<String, usize>,
     /// Names of parameters declared as `mut` in the current function.
     /// Used by qualifier inference to determine auto-ref mutability and to detect
     /// def calls on immutable parameters.
@@ -432,6 +438,10 @@ struct Transpiler {
     /// `use boring_mod.*` / `use boring_mod.x` must be suppressed because `emit_mod` inlines
     /// items directly — no Rust `mod` block is created, so `use boring_mod::*` is unresolvable.
     pub(crate) boring_mod_names: std::collections::HashSet<String>,
+    /// Directory of the root source file — used to resolve relative `use` paths.
+    pub(crate) source_dir: std::path::PathBuf,
+    /// Canonical paths already inlined — prevents duplicate / circular imports.
+    pub(crate) loaded: std::collections::HashSet<std::path::PathBuf>,
     /// True when the program calls any of the log-level builtins (error/warn/info/debug/trace).
     /// The CLI uses this to warn that `log = "0.4"` is needed in Cargo.toml.
     /// Uses Rc<Cell<bool>> so sub-transpilers share the same instance — any set(true) in a
@@ -580,6 +590,7 @@ impl Transpiler {
             impl_type_params: Vec::new(),
             fn_return_ty: None,
             fn_current_params: std::collections::HashMap::new(),
+            fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
@@ -623,6 +634,8 @@ impl Transpiler {
             struct_ext_method_overrides: std::collections::HashSet::new(),
             rc_identity_vars: std::collections::HashSet::new(),
             boring_mod_names: std::collections::HashSet::new(),
+            source_dir: std::path::PathBuf::new(),
+            loaded: std::collections::HashSet::new(),
             uses_log: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_thiserror: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_reqwest: false,
