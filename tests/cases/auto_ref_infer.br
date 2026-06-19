@@ -1,0 +1,53 @@
+# Auto-ref inference: Counter n → Counter& when no storage/qualifier-demand signal
+
+struct ARCounter:
+    init(pub int n)
+
+    req int value():
+        n
+
+    def inc():
+        n += 1
+
+# --- Case 1: bare param, req call only → infers Counter& ---
+# Caller can pass any qualifier that safely coerces to &T.
+req int read_n(ARCounter c):
+    c.value()
+
+let ARCounter'stack s = ARCounter(10)
+let ARCounter'shared sh = ARCounter(20)
+
+print read_n(s)
+print read_n(sh)
+
+# --- Case 2: mut param, def call → infers mut Counter& ---
+# Caller must have a mutable qualifier.
+def void increment(mut ARCounter c):
+    c.inc()
+
+var ms = ARCounter(0)
+
+increment(ms)
+increment(ms)
+print ms.n
+
+# --- Case 3: qualifier demand → 'actor inferred (not auto-ref) ---
+# c is passed to a function expecting 'actor → infers 'actor
+def int take_actor(ARCounter'actor c):
+    c.value()
+
+def int relay(ARCounter c):
+    take_actor(c)
+
+let relay_c = ARCounter(99)   # infers 'stack — compatible with relay's 'stack param
+print relay(relay_c)
+
+# --- Case 4: read-only usage + explicit borrow pass → still auto-ref ---
+req int read_via_borrow(ARCounter& c):
+    c.value()
+
+req int relay_borrow(ARCounter c):
+    read_via_borrow(c)
+
+let ARCounter'shared rb_c = ARCounter(77)
+print relay_borrow(rb_c)

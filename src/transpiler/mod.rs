@@ -314,6 +314,10 @@ struct Transpiler {
     /// Set before emit_body; used by the qualifier inference pass for annotation hints
     /// and body-compatibility checks on union-qualified parameters.
     pub(crate) fn_current_params: std::collections::HashMap<String, Type>,
+    /// Names of parameters declared as `mut` in the current function.
+    /// Used by qualifier inference to determine auto-ref mutability and to detect
+    /// def calls on immutable parameters.
+    pub(crate) fn_current_params_mut: std::collections::HashSet<String>,
     /// Names declared as `type Name as InnerType` newtype wrappers.
     /// Used in emit_constructor to emit `Name(val)` (tuple struct) rather than `Name { field: val }`.
     pub(crate) newtype_types: std::collections::HashSet<String>,
@@ -572,6 +576,7 @@ impl Transpiler {
             impl_type_params: Vec::new(),
             fn_return_ty: None,
             fn_current_params: std::collections::HashMap::new(),
+            fn_current_params_mut: std::collections::HashSet::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
             var_newtype_type: std::collections::HashMap::new(),

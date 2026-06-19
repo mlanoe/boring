@@ -382,15 +382,7 @@ impl Transpiler {
                 // Priority 5: use-site qualifier inference — apply the inferred qualifier.
                 // Handles bare T, T', T?, and T'? initialisers.
                 let type_name_opt = match &s_value.kind {
-                    // Counter(0)
-                    ExprKind::Call(callee, _) => {
-                        if let ExprKind::Var(n) = &callee.kind {
-                            if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                                Some((n.clone(), false))
-                            } else { None }
-                        } else { None }
-                    }
-                    // some(Counter(0))
+                    // some(Counter(0)) — must come before the generic Call arm
                     ExprKind::Call(callee, args)
                         if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "some") =>
                     {
@@ -401,6 +393,14 @@ impl Transpiler {
                                         Some((n.clone(), true))
                                     } else { None }
                                 } else { None }
+                            } else { None }
+                        } else { None }
+                    }
+                    // Counter(0)
+                    ExprKind::Call(callee, _) => {
+                        if let ExprKind::Var(n) = &callee.kind {
+                            if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                Some((n.clone(), false))
                             } else { None }
                         } else { None }
                     }
@@ -1004,17 +1004,7 @@ impl Transpiler {
             &self.config, &self.user_types, &self.unit_enums, ty)
     }
 
-    /// Static version for use from emit_top.rs (where calling self.is_managed_owned_user is awkward).
-    pub(crate) fn is_managed_owned_user_static(
-        config: &crate::transpiler::TranspileConfig,
-        user_types: &std::collections::HashSet<String>,
-        unit_enums: &std::collections::HashSet<String>,
-        ty: &Type) -> bool
-    {
-        crate::transpiler::Transpiler::is_managed_user_owned(config, user_types, unit_enums, ty)
-    }
-
-    /// Wrap a raw constructor value in the managed-mode wrapper.
+/// Wrap a raw constructor value in the managed-mode wrapper.
     /// Multi: `Arc::new(std::sync::Mutex::new(val))`
     /// Single: `RefCell::new(val)`
     pub(crate) fn wrap_managed(&self, val: &str) -> String {
@@ -2478,14 +2468,13 @@ impl Transpiler {
             || if let ExprKind::Var(vname) = &s.subject.kind {
                 self.optional_vars.contains(vname.as_str())
             } else { false };
-        let arms_for_emit: Vec<MatchArm>;
-        let arms_ref: &[MatchArm] = if subj_is_optional {
+        let arms_for_emit: Option<Vec<MatchArm>> = if subj_is_optional {
             let has_variant_arm = s.arms.iter().any(|arm| arm.patterns.iter().any(|p| {
                 matches!(p, Pattern::Variant(_, _) | Pattern::Bind(_))
                     && !matches!(p, Pattern::None)
             }));
             if has_variant_arm {
-                arms_for_emit = s.arms.iter().map(|arm| {
+                Some(s.arms.iter().map(|arm| {
                     let new_pats: Vec<Pattern> = arm.patterns.iter().map(|p| match p {
                         Pattern::Lit(LitPattern::Nil) | Pattern::None => p.clone(),
                         Pattern::Wildcard => p.clone(),
@@ -2493,15 +2482,14 @@ impl Transpiler {
                         other => Pattern::Some(Box::new(other.clone())),
                     }).collect();
                     MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line }
-                }).collect();
-                &arms_for_emit
+                }).collect())
             } else {
-                &s.arms
+                None
             }
         } else {
-            arms_for_emit = vec![];
-            &s.arms
+            None
         };
+        let arms_ref: &[MatchArm] = arms_for_emit.as_deref().unwrap_or(&s.arms);
 
         self.line(&format!("match {} {{", subj));
         self.indent += 1;

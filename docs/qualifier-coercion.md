@@ -28,7 +28,8 @@ The idea: Boring could express this pattern natively. A function that takes a **
 
 | Parameter syntax | Rust emitted | Semantics |
 |---|---|---|
-| `Counter c` | inferred | qualifier inferred from body; move if `'stack` or `'heap` |
+| `Counter c` | inferred — see below | qualifier inferred from body; or `Counter&` / `mut Counter&` if no storage signal |
+| `mut Counter c` | inferred — see below | mutable; infers `mut Counter&` if no storage, mutable qualifier otherwise |
 | `Counter'stack c` | `Counter` | move (or copy for primitives) |
 | `Counter'heap c` | `Box<Counter>` | move |
 | `Counter'shared c` | `&Arc<Counter>` | auto-ref, transparent to the developer |
@@ -93,7 +94,23 @@ def process_batch(Counter'actor c):
 
 ### Why not `Counter c` (bare, no marker)?
 
-`Counter c` without a qualifier is already reserved for qualifier inference — the transpiler resolves the qualifier from usage in the body. It cannot double as a coerced reference marker. `Counter&` is therefore the explicit, unambiguous form for universal borrowing.
+`Counter c` without a qualifier is subject to qualifier inference. The inference algorithm has been extended to include universal borrowing as a possible output: when the parameter is never stored and all body usages are compatible with a borrow, the transpiler resolves `Counter c` to `Counter&` (or `mut Counter&`) rather than falling back to a concrete qualifier.
+
+```boring
+req display(Counter c):       # c never stored, read-only
+    print c.value
+# infers Counter& → fn display(c: &Counter)
+# any qualifier accepted at call site
+
+def reset(mut Counter c):     # c never stored, mut declared
+    c.value = 0
+# infers mut Counter& → fn reset(c: &mut Counter)
+# any mutable qualifier accepted at call site
+```
+
+The `mut` keyword is not inferred — it must be written explicitly. A `def` call on a `Counter c` parameter (without `mut`) is a compile error: `"parameter 'c' is immutable but 'inc' is a def method — declare mut Counter c"`. This keeps mutability visible in the signature regardless of what the body does.
+
+`Counter& c` remains the explicit form — use it to document intent, or to lock in universal borrowing regardless of future body changes that might add a qualifier-demanding usage.
 
 ---
 

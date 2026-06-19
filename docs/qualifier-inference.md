@@ -190,6 +190,144 @@ A conflict on an optional variable is reported the same way as for a bare variab
 
 ---
 
+## Universal borrow as inference output
+
+When a parameter has no explicit qualifier and no storage signals, the inference can resolve to a universal borrow (`Counter&` or `mut Counter&`) rather than a concrete qualifier. This is evaluated as a pre-fallback step, before the priority-ordered chain.
+
+### Mutability is declared, not inferred
+
+The `mut` keyword on a parameter is **not inferred** — it must be written explicitly by the developer. This is consistent with the rest of the language (`let`/`mut`/`var`, `req`/`def`, `def mut T`): mutability is a contract visible in the signature, not an implementation detail the transpiler resolves from the body.
+
+- `Counter n` — read-only parameter. The transpiler infers `Counter&` when `n` is not stored.
+- `mut Counter n` — mutable parameter. The transpiler infers `mut Counter&` when `n` is not stored.
+
+A `def` method call on `Counter n` (without `mut`) is a compile error:
+
+```
+error: parameter `n` is immutable but `inc` is a `def` method — declare `mut Counter n`
+```
+
+### Conditions for universal borrow inference
+
+A parameter resolves to a universal borrow if it triggers neither a **storage signal** nor a **qualifier demand signal**.
+
+**Storage signals** — `n` is never:
+- assigned to a struct field (`self.x = n`, `field = n`)
+- returned with an ownership qualifier
+- captured by a closure or task
+
+**Qualifier demand signals** — `n` is never:
+- passed to a function parameter with an explicit qualifier (e.g. `Counter'actor`)
+
+Passes to `Counter&` or `mut Counter&` parameters do not count as qualifier demand signals — they are borrow-compatible and leave the inference open.
+
+| Declaration | Signals | Inferred form | Rust emitted |
+|---|---|---|---|
+| `Counter n` | none | `Counter&` | `&Counter` |
+| `mut Counter n` | none | `mut Counter&` | `&mut Counter` |
+| `Counter n` | qualifier demand | qualifier via constraints | — |
+| `mut Counter n` | qualifier demand | mutable qualifier via constraints | — |
+| `Counter n` | storage | qualifier via constraints | — |
+| `mut Counter n` | storage | mutable qualifier via constraints | — |
+
+`'shared` is excluded from `mut Counter n` by construction — it cannot produce `&mut Counter`.
+
+**Not applicable to:** `Counter' n` (tick — stays on the indirection path), `Counter? n` (optional — excluded from auto-ref inference), `var Counter n` (out-parameter), and explicit qualifier groups (`Counter'mut n`).
+
+### Examples
+
+```boring
+req display(Counter n):
+    print n.value
+# no storage, read-only → infers Counter& → fn display(n: &Counter)
+# caller can pass any qualifier: 'stack, 'heap, 'shared, 'actor, 'guard
+```
+
+```boring
+def reset(mut Counter n):
+    n.value = 0
+# no storage, mutable → infers mut Counter& → fn reset(n: &mut Counter)
+# caller can pass any mutable qualifier: 'stack, 'heap, 'actor, 'guard
+# 'shared is rejected at the call site
+```
+
+```boring
+def reset(Counter n):
+    n.value = 0         # def call on immutable parameter → compile error
+# error: parameter `n` is immutable but `value` is mutated — declare `mut Counter n`
+```
+
+```boring
+def process(mut Counter n):
+    n.inc()              # def call — ok, mut declared
+    spawn_actor(n)       # storage signal: demands 'actor
+# storage signal wins → infers 'actor, not mut Counter&
+# 'shared excluded because mut
+```
+
+### Lock acquisition at call sites
+
+When a parameter infers `Counter&` or `mut Counter&` and the caller passes a `'actor` or `'guard` argument, the transpiler must acquire the lock at the call site — identical to the behavior of an explicit `Counter&` or `mut Counter&` parameter.
+
+```boring
+req display(Counter n):   # infers Counter&
+    print n.value
+
+let b = Counter'actor(0)
+display(b)
+# emits: { let __g = b.lock()?; display(&*__g); }
+```
+
+```boring
+def reset(mut Counter n):   # infers mut Counter&
+    n.value = 0
+
+let b = Counter'actor(0)
+reset(b)
+# emits: { let mut __g = b.lock()?; reset(&mut *__g); }
+```
+
+For `'guard`, `Counter&` uses `read()` (shared read lock) and `mut Counter&` uses `write()` (exclusive write lock).
+
+This is the same code generation as explicit `Counter&` / `mut Counter&` — the inferred and explicit forms are identical at the Rust level. What `fn_sigs` records as `Counter&` (inferred) is treated exactly like `Counter&` (explicit) at every call site.
+
+### Interaction with qualifier groups
+
+If the parameter has an explicit qualifier group (`Counter'mut n`, `Counter'req n`), the universal borrow inference does not apply — the group is the declared constraint and the body narrows within it. Universal borrow inference applies only to bare `Counter n`.
+
+### Generics
+
+Universal borrow inference applies to generic parameters the same way as concrete types. `T n` with no storage signal and no qualifier demand resolves to `T&`; `mut T n` resolves to `mut T&`.
+
+```boring
+req display(T n):       # no storage, no qualifier demand
+    print n.value
+# infers T& → fn display<T>(n: &T)
+# caller can pass any qualifier
+```
+
+```boring
+def reset(mut T n):     # no storage, mut declared
+    n.value = 0
+# infers mut T& → fn reset<T>(n: &mut T)
+```
+
+The lock acquisition rule at call sites applies identically: if the concrete type instantiated for `T` is `'actor` or `'guard`, the transpiler inserts the lock at the call site.
+
+### Explicit form
+
+`Counter& n` and `mut Counter& n` remain valid as explicit forms. Use them to:
+- Document intent — make universal borrowing visible in the signature.
+- Lock in the behavior regardless of future body changes that might introduce a storage signal.
+
+When a bare `Counter n` inference resolves to `Counter&`, the emitted signature is identical to an explicit `Counter& n`.
+
+### Implementation status
+
+> Not implemented. This section describes the intended extension to the inference algorithm.
+
+---
+
 ## Parameter auto-apply
 
 A pre-inference pass runs `infer_qualifiers` on the function body before emitting parameters. `emit_param` then consults `inferred_qualifiers`: if the parameter has no explicit qualifier but inference resolved one, it is applied at emission automatically.
@@ -246,7 +384,7 @@ struct Service:
 
 ---
 
-## [DRAFT] Cross-file struct field inference
+## Cross-file struct field inference
 
 > **Status: not planned.** This section documents the problem space and open questions. No implementation is scheduled.
 

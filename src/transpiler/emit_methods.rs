@@ -1384,9 +1384,31 @@ impl Transpiler {
                 let emitted = if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) {
                     let mutable = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
                     let ref_prefix = if mutable { "&mut " } else { "&" };
+                    let _actor_placeholder;
+                    let _guard_placeholder;
+                    let _shared_placeholder;
+                    let _borrow_placeholder;
+                    let _borrow_mut_placeholder;
                     let arg_qual = if let ExprKind::Var(vname) = &a.value.kind {
-                        self.fn_current_params.get(vname.as_str())
-                            .or_else(|| self.var_types.get(vname.as_str()))
+                        if self.var_mutex_types.contains(vname.as_str()) {
+                            _actor_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Actor);
+                            Some(&_actor_placeholder)
+                        } else if self.var_rwlock_types.contains(vname.as_str()) {
+                            _guard_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Guard);
+                            Some(&_guard_placeholder)
+                        } else if self.arc_vars.contains(vname.as_str()) {
+                            _shared_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Shared);
+                            Some(&_shared_placeholder)
+                        } else if matches!(self.inferred_qualifiers.get(vname.as_str()), Some(OwnerQual::Borrow)) {
+                            _borrow_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Borrow);
+                            Some(&_borrow_placeholder)
+                        } else if matches!(self.inferred_qualifiers.get(vname.as_str()), Some(OwnerQual::BorrowMut)) {
+                            _borrow_mut_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::BorrowMut);
+                            Some(&_borrow_mut_placeholder)
+                        } else {
+                            self.fn_current_params.get(vname.as_str())
+                                .or_else(|| self.var_types.get(vname.as_str()))
+                        }
                     } else { None };
                     // Q4: 'shared → mut Counter& is a compile error — 'shared has no interior mutability.
                     if mutable && matches!(arg_qual, Some(Type::Qualified(_, OwnerQual::Shared))) {
@@ -1415,7 +1437,17 @@ impl Transpiler {
                                     a.value.line, fn_name
                                 );
                             }
-                            format!("{{ let __g = {}.lock(); {}*__g }}", emitted, ref_prefix)
+                            // Use the raw variable name (not the auto-ref'd form) for lock acquisition,
+                            // so the guard lifetime is correct: `let __g = ac.borrow()` not `&ac.borrow()`.
+                            let raw = if let ExprKind::Var(vname) = &a.value.kind {
+                                vname.clone()
+                            } else {
+                                emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
+                            };
+                            let lock_method = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                                if mutable { "borrow_mut" } else { "borrow" }
+                            } else if mutable { "lock" } else { "lock" };
+                            format!("{{ let __g = {}.{}(); {}*__g }}", raw, lock_method, ref_prefix)
                         }
                         Some(Type::Qualified(_, OwnerQual::Guard)) => {
                             // Q5: RwLockGuard held across .await — same issue.
@@ -1427,8 +1459,23 @@ impl Transpiler {
                                     a.value.line, fn_name
                                 );
                             }
-                            let lock_method = if mutable { "write" } else { "read" };
-                            format!("{{ let __g = {}.{}(); {}*__g }}", emitted, lock_method, ref_prefix)
+                            let raw = if let ExprKind::Var(vname) = &a.value.kind {
+                                vname.clone()
+                            } else {
+                                emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
+                            };
+                            let lock_method = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                                if mutable { "borrow_mut" } else { "borrow" }
+                            } else if mutable { "write" } else { "read" };
+                            format!("{{ let __g = {}.{}(); {}*__g }}", raw, lock_method, ref_prefix)
+                        }
+                        // Arg is already a borrow (Counter&): pass through without adding another &.
+                        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)) => {
+                            if let ExprKind::Var(vname) = &a.value.kind {
+                                vname.clone()
+                            } else {
+                                emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
+                            }
                         }
                         _ => format!("{}{}", ref_prefix, emitted),
                     }
@@ -1911,6 +1958,7 @@ impl Transpiler {
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             fn_current_params: std::collections::HashMap::new(),
+            fn_current_params_mut: std::collections::HashSet::new(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,
         }

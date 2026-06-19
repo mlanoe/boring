@@ -3565,16 +3565,16 @@ print host             <span class="co"># localhost</span></code></pre></div>
 <hr>
 <h2 id="30-qualifier-inference">30. Qualifier Inference</h2>
 <p>Boring&#x27;s ownership qualifiers (<code>&#x27;stack</code>, <code>&#x27;heap</code>, <code>&#x27;shared</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code>) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.</p>
-<h4 id="the-zero-annotation-goal">The zero-annotation goal</h4>
+<h3 id="the-zero-annotation-goal">The zero-annotation goal</h3>
 <p>Boring aims to let you write code that looks like a high-level scripting language while emitting Rust that is as precise and zero-cost as hand-written systems code. The qualifier system is the bridge: it maps naturally to <code>T</code>, <code>Box&lt;T&gt;</code>, <code>Arc&lt;T&gt;</code>, <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>, and <code>Arc&lt;RwLock&lt;T&gt;&gt;</code> without forcing you to spell those types out.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)      <span class="co"># qualifier not written — inferred from use</span>
 <span class="fn">spawn_actor</span>(c)          <span class="co"># demands &#x27;actor → c inferred as Arc&lt;Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
 <p>The emitted Rust is identical to what you would write by hand, but you never had to decide.</p>
-<h4 id="constraint-elimination">Constraint elimination</h4>
+<h3 id="constraint-elimination">Constraint elimination</h3>
 <p>Each unqualified local variable starts as a candidate for every qualifier: <code>{Stack, Owned, Shared, Actor, Guard}</code>. Every usage signal narrows the set by eliminating qualifiers that are incompatible. When exactly one candidate remains, it is chosen. When none remain, the constraints are contradictory and the compiler reports an error. When several remain, the compiler applies a priority-ordered fallback (see below).</p>
 <table><thead><tr><th>Signal</th><th>Compatible qualifiers</th></tr></thead><tbody><tr><td>Call site demanding <code>T&#x27;shared</code></td><td><code>{Shared}</code></td></tr><tr><td>Call site demanding <code>T&#x27;actor</code></td><td><code>{Actor}</code></td></tr><tr><td>Call site demanding <code>T&#x27;guard</code></td><td><code>{Guard}</code></td></tr><tr><td>Call site demanding <code>T&#x27;stack</code></td><td><code>{Stack}</code></td></tr><tr><td>Call site demanding <code>T&#x27;heap</code></td><td><code>{Owned}</code></td></tr><tr><td><code>def</code> method call on the variable</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td><code>mut</code> binding (<code>mut x = ...</code>)</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td>Task capture as method receiver</td><td><code>{Actor, Guard}</code></td></tr><tr><td>Task capture, read-only</td><td><code>{Shared, Actor, Guard}</code></td></tr><tr><td><code>req</code> method call</td><td><em>(no constraint — all qualifiers remain)</em></td></tr></tbody></table>
 <p>Each signal intersects the current candidate set. The order of signals does not matter.</p>
-<h4 id="priority-ordered-fallback">Priority-ordered fallback</h4>
+<h3 id="priority-ordered-fallback">Priority-ordered fallback</h3>
 <p>When the candidate set still contains multiple qualifiers after all signals are applied, the transpiler resolves the tie using the following algorithm:</p>
 <p><strong>Step 1 — <code>&#x27;stack</code> candidate.</strong> If <code>&#x27;stack</code> is in the candidate set:</p>
 <table><thead><tr><th>Context</th><th>Decision</th></tr></thead><tbody><tr><td>Struct field (any binding — <code>let</code>, <code>mut</code>, <code>var</code>)</td><td><code>&#x27;stack</code> — field bytes are part of the parent allocation; no indirection regardless of size</td></tr><tr><td>Local variable, sizeof(T) ≤ <code>--stack-auto-bytes</code></td><td><code>&#x27;stack</code></td></tr><tr><td>Local variable, sizeof(T) &gt; <code>--stack-auto-bytes</code></td><td>skip <code>&#x27;stack</code>; continue with step 3</td></tr></tbody></table>
@@ -3585,34 +3585,34 @@ print host             <span class="co"># localhost</span></code></pre></div>
     <span class="kw">let</span> BigData&#x27; backup  <span class="co"># T&#x27; — always Box&lt;BigData&gt;</span></code></pre></div>
 <p><strong>Step 2 — ordered chain.</strong> If <code>&#x27;stack</code> was not selected, the transpiler picks the first qualifier present in the remaining candidates, in this order:</p>
 <p><code>&#x27;heap</code> &gt; <code>&#x27;shared</code> &gt; <code>&#x27;actor</code> &gt; <code>&#x27;guard</code></p>
-<h4 id="threshold">Threshold</h4>
+<h3 id="threshold">Threshold</h3>
 <p>The stack size threshold is configurable:</p>
 <div class="code-block"><pre><code>boring build --stack-auto-bytes 512  # promote locals &gt; 512 bytes to Box&lt;T&gt;</code></pre></div>
 <p>Default: 256 bytes.</p>
 <blockquote>The size estimate is best-effort: it sums struct fields recursively but treats <code>Vec</code>, <code>HashMap</code>, and pointer-sized types as 8–16 bytes. The estimate is conservative — when in doubt the transpiler prefers <code>&#x27;heap</code> over a potentially large stack frame.</blockquote>
-<h4 id="example-sharing--mutation--conflict">Example: sharing + mutation → conflict</h4>
+<h3 id="example-sharing--mutation--conflict">Example: sharing + mutation → conflict</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
 c.<span class="fn">inc</span>()             <span class="co"># def call → eliminates Shared, Const → {Stack, Owned, Actor, Guard}</span>
 <span class="fn">share_with</span>(c)       <span class="co"># demands &#x27;shared → intersect to {Shared}</span>
                     <span class="co"># result: {} → error: no qualifier satisfies all constraints</span></code></pre></div>
 <p>This is correct: <code>Arc&lt;T&gt;</code> does not support <code>.inc()</code> (a mutating method). The developer must choose: either pass <code>c</code> to <code>share_with</code> only, or use <code>T&#x27;guard</code> explicitly to get <code>Arc&lt;RwLock&lt;T&gt;&gt;</code>.</p>
-<h4 id="return-type-demand">Return-type demand</h4>
+<h3 id="return-type-demand">Return-type demand</h3>
 <p>If the function has a declared return type with a qualifier, a bare variable in tail position or in a <code>return</code> statement inherits that qualifier.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Counter<span class="lf">&#x27;actor</span> <span class="fn">make_counter</span>():
     <span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)   <span class="co"># anonymous</span>
     c                    <span class="co"># tail expression → infers &#x27;actor from return type</span></code></pre></div>
-<h4 id="alias-propagation">Alias propagation</h4>
+<h3 id="alias-propagation">Alias propagation</h3>
 <p><code>let y = x</code> makes <code>y</code> an alias of <code>x</code>. Any constraint applied to either one is propagated to the whole group.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="kw">let</span> d = c               <span class="co"># d is an alias of c</span>
 <span class="fn">spawn_actor</span>(d)          <span class="co"># demands &#x27;actor on d → also applied to c</span></code></pre></div>
-<h4 id="task-captures">Task captures</h4>
+<h3 id="task-captures">Task captures</h3>
 <p>Variables captured by a <code>task:</code> body must be <code>Arc</code>-based so they can be cloned and moved into the async closure.</p>
 <ul><li>Captured as a method receiver (e.g. <code>c.inc()</code> inside the task) → <code>{Actor, Guard}</code></li><li>Captured read-only → <code>{Shared, Actor, Guard}</code></li></ul>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="kw">task</span>:
     c.<span class="fn">inc</span>()    <span class="co"># c is a receiver inside the task → infers &#x27;actor</span></code></pre></div>
-<h4 id="parameter-auto-apply">Parameter auto-apply</h4>
+<h3 id="parameter-auto-apply">Parameter auto-apply</h3>
 <p>Parameters without an explicit qualifier, with a tick (<code>T&#x27;</code>), or with a qualifier group (<code>T&#x27;mut</code>, <code>T&#x27;many</code>, …) are all subject to body inference. The inferred qualifier is applied automatically at emission — the Rust function signature carries the correct type even if the Boring source does not.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(Counter c):     <span class="co"># bare — full candidate set</span>
     <span class="fn">spawn_actor</span>(c)          <span class="co"># demands &#x27;actor → fn process(c: Arc&lt;Mutex&lt;Counter&gt;&gt;)</span>
@@ -3623,7 +3623,19 @@ c.<span class="fn">inc</span>()             <span class="co"># def call → elim
 <span class="kw">def</span> <span class="fn">process</span>(Counter<span class="lf">&#x27;mut</span> c): <span class="co"># group — {Stack, Owned, Actor, Guard}</span>
     <span class="fn">spawn_actor</span>(c)          <span class="co"># demands &#x27;actor → fn process(c: Arc&lt;Mutex&lt;Counter&gt;&gt;)</span></code></pre></div>
 <p>If the body provides no narrowing signal, the fallback for bare <code>T</code> is size-based, for <code>T&#x27;</code> is <code>&#x27;heap</code>, and for a group is the first member of the group.</p>
-<h4 id="cross-function-propagation">Cross-function propagation</h4>
+<h3 id="universal-borrow-as-inference-output">Universal borrow as inference output</h3>
+<p>When a bare parameter has no storage signal and no qualifier demand signal, the inference resolves to a <strong>universal borrow</strong> — <code>Counter&amp;</code> or <code>mut Counter&amp;</code> — as a pre-fallback step, before the size-based chain.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="fn">display</span>(Counter c):   <span class="co"># no storage, read-only → infers Counter&amp; → fn display(c: &amp;Counter)</span>
+    print c.value
+
+<span class="kw">def</span> <span class="fn">reset</span>(<span class="kw">mut</span> Counter c): <span class="co"># no storage, mut declared → infers mut Counter&amp; → fn reset(c: &amp;mut Counter)</span>
+    c.value = <span class="nb">0</span></code></pre></div>
+<p>Callers can pass any qualifier. The transpiler acquires the lock at the call site for <code>&#x27;actor</code> and <code>&#x27;guard</code> arguments, exactly as for an explicit <code>Counter&amp;</code> parameter.</p>
+<p><strong>Mutability is declared, not inferred.</strong> <code>mut</code> on a parameter is always written explicitly; it is not inferred from the body. A <code>def</code> method call on an immutable parameter is a compile error (<code>declare mut Counter n</code>).</p>
+<p>A storage signal (field assignment, task capture, return with ownership qualifier) or a qualifier demand signal (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.</p>
+<table><thead><tr><th>Parameter</th><th>Signals</th><th>Emitted form</th></tr></thead><tbody><tr><td><code>Counter c</code></td><td>none</td><td><code>&amp;Counter</code></td></tr><tr><td><code>mut Counter c</code></td><td>none</td><td><code>&amp;mut Counter</code></td></tr><tr><td><code>Counter c</code></td><td>qualifier demand</td><td>concrete qualifier</td></tr><tr><td><code>Counter c</code></td><td>storage</td><td>concrete qualifier</td></tr></tbody></table>
+<p>The same rule applies to generic parameters: <code>T c</code> without signals infers <code>&amp;T</code>; <code>mut T c</code> infers <code>&amp;mut T</code>. Optionals (<code>Counter? c</code>), tick parameters (<code>Counter&#x27; c</code>), <code>var</code> parameters, and explicit qualifier groups are excluded from universal borrow inference. The explicit forms <code>Counter&amp; c</code> and <code>mut Counter&amp; c</code> lock in the behavior regardless of future body changes.</p>
+<h3 id="cross-function-propagation">Cross-function propagation</h3>
 <p>After a function body is processed, <code>fn_sigs</code> is updated with the inferred parameter qualifiers. Functions defined later in the same file that call this function will see the qualified signature and propagate the constraint to their own variables.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(Counter c):   <span class="co"># inferred &#x27;actor from body</span>
     <span class="fn">spawn_actor</span>(c)
@@ -3631,7 +3643,7 @@ c.<span class="fn">inc</span>()             <span class="co"># def call → elim
 <span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="fn">process</span>(c)                <span class="co"># fn_sigs now shows Counter&#x27;actor → c infers &#x27;actor</span></code></pre></div>
 <p><strong>Limitation:</strong> propagation is a single forward pass. If a caller is defined before the callee in the file, no propagation occurs. Mutual recursion is not covered.</p>
-<h4 id="struct-field-inference">Struct field inference</h4>
+<h3 id="struct-field-inference">Struct field inference</h3>
 <p>Private and public fields with no explicit qualifier are inferred from the struct&#x27;s own method bodies using the same constraint-elimination algorithm. Only fields of struct types (<code>Named</code> types) are candidates.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Service:
     Counter stats        <span class="co"># no qualifier</span>
@@ -3641,22 +3653,22 @@ c.<span class="fn">inc</span>()             <span class="co"># def call → elim
         <span class="co"># inferred: stats: Arc&lt;Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
 <p>Results are applied at emit time: the field is emitted with the inferred Rust wrapper, and all <code>self.stats</code> accesses in method bodies are wrapped or unwrapped accordingly. Public fields are resolved from internal usage only — external callers must work with the inferred type. Generating per-qualifier struct variants would leak implementation details through the module boundary.</p>
 <p><strong>Limitation:</strong> cross-file inference is not supported. A field accessed only from another module retains its fallback type.</p>
-<h4 id="the-mut-binding-keyword">The <code>mut</code> binding keyword</h4>
+<h3 id="the-mut-binding-keyword">The <code>mut</code> binding keyword</h3>
 <p><code>mut x = expr</code> marks a fixed binding with a mutable instance. It contributes a mutation signal at the declaration site — equivalent to a <code>def</code> method call on the same line, but earlier. This allows the compiler to narrow the candidate set before any method calls are seen.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)      <span class="co"># eliminates Shared, Const → {Stack, Owned, Actor, Guard}</span>
 <span class="fn">spawn_actor</span>(c)          <span class="co"># demands &#x27;actor → infers &#x27;actor</span></code></pre></div>
-<h4 id="explicit-annotation-as-escape-hatch">Explicit annotation as escape hatch</h4>
+<h3 id="explicit-annotation-as-escape-hatch">Explicit annotation as escape hatch</h3>
 <p>When inference cannot resolve a unique qualifier — for example when a variable is used in two mutually exclusive ways — you annotate explicitly:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Counter<span class="lf">&#x27;guard</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)   <span class="co"># developer decides: RwLock</span></code></pre></div>
 <p>An explicit qualifier has the highest priority and overrides all inference signals. The compiler will still validate that the declared qualifier is compatible with the usage in the body.</p>
-<h4 id="t--the-indirection-hint"><code>T&#x27;</code> — the indirection hint</h4>
+<h3 id="t--the-indirection-hint"><code>T&#x27;</code> — the indirection hint</h3>
 <p><code>T&#x27;</code> (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to <code>{Owned, Shared, Actor, Guard}</code>, eliminating <code>Stack</code> and <code>Const</code> from the start.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c&#x27; = <span class="fn">Counter</span>(<span class="nb">0</span>)        <span class="co"># tick → candidates: {Owned, Shared, Actor, Guard}</span>
 <span class="fn">spawn_actor</span>(c)             <span class="co"># demands &#x27;actor → {Actor} → emits Arc&lt;Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
 <p>If no signal further constrains the set, the fallback is <code>&#x27;heap</code> (<code>Box&lt;T&gt;</code>):</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c&#x27; = <span class="fn">Counter</span>(<span class="nb">0</span>)        <span class="co"># tick, no further signal → Box&lt;Counter&gt;</span></code></pre></div>
 <p>This is distinct from the plain <code>T</code> fallback, which is <code>&#x27;stack</code> for small types. <code>T&#x27;</code> is the right form when you know a value should live on the heap or be shared, but the specific qualifier depends on how it is used.</p>
-<h4 id="optional-forms--t-and-t">Optional forms — <code>T?</code> and <code>T&#x27;?</code></h4>
+<h3 id="optional-forms--t-and-t">Optional forms — <code>T?</code> and <code>T&#x27;?</code></h3>
 <p>Optional variables (<code>T?</code> and <code>T&#x27;?</code>) participate in inference the same way as their non-optional counterparts. The inferred qualifier is applied to the <strong>inner type</strong> of the <code>Option</code>, not to the <code>Option</code> itself.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c? = <span class="fn">some</span>(<span class="fn">Counter</span>(<span class="nb">0</span>))   <span class="co"># T? → full candidate set</span>
 <span class="fn">spawn_actor</span>(c?)             <span class="co"># demands Counter&#x27;actor → infers &#x27;actor</span>

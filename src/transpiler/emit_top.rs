@@ -416,11 +416,17 @@ impl Transpiler {
         // emit_body will re-run it (it clears first), so there is no double-application.
         {
             let prev = std::mem::take(&mut self.fn_current_params);
+            let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
             self.fn_current_params = f.params.iter()
                 .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
                 .collect();
+            self.fn_current_params_mut = f.params.iter()
+                .filter(|p| p.mutable)
+                .map(|p| p.name.clone())
+                .collect();
             self.infer_qualifiers(&f.body);
             self.fn_current_params = prev;
+            self.fn_current_params_mut = prev_mut;
         }
         let params_s: Vec<String> = f.params.iter().map(|p| self.emit_param(p)).collect();
         let all_params = match self_ty {
@@ -695,6 +701,11 @@ impl Transpiler {
         self.fn_current_params = f.params.iter()
             .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
             .collect();
+        let prev_fn_current_params_mut = std::mem::take(&mut self.fn_current_params_mut);
+        self.fn_current_params_mut = f.params.iter()
+            .filter(|p| p.mutable)
+            .map(|p| p.name.clone())
+            .collect();
         let prev_auto_ref_params = std::mem::take(&mut self.auto_ref_params);
         self.auto_ref_params = f.params.iter()
             .filter(|p| matches!(&p.ty,
@@ -771,7 +782,8 @@ impl Transpiler {
         self.fn_returns_void   = prev_fn_returns_void;
         self.fn_declared_void  = prev_fn_declared_void;
         self.fn_return_ty      = prev_fn_return_ty;
-        self.fn_current_params = prev_fn_current_params;
+        self.fn_current_params     = prev_fn_current_params;
+        self.fn_current_params_mut = prev_fn_current_params_mut;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
         self.task_vars             = prev_task_vars;
@@ -941,18 +953,6 @@ impl Transpiler {
             }
         }
         false
-    }
-
-    /// Returns true if the parameter type is a trait-object wrapper (e.g. `T'shared` where T is
-    /// a known trait). `&Rc<dyn Trait>` does not support unsized coercion from `&Rc<Concrete>`,
-    /// so these params must be passed by value despite the auto-ref convention.
-    pub(crate) fn is_trait_object_param(&self, ty: Option<&Type>) -> bool {
-        match ty {
-            Some(Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) => {
-                matches!(inner.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
-            }
-            _ => false,
-        }
     }
 
     pub(crate) fn emit_param(&self, p: &Param) -> String {
@@ -1770,7 +1770,7 @@ impl Transpiler {
     /// `impl Trait` is not a valid field type in Rust — use `Rc<dyn Fn(...)>` instead.
     /// `Rc` (rather than `Box`) is used so the field is `Clone`, matching auto-derived Clone on
     /// the containing struct/enum.
-    pub(crate) fn emit_field_type(&self, ty: &Type, rebindable: bool) -> String {
+    pub(crate) fn emit_field_type(&self, ty: &Type, _rebindable: bool) -> String {
         match ty {
             Type::Fn(ret, params, throws, _task, _req) => {
                 let ps = params.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ");

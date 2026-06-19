@@ -6216,7 +6216,7 @@ let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 
 Boring's ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
 
-#### The zero-annotation goal
+### The zero-annotation goal
 
 Boring aims to let you write code that looks like a high-level scripting language while emitting Rust that is as precise and zero-cost as hand-written systems code. The qualifier system is the bridge: it maps naturally to `T`, `Box<T>`, `Arc<T>`, `Arc<Mutex<T>>`, and `Arc<RwLock<T>>` without forcing you to spell those types out.
 
@@ -6227,7 +6227,7 @@ spawn_actor(c)          # demands 'actor → c inferred as Arc<Mutex<Counter>>
 
 The emitted Rust is identical to what you would write by hand, but you never had to decide.
 
-#### Constraint elimination
+### Constraint elimination
 
 Each unqualified local variable starts as a candidate for every qualifier: `{Stack, Owned, Shared, Actor, Guard}`. Every usage signal narrows the set by eliminating qualifiers that are incompatible. When exactly one candidate remains, it is chosen. When none remain, the constraints are contradictory and the compiler reports an error. When several remain, the compiler applies a priority-ordered fallback (see below).
 
@@ -6246,7 +6246,7 @@ Each unqualified local variable starts as a candidate for every qualifier: `{Sta
 
 Each signal intersects the current candidate set. The order of signals does not matter.
 
-#### Priority-ordered fallback
+### Priority-ordered fallback
 
 When the candidate set still contains multiple qualifiers after all signals are applied, the transpiler resolves the tie using the following algorithm:
 
@@ -6271,7 +6271,7 @@ struct Wrapper:
 
 `'heap` > `'shared` > `'actor` > `'guard`
 
-#### Threshold
+### Threshold
 
 The stack size threshold is configurable:
 
@@ -6283,7 +6283,7 @@ Default: 256 bytes.
 
 > The size estimate is best-effort: it sums struct fields recursively but treats `Vec`, `HashMap`, and pointer-sized types as 8–16 bytes. The estimate is conservative — when in doubt the transpiler prefers `'heap` over a potentially large stack frame.
 
-#### Example: sharing + mutation → conflict
+### Example: sharing + mutation → conflict
 
 ```boring
 let c = Counter(0)
@@ -6294,7 +6294,7 @@ share_with(c)       # demands 'shared → intersect to {Shared}
 
 This is correct: `Arc<T>` does not support `.inc()` (a mutating method). The developer must choose: either pass `c` to `share_with` only, or use `T'guard` explicitly to get `Arc<RwLock<T>>`.
 
-#### Return-type demand
+### Return-type demand
 
 If the function has a declared return type with a qualifier, a bare variable in tail position or in a `return` statement inherits that qualifier.
 
@@ -6304,7 +6304,7 @@ Counter'actor make_counter():
     c                    # tail expression → infers 'actor from return type
 ```
 
-#### Alias propagation
+### Alias propagation
 
 `let y = x` makes `y` an alias of `x`. Any constraint applied to either one is propagated to the whole group.
 
@@ -6314,7 +6314,7 @@ let d = c               # d is an alias of c
 spawn_actor(d)          # demands 'actor on d → also applied to c
 ```
 
-#### Task captures
+### Task captures
 
 Variables captured by a `task:` body must be `Arc`-based so they can be cloned and moved into the async closure.
 
@@ -6327,7 +6327,7 @@ task:
     c.inc()    # c is a receiver inside the task → infers 'actor
 ```
 
-#### Parameter auto-apply
+### Parameter auto-apply
 
 Parameters without an explicit qualifier, with a tick (`T'`), or with a qualifier group (`T'mut`, `T'many`, …) are all subject to body inference. The inferred qualifier is applied automatically at emission — the Rust function signature carries the correct type even if the Boring source does not.
 
@@ -6344,7 +6344,34 @@ def process(Counter'mut c): # group — {Stack, Owned, Actor, Guard}
 
 If the body provides no narrowing signal, the fallback for bare `T` is size-based, for `T'` is `'heap`, and for a group is the first member of the group.
 
-#### Cross-function propagation
+### Universal borrow as inference output
+
+When a bare parameter has no storage signal and no qualifier demand signal, the inference resolves to a **universal borrow** — `Counter&` or `mut Counter&` — as a pre-fallback step, before the size-based chain.
+
+```boring
+req display(Counter c):   # no storage, read-only → infers Counter& → fn display(c: &Counter)
+    print c.value
+
+def reset(mut Counter c): # no storage, mut declared → infers mut Counter& → fn reset(c: &mut Counter)
+    c.value = 0
+```
+
+Callers can pass any qualifier. The transpiler acquires the lock at the call site for `'actor` and `'guard` arguments, exactly as for an explicit `Counter&` parameter.
+
+**Mutability is declared, not inferred.** `mut` on a parameter is always written explicitly; it is not inferred from the body. A `def` method call on an immutable parameter is a compile error (`declare mut Counter n`).
+
+A storage signal (field assignment, task capture, return with ownership qualifier) or a qualifier demand signal (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.
+
+| Parameter | Signals | Emitted form |
+|---|---|---|
+| `Counter c` | none | `&Counter` |
+| `mut Counter c` | none | `&mut Counter` |
+| `Counter c` | qualifier demand | concrete qualifier |
+| `Counter c` | storage | concrete qualifier |
+
+The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), tick parameters (`Counter' c`), `var` parameters, and explicit qualifier groups are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes.
+
+### Cross-function propagation
 
 After a function body is processed, `fn_sigs` is updated with the inferred parameter qualifiers. Functions defined later in the same file that call this function will see the qualified signature and propagate the constraint to their own variables.
 
@@ -6358,7 +6385,7 @@ process(c)                # fn_sigs now shows Counter'actor → c infers 'actor
 
 **Limitation:** propagation is a single forward pass. If a caller is defined before the callee in the file, no propagation occurs. Mutual recursion is not covered.
 
-#### Struct field inference
+### Struct field inference
 
 Private and public fields with no explicit qualifier are inferred from the struct's own method bodies using the same constraint-elimination algorithm. Only fields of struct types (`Named` types) are candidates.
 
@@ -6375,7 +6402,7 @@ Results are applied at emit time: the field is emitted with the inferred Rust wr
 
 **Limitation:** cross-file inference is not supported. A field accessed only from another module retains its fallback type.
 
-#### The `mut` binding keyword
+### The `mut` binding keyword
 
 `mut x = expr` marks a fixed binding with a mutable instance. It contributes a mutation signal at the declaration site — equivalent to a `def` method call on the same line, but earlier. This allows the compiler to narrow the candidate set before any method calls are seen.
 
@@ -6384,7 +6411,7 @@ mut c = Counter(0)      # eliminates Shared, Const → {Stack, Owned, Actor, Gua
 spawn_actor(c)          # demands 'actor → infers 'actor
 ```
 
-#### Explicit annotation as escape hatch
+### Explicit annotation as escape hatch
 
 When inference cannot resolve a unique qualifier — for example when a variable is used in two mutually exclusive ways — you annotate explicitly:
 
@@ -6394,7 +6421,7 @@ let Counter'guard c = Counter(0)   # developer decides: RwLock
 
 An explicit qualifier has the highest priority and overrides all inference signals. The compiler will still validate that the declared qualifier is compatible with the usage in the body.
 
-#### `T'` — the indirection hint
+### `T'` — the indirection hint
 
 `T'` (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Stack` and `Const` from the start.
 
@@ -6411,7 +6438,7 @@ let c' = Counter(0)        # tick, no further signal → Box<Counter>
 
 This is distinct from the plain `T` fallback, which is `'stack` for small types. `T'` is the right form when you know a value should live on the heap or be shared, but the specific qualifier depends on how it is used.
 
-#### Optional forms — `T?` and `T'?`
+### Optional forms — `T?` and `T'?`
 
 Optional variables (`T?` and `T'?`) participate in inference the same way as their non-optional counterparts. The inferred qualifier is applied to the **inner type** of the `Option`, not to the `Option` itself.
 
