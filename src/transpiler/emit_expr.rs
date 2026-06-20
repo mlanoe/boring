@@ -37,6 +37,18 @@ impl Transpiler {
                 if self.var_primitive_params.contains(n.as_str()) {
                     return format!("(*{})", n);
                 }
+                // `lazy` vars hold a `OnceCell<T>` — reads unwrap via `.get().expect(…)`.
+                // For Copy types (int, float, bool) use `.copied()` to avoid a ref.
+                if self.lazy_vars.contains(n.as_str()) {
+                    let is_copy = self.lazy_var_types.get(n.as_str())
+                        .map(|t| t.is_copy())
+                        .unwrap_or(false);
+                    return if is_copy {
+                        format!("{}.get().copied().expect(\"{} used before lazy init\")", n, n)
+                    } else {
+                        format!("{}.get().expect(\"{} used before lazy init\")", n, n)
+                    };
+                }
                 self.map_builtin_var(n)
             }
 
@@ -111,7 +123,7 @@ impl Transpiler {
                     let mut parts: Vec<String> = Vec::new();
                     self.collect_string_parts(expr, &mut parts);
                     let fmt = parts.iter().map(|_| "{}").collect::<Vec<_>>().join("");
-                    return format!("Arc::<str>::from(format!(\"{}\", {}))", fmt, parts.join(", "));
+                    return format!("{}::<str>::from(format!(\"{}\", {}))", self.str_ptr(), fmt, parts.join(", "));
                 }
                 // Numeric type coercion: when adding/subtracting/multiplying typed numeric vars
                 // of different widths (i8 + i16, etc.), cast both to the wider type.
@@ -243,15 +255,15 @@ impl Transpiler {
                             } else { format!("(&*{})", rs_expr) };
                             return format!("({}.cmp({}) {})", l_deref, r_deref, ord);
                         }
-                        // For Eq/NotEq: wrap literals in Arc::<str>::from(...) for type compat.
+                        // For Eq/NotEq: wrap literals in Rc/Arc::<str>::from(...) for type compat.
                         let ls = if l_is_raw_lit {
                             if let ExprKind::Str(s) = &l.kind {
-                                format!("Arc::<str>::from(\"{}\")", escape_str(s))
+                                self.str_from(&escape_str(s))
                             } else { ls_expr.clone() }
                         } else { ls_expr };
                         let rs = if r_is_raw_lit {
                             if let ExprKind::Str(s) = &r.kind {
-                                format!("Arc::<str>::from(\"{}\")", escape_str(s))
+                                self.str_from(&escape_str(s))
                             } else { rs_expr.clone() }
                         } else { rs_expr };
                         return format!("({} {} {})", ls, binop_str(op), rs);
@@ -358,9 +370,9 @@ impl Transpiler {
                 // Mutex field write: w.field = v
                 if let ExprKind::Field(obj, field) = &target.kind {
                     if let ExprKind::Var(v) = &obj.kind {
-                        if self.var_mutex_types.contains(v.as_str()) {
+                        if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                             let val_s = self.emit_expr_owned(value);
-                            let guard = self.actor_write_guard(v);
+                            let guard = self.mutex_var_write(v, v);
                             return format!("{{ let mut __g = {}; __g.{} = {}; }}", guard, field, val_s);
                         }
                     }
@@ -371,9 +383,9 @@ impl Transpiler {
                                 let key = self.self_type.as_deref()
                                     .map(|t| format!("{}::{}", t, mutex_field));
                                 if let Some(k) = key {
-                                    if self.struct_mutex_fields.contains(&k) {
+                                    if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
                                         let val_s = self.emit_expr_owned(value);
-                                        let guard = self.actor_write_guard(&format!("self.{}", mutex_field));
+                                        let guard = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                                         return format!("{{ let mut __g = {}; __g.{} = {}; }}", guard, field, val_s);
                                     }
                                 }
@@ -384,9 +396,13 @@ impl Transpiler {
                 // RwLock field write: c.field = v
                 if let ExprKind::Field(obj, field) = &target.kind {
                     if let ExprKind::Var(v) = &obj.kind {
-                        if self.var_rwlock_types.contains(v.as_str()) {
+                        if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                             let val_s = self.emit_expr_owned(value);
-                            let guard = self.guard_write_guard(v);
+                            let guard = if self.var_rwlock_task_types.contains(v.as_str()) {
+                                self.guard_task_write_guard(v)
+                            } else {
+                                self.guard_write_guard(v)
+                            };
                             return format!("{{ let mut __wg = {}; __wg.{} = {}; }}", guard, field, val_s);
                         }
                     }
@@ -397,11 +413,38 @@ impl Transpiler {
                                 let key = self.self_type.as_deref()
                                     .map(|t| format!("{}::{}", t, rwlock_field));
                                 if let Some(k) = key {
-                                    if self.struct_rwlock_fields.contains(&k) {
+                                    if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
                                         let val_s = self.emit_expr_owned(value);
-                                        let guard = self.guard_write_guard(&format!("self.{}", rwlock_field));
+                                        let guard = self.rwlock_field_write(&k, &format!("self.{}", rwlock_field));
                                         return format!("{{ let mut __wg = {}; __wg.{} = {}; }}", guard, field, val_s);
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Diagnostic: assigning to a field of a non-`mut` struct parameter.
+                if let ExprKind::Field(obj, field) = &target.kind {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if v != "self"
+                            && self.fn_current_params.contains_key(v.as_str())
+                            && !self.fn_current_params_mut.contains(v.as_str())
+                            && !self.var_mutex_types.contains(v.as_str())
+                            && !self.var_mutex_task_types.contains(v.as_str())
+                            && !self.var_rwlock_types.contains(v.as_str())
+                            && !self.var_rwlock_task_types.contains(v.as_str())
+                        {
+                            let struct_name = self.fn_current_params.get(v.as_str()).and_then(|ty| {
+                                if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
+                            });
+                            if let Some(sn) = struct_name {
+                                if self.struct_fields.contains_key(sn.as_str()) {
+                                    let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                                    eprintln!(
+                                        "error (line {}): `{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding\n  \
+                                         fix: declare the parameter as `mut {} {}`",
+                                        line, v, field, sn, v
+                                    );
                                 }
                             }
                         }
@@ -413,10 +456,13 @@ impl Transpiler {
                 // Exception: string addition (`Arc<str>` does not implement `AddAssign`).
                 if let ExprKind::BinOp(op, lhs_copy, rhs) = &value.kind {
                     let is_string_add = matches!(op, BinOp::Add)
-                        && (matches!(lhs_copy.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
-                            || matches!(rhs.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                        && (self.is_string_expr(lhs_copy)
+                            || self.is_string_expr(rhs)
+                            || self.is_string_expr(target)
                             || matches!(&target.kind, ExprKind::Var(v)
-                                if self.arc_vars.contains(v.as_str()) || self.string_arc_vars.contains(v.as_str())));
+                                if self.var_types.get(v.as_str())
+                                    .map(|t| matches!(t, Type::Named(n) if n == "string"))
+                                    .unwrap_or(false)));
                     if !is_string_add {
                         let compound_op = match op {
                             BinOp::Add => Some("+="),
@@ -467,9 +513,68 @@ impl Transpiler {
                         _ => self.emit_expr(target),
                     }
                 } else {
-                    self.emit_expr(target)
+                    self.in_lhs_assign.set(true);
+                    let s = self.emit_expr(target);
+                    self.in_lhs_assign.set(false);
+                    s
                 };
-                format!("{} = {}", target_s, self.emit_expr_owned(value))
+                let rhs_s = self.emit_expr_owned(value);
+                // When assigning an actor (Arc<Mutex<T>>) variable into a struct field, auto-clone
+                // so the original binding remains usable after the assignment. Arc::clone is cheap.
+                let rhs_s = if matches!(&target.kind, ExprKind::Field(..))
+                    && matches!(&value.kind, ExprKind::Var(vn)
+                        if (self.var_mutex_types.contains(vn.as_str())
+                            || self.var_mutex_task_types.contains(vn.as_str()))
+                            && !rhs_s.ends_with(".clone()"))
+                {
+                    format!("{}.clone()", rhs_s)
+                } else {
+                    rhs_s
+                };
+                // When assigning to an optional var, wrap non-optional RHS in Some().
+                // Needed for `var Expr? x = nil; x = throws_call()?` → `x = Some(throws_call()?)`.
+                let rhs_s = if let ExprKind::Var(v) = &target.kind {
+                    let rhs_already_opt = rhs_s.starts_with("Some(")
+                        || rhs_s == "None"
+                        || matches!(&value.kind, ExprKind::Nil)
+                        || matches!(&value.kind, ExprKind::Var(vn)
+                            if self.optional_vars.contains(vn.as_str())
+                            || self.var_types.get(vn.as_str())
+                                .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
+                        // RHS is a call to a function that returns Optional — no extra Some() needed.
+                        || matches!(&value.kind, ExprKind::Call(callee, _)
+                            if matches!(&callee.kind, ExprKind::Var(fn_name)
+                                if self.fn_return_types.get(fn_name.as_str())
+                                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)));
+                    if self.optional_vars.contains(v.as_str()) && !rhs_already_opt {
+                        format!("Some({})", rhs_s)
+                    } else {
+                        rhs_s
+                    }
+                } else {
+                    rhs_s
+                };
+                format!("{} = {}", target_s, rhs_s)
+            }
+            ExprKind::QuestionAssign(target, rhs) => {
+                // `w ?= expr`
+                // For lazy vars: emit `w.get_or_init(|| expr)`
+                // For optional vars: emit a nil-coalescing assignment block
+                if let ExprKind::Var(var_name) = &target.kind {
+                    if self.lazy_vars.contains(var_name.as_str()) {
+                        let rhs_s = self.emit_expr_owned(rhs);
+                        return format!("{}.get_or_init(|| {})", var_name, rhs_s);
+                    }
+                    // Non-lazy: nil-coalescing assignment `lhs = lhs else rhs`
+                    let else_rhs = self.emit_expr_owned(rhs);
+                    let lhs_s = self.emit_expr(target);
+                    return format!("{{ if {lhs_s}.is_none() {{ {lhs_s} = Some({else_rhs}); }} }}",
+                        lhs_s = lhs_s, else_rhs = else_rhs);
+                }
+                // Fallback: desugar as nil-coalescing
+                let lhs_s = self.emit_expr(target);
+                let rhs_s = self.emit_expr_owned(rhs);
+                format!("{{ if {lhs_s}.is_none() {{ {lhs_s} = Some({rhs_s}); }} }}", lhs_s = lhs_s, rhs_s = rhs_s)
             }
             ExprKind::Field(obj, field) => {
                 // Special case: `(task expr).value` / `(task expr).wait` where the task body
@@ -552,13 +657,14 @@ impl Transpiler {
                         let in_throws_ctx = self.in_throws || self.in_try_body;
                         let is_throws_handle = self.throws_join_handle_vars.contains(type_name.as_str());
                         let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
+                        let p = self.str_ptr();
                         return if field == "wait" {
                             if is_throws_handle && in_throws_ctx {
-                                format!("{{ let _ = {}.await.map_err(|__e| Box::new(BoringError::String(Arc::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}", type_name)
+                                format!("{{ let _ = {}.await.map_err(|__e| Box::new(BoringError::String({}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)??.expect(\"unhandled task error\"); }}", type_name, p)
                             } else if is_throws_handle {
                                 format!("{{ let _ = {}.await.expect(\"task panicked\").expect(\"unhandled task error\"); }}", type_name)
                             } else if in_throws_ctx {
-                                format!("{{ {}.await.map_err(|__e| Box::new(BoringError::String(Arc::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)?; }}", type_name)
+                                format!("{{ {}.await.map_err(|__e| Box::new(BoringError::String({}::from(__e.to_string()))) as Box<dyn std::error::Error + Send + Sync>)?; }}", type_name, p)
                             } else {
                                 format!("{{ let _ = {}.await; }}", type_name)
                             }
@@ -693,8 +799,8 @@ impl Transpiler {
                 }
                 // Mutex var access: w.field → w.lock().await.field (multi) or w.borrow().field (single)
                 if let ExprKind::Var(v) = &obj.kind {
-                    if self.var_mutex_types.contains(v.as_str()) {
-                        let access = self.actor_read_access(v);
+                    if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                        let access = self.mutex_var_read(v, v);
                         // If the field is itself an Rc/Arc<RefCell/Mutex<T>> (actor/guard),
                         // we must clone it to avoid moving out of the borrow/lock guard.
                         let field_is_shared = self.var_types.get(v.as_str())
@@ -714,6 +820,15 @@ impl Transpiler {
                         } else {
                             format!("{}.{}", access, field)
                         };
+                    }
+                    // RwLock var access: w.field → w.read().unwrap().field (multi) or w.borrow().field (single)
+                    if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                        let access = if self.var_rwlock_task_types.contains(v.as_str()) {
+                            self.guard_task_read_access(v)
+                        } else {
+                            self.guard_read_access(v)
+                        };
+                        return format!("{}.{}", access, field);
                     }
                     // Managed-mode mutex var (std::sync::Mutex, synchronous):
                     // w.field → w.lock().unwrap().field
@@ -737,8 +852,8 @@ impl Transpiler {
                             let key = self.self_type.as_deref()
                                 .map(|t| format!("{}::{}", t, mutex_field));
                             if let Some(k) = key {
-                                if self.struct_mutex_fields.contains(&k) {
-                                    return format!("{}.{}", self.actor_read_access(&format!("self.{}", mutex_field)), field);
+                                if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
+                                    return format!("{}.{}", self.mutex_field_read(&k, &format!("self.{}", mutex_field)), field);
                                 }
                             }
                         }
@@ -790,7 +905,29 @@ impl Transpiler {
                 } else {
                     map_field(field)
                 };
-                let result = format!("{}.{}", obj_s, mapped);
+                // If the accessed field is Arc-qualified (actor/guard/shared), add .clone()
+                // so the value is not moved out of the struct — Arc::clone is cheap.
+                let field_is_arc = if let ExprKind::Var(v) = &obj.kind {
+                    let struct_name = self.var_struct_types.get(v.as_str())
+                        .cloned()
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                            Type::Named(n) => Some(n.clone()),
+                            Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
+                            _ => None,
+                        }));
+                    struct_name
+                        .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                        .and_then(|fields| fields.iter().find(|(fname, _)| fname == field))
+                        .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty) || Self::is_string_type(fty))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let result = if field_is_arc && !self.in_lhs_assign.get() {
+                    format!("{}.{}.clone()", obj_s, mapped)
+                } else {
+                    format!("{}.{}", obj_s, mapped)
+                };
                 // Wrap `x.len() as i64` etc. in parens to avoid Rust parsing `i64 <` as generic args.
                 if mapped.contains(" as ") { format!("({})", result) } else { result }
             }
@@ -1015,9 +1152,39 @@ impl Transpiler {
                 }).collect();
                 format!("vec![{}]", es.join(", "))
             }
+            ExprKind::ArrayFill { value, count } => {
+                let v = self.emit_expr_owned(value);
+                let n = self.emit_expr(count);
+                format!("vec![{}; {} as usize]", v, n)
+            }
+            ExprKind::ArrayComp { expr, var, count } => {
+                let n = self.emit_expr(count);
+                let body = self.emit_expr(expr);
+                format!("(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as i64; {} }}).collect::<Vec<_>>()", n, var, body)
+            }
             ExprKind::Tuple(elems) => {
                 // Use emit_expr_owned so string literals become Rc/Arc<str> in tuple slots.
-                let es: Vec<String> = elems.iter().map(|e| self.emit_expr_owned(e)).collect();
+                // Auto-clone non-Copy vars/fields so they remain usable after the tuple is built.
+                let es: Vec<String> = elems.iter().map(|e| {
+                    let s = self.emit_expr_owned(e);
+                    if s.ends_with(".clone()") || s.starts_with('&') || s.starts_with("Arc::") || s.starts_with("Rc::") {
+                        return s;
+                    }
+                    let needs_clone = match &e.kind {
+                        ExprKind::Field(..) => true,
+                        ExprKind::Var(vname) =>
+                            self.var_struct_types.contains_key(vname.as_str())
+                            || self.collection_vars.contains(vname.as_str())
+                            || self.vec_vars.contains(vname.as_str())
+                            || self.string_arc_vars.contains(vname.as_str())
+                            || matches!(
+                                self.fn_current_params.get(vname.as_str()).or_else(|| self.var_types.get(vname.as_str())),
+                                Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_))
+                            ),
+                        _ => false,
+                    };
+                    if needs_clone { format!("{}.clone()", s) } else { s }
+                }).collect();
                 format!("({})", es.join(", "))
             }
             ExprKind::Dict(pairs) => {
@@ -1241,8 +1408,8 @@ impl Transpiler {
                     Type::Bool => format!("({} == \"true\")", src),
                     Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
                     // numeric/value → string
-                    Type::Str => format!("Arc::<str>::from({}.to_string())", src),
-                    Type::Named(n) if n == "string" => format!("Arc::<str>::from({}.to_string())", src),
+                    Type::Str => self.str_from_expr(&format!("{}.to_string()", src)),
+                    Type::Named(n) if n == "string" => self.str_from_expr(&format!("{}.to_string()", src)),
                     // everything else: primitive Rust cast
                     _ => format!("({} as {})", src, dst),
                 }
@@ -1443,31 +1610,46 @@ impl Transpiler {
             }
 
             ExprKind::If(s) => {
-                // If-as-expression: branches must return values (no semicolons on last stmt).
-                // Keep in_throws from the outer context so that `?` is propagated on throws
-                // calls inside branches, but set suppress_ok_wrap so the last expression is
-                // NOT wrapped in Ok() (it's an expression value, not a function return).
-                // If-as-expression: clear fn_return_ty so branch bodies don't inherit the
-                // outer function's Optional return type. The let-binding context (emit_let_value)
-                // handles Optional coercion at the outer level. For function returns, the
-                // if-expression itself is detected as already-Optional by the branch_ends_optional
-                // check in emit_stmt.
+                // When the if-expression is used in an Optional context (fn_return_ty = Optional(T)),
+                // OR when the if-expression itself has a nil branch (making it implicitly Optional),
+                // non-nil branches must be wrapped in Some(...) and nil branches emit None.
+                fn branch_has_nil(body: &[crate::ast::Stmt]) -> bool {
+                    matches!(body.last(), Some(crate::ast::Stmt::Expr(e)) if matches!(&e.kind, ExprKind::Nil))
+                }
+                let has_nil_branch = s.branches.iter().any(|(_, b)| branch_has_nil(b))
+                    || s.else_body.as_ref().map(|b| branch_has_nil(b)).unwrap_or(false);
+                // Only apply Optional wrapping when there is an explicit nil branch.
+                // The Stmt::Expr tail handler wraps the whole if/else in Some() when
+                // needed — we must NOT apply fn_return_ty here or we double-wrap when
+                // the if/else is used as an intermediate let-binding value.
+                let optional_inner = if has_nil_branch {
+                    Some(crate::ast::Type::Named("_".to_string()))
+                } else {
+                    None
+                };
                 let mut sub = self.make_sub();
                 sub.fn_returns_void = false;
-                sub.suppress_ok_wrap = true; // prevent Ok() wrapping in branch bodies
+                sub.suppress_ok_wrap = true;
                 sub.fn_return_ty = None; // prevent spurious Some() wrapping in branch bodies
+                let emit_branch = |sub: &mut Self, body: &[crate::ast::Stmt]| {
+                    if optional_inner.is_some() {
+                        sub.emit_body_optional_last(body);
+                    } else {
+                        sub.emit_body(body);
+                    }
+                };
                 for (i, (cond, body)) in s.branches.iter().enumerate() {
                     let kw = if i == 0 { "if" } else { "} else if" };
                     let cond_s = sub.emit_expr(cond);
                     sub.line(&format!("{} {} {{", kw, cond_s));
                     sub.indent += 1;
-                    sub.emit_body(body);
+                    emit_branch(&mut sub, body);
                     sub.indent -= 1;
                 }
                 if let Some(else_body) = &s.else_body {
                     sub.line("} else {");
                     sub.indent += 1;
-                    sub.emit_body(else_body);
+                    emit_branch(&mut sub, else_body);
                     sub.indent -= 1;
                 }
                 sub.line("}");
@@ -1751,6 +1933,15 @@ impl Transpiler {
                     (false, false) => base,
                 };
             }
+            // Callable struct: `obj(args)` where `obj` is a struct instance with `def ()` / `req ()`.
+            // Emit `obj.__call__(args)` — the anonymous method is named `__call__` in Rust.
+            if let Some(struct_name) = self.var_struct_types.get(name.as_str()).cloned() {
+                if self.callable_structs.contains(&struct_name) {
+                    let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
+                    return format!("{}.__call__({})", name, args_s);
+                }
+            }
+
             // Special case: `timeout(dur, future_expr)` — the second arg must be a future.
             // `tokio::time::timeout` takes `F: Future`, so the second arg should be the future
             // expression directly (e.g. `tokio::time::sleep(dur)` or a closure async block).
@@ -1873,6 +2064,15 @@ impl Transpiler {
                     let callee_s = format!("{}::{}", enum_type, variant_name);
                     let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                         let raw = self.emit_let_value(field_types.get(i), &a.value);
+                        // enum variant fields are owned — strip the leading `&` that
+                        // emit_let_value adds for actor-typed function params.
+                        let raw = if matches!(field_types.get(i),
+                            Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                        ) {
+                            raw.strip_prefix('&').unwrap_or(&raw).to_string()
+                        } else {
+                            raw
+                        };
                         let rec_key = format!("{}::{}::{}", enum_type, variant_name, i);
                         if self.recursive_fields.contains(&rec_key) {
                             if matches!(field_types.get(i), Some(Type::Optional(_))) {
@@ -2108,7 +2308,7 @@ impl Transpiler {
                         };
                     }
                 }
-                Type::Qualified(inner, OwnerQual::Stack | OwnerQual::Copy) => {
+                Type::Qualified(inner, OwnerQual::Stack) => {
                     if let Type::Named(inner_name) = inner.as_ref() {
                         return self.emit_constructor_inner(inner_name, args);
                     }
@@ -2522,8 +2722,8 @@ impl Transpiler {
                 // For actor (Arc<Mutex<T>>) variables, lock first.
                 if let Some(first) = args.first() {
                     if let ExprKind::Var(v) = &first.value.kind {
-                        if self.var_mutex_types.contains(v.as_str()) && self.in_async {
-                            return format!("{}.len()", self.actor_read_access(v));
+                        if (self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())) && self.in_async {
+                            return format!("{}.len()", self.mutex_var_read(v, v));
                         }
                     }
                 }
@@ -2598,8 +2798,8 @@ impl Transpiler {
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
             "readLine"   => {
-                // trim_end strips trailing \n/\r but preserves leading whitespace (indentation).
-                "{ let mut __line = String::new(); std::io::stdin().read_line(&mut __line).expect(\"failed to read from stdin\"); Arc::<str>::from(__line.trim_end()) }".into()
+                // Returns None on EOF, Some(line) otherwise (trim_end strips trailing \n/\r).
+                format!("{{ let mut __line = String::new(); let __n = std::io::stdin().read_line(&mut __line).unwrap_or(0); if __n == 0 {{ None }} else {{ Some({}::<str>::from(__line.trim_end_matches('\\n').trim_end_matches('\\r'))) }} }}", self.str_ptr())
             }
             // drop(x) — explicitly releases ownership, maps directly to Rust's drop()
             "drop" => {
@@ -2607,7 +2807,7 @@ impl Transpiler {
                 format!("drop({})", a)
             }
             "args" => {
-                "std::env::args().skip(1).map(|s| Arc::<str>::from(s)).collect::<Vec<_>>()".into()
+                format!("std::env::args().skip(1).map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
             }
             "ord" => {
                 let s = self.emit_expr(&args[0].value);
@@ -2615,7 +2815,7 @@ impl Transpiler {
             }
             "chr" => {
                 let n = self.emit_expr(&args[0].value);
-                format!("Arc::<str>::from(char::from_u32({} as u32).expect(\"chr: invalid codepoint\").to_string())", n)
+                format!("{}::<str>::from(char::from_u32({} as u32).expect(\"chr: invalid codepoint\").to_string())", self.str_ptr(), n)
             }
             "exit" => {
                 let code = self.emit_expr(&args[0].value);

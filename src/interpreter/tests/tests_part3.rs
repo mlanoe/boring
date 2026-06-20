@@ -1719,3 +1719,151 @@ let _result = deep(Outer(inner=Inner(value=42)))
 "#;
     assert_eq!(run_src(src), Value::Int(42));
 }
+
+// ── lazy binding tests ────────────────────────────────────────────────────────
+
+#[test]
+fn test_lazy_basic_init() {
+    let src = r#"
+lazy int x
+x ?= 42
+let _result = x
+"#;
+    assert_eq!(run_src(src), Value::Int(42));
+}
+
+#[test]
+fn test_lazy_idempotent() {
+    // Second ?= must be a no-op — value stays 10
+    let src = r#"
+lazy int x
+x ?= 10
+x ?= 99
+let _result = x
+"#;
+    assert_eq!(run_src(src), Value::Int(10));
+}
+
+#[test]
+fn test_lazy_string() {
+    let src = r#"
+lazy string name
+name ?= "Alice"
+name ?= "Bob"
+let _result = name
+"#;
+    assert_eq!(run_src(src), Value::Str("Alice".into()));
+}
+
+#[test]
+fn test_lazy_rhs_expression() {
+    let src = r#"
+lazy int r
+r ?= 3 + 4
+let _result = r
+"#;
+    assert_eq!(run_src(src), Value::Int(7));
+}
+
+#[test]
+fn test_lazy_assign_error() {
+    // Plain `=` on a lazy binding must be a runtime error
+    let src = r#"
+lazy int x
+x = 42
+"#;
+    let (_, res) = run(src);
+    assert!(res.is_err(), "expected runtime error for '=' on lazy");
+    let msg = format!("{:?}", res.unwrap_err());
+    assert!(msg.contains("lazy"), "error should mention 'lazy': {}", msg);
+}
+
+#[test]
+fn test_question_eq_nil_coalescing_preserved() {
+    // ?= on a regular optional var must still work as nil-coalescing
+    let src = r#"
+var int? opt = nil
+opt ?= 55
+let _result = opt
+"#;
+    assert_eq!(run_src(src), Value::Int(55));
+}
+
+#[test]
+fn test_question_eq_non_nil_no_op() {
+    // ?= on a non-nil var must not overwrite
+    let src = r#"
+var int? opt = 10
+opt ?= 99
+let _result = opt
+"#;
+    assert_eq!(run_src(src), Value::Int(10));
+}
+
+// ─── Callable structs ────────────────────────────────────────────────────────
+
+#[test]
+fn test_callable_struct_req_with_return_type() {
+    let src = r#"
+struct Adder:
+    int base
+    req int ():
+        base + 10
+
+let a = Adder(base= 5)
+let _result = a()
+"#;
+    assert_eq!(run_src(src), Value::Int(15));
+}
+
+#[test]
+fn test_callable_struct_def_mutation() {
+    let src = r#"
+struct Counter:
+    var int value = 0
+    def ():
+        value += 1
+
+var c = Counter()
+c()
+c()
+c()
+let _result = c.value
+"#;
+    assert_eq!(run_src(src), Value::Int(3));
+}
+
+#[test]
+fn test_callable_struct_req_no_return() {
+    // req () with no declared return type — invocation succeeds, result is Void
+    let src = r#"
+struct Noop:
+    int x
+    req ():
+        x
+
+let n = Noop(x= 7)
+n()
+let _result = 42
+"#;
+    assert_eq!(run_src(src), Value::Int(42));
+}
+
+#[test]
+fn test_callable_struct_not_callable_error() {
+    let src = r#"
+struct Plain:
+    int x
+
+let p = Plain(x= 1)
+p()
+"#;
+    let (_, res) = run(src);
+    assert!(res.is_err(), "expected runtime error for non-callable struct");
+    let msg = format!("{:?}", res.unwrap_err());
+    assert!(
+        msg.contains("not callable") || msg.contains("__call__"),
+        "error should mention callable: {}",
+        msg
+    );
+}

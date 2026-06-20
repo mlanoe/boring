@@ -277,6 +277,7 @@ struct LetStmt:
     bool mutable
     bool is_pub
     bool is_static
+    bool is_lazy
     string name
     Type? ty
     Expr? value
@@ -418,6 +419,7 @@ enum ExprKind:
     BinOp(BinOp op, Expr left, Expr right)
     UnaryOp(UnaryOp op, Expr expr)
     Assign(Expr target, Expr value)
+    QuestionAssign(Expr target, Expr value)
     Field(Expr expr, string name)
     Index(Expr expr, Expr index)
     Call(Expr callee, [Arg] args)
@@ -427,6 +429,8 @@ enum ExprKind:
     TryElse(Expr expr, Expr default)
     TryElseBlock([Stmt] body, [Stmt] else_body)
     Array([Expr] elems)
+    ArrayFill(Expr value, Expr count)
+    ArrayComp(Expr expr, string varname, Expr count)
     Tuple([Expr] elems)
     Dict([(Expr, Expr)] pairs)
     Set([Expr] elems)
@@ -515,6 +519,7 @@ enum Type:
     Named(string name)
     Optional(Type inner)
     Array(Type elem)
+    ArrayN(Type elem, int n)
     Tuple([Type] elems)
     Dict(Type key, Type value)
     Set(Type elem)

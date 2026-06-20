@@ -1,0 +1,41 @@
+# lazy — deferred write-once binding
+
+# 1. Basic init with ?=
+lazy int x
+x ?= 42
+print x
+
+# 2. Subsequent ?= is a no-op (idempotent)
+lazy int y
+y ?= 10
+y ?= 99
+print y
+
+# 3. String lazy binding
+lazy string name
+name ?= "Alice"
+name ?= "Bob"
+print name
+
+# 4. rhs is an expression
+lazy int r
+r ?= 3 + 4
+print r
+
+# 5. ?= on a regular optional var still works as nil-coalescing
+var int? opt = nil
+opt ?= 55
+print (opt else 0)
+
+var int? opt2 = 10
+opt2 ?= 99
+print (opt2 else 0)
+
+# 6. lazy inside a function — reset on each call
+def int make_val():
+    lazy int v
+    v ?= 7
+    v ?= 8
+    v else 0
+
+print make_val()

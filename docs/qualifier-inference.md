@@ -1,6 +1,6 @@
 # Qualifier Inference
 
-Boring's ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'const`) describe how a value is stored and shared at runtime. In most programs you never write them — the transpiler infers the right one from how each variable is used.
+Boring's ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most programs you never write them — the transpiler infers the right one from how each variable is used.
 
 The zero-annotation goal: qualifier-free Boring code emits the same Rust as hand-annotated code. This document explains the full inference algorithm.
 
@@ -14,9 +14,9 @@ Each unqualified local variable starts with a candidate set of all possible qual
 
 | Declaration form | Initial candidate set | Fallback (multiple remaining) |
 |---|---|---|
-| `T` (bare, no qualifier) | `{Stack, Owned, Shared, Actor, Guard, Const}` | priority-ordered fallback (see below) |
+| `T` (bare, no qualifier) | `{Stack, Owned, Shared, Actor, Guard}` | priority-ordered fallback (see below) |
 | `T'` (tick, indirection hint) | `{Owned, Shared, Actor, Guard}` | `'heap` (`Box<T>`) |
-| `T?` (optional, bare) | `{Stack, Owned, Shared, Actor, Guard, Const}` | same priority-ordered fallback |
+| `T?` (optional, bare) | `{Stack, Owned, Shared, Actor, Guard}` | same priority-ordered fallback |
 | `T'?` (optional tick) | `{Owned, Shared, Actor, Guard}` | `Option<Box<T>>` |
 
 `T'` and `T'?` restrict the initial set to indirection qualifiers. For optional forms, the inferred qualifier is applied to the **inner type** of the `Option` — `T?` with inferred `'actor` emits `Option<Arc<Mutex<T>>>`, not `Arc<Mutex<Option<T>>>`.
@@ -46,19 +46,7 @@ Each signal intersects the current candidate set. The order of signals does not 
 
 When the candidate set still contains multiple qualifiers after all signals are applied, the transpiler resolves the tie using the following ordered algorithm.
 
-#### Step 1 — `'const` candidate
-
-`'const` is the read-only counterpart of `'stack`, in the same way `'shared` is the read-only counterpart of `'actor`. It emits as `&'static T` and is therefore only valid for non-struct types (primitives, expressions). When `'const` is in the candidate set:
-
-| Context | Decision |
-|---|---|
-| Struct field, or known struct type | skip to Step 2 |
-| Non-struct local, sizeof(T) ≤ `--stack-auto-bytes` | `'const` |
-| Non-struct local, sizeof(T) > `--stack-auto-bytes` | skip BOTH `'const` AND `'stack` (they share the same size criteria); continue with the ordered chain |
-
-Because `mut` and `var` signals eliminate `Const` from the candidate set, when `'const` survives to fallback the binding is implicitly read-only.
-
-#### Step 2 — `'stack` candidate
+#### Step 1 — `'stack` candidate
 
 If `'stack` is in the candidate set:
 
@@ -70,9 +58,9 @@ If `'stack` is in the candidate set:
 
 All bare-T struct fields suppress size-based auto-boxing. This applies to `var` fields as well as `let`/`mut` fields — a `var` field is still stored in-place in the struct, and boxing it would add unnecessary indirection. `T'` fields are not affected: an indirection hint always produces `Box<T>`.
 
-#### Step 3 — ordered chain
+#### Step 2 — ordered chain
 
-If neither `'const` nor `'stack` was selected, the transpiler picks the first qualifier from the remaining candidate set according to this chain:
+If `'stack` was not selected, the transpiler picks the first qualifier from the remaining candidate set according to this chain:
 
 `'heap` > `'shared` > `'actor` > `'guard`
 
@@ -371,6 +359,23 @@ process(c)                # fn_sigs now shows Counter'actor → c infers 'actor
 
 **Limitation:** functions must be declared before their callers. Mutual recursion and reverse declaration order are not covered — a fixed-point iteration would be needed for full coverage.
 
+**`'stack` is not propagated.** `fn_sigs` only records qualifiers that carry real information (`'actor`, `'guard`, `'shared`, `Counter&`). When a parameter falls back to the default `'stack`, that fallback is not written into `fn_sigs` — it would otherwise poison callers processed later with a spurious `'stack` constraint from a first-processed-file ordering artifact.
+
+### Return-type–driven parameter inference
+
+When a constructor function (e.g. `new_interpreter()`) is declared to return `T'actor`, the transpiler records `T` as an *actor source type*. Any subsequent function whose parameter has the bare type `T` — with no explicit qualifier — automatically infers `'actor` for that parameter without manual annotation:
+
+```boring
+def Interpreter'actor new_interpreter():
+    …
+
+def Value eval_expr(Interpreter interp, Expr e):
+    # interp infers 'actor because Interpreter is an actor source type
+    …
+```
+
+This avoids annotating every downstream function that handles the actor. Only bare (unqualified) parameter types are affected — explicit qualifiers are always respected.
+
 ---
 
 ## Struct field inference
@@ -496,10 +501,10 @@ Named qualifier groups expand to the corresponding member sets:
 
 | Group | Members |
 |---|---|
-| `'one` | `'stack`, `'heap`, `'const` |
+| `'one` | `'stack`, `'heap` |
 | `'many` | `'shared`, `'actor`, `'guard` |
 | `'mut` | `'stack`, `'heap`, `'actor`, `'guard` |
-| `'req` | `'shared`, `'const` |
+| `'req` | `'shared` |
 
 **Scope: parameters only.** Qualifier groups are useful as parameter-level constraints — they express "this parameter accepts any mutable qualifier" and let the inference narrow to the one actually used in the body. They have no Rust representation (no trait bound is emitted for the union itself) — the constraint is enforced at the Boring level only. On local variables they have no value: the inference starting set already covers the same information, and a developer who knows the qualifier can write it directly.
 
@@ -533,6 +538,8 @@ The transpiler also verifies that callers do not pass a qualifier outside the de
 | Generic element types (`[Counter]`, `{K: Counter}`) | not applicable — qualifier is part of the declared type |
 | Cross-file inference | not implemented |
 | Fixed-point propagation (mutual recursion) | not implemented |
+
+> **Note on `'actor'task` / `'guard'task`:** these compound qualifiers require explicit annotation — qualifier inference does not distinguish sync vs async contexts. See qualifiers.md for the open question.
 
 ---
 

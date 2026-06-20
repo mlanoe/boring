@@ -280,7 +280,7 @@ pub enum TokenKind {
     Ident(String),
 
     // Keywords
-    Let, Mut, Var, Def, Return,
+    Let, Mut, Var, Lazy, Def, Return,
     If, Elif, Else,
     Match,
     While, Do, Loop, Wait,
@@ -850,6 +850,7 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "let"      => TokenKind::Let,
         "mut"      => TokenKind::Mut,
         "var"      => TokenKind::Var,
+        "lazy"     => TokenKind::Lazy,
         "def"      => TokenKind::Def,
         "return"   => TokenKind::Return,
         "if"       => TokenKind::If,

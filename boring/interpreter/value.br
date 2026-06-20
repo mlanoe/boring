@@ -64,6 +64,8 @@ enum Value:
     OverloadedFn(string name, [Value] variants)
     Range(int start, int end, bool inclusive, int step)
     Labeled(string label, Value val)
+    StructDef(string name)
+    EnumDef(string name)
 
     req string type_name():
         match self:
@@ -78,7 +80,7 @@ enum Value:
             Value.Tuple(_): "tuple"
             Value.Dict(_): "dict"
             Value.Set(_): "set"
-            Value.Object(_): "object"
+            Value.Object(inner): inner.type_name.clone()
             Value.EnumVariant(typeName, _, _): "{typeName}"
             Value.Fn(_, _): "fn"
             Value.Closure(_, _, _): "closure"
@@ -86,12 +88,15 @@ enum Value:
             Value.OverloadedFn(_, _): "overloaded-fn"
             Value.Range(_, _, _, _): "range"
             Value.Labeled(_, _): "labeled"
+            Value.StructDef(n): "struct:{n}"
+            Value.EnumDef(n): "enum:{n}"
 
 # ─── Env ──────────────────────────────────────────────────────────────────────
 
 struct Env:
     var {string=Value} vars
     {string} mutable_vars
+    {string} lazy_vars
     {string} owned_collections
     {string} task_safe_vars
     {string} owned_vars
@@ -109,7 +114,11 @@ struct Env:
 
     def bool set(string name, Value value):
         if self.vars.has(name):
-            if not self.mutable_vars.contains(name):
+            if self.lazy_vars.contains(name):
+                self.vars.set(name, value)
+                self.lazy_vars.remove(name)
+                true
+            elif not self.mutable_vars.contains(name):
                 false
             else:
                 self.vars.set(name, value)
@@ -117,6 +126,19 @@ struct Env:
         else:
             if let p = self.parent:
                 p.set(name, value)
+            else:
+                false
+
+    def void define_lazy(string name):
+        self.vars.set(name, Value.Uninitialized)
+        self.lazy_vars.add(name)
+
+    req bool is_lazy(string name):
+        if self.vars.has(name):
+            self.lazy_vars.contains(name)
+        else:
+            if let p = self.parent:
+                p.is_lazy(name)
             else:
                 false
 
@@ -183,6 +205,7 @@ struct Env:
         if self.vars.has(name):
             self.vars.remove(name)
             self.mutable_vars.remove(name)
+            self.lazy_vars.remove(name)
             self.owned_collections.remove(name)
             self.task_safe_vars.remove(name)
             self.owned_vars.remove(name)
@@ -206,14 +229,15 @@ struct Env:
 
 # ─── new_env ──────────────────────────────────────────────────────────────────
 
-def Env'actor new_env(Env'actor? parent):
-    let e = Env(
+def Env'actor new_env(Env? parent):
+    let e'actor = Env(
         vars = {=},
         mutable_vars = {},
+        lazy_vars = {},
         owned_collections = {},
         task_safe_vars = {},
         owned_vars = {},
         shared_bindings = {},
         parent = parent
     )
-    e as Env'actor
+    e

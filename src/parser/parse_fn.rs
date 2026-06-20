@@ -214,6 +214,12 @@ impl Parser {
         // treat current as return type.
         let maybe_ty = self.try_parse_return_type_prefix();
 
+        // Anonymous call operator: `def ()` or `req ()` — name is empty string.
+        // The `(` is left for parse_params() to consume.
+        if self.check(&TokenKind::LParen) {
+            return Ok((maybe_ty, None, String::new()));
+        }
+
         // Now parse qualifier.name or just name.
         // Use expect_ident_or_keyword so reserved words (e.g. `join`, `wait`) are
         // valid function / method names.

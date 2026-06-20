@@ -39,6 +39,11 @@ impl Interpreter {
                 if let Some(ty) = &s.ty {
                     self.check_type_has_qualifier(ty, s.line)?;
                 }
+                // `lazy` binding — always uninitialized, awaits first `?=`.
+                if s.is_lazy || matches!(s.binding, BindingKind::Lazy) {
+                    target_env.borrow_mut().define_lazy(&s.name);
+                    return Ok(());
+                }
                 // Deferred initialisation (`let v` / `var v` without `= expr`).
                 // Always define as mutable so the first assignment in a branch is allowed.
                 // The transpiler emits `let v;` / `let mut v;` and Rust enforces single-assignment.
@@ -699,6 +704,7 @@ impl Interpreter {
             }
             Type::Optional(inner) => Type::Optional(Box::new(self.resolve_type(inner))),
             Type::Array(elem) => Type::Array(Box::new(self.resolve_type(elem))),
+            Type::ArrayN(elem, n) => Type::ArrayN(Box::new(self.resolve_type(elem)), *n),
             Type::Set(elem) => Type::Set(Box::new(self.resolve_type(elem))),
             Type::Dict(k, v) => Type::Dict(
                 Box::new(self.resolve_type(k)),
@@ -816,6 +822,7 @@ impl Interpreter {
             Type::Named(n) => n.clone(),
             Type::Optional(inner) => format!("{}?", Self::display_type(inner)),
             Type::Array(e) => format!("[{}]", Self::display_type(e)),
+            Type::ArrayN(e, n) => format!("[{}, {}]", Self::display_type(e), n),
             Type::Tuple(ts) => {
                 let inner = ts.iter().map(|t| Self::display_type(t)).collect::<Vec<_>>().join(", ");
                 format!("({})", inner)
@@ -833,9 +840,10 @@ impl Interpreter {
             Type::Qualified(inner, qual) => {
                 let qual_str = match qual {
                     OwnerQual::Owned        => "'".to_string(),
-                    OwnerQual::Copy         => "'copy".to_string(),
                     OwnerQual::Actor        => "'actor".to_string(),
+                    OwnerQual::ActorTask    => "'task".to_string(),
                     OwnerQual::Guard        => "'guard".to_string(),
+                    OwnerQual::GuardTask    => "'guard'task".to_string(),
                     OwnerQual::Shared       => "'shared".to_string(),
                     OwnerQual::Weak         => "'weak".to_string(),
                     OwnerQual::Stack        => "'stack".to_string(),
@@ -932,6 +940,10 @@ impl Interpreter {
             },
             Type::Array(elem_ty) => match val {
                 Value::Array(elems) => elems.is_empty() || elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                _ => false,
+            },
+            Type::ArrayN(elem_ty, n) => match val {
+                Value::Array(elems) => elems.len() == *n && elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
                 _ => false,
             },
             Type::Set(elem_ty) => match val {
@@ -1439,7 +1451,7 @@ impl Interpreter {
             ExprKind::Var(name) => out.push(name.clone()),
             ExprKind::BinOp(_, l, r) => { Self::collect_vars_expr(l, out); Self::collect_vars_expr(r, out); }
             ExprKind::UnaryOp(_, e) => Self::collect_vars_expr(e, out),
-            ExprKind::Assign(t, v) => { Self::collect_vars_expr(t, out); Self::collect_vars_expr(v, out); }
+            ExprKind::Assign(t, v) | ExprKind::QuestionAssign(t, v) => { Self::collect_vars_expr(t, out); Self::collect_vars_expr(v, out); }
             ExprKind::Field(e, _) | ExprKind::OptionalField(e, _) => Self::collect_vars_expr(e, out),
             ExprKind::Index(e, i) => { Self::collect_vars_expr(e, out); Self::collect_vars_expr(i, out); }
             ExprKind::Call(f, args) => {

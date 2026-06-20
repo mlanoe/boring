@@ -110,6 +110,7 @@ impl KernelTranspiler {
 
             Type::Optional(inner)  => format!("Option<{}>", self.emit_type(inner)),
             Type::Array(inner)     => format!("kernel::prelude::Vec<{}>", self.emit_type(inner)),
+            Type::ArrayN(inner, n) => format!("[{}; {}]", self.emit_type(inner), n),
             Type::Tuple(elems)     => format!(
                 "({})",
                 elems.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ")
@@ -149,7 +150,7 @@ impl KernelTranspiler {
                     format!("Box<{}, kernel::alloc::KVmalloc>", self.emit_type(inner))
                 }
                 // T'stack → T
-                OwnerQual::Stack | OwnerQual::Copy => self.emit_type(inner),
+                OwnerQual::Stack => self.emit_type(inner),
                 // T'shared → Arc<T>  (no Rc in kernel — single-thread mode not applicable)
                 OwnerQual::Shared => {
                     format!("Arc<{}>", self.emit_type(inner))

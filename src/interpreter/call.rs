@@ -342,9 +342,20 @@ impl Interpreter {
 
     pub(crate) fn instantiate_struct_labeled(&mut self, decl: &StructDecl, captured: &EnvRef, args: Vec<Value>, line: usize) -> Eval {
 
-        // If the struct has `init` declarations, use the first one (overload resolution not yet implemented).
         if !decl.inits.is_empty() {
-            let init_decl = decl.inits[0].clone();
+            let arg_count = args.len();
+            let init_decl = decl.inits.iter()
+                .min_by_key(|init| {
+                    let total = init.params.len();
+                    let required = init.params.iter().filter(|p| p.default.is_none()).count();
+                    if arg_count >= required && arg_count <= total {
+                        0usize
+                    } else {
+                        ((total as i64) - (arg_count as i64)).unsigned_abs() as usize + 1
+                    }
+                })
+                .unwrap()
+                .clone();
             return self.call_init(decl, &init_decl, captured, args, line);
         }
 
@@ -482,7 +493,9 @@ impl Interpreter {
             Err(e) => return Err(e),
         }
 
-        let final_self = env.borrow().get("self").unwrap_or(Value::Nil);
+        let final_self = env.borrow().get("self").ok_or_else(|| {
+            err("init body did not assign 'self'", 0)
+        })?;
         Ok(final_self)
     }
 

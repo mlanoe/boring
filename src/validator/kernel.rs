@@ -213,7 +213,7 @@ impl KernelValidator {
                 self.check_expr(rhs);
             }
             ExprKind::UnaryOp(_, inner) => self.check_expr(inner),
-            ExprKind::Assign(lhs, rhs) => {
+            ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => {
                 self.check_expr(lhs);
                 self.check_expr(rhs);
             }
@@ -250,6 +250,12 @@ impl KernelValidator {
                 for i in items {
                     self.check_expr(i);
                 }
+            }
+            ExprKind::ArrayFill { value, count } => {
+                self.check_expr(value); self.check_expr(count);
+            }
+            ExprKind::ArrayComp { expr, count, .. } => {
+                self.check_expr(expr); self.check_expr(count);
             }
             ExprKind::Dict(pairs) => {
                 for (k, v) in pairs {

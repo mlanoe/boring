@@ -15,22 +15,26 @@ The flags are independent — any combination is valid. `--threading` is not ava
 
 Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` affects them.
 
-| Qualifier     | `--threading multi` (default)        | `--threading single`       |
-|---------------|--------------------------------------|----------------------------|
-| `T'stack`     | `T`                                  | `T`                        |
-| `T'heap`      | `Box<T>`                             | `Box<T>`                   |
-| `T'copy`      | `T` (Copy)                           | `T` (Copy)                 |
-| `T'shared`    | `Arc<T>`                             | `Rc<T>`                    |
-| `T'actor`     | `Arc<tokio::sync::Mutex<T>>`         | `RefCell<T>`               |
-| `T'guard`     | `Arc<tokio::sync::RwLock<T>>`        | `RefCell<T>`               |
-| `T'wshared`   | `std::sync::Weak<T>`                 | `Weak<T>`                  |
-| `T'wactor`    | `std::sync::Weak<Mutex<T>>`          | `Weak<RefCell<T>>`         |
-| `T'wguard`    | `std::sync::Weak<RwLock<T>>`         | `Weak<RefCell<T>>`         |
-| `T'option`    | `Option<T>`                          | `Option<T>`                |
+| Qualifier          | `--threading multi` (default)        | `--threading single`       |
+|--------------------|--------------------------------------|----------------------------|
+| `T'stack`          | `T`                                  | `T`                        |
+| `T'heap`           | `Box<T>`                             | `Box<T>`                   |
+| `T'shared`         | `Arc<T>`                             | `Rc<T>`                    |
+| `T'actor`          | `Arc<std::sync::Mutex<T>>`           | `Rc<RefCell<T>>`           |
+| `T'guard`          | `Arc<std::sync::RwLock<T>>`          | `Rc<RefCell<T>>`           |
+| `T'actor'task`     | `Arc<tokio::sync::Mutex<T>>`         | not supported              |
+| `T'guard'task`     | `Arc<tokio::sync::RwLock<T>>`        | not supported              |
+| `T'shared'weak`    | `std::sync::Weak<T>`                 | `Weak<T>`                  |
+| `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`          | `Weak<RefCell<T>>`         |
+| `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`         | `Weak<RefCell<T>>`         |
+| `T'option`         | `Option<T>`                          | `Option<T>`                |
+| `string`           | `Arc<str>`                           | `Rc<str>`                  |
 
-`T'wshared`, `T'wactor`, `T'wguard` are shorthands for weak non-owning pointers that do not prevent the pointee from being dropped.
+`T'shared'weak`, `T'actor'weak`, `T'guard'weak` are weak non-owning pointers that do not prevent the pointee from being dropped.
 
-`T'guard` in single-thread maps to `RefCell<T>` (same as `T'actor`) — `RefCell` has no read/write distinction. The qualifier is preserved as documentation of intent; no warning is emitted.
+`T'guard` in single-thread maps to `Rc<RefCell<T>>` (same as `T'actor`) — `RefCell` has no read/write distinction. The qualifier is preserved as documentation of intent; no warning is emitted.
+
+`T'actor'task` and `T'guard'task` use Tokio's async-aware mutexes. They require `--threading multi` and an async (task) context; using them with `--threading single` is a compile error.
 
 ---
 
@@ -66,13 +70,12 @@ Before applying flag defaults, the transpiler runs a series of inference passes.
 | Priority | Situation | Result |
 |----------|-----------|--------|
 | 1 | Explicit qualifier written by the developer | as written |
-| 2 | Non-parametric enum (all unit variants) | `T'copy` — always, regardless of flags |
-| 3 | Recursive type position | `Box<T>` inserted on the recursive field/variant |
-| 4 | `dyn Trait` position | `Box<dyn Trait>` |
-| 5 | Use-site qualifier inference | qualifier demanded by call sites — all modes |
-| 6 | `sizeof(T) > --stack-auto-bytes` in strict mode | `T` promoted to `Box<T>` |
+| 2 | Recursive type position | `Box<T>` inserted on the recursive field/variant |
+| 3 | `dyn Trait` position | `Box<dyn Trait>` |
+| 4 | Use-site qualifier inference | qualifier demanded by call sites — all modes |
+| 5 | `sizeof(T) > --stack-auto-bytes` in strict mode | `T` promoted to `Box<T>` |
 
-Priorities 2–4 are correctness constraints — they are never overridden. Priority 5 (use-site inference) runs before size-based decisions and applies in all flag combinations. Priority 6 applies only in `--mode strict` when priority 5 yields no result. Flag defaults are applied last.
+Priorities 2–3 are correctness constraints — they are never overridden. Priority 4 (use-site inference) runs before size-based decisions and applies in all flag combinations. Priority 5 applies only in `--mode strict` when priority 4 yields no result. Flag defaults are applied last.
 
 ---
 
@@ -113,6 +116,8 @@ boring build --mode strict
 ---
 
 ## `--threading single` — runtime and limitations
+
+`--threading single` emits to `<project>_rust_single/` instead of `<project>_rust/`, so both builds can coexist side by side in the same directory.
 
 ### Tokio runtime
 

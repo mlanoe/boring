@@ -120,14 +120,30 @@ The `mut` keyword is not inferred — it must be written explicitly. A `def` cal
 
 The rationale: moving an `Arc` silently increments the reference counter, a cost invisible in the source. A reference suffices in the vast majority of call sites. The auto-ref convention makes this the default — the developer writes `Counter'actor c` and treats `c` as an owned value throughout the body. Refcount increments and `Arc::clone` calls are inserted by the transpiler only when needed.
 
-When the callee stores the parameter into an owned field, the transpiler inserts `Arc::clone` automatically:
+The transpiler inserts `Arc::clone` (or `Rc::clone` in single-thread mode) automatically whenever a reference parameter is used in an owned position. This covers field assignment, `let` bindings, `match` and `if let` bindings, tuple construction, and call-site arguments:
 
 ```boring
 struct Processor:
     Counter'actor counter
 
 def init(Counter'actor c):
-    counter = c   # transpiler emits: Arc::clone(c)
+    counter = c              # field assign → Arc::clone(c)
+    let x = c                # let binding → Arc::clone(c)
+    let (a, b) = (c, other)  # tuple → Arc::clone(c)
+
+match c:
+    _: store(c)              # match binding → Arc::clone(c)
+```
+
+Call sites where a `'actor`/`'guard`/`'shared` value is passed to a function expecting an owned parameter also trigger auto-clone:
+
+```boring
+def store(Counter'actor c):
+    …
+
+let x = Counter'actor(0)
+store(x)     # Arc::clone(&x) at call site
+store(x)     # x is still valid — clone was inserted, not a move
 ```
 
 ---

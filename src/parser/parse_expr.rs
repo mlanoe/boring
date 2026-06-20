@@ -119,11 +119,10 @@ impl Parser {
             let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line };
             return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line }));
         }
-        // Nil-coalescing assignment: `lhs ?= rhs` → `lhs = lhs else rhs`
+        // Write-once / nil-coalescing assignment: `lhs ?= rhs`
         if self.eat(&TokenKind::QuestionEq) {
             let rhs = self.parse_or()?;
-            let else_expr = Expr { kind: ExprKind::Else(Box::new(lhs.clone()), Box::new(rhs)), line };
-            return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(else_expr)), line }));
+            return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line }));
         }
         // Command-style call: `print "hello"` or `foo arg1, arg2`
         // Same logic as in parse_stmt, but here we don't consume the trailing newline
@@ -1327,16 +1326,44 @@ impl Parser {
             }
             TokenKind::LBracket => {
                 self.advance();
-                self.skip_newlines_and_indent(); // allow `[\n    elem,` multi-line form
-                let mut elems = Vec::new();
-                while !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
-                    elems.push(self.parse_expr()?);
-                    if !self.eat(&TokenKind::Comma) { break; }
-                    self.skip_newlines_and_indent(); // allow newline between elements
+                self.skip_newlines_and_indent();
+                // Comprehension forms: `[v for ..n]` or `[f(i) for i in ..n]`
+                if !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
+                    // Parse first expression (value or computed expr)
+                    let first = self.parse_expr()?;
+                    if self.eat(&TokenKind::For) {
+                        // `[v for i in ..n]` — computed form
+                        let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
+                            let var = self.expect_ident()?;
+                            self.expect(&TokenKind::In)?;
+                            let count = self.parse_comprehension_count(line)?;
+                            ExprKind::ArrayComp { expr: Box::new(first), var, count: Box::new(count) }
+                        } else {
+                            // `[v for ..n]` — fill form
+                            let count = self.parse_comprehension_count(line)?;
+                            ExprKind::ArrayFill { value: Box::new(first), count: Box::new(count) }
+                        };
+                        self.skip_newlines_and_indent();
+                        self.expect(&TokenKind::RBracket)?;
+                        return Ok(Expr { kind, line });
+                    }
+                    // Regular array literal — continue collecting elements
+                    let mut elems = vec![first];
+                    if self.eat(&TokenKind::Comma) {
+                        self.skip_newlines_and_indent();
+                        while !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
+                            elems.push(self.parse_expr()?);
+                            if !self.eat(&TokenKind::Comma) { break; }
+                            self.skip_newlines_and_indent();
+                        }
+                    }
+                    self.skip_newlines_and_indent();
+                    self.expect(&TokenKind::RBracket)?;
+                    return Ok(Expr { kind: ExprKind::Array(elems), line });
                 }
-                self.skip_newlines_and_indent(); // allow newline before `]`
+                self.skip_newlines_and_indent();
                 self.expect(&TokenKind::RBracket)?;
-                Ok(Expr { kind: ExprKind::Array(elems), line })
+                Ok(Expr { kind: ExprKind::Array(vec![]), line })
             }
             TokenKind::LBrace => {
                 self.parse_brace_expr(line)
@@ -1617,5 +1644,36 @@ impl Parser {
             }
         };
         Ok(Expr { kind: ExprKind::Task(Box::new(inner)), line })
+    }
+
+    /// Parse the count expression in an array comprehension (`[v for ..n]` or `[f(i) for i in ..n]`).
+    /// Accepts `..n` (sugar for `0..n`) and `0..n`. Rejects any non-zero start.
+    fn parse_comprehension_count(&mut self, line: usize) -> Result<Expr, ParseError> {
+        if self.eat(&TokenKind::DotDot) {
+            // `..n` — implicit start 0
+            return self.parse_or();
+        }
+        // Parse the full expression — `parse_or` will consume `0..n` as a Range node.
+        let expr = self.parse_or()?;
+        match expr.kind {
+            ExprKind::Range { ref start, ref end, inclusive: false } => {
+                if matches!(start.kind, ExprKind::Int(0)) {
+                    Ok(*end.clone())
+                } else {
+                    Err(ParseError::Generic {
+                        msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
+                        line,
+                    })
+                }
+            }
+            ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
+                msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
+                line,
+            }),
+            _ => Err(ParseError::Generic {
+                msg: "expected `..n` or `0..n` in array comprehension".to_string(),
+                line,
+            }),
+        }
     }
 }

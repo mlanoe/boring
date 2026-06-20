@@ -443,6 +443,12 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
             for e in elems { collect_vars_in(e, out); }
         }
+        ExprKind::ArrayFill { value, count } => {
+            collect_vars_in(value, out); collect_vars_in(count, out);
+        }
+        ExprKind::ArrayComp { expr, count, .. } => {
+            collect_vars_in(expr, out); collect_vars_in(count, out);
+        }
         ExprKind::Dict(pairs) => {
             for (k, v) in pairs { collect_vars_in(k, out); collect_vars_in(v, out); }
         }
@@ -541,6 +547,9 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         ExprKind::MacroCall { args, .. } => {
             for e in args { collect_vars_in(e, out); }
         }
+
+        // Write-once / nil-coalescing assign: recurse both sides
+        ExprKind::QuestionAssign(target, rhs) => { collect_vars_in(target, out); collect_vars_in(rhs, out); }
 
         // Leaf nodes (no sub-expressions containing variable references)
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
@@ -1270,6 +1279,12 @@ pub(crate) fn expr_uses_task_cancelled(expr: &Expr) -> bool {
         ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
             elems.iter().any(expr_uses_task_cancelled)
         }
+        ExprKind::ArrayFill { value, count } => {
+            expr_uses_task_cancelled(value) || expr_uses_task_cancelled(count)
+        }
+        ExprKind::ArrayComp { expr, count, .. } => {
+            expr_uses_task_cancelled(expr) || expr_uses_task_cancelled(count)
+        }
         ExprKind::Block(stmts) | ExprKind::Do(stmts) => stmts_use_task_cancelled(stmts),
         ExprKind::Task(e) => expr_uses_task_cancelled(e),
         ExprKind::TaskWithTimeout(dur, body) => {
@@ -1397,7 +1412,7 @@ pub(crate) fn infer_overload_expr_type(
         ExprKind::Bool(_)                             => Some(Type::Bool),
         ExprKind::Nil                                 => Some(Type::Optional(Box::new(Type::Void))),
         ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Type::Str),
-        ExprKind::Array(_)                            => Some(Type::Array(Box::new(Type::Int))),
+        ExprKind::Array(_) | ExprKind::ArrayFill { .. } | ExprKind::ArrayComp { .. } => Some(Type::Array(Box::new(Type::Int))),
         ExprKind::Var(name) => var_types.get(name.as_str()).cloned(),
         ExprKind::Call(callee, _) => {
             if let ExprKind::Var(fn_name) = &callee.kind {

@@ -2,21 +2,128 @@
 
 # ─── exec_block ───────────────────────────────────────────────────────────────
 
-def Signal? exec_block(var Interpreter'actor interp, [Stmt] stmts):
+def Signal? exec_block(mut Interpreter interp, [Stmt] stmts):
     for stmt in stmts:
         let Signal? sig = exec_stmt(interp, stmt)
         if sig != nil:
             return sig
     nil
 
+# Like exec_block but treats the last Stmt::Expr as an implicit return value
+def Signal? exec_block_do(mut Interpreter interp, [Stmt] stmts):
+    let n = stmts.length
+    var i = 0
+    while i < n:
+        let stmt = stmts[i]
+        if i == n - 1:
+            match stmt:
+                Stmt.Expr(e):
+                    let val = eval_expr(interp, e)
+                    if interp.has_pending_return:
+                        return nil
+                    return YieldSignal(val, 0)
+                Stmt.If(s):
+                    return exec_if_as_do(interp, s)
+                _:
+                    let sig = exec_stmt(interp, stmt)
+                    if sig != nil:
+                        return sig
+        else:
+            let sig = exec_stmt(interp, stmt)
+            if sig != nil:
+                return sig
+        i = i + 1
+    nil
+
+def Signal? exec_if_as_do(mut Interpreter interp, IfStmt s):
+    for branch in s.branches:
+        let cond_val = eval_expr(interp, branch.cond)
+        let b = expect_bool(cond_val)
+        if b:
+            let child = new_env(interp.current_env)
+            let prev = interp.current_env
+            interp.current_env = child
+            let sig = exec_block_do(interp, branch.body)
+            interp.current_env = prev
+            if sig != nil:
+                return sig
+            return nil
+    if let else_body = s.else_body:
+        let child = new_env(interp.current_env)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block_do(interp, else_body)
+        interp.current_env = prev
+        if sig != nil:
+            return sig
+    nil
+
+def Signal? exec_if_as_expr(mut Interpreter interp, IfStmt s):
+    for branch in s.branches:
+        let cond_val = eval_expr(interp, branch.cond)
+        let b = expect_bool(cond_val)
+        if b:
+            let child = new_env(interp.current_env)
+            let prev = interp.current_env
+            interp.current_env = child
+            let sig = exec_block_fn(interp, branch.body)
+            interp.current_env = prev
+            if sig != nil:
+                return sig
+            return ReturnSignal(Value.Nil)
+    if let else_body = s.else_body:
+        let child = new_env(interp.current_env)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block_fn(interp, else_body)
+        interp.current_env = prev
+        if sig != nil:
+            return sig
+        return ReturnSignal(Value.Nil)
+    ReturnSignal(Value.Nil)
+
+def Signal? exec_match_as_expr(mut Interpreter interp, MatchStmt s):
+    let subject = eval_expr(interp, s.subject)
+    let result = eval_match(interp, subject, s.arms)
+    ReturnSignal(result)
+
+def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
+    let n = stmts.length
+    var i = 0
+    while i < n:
+        let stmt = stmts[i]
+        if i == n - 1:
+            match stmt:
+                Stmt.Expr(e):
+                    let val = eval_expr(interp, e)
+                    if interp.has_pending_throw:
+                        return ThrowSignal(interp.take_pending_throw())
+                    return ReturnSignal(val)
+                Stmt.If(s):
+                    return exec_if_as_expr(interp, s)
+                Stmt.Match(s):
+                    return exec_match_as_expr(interp, s)
+                _:
+                    let sig = exec_stmt(interp, stmt)
+                    if sig != nil:
+                        return sig
+        else:
+            let sig = exec_stmt(interp, stmt)
+            if sig != nil:
+                return sig
+        i = i + 1
+    nil
+
 # ─── exec_stmt ────────────────────────────────────────────────────────────────
 
-def Signal? exec_stmt(var Interpreter'actor interp, Stmt stmt):
+def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
     match stmt:
         Let(s):
             var val = Uninitialized
             if let expr = s.value:
                 val = eval_expr(interp, expr)
+                if interp.has_pending_throw:
+                    return ThrowSignal(interp.take_pending_throw())
             if s.mutable:
                 interp.current_env.define_mut(s.name, val)
             else:
@@ -39,10 +146,15 @@ def Signal? exec_stmt(var Interpreter'actor interp, Stmt stmt):
             var val = Nil
             if let expr = s.value:
                 val = eval_expr(interp, expr)
+                if interp.has_pending_throw:
+                    return ThrowSignal(interp.take_pending_throw())
             ReturnSignal(val)
 
-        Break:
-            BreakSignal(Void)
+        Break(line, value_expr):
+            var break_val = Void
+            if let expr = value_expr:
+                break_val = eval_expr(interp, expr)
+            BreakSignal(break_val)
 
         Continue:
             ContinueSignal
@@ -59,15 +171,238 @@ def Signal? exec_stmt(var Interpreter'actor interp, Stmt stmt):
         Try(s):
             exec_try(interp, s)
 
+        DoWhile(s):
+            exec_do_while(interp, s)
+
         Expr(expr):
             eval_expr(interp, expr)
+            if interp.has_pending_throw:
+                interp.has_pending_return = false
+                interp.pending_return_val = Value.Nil
+                return ThrowSignal(interp.take_pending_throw())
+            if interp.has_pending_return:
+                let v = interp.pending_return_val
+                interp.has_pending_return = false
+                interp.pending_return_val = Value.Nil
+                return ReturnSignal(v)
+            nil
+
+        Guard(s):
+            let cond_val = match s.cond:
+                GuardCond.Expr(e): eval_expr(interp, e)
+                GuardCond.Clauses(clauses):
+                    var all_true = true
+                    var ci = 0
+                    while ci < clauses.length and all_true:
+                        let clause = clauses[ci]
+                        match clause:
+                            CondClause.Expr(e):
+                                if not val_to_bool(eval_expr(interp, e)):
+                                    all_true = false
+                            CondClause.Let(name, e):
+                                let v = eval_expr(interp, e)
+                                match v:
+                                    Value.Nil: all_true = false
+                                    _: interp.current_env.define(name, v)
+                            _: nil
+                        ci = ci + 1
+                    Value.Bool(all_true)
+            let passed = val_to_bool(cond_val)
+            if not passed:
+                let child = new_env(interp.current_env)
+                let prev = interp.current_env
+                interp.current_env = child
+                let sig = exec_block(interp, s.else_body)
+                interp.current_env = prev
+                if sig != nil:
+                    return sig
+            nil
+
+        LetDestructure(s):
+            let val = eval_expr(interp, s.value)
+            var elems = []
+            match val:
+                Value.Tuple(items): elems = items
+                Value.Array(items): elems = items
+                _: elems = [val]
+            var i = 0
+            for binding in s.bindings:
+                if binding.name == "_":
+                    i = i + 1
+                    continue
+                let v = elems[i] else Value.Nil
+                if s.mutable:
+                    interp.current_env.define_mut(binding.name, v)
+                else:
+                    interp.current_env.define(binding.name, v)
+                i = i + 1
+            nil
+
+        Loop(s):
+            exec_loop(interp, s)
+
+        IfLet(s):
+            exec_if_let(interp, s)
+
+        WhileLet(s):
+            exec_while_let(interp, s)
+
+        Fn(decl):
+            # Nested function declaration — register in current scope
+            let fn_name = decl.name
+            interp.set_fn_decl(fn_name, decl)
+            let fn_val = Value.Fn(fn_name, interp.current_env)
+            interp.current_env.define(fn_name, fn_val)
+            nil
+
+        Struct(decl):
+            # Nested struct declaration
+            let sname = decl.name
+            interp.set_struct_decl(sname, decl)
+            interp.set_method_decls(sname, decl.methods)
+            interp.current_env.define(sname, Value.StructDef(sname))
+            nil
+
+        Enum(decl):
+            # Nested enum declaration
+            let ename = decl.name
+            interp.set_enum_decl(ename, decl)
+            interp.set_method_decls(ename, decl.methods)
+            interp.current_env.define(ename, Value.EnumDef(ename))
             nil
 
         _: nil
 
+# ─── exec_if_let ──────────────────────────────────────────────────────────────
+
+def Signal? exec_if_let(mut Interpreter interp, IfLetStmt s):
+    let all_matched = exec_if_let_match(interp, s.clauses)
+    if all_matched:
+        let child = interp.current_env
+        let sig = exec_block(interp, s.then_body)
+        interp.current_env = child
+        return sig
+    if let else_stmts = s.else_body:
+        return exec_block(interp, else_stmts)
+    nil
+
+def Value eval_in_env(mut Interpreter interp, Env'actor env, Expr expr):
+    let prev = interp.current_env
+    interp.current_env = env
+    let v = eval_expr(interp, expr)
+    interp.current_env = prev
+    v
+
+def bool exec_if_let_match(mut Interpreter interp, [CondClause] clauses):
+    # Evaluate all bindings in the parent scope, populate child env
+    let child = new_env(interp.current_env)
+    var all_matched = true
+    var ci = 0
+    while all_matched and ci < clauses.length:
+        let clause = clauses[ci]
+        ci = ci + 1
+        match clause:
+            CondClause.Let(name, expr):
+                let v = eval_expr(interp, expr)
+                match v:
+                    Value.Nil: all_matched = false
+                    _: child.define(name, v)
+            CondClause.LetPat(pat, expr):
+                let v = eval_expr(interp, expr)
+                if not match_pattern(v, pat, child):
+                    all_matched = false
+            CondClause.Expr(expr):
+                # guard: eval in child context via helper (forces Arc::clone at call site)
+                let gv = eval_in_env(interp, child, expr)
+                if not val_to_bool(gv):
+                    all_matched = false
+    if all_matched:
+        interp.current_env = child
+    all_matched
+
+# ─── exec_while_let ───────────────────────────────────────────────────────────
+
+def Signal? exec_while_let_pattern(mut Interpreter interp, Pattern pattern, Expr value_expr, [Stmt] body):
+    while true:
+        let v = eval_expr(interp, value_expr)
+        let child = new_env(interp.current_env)
+        if not match_pattern(v, pattern, child):
+            break
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block(interp, body)
+        interp.current_env = prev
+        match sig:
+            BreakSignal(_): return nil
+            ReturnSignal(rv): return ReturnSignal(rv)
+            ThrowSignal(tv): return ThrowSignal(tv)
+            _: nil
+    nil
+
+def Signal? exec_while_let_simple(mut Interpreter interp, string name, Expr value_expr, [Stmt] body):
+    while true:
+        let v = eval_expr(interp, value_expr)
+        match v:
+            Value.Nil: break
+            _:
+                let child = new_env(interp.current_env)
+                child.define(name, v)
+                let prev = interp.current_env
+                interp.current_env = child
+                let sig = exec_block(interp, body)
+                interp.current_env = prev
+                match sig:
+                    BreakSignal(_): return nil
+                    ReturnSignal(rv): return ReturnSignal(rv)
+                    ThrowSignal(tv): return ThrowSignal(tv)
+                    _: nil
+    nil
+
+def Signal? exec_while_let(mut Interpreter interp, WhileLetStmt s):
+    if let pattern = s.pattern:
+        exec_while_let_pattern(interp, pattern, s.value, s.body)
+    else:
+        exec_while_let_simple(interp, s.name, s.value, s.body)
+
+# ─── exec_loop ────────────────────────────────────────────────────────────────
+
+def Signal? exec_loop(mut Interpreter interp, LoopStmt s):
+    while true:
+        let child = new_env(interp.current_env)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block(interp, s.body)
+        interp.current_env = prev
+        match sig:
+            BreakSignal(_): return nil
+            ReturnSignal(v): return ReturnSignal(v)
+            ThrowSignal(v): return ThrowSignal(v)
+            _: nil
+    nil
+
+# ─── exec_do_while ────────────────────────────────────────────────────────────
+
+def Signal? exec_do_while(mut Interpreter interp, DoWhileStmt s):
+    while true:
+        let child = new_env(interp.current_env)
+        let prev = interp.current_env
+        interp.current_env = child
+        let sig = exec_block(interp, s.body)
+        interp.current_env = prev
+        match sig:
+            BreakSignal(_): return nil
+            ReturnSignal(v): return ReturnSignal(v)
+            ThrowSignal(v): return ThrowSignal(v)
+            _: nil
+        let cond_val = eval_expr(interp, s.condition)
+        let cond = expect_bool(cond_val)
+        if not cond:
+            break
+    nil
+
 # ─── exec_if ──────────────────────────────────────────────────────────────────
 
-def Signal? exec_if(var Interpreter'actor interp, IfStmt s):
+def Signal? exec_if(mut Interpreter interp, IfStmt s):
     for branch in s.branches:
         let cond_val = eval_expr(interp, branch.cond)
         let b = expect_bool(cond_val)
@@ -89,11 +424,11 @@ def Signal? exec_if(var Interpreter'actor interp, IfStmt s):
 
 # ─── exec_while ───────────────────────────────────────────────────────────────
 
-def Signal? exec_while(var Interpreter'actor interp, WhileStmt s):
+def Signal? exec_while(mut Interpreter interp, WhileStmt s):
     var running = true
     var Signal? result = nil
     while running:
-        let cond_val = eval_expr(interp, s.condition.clone())
+        let cond_val = eval_expr(interp, s.condition)
         let b = expect_bool(cond_val)
         if not b:
             running = false
@@ -101,7 +436,7 @@ def Signal? exec_while(var Interpreter'actor interp, WhileStmt s):
             let child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
-            let sig = exec_block(interp, s.body.clone())
+            let sig = exec_block(interp, s.body)
             interp.current_env = prev
             match sig:
                 nil: nil
@@ -114,7 +449,7 @@ def Signal? exec_while(var Interpreter'actor interp, WhileStmt s):
 
 # ─── exec_for ─────────────────────────────────────────────────────────────────
 
-def Signal? exec_for(var Interpreter'actor interp, ForStmt s):
+def Signal? exec_for(mut Interpreter interp, ForStmt s):
     let iterable = eval_expr(interp, s.iterable)
     let items = collect_iterable(iterable)
     var Signal? result = nil
@@ -124,24 +459,24 @@ def Signal? exec_for(var Interpreter'actor interp, ForStmt s):
         let item = items[idx]
         idx = idx + 1
         let child = new_env(interp.current_env)
-        let vars = s.vars.clone()
+        let vars = s.vars
         if vars.length == 1:
-            child.define(vars[0], item)
+            child.define_mut(vars[0], item)
         else:
             match item:
                 Tuple(elems):
                     var i = 0
                     for v in vars:
                         let val = if i < elems.length: elems[i] else: Value.Nil
-                        child.define(v, val)
+                        child.define_mut(v, val)
                         i = i + 1
                 _:
-                    child.define(vars[0], Int(idx - 1))
+                    child.define_mut(vars[0], Int(idx - 1))
                     if vars.length >= 2:
-                        child.define(vars[1], item)
+                        child.define_mut(vars[1], item)
         let prev = interp.current_env
         interp.current_env = child
-        let sig = exec_block(interp, s.body.clone())
+        let sig = exec_block(interp, s.body)
         interp.current_env = prev
         match sig:
             nil: nil
@@ -181,7 +516,7 @@ def [Value] collect_iterable(Value val):
 
 # ─── exec_match_stmt ──────────────────────────────────────────────────────────
 
-def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
+def Signal? exec_match_stmt(mut Interpreter interp, MatchStmt s):
     let subject = eval_expr(interp, s.subject)
     var matched = false
     var Signal? result = nil
@@ -194,10 +529,10 @@ def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
             let pattern = arm.patterns[pat_idx]
             pat_idx = pat_idx + 1
             let child = new_env(interp.current_env)
-            let did_match = match_pattern(subject.clone(), pattern, child.clone())
+            let did_match = match_pattern(subject, pattern, child)
             if did_match:
                 var guard_ok = true
-                if let guard_expr = arm.match_guard.clone():
+                if let guard_expr = arm.match_guard:
                     let gprev = interp.current_env
                     interp.current_env = child.clone()
                     let gv = eval_expr(interp, guard_expr)
@@ -207,7 +542,7 @@ def Signal? exec_match_stmt(var Interpreter'actor interp, MatchStmt s):
                     matched = true
                     let prev = interp.current_env
                     interp.current_env = child
-                    let sig = match arm.body.clone():
+                    let sig = match arm.body:
                         MatchBody.Expr(e):
                             eval_expr(interp, e)
                             nil
@@ -228,7 +563,7 @@ def Value expr_to_value_literal(Expr expr):
         ExprKind.Nil: Value.Nil
         _: Value.Nil
 
-def bool match_pattern(Value val, Pattern pattern, var Env'actor env):
+def bool match_pattern(Value val, Pattern pattern, Env'actor env):
     match pattern:
         Pattern.Wildcard:
             true
@@ -296,39 +631,51 @@ def bool match_pattern(Value val, Pattern pattern, var Env'actor env):
 
 # ─── exec_try ─────────────────────────────────────────────────────────────────
 
-def Signal? exec_try(var Interpreter'actor interp, TryStmt s):
+def Signal? exec_try(mut Interpreter interp, TryStmt s):
     let child = new_env(interp.current_env)
     let prev = interp.current_env
     interp.current_env = child
     let body_sig = exec_block(interp, s.body)
     interp.current_env = prev
+    # Check pending throw from function calls
+    var Value? exc_val_opt = nil
     match body_sig:
-        ThrowSignal(exc_val):
-            let exc_type = value_type_name(exc_val.clone())
-            var handled = false
-            var clause_idx = 0
-            while not handled and clause_idx < s.catch_clauses.length:
-                let clause = s.catch_clauses[clause_idx]
-                clause_idx = clause_idx + 1
-                let matches = clause.types.length == 0 or clause.types.contains(exc_type)
-                if matches:
-                    handled = true
-                    let cenv = new_env(interp.current_env)
-                    cenv.define("error", exc_val.clone())
-                    let cprev = interp.current_env
-                    interp.current_env = cenv
-                    let csig = exec_block(interp, clause.body)
-                    interp.current_env = cprev
-                    return csig
-            if not handled:
-                ThrowSignal(exc_val)
-            else:
-                nil
-        _: body_sig
+        ThrowSignal(v): exc_val_opt = v
+        _: nil
+    if exc_val_opt == nil and interp.has_pending_throw:
+        exc_val_opt = interp.take_pending_throw()
+    if let exc_val = exc_val_opt:
+        let exc_type = value_type_name(exc_val)
+        var handled = false
+        var clause_idx = 0
+        while not handled and clause_idx < s.catch_clauses.length:
+            let clause = s.catch_clauses[clause_idx]
+            clause_idx = clause_idx + 1
+            let catch_types = clause.types
+            let num_types = catch_types.length
+            var type_matches = false
+            for ct in catch_types:
+                if ct == exc_type or normalize_type_name(ct) == exc_type:
+                    type_matches = true
+            let matches = num_types == 0 or type_matches
+            if matches:
+                handled = true
+                let cenv = new_env(interp.current_env)
+                cenv.define("error", exc_val)
+                let cprev = interp.current_env
+                interp.current_env = cenv
+                let csig = exec_block(interp, clause.body)
+                interp.current_env = cprev
+                return csig
+        if not handled:
+            return ThrowSignal(exc_val)
+        nil
+    else:
+        body_sig
 
 # ─── call_fn ──────────────────────────────────────────────────────────────────
 
-def Value call_fn(var Interpreter'actor interp, FnDecl decl, [Value] args, Env'actor? captured):
+def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? captured):
     let base_env = captured else interp.global_env
     let fn_env = new_env(base_env.clone())
     var {string=Value} labeled = {}
@@ -360,17 +707,19 @@ def Value call_fn(var Interpreter'actor interp, FnDecl decl, [Value] args, Env'a
             fn_env.define(param.name, val)
     let prev_env = interp.current_env
     interp.current_env = fn_env
-    let sig = exec_block(interp, decl.body)
+    let sig = exec_block_fn(interp, decl.body)
     interp.current_env = prev_env
     match sig:
         nil: Nil
         ReturnSignal(v): v
-        ThrowSignal(v): throw value_to_string(v)
+        ThrowSignal(v):
+            interp.set_pending_throw(v)
+            Nil
         _: Nil
 
 # ─── call_closure ─────────────────────────────────────────────────────────────
 
-def Value call_closure(var Interpreter'actor interp, [Param] params, ClosureBody body, [Value] args, Env'actor? captured):
+def Value call_closure(mut Interpreter interp, [Param] params, ClosureBody body, [Value] args, Env? captured):
     let fn_env = new_env(captured)
     var i = 0
     for param in params:
@@ -382,21 +731,23 @@ def Value call_closure(var Interpreter'actor interp, [Param] params, ClosureBody
     var Signal? sig = nil
     match body:
         ClosureBody.Block(stmts):
-            sig = exec_block(interp, stmts)
+            sig = exec_block_fn(interp, stmts)
         ClosureBody.Expr(e):
-            sig = some(Signal.ReturnSignal(eval_expr(interp, e)))
+            sig = Signal.ReturnSignal(eval_expr(interp, e))
     interp.current_env = prev_env
     match sig:
         nil: Nil
         ReturnSignal(v): v
         BreakSignal(v): v
         ContinueSignal: Nil
-        ThrowSignal(v): throw value_to_string(v)
+        ThrowSignal(v):
+            interp.set_pending_throw(v)
+            Nil
         _: Nil
 
 # ─── call_value ───────────────────────────────────────────────────────────────
 
-def Value call_value(var Interpreter'actor interp, Value callee, [Value] args):
+def Value call_value(mut Interpreter interp, Value callee, [Value] args):
     match callee:
         Value.Fn(name, captured):
             let decl = lookup_fn_decl(interp, name)
@@ -409,12 +760,38 @@ def Value call_value(var Interpreter'actor interp, Value callee, [Value] args):
             call_native(interp, name, func, args)
 
         Value.OverloadedFn(name, variants):
-            let best = resolve_overload(interp, variants, args.clone())
+            let best = resolve_overload(interp, variants, args)
             call_value(interp, best, args)
+
+        Value.StructDef(name):
+            let decl_opt = interp.get_struct_decl(name)
+            if let decl = decl_opt:
+                instantiate_struct(interp, decl, args)
+            else:
+                throw "struct not found: {name}"
+
+        Value.EnumDef(name):
+            let variant_name = match args[0] else Value.Nil:
+                Value.Str(s): s
+                _: throw "enum constructor requires variant name"
+            var fields = []
+            var i = 1
+            while i < args.length:
+                fields.append(args[i])
+                i = i + 1
+            Value.EnumVariant(name, variant_name, fields)
 
         _: throw "value is not callable"
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
+
+def string normalize_type_name(string name):
+    if name == "String": "string"
+    else if name == "Int": "int"
+    else if name == "Float": "float"
+    else if name == "Bool": "bool"
+    else if name == "Nil": "nil"
+    else: name
 
 def bool expect_bool(Value val):
     match val:
@@ -442,6 +819,8 @@ def string value_type_name(Value val):
         OverloadedFn(n, _): "fn({n})"
         Range(_, _, _, _): "range"
         Labeled(_, _): "labeled"
+        StructDef(n): "struct:{n}"
+        EnumDef(n): "enum:{n}"
 
 def string value_to_string(Value val):
     match val:

@@ -515,6 +515,12 @@ pub struct Env {
     /// Variables declared as `var T'shared` — reassignable but NOT method-mutable.
     /// Arc<T> has no interior mutability: def methods are forbidden, req methods are fine.
     pub shared_bindings: HashSet<String>,
+    /// Variables with interior mutability: `T'actor`, `T'guard`, `T'task`, `T'actor'task`, `T'guard'task`.
+    /// `def` methods are allowed even on `let` bindings because the Mutex/RwLock provides the lock.
+    pub actor_bindings: HashSet<String>,
+    /// Variables declared with `lazy` — uninitialized until first `?=` assignment.
+    /// After the first assignment the name is removed from this set (init-once semantics).
+    pub lazy_vars: HashSet<String>,
 }
 
 impl fmt::Debug for Env {
@@ -535,6 +541,8 @@ impl Env {
             task_safe_vars: HashSet::new(),
             owned_vars: HashSet::new(),
             shared_bindings: HashSet::new(),
+            actor_bindings: HashSet::new(),
+            lazy_vars: HashSet::new(),
         }));
         register_stdlib(&env);
         env
@@ -549,6 +557,8 @@ impl Env {
             task_safe_vars: HashSet::new(),
             owned_vars: HashSet::new(),
             shared_bindings: HashSet::new(),
+            actor_bindings: HashSet::new(),
+            lazy_vars: HashSet::new(),
         }))
     }
 
@@ -565,6 +575,12 @@ impl Env {
     /// Returns Err if the variable exists but is immutable, Ok(false) if not found, Ok(true) if set.
     pub fn set(&mut self, name: &str, value: Value) -> Result<bool, ()> {
         if self.vars.contains_key(name) {
+            // Lazy vars can be set once (they are in lazy_vars until first assignment).
+            if self.lazy_vars.contains(name) {
+                self.vars.insert(name.to_string(), value);
+                self.lazy_vars.remove(name);
+                return Ok(true);
+            }
             if !self.mutable.contains(name) {
                 return Err(());
             }
@@ -574,6 +590,24 @@ impl Env {
             parent.borrow_mut().set(name, value)
         } else {
             Ok(false)
+        }
+    }
+
+    /// Declare a `lazy` variable: stores Nil and marks it as pending initialization.
+    pub fn define_lazy(&mut self, name: &str) {
+        self.vars.insert(name.to_string(), Value::Nil);
+        self.lazy_vars.insert(name.to_string());
+        self.mutable.remove(name);
+    }
+
+    /// Returns true if the variable is a lazy binding pending its first `?=` assignment.
+    pub fn is_lazy(&self, name: &str) -> bool {
+        if self.vars.contains_key(name) {
+            self.lazy_vars.contains(name)
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().is_lazy(name)
+        } else {
+            false
         }
     }
 
@@ -618,6 +652,22 @@ impl Env {
         names
     }
 
+    /// True if the binding has interior mutability (`T'actor`, `T'guard`, task variants).
+    /// `def` methods are allowed even on `let` bindings.
+    pub fn is_actor(&self, name: &str) -> bool {
+        if self.vars.contains_key(name) {
+            self.actor_bindings.contains(name)
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().is_actor(name)
+        } else {
+            false
+        }
+    }
+
+    pub fn mark_actor(&mut self, name: &str) {
+        self.actor_bindings.insert(name.to_string());
+    }
+
     /// True if the binding was declared as `var T'shared` (reassignable, not method-mutable).
     pub fn is_shared(&self, name: &str) -> bool {
         if self.vars.contains_key(name) {
@@ -637,6 +687,7 @@ impl Env {
             self.task_safe_vars.remove(name);
             self.owned_vars.remove(name);
             self.shared_bindings.remove(name);
+            self.actor_bindings.remove(name);
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().invalidate(name);
         }
@@ -1052,8 +1103,12 @@ fn register_stdlib(env: &EnvRef) {
         name: "readLine".into(),
         func: |_args, _line| {
             let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf).ok();
-            Ok(Value::Str(buf.trim_end_matches('\n').to_string()))
+            let n = std::io::stdin().read_line(&mut buf).unwrap_or(0);
+            if n == 0 {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::Str(buf.trim_end_matches('\n').to_string()))
+            }
         },
     });
 
@@ -1415,26 +1470,26 @@ pub struct Interpreter {
 impl Interpreter {
     pub fn new() -> Self {
         let mut aliases: HashMap<String, Type> = HashMap::new();
-        // Built-in lowercase aliases (with default ownership qualifier)
-        aliases.insert("int".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("uint".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("float".into(),  Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
-        aliases.insert("bool".into(),   Type::Qualified(Box::new(Type::Bool),  OwnerQual::Copy));
+        // Built-in lowercase aliases
+        aliases.insert("int".into(),    Type::Int);
+        aliases.insert("uint".into(),   Type::Uint);
+        aliases.insert("float".into(),  Type::Float);
+        aliases.insert("bool".into(),   Type::Bool);
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
         aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Stack));
         // Rust-specific numeric types — same runtime representation, preserved for transpilation.
-        aliases.insert("i8".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("i16".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("i32".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("i64".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("isize".into(), Type::Qualified(Box::new(Type::Int),   OwnerQual::Copy));
-        aliases.insert("u8".into(),    Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("u16".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("u32".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("u64".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("usize".into(), Type::Qualified(Box::new(Type::Uint),  OwnerQual::Copy));
-        aliases.insert("f32".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
-        aliases.insert("f64".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Copy));
+        aliases.insert("i8".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
+        aliases.insert("i16".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
+        aliases.insert("i32".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
+        aliases.insert("i64".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
+        aliases.insert("isize".into(), Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
+        aliases.insert("u8".into(),    Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        aliases.insert("u16".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        aliases.insert("u32".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        aliases.insert("u64".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        aliases.insert("usize".into(), Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        aliases.insert("f32".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
+        aliases.insert("f64".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
         // Uppercase base-type aliases — resolve Named("String") etc. to the primitive type so
         // that explicit qualifications like `String'shared`, `Int'copy` work correctly.
         aliases.insert("String".into(), Type::Str);
@@ -1588,10 +1643,10 @@ impl Interpreter {
 
         let abs = match found {
             Some(p) => p,
-            None => return Err(err(
-                format!("module '{}' not found", decl.path.join(".")),
-                decl.line,
-            )),
+            // No .br file found — treat as a native Rust module (pass-through for the
+            // transpiler; the interpreter simply ignores it since native symbols are not
+            // available at interpretation time).
+            None => return Ok(()),
         };
 
         // Circular / duplicate import guard
@@ -1929,6 +1984,10 @@ impl Interpreter {
                     }
                     if matches!(resolved, Type::Qualified(_, OwnerQual::Owned)) {
                         env.borrow_mut().mark_owned_var(&stmt.name);
+                    }
+                    // Interior-mutable qualifiers: def methods allowed on let bindings.
+                    if matches!(resolved, Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)) {
+                        env.borrow_mut().mark_actor(&stmt.name);
                     }
                 }
                 // `let b' = a` — move: only meaningful for owned (non-copy) values.

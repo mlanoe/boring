@@ -1,0 +1,18 @@
+struct Adder:
+    int base
+    req int ():
+        base + 10
+
+let a = Adder(base= 5)
+print a()
+
+struct Counter:
+    var int value = 0
+    def ():
+        value += 1
+
+var c = Counter()
+c()
+c()
+c()
+print c.value

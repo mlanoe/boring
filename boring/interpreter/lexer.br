@@ -5,9 +5,46 @@
 def string lex_ident_chars(string first, [string] chars, int pos):
     throw "use the Lexer method instead"
 
+def int hex_digit_val(string c):
+    if c == "0": 0
+    elif c == "1": 1
+    elif c == "2": 2
+    elif c == "3": 3
+    elif c == "4": 4
+    elif c == "5": 5
+    elif c == "6": 6
+    elif c == "7": 7
+    elif c == "8": 8
+    elif c == "9": 9
+    elif c == "a" or c == "A": 10
+    elif c == "b" or c == "B": 11
+    elif c == "c" or c == "C": 12
+    elif c == "d" or c == "D": 13
+    elif c == "e" or c == "E": 14
+    elif c == "f" or c == "F": 15
+    else: 0
+
+def int parse_hex_str(string s):
+    var acc = 0
+    for c in s.chars():
+        acc = acc * 16 + hex_digit_val(c)
+    acc
+
+def int parse_bin_str(string s):
+    var acc = 0
+    for c in s.chars():
+        acc = acc * 2 + ((c as int) else 0)
+    acc
+
+def int parse_oct_str(string s):
+    var acc = 0
+    for c in s.chars():
+        acc = acc * 8 + ((c as int) else 0)
+    acc
+
 def int measure_indent(string line):
-    var int spaces = 0
-    var int tabs = 0
+    var spaces = 0
+    var tabs = 0
     for ch in line.chars():
         if ch == " ":
             spaces += 1
@@ -25,7 +62,7 @@ def int comment_start_index([string] chars):
 # ── Preprocess triple strings ────────────────────────────────────────────────
 
 def string dedent_triple(string raw):
-    var string s = raw
+    var s = raw
     if s.startsWith("\n"):
         s = s.slice(1, s.length)
     if s.endsWith("\n"):
@@ -33,10 +70,10 @@ def string dedent_triple(string raw):
     if s.length == 0:
         return ""
     var lines = s.split("\n")
-    var int min_indent = 999999
+    var min_indent = 999999
     for ln in lines:
         if ln.trim().length > 0:
-            var int count = 0
+            var count = 0
             for ch in ln.chars():
                 if ch == " " or ch == "\t":
                     count += 1
@@ -56,7 +93,7 @@ def string dedent_triple(string raw):
             result.append(ln.slice(min_indent, ln.length))
         else:
             result.append(ln)
-    var string out = ""
+    var out = ""
     for ii in 0..result.length:
         if ii > 0:
             out = out + "\n"
@@ -66,9 +103,9 @@ def string dedent_triple(string raw):
 def string preprocess_triple_strings(string source):
     let chars = source.chars()
     let n = chars.length
-    var string result = ""
-    var int i = 0
-    var int line = 1
+    var result = ""
+    var i = 0
+    var line = 1
     while i < n:
         let ch = chars[i]
         if ch == "\n":
@@ -85,9 +122,9 @@ def string preprocess_triple_strings(string source):
             if i + 2 < n and chars[i + 1] == "\"" and chars[i + 2] == "\"":
                 let start_line = line
                 i += 3
-                var string raw = ""
-                var int newlines_consumed = 0
-                var bool closed = false
+                var raw = ""
+                var newlines_consumed = 0
+                var closed = false
                 while i < n:
                     if i + 2 < n and chars[i] == "\"" and chars[i + 1] == "\"" and chars[i + 2] == "\"":
                         i += 3
@@ -112,7 +149,7 @@ def string preprocess_triple_strings(string source):
                     else:
                         result = result + c
                 result = result + "\""
-                var int nl = 0
+                var nl = 0
                 while nl < newlines_consumed:
                     result = result + "\n"
                     nl += 1
@@ -128,7 +165,7 @@ def string preprocess_triple_strings(string source):
                         result = result + chars[i]
                         i += 1
                 elif c == "{{":
-                    var int depth = 1
+                    var depth = 1
                     while i < n and depth > 0:
                         let ic = chars[i]
                         result = result + ic
@@ -149,8 +186,8 @@ def string preprocess_triple_strings(string source):
 # ── Split interpolation hole on first ':' at depth 0 ─────────────────────────
 
 def [string] split_hole_fmt(string s):
-    var int depth = 0
-    var int idx = 0
+    var depth = 0
+    var idx = 0
     for ch in s.chars():
         if ch == "(" or ch == "[" or ch == "{{":
             depth += 1
@@ -232,7 +269,7 @@ struct Lexer:
 
     # ── Comment-start scanning (skips inside strings) ──────────────────────
     req int find_comment_start([string] line_chars):
-        var int i = 0
+        var i = 0
         while i < line_chars.length:
             let ch = line_chars[i]
             if ch == "#":
@@ -249,7 +286,7 @@ struct Lexer:
                         if i < line_chars.length and line_chars[i] == "{{":
                             i += 1
                         else:
-                            var int depth = 1
+                            var depth = 1
                             while i < line_chars.length and depth > 0:
                                 let ic = line_chars[i]
                                 i += 1
@@ -266,7 +303,7 @@ struct Lexer:
     # ── Lex a string (after opening quote consumed) ────────────────────────
     def TokenKind lex_string() throws:
         var [RawInterpPart] parts = []
-        var string current_lit = ""
+        var current_lit = ""
         while true:
             if self.at_end():
                 throw "line {self.line}: unterminated string literal"
@@ -283,8 +320,8 @@ struct Lexer:
                     if current_lit.length > 0:
                         parts.append(RawInterpPart.Lit(current_lit))
                         current_lit = ""
-                    var string inner = ""
-                    var int depth = 0
+                    var inner = ""
+                    var depth = 0
                     while true:
                         if self.at_end():
                             throw "line {self.line}: unterminated string literal"
@@ -331,7 +368,7 @@ struct Lexer:
                     elif esc == "u":
                         if self.match_char("{{"):
                             self.consume()
-                            var string hex = ""
+                            var hex = ""
                             while not self.at_end() and self.chars[self.pos] != "}}":
                                 hex = hex + self.consume()
                             if not self.at_end():
@@ -355,7 +392,7 @@ struct Lexer:
             let prefix = self.chars[self.pos]
             if prefix == "x" or prefix == "X":
                 self.consume()
-                var string hex = ""
+                var hex = ""
                 while not self.at_end():
                     let c = self.chars[self.pos]
                     if c == "_":
@@ -365,10 +402,10 @@ struct Lexer:
                         hex = hex + self.consume()
                     else:
                         break
-                return TokenKind.Int((hex as int) else 0)
+                return TokenKind.Int(parse_hex_str(hex))
             elif prefix == "b" or prefix == "B":
                 self.consume()
-                var string bin = ""
+                var bin = ""
                 while not self.at_end():
                     let c = self.chars[self.pos]
                     if c == "_":
@@ -378,10 +415,10 @@ struct Lexer:
                         bin = bin + self.consume()
                     else:
                         break
-                return TokenKind.Int((bin as int) else 0)
+                return TokenKind.Int(parse_bin_str(bin))
             elif prefix == "o" or prefix == "O":
                 self.consume()
-                var string oct = ""
+                var oct = ""
                 while not self.at_end():
                     let c = self.chars[self.pos]
                     if c == "_":
@@ -391,8 +428,8 @@ struct Lexer:
                         oct = oct + self.consume()
                     else:
                         break
-                return TokenKind.Int((oct as int) else 0)
-        var string s = first
+                return TokenKind.Int(parse_oct_str(oct))
+        var s = first
         while not self.at_end():
             let c = self.chars[self.pos]
             if c == "_":
@@ -431,7 +468,7 @@ struct Lexer:
 
     # ── Lex an identifier (first char already read) ────────────────────────
     def string lex_ident(string first):
-        var string s = first
+        var s = first
         while not self.at_end():
             let c = self.chars[self.pos]
             if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_":
@@ -444,6 +481,7 @@ struct Lexer:
     req TokenKind keyword_or_ident(string s):
         match s:
             "let": return TokenKind.Let
+            "lazy": return TokenKind.Lazy
             "var": return TokenKind.Var
             "def": return TokenKind.Def
             "return": return TokenKind.Return
@@ -490,6 +528,7 @@ struct Lexer:
             "get": return TokenKind.Get
             "set": return TokenKind.Set
             "init_val": return TokenKind.Init
+            "init": return TokenKind.Init
             "pass": return TokenKind.Pass
             "native": return TokenKind.Native
             "mod": return TokenKind.Mod
@@ -613,8 +652,8 @@ struct Lexer:
     def [Token] lex_line_tokens(string content) throws:
         let cut = self.find_comment_start(content.chars())
         let line_chars = content.chars()
-        var string trimmed_content = ""
-        var int ci = 0
+        var trimmed_content = ""
+        var ci = 0
         while ci < cut:
             trimmed_content = trimmed_content + line_chars[ci]
             ci += 1
@@ -637,7 +676,7 @@ struct Lexer:
     # ── Main tokenize pass ────────────────────────────────────────────────
     def [Token] tokenize(string preprocessed) throws:
         let all_lines = preprocessed.split("\n")
-        var int i = 0
+        var i = 0
         self.line = 1
         self.indent_stack = [0]
         self.tokens = []
@@ -647,7 +686,7 @@ struct Lexer:
         while i < all_lines.length:
             self.line = i + 1
             let raw = all_lines[i]
-            let string trimmed = raw.trim()
+            let trimmed = raw.trim()
             if trimmed.length == 0:
                 if self.paren_depth == 0:
                     self.push(TokenKind.Newline)
@@ -693,7 +732,7 @@ struct Lexer:
                         self.indent_stack.pop()
                         self.push(TokenKind.Dedent)
             let line_tokens = self.lex_line_tokens(raw.trim())
-            var bool last_is_colon = false
+            var last_is_colon = false
             for t in line_tokens:
                 match t.kind:
                     TokenKind.LParen: self.paren_depth += 1

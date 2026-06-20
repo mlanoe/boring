@@ -54,7 +54,10 @@ impl Interpreter {
                 // SHORTENED array AND return the extracted element (not the new array).
                 if method == "pop" {
                     if let Value::Array(mut arr_owned) = obj.clone() {
-                        let last = arr_owned.pop().unwrap_or(Value::Nil);
+                        if arr_owned.is_empty() {
+                            return Err(err("pop: array is empty", line));
+                        }
+                        let last = arr_owned.pop().unwrap();
                         *out_self = Some(Value::Array(arr_owned));
                         return Ok(last);
                     }
@@ -163,7 +166,11 @@ impl Interpreter {
                             *out_self = fn_env.borrow().get("self");
                             return Ok(result);
                         }
-                        Err(err(format!("no method '{}' on type '{}'", method, type_name), line))
+                        if method.is_empty() {
+                            Err(err(format!("'{}' is not callable — no anonymous `def ()` or `req ()` defined", type_name), line))
+                        } else {
+                            Err(err(format!("no method '{}' on type '{}'", method, type_name), line))
+                        }
                     })();
 
                     if pushed_type_params {
@@ -354,10 +361,23 @@ impl Interpreter {
                 Ok(Some(Value::Array(lines)))
             }
             "slice" => {
-                let start = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)? as usize;
+                let char_count = s.chars().count();
+                let start_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let start = if start_i < 0 {
+                    (char_count as i64 + start_i).max(0) as usize
+                } else {
+                    (start_i as usize).min(char_count)
+                };
                 let end = match args.get(1).cloned() {
-                    Some(v) => self.expect_int(v, line)? as usize,
-                    None => s.chars().count(),
+                    Some(v) => {
+                        let end_i = self.expect_int(v, line)?;
+                        if end_i < 0 {
+                            (char_count as i64 + end_i).max(0) as usize
+                        } else {
+                            (end_i as usize).min(char_count)
+                        }
+                    }
+                    None => char_count,
                 };
                 let result: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
                 Ok(Some(Value::Str(result)))
@@ -532,20 +552,35 @@ impl Interpreter {
                 Ok(Some(Value::Array(result)))
             }
             "slice" => {
-                let start = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)? as usize;
-                let end = match args.get(1).cloned() {
-                    Some(v) => self.expect_int(v, line)? as usize,
-                    None => arr.len(),
+                let len = arr.len();
+                let start_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let start = if start_i < 0 {
+                    (len as i64 + start_i).max(0) as usize
+                } else {
+                    (start_i as usize).min(len)
                 };
-                let start = start.min(arr.len());
-                let end = end.min(arr.len());
-                Ok(Some(Value::Array(arr[start..end].to_vec())))
+                let end = match args.get(1).cloned() {
+                    Some(v) => {
+                        let end_i = self.expect_int(v, line)?;
+                        if end_i < 0 {
+                            (len as i64 + end_i).max(0) as usize
+                        } else {
+                            (end_i as usize).min(len)
+                        }
+                    }
+                    None => len,
+                };
+                Ok(Some(Value::Array(arr[start..end.max(start)].to_vec())))
             }
             "insert" => {
-                let idx = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)? as usize;
+                let idx_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
                 let val = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut new_arr = arr;
-                let idx = idx.min(new_arr.len());
+                let idx = if idx_i < 0 {
+                    (new_arr.len() as i64 + idx_i).max(0) as usize
+                } else {
+                    (idx_i as usize).min(new_arr.len())
+                };
                 new_arr.insert(idx, val);
                 Ok(Some(Value::Array(new_arr)))
             }
@@ -1670,14 +1705,10 @@ impl Interpreter {
             // Special types — always OK
             Type::Nil | Type::Void | Type::Never => Ok(()),
 
-            // Bare primitive types without a qualifier: require the lowercase alias instead.
-            // `Int` → use `int` (= Int'copy), `Float` → use `float`, `String` → use `string`, etc.
-            // Bare uppercase = "unqualified reference" with no owner — not valid in annotation position.
-            Type::Int   => Err(err("use 'int' instead of bare 'Int' (which has no ownership qualifier)", line)),
-            Type::Uint  => Err(err("use 'uint' instead of bare 'Uint' (which has no ownership qualifier)", line)),
-            Type::Float => Err(err("use 'float' instead of bare 'Float' (which has no ownership qualifier)", line)),
-            Type::Str   => Err(err("use 'string' instead of bare 'String' (which has no ownership qualifier)", line)),
-            Type::Bool  => Err(err("use 'bool' instead of bare 'Bool' (which has no ownership qualifier)", line)),
+            // Bare primitive types: stack-allocated by default, always valid.
+            Type::Int | Type::Uint | Type::Float | Type::Bool => Ok(()),
+            // Bare String without qualifier: requires explicit qualification.
+            Type::Str => Err(err("use 'string' instead of bare 'String' (which has no ownership qualifier)", line)),
 
             // Type parameters — resolved later, skip
             Type::TypeParam(_) => Ok(()),
@@ -1694,7 +1725,7 @@ impl Interpreter {
             Type::Optional(inner) => self.check_resolved_qualifier(inner, line),
 
             // Collection element / key / value types
-            Type::Array(elem) | Type::Set(elem) => self.check_resolved_qualifier(elem, line),
+            Type::Array(elem) | Type::ArrayN(elem, _) | Type::Set(elem) => self.check_resolved_qualifier(elem, line),
             Type::Dict(k, v) => {
                 self.check_resolved_qualifier(k, line)?;
                 self.check_resolved_qualifier(v, line)

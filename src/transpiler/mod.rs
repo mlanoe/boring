@@ -107,6 +107,10 @@ pub struct TranspileOutput {
     /// True when `--instrument` was requested.  The generated code includes the inline
     /// `__boring_instrument` module; no external Cargo.toml dependency is needed.
     pub uses_instrument: bool,
+    /// Per-file Rust output from `use` imports resolved to `.br` source files.
+    /// Each entry is `(module_name, rust_code)` — written as `src/<module_name>.rs`
+    /// and included into `src/main.rs` via `include!` macros.
+    pub modules: Vec<(String, String)>,
 }
 
 pub fn transpile(program: &Program) -> String {
@@ -121,8 +125,8 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     let mut t = Transpiler::new(config);
     t.source_dir = t.config.source_dir.clone();
     t.emit_program(program);
-    let code = if matches!(t.config.threading, ThreadingMode::Single) {
-        t.out
+    let apply_single_thread_fixups = |s: String| -> String {
+        s
             .replace("Arc::<str>::from", "Rc::<str>::from")
             .replace("Arc::from(", "Rc::from(")
             .replace("Arc::clone(", "Rc::clone(")
@@ -138,17 +142,28 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
             .replace("impl<T: std::fmt::Display + std::any::Any + Send + Sync + 'static> BoringVal for T", "impl<T: std::fmt::Display + std::any::Any + 'static> BoringVal for T")
             .replace("impl std::fmt::Debug for dyn BoringVal + Send + Sync", "impl std::fmt::Debug for dyn BoringVal")
             .replace("Box<dyn BoringVal + Send + Sync>", "Box<dyn BoringVal>")
+    };
+    let code = if matches!(t.config.threading, ThreadingMode::Single) {
+        // Apply fixups to modules too — previously only `t.out` was processed.
+        t.modules = t.modules.into_iter()
+            .map(|(name, src)| (name, apply_single_thread_fixups(src)))
+            .collect();
+        apply_single_thread_fixups(t.out)
     } else {
         t.out
     };
-    // If the generated code defines both `enum Value` and `fn value_equals`, inject a
-    // PartialEq impl so that Value comparisons (==, !=) compile.
-    let code = if code.contains("enum Value {") && code.contains("fn value_equals(") {
+    // If the generated code (across main + all modules) defines both `enum Value` and
+    // `fn value_equals`, inject a PartialEq impl into the main code so comparisons compile.
+    let all_code_combined: String = std::iter::once(code.as_str())
+        .chain(t.modules.iter().map(|(_, c)| c.as_str()))
+        .collect::<Vec<_>>()
+        .concat();
+    let code = if all_code_combined.contains("enum Value {") && all_code_combined.contains("fn value_equals(") {
         code + "\nimpl PartialEq for Value {\n    fn eq(&self, other: &Self) -> bool { value_equals(self.clone(), other.clone()) }\n}\nimpl Eq for Value {}\n"
     } else {
         code
     };
-    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument }
+    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -159,6 +174,9 @@ struct Transpiler {
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
     pub(crate) in_throws: bool,
+    /// True while emitting the LHS of an assignment — suppresses `.clone()` on Arc fields.
+    /// Uses Cell<bool> because emit_expr takes &self.
+    pub(crate) in_lhs_assign: std::cell::Cell<bool>,
     /// Are we inside a `req` (non-mutating, &self) function body?
     pub(crate) in_req_fn: bool,
     /// Are we emitting a struct/enum method (self_ty.is_some())?
@@ -211,6 +229,17 @@ struct Transpiler {
     /// Estimated stack sizes (bytes) for user-defined types, computed during pre_scan.
     /// Used for strict-mode auto-boxing (> stack_auto_bytes → Box<T>).
     pub(crate) type_sizes: std::collections::HashMap<String, usize>,
+    /// Structs that have at least one explicitly-qualified field ('actor, 'shared, 'guard, 'heap).
+    /// These are eligible for T? parameter qualifier inference.
+    pub(crate) qualified_struct_types: std::collections::HashSet<String>,
+    /// Types T for which at least one function declares return type `T'actor` or `T'guard`.
+    /// Bare `T` parameters of these types default to 'actor during qualifier inference instead
+    /// of falling back to 'stack, enabling automatic propagation without explicit annotation.
+    pub(crate) actor_source_types: std::collections::HashSet<String>,
+    /// All user-defined struct names, including those whose size cannot be estimated (dynamic fields).
+    /// Used to determine qualifier inference eligibility, separate from `type_sizes` which only
+    /// stores structs with known sizes (for boxing/stack-size decisions).
+    pub(crate) all_struct_types: std::collections::HashSet<String>,
     /// Struct name → assoc type name → concrete type (for `T.AssocName` resolution).
     pub(crate) struct_assoc_types: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
     /// Top-level functions that declare `throws`.
@@ -272,14 +301,22 @@ struct Transpiler {
     pub(crate) var_struct_types: std::collections::HashMap<String, String>,
     /// Variable names declared as `T'actor` — hold `Arc<tokio::sync::Mutex<T>>`.
     /// All field reads/writes and method calls go through `.lock().await`.
+    /// Variable names declared as `T'actor` — hold `Arc<std::sync::Mutex<T>>` (sync).
     pub(crate) var_mutex_types: std::collections::HashSet<String>,
-    /// "StructName::field_name" for fields typed `var T'task` (Arc<Mutex<T>> in Rust).
+    /// Variable names declared as `T'task` / `T'actor'task` — hold `Arc<tokio::sync::Mutex<T>>` (async).
+    pub(crate) var_mutex_task_types: std::collections::HashSet<String>,
+    /// "StructName::field_name" for fields typed `T'actor` (Arc<std::sync::Mutex<T>> in Rust).
     pub(crate) struct_mutex_fields: std::collections::HashSet<String>,
-    /// Variable names declared as `T'guard` — hold `Arc<tokio::sync::RwLock<T>>`.
-    /// Reads go through `.read().await`, writes through `.write().await`.
+    /// "StructName::field_name" for fields typed `T'task` (Arc<tokio::sync::Mutex<T>> in Rust).
+    pub(crate) struct_mutex_task_fields: std::collections::HashSet<String>,
+    /// Variable names declared as `T'guard` — hold `Arc<std::sync::RwLock<T>>` (sync).
     pub(crate) var_rwlock_types: std::collections::HashSet<String>,
-    /// "StructName::field_name" for fields typed `T'guard` (Arc<RwLock<T>> in Rust).
+    /// Variable names declared as `T'guard'task` — hold `Arc<tokio::sync::RwLock<T>>` (async).
+    pub(crate) var_rwlock_task_types: std::collections::HashSet<String>,
+    /// "StructName::field_name" for fields typed `T'guard` (Arc<std::sync::RwLock<T>> in Rust).
     pub(crate) struct_rwlock_fields: std::collections::HashSet<String>,
+    /// "StructName::field_name" for fields typed `T'guard'task` (Arc<tokio::sync::RwLock<T>> in Rust).
+    pub(crate) struct_rwlock_task_fields: std::collections::HashSet<String>,
     /// "StructName::method_name" for methods that are non-mutating (`req`).
     /// Used by 'guard dispatch to choose `.read()` vs `.write()`.
     pub(crate) struct_req_methods: std::collections::HashSet<String>,
@@ -442,6 +479,13 @@ struct Transpiler {
     pub(crate) source_dir: std::path::PathBuf,
     /// Canonical paths already inlined — prevents duplicate / circular imports.
     pub(crate) loaded: std::collections::HashSet<std::path::PathBuf>,
+    /// Per-file Rust output collected from inlined `.br` use imports.
+    /// Each entry is (module_name, rust_code). Written as separate .rs files at build time.
+    pub(crate) modules: Vec<(String, String)>,
+    /// True once the standard prelude has been emitted — prevents re-emission for inlined files.
+    pub(crate) prelude_emitted: bool,
+    /// Function signatures already emitted — shared across all inlined files to deduplicate.
+    pub(crate) emitted_fn_sigs: std::collections::HashSet<String>,
     /// True when the program calls any of the log-level builtins (error/warn/info/debug/trace).
     /// The CLI uses this to warn that `log = "0.4"` is needed in Cargo.toml.
     /// Uses Rc<Cell<bool>> so sub-transpilers share the same instance — any set(true) in a
@@ -499,6 +543,10 @@ struct Transpiler {
     /// Variables holding `Arc<std::sync::Mutex<T>>` in managed multi mode (anonymous T/T').
     /// Field reads, method calls, and optional chaining go through `.lock().unwrap()`.
     pub(crate) managed_mutex_vars: std::collections::HashSet<String>,
+    /// Subset of managed_mutex_vars that were obtained from a function return value.
+    /// These are fresh, unshared Arc values — no pre-lock guard is emitted for them
+    /// (they may be moved, and deadlock is impossible for a freshly-created Arc).
+    pub(crate) managed_mutex_fn_return_vars: std::collections::HashSet<String>,
     /// Variables holding `RefCell<T>` in managed single mode (anonymous T/T').
     /// Field reads go through `.borrow()`, method calls through `.borrow_mut()`.
     pub(crate) managed_refcell_vars: std::collections::HashSet<String>,
@@ -517,6 +565,19 @@ struct Transpiler {
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
     pub(crate) inferred_qualifiers: std::collections::HashMap<String, crate::ast::OwnerQual>,
+    /// Temporary: local variables in the current function body that are assigned from a
+    /// call whose declared return type is `'actor` or `'guard`. Populated by a pre-pass
+    /// in `infer_qualifiers` and consumed by `walk_expr_for_qualifiers`. Cleared each call.
+    pub(crate) infer_local_actor_vars: std::collections::HashSet<String>,
+    /// Local variables declared with `lazy` — hold `OnceCell<T>`.
+    /// `?=` on these emits `name.get_or_init(|| rhs)`.
+    /// Reads of these variables emit `*name.get().expect("name used before lazy init")`.
+    pub(crate) lazy_vars: std::collections::HashSet<String>,
+    /// `lazy` variable name → declared boring type (for Copy detection on read).
+    pub(crate) lazy_var_types: std::collections::HashMap<String, crate::ast::Type>,
+    /// Struct type names that declare an anonymous `def ()` or `req ()` call operator.
+    /// When `var(args)` is called and `var` resolves to one of these types, emit `var.__call__(args)`.
+    pub(crate) callable_structs: std::collections::HashSet<String>,
 }
 
 impl Transpiler {
@@ -526,6 +587,7 @@ impl Transpiler {
             out: String::new(),
             indent: 0,
             in_throws: false,
+            in_lhs_assign: std::cell::Cell::new(false),
             in_req_fn: false,
             in_struct_method: false,
             in_async: false,
@@ -549,6 +611,9 @@ impl Transpiler {
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
             type_sizes: std::collections::HashMap::new(),
+            qualified_struct_types: std::collections::HashSet::new(),
+            actor_source_types: std::collections::HashSet::new(),
+            all_struct_types: std::collections::HashSet::new(),
             struct_assoc_types: std::collections::HashMap::new(),
             fn_throws: std::collections::HashSet::new(),
             typed_error_enums: std::collections::HashSet::new(),
@@ -574,9 +639,13 @@ impl Transpiler {
             transient_fields: std::collections::HashMap::new(),
             var_struct_types: std::collections::HashMap::new(),
             var_mutex_types: std::collections::HashSet::new(),
+            var_mutex_task_types: std::collections::HashSet::new(),
             struct_mutex_fields: std::collections::HashSet::new(),
+            struct_mutex_task_fields: std::collections::HashSet::new(),
             var_rwlock_types: std::collections::HashSet::new(),
+            var_rwlock_task_types: std::collections::HashSet::new(),
             struct_rwlock_fields: std::collections::HashSet::new(),
+            struct_rwlock_task_fields: std::collections::HashSet::new(),
             struct_req_methods: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
@@ -636,6 +705,9 @@ impl Transpiler {
             boring_mod_names: std::collections::HashSet::new(),
             source_dir: std::path::PathBuf::new(),
             loaded: std::collections::HashSet::new(),
+            modules: Vec::new(),
+            prelude_emitted: false,
+            emitted_fn_sigs: std::collections::HashSet::new(),
             uses_log: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_thiserror: std::rc::Rc::new(std::cell::Cell::new(false)),
             uses_reqwest: false,
@@ -658,11 +730,16 @@ impl Transpiler {
             shared_ref_params: std::collections::HashSet::new(),
             var_primitive_params: std::collections::HashSet::new(),
             managed_mutex_vars: std::collections::HashSet::new(),
+            managed_mutex_fn_return_vars: std::collections::HashSet::new(),
             managed_refcell_vars: std::collections::HashSet::new(),
             managed_param_shadows: std::collections::HashMap::new(),
             struct_method_return_types: std::collections::HashMap::new(),
             struct_method_throws: std::collections::HashSet::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
+            infer_local_actor_vars: std::collections::HashSet::new(),
+            lazy_vars: std::collections::HashSet::new(),
+            lazy_var_types: std::collections::HashMap::new(),
+            callable_structs: std::collections::HashSet::new(),
         }
     }
 
@@ -694,7 +771,30 @@ impl Transpiler {
         matches!(self.config.threading, ThreadingMode::Single)
     }
 
+    /// `"Rc"` in single-thread mode, `"Arc"` otherwise.
+    pub(crate) fn str_ptr(&self) -> &'static str {
+        if self.use_rc_str() { "Rc" } else { "Arc" }
+    }
+
+    /// `Rc::<str>::from("<s>")` or `Arc::<str>::from("<s>")` depending on threading mode.
+    pub(crate) fn str_from(&self, s: &str) -> String {
+        format!("{}::<str>::from(\"{}\")", self.str_ptr(), s)
+    }
+
+    /// `Rc::<str>::from(<expr>)` or `Arc::<str>::from(<expr>)` for a non-literal expression.
+    pub(crate) fn str_from_expr(&self, expr: &str) -> String {
+        format!("{}::<str>::from({})", self.str_ptr(), expr)
+    }
+
     // ── Inference helpers ─────────────────────────────────────────────────────
+
+    fn field_type_has_qualifier(ty: &Type) -> bool {
+        match ty {
+            Type::Qualified(_, q) => !matches!(q, crate::ast::OwnerQual::Owned | crate::ast::OwnerQual::Stack),
+            Type::Optional(inner) => Self::field_type_has_qualifier(inner),
+            _ => false,
+        }
+    }
 
     /// Estimate the stack size in bytes of a type (best-effort, concrete types only).
     /// Returns None for generic parameters, arrays, or types with unknown inner sizes.
@@ -712,7 +812,7 @@ impl Transpiler {
             Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float") => Some(8),
             Type::Named(n) if n.as_str() == "bool" => Some(1),
             Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
-            Type::Qualified(inner, OwnerQual::Copy | OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
+            Type::Qualified(inner, OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
             // Pointer-sized types (Box, Arc, Rc, Option<Box>) — always 8 or 16 bytes
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => Some(16),
             Type::Optional(inner) => Self::estimate_size_inner(inner, program, visiting).map(|s| s + 8), // discriminant
@@ -854,7 +954,19 @@ impl Transpiler {
             self.uses_local_broadcast.set(true);
         }
 
-        // Standard prelude
+        // Standard prelude — emitted once only (skipped for inlined `use` files).
+        if self.prelude_emitted { return self.emit_program_items(program, false); }
+
+        // Deep pre-scan: before emitting anything, recursively pre-scan all reachable `use` files.
+        // This ensures fn_throws / fn_sigs / struct_fields are populated for all files before any
+        // code is emitted, so forward references across file boundaries resolve correctly.
+        {
+            let mut visited = std::collections::HashSet::new();
+            let prev_dir = self.source_dir.clone();
+            self.deep_pre_scan(program, &mut visited);
+            self.source_dir = prev_dir;
+        }
+        self.prelude_emitted = true;
         self.line("// Generated by boring build");
         self.line("use std::collections::{HashMap, HashSet};");
         self.line("use std::hash::Hash;");
@@ -1124,11 +1236,14 @@ impl Transpiler {
             }
         }
 
+        self.emit_program_items(program, true);
+    }
+
+    fn emit_program_items(&mut self, program: &Program, emit_main: bool) {
         // Separate top-level declarations from statements
         let mut stmts: Vec<&Item> = Vec::new();
-        // Track emitted function signatures (name + param type key) to avoid duplicates
-        // while allowing legitimate overloads (same name, different param types).
-        let mut emitted_fn_sigs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // emitted_fn_sigs is shared across all inlined files (self.emitted_fn_sigs) to deduplicate
+        // functions that appear in multiple files (kept for historical compatibility).
         for item in &program.items {
             match item {
                 Item::Stmt(_) => stmts.push(item),
@@ -1146,7 +1261,7 @@ impl Transpiler {
                     } else {
                         f.name.clone()
                     };
-                    if !emitted_fn_sigs.insert(sig_key) {
+                    if !self.emitted_fn_sigs.insert(sig_key) {
                         continue;
                     }
                     self.emit_item(item);
@@ -1165,6 +1280,7 @@ impl Transpiler {
             matches!(item, Item::Fn(f) if f.name == "main" && f.qualifier.is_none())
         });
 
+        if !emit_main { return; }
         // Top-level statements → fn main()
         // All stmts are side-effectful; in_throws stays false so no Ok() wrapping happens.
         // We always append Ok(()) explicitly.
@@ -1408,6 +1524,7 @@ impl Transpiler {
         for item in &program.items {
             match item {
                 Item::Struct(s) => {
+                    self.all_struct_types.insert(s.name.clone());
                     if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
                         self.type_sizes.insert(s.name.clone(), size);
                     }
@@ -1480,7 +1597,12 @@ impl Transpiler {
                             }
                         }
                     }
+                    let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
+                    if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
                     self.struct_fields.insert(s.name.clone(), fields);
+                    if s.methods.iter().any(|m| m.name.is_empty()) {
+                        self.callable_structs.insert(s.name.clone());
+                    }
                 }
                 Item::Struct(s) => {
                     // Don't register method names in fn_sigs — they're only called as obj.method()
@@ -1501,7 +1623,12 @@ impl Transpiler {
                             }
                         }
                     }
+                    let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
+                    if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
                     self.struct_fields.insert(s.name.clone(), fields);
+                    if s.methods.iter().any(|m| m.name.is_empty()) {
+                        self.callable_structs.insert(s.name.clone());
+                    }
                     // Track inits that have a body (constructor call must use ::new(), not struct literal).
                     // Also collect default values for init params (for filling in omitted args).
                     for init in &s.inits {
@@ -1589,13 +1716,23 @@ impl Transpiler {
                             self.overloaded_method_keys.insert(method_key);
                         }
                     }
-                    // Track T'actor struct fields → Arc<Mutex<T>>.
+                    // Track T'actor / T'actor'task struct fields → Arc<Mutex<T>> or Arc<tokio::sync::Mutex<T>>.
                     for f in &s.fields {
                         if Self::is_mutex_binding(f.mutable, &f.ty) {
-                            self.struct_mutex_fields.insert(format!("{}::{}", s.name, f.name));
+                            let key = format!("{}::{}", s.name, f.name);
+                            if Self::is_mutex_task_binding(f.mutable, &f.ty) {
+                                self.struct_mutex_task_fields.insert(key);
+                            } else {
+                                self.struct_mutex_fields.insert(key);
+                            }
                         }
                         if Self::is_rwlock_binding(f.mutable, &f.ty) {
-                            self.struct_rwlock_fields.insert(format!("{}::{}", s.name, f.name));
+                            let key = format!("{}::{}", s.name, f.name);
+                            if Self::is_rwlock_task_binding(f.mutable, &f.ty) {
+                                self.struct_rwlock_task_fields.insert(key);
+                            } else {
+                                self.struct_rwlock_fields.insert(key);
+                            }
                         }
                         // Note: infer_struct_field_qualifiers runs after this loop and may add
                         // further entries to struct_mutex_fields / struct_rwlock_fields.
@@ -1893,6 +2030,13 @@ impl Transpiler {
             };
             if overwrite {
                 self.fn_return_types.insert(f.name.clone(), ret_ty.clone());
+            }
+            // If this function returns T'actor or T'guard, register T as an "actor source type".
+            // Bare T parameters of that type will then default to 'actor during qualifier inference.
+            if let Type::Qualified(inner, OwnerQual::Actor | OwnerQual::Guard) = ret_ty {
+                if let Type::Named(n) = inner.as_ref() {
+                    self.actor_source_types.insert(n.clone());
+                }
             }
         }
         if f.throws {

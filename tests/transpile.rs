@@ -216,5 +216,6 @@ transpile_test!(collections2);
 transpile_test!(join_handle);
 transpile_test!(select);
 transpile_test!(auto_ref_infer);
+transpile_test!(qualifiers_actor);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

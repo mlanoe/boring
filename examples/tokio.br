@@ -32,59 +32,48 @@ task def void main():
 
     let url = "https://jsonplaceholder.typicode.com/users"
 
-    var [User]'actor shared_users = []
-    var [User]'actor shared_processed_users = []
+    # Lance les deux sources en parallèle
+    let h_file = task read_users_from_file_blocking("users.json")
+    let h_api  = task fetch_users_from_api(url)
 
+    # Collecte séquentielle — les fetches ont tourné en parallèle
+    var [User] all_users = []
+    try:
+        all_users.extend(h_file.value)
+        info "Fichier lu: {all_users.length} utilisateurs"
+    catch:
+        error "Erreur lors de la lecture du fichier: {error}"
+    try:
+        all_users.extend(h_api.value)
+        info "API: {all_users.length} utilisateurs au total"
+    catch:
+        error "Erreur API: {error}"
+
+    # Canal pour pipeliner le traitement
     let user_sender, user_receiver = channel<User>(10)
 
-    task:
-        debug "Lecture des utilisateurs depuis un fichier..."
-        try:
-            let users = read_users_from_file_blocking("users.json")
-            shared_users.append(users)
-            info "Fichier lu: {len(shared_users)} utilisateurs chargés"
-        catch:
-            error "Erreur lors de la lecture du fichier: {error}"
-
-    task:
-        debug "Récupération des utilisateurs depuis l'API..."
-        try:
-            let users = fetch_users_from_api(url)
-            shared_users.append(users)
-            info "API: {len(shared_users)} utilisateurs récupérés"
-        catch:
-            error "Erreur API: {error}"
-
-    task:
-        wait(Duration.fromMillis(100))
-        for user in shared_users:
+    # Producteur : envoie les utilisateurs puis ferme le canal
+    let h_send = task:
+        for user in all_users:
             try:
                 user_sender.send(user)
             catch:
                 warn "Échec de l'envoi d'un utilisateur dans le canal"
+        drop(user_sender)
 
-    task:
+    # Consommateur : traite chaque utilisateur avec un timeout
+    # 'actor est nécessaire ici car processed est modifié depuis une task
+    var [User]'actor processed = []
+    let h_proc = task:
         for user in user_receiver:
             try:
-                let processed_user = timeout(Duration.fromSecs(1)): process_user(user)
-                shared_processed_users.append(processed_user)
-                info "Utilisateur traité avec succès"
+                let p = timeout(Duration.fromSecs(1)): process_user(user)
+                info "✓ {p.name}"
+                processed.push(p)
             catch:
-                warn "Timeout ou erreur lors du traitement: {error}"
+                warn "Timeout ou erreur lors du traitement de {user.name}"
 
-    task:
-        loop:
-            wait(Duration.fromMillis(500))
-            info "📊 Utilisateurs traités: {len(shared_processed_users)}"
+    h_send.wait
+    h_proc.wait
 
-    let shutdown_sender, shutdown_receiver = channel<void>(1)
-
-    task:
-        wait(Duration.fromSecs(5))
-        info "🛑 Arrêt du programme..."
-        shutdown_sender.send(void)
-
-    for _ in shutdown_receiver:
-        break
-
-    info "✅ Programme terminé"
+    info "✅ {len(processed)} utilisateurs traités"

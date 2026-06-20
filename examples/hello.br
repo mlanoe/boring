@@ -6,7 +6,7 @@
 # 1. Bindings
 # ═══════════════════════════════════════════════════════════════════════════════
 
-let name = "World"           # String'const (&str) inferred from literal
+let name = "World"           # &str inferred from string literal
 let int x = 42               # explicit type annotation before name
 var counter = 0              # mutable binding
 let float pi = 3.14159
@@ -565,25 +565,12 @@ print "red={red as string}, green={green as string}"
 # 18. Modules & use
 # ═══════════════════════════════════════════════════════════════════════════════
 
-mod math_utils:
-    pub def float hypot(float a, float b):
-        sqrt(a * a + b * b)
-
-    pub def float clamp_f(float v, float lo, float hi):
-        max(lo, min(v, hi))
-
-    pub def float circle_area(float r):
-        3.14159 * r * r
-
-# Import all public items
+# Import a native Rust module — falls back to `use math_utils::*;` in emitted Rust.
+# No .br source file needed; symbols are resolved by the Rust compiler.
 use math_utils.*
 
-# Import specific items by name
+# Import a specific item by name
 use math_utils.clamp_f
-
-print "hypot(3,4) = {hypot(3.0, 4.0)}"
-print "clamp(12, 0, 10) = {clamp_f(12.0, 0.0, 10.0)}"
-print "circle area r=5 = {circle_area(5.0)}"
 
 # Type aliases
 use Score as int                    # i64 — rename a primitive
@@ -616,26 +603,25 @@ print "uid={uid}  order={oid}  email={email}  raw={raw_id}"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Shorthands (aliases):
-# T        = T'stack      → T            (stack, Rust default)
-# T'       = T'heap       → Box<T>       (exclusive heap ownership)
-# T?       = T'option     → Option<T>    (optional value)
-# str      = String'const → &str         (borrowed string slice)
-# string   = String'shared → Arc<String>  (thread-safe shared)
-# int      = Int'copy     → i64
-# uint     = Uint'copy    → u64
-# float    = Float'copy   → f64
-# bool     = Bool'copy    → bool
-# Other qualifiers:
-# T'shared   = Rc<T>        (single-thread shared reference-count)
-# T'shared = Arc<T>       (multi-thread shared reference-count)
-# T'weak = Weak<T> or sync::Weak<T> (non-owning, inferred from RHS qualifier)
-#   T'shared'weak  = Weak<T>                     (explicit form, rc — single-thread)
-#   T'shared'weak  = std::sync::Weak<T>          (explicit form, arc — task-safe)
-#   T'actor'weak = std::sync::Weak<Mutex<T>>   (explicit form, actor — task-safe)
-# T'const  = &'static T   (compile-time constant)
+# T        = T'stack      → T               (stack, Rust default)
+# T'       = T'heap       → Box<T>          (exclusive heap ownership)
+# T?                      → Option<T>       (optional value)
+# str                     → &str            (borrowed string slice)
+# string                  → Arc<str>        (thread-safe shared string)
+# int                     → i64
+# uint                    → u64
+# float                   → f64
+# bool                    → bool
+# Ownership qualifiers:
+# T'shared   → Arc<T>             (multi-thread shared, read-only)
+# T'actor    → Arc<Mutex<T>>      (multi-thread shared, interior mutable — sync)
+# T'actor'task / T'task → Arc<tokio::sync::Mutex<T>>  (async context)
+# T'guard    → Arc<RwLock<T>>     (multi-thread shared, reader-writer lock — sync)
+# T'guard'task → Arc<tokio::sync::RwLock<T>>          (async context)
+# T'weak     → Weak<T>            (non-owning, qualifier inferred from RHS)
 
-let string owned = "shared"   # forces Arc<String>
-let slice = "constant"        # &str inferred (String'const)
+let string owned = "shared"   # Arc<str> inferred
+let slice = "constant"        # &str inferred (string literal)
 print "owned={owned}, slice={slice}"
 
 # ═══════════════════════════════════════════════════════════════════════════════

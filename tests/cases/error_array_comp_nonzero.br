@@ -1,0 +1,2 @@
+let n = 5
+let [int] bad = [0 for 1..n]

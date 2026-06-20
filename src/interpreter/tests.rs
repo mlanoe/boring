@@ -675,7 +675,7 @@ let _stale = d
 fn test_alias_declaration() {
     // User-defined alias: uppercase so it's recognised as a type name
     let src = r#"
-use Kg as Float'copy
+use Kg as Float'stack
 let Kg weight = 72.5
 let _result = weight + 1.0
 "#;

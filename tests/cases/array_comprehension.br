@@ -1,0 +1,16 @@
+# [v for ..n] — fill
+let n = 5
+let [float] a = [0.0 for ..n]
+print a
+
+# [f(i) for i in ..n] — computed
+let [int] b = [i * 2 for i in ..n]
+print b
+
+# explicit 0..n
+let [int] c = [i * i for i in 0..n]
+print c
+
+# literal count
+let [int] d = [1 for ..3]
+print d

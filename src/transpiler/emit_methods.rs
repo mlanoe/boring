@@ -148,6 +148,15 @@ impl Transpiler {
                         let vals: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                             let ty = field_tys.get(i);
                             let raw = self.emit_let_value(ty, &a.value);
+                            // enum variant fields are owned — strip the leading `&` that
+                            // emit_let_value adds for actor-typed function params.
+                            let raw = if matches!(ty,
+                                Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                            ) {
+                                raw.strip_prefix('&').unwrap_or(&raw).to_string()
+                            } else {
+                                raw
+                            };
                             let rec_key = format!("{}::{}::{}", type_name, method, i);
                             if self.recursive_fields.contains(&rec_key) {
                                 if matches!(ty, Some(Type::Optional(_))) {
@@ -200,16 +209,23 @@ impl Transpiler {
                 return call;
             }
         }
-        // RwLock local var method: c.method(args) → c.read/write().await.method(args)
-        // req methods use .read().await, def (mutating) methods use .write().await.
+        // RwLock local var method: c.method(args) → c.read/write()[.await|.unwrap()].method(args)
+        // req methods use .read(), def methods use .write().
+        // 'guard → std::sync::RwLock (unwrap), 'guard'task → tokio::sync::RwLock (await in async ctx).
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_rwlock_types.contains(v.as_str()) {
+            if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                let is_task = self.var_rwlock_task_types.contains(v.as_str());
                 let (rust_method, extra_wrap) = map_method(method, args.len());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let struct_name = self.var_struct_types.get(v.as_str()).cloned().unwrap_or_default();
                 let req_key = format!("{}::{}", struct_name, method);
-                let lock = if self.struct_req_methods.contains(&req_key) { "read" } else { "write" };
-                let call = format!("{}.{}().await.{}({})", v, lock, rust_method, args_s.join(", "));
+                let is_req = self.struct_req_methods.contains(&req_key);
+                let guard = if is_req {
+                    if is_task { self.guard_task_read_access(v) } else { self.guard_read_access(v) }
+                } else {
+                    if is_task { self.guard_task_write_guard(v) } else { self.guard_write_guard(v) }
+                };
+                let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
@@ -228,14 +244,20 @@ impl Transpiler {
                     let key = self.self_type.as_deref()
                         .map(|t| format!("{}::{}", t, rwlock_field));
                     if let Some(k) = key {
-                        if self.struct_rwlock_fields.contains(&k) {
+                        if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
+                            let is_task_field = self.struct_rwlock_task_fields.contains(&k);
                             let (rust_method, extra_wrap) = map_method(method, args.len());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                            // Determine lock kind from struct_req_methods
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
                             let req_key = format!("{}::{}", struct_type_name, method);
-                            let lock = if self.struct_req_methods.contains(&req_key) { "read" } else { "write" };
-                            let call = format!("self.{}.{}().await.{}({})", rwlock_field, lock, rust_method, args_s.join(", "));
+                            let is_req = self.struct_req_methods.contains(&req_key);
+                            let field_expr = format!("self.{}", rwlock_field);
+                            let guard = if is_req {
+                                if is_task_field { self.guard_task_read_access(&field_expr) } else { self.guard_read_access(&field_expr) }
+                            } else {
+                                if is_task_field { self.guard_task_write_guard(&field_expr) } else { self.guard_write_guard(&field_expr) }
+                            };
+                            let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
@@ -249,7 +271,7 @@ impl Transpiler {
         }
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_mutex_types.contains(v.as_str()) {
+            if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                 let (mut rust_method, extra_wrap) = map_method(method, args.len());
                 // `append(xs)` where xs is a collection → use `extend` instead of `push`
                 // so that Vec<T> arguments are flattened into the actor collection.
@@ -282,13 +304,16 @@ impl Transpiler {
                         && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
                     return if throws { format!("{}?", call) } else { call };
                 }
-                let guard_expr = self.actor_write_guard(v);
+                let guard_expr = self.mutex_var_write(v, v);
                 let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 // Add .await for user task methods AND known tokio async instance methods (recv, etc.)
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
                     || TOKIO_ASYNC_INSTANCE.iter().any(|&m| m == method);
+                let throws = (self.in_throws || self.in_try_body)
+                    && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
+                let call = if throws { format!("{}?", call) } else { call };
                 return if self.in_async && needs_await {
                     format!("{}.await", call)
                 } else {
@@ -322,10 +347,10 @@ impl Transpiler {
                     let key = self.self_type.as_deref()
                         .map(|t| format!("{}::{}", t, mutex_field));
                     if let Some(k) = key {
-                        if self.struct_mutex_fields.contains(&k) {
+                        if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
                             let (rust_method, extra_wrap) = map_method(method, args.len());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                            let guard_expr = self.actor_write_guard(&format!("self.{}", mutex_field));
+                            let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return if self.in_async && self.instance_task_methods.contains(method) {
@@ -351,6 +376,7 @@ impl Transpiler {
                         if self.managed_refcell_vars.contains(v.as_str())
                             || self.managed_mutex_vars.contains(v.as_str())
                             || self.var_mutex_types.contains(v.as_str())
+                            || self.var_mutex_task_types.contains(v.as_str())
                         {
                             self.var_types.get(v.as_str()).and_then(|t| {
                                 match t {
@@ -369,13 +395,17 @@ impl Transpiler {
                         .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
                         .map(|(_, ty)| ty.clone());
                     let is_actor_field = matches!(&field_ty,
-                        Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor)));
+                        Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
                     if is_actor_field {
                         let (rust_method, extra_wrap) = map_method(method, args.len());
                         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                         let obj_s = self.emit_expr(obj);
+                        let is_task_field = matches!(&field_ty,
+                            Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::ActorTask)));
                         let call = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                             format!("{}.borrow_mut().{}({})", obj_s, rust_method, args_s.join(", "))
+                        } else if is_task_field {
+                            { let g = self.actor_task_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         } else {
                             { let g = self.actor_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         };
@@ -837,7 +867,7 @@ impl Transpiler {
             let obj_s = self.emit_expr(obj);
             let sep_s = args.first()
                 .map(|a| self.emit_expr_owned(&a.value))
-                .unwrap_or_else(|| "Arc::<str>::from(\"\")".to_string());
+                .unwrap_or_else(|| self.str_from(""));
             return format!("{}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{})", obj_s, sep_s);
         }
 
@@ -1055,6 +1085,38 @@ impl Transpiler {
             }
             return call;
         }
+        // Diagnostic: calling a `def` (mutating) method on a non-`mut` parameter is an error.
+        // The developer must declare the parameter `mut T param` in Boring.
+        if let ExprKind::Var(v) = &obj.kind {
+            if v != "self"
+                && self.fn_current_params.contains_key(v.as_str())
+                && !self.fn_current_params_mut.contains(v.as_str())
+                && !self.var_mutex_types.contains(v.as_str())
+                && !self.var_mutex_task_types.contains(v.as_str())
+                && !self.var_rwlock_types.contains(v.as_str())
+                && !self.var_rwlock_task_types.contains(v.as_str())
+            {
+                // Check if the param's type is a known user struct and the method is `def` (not `req`).
+                let struct_name = self.fn_current_params.get(v.as_str()).and_then(|ty| {
+                    if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
+                });
+                if let Some(sn) = struct_name {
+                    if self.struct_fields.contains_key(sn.as_str()) {
+                        let req_key = format!("{}::{}", sn, method);
+                        let is_req = self.struct_req_methods.contains(&req_key);
+                        if !is_req {
+                            let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                            eprintln!(
+                                "error (line {}): `{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding\n  \
+                                 fix: declare the parameter as `mut {} {}`",
+                                line, v, method, sn, v
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // If the receiver is a known user struct, preserve method names (don't remap to Rust builtins).
         let is_user_struct_receiver = match &obj.kind {
             ExprKind::Var(v) => {
@@ -1379,6 +1441,50 @@ impl Transpiler {
                     }
                 }
                 let emitted = coerced.unwrap_or_else(|| self.emit_let_value(param_ty, &a.value));
+                // Auto-clone: boring has value semantics (no moves).
+                // Field accesses can never be moved out of a struct in Rust; non-Copy variables
+                // may be used again after the call. Add .clone() unless:
+                //   - the param type is Copy (int/float/bool/uint/reference)
+                //   - the emitted string already ends with .clone()
+                //   - the emitted string starts with & (already a reference)
+                //   - emit_let_value already produced a fresh owned value (Arc::, Rc::, Vec::,
+                //     actor borrow block, etc.) — cloning further would be wrong/wasteful
+                let emitted_needs_clone = !emitted.ends_with(".clone()")
+                    && !emitted.starts_with('&')
+                    && !emitted.starts_with("Arc::")
+                    && !emitted.starts_with("Rc::")
+                    && !emitted.starts_with("Vec::")
+                    && !emitted.starts_with("{ let __g")
+                    && !param_ty_is_copy(param_ty)
+                    && !param_rebindable;
+                let emitted = if emitted_needs_clone {
+                    match &a.value.kind {
+                        ExprKind::Field(..) => format!("{}.clone()", emitted),
+                        ExprKind::Var(vname) if
+                            self.var_struct_types.contains_key(vname.as_str())
+                            || self.collection_vars.contains(vname.as_str())
+                            || self.vec_vars.contains(vname.as_str())
+                            || self.dict_vars.contains(vname.as_str())
+                            || self.set_vars.contains(vname.as_str())
+                            || self.string_arc_vars.contains(vname.as_str())
+                            || self.tuple_vars.contains_key(vname.as_str())
+                            // Function params with non-Copy types.
+                            || matches!(
+                                self.fn_current_params.get(vname.as_str()),
+                                Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
+                            )
+                            // Local variables whose type was tracked as a named/collection type.
+                            || matches!(
+                                self.var_types.get(vname.as_str()),
+                                Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
+                            ) => {
+                            format!("{}.clone()", emitted)
+                        }
+                        _ => emitted,
+                    }
+                } else {
+                    emitted
+                };
 // Counter& coercion: parameter expects &T (Borrow/BorrowMut), caller may hold
                 // any qualifier. Wrap the emitted argument with the appropriate deref.
                 let emitted = if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) {
@@ -1483,8 +1589,22 @@ impl Transpiler {
                 // owned value — emit_let_value already handles Rc::clone / Arc::clone.
                 // Exception: trait object wrappers (Rc<dyn Trait> / Arc<dyn Trait>) also pass
                 // by value (unsized coercion requires an owned value anyway).
-                } else if is_auto_ref_param(param_ty) {
-                    emitted
+                } else if is_auto_ref_param(param_ty) || is_unqualified_actor_source_param(param_ty, &self.actor_source_types) {
+                    // Actor/Guard params (explicit or inferred) are declared as `&Arc<Mutex<T>>`.
+                    // Pass by reference: strip the auto-added `.clone()` and prepend `&`.
+                    let is_actor_or_guard = matches!(param_ty,
+                        Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                    ) || is_unqualified_actor_source_param(param_ty, &self.actor_source_types);
+                    if is_actor_or_guard {
+                        if emitted.starts_with('&') || emitted.starts_with("Arc::") || emitted.starts_with("Rc::") {
+                            emitted
+                        } else {
+                            let base = emitted.strip_suffix(".clone()").unwrap_or(&emitted);
+                            format!("&{}", base)
+                        }
+                    } else {
+                        emitted
+                    }
                 // var (rebindable) param: out-parameter, pass &mut for all stack/primitive types.
                 } else if param_rebindable && !matches!(param_ty,
                     Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
@@ -1847,6 +1967,9 @@ impl Transpiler {
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
             type_sizes: self.type_sizes.clone(),
+            qualified_struct_types: self.qualified_struct_types.clone(),
+            actor_source_types: self.actor_source_types.clone(),
+            all_struct_types: self.all_struct_types.clone(),
             struct_assoc_types: self.struct_assoc_types.clone(),
             fn_throws: self.fn_throws.clone(),
             typed_error_enums: self.typed_error_enums.clone(),
@@ -1870,9 +1993,13 @@ impl Transpiler {
             transient_fields: self.transient_fields.clone(),
             var_struct_types: self.var_struct_types.clone(),
             var_mutex_types: self.var_mutex_types.clone(),
+            var_mutex_task_types: self.var_mutex_task_types.clone(),
             struct_mutex_fields: self.struct_mutex_fields.clone(),
+            struct_mutex_task_fields: self.struct_mutex_task_fields.clone(),
             var_rwlock_types: self.var_rwlock_types.clone(),
+            var_rwlock_task_types: self.var_rwlock_task_types.clone(),
             struct_rwlock_fields: self.struct_rwlock_fields.clone(),
+            struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
@@ -1952,19 +2079,28 @@ impl Transpiler {
             shared_ref_params: self.shared_ref_params.clone(),
             var_primitive_params: self.var_primitive_params.clone(),
             managed_mutex_vars: self.managed_mutex_vars.clone(),
+            managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),
+            in_lhs_assign: std::cell::Cell::new(false),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
+            infer_local_actor_vars: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             loaded: self.loaded.clone(),
+            prelude_emitted: self.prelude_emitted,
+            emitted_fn_sigs: self.emitted_fn_sigs.clone(),
             fn_current_params: std::collections::HashMap::new(),
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,
             in_struct_method: self.in_struct_method,
+            modules: Vec::new(),
+            lazy_vars: self.lazy_vars.clone(),
+            lazy_var_types: self.lazy_var_types.clone(),
+            callable_structs: self.callable_structs.clone(),
         }
     }
 
@@ -2025,8 +2161,8 @@ impl Transpiler {
             "read" => {
                 let path = a(0);
                 format!(
-                    "{{ let __boring_s = {}::read_to_string({}){aw}; Arc::<str>::from(__boring_s.as_str()) }}",
-                    fs_mod, path, aw = aw
+                    "{{ let __boring_s = {}::read_to_string({}){aw}; {}::<str>::from(__boring_s.as_str()) }}",
+                    fs_mod, path, self.str_ptr(), aw = aw
                 )
             }
 
@@ -2034,8 +2170,8 @@ impl Transpiler {
             "readLines" => {
                 let path = a(0);
                 format!(
-                    "{{ let __boring_s = {}::read_to_string({}){aw}; __boring_s.lines().map(|l| Arc::<str>::from(l)).collect::<Vec<Arc<str>>>() }}",
-                    fs_mod, path, aw = aw
+                    "{{ let __boring_s = {}::read_to_string({}){aw}; __boring_s.lines().map(|l| {}::<str>::from(l)).collect::<Vec<{}<str>>>() }}",
+                    fs_mod, path, self.str_ptr(), self.str_ptr(), aw = aw
                 )
             }
 
@@ -2128,15 +2264,16 @@ impl Transpiler {
             // fs.list("path") → Vec<Arc<str>> of entry names
             "list" => {
                 let path = a(0);
+                let p = self.str_ptr();
                 if self.in_async {
                     format!(
-                        "{{ let mut __boring_dir = tokio::fs::read_dir({}){aw}; let mut __boring_entries: Vec<Arc<str>> = Vec::new(); while let Some(__boring_e) = __boring_dir.next_entry().await{prop} {{ __boring_entries.push(Arc::<str>::from(__boring_e.file_name().to_string_lossy().as_ref())); }} __boring_entries }}",
-                        path, aw = aw, prop = prop
+                        "{{ let mut __boring_dir = tokio::fs::read_dir({}){aw}; let mut __boring_entries: Vec<{p}<str>> = Vec::new(); while let Some(__boring_e) = __boring_dir.next_entry().await{prop} {{ __boring_entries.push({p}::<str>::from(__boring_e.file_name().to_string_lossy().as_ref())); }} __boring_entries }}",
+                        path, aw = aw, prop = prop, p = p
                     )
                 } else {
                     format!(
-                        "{{ std::fs::read_dir({}){prop}.filter_map(|e| e.ok()).map(|e| Arc::<str>::from(e.file_name().to_string_lossy().as_ref())).collect::<Vec<Arc<str>>>() }}",
-                        path, prop = prop
+                        "{{ std::fs::read_dir({}){prop}.filter_map(|e| e.ok()).map(|e| {p}::<str>::from(e.file_name().to_string_lossy().as_ref())).collect::<Vec<{p}<str>>>() }}",
+                        path, prop = prop, p = p
                     )
                 }
             }
@@ -2199,5 +2336,22 @@ fn is_auto_ref_param(ty: Option<&Type>) -> bool {
     matches!(ty,
         Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) |
         Some(Type::Qualified(_, OwnerQual::Weak))
+    )
+}
+
+/// Returns true if the param type is an unqualified Named type whose name is a known actor-source type.
+/// These are emitted as `&Arc<Mutex<T>>` by qualifier inference, so call sites must add `&`.
+fn is_unqualified_actor_source_param(ty: Option<&Type>, actor_source_types: &std::collections::HashSet<String>) -> bool {
+    match ty {
+        Some(Type::Named(n)) => actor_source_types.contains(n.as_str()),
+        _ => false,
+    }
+}
+
+/// Returns true when param_ty is a primitive Copy type that never needs .clone().
+fn param_ty_is_copy(ty: Option<&Type>) -> bool {
+    matches!(ty,
+        Some(Type::Int | Type::Uint | Type::Float | Type::Bool) |
+        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
     )
 }

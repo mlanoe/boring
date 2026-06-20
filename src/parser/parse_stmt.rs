@@ -50,16 +50,17 @@ impl Parser {
                 while self.is_newline() { self.advance(); }
                 Ok(Stmt::Comment(text))
             }
-            TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static => {
+            TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static | TokenKind::Lazy => {
                 if self.is_let_destructure() {
                     let line = self.line();
                     let _is_static = self.eat(&TokenKind::Static);
                     let binding = match self.peek() {
                         TokenKind::Mut => BindingKind::Mut,
                         TokenKind::Var => BindingKind::Var,
+                        TokenKind::Lazy => BindingKind::Lazy,
                         _ => BindingKind::Let,
                     };
-                    self.advance(); // consume let/mut/var
+                    self.advance(); // consume let/mut/var/lazy
                     Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, line)?))
                 } else {
                     Ok(Stmt::Let(self.parse_let_stmt()?))
@@ -246,12 +247,12 @@ impl Parser {
                     self.expect_newline()?;
                     return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line }));
                 }
-                // Nil-coalescing assignment: `lhs ?= rhs` → `lhs = lhs else rhs`
+                // Write-once / nil-coalescing assignment: `lhs ?= rhs`
+                // Emits ExprKind::QuestionAssign; the transpiler distinguishes lazy vs optional.
                 if self.eat(&TokenKind::QuestionEq) {
                     let rhs = self.parse_else_expr()?;
-                    let else_expr = Expr { kind: ExprKind::Else(Box::new(lhs.clone()), Box::new(rhs)), line };
                     self.expect_newline()?;
-                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(else_expr)), line }));
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line }));
                 }
 
                 // Command-style call: `print "hello"` or `print "{}", expr, expr2`
@@ -287,8 +288,9 @@ impl Parser {
         // optional `static` before `let` / `var`
         let is_static = self.eat(&TokenKind::Static);
         let binding = match self.peek() {
-            TokenKind::Mut => { self.advance(); BindingKind::Mut }
-            TokenKind::Var => { self.advance(); BindingKind::Var }
+            TokenKind::Mut  => { self.advance(); BindingKind::Mut }
+            TokenKind::Var  => { self.advance(); BindingKind::Var }
+            TokenKind::Lazy => { self.advance(); BindingKind::Lazy }
             _ => { self.advance(); BindingKind::Let } // let
         };
         // `let name = value`         — no type annotation, borrow by default
@@ -323,7 +325,7 @@ impl Parser {
                         self.expect(&TokenKind::Eq)?;
                         let value = self.parse_expr()?;
                         self.expect_newline_soft();
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, is_lazy: false, line });
                     }
                     // `name'qualifier = Ctor(...)` → qualifier on variable, type inferred from RHS
                     Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) => {
@@ -343,22 +345,27 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, is_lazy: false, line });
                     }
                     _ => {}
                 }
             }
             (name, None, false)
         };
+        // `lazy T name` — deferred write-once binding, no initializer allowed.
+        if matches!(binding, BindingKind::Lazy) {
+            self.expect_newline_soft();
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, is_lazy: true, line });
+        }
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, is_lazy: false, line });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, line })
+        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, is_lazy: false, line })
     }
 
     /// Parse the binding list of a destructuring `let`.

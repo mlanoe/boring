@@ -323,7 +323,7 @@ pub struct FnSignature {
 
 // ─── Binding kind ────────────────────────────────────────────────────────────
 
-/// Describes the binding semantics of a `let` / `mut` / `var` declaration.
+/// Describes the binding semantics of a `let` / `mut` / `var` / `lazy` declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BindingKind {
     /// `let` — fixed binding, immutable instance.
@@ -332,6 +332,9 @@ pub enum BindingKind {
     Mut,
     /// `var` — rebindable, mutable instance.
     Var,
+    /// `lazy` — deferred, write-once binding.  Transpiles to `OnceCell<T>`.
+    /// Initialized on first `?=` call; subsequent calls are no-ops.
+    Lazy,
 }
 
 impl BindingKind {
@@ -438,6 +441,8 @@ pub struct LetStmt {
     /// `let b' = a`  — move ownership from `a` into `b`; `a` becomes invalid after this.
     /// Without `'`, the default is a borrow: `let b = a` gives `b: T` (reference).
     pub is_move: bool,
+    /// `true` for `lazy` bindings — deferred, write-once via `?=`.
+    pub is_lazy: bool,
     pub line: usize,
 }
 
@@ -614,6 +619,10 @@ pub enum ExprKind {
 
     // Assignment
     Assign(Box<Expr>, Box<Expr>),
+    /// `lhs ?= rhs` — write-once / nil-coalescing assign.
+    /// For `lazy` variables: emits `lhs.get_or_init(|| rhs)`.
+    /// For optional variables: emits `if lhs.is_none() { lhs = Some(rhs); }`.
+    QuestionAssign(Box<Expr>, Box<Expr>),
 
     // Access
     Field(Box<Expr>, String),
@@ -638,6 +647,10 @@ pub enum ExprKind {
 
     // Collections
     Array(Vec<Expr>),
+    /// `[v for ..n]` — fill array of length `count` with `value`
+    ArrayFill { value: Box<Expr>, count: Box<Expr> },
+    /// `[f(i) for i in ..n]` — computed array of length `count` with `var` bound to index
+    ArrayComp { expr: Box<Expr>, var: String, count: Box<Expr> },
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
@@ -734,7 +747,6 @@ pub enum UnaryOp {
 /// `Dog'`        → Owned           (Box<Dog>   — heap-owned; same as Dog'heap)
 /// `Dog'heap`    → Owned           (Box<Dog>   — explicit heap alias for bare tick)
 /// `Dog'stack`   → Stack           (Dog        — explicit stack, equivalent to bare Dog)
-/// `Dog'copy`    → Copy            (Dog: Copy  — copied on every use)
 /// `Dog'const`   → Const           (&'static D — compile-time constant / string literal)
 /// `Dog'shared`  → Shared          (Arc<Dog> multi / Rc<Dog> single — threading-aware)
 /// `Dog'weak`    → Weak            (Weak<Dog>  — non-owning ref, must upgrade to Dog'shared)
@@ -748,9 +760,10 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OwnerQual {
     Owned,
-    Copy,
-    Actor,   // Arc<tokio::sync::Mutex<T>> (multi) or RefCell<T> (single)
-    Guard,   // Arc<tokio::sync::RwLock<T>> (multi) or RefCell<T> (single)
+    Actor,     // Arc<std::sync::Mutex<T>> (multi) or Rc<RefCell<T>> (single)
+    ActorTask, // Arc<tokio::sync::Mutex<T>> (multi) or Rc<RefCell<T>> (single) — alias: 'task
+    Guard,     // Arc<std::sync::RwLock<T>> (multi) or Rc<RefCell<T>> (single)
+    GuardTask, // Arc<tokio::sync::RwLock<T>> (multi) or Rc<RefCell<T>> (single)
     /// Arc<T> (multi-thread) or Rc<T> (single-thread).
     /// The `--threading` flag determines which is emitted.
     /// Replaces the deprecated `T'auto` and `T'task` qualifiers.
@@ -807,6 +820,8 @@ pub enum Type {
     Named(String),
     Optional(Box<Type>),
     Array(Box<Type>),
+    /// Fixed-size array: `[T, N]` → Rust `[T; N]`
+    ArrayN(Box<Type>, usize),
     Tuple(Vec<Type>),
     Dict(Box<Type>, Box<Type>),
     Set(Box<Type>),
@@ -836,7 +851,7 @@ impl Type {
             Type::Int | Type::Uint | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
-            Type::Array(_) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
             Type::Fn(..) => true,  // functions are copy (shared under the hood)
             // Owned = exclusive move → never copy
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => false,
@@ -861,13 +876,12 @@ impl Type {
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),
             // Unqualified collections / named types are not safe (sharing semantics undefined)
-            Type::Array(_) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
             // Qualifiers
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => true,  // exclusive move → source invalidated
-            Type::Qualified(_, OwnerQual::Copy)       => true,  // independent copy
             Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe
-            Type::Qualified(_, OwnerQual::Actor)      => true,  // Arc<Mutex<T>> — actor pattern, task-safe
-            Type::Qualified(_, OwnerQual::Guard)      => true,  // Arc<RwLock<T>> — guard pattern, task-safe
+            Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask) => true,
+            Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => true,
             Type::Qualified(_, OwnerQual::Weak)       => false, // Weak<T> — non-owning, conservative
             Type::Qualified(_, OwnerQual::Lifetime(_)) => true, // borrow — task-safe for transpilation
             Type::Qualified(_, OwnerQual::BorrowShared) => true, // &Arc<T> / &Rc<T> — threading-aware borrow

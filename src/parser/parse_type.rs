@@ -179,6 +179,17 @@ impl Parser {
                 self.advance();
                 let inner = self.parse_type()?;
                 let inner = self.parse_type_qualifier(inner)?;
+                if self.eat(&TokenKind::Comma) {
+                    let n = match self.peek().clone() {
+                        TokenKind::Int(n) if n >= 0 => { self.advance(); n as usize }
+                        _ => return Err(ParseError::Generic {
+                            line: self.line(),
+                            msg: "expected integer literal for fixed-size array length".into(),
+                        }),
+                    };
+                    self.expect(&TokenKind::RBracket)?;
+                    return Ok(Type::ArrayN(Box::new(inner), n));
+                }
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Type::Array(Box::new(inner)))
             }
@@ -276,41 +287,40 @@ impl Parser {
         }
         let qual = match self.peek().clone() {
             TokenKind::Ident(ref s) => match s.as_str() {
-                "copy"   => { self.advance(); OwnerQual::Copy   }
                 "shared" => { self.advance(); OwnerQual::Shared }
-                // `T'weak` — standalone weak ref; the base qualifier (auto/task/actor)
-                // is inferred from the right-hand side at the let-binding site.
                 "weak"   => { self.advance(); OwnerQual::Weak }
-                "stack"  => { self.advance(); OwnerQual::Stack  }
-                "heap"   => { self.advance(); OwnerQual::Owned  } // explicit alias for bare '
-                "actor"  => { self.advance(); OwnerQual::Actor  } // Arc<Mutex<T>> — actor pattern
+                "stack"  => { self.advance(); OwnerQual::Stack }
+                "heap"   => { self.advance(); OwnerQual::Owned }
+                "actor"  => {
+                    self.advance();
+                    // `T'actor'task` → ActorTask
+                    if self.eat(&TokenKind::Tick) {
+                        if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
+                        else { return Err(ParseError::Generic { msg: "expected 'task after 'actor'".into(), line: self.line() }); }
+                    } else {
+                        OwnerQual::Actor
+                    }
+                }
                 // Named qualifier groups — sugar for qualifier unions.
-                "one"    => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned]) }
-                "many"   => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
-                "mut"    => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
-                "req"    => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
-                "wshared" => {
-                    self.advance();
-                    // `T'wshared` is sugar for `T'shared'weak`
-                    let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Shared);
-                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
-                }
-                "wactor" => {
-                    self.advance();
-                    // `T'wactor` is sugar for `T'actor'weak`
-                    let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Actor);
-                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
-                }
-                "wguard" => {
-                    self.advance();
-                    // `T'wguard` is sugar for `T'guard'weak`
-                    let qualified = Type::Qualified(Box::new(ty.clone()), OwnerQual::Guard);
-                    return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
-                }
+                "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned]) }
+                "many" => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
+                "mut"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
+                "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
                 _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
             },
-            // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<RwLock<T>>
-            TokenKind::Guard => { self.advance(); OwnerQual::Guard }
+            // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
+            TokenKind::Guard => {
+                self.advance();
+                // `T'guard'task` → GuardTask
+                if self.eat(&TokenKind::Tick) {
+                    if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::GuardTask }
+                    else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line() }); }
+                } else {
+                    OwnerQual::Guard
+                }
+            }
+            // `T'task` — alias for `T'actor'task`: Arc<tokio::sync::Mutex<T>>
+            TokenKind::Task => { self.advance(); OwnerQual::ActorTask }
             _ => OwnerQual::Owned,
         };
         // `T'stack|heap|actor` — qualifier union (pipe-separated list).

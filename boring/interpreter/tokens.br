@@ -19,6 +19,7 @@ enum TokenKind:
 
     # Keywords
     Let
+    Lazy
     Var
     Def
     Return
@@ -136,7 +137,7 @@ struct Token:
     int line
 
     req string text():
-        let kind = self.kind.clone()
+        let kind = self.kind
         match kind:
             TokenKind.Ident(s): s
             _: ""

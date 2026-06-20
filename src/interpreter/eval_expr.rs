@@ -106,9 +106,42 @@ impl Interpreter {
             }
 
             ExprKind::Assign(target, value) => {
+                // Guard: prevent `=` on a lazy binding — use `?=` instead.
+                if let ExprKind::Var(name) = &target.kind {
+                    if env.borrow().is_lazy(name) {
+                        return Err(err(
+                            format!("cannot use '=' on lazy binding '{}', use '?=' to initialize it", name),
+                            line,
+                        ));
+                    }
+                }
                 let val = self.eval_expr(value, Rc::clone(&env))?;
                 self.assign(target, val.clone(), Rc::clone(&env), line)?;
                 Ok(val)
+            }
+
+            // `w ?= expr` — write-once / nil-coalescing assign.
+            // For lazy vars: initialize if not yet set; subsequent calls are no-ops.
+            // For optional vars: assign if currently nil.
+            ExprKind::QuestionAssign(target, rhs) => {
+                // If target is a lazy var: initialize it once (regardless of current value).
+                if let ExprKind::Var(name) = &target.kind {
+                    if env.borrow().is_lazy(name) {
+                        let val = self.eval_expr(rhs, Rc::clone(&env))?;
+                        env.borrow_mut().set(name, val.clone())
+                            .map_err(|_| err(format!("lazy binding '{}' has already been initialized", name), line))?;
+                        return Ok(val);
+                    }
+                }
+                // For non-lazy: null-coalescing — assign rhs only if current value is Nil.
+                let current = self.eval_expr(target, Rc::clone(&env))?;
+                if matches!(current, Value::Nil) {
+                    let val = self.eval_expr(rhs, Rc::clone(&env))?;
+                    self.assign(target, val.clone(), Rc::clone(&env), line)?;
+                    Ok(val)
+                } else {
+                    Ok(current)
+                }
             }
 
             ExprKind::Field(obj_expr, field) => {
@@ -203,10 +236,9 @@ impl Interpreter {
                                     }
                                     return Ok(result);
                                 }
-                                Err(ref e) if name != "len" => {
-                                    eprintln!("[implicit-self] {name} failed: {:?}", e);
+                                Err(e) => {
+                                    return Err(e);
                                 }
-                                _ => {}
                             }
                         }
                     }
@@ -291,13 +323,14 @@ impl Interpreter {
                                         .unwrap_or(true)
                                 } else { true }
                             };
-                            if is_mutating && !env.borrow().is_mutable(binding_name) {
+                            let is_interior_mutable = env.borrow().is_actor(binding_name);
+                            if is_mutating && !is_interior_mutable && !env.borrow().is_mutable(binding_name) {
                                 return Err(err(
                                     format!("cannot call mutating method '{}' on let binding '{}'", method, binding_name),
                                     line,
                                 ));
                             }
-                            if is_mutating && env.borrow().is_shared(binding_name) {
+                            if is_mutating && !is_interior_mutable && env.borrow().is_shared(binding_name) {
                                 return Err(err(
                                     format!("cannot call mutating method '{}' on shared binding '{}' — use T'actor for interior mutability", method, binding_name),
                                     line,
@@ -488,6 +521,25 @@ impl Interpreter {
                 Ok(Value::Array(vals))
             }
 
+            ExprKind::ArrayFill { value, count } => {
+                let cv = self.eval_expr(count, Rc::clone(&env))?;
+                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line })) };
+                let v = self.eval_expr(value, Rc::clone(&env))?;
+                Ok(Value::Array(vec![v; n]))
+            }
+
+            ExprKind::ArrayComp { expr, var, count } => {
+                let cv = self.eval_expr(count, Rc::clone(&env))?;
+                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line })) };
+                let mut vals = Vec::with_capacity(n);
+                for i in 0..n {
+                    let inner = Env::child(Rc::clone(&env));
+                    inner.borrow_mut().define(var, Value::Int(i as i64));
+                    vals.push(self.eval_expr(expr, Rc::clone(&inner))?);
+                }
+                Ok(Value::Array(vals))
+            }
+
             ExprKind::Tuple(elems) => {
                 let mut vals = Vec::new();
                 for e in elems {
@@ -623,7 +675,12 @@ impl Interpreter {
                 // Collect owned vars captured by this task so we can invalidate them after
                 let owned_captures = Self::collect_owned_task_captures(inner, &env);
                 Self::check_task_captures(inner, &env, line)?;
-                let val = self.eval_expr(inner, Rc::clone(&env))?;
+                let mut val = self.eval_expr(inner, Rc::clone(&env))?;
+                // Auto-invoke `def ()` when `task obj` and obj is a callable struct with no params.
+                if let Value::Object(_) = &val {
+                    let mut out_self = None;
+                    val = self.call_method(val, "", vec![], line, &mut out_self)?;
+                }
                 // Invalidate owned captures — the task is now the sole owner
                 for name in &owned_captures {
                     env.borrow_mut().invalidate(name);
@@ -1229,6 +1286,12 @@ impl Interpreter {
             }
             Value::RustType { name } => {
                 Self::construct_rust_type(&name, args, line)
+            }
+            Value::Object(_) => {
+                // Callable struct: look for anonymous `def ()` / `req ()` method (name == "")
+                let mut out_self = None;
+                let result = self.call_method(callee.clone(), "", args, line, &mut out_self)?;
+                Ok(result)
             }
             other => Err(err(format!("'{}' is not callable", other.type_name()), line)),
         }

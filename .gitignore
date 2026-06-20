@@ -3,5 +3,18 @@
 tests/cases/*_rust/
 examples/*_rust/
 stdlib/*_rust/
+# Scratch Cargo projects generated per .br file (boring build <file.br>)
+boring/interpreter/ast_rust/
+boring/interpreter/eval_rust/
+boring/interpreter/exec_rust/
+boring/interpreter/lexer_rust/
+boring/interpreter/methods_rust/
+boring/interpreter/parser_core_rust/
+boring/interpreter/parser_exprstmt_rust/
+boring/interpreter/stdlib_rust/
+boring/interpreter/tokens_rust/
+boring/interpreter/value_rust/
+boring/interpreter/main_rust/
+boring/interpreter/main_rust_single/
 Cargo.lock
 .claude/worktrees/

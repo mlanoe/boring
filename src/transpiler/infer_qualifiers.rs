@@ -44,15 +44,26 @@ impl Transpiler {
                 // and type parameters are excluded: the fallback would infer 'stack and
                 // emit_param would wrap them incorrectly (Addable'stack → "Addable" instead
                 // of impl Addable, Pt'stack bypasses the non-fn alias expansion, etc.).
-                Type::Named(n) if self.type_sizes.contains_key(n.as_str()) => {
+                Type::Named(n) if self.type_sizes.contains_key(n.as_str())
+                    || self.all_struct_types.contains(n.as_str()) => {
                     anonymous_vars.insert(name.clone());
                     // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
                     var_struct_types.insert(name.clone(), n.clone());
-                    // Eligible for universal borrow inference — free functions only.
-                    // Struct/enum method params are excluded: call sites emit arguments by value
-                    // and cannot automatically add `&` for method arguments.
-                    if !self.in_struct_method {
+                    // Eligible for auto-ref inference — free functions only, known-size types only.
+                    // Types with dynamic fields (in all_struct_types but not type_sizes) are excluded:
+                    // they do not benefit from borrow inference and may be actor-source types.
+                    if !self.in_struct_method && self.type_sizes.contains_key(n.as_str()) {
                         auto_ref_param_vars.insert(name.clone());
+                    }
+                }
+                // T? parameter — bare optional struct: eligible for qualifier inference.
+                // Optional params are never auto-ref (Option<&T> is not useful).
+                Type::Optional(inner) => {
+                    if let Type::Named(n) = inner.as_ref() {
+                        if self.type_sizes.contains_key(n.as_str()) || self.qualified_struct_types.contains(n.as_str()) {
+                            anonymous_vars.insert(name.clone());
+                            var_struct_types.insert(name.clone(), n.clone());
+                        }
                     }
                 }
                 // T' parameter — indirection-only candidate set.
@@ -96,6 +107,73 @@ impl Transpiler {
                 &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
                 &alias_of,
             );
+        }
+
+        // Actor-source type constraint: if a type T is known to be produced by an 'actor-returning
+        // function (recorded in actor_source_types during pre_scan), immediately constrain bare T
+        // params to {Actor, Guard}. This enables automatic inference without manual annotation.
+        for var_name in anonymous_vars.iter() {
+            if let Some(struct_name) = var_struct_types.get(var_name.as_str()) {
+                if self.actor_source_types.contains(struct_name.as_str()) {
+                    constrain_candidates(
+                        &mut candidates, var_name,
+                        &[OwnerQual::Actor, OwnerQual::Guard],
+                        &alias_of,
+                    );
+                    has_qualifier_constraint.insert(var_name.clone());
+                }
+            }
+        }
+
+        // Pre-pass: collect local variables assigned from 'actor-returning calls.
+        // Recursive so nested let-bindings (inside if/for/while bodies) are found.
+        self.infer_local_actor_vars.clear();
+        fn collect_actor_lets(transpiler: &Transpiler, stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+            for stmt in stmts {
+                match stmt {
+                    Stmt::Let(s) => {
+                        if let Some(val) = &s.value {
+                            if transpiler.expr_returns_actor_qual(val) {
+                                out.insert(s.name.clone());
+                            }
+                        }
+                    }
+                    Stmt::If(s) => {
+                        for (_, body) in &s.branches { collect_actor_lets(transpiler, body, out); }
+                        if let Some(eb) = &s.else_body { collect_actor_lets(transpiler, eb, out); }
+                    }
+                    Stmt::IfLet(s) => {
+                        collect_actor_lets(transpiler, &s.then_body, out);
+                        if let Some(eb) = &s.else_body { collect_actor_lets(transpiler, eb, out); }
+                    }
+                    Stmt::While(s) => { collect_actor_lets(transpiler, &s.body, out); }
+                    Stmt::For(s) => { collect_actor_lets(transpiler, &s.body, out); }
+                    Stmt::Match(s) => {
+                        for arm in &s.arms {
+                            if let crate::ast::MatchBody::Block(body) = &arm.body {
+                                collect_actor_lets(transpiler, body, out);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut local_actor_vars = std::collections::HashSet::new();
+        collect_actor_lets(self, stmts, &mut local_actor_vars);
+        self.infer_local_actor_vars = local_actor_vars;
+
+        // Direct 'actor constraint: any anonymous var (local or param) that is known to hold an
+        // 'actor value (from infer_local_actor_vars) is constrained to {Actor, Guard} immediately.
+        for var_name in self.infer_local_actor_vars.iter() {
+            if anonymous_vars.contains(var_name.as_str()) {
+                constrain_candidates(
+                    &mut candidates, var_name,
+                    &[OwnerQual::Actor, OwnerQual::Guard],
+                    &alias_of,
+                );
+                has_qualifier_constraint.insert(var_name.clone());
+            }
         }
 
         for stmt in stmts {
@@ -301,8 +379,24 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Call(callee, args) => {
                 self.walk_expr_for_qualifiers(callee, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                // Detect struct-constructor call: `Foo(field: expr, ...)`.
+                // In boring, `field: expr` inside a call is a single-param closure `(field): expr`
+                // that serves as a labeled-arg shorthand for struct construction.
+                // These are NOT real closures — their bodies should be walked without capture constraints.
+                let is_struct_ctor = if let ExprKind::Var(fn_name) = &callee.kind {
+                    fn_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && self.struct_fields.contains_key(fn_name.as_str())
+                } else { false };
                 for arg in args {
-                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    // For struct-ctor calls, unwrap single-param labeled-arg closures.
+                    let walk_target: &Expr = if is_struct_ctor {
+                        if let ExprKind::Closure(params, _, body, _, _) = &arg.value.kind {
+                            if params.len() == 1 {
+                                if let crate::ast::ClosureBody::Expr(e) = body { e.as_ref() } else { &arg.value }
+                            } else { &arg.value }
+                        } else { &arg.value }
+                    } else { &arg.value };
+                    self.walk_expr_for_qualifiers(walk_target, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
                 // Call site with a concrete qualifier demand: intersect to the compatible set.
                 // For 'shared/'actor/'guard demands, 'stack and 'heap are also compatible
@@ -311,10 +405,18 @@ impl Transpiler {
                     let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
                     if let Some(param_types) = param_types {
                         for (i, arg) in args.iter().enumerate() {
-                            let Some(demanded) = param_types.get(i).and_then(qual_of_type) else { continue };
+                            let Some(param_ty) = param_types.get(i) else { continue };
+                            let Some(demanded) = qual_of_type(param_ty) else { continue };
                             let ExprKind::Var(var_name) = &arg.value.kind else { continue };
                             if anonymous_vars.contains(var_name.as_str()) {
-                                constrain_candidates(candidates, var_name, &coercible_from(demanded.clone()), alias_of);
+                                // Optional params require exact qualifier match: Option<T> cannot be
+                                // auto-coerced to Option<Arc<Mutex<T>>> at the call site.
+                                let compatible = if matches!(param_ty, Type::Optional(_)) {
+                                    vec![demanded.clone()]
+                                } else {
+                                    coercible_from(demanded.clone())
+                                };
+                                constrain_candidates(candidates, var_name, &compatible, alias_of);
                                 // A concrete qualifier demand (not Borrow/BorrowMut) is a
                                 // qualifier-demand signal: auto-ref inference does not apply.
                                 if auto_ref_param_vars.contains(var_name.as_str()) {
@@ -323,6 +425,39 @@ impl Transpiler {
                                     }
                                 }
                             }
+                        }
+                    }
+                    // Struct constructor call: `Env(parent = x, ...)` — constrain named args
+                    // by the corresponding struct field's declared qualifier.
+                    let is_struct_ctor = fn_name.chars().next()
+                        .map(|c| c.is_uppercase()).unwrap_or(false)
+                        && self.struct_fields.contains_key(fn_name.as_str());
+                    if is_struct_ctor {
+                        let fields = self.struct_fields.get(fn_name.as_str()).cloned().unwrap_or_default();
+                        for arg in args {
+                            // Resolve both explicit label (`field= x`) and closure-style (`field: x`).
+                            let (field_name_opt, val_expr): (Option<&String>, &Expr) =
+                                if let Some(lbl) = &arg.label {
+                                    (Some(lbl), &arg.value)
+                                } else if let ExprKind::Closure(params, _, body, _, _) = &arg.value.kind {
+                                    if params.len() == 1 {
+                                        let field_name = &params[0].name;
+                                        if let crate::ast::ClosureBody::Expr(e) = body {
+                                            (Some(field_name), e.as_ref())
+                                        } else { (None, &arg.value) }
+                                    } else { (None, &arg.value) }
+                                } else { (None, &arg.value) };
+                            let ExprKind::Var(var_name) = &val_expr.kind else { continue };
+                            if !anonymous_vars.contains(var_name.as_str()) { continue; }
+                            let Some(field_name) = field_name_opt else { continue };
+                            let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == field_name) else { continue };
+                            let Some(demanded) = qual_of_type(field_ty) else { continue };
+                            let compatible = if matches!(field_ty, Type::Optional(_)) {
+                                vec![demanded.clone()]
+                            } else {
+                                coercible_from(demanded.clone())
+                            };
+                            constrain_candidates(candidates, var_name, &compatible, alias_of);
                         }
                     }
                 }
@@ -413,6 +548,20 @@ impl Transpiler {
                         );
                         if auto_ref_param_vars.contains(var_name) {
                             has_qualifier_constraint.insert(var_name.to_string());
+                        }
+                    }
+                }
+                // Field assignment with 'actor RHS: `param.field = actor_val`
+                // → tighten the owning param's candidates to {Actor, Guard}.
+                if let ExprKind::Field(obj, _) = &target.kind {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if anonymous_vars.contains(v.as_str()) && self.expr_returns_actor_qual(val) {
+                            constrain_candidates(
+                                candidates, v.as_str(),
+                                &[OwnerQual::Actor, OwnerQual::Guard],
+                                alias_of,
+                            );
+                            has_qualifier_constraint.insert(v.to_string());
                         }
                     }
                 }
@@ -600,8 +749,10 @@ impl Transpiler {
                 }
             };
             match &resolved {
-                OwnerQual::Actor => { self.struct_mutex_fields.insert(key); }
-                OwnerQual::Guard => { self.struct_rwlock_fields.insert(key); }
+                OwnerQual::Actor    => { self.struct_mutex_fields.insert(key); }
+                OwnerQual::ActorTask => { self.struct_mutex_task_fields.insert(key); }
+                OwnerQual::Guard    => { self.struct_rwlock_fields.insert(key); }
+                OwnerQual::GuardTask => { self.struct_rwlock_task_fields.insert(key); }
                 // Stack / Owned / Shared: no registry needed — plain T or Box<T>.
                 _ => {}
             }
@@ -924,6 +1075,31 @@ impl Transpiler {
             }
         }
     }
+
+    /// Returns true if `expr` evaluates to a value whose qualifier is 'actor or 'guard.
+    /// Handles: calls to functions with declared 'actor/'guard return types, and variables
+    /// already known to be 'actor (via var_mutex_types, var_mutex_task_types, or
+    /// infer_local_actor_vars populated by the pre-pass in infer_qualifiers).
+    pub(crate) fn expr_returns_actor_qual(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Call(callee, _) => {
+                if let ExprKind::Var(fn_name) = &callee.kind {
+                    matches!(
+                        self.fn_return_types.get(fn_name.as_str()),
+                        Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
+                    )
+                } else {
+                    false
+                }
+            }
+            ExprKind::Var(vname) => {
+                self.infer_local_actor_vars.contains(vname.as_str())
+                    || self.var_mutex_types.contains(vname.as_str())
+                    || self.var_mutex_task_types.contains(vname.as_str())
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Intersect the candidate set for `var_name` (and its aliases) with `compatible`.
@@ -1173,9 +1349,10 @@ fn qual_name(q: &OwnerQual) -> &'static str {
         OwnerQual::Owned     => "heap",
         OwnerQual::Shared    => "shared",
         OwnerQual::Actor     => "actor",
+        OwnerQual::ActorTask => "actor'task",
         OwnerQual::Guard     => "guard",
+        OwnerQual::GuardTask => "guard'task",
         OwnerQual::Weak      => "weak",
-        OwnerQual::Copy      => "copy",
         OwnerQual::Borrow    => "T&",
         OwnerQual::BorrowMut => "mut T&",
         _                    => "unknown",

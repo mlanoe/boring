@@ -1,7 +1,7 @@
 # Plan: porting the Rust interpreter to Boring
 
 **Date:** 2026-06-10  
-**Status:** Draft — preliminary analysis, no code written yet  
+**Status:** Implementation complete — all core modules ported to Boring (`boring/interpreter/`)  
 **Goal:** rewrite the interpreter (`src/interpreter/`) in Boring, transpile it to single-threaded Rust, and have it pass the existing test suite.
 
 ---
@@ -84,7 +84,7 @@ All methods on `Array`, `Dict`, `Set`, `String`, `Range`, `Channel`, etc. — di
 
 | Component | Fidelity to Rust | Notes |
 |---|---|---|
-| `Value` (data variants) | ✅ 1-to-1 | except `NativeFn` |
+| `Value` (data variants) | ⚠️ Partial | 6 Rust variants absent from port: `Uint`, `Channel`, `RustType`, `Index`, `EnumNamespace`, `Future` |
 | `NativeFn` | ✅ 1-to-1 | fn-pointer field transpiles to `Rc<dyn Fn(...)>` |
 | `Env` / `EnvRef` | ✅ 1-to-1 | `Rc<RefCell<Env>>` emitted via `T'actor` in single-thread |
 | `Signal` / `RuntimeError` | ✅ 1-to-1 | simple enum |
@@ -130,7 +130,7 @@ This is essentially Option A — the distinction is whether the entry point stay
 5. **`methods.boring`** — Built-in methods on collections and strings. ~800 lines.
 6. **`eval_expr.boring`** — Expression evaluation. ~600 lines.
 7. **`exec.boring`** — Statement execution. ~700 lines.
-8. **`call.boring`** — Call dispatch. ~400 lines.
+8. ~~**`call.boring`**~~ — Call dispatch was integrated into `eval.br` (around line 1202) rather than as a separate module.
 9. **`main.boring`** — Entry point: read AST JSON, run interpreter.
 
 **Total estimate:** 3 500–4 500 lines of Boring.

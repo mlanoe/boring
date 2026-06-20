@@ -17,7 +17,7 @@ def string val_type_name(Value v):
         Value.EnumVariant(type_name, _, _): type_name
         _: "unknown"
 
-def Value call_method(var Interpreter'actor interp, Value recv, string method_name, [Value] args):
+def Value call_method(Interpreter interp, Value recv, string method_name, [Value] args):
     let recv_type = recv.type_name()
     match recv:
         Value.Str(s):
@@ -64,7 +64,15 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                         _: throw "replace: expected string arguments"
                 "toUpper":
                     Value.Str(s.toUpper())
+                "upper":
+                    Value.Str(s.toUpper())
+                "to_upper":
+                    Value.Str(s.toUpper())
                 "toLower":
+                    Value.Str(s.toLower())
+                "lower":
+                    Value.Str(s.toLower())
+                "to_lower":
                     Value.Str(s.toLower())
                 "chars":
                     Value.Array(s.chars().map((c): Value.Str(c)))
@@ -178,10 +186,9 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                 "remove":
                     let idx_val = args[0] else Value.Int(0)
                     match idx_val:
-                        Value.Int(idx):
-                            var result = arr
-                            result.remove(idx)
-                            Value.Array(result)
+                        Value.Int(raw_idx):
+                            let idx = if raw_idx < 0: arr.length + raw_idx else raw_idx
+                            arr[idx] else Value.Nil
                         _: throw "remove: expected int index"
                 "insert":
                     let idx_val = args[0] else Value.Int(0)
@@ -544,6 +551,15 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                             found = true
                         i = i + 1
                     Value.Bool(found)
+                "has":
+                    let key = args[0] else Value.Nil
+                    var found = false
+                    var i = 0
+                    while i < pairs.length:
+                        if pairs[i].0 == key:
+                            found = true
+                        i = i + 1
+                    Value.Bool(found)
                 "remove":
                     let key = args[0] else Value.Nil
                     var result = []
@@ -783,6 +799,74 @@ def Value call_method(var Interpreter'actor interp, Value recv, string method_na
                         _: throw "step: expected int argument"
                 _:
                     throw "unknown method {method_name} on {recv_type}"
+
+        Value.Tuple(elems):
+            match method_name:
+                "length":
+                    Value.Int(elems.length)
+                "len":
+                    Value.Int(elems.length)
+                "isEmpty":
+                    Value.Bool(elems.length == 0)
+                "first":
+                    elems[0] else Value.Nil
+                "last":
+                    elems[elems.length - 1] else Value.Nil
+                "get":
+                    let idx_val = args[0] else Value.Int(0)
+                    match idx_val:
+                        Value.Int(i): elems[i] else Value.Nil
+                        _: throw "tuple.get: expected int"
+                _:
+                    throw "unknown method {method_name} on tuple"
+
+        Value.Object(inner):
+            # Struct method call
+            let type_name = inner.type_name.clone()
+            let method_decl_opt = interp.find_method(type_name, method_name)
+            if let method_decl = method_decl_opt:
+                let self_val = Value.Object(inner)
+                let child_env = push_scope(interp)
+                env_define(interp, "self", self_val, false)
+                for field in inner.fields:
+                    env_define(interp, field.0, field.1, true)
+                var i = 0
+                while i < method_decl.params.length and i < args.length:
+                    let param = method_decl.params[i]
+                    env_define(interp, param.name, args[i], param.mutable)
+                    i += 1
+                let result = eval_block(interp, method_decl.body)
+                if method_decl.mutating:
+                    for field in inner.fields:
+                        let updated = interp.current_env.get(field.0)
+                        if let v = updated:
+                            inner.set_field(field.0, v)
+                pop_scope(interp)
+                result
+            else:
+                throw "unknown method {method_name} on {type_name}"
+
+        Value.EnumDef(type_name):
+            # EnumDef.Variant(args) → construct enum variant
+            Value.EnumVariant(type_name, method_name, args)
+
+        Value.EnumVariant(type_name, variant, fields):
+            # Enum variant method call — look up in interp method table
+            let method_decl_opt = interp.find_method(type_name, method_name)
+            if let method_decl = method_decl_opt:
+                let self_val = Value.EnumVariant(type_name, variant, fields)
+                let child_env = push_scope(interp)
+                env_define(interp, "self", self_val, false)
+                var i = 0
+                while i < method_decl.params.length and i < args.length:
+                    let param = method_decl.params[i]
+                    env_define(interp, param.name, args[i], param.mutable)
+                    i += 1
+                let result = eval_block(interp, method_decl.body)
+                pop_scope(interp)
+                result
+            else:
+                throw "no method '{method_name}' on enum '{type_name}'"
 
         _:
             throw "unknown method {method_name} on {recv_type}"

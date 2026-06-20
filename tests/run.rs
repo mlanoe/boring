@@ -141,6 +141,11 @@ interp_test!(try_else_block);
 interp_test!(error_match);
 interp_test!(fn_shorthand);
 interp_test!(camel_to_snake);
+interp_test!(qualifiers_actor);
+interp_test!(lazy);
+interp_test!(array_comprehension);
+interp_test!(callable_struct);
+interp_test!(fixed_array);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
@@ -150,3 +155,5 @@ error_test!(error_move_source);
 error_test!(error_immutable_param);
 error_test!(error_conformance_missing);
 error_test!(error_must_use);
+error_test!(error_lazy_assign);
+error_test!(error_array_comp_nonzero);

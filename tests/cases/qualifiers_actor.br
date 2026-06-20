@@ -1,0 +1,61 @@
+# 'actor qualifier: Arc<std::sync::Mutex<T>> in multi, Rc<RefCell<T>> in single
+
+struct Counter:
+    var int value = 0
+
+    def inc():
+        value += 1
+
+    req int get():
+        value
+
+let Counter'actor c = Counter()
+c.inc()
+c.inc()
+c.inc()
+print c.get()
+
+# Field read on 'actor
+struct Named:
+    string label
+
+let Named'actor named = Named(label = "hello")
+print named.label
+
+# 'actor passed as function param
+def int read_counter(Counter'actor c):
+    c.get()
+
+let Counter'actor c2 = Counter()
+c2.inc()
+print read_counter(c2)
+
+# 'guard qualifier: Arc<std::sync::RwLock<T>> in multi, Rc<RefCell<T>> in single
+
+struct Store:
+    var int count = 0
+
+    req int read():
+        count
+
+    def void write(int v):
+        count = v
+
+let Store'guard s = Store()
+s.write(42)
+print s.read()
+
+# Field read on 'guard
+struct Tag:
+    string label
+
+let Tag'guard gtag = Tag(label = "world")
+print gtag.label
+
+# 'guard passed as function param
+def int read_store(Store'guard s):
+    s.read()
+
+let Store'guard s2 = Store()
+s2.write(7)
+print read_store(s2)

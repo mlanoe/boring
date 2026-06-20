@@ -47,8 +47,9 @@ One of Boring's core goals is **zero-annotation ownership**: the compiler infers
 boring new my_project   # scaffold a project directory
 cd my_project
 boring run              # interpret main.br
-boring build            # emit a Cargo project (→ my_project_rust/)
-boring build --compile  # emit a Cargo project and immediately compile it
+boring build                      # emit a Cargo project (→ my_project_rust/)
+boring build --threading single   # emit to my_project_rust_single/ (both can coexist)
+boring build --compile            # emit a Cargo project and immediately compile it
 ```
 
 `boring new` creates:
@@ -111,6 +112,7 @@ Three keywords control this:
 | `let` | no | no |
 | `mut` | no | yes |
 | `var` | yes | depends on qualifier |
+| `lazy` | no | no — deferred init via `?=`, immutable after first assignment |
 
 ### Immutable bindings — `let`
 
@@ -215,7 +217,7 @@ var bool flag = true
 ```rust
 let x: i64 = 42;
 let pi: f64 = 3.14159;
-let label: &'static str = "ok";
+let label: &str = "ok";   // literal stays &str; promoted to Rc<str> when stored
 let mut flag: bool = true;
 ```
 
@@ -264,13 +266,13 @@ if condition {
 
 ### Scalar types
 
-| Boring         | Alias for        | Rust            | Notes                              |
-|----------------|------------------|-----------------|------------------------------------|
-| `int`          | `Int'stack`       | `i64`           | 64-bit signed integer, stack (read only)        |
-| `uint`         | `Uint'stack`      | `u64`           | 64-bit unsigned integer, stack (read only)      |
-| `float`        | `Float'stack`     | `f64`           | 64-bit floating-point, stack (read only)        |
-| `bool`         | `Bool'stack`      | `bool`          | `true` / `false`, stack (read only)             |
-| `string`   | `String'stack` or `String'shared` | `&'static str` or `Arc<str>` / `Rc<str>` | Inferred: `'stack` (read only) for compile-time literals, `'shared` for computed/stored values; `'shared` maps to `Arc` (multi-thread) or `Rc` (single-thread) |
+| Boring         | Rust            | Notes                              |
+|----------------|-----------------|-------------------------------------|
+| `int`          | `i64`           | 64-bit signed integer               |
+| `uint`         | `u64`           | 64-bit unsigned integer             |
+| `float`        | `f64`           | 64-bit floating-point               |
+| `bool`         | `bool`          | `true` / `false`                    |
+| `string`       | `&str` (literal) / `Rc<str>` · `Arc<str>` (stored/computed) | Literals stay `&str`; the transpiler promotes to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it |
 
 ### Integer literals
 
@@ -330,7 +332,7 @@ let string c = a + " " + b     # string — concatenation
 let string d = "Hi, {a}!"      # string — interpolation
 ```
 
-> Boring infers the string representation automatically. Under the hood, string literals in strict mode compile to `&'static str`; heap strings compile to `Arc<str>`. See [Advanced — Strings](#advanced--strings-string-and-stringshared) for details.
+> Boring infers the string representation automatically. String literals stay as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it (storage in a variable, field, collection, or concatenation). See [Advanced — Strings](#advanced--strings-string-and-stringshared) for details.
 
 ### String interpolation
 
@@ -637,7 +639,7 @@ Functions can return any collection type — arrays, sets, and dicts are all sup
 ```rust
 fn first_n(n: i64) -> Vec<i64> { (1..=n).collect() }
 fn unique_squares() -> std::collections::HashSet<i64> { [1,4,9].into() }
-fn char_count(s: &'static str) -> std::collections::HashMap<Arc<str>, i64> { ... }
+fn char_count(s: &str) -> std::collections::HashMap<Arc<str>, i64> { ... }
 ```
 
 ### Multi-line parameter lists
@@ -1084,7 +1086,7 @@ string describe(int n):
 
 **Rust equivalent**
 ```rust
-fn describe(n: i64) -> &'static str {
+fn describe(n: i64) -> Arc<str> {
     match n {
         0          => "zero",
         1 | 2 | 3  => "small",
@@ -1440,6 +1442,46 @@ let [int] empty = []
 let numbers: Vec<i64> = vec![1, 2, 3, 4, 5];
 let empty: Vec<i64> = Vec::new();
 ```
+
+#### Array fill and comprehension
+
+Two shorthand forms create arrays without listing every element:
+
+```boring
+let zeros  = [0 for ..10]             # fill: 10 zeros
+let squares = [i * i for i in ..5]   # comprehension: [0, 1, 4, 9, 16]
+```
+
+The range must be `..n` (exclusive, starting at 0) or `0..n`. In the comprehension form, `i` is bound to the index (0-based, type `int`). Both forms produce a `[T]` (`Vec<T>`).
+
+**Rust equivalent**
+```rust
+let zeros: Vec<i64>   = vec![0i64; 10];
+let squares: Vec<i64> = (0..5i64).map(|i| i * i).collect();
+```
+
+#### Fixed-size arrays — `[T, N]`
+
+A compile-time size can be given as a second element of the type, separated by a comma. The result is a stack-allocated array of exactly `N` elements, analogous to Rust's `[T; N]`.
+
+```boring
+let [float, 4] v = [1.0, 2.0, 3.0, 4.0]
+let [int, 3]   z = [0 for ..3]
+
+struct Mat2:
+    [float, 4] data                   # inline in a struct field
+
+let m = Mat2(data= [0.0, 1.0, 0.0, 1.0])
+print m.data[0]                       # 0
+```
+
+**Rust equivalent**
+```rust
+let v: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+let z: [i64; 3] = [0i64; 3];
+```
+
+`N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
 
 #### Array methods
 
@@ -1953,6 +1995,45 @@ greet(d.into_animal());
 The `_mut` variant is only generated when the body is exactly `self.field`. For computed bodies (constructed values, string conversions, etc.) only the immutable method is emitted — returning `&mut T` on a temporary would be invalid Rust.
 
 The `as Type:` body is a single expression that produces a value of the target type. Method dispatch is always on the concrete type — there is no dynamic dispatch between structs.
+
+### Anonymous call operator — `def ()` / `req ()`
+
+A struct can be made callable by defining a method with an empty name. Use `req ()` for a read-only call (callable on `let` and `var` bindings), or `def ()` for a mutating call (callable on `var` bindings only).
+
+```boring
+struct Adder:
+    int base
+    req int ():          # callable on let, returns int
+        base + 10
+
+let a = Adder(base= 5)
+print a()                # 15
+```
+
+```boring
+struct Counter:
+    var int value = 0
+    def ():              # callable on var, mutates state
+        value += 1
+
+var c = Counter()
+c()
+c()
+c()
+print c.value            # 3
+```
+
+**Rust equivalent**
+```rust
+impl Adder {
+    fn __call__(&self) -> i64 { self.base + 10 }
+}
+impl Counter {
+    fn __call__(&mut self) { self.value += 1; }
+}
+```
+
+`obj()` at a call site dispatches to `__call__` when `obj` is a known struct instance. Calling a struct that has no `def ()`/`req ()` defined is a runtime error.
 
 ---
 
@@ -3586,16 +3667,7 @@ type Parser     = fn(&str) -> Result<Arc<str>, Box<dyn std::error::Error>>;
 // async and throws/task equivalents are function signatures, not type aliases in plain Rust
 ```
 
-Built-in primitive aliases use this same mechanism:
-
-```boring
-use int   as Int'stack    # i64
-use uint  as Uint'stack   # u64
-use float as Float'stack  # f64
-use bool  as Bool'stack   # bool
-```
-
-> `String'shared` is inferred automatically when a string is stored or computed — you rarely need to write it explicitly. See [Advanced — Strings](#advanced--strings-string-and-stringshared).
+Built-in primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` literals emit as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when they are stored or concatenated. See [Advanced — Strings](#advanced--strings-string-and-arc-str).
 
 ---
 
@@ -4482,17 +4554,19 @@ In managed mode, `Arc<Mutex<T>>` is used with `--threading multi` (default) and 
 
 All ownership qualifiers:
 
-| Boring type   | `--threading multi`              | `--threading single`  | Semantics                             |
-|---------------|----------------------------------|-----------------------|---------------------------------------|
-| `T'stack`     | `T`                              | `T`                   | Stack allocation — copied on pass for primitives |
-| `T'heap`      | `Box<T>`                         | `Box<T>`              | Exclusive heap ownership              |
-| `T'shared`    | `Arc<T>`                         | `Rc<T>`               | Shared ref-counted — threading-aware  |
-| `T'actor`     | `Arc<tokio::sync::Mutex<T>>`     | `RefCell<T>`          | Shared mutable — all accesses auto-locked |
-| `T'guard`     | `Arc<tokio::sync::RwLock<T>>`    | `RefCell<T>`          | Shared mutable — concurrent reads, exclusive writes |
-| `T'wshared`   | `std::sync::Weak<T>`             | `Weak<T>`             | Weak ref to `T'shared`                |
-| `T'wactor`    | `std::sync::Weak<Mutex<T>>`      | `Weak<RefCell<T>>`    | Weak ref to actor                     |
-| `T'wguard`    | `std::sync::Weak<RwLock<T>>`     | `Weak<RefCell<T>>`    | Weak ref to guard                     |
-| `T?`          | `Option<T>`                      | `Option<T>`           | Optional value                        |
+| Boring type        | `--threading multi`                   | `--threading single`  | Semantics                             |
+|--------------------|---------------------------------------|-----------------------|---------------------------------------|
+| `T'stack`          | `T`                                   | `T`                   | Stack allocation — copied on pass for primitives |
+| `T'heap`           | `Box<T>`                              | `Box<T>`              | Exclusive heap ownership              |
+| `T'shared`         | `Arc<T>`                              | `Rc<T>`               | Shared ref-counted, read-only         |
+| `T'actor`          | `Arc<std::sync::Mutex<T>>`            | `Rc<RefCell<T>>`      | Shared mutable — sync, no tokio required |
+| `T'actor'task` / `T'task` | `Arc<tokio::sync::Mutex<T>>`   | not supported         | Shared mutable — async, hold lock across `.await` |
+| `T'guard`          | `Arc<std::sync::RwLock<T>>`           | `Rc<RefCell<T>>`      | Shared mutable — reader-writer, sync  |
+| `T'guard'task`     | `Arc<tokio::sync::RwLock<T>>`         | not supported         | Reader-writer — async context         |
+| `T'shared'weak`    | `std::sync::Weak<T>`                  | `Weak<T>`             | Weak ref to `T'shared`                |
+| `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`           | `Weak<RefCell<T>>`    | Weak ref to `T'actor`                 |
+| `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`          | `Weak<RefCell<T>>`    | Weak ref to `T'guard`                 |
+| `T?`               | `Option<T>`                           | `Option<T>`           | Optional value                        |
 
 ### Qualifier groups — parameter constraints
 
@@ -4534,14 +4608,15 @@ Each qualifier imposes constraints on `mut`. `mut` is forbidden with `'shared` �
 | `let` | yes | yes | yes | yes | yes |
 | `mut` | **error** | yes | yes | yes | yes |
 | `var` | yes | yes | yes | yes | yes |
+| `lazy` | yes | yes | yes | yes | yes |
 
 Qualifiers carry three kinds of information: Rust mapping, passing semantics, and mutability constraints:
 
 | Qualifier | Passing semantics | Mutability |
 |---|---|---|
-| `'shared` | pointer shared | forbidden — immutable shared ref |
-| `'actor` | pointer shared | interior mutability — exclusive lock (Mutex) |
-| `'guard` | pointer shared | interior mutability — shared reads / exclusive writes (RwLock) |
+| `'shared` | by reference (`&Arc<T>`) — no refcount increment | forbidden — immutable shared ref |
+| `'actor` | by reference (`&Arc<Mutex<T>>`) — no refcount increment | interior mutability — exclusive lock (Mutex) |
+| `'guard` | by reference (`&Arc<RwLock<T>>`) — no refcount increment | interior mutability — shared reads / exclusive writes (RwLock) |
 | `'stack` | move | determined by `let`/`mut`/`var` |
 | `'heap` | move | determined by `let`/`mut`/`var` |
 
@@ -4618,57 +4693,50 @@ Borrow forms with lifetime:
 
 The primitive types are defined as aliases with an explicit qualifier:
 
-```boring
-use int   as Int'stack    # i64  — stack (read only)
-use uint  as Uint'stack   # u64  — stack (read only)
-use float as Float'stack  # f64  — stack (read only)
-use bool  as Bool'stack   # bool — stack (read only)
-```
-
-These aliases have no runtime cost. The qualifier only affects the transpiled Rust output — the interpreter ignores it.
+Primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` always compiles to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread).
 
 ```boring
 let int   x = 42    # i64
 let uint  n = 100   # u64
 ```
 
-> `String'shared` is inferred automatically when a string is stored or computed. See [Advanced — Strings](#advanced--strings-string-and-stringshared).
+> For `string` details see [Advanced — Strings](#advanced--strings-string-and-arc-str).
 
-### Weak references — `'wshared`, `'wactor`, `'wguard`
+### Weak references — `T'shared'weak`, `T'actor'weak`, `T'guard'weak`
 
-Weak qualifiers are single-token shorthands that combine ownership and non-owning semantics. They produce a non-owning pointer that does not prevent the pointee from being dropped:
+A `'weak` qualifier produces a non-owning pointer that does not prevent the pointee from being dropped. The base qualifier is written explicitly or inferred from the right-hand side:
 
-| Qualifier     | Expands to         | Rust type                   | Meaning                             |
-|---------------|--------------------|-----------------------------|-------------------------------------|
-| `T'wshared`   | `T'shared'weak`    | `Weak<T>` / `std::sync::Weak<T>` | Weak ref to `T'shared` — threading-aware |
-| `T'wactor`    | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>` | Weak ref to actor                   |
-| `T'wguard`    | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>` | Weak ref to guard                  |
+| Qualifier          | Rust type (multi)               | Meaning                         |
+|--------------------|---------------------------------|---------------------------------|
+| `T'shared'weak`    | `std::sync::Weak<T>`            | Weak ref to `T'shared`          |
+| `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`     | Weak ref to `T'actor`           |
+| `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`    | Weak ref to `T'guard`           |
 
-At a **binding site**, the qualifier can be inferred from the right-hand side — writing `'weak` alone is enough:
+At a **binding site** the base qualifier can be inferred from the right-hand side — writing `'weak` alone is enough:
 
 | RHS qualifier  | Inferred weak type      | Rust                                      |
 |----------------|-------------------------|-------------------------------------------|
-| `'shared`      | `T'wshared`             | `Weak<T>` / `std::sync::Weak<T>`          |
-| `'actor`       | `T'wactor`              | `std::sync::Weak<Mutex<T>>`               |
-| `'guard`       | `T'wguard`              | `std::sync::Weak<RwLock<T>>`              |
+| `'shared`      | `T'shared'weak`         | `Weak<T>` / `std::sync::Weak<T>`          |
+| `'actor`       | `T'actor'weak`          | `std::sync::Weak<Mutex<T>>`               |
+| `'guard`       | `T'guard'weak`          | `std::sync::Weak<RwLock<T>>`              |
 
-**Assigning** a strong reference to a weak binding automatically calls the right downgrade function (`Rc::downgrade` or `Arc::downgrade`). Calling **`.upgrade()`** returns the strong reference wrapped in an optional; it returns `nil` if the object was already dropped.
+**Assigning** a strong reference to a weak binding automatically calls `Rc::downgrade` or `Arc::downgrade`. Calling **`.upgrade()`** returns the strong reference or `nil` if the object was already dropped.
 
 ```boring
 struct Resource:
     init(pub string label)
 
-# Shared ref (Rc in single-thread, Arc in multi-thread)
+# Strong ref (Rc in single-thread, Arc in multi-thread)
 let Resource'shared strong = Resource(label = "config.toml")
-let Resource'wshared w1    = strong   # downgrade — Weak<Resource>
+let Resource'shared'weak w1 = strong   # downgrade → Weak<Resource>
 
 # Qualifier inferred from RHS
 let a'shared = Resource(label = "shared")
-let b'weak   = a                      # Weak<Resource> (a is 'shared)
+let b'weak   = a                       # Weak<Resource> (inferred from a)
 
 # .upgrade() recovers the strong reference
 let r = w1.upgrade()
-print r.label                         # config.toml
+print r.label                          # config.toml
 ```
 
 **Rust equivalent (multi-thread)**
@@ -4680,19 +4748,17 @@ let r = w1.upgrade().unwrap();
 println!("{}", r.label);
 ```
 
-Weak refs are useful for **breaking reference cycles** — for example, a parent holds a strong ref to its children, and each child holds a weak back-ref to its parent.
-
-Weak refs can be passed to and returned from functions:
+Weak refs break **reference cycles** — a parent holds a strong ref to its children, each child holds a weak back-ref to its parent.
 
 ```boring
-string describe(Resource'wshared w):
+string describe(Resource'shared'weak w):
     let r = w.upgrade()
     "resource: {r.label}"
 
 print describe(w1)   # resource: config.toml
 ```
 
-> Use `T'wshared` for both single-thread (Weak<Rc<T>>) and multi-thread (sync::Weak<T>) weak references. The transpiler selects the correct type based on `--threading`.
+> The transpiler selects `Weak<T>` (single-thread) or `std::sync::Weak<T>` (multi-thread) based on `--threading`.
 
 > In most programs you never need to write a qualifier explicitly. The transpiler infers the right one from how each variable is used. See [chapter 30 — Qualifier Inference](#30-qualifier-inference) for the full inference algorithm, including signal table, size-based fallback, and cross-function propagation.
 
@@ -5045,8 +5111,7 @@ strategy automatically — no `move` keyword or explicit `.clone()` required.
 | Variable type          | Capture strategy                                             |
 |------------------------|--------------------------------------------------------------|
 | `int`, `float`, `bool` | Copied into the task (Copy types)                           |
-| `string` (literal → `&'static str`) | Copied directly — `&'static str` is `Copy`, no allocation |
-| `string` (heap → `String'shared`)   | `Arc::clone` — both the task and the outer scope keep access |
+| `string`               | `Rc::clone` / `Arc::clone` — cheap reference count bump, no data copy |
 | `T'actor`              | `Arc::clone` — the mutex is shared across the tasks          |
 | `T'` (owned)           | Moved into the task; the outer binding is invalidated        |
 | Array / Dict / Set without qualifier | **Blocked** — use `T'shared` or `T'actor` instead |
@@ -5056,8 +5121,8 @@ task string transform(string s):
     "done: {s}"
 
 def main():
-    let string label = "hello"      # literal string — copied cheaply into the task
-    let f = task transform(label)   # &'static str is Copy, no allocation
+    let string label = "hello"      # string — Rc<str>, cheap clone into the task
+    let f = task transform(label)   # Rc::clone — no data copy
     print label                    # hello  (outer binding intact)
     print f.value                  # done: hello
 ```
@@ -5068,8 +5133,8 @@ async fn transform(s: &str) -> Arc<str> { Arc::<str>::from(format!("done: {}", s
 
 #[tokio::main]
 async fn main() {
-    let label: &'static str = "hello";
-    // &'static str is Copy — no clone needed:
+    let label: Rc<str> = Rc::from("hello");
+    // Rc::clone is cheap — no data copy:
     let f = tokio::spawn(async move { transform(label).await });
     println!("{}", label);              // hello
     println!("{}", f.await.unwrap());   // done: hello
@@ -5116,13 +5181,17 @@ A plain struct (without `'shared`) cannot be used with `task w.method()` — the
 will reject the capture at runtime, and the generated Rust would not compile
 (`tokio::spawn` requires `'static` bounds that a borrowed `&self` cannot satisfy).
 
-### Shared mutable state — `T'actor`
+### Shared mutable state — `T'actor` / `T'actor'task`
 
 `T'shared` gives read-only shared access (`Arc<T>`). When multiple tasks need to
 **read and write** the same struct, use **`T'actor`** — this wraps the value in
-`Arc<tokio::sync::Mutex<T>>` and **inserts `.lock().await` automatically** at every
+`Arc<std::sync::Mutex<T>>` and inserts `.lock().unwrap()` automatically at every
 field access and method call. The qualifier works with both `let` and `var`; no
 explicit locking is ever written in Boring source.
+
+In an **async context** (inside a `task` function), use **`T'actor'task`** instead —
+this uses `Arc<tokio::sync::Mutex<T>>` and inserts `.lock().await` so the lock can
+be held across `.await` points.
 
 ```boring
 struct SharedCount:
@@ -5134,12 +5203,27 @@ struct SharedCount:
 
 def main():
     let c'actor = SharedCount()
-    c.inc()             # → c.lock().await.inc()
+    c.inc()                    # → c.lock().unwrap().inc()
     c.inc()
-    print "count = {c.value}"   # → c.lock().await.value
+    print "count = {c.value}"  # → c.lock().unwrap().value
+
+task async_main():
+    let c'actor'task = SharedCount()
+    c.inc()                    # → c.lock().await.inc()
+    c.inc()
+    print "count = {c.value}"  # → c.lock().await.value
 ```
 
-**Rust equivalent**
+**Rust equivalent (sync)**
+```rust
+let c: Arc<std::sync::Mutex<SharedCount>> =
+    Arc::new(std::sync::Mutex::new(SharedCount::new()));
+c.lock().unwrap().inc();
+c.lock().unwrap().inc();
+println!("count = {}", c.lock().unwrap().value);
+```
+
+**Rust equivalent (async)**
 ```rust
 let c: Arc<tokio::sync::Mutex<SharedCount>> =
     Arc::new(tokio::sync::Mutex::new(SharedCount::new()));
@@ -5152,7 +5236,7 @@ The same pattern works for struct fields:
 
 ```boring
 struct App:
-    SharedCount'actor counter    # field is Arc<Mutex<SharedCount>>
+    SharedCount'actor'task counter    # field is Arc<tokio::sync::Mutex<SharedCount>>
 
     task bump():
         self.counter.inc()               # → self.counter.lock().await.inc()
@@ -5162,18 +5246,21 @@ struct App:
 | Qualifier | Rust type | Semantics |
 |---|---|---|
 | `T'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | read-only shared; task methods use `self: Arc<Self>` |
-| `T'actor` | `Arc<tokio::sync::Mutex<T>>` | shared mutable; all accesses auto-locked |
-| `T'guard` | `Arc<tokio::sync::RwLock<T>>` | shared mutable; concurrent reads, exclusive writes |
+| `T'actor` | `Arc<std::sync::Mutex<T>>` | shared mutable; sync lock (`.lock().unwrap()`) |
+| `T'actor'task` | `Arc<tokio::sync::Mutex<T>>` | shared mutable; async lock (`.lock().await`), safe across await points |
+| `T'guard` | `Arc<std::sync::RwLock<T>>` | reader-writer; sync (`read()`/`write()`) |
+| `T'guard'task` | `Arc<tokio::sync::RwLock<T>>` | reader-writer; async (`read().await`/`write().await`) |
 
-> **Note**: `T'actor` uses **tokio's async mutex** (`tokio::sync::Mutex`), which can be
-> held across `.await` points. Avoid holding the lock during long-running operations.
+> Use `'actor'task` / `'guard'task` inside `task` functions. Use bare `'actor` / `'guard` in sync code.
 
-### Read-heavy shared state — `T'guard`
+### Read-heavy shared state — `T'guard` / `T'guard'task`
 
-When reads dominate, **`T'guard`** uses a `RwLock` instead of a `Mutex`. Multiple tasks can read concurrently; a write acquires an exclusive lock. The transpiler automatically chooses the right lock mode based on the method declaration:
+When reads dominate, **`T'guard`** uses a `RwLock` instead of a `Mutex`. Multiple
+tasks can read concurrently; a write acquires an exclusive lock. The transpiler
+automatically chooses the right lock mode based on the method declaration:
 
-- `req` methods and field reads → `.read().await` (shared lock, concurrent)
-- `def` methods and field writes → `.write().await` (exclusive lock)
+- `req` methods and field reads → `.read()` / `.read().await` (shared lock, concurrent)
+- `def` methods and field writes → `.write()` / `.write().await` (exclusive lock)
 
 ```boring
 struct Counter:
@@ -5184,7 +5271,7 @@ struct Counter:
         self.value += 1
 
 task run():
-    let c'guard = Counter()
+    let c'guard'task = Counter()
     c.inc()                   # → c.write().await.inc()
     c.inc()
     print "count = {c.get()}" # → c.read().await.get()
@@ -5202,21 +5289,21 @@ println!("count = {}", c.read().await.get());
 Weak references work the same as with `'actor`:
 
 ```boring
-let c'guard  = Counter()
-let w'wguard = c          # Arc::downgrade(&c)
+let c'guard'task  = Counter()
+let w'guard'weak  = c          # Arc::downgrade(&c)
 
 if let strong = w.upgrade():
-    print strong.get()    # → strong.read().await.get()
+    print strong.get()         # → strong.read().await.get()
 ```
 
-| `'actor` | `'guard` |
+| `'actor` / `'actor'task` | `'guard` / `'guard'task` |
 |---|---|
-| `Arc<Mutex<T>>` | `Arc<RwLock<T>>` |
-| `.lock().await` for everything | `.read().await` / `.write().await` |
+| `Arc<std::sync::Mutex<T>>` / `Arc<tokio::sync::Mutex<T>>` | `Arc<std::sync::RwLock<T>>` / `Arc<tokio::sync::RwLock<T>>` |
+| `.lock()` for everything | `.read()` / `.write()` |
 | Fair, no starvation risk | Can starve writers under heavy read load |
 | Lower overhead for write-heavy workloads | Better throughput when reads dominate |
 
-> Use `'actor` as the default. Switch to `'guard` when profiling shows lock contention and reads significantly outnumber writes.
+> Use `'actor` / `'actor'task` as the default. Switch to `'guard` / `'guard'task` when profiling shows lock contention and reads significantly outnumber writes.
 
 ### Task cancellation — `f.cancel()`
 
@@ -5640,6 +5727,8 @@ unreachable("variant {v} should have been handled above")
 | `req R f(T a):  body`               | `fn f(&self, a: T) -> R { body }`             |
 | `def R f(T a):  body`               | `fn f(&mut self, a: T) -> R { body }`         |
 | `R f(T a):  body`                   | same as `def R f(T a): body` — `def` implicit when return type is present |
+| `req R ():  body`                   | `fn __call__(&self) -> R { body }` — anonymous call, callable on `let`/`var` |
+| `def ():  body`                     | `fn __call__(&mut self) { body }` — anonymous call, callable on `var` only |
 | `set prop(T v): body`               | `fn set_prop(&mut self, v: T) { body }`       |
 | `def R f(T a) throws:  body`        | `fn f(&mut self, a: T) -> Result<R, Box<dyn Error>>` |
 | `def R f(T a) throws E.T: body`     | `fn f(&mut self, a: T) -> Result<R, E::T>`           |
@@ -5670,24 +5759,26 @@ unreachable("variant {v} should have been handled above")
 | `uint`            | `Uint'stack`    | `u64`                                 |
 | `float`           | `Float'stack`   | `f64`                                 |
 | `bool`            | `Bool'stack`    | `bool`                                |
-| `string` (param)           | —               | `&str` — accepts both literals and heap strings   |
-| `string` (literal)         | —               | `&'static str` — zero allocation, `Copy` (strict mode) |
-| `string` (heap / stored)   | `String'shared` | `Arc<str>` — reference-counted, single allocation    |
+| `string` (literal)         | —               | `&str` — zero allocation; promoted to `Rc<str>`/`Arc<str>` when stored |
+| `string` (stored/computed) | —               | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread)                 |
 | `T`     | `T'stack`   | `T` (stack, Rust default)             |
 | `T'`    | `T'heap`    | `Box<T>`                              |
 | `T?`    | —           | `Option<T>`                           |
 | `T?&`   | —           | `&Option<T>`                          |
-| `[T]`   | `Vec<T>`    | `Vec<T>`                              |
+| `[T]`      | `Vec<T>`    | `Vec<T>` — dynamic array              |
+| `[T, N]`   | —           | `[T; N]` — fixed-size stack array     |
 | `{K=V}` | `Dict<K,V>` | `HashMap<K, V>`                       |
 | `{T}`   | `Set<T>`    | `HashSet<T>`                          |
 | `(T1, T2)`         | —           | `(T1, T2)`                            |
 | `T'stack`          | —           | `T` — stack (read only), copied on pass |
 | `T'shared`         | —           | `Arc<T>` (multi) / `Rc<T>` (single)  |
-| `T'actor`          | —           | `Arc<tokio::sync::Mutex<T>>` — shared mutable, all accesses auto-locked |
-| `T'guard`          | —           | `Arc<tokio::sync::RwLock<T>>` — concurrent reads, exclusive writes |
-| `T'wshared`        | `T'shared'weak` | `std::sync::Weak<T>` / `Weak<T>` — weak ref, threading-aware |
-| `T'wactor`         | `T'actor'weak` | `std::sync::Weak<Mutex<T>>`           |
-| `T'wguard`         | `T'guard'weak` | `std::sync::Weak<RwLock<T>>`          |
+| `T'actor`          | —           | `Arc<std::sync::Mutex<T>>` — shared mutable, sync lock |
+| `T'actor'task`     | —           | `Arc<tokio::sync::Mutex<T>>` — shared mutable, async lock |
+| `T'guard`          | —           | `Arc<std::sync::RwLock<T>>` — concurrent reads, exclusive writes (sync) |
+| `T'guard'task`     | —           | `Arc<tokio::sync::RwLock<T>>` — concurrent reads, exclusive writes (async) |
+| `T'shared'weak`    | —           | `Weak<T>` — weak ref to `Arc<T>`      |
+| `T'actor'weak`     | —           | `Weak<Mutex<T>>` — weak ref to actor  |
+| `T'guard'weak`     | —           | `Weak<RwLock<T>>` — weak ref to guard |
 | `Index<T>`         | —           | `Option<usize>` (array/set) or `Option<K>` (dict) |
 | `Trait` (bare)     | —           | `Box<dyn Trait>` — dynamic dispatch, heap |
 | `<Trait>`          | —           | `impl Trait` — static dispatch, no allocation |
@@ -5839,34 +5930,20 @@ This chapter covers features you will rarely need in everyday code. They exist f
 
 ---
 
-### Advanced — Strings: `string` and `String'shared`
+### Advanced — Strings: `string`
 
 Boring has one user-facing string type — `string` — whose concrete Rust representation is inferred automatically. You should use bare `string` everywhere; the compiler picks the right form.
 
 #### Inference rules
 
-| Context                                       | Rust type          |
-|-----------------------------------------------|--------------------|
-| Function parameter (`string s`)               | `&str`             |
-| Initialised from a compile-time literal (strict mode) | `&'static str` — zero allocation, `Copy` |
-| Initialised from concatenation / interpolation | `Arc<str>`        |
-| Stored in a variable, field, or collection    | `Arc<str>`         |
+| Context                                                  | Rust type emitted                          |
+|----------------------------------------------------------|--------------------------------------------|
+| Bare string literal (not stored or compared)             | `&str`                                     |
+| Literal stored in a variable, field, or collection       | `Rc::<str>::from("…")` / `Arc::<str>::from("…")` |
+| Concatenation or interpolation (`a + b`, `"Hi, {x}!"`)  | `Rc::<str>::from(format!(…))` / `Arc::<str>::from(format!(…))` |
+| Already a `Rc<str>` / `Arc<str>` expression             | used as-is                                 |
 
-`String'shared` is reference-counted (`Arc<str>`) — a single allocation storing the string data directly in the Arc. In strict mode, string literals compile to `&'static str` automatically, without any explicit qualifier.
-
-#### Explicit long form
-
-You can write the long form when you need to be precise:
-
-```boring
-let String'shared b = a + " world" # Arc<str> — heap string, single allocation
-```
-
-The long form is useful in newtypes:
-
-```boring
-type SharedName as String'shared   # wraps Arc<str>
-```
+String literals start as `&str` and are promoted to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) whenever the context requires heap ownership. This happens automatically — no annotation needed.
 
 #### String representation in tasks
 
@@ -5874,16 +5951,16 @@ When a string is captured by a task:
 
 | String kind          | Capture strategy                                            |
 |----------------------|-------------------------------------------------------------|
-| Literal (`&'static str` in strict mode) | Copied directly — `&'static str` is `Copy`, no allocation |
-| Heap (`String'shared`)   | `Arc::clone` — task and outer scope both keep access       |
+| Literal `string`     | `&str` copied directly into the task — zero allocation             |
+| Stored `string`      | `Arc::clone` — task and outer scope both keep access, no data copy |
 
 ```boring
 task string transform(string s):
     "done: {s}"
 
 def main():
-    let string label = "hello"      # literal — copied cheaply
-    let f = task transform(label)   # &'static str is Copy, no allocation
+    let string label = "hello"      # literal — stored as Rc<str>
+    let f = task transform(label)   # Arc::clone — no data copy
     print label                     # hello
     print f.value                   # done: hello
 ```
@@ -5994,6 +6071,57 @@ print host             # localhost
 **Rust equivalent** — `x ?= expr` maps to `x = x.unwrap_or_else(|| expr)`:
 ```rust
 host = host.unwrap_or_else(|| Arc::from("localhost"));
+```
+
+### Advanced — `lazy` binding
+
+`lazy` is a binding keyword for **deferred, write-once initialisation**. Unlike `let`, which requires a value immediately, a `lazy` binding is declared without a value and must be initialised later with `?=`. After the first `?=`, the binding becomes immutable.
+
+```boring
+lazy int x
+x ?= compute_value()   # first call — initialises x
+x ?= compute_value()   # subsequent calls — no-op
+```
+
+#### Binding table (extended)
+
+| Binding | Rebindable | Mutable | Initialisation |
+|---|---|---|---|
+| `let` | no | no | immediate — `=` required |
+| `mut` | no | yes | immediate — `=` required |
+| `var` | yes | yes | immediate — `=` required |
+| `lazy` | no | no | deferred — `?=` required, immutable after first assignment |
+
+#### Rules
+
+- **Declaration**: `lazy T name` — no `=` and no value at the declaration site.
+- **Initialisation**: `name ?= expr` — evaluates `expr` and assigns it; if already initialised, `expr` is not evaluated and the call is a no-op.
+- **Plain `=` is forbidden**: assigning a `lazy` binding with `=` is a compile-time error (transpiler) or a runtime error (interpreter).
+- **Qualifiers**: `lazy` is incompatible with `mut` and `var` — the binding is always immutable once set.
+
+#### Typical use — one-time computed constant
+
+```boring
+lazy [float] weights
+weights ?= load_weights("model.bin")   # loaded once; subsequent calls no-op
+```
+
+#### Difference from `transient`
+
+| | `transient` | `lazy` |
+|---|---|---|
+| Scope | struct field only | any binding (local, global) |
+| Write | multiple times | once — immutable after first `?=` |
+| From `req` | yes | depends on binding location |
+| Rust | `Cell<T>` / `RefCell<T>` | `std::cell::OnceCell<T>` |
+
+`transient` is for mutable caches in struct methods. `lazy` is for deferred constants: it enforces that the value is set once and never changed.
+
+#### Rust equivalent
+
+```rust
+let weights: std::cell::OnceCell<Vec<f64>> = std::cell::OnceCell::new();
+weights.get_or_init(|| load_weights("model.bin"));
 ```
 
 ### Advanced — Struct spread — `..other`
@@ -6287,7 +6415,7 @@ Default: 256 bytes.
 
 ```boring
 let c = Counter(0)
-c.inc()             # def call → eliminates Shared, Const → {Stack, Owned, Actor, Guard}
+c.inc()             # def call → eliminates Shared → {Stack, Owned, Actor, Guard}
 share_with(c)       # demands 'shared → intersect to {Shared}
                     # result: {} → error: no qualifier satisfies all constraints
 ```
@@ -6407,7 +6535,7 @@ Results are applied at emit time: the field is emitted with the inferred Rust wr
 `mut x = expr` marks a fixed binding with a mutable instance. It contributes a mutation signal at the declaration site — equivalent to a `def` method call on the same line, but earlier. This allows the compiler to narrow the candidate set before any method calls are seen.
 
 ```boring
-mut c = Counter(0)      # eliminates Shared, Const → {Stack, Owned, Actor, Guard}
+mut c = Counter(0)      # eliminates Shared → {Stack, Owned, Actor, Guard}
 spawn_actor(c)          # demands 'actor → infers 'actor
 ```
 
@@ -6423,7 +6551,7 @@ An explicit qualifier has the highest priority and overrides all inference signa
 
 ### `T'` — the indirection hint
 
-`T'` (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Stack` and `Const` from the start.
+`T'` (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Stack` from the start.
 
 ```boring
 let c' = Counter(0)        # tick → candidates: {Owned, Shared, Actor, Guard}

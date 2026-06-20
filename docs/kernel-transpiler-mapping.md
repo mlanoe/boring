@@ -36,7 +36,6 @@ and the architecture of the kernel emission backend (`--target kernel`).
 | Boring | Rust std | Rust-kernel | Status | Notes |
 |--------|----------|-------------|--------|-------|
 | `T'` | `Box<T>` | `Box<T>` | ✅ | kernel allocator |
-| `T'auto` | `Rc<T>` | `kernel::sync::Arc` | ⚠️ | `Rc` unavailable in kernel — replaced by `Arc`, validation emits a warning |
 | `T'task` | `Arc<T>` | `kernel::sync::Arc` | ✅ | |
 | `T'actor` | `Arc<Mutex<T>>` | `kernel::sync::Mutex` | ✅ | |
 | `T'guard` | `Arc<RwLock<T>>` | `kernel::sync::RwLock` | ✅ | |
@@ -342,7 +341,6 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 - `print!` / assertions → kernel macros
 - `Box<T>` → kernel allocator
 - `HashMap` / `HashSet` → `RBTree` — ordered, O(log n), keys must implement `Ord`
-- `T'auto` → replaced by `Arc<T>`, validation emits a warning
 
 ### Forbidden
 
@@ -381,7 +379,7 @@ The standard backend (`--target rust`, default) is not modified.
 
 ## Implementation order
 
-1. **Validation pass** — reject `float`, `panic`, `T&`/`T&mut` on `task def`; warn on `channel`/`stream` without explicit capacity, `T'auto`
+1. **Validation pass** — reject `float`, `panic`, `T&`/`T&mut` on `task def`; warn on `channel`/`stream` without explicit capacity
 2. **Primitives and types** — `emit_kernel_top.rs`: structs, enums, ownership qualifiers, error type binding
 3. **`KernelFuture<T>`** — `task def` → `Work` item generation, `.done()` / `.wait()`
 4. **`KernelChan<T, N>`** — ring buffer, `send()` / `recv()`

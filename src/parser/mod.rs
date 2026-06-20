@@ -696,11 +696,23 @@ impl Parser {
 
         if is_type_start {
             let saved = self.pos;
+            let line = self.line();
+            // First attempt: full parse_type (handles `T?`, `[T]`, fn types, etc.).
             if let Ok(ty) = self.parse_type() {
                 if let Ok(ty) = self.parse_type_qualifier(ty) {
-                    // Accept any token that can be used as an identifier (including soft keywords
-                    // like `join`, `wait`, etc.) as the function / field name following the type.
-                    if self.keyword_as_ident_str(self.peek()).is_some() {
+                    if self.keyword_as_ident_str(self.peek()).is_some() || self.check(&TokenKind::LParen) {
+                        return Some(ty);
+                    }
+                }
+            }
+            // Fallback: parse_type may have consumed `int ()` as a fn-type signature.
+            // For the anonymous call operator `def int ():`, the `()` is the method
+            // signature, not part of the return type. Re-try with parse_type_base so
+            // that only `int` is consumed, leaving `(` for parse_params().
+            self.pos = saved;
+            if let Ok(ty) = self.parse_type_base(line) {
+                if let Ok(ty) = self.parse_type_qualifier(ty) {
+                    if self.keyword_as_ident_str(self.peek()).is_some() || self.check(&TokenKind::LParen) {
                         return Some(ty);
                     }
                 }
@@ -788,7 +800,11 @@ impl Parser {
             }
             Some(t) if self.kind_is_type_start(t) => {
                 let mut i = after_kw + 1;
-                let mut depth = 0i32;
+                // If the type starts with `[` or `{`, we're already inside the bracket — start at depth 1.
+                let mut depth = match self.tokens.get(after_kw).map(|t| &t.kind) {
+                    Some(TokenKind::LBracket | TokenKind::LBrace) => 1i32,
+                    _ => 0i32,
+                };
                 while i < self.tokens.len() {
                     match &self.tokens[i].kind {
                         TokenKind::Lt => { depth += 1; i += 1; }
@@ -846,8 +862,29 @@ impl Parser {
                     if let Some(tok) = self.tokens.get(i) {
                         match &tok.kind {
                             TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::Ident(q) if matches!(q.as_str(), "copy" | "const" | "stack" | "heap" | "actor" | "wguard") => { i += 1; }
-                            TokenKind::Guard => { i += 1; qual_is_auto_or_shared = true; }
+                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
+                            // `'actor` may be followed by `'task` → `'actor'task`
+                            TokenKind::Ident(q) if q == "actor" => {
+                                i += 1;
+                                if i < self.tokens.len()
+                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
+                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                                {
+                                    i += 2; // consume `'task`
+                                    qual_is_auto_or_shared = true;
+                                }
+                            }
+                            // `'guard` may be followed by `'task` → `'guard'task`
+                            TokenKind::Guard => {
+                                i += 1;
+                                qual_is_auto_or_shared = true;
+                                if i < self.tokens.len()
+                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
+                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                                {
+                                    i += 2;
+                                }
+                            }
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
                             _ => {}
@@ -937,7 +974,7 @@ impl Parser {
                     if let Some(tok) = self.tokens.get(i) {
                         match &tok.kind {
                             TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::Ident(q) if matches!(q.as_str(), "copy" | "const" | "stack" | "heap" | "actor" | "wguard") => { i += 1; }
+                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap" | "actor") => { i += 1; }
                             TokenKind::Guard => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }

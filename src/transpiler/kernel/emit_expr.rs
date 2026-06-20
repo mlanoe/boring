@@ -205,6 +205,12 @@ impl KernelTranspiler {
                 let elems_s: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
                 format!("kernel::prelude::vec![{}]", elems_s.join(", "))
             }
+            ExprKind::ArrayFill { value, count } => {
+                format!("kernel::prelude::vec![{}; {} as usize]", self.emit_expr(value), self.emit_expr(count))
+            }
+            ExprKind::ArrayComp { expr, var, count } => {
+                format!("(0..({} as usize)).map(|{}| {{ {} }}).collect::<kernel::prelude::Vec<_>>()", self.emit_expr(count), var, self.emit_expr(expr))
+            }
 
             ExprKind::Tuple(elems) => {
                 let elems_s: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
@@ -411,6 +417,12 @@ impl KernelTranspiler {
                 } else {
                     format!("{}({}, {})", fn_name, lhs_s, args_s.join(", "))
                 }
+            }
+            ExprKind::QuestionAssign(target, rhs) => {
+                // Kernel mode: emit as nil-coalescing assign (no OnceCell)
+                let lhs_s = self.emit_expr(target);
+                let rhs_s = self.emit_expr(rhs);
+                format!("{{ if {lhs_s}.is_none() {{ {lhs_s} = Some({rhs_s}); }} }}", lhs_s = lhs_s, rhs_s = rhs_s)
             }
         }
     }

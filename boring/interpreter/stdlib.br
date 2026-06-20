@@ -7,6 +7,26 @@ struct Interpreter:
     Env'actor current_env
     var {string=[FnDecl]} struct_methods
     var {string=FnDecl} fn_decls
+    var {string=StructDecl} struct_decls
+    var {string=EnumDecl} enum_decls
+    var bool has_pending_return
+    var Value pending_return_val
+    var bool has_pending_throw
+    var Value pending_throw_val
+
+    def void set_pending_return(Value v):
+        has_pending_return = true
+        pending_return_val = v
+
+    def void set_pending_throw(Value v):
+        has_pending_throw = true
+        pending_throw_val = v
+
+    def Value take_pending_throw():
+        has_pending_throw = false
+        let v = pending_throw_val
+        pending_throw_val = Value.Nil
+        v
 
     req FnDecl? find_method(string type_name, string method_name):
         let methods_opt = struct_methods.get(type_name)
@@ -26,6 +46,24 @@ struct Interpreter:
         let result = fn_decls.get(name)
         if let decl = result:
             return decl
+        nil
+
+    def void set_struct_decl(string name, StructDecl decl):
+        struct_decls.set(name, decl)
+
+    req StructDecl? get_struct_decl(string name):
+        let r = struct_decls.get(name)
+        if let d = r:
+            return d
+        nil
+
+    def void set_enum_decl(string name, EnumDecl decl):
+        enum_decls.set(name, decl)
+
+    req EnumDecl? get_enum_decl(string name):
+        let r = enum_decls.get(name)
+        if let d = r:
+            return d
         nil
 
 # ─── val_to_string ────────────────────────────────────────────────────────────
@@ -219,7 +257,7 @@ def bool values_equal(Value a, Value b):
 
 # ─── env_define ───────────────────────────────────────────────────────────────
 
-def void env_define(var Env'actor env, string name, Value val, bool mutable):
+def void env_define(mut Env'actor env, string name, Value val, bool mutable):
     if mutable:
         env.define_mut(name, val)
     else:
@@ -227,7 +265,7 @@ def void env_define(var Env'actor env, string name, Value val, bool mutable):
 
 # ─── register_stdlib ──────────────────────────────────────────────────────────
 
-def void register_stdlib(var Interpreter'actor interp):
+def void register_stdlib(Interpreter interp):
     let env = interp.global_env
 
     let print_fn = Value.NativeFn("print", Value.Nil)
@@ -353,6 +391,12 @@ def void register_stdlib(var Interpreter'actor interp):
     let all_fn = Value.NativeFn("all", Value.Nil)
     env_define(env, "all", all_fn, false)
 
+    let assert_eq_fn = Value.NativeFn("assert_eq", Value.Nil)
+    env_define(env, "assert_eq", assert_eq_fn, false)
+
+    let assert_neq_fn = Value.NativeFn("assert_neq", Value.Nil)
+    env_define(env, "assert_neq", assert_neq_fn, false)
+
     env_define(env, "PI", Value.Float(3.141592653589793), false)
     env_define(env, "E", Value.Float(2.718281828459045), false)
 
@@ -360,19 +404,24 @@ def void register_stdlib(var Interpreter'actor interp):
 
 def Interpreter'actor new_interpreter():
     let global = new_env(nil)
-    let interp = Interpreter(
+    var interp'actor = Interpreter(
         global_env = global,
         current_env = global,
         struct_methods = {},
-        fn_decls = {}
+        fn_decls = {},
+        struct_decls = {},
+        enum_decls = {},
+        has_pending_return = false,
+        pending_return_val = Value.Nil,
+        has_pending_throw = false,
+        pending_throw_val = Value.Nil
     )
-    let interp_actor = interp as Interpreter'actor
-    register_stdlib(interp_actor)
-    interp_actor
+    register_stdlib(interp)
+    interp
 
 # ─── exec_item ────────────────────────────────────────────────────────────────
 
-def void exec_item(var Interpreter'actor interp, Item item):
+def void exec_item(mut Interpreter interp, Item item):
     match item:
         Item.Fn(decl):
             let fn_name = decl.name
@@ -380,12 +429,15 @@ def void exec_item(var Interpreter'actor interp, Item item):
             let fn_val = Value.Fn(fn_name, interp.global_env)
             env_define(interp.global_env, fn_name, fn_val, false)
         Item.Struct(decl):
-            let struct_val = Value.Nil
-            env_define(interp.global_env, decl.name, struct_val, false)
-            interp.set_method_decls(decl.name, decl.methods)
+            let sname = decl.name
+            interp.set_struct_decl(sname, decl)
+            interp.set_method_decls(sname, decl.methods)
+            env_define(interp.global_env, sname, Value.StructDef(sname), false)
         Item.Enum(decl):
-            let enum_val = Value.Nil
-            env_define(interp.global_env, decl.name, enum_val, false)
+            let ename = decl.name
+            interp.set_enum_decl(ename, decl)
+            interp.set_method_decls(ename, decl.methods)
+            env_define(interp.global_env, ename, Value.EnumDef(ename), false)
         Item.Trait(decl):
             env_define(interp.global_env, decl.name, Value.Nil, false)
         Item.Let(stmt):
@@ -404,7 +456,7 @@ def void exec_item(var Interpreter'actor interp, Item item):
 
 # ─── run_program ──────────────────────────────────────────────────────────────
 
-def void run_program(var Interpreter'actor interp, Program prog):
+def void run_program(Interpreter interp, Program prog):
     for item in prog.items:
         exec_item(interp, item)
 

@@ -25,11 +25,16 @@ They carry three kinds of information: the Rust mapping, the passing semantics b
 
 | Qualifier | Rust impl | Passing semantics | Mutability |
 |---|---|---|---|
-| `'shared` | `Rc<T>` / `Arc<T>` | pointer shared | forbidden |
-| `'actor` | `Rc<RefCell<T>>` / `Arc<Mutex<T>>` | pointer shared | allowed |
-| `'guard` | `Mutex<T>` / `RwLock<T>` | pointer shared | under lock only |
+| `'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | pointer shared | forbidden |
+| `'actor` | `Arc<std::sync::Mutex<T>>` (multi) / `Rc<RefCell<T>>` (single) | pointer shared | allowed |
+| `'guard` | `Arc<std::sync::RwLock<T>>` (multi) / `Rc<RefCell<T>>` (single) | pointer shared | under lock only |
 | `'stack` | `T` on stack | move | determined by `let`/`mut`/`var` |
 | `'heap` | `Box<T>` | move | determined by `let`/`mut`/`var` |
+| `'weak` | `sync::Weak<T>` (multi) / `Rc::Weak<T>` (single) | non-owning pointer | none (no interior mutability) |
+
+`'weak` is a compound qualifier used with an owning qualifier: `T'shared'weak`, `T'actor'weak`, `T'guard'weak`. It holds a non-owning reference to the inner value of the corresponding owning smart pointer and must be upgraded before use.
+
+> **`'actor'task` / `'guard'task`:** these are multi-thread only qualifiers (`Arc<tokio::sync::Mutex<T>>` and `Arc<tokio::sync::RwLock<T>>` respectively) and do not fall back to a single-thread form. They require explicit annotation inside `task` functions — qualifier inference does not automatically promote `'actor` or `'guard` to their `'task` variants.
 
 `'stack` and `'heap` are the only qualifiers where `mut` has its full meaning — and where compiler optimizations from `mut` are most impactful.
 

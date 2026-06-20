@@ -13,13 +13,8 @@ use stdlib
 
 def void main() throws:
     var source = ""
-    var done = false
-    while not done:
-        let ln = readLine()
-        if ln == "":
-            done = true
-        else:
-            source = source + ln + "\n"
+    while let ln = readLine():
+        source = source + ln + "\n"
     let prog = parse(source)
     var interp = new_interpreter()
     run_program(interp, prog)
