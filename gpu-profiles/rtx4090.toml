@@ -1,0 +1,7 @@
+# NVIDIA GeForce RTX 4090 (24 GB GDDR6X)
+name = "NVIDIA GeForce RTX 4090"
+totalMem = 25769803776      # 24 GB
+warpSize = 32
+maxThreads = 1024
+maxSharedMem = 101376       # 99 KB
+computeCapability = [8, 9]

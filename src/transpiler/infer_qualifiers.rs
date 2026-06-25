@@ -614,6 +614,12 @@ impl Transpiler {
                     }
                 }
             }
+            ExprKind::New { arena, ctor } => {
+                if let Some(arena_expr) = arena {
+                    self.walk_expr_for_qualifiers(arena_expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                self.walk_expr_for_qualifiers(ctor, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
             _ => {}
         }
     }
@@ -1216,8 +1222,8 @@ fn collect_anonymous_vars(
     match stmt {
         Stmt::Let(s) => {
             let is_tick = match &s.ty {
-                Some(Type::Qualified(_, OwnerQual::Owned)) => true,
-                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned)),
+                Some(Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) => true,
+                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)),
                 _ => false,
             };
             let is_anonymous = is_tick || match &s.ty {
@@ -1237,6 +1243,21 @@ fn collect_anonymous_vars(
                     mut_bindings.insert(s.name.clone());
                 }
                 if let Some(val) = &s.value {
+                    // `new Constructor()` on RHS without arena: treat as tick binding
+                    // (infer excluding 'stack), same as T' bare tick.
+                    if !is_tick {
+                        if let ExprKind::New { arena: None, ctor } = &val.kind {
+                            tick_bindings.insert(s.name.clone());
+                            // Also populate var_struct_types from the ctor callee.
+                            if let ExprKind::Call(callee, _) = &ctor.kind {
+                                if let ExprKind::Var(type_name) = &callee.kind {
+                                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                        var_struct_types.insert(s.name.clone(), type_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match &val.kind {
                         ExprKind::Var(src) => {
                             alias_of.insert(s.name.clone(), src.clone());
@@ -1259,6 +1280,16 @@ fn collect_anonymous_vars(
                             if let ExprKind::Var(type_name) = &callee.kind {
                                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                                     var_struct_types.insert(s.name.clone(), type_name.clone());
+                                }
+                            }
+                        }
+                        // `new(arena) Constructor()` — populate var_struct_types from ctor callee.
+                        ExprKind::New { ctor, .. } => {
+                            if let ExprKind::Call(callee, _) = &ctor.kind {
+                                if let ExprKind::Var(type_name) = &callee.kind {
+                                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                        var_struct_types.insert(s.name.clone(), type_name.clone());
+                                    }
                                 }
                             }
                         }

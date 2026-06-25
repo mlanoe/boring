@@ -149,11 +149,16 @@ impl Transpiler {
                             let ty = field_tys.get(i);
                             let raw = self.emit_let_value(ty, &a.value);
                             // enum variant fields are owned — strip the leading `&` that
-                            // emit_let_value adds for actor-typed function params.
+                            // emit_let_value adds for actor-typed function params, and add .clone()
+                            // so the original Arc<Mutex<T>> variable can still be used afterward.
                             let raw = if matches!(ty,
                                 Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
                             ) {
-                                raw.strip_prefix('&').unwrap_or(&raw).to_string()
+                                if let Some(stripped) = raw.strip_prefix('&') {
+                                    format!("{}.clone()", stripped)
+                                } else {
+                                    raw
+                                }
                             } else {
                                 raw
                             };
@@ -1198,9 +1203,9 @@ impl Transpiler {
             // generated method signatures (Boring `string` params map to `Arc<str>`).
             args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
         } else if (rust_method == "push" || rust_method == "extend") && {
-            // Only wrap when pushing into a Vec<Arc<str>> (str_vec_vars or field with string type).
+            // Use emit_expr_owned for any vec push so non-Copy values (e.g. Value enum) are cloned.
             match &obj.kind {
-                ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),
+                ExprKind::Var(v) => self.vec_vars.contains(v.as_str()) || self.str_vec_vars.contains(v.as_str()),
                 _ => false,
             }
         } {

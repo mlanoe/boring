@@ -25,6 +25,7 @@ mod infer_qualifiers;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
 pub mod kernel;
+pub mod cuda;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 

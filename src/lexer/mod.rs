@@ -280,7 +280,7 @@ pub enum TokenKind {
     Ident(String),
 
     // Keywords
-    Let, Mut, Var, Lazy, Def, Return,
+    Let, Mut, Var, Lazy, New, Def, Return,
     If, Elif, Else,
     Match,
     While, Do, Loop, Wait,
@@ -311,6 +311,8 @@ pub enum TokenKind {
     Pass,
     Native,
     Mod,
+    Kernel,
+    Sync,
 
     // Operators
     Plus, Minus, Star, Slash, Percent,
@@ -851,6 +853,7 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "mut"      => TokenKind::Mut,
         "var"      => TokenKind::Var,
         "lazy"     => TokenKind::Lazy,
+        "new"      => TokenKind::New,
         "def"      => TokenKind::Def,
         "return"   => TokenKind::Return,
         "if"       => TokenKind::If,
@@ -898,6 +901,8 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "pass"     => TokenKind::Pass,
         "native"   => TokenKind::Native,
         "mod"      => TokenKind::Mod,
+        "kernel"   => TokenKind::Kernel,
+        "sync"     => TokenKind::Sync,
         "true"     => TokenKind::Bool(true),
         "false"    => TokenKind::Bool(false),
         "nil"      => TokenKind::Nil,

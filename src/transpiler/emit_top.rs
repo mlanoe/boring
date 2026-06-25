@@ -40,6 +40,7 @@ impl Transpiler {
                 }
             }
             Item::Stmt(s)   => self.emit_stmt(s, false),
+            Item::Kernel(_) => { /* GPU kernel transpilation — not yet implemented */ }
         }
     }
 
@@ -1233,13 +1234,18 @@ impl Transpiler {
                         let access = self.mutex_var_read(v, v);
                         // If the field itself is an actor (Rc/Arc<RefCell/Mutex<T>>), clone it
                         // to avoid moving out of a temporary borrow/lock guard.
-                        let field_is_shared = self.struct_fields.get(
+                        let field_ty_opt = self.struct_fields.get(
                                 self.var_types.get(v.as_str())
                                     .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
                                     .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
                                     .unwrap_or("")
                             ).and_then(|fields| fields.iter().find(|(fname,_)| fname == field))
-                            .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
+                            .map(|(_, fty)| fty.clone());
+                        let field_is_shared = field_ty_opt.as_ref()
+                            .map(|fty| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
+                            .unwrap_or(false);
+                        let field_is_string = field_ty_opt.as_ref()
+                            .map(|fty| Self::is_string_type(fty))
                             .unwrap_or(false);
                         return if field_is_shared {
                             match self.config.threading {
@@ -1248,6 +1254,9 @@ impl Transpiler {
                                 crate::transpiler::ThreadingMode::Multi =>
                                     format!("Arc::clone(&{}.{})", access, field),
                             }
+                        } else if field_is_string {
+                            // Arc<str> fields can't be moved out of a MutexGuard — clone them.
+                            format!("{}.{}.clone()", access, field)
                         } else {
                             format!("{}.{}", access, field)
                         };
@@ -1332,7 +1341,8 @@ impl Transpiler {
                 } else {
                     map_field(field)
                 };
-                let result = if obj_s == "self" && !field_s.ends_with(')') {
+                let result = if (obj_s == "self" || field.chars().all(|c| c.is_ascii_digit())) && !field_s.ends_with(')') {
+                    // self.field or tuple index .0/.1/... — always clone in owned context (value semantics)
                     format!("{}.{}.clone()", obj_s, field_s)
                 } else {
                     format!("{}.{}", obj_s, field_s)
@@ -1364,7 +1374,18 @@ impl Transpiler {
                 format!("{}.clone()", v)
             }
             // Arc/Rc var in owned position (actor/shared params passed by ref): clone the pointer.
-            ExprKind::Var(v) if self.arc_vars.contains(v.as_str()) => {
+            ExprKind::Var(v) if self.arc_vars.contains(v.as_str())
+                || self.var_mutex_types.contains(v.as_str())
+                || self.managed_mutex_vars.contains(v.as_str())
+                || self.managed_refcell_vars.contains(v.as_str()) =>
+            {
+                format!("{}.clone()", v)
+            }
+            // Non-Copy named types (user enums/structs tracked in var_types): clone to preserve value semantics.
+            ExprKind::Var(v) if matches!(
+                self.var_types.get(v.as_str()),
+                Some(crate::ast::Type::Named(_) | crate::ast::Type::Array(_) | crate::ast::Type::Dict(..) | crate::ast::Type::Set(_))
+            ) => {
                 format!("{}.clone()", v)
             }
             _ => self.emit_expr(expr),
@@ -2070,6 +2091,14 @@ impl Transpiler {
                 // Qualifier union / named group (`'one`, `'many`, `'mut`, `'req`, `T'a|b|c`).
                 // Emits as the plain inner type — the union is a Boring-level constraint only.
                 OwnerQual::Union(_) => self.emit_type(inner),
+                // 'new pseudo-qualifier: infer-excluding-stack, emits as Box<T> (same as Owned).
+                OwnerQual::New => format!("Box<{}>", self.emit_type(inner)),
+                // GPU memory qualifiers: emitted as pointer types (placeholders).
+                OwnerQual::GpuUnified => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuGlobal | OwnerQual::GpuActorGlobal => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuShared  => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuLocal   => self.emit_type(inner), // local = stack in Rust
+                OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),
             }
         }
     }

@@ -291,12 +291,46 @@ impl Parser {
                 "weak"   => { self.advance(); OwnerQual::Weak }
                 "stack"  => { self.advance(); OwnerQual::Stack }
                 "heap"   => { self.advance(); OwnerQual::Owned }
+                "new"    => { self.advance(); OwnerQual::New }
+                // GPU memory qualifiers (kernel-context and host-context).
+                // 'shared already caught above as OwnerQual::Shared (Arc/Rc).
+                "unified" => { self.advance(); OwnerQual::GpuUnified }
+                "global"  => { self.advance(); OwnerQual::GpuGlobal }
+                "local"   => { self.advance(); OwnerQual::GpuLocal }
+                "const"   => { self.advance(); OwnerQual::GpuConst }
+                "gpu"    => {
+                    self.advance();
+                    // `T'gpu'unified`, `T'gpu'global`, `T'gpu'const` — host-side GPU qualifiers.
+                    if self.eat(&TokenKind::Tick) {
+                        match self.peek().clone() {
+                            TokenKind::Ident(ref s) => match s.as_str() {
+                                "unified" => { self.advance(); OwnerQual::GpuUnified }
+                                "global"  => { self.advance(); OwnerQual::GpuGlobal }
+                                "const"   => { self.advance(); OwnerQual::GpuConst }
+                                _ => return Err(ParseError::Generic {
+                                    msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
+                                    line: self.line(),
+                                }),
+                            },
+                            _ => return Err(ParseError::Generic {
+                                msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
+                                line: self.line(),
+                            }),
+                        }
+                    } else {
+                        return Err(ParseError::Generic {
+                            msg: "'gpu must be followed by 'unified, 'global, or 'const".into(),
+                            line: self.line(),
+                        });
+                    }
+                }
                 "actor"  => {
                     self.advance();
-                    // `T'actor'task` → ActorTask
+                    // `T'actor'task` → ActorTask  /  `T'actor'global` → GpuActorGlobal
                     if self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
-                        else { return Err(ParseError::Generic { msg: "expected 'task after 'actor'".into(), line: self.line() }); }
+                        else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
+                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line() }); }
                     } else {
                         OwnerQual::Actor
                     }
@@ -308,6 +342,8 @@ impl Parser {
                 "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
                 _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
             },
+            // `T'new` — `new` is a keyword, not an ident: pseudo-qualifier "infer excluding 'stack"
+            TokenKind::New => { self.advance(); OwnerQual::New }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
             TokenKind::Guard => {
                 self.advance();

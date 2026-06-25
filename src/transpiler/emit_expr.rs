@@ -26,9 +26,22 @@ impl Transpiler {
                 if let Some(struct_name) = &self.self_type {
                     if !self.known_local_vars.contains(n.as_str()) {
                         if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
-                            if fields.iter().any(|(f, _)| f == n) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == n) {
                                 let self_ref = if self.in_init_body { "__self" } else { "self" };
-                                return format!("{}.{}", self_ref, escape_rust_keyword(n));
+                                let field_s = escape_rust_keyword(n);
+                                // Auto-clone non-Copy fields to avoid moving out of &self/&mut self.
+                                // Only in read (RHS) context — not when the field is being assigned to.
+                                // Do NOT clone collections (dict/array/set/vec) — they are mutated
+                                // in-place via method calls on self; cloning would make mutations no-ops.
+                                let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float | Type::Bool)
+                                    || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "bool" | "usize" | "isize"));
+                                let is_collection = matches!(fty, Type::Dict(..) | Type::Array(_) | Type::Set(_));
+                                let needs_clone = !is_primitive && !is_collection && !self.in_lhs_assign.get();
+                                return if needs_clone {
+                                    format!("{}.{}.clone()", self_ref, field_s)
+                                } else {
+                                    format!("{}.{}", self_ref, field_s)
+                                };
                             }
                         }
                     }
@@ -994,6 +1007,17 @@ impl Transpiler {
             ExprKind::MethodCall(obj, method, args) => self.emit_method_call(obj, method, args),
             ExprKind::Pipe(lhs, name, args) => self.emit_pipe(lhs, name, args),
             ExprKind::GenericCall(callee, type_args, args) => self.emit_generic_call(callee, type_args, args),
+
+            ExprKind::New { ctor, .. } => {
+                // Arena placement is not yet emitted — just emit the constructor call.
+                // Qualifier wrapping is handled by the surrounding qualifier emission infrastructure.
+                self.emit_expr(ctor)
+            }
+
+            ExprKind::KernelLaunch { .. } => {
+                // GPU kernel launch transpilation — not yet implemented.
+                "/* kernel launch */".to_string()
+            }
 
             ExprKind::TryElse(e, default) => {
                 // `try expr else default` — calls a throws/Result function and returns the Ok

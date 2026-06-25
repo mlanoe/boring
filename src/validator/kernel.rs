@@ -357,6 +357,19 @@ impl KernelValidator {
                     }
                 }
             }
+            ExprKind::New { arena, ctor } => {
+                if let Some(a) = arena { self.check_expr(a); }
+                self.check_expr(ctor);
+            }
+
+            ExprKind::KernelLaunch { config, kernel } => {
+                if let Some(e) = &config.block { self.check_expr(e); }
+                if let Some(e) = &config.grid  { self.check_expr(e); }
+                if let Some(e) = &config.smem  { self.check_expr(e); }
+                if let Some(e) = &config.after { self.check_expr(e); }
+                self.check_expr(kernel);
+            }
+
             // Leaf kinds — nothing to recurse into
             ExprKind::Int(_)
             | ExprKind::Str(_)
@@ -797,6 +810,47 @@ impl KernelValidator {
             Item::Alias(a) => self.check_alias(a),
             Item::Stmt(s) => self.check_stmt(s),
             Item::Use(_) => {}
+            Item::Kernel(k) => self.check_kernel(k),
+        }
+    }
+
+    /// GPU kernel struct validation.
+    ///
+    /// Rule (Item 8): `'shared` and `'local` fields are block-/thread-local device
+    /// memory and cannot be written from a host-side `init` constructor.  Any
+    /// assignment in an `init` body whose LHS names such a field is an error.
+    fn check_kernel(&mut self, k: &crate::ast::KernelDecl) {
+        use crate::ast::GpuQual;
+        for init in &k.inits {
+            for stmt in &init.body {
+                if let Stmt::Expr(e) = stmt {
+                    if let ExprKind::Assign(lhs, _) = &e.kind {
+                        // LHS may be `field` or `field[idx]` or `self.field`.
+                        let target = match &lhs.kind {
+                            ExprKind::Var(n) => Some(n.clone()),
+                            ExprKind::Index(base, _) => {
+                                if let ExprKind::Var(n) = &base.kind { Some(n.clone()) } else { None }
+                            }
+                            ExprKind::Field(_, f) => Some(f.clone()),
+                            _ => None,
+                        };
+                        if let Some(name) = target {
+                            if let Some(field) = k.fields.iter().find(|f| f.name == name) {
+                                if matches!(field.qual, GpuQual::Shared | GpuQual::Local) {
+                                    let kind = if matches!(field.qual, GpuQual::Shared) { "'shared" } else { "'local" };
+                                    self.error(
+                                        e.line,
+                                        format!(
+                                            "cannot assign to {kind} field '{name}' in an init constructor — \
+                                             {kind} memory is device-local and not accessible from the host"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

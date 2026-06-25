@@ -700,6 +700,18 @@ impl Transpiler {
         if matches!(&s_value.kind, ExprKind::Nil) {
             self.optional_vars.insert(s.name.clone());
         }
+        // Propagate optional through `.clone()` — `let x = opt_var.clone()` keeps x optional.
+        if s.ty.is_none() {
+            if let ExprKind::MethodCall(recv, method, _) = &s_value.kind {
+                if method == "clone" {
+                    if let ExprKind::Var(src) = &recv.kind {
+                        if self.optional_vars.contains(src.as_str()) {
+                            self.optional_vars.insert(s.name.clone());
+                        }
+                    }
+                }
+            }
+        }
         // If-expression or match-expression with nil/some branches already produces Option<T>.
         if s.ty.is_none() {
             fn body_ends_optional_sv(body: &[Stmt], fn_return_types: &std::collections::HashMap<String, crate::ast::Type>) -> bool {
@@ -924,6 +936,26 @@ impl Transpiler {
                     self.string_vars.insert(s.name.clone());
                 } else if STRING_CONDITIONAL_METHODS.contains(&method_name.as_str()) && recv_is_str {
                     self.string_vars.insert(s.name.clone());
+                } else if method_name == "clone" {
+                    // clone() on a string var or a string field access → result is also a string
+                    let is_str_field = if let ExprKind::Field(obj, field_name) = &recv_expr.kind {
+                        if let ExprKind::Var(v) = &obj.kind {
+                            let struct_name = self.var_types.get(v.as_str())
+                                .and_then(|t| match t {
+                                    Type::Named(n) => Some(n.as_str()),
+                                    Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None },
+                                    _ => None,
+                                })
+                                .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()));
+                            struct_name.and_then(|sn| self.struct_fields.get(sn))
+                                .and_then(|fields| fields.iter().find(|(fname, _)| fname == field_name))
+                                .map(|(_, fty)| Self::is_string_type(fty))
+                                .unwrap_or(false)
+                        } else { false }
+                    } else { false };
+                    if recv_is_str || is_str_field {
+                        self.string_vars.insert(s.name.clone());
+                    }
                 }
             }
             // Propagate actor/rc type when `let g = f` where f is already an actor var.
@@ -1618,6 +1650,17 @@ impl Transpiler {
                     if is_owned_actor { format!("&{}", v) }
                     else if is_borrowed_actor { v.to_string() }
                     else { let inner = self.emit_expr(value); format!("&{}", self.emit_actor_new(&inner)) }
+                } else if let ExprKind::MethodCall(recv, method, _) = &value.kind {
+                    // `actor_var.clone()` already produces Arc<Mutex<T>> — don't double-wrap.
+                    if method == "clone" {
+                        if let ExprKind::Var(v) = &recv.kind {
+                            if self.var_mutex_types.contains(v.as_str()) {
+                                return format!("{}.clone()", v);
+                            }
+                        }
+                    }
+                    let inner = self.emit_expr(value);
+                    format!("&{}", self.emit_actor_new(&inner))
                 } else {
                     let inner = self.emit_expr(value);
                     if inner.starts_with('&') {
@@ -2868,6 +2911,25 @@ impl Transpiler {
         } else {
             subj
         };
+        // Auto-clone the match subject when:
+        // - it is a local optional var (optional_vars) with binding arms, AND
+        // - there are non-wildcard binding arms that would partially move the subject.
+        // This avoids E0382 "use of partially moved value" when the subject is also
+        // used elsewhere after the match (e.g. as a return value in an else branch).
+        let subj = if let ExprKind::Var(vname) = &s.subject.kind {
+            let is_optional_var = self.optional_vars.contains(vname.as_str());
+            let has_binding_arm = arms_ref.iter().any(|arm| arm.patterns.iter().any(|p| {
+                matches!(p, Pattern::Variant(_, subs) if !subs.is_empty())
+                    || matches!(p, Pattern::Some(inner) if matches!(inner.as_ref(), Pattern::Variant(_, subs) if !subs.is_empty()))
+            }));
+            if is_optional_var && has_binding_arm {
+                format!("{}.clone()", vname)
+            } else {
+                subj
+            }
+        } else {
+            subj
+        };
         self.line(&format!("match {} {{", subj));
         self.indent += 1;
         for arm in arms_ref {
@@ -2992,7 +3054,7 @@ impl Transpiler {
         // e.g. `Value.Int(a)` → var_types["a"] = Type::Int; `Value.Float(f)` → Type::Float.
         let mut bound_types: Vec<(String, Type)> = Vec::new();
         for p in &arm.patterns {
-            Self::collect_pattern_var_types(p, &self.enum_variant_field_types, &mut bound_types);
+            Self::collect_pattern_var_types(p, &self.enum_variant_field_types, self.match_subject_enum.as_deref(), &mut bound_types);
         }
         let mut bound_structs: Vec<String> = Vec::new();
         let mut bound_optionals: Vec<String> = Vec::new();
@@ -3020,6 +3082,9 @@ impl Transpiler {
         for (name, ty) in &bound_types {
             if matches!(ty, Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
                 bound_actors.push(name.clone());
+                // Track actor-bound vars in var_mutex_types so emit_let_value knows they are
+                // already Arc<Mutex<T>> and avoids double-wrapping them.
+                self.var_mutex_types.insert(name.clone());
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
                     crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.clone()); }
@@ -3095,6 +3160,7 @@ impl Transpiler {
         }
         // Remove actor tracking added for this arm (scoped to the arm body).
         for name in &bound_actors {
+            self.var_mutex_types.remove(name.as_str());
             self.managed_refcell_vars.remove(name.as_str());
             self.managed_mutex_vars.remove(name.as_str());
         }
@@ -3158,6 +3224,7 @@ impl Transpiler {
     fn collect_pattern_var_types(
         pat: &Pattern,
         enum_variant_field_types: &std::collections::HashMap<String, Vec<Type>>,
+        subject_enum: Option<&str>,
         out: &mut Vec<(String, Type)>,
     ) {
         match pat {
@@ -3167,11 +3234,17 @@ impl Transpiler {
                 let field_tys = enum_variant_field_types.get(qual_name.as_str())
                     .cloned()
                     .or_else(|| {
-                        // Try "Foo::Bar" forms when qual_name is "Bar".
-                        // Prefer the variant with the most fields (avoids empty unit variants
-                        // like TokenKind::Return shadowing Stmt::Return(ReturnStmt)).
                         if !qual_name.contains("::") {
                             let suffix = format!("::{}", qual_name);
+                            // Prefer the subject enum's variant if known, to avoid ambiguity
+                            // (e.g. Stmt::Fn vs Value::Fn when matching on a Stmt).
+                            if let Some(en) = subject_enum {
+                                let subject_key = format!("{}::{}", en, qual_name);
+                                if let Some(tys) = enum_variant_field_types.get(&subject_key) {
+                                    return Some(tys.clone());
+                                }
+                            }
+                            // Fallback: pick the variant with the most fields.
                             enum_variant_field_types.iter()
                                 .filter(|(k, _)| k.ends_with(&suffix))
                                 .max_by_key(|(_, v)| v.len())
@@ -3185,13 +3258,13 @@ impl Transpiler {
                             out.push((name.clone(), ty.clone()));
                         }
                     } else {
-                        Self::collect_pattern_var_types(f, enum_variant_field_types, out);
+                        Self::collect_pattern_var_types(f, enum_variant_field_types, subject_enum, out);
                     }
                 }
             }
-            Pattern::Some(inner) => Self::collect_pattern_var_types(inner, enum_variant_field_types, out),
+            Pattern::Some(inner) => Self::collect_pattern_var_types(inner, enum_variant_field_types, subject_enum, out),
             Pattern::Tuple(fields) => {
-                for f in fields { Self::collect_pattern_var_types(f, enum_variant_field_types, out); }
+                for f in fields { Self::collect_pattern_var_types(f, enum_variant_field_types, subject_enum, out); }
             }
             _ => {}
         }
@@ -3600,6 +3673,26 @@ impl Transpiler {
         // `self.field` (struct field) uses `.iter().cloned()` to avoid moving out of self.
         // All other expressions (local vars, method call results) use `.into_iter()` —
         // this handles non-Clone types like JoinHandle and is safe for owned collections.
+        // For `for x in actor_var.field:` or `for k, v in actor_var.field:`,
+        // the field access moves out of the MutexGuard. Clone the field first.
+        if let ExprKind::Field(obj, field_name) = &s.iterable.kind {
+            if let ExprKind::Var(v) = &obj.kind {
+                if self.var_mutex_types.contains(v.as_str()) || self.managed_mutex_vars.contains(v.as_str()) {
+                    let access = self.mutex_var_read(v, v);
+                    let cloned_field = format!("{}.{}.clone()", access, field_name);
+                    let tmp = format!("__iter_{}", v);
+                    self.line(&format!("let {} = {};", tmp, cloned_field));
+                    let pat = if s.vars.len() > 1 { format!("({})", vars) } else { vars };
+                    self.line(&format!("for {} in {}.into_iter() {{", pat, tmp));
+                    self.indent += 1;
+                    self.emit_loop_body(&s.body);
+                    self.indent -= 1;
+                    self.line("}");
+                    self.known_local_vars = saved_locals;
+                    return;
+                }
+            }
+        }
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
             ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
@@ -3607,12 +3700,15 @@ impl Transpiler {
             }
             // Local variable iteration: use iter().cloned() so the variable is not moved
             // and can be reused after the loop. into_iter() would consume the collection.
-            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) => {
+            // Exception: multi-var (dict/tuple) iteration needs into_iter() to get owned pairs.
+            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) && s.vars.len() <= 1 => {
                 format!("{}.iter().cloned()", iter)
             }
             _ => format!("{}.into_iter()", iter),
         };
-        self.line(&format!("for {} in {} {{", vars, iter_expr));
+        // Tuple destructuring: `for k, v in dict:` → `for (k, v) in dict { ... }`
+        let pat = if s.vars.len() > 1 { format!("({})", vars) } else { vars };
+        self.line(&format!("for {} in {} {{", pat, iter_expr));
         self.indent += 1;
         self.emit_loop_body(&s.body);
         self.indent -= 1;

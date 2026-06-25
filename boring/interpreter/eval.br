@@ -296,10 +296,10 @@ def Value eval_expr(Interpreter interp, Expr expr):
                 ExprKind.Var(name):
                     if interp.current_env.is_lazy(name):
                         let cur = interp.current_env.get(name)
-                        let needs_init = match cur:
-                            Value.Uninitialized: true
-                            nil: true
-                            _: false
+                        var needs_init = cur == nil
+                        if let cur_val = cur:
+                            if cur_val == Value.Uninitialized:
+                                needs_init = true
                         if needs_init:
                             let rhs_val = eval_expr(interp, rhs_expr)
                             let ok = interp.current_env.set(name, rhs_val)
@@ -405,9 +405,7 @@ def Value eval_expr(Interpreter interp, Expr expr):
 
 # DotIdent: .Variant — search all known enums for a matching variant
 def Value eval_dot_ident(Interpreter interp, string variant_name):
-    for pair in interp.enum_decls.pairs():
-        let ename = pair.0
-        let decl = pair.1
+    for ename, decl in interp.enum_decls:
         for variant in decl.variants:
             if variant.name == variant_name:
                 return Value.EnumVariant(ename, variant_name, [])

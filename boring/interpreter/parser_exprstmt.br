@@ -701,8 +701,7 @@ def Arg parse_arg(mut Parser p) throws:
         let value = parse_or(p)
         return make_arg(nil, value, true)
     if parser_peek_is_ident(p) and parser_check2(p, "Eq"):
-        let after_eq_pos = parser_pos(p) + 2
-        let is_double_eq = parser_token_at_is_eq(p, after_eq_pos)
+        let is_double_eq = parser_token_at_is_eq(p, 2)
         if not is_double_eq:
             let label = parser_expect_ident(p)
             parser_advance(p)

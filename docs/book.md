@@ -4537,18 +4537,45 @@ let mut c: Arc<Mutex<Counter>>   = Arc::new(Mutex::new(Counter { value: 0 }));
 
 The qualifier-on-name form is especially concise when the type is obvious from context. The full `Type'qualifier name` form remains valid and is preferred when the type needs to be explicit.
 
+### Placement operator — `new`
+
+`new` is a placement operator that signals non-stack allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'stack`):
+
+```boring
+let v = Counter()       # inferred — 'stack included in candidates
+let v = new Counter()   # inferred — 'stack excluded from candidates
+let v'actor = Counter() # explicit qualifier
+```
+
+For delayed initialisation, `'new` is the equivalent pseudo-qualifier:
+
+```boring
+let Counter v           # delayed init — 'stack included
+let Counter'new v       # delayed init — 'stack excluded
+let Counter'actor v     # delayed init — explicit qualifier
+```
+
+`new` also accepts a GPU arena as first argument (see the CUDA section):
+
+```boring
+new(g0) Counter()         # GPU device g0, CPU side inferred
+new(g0('heap)) Counter()  # GPU device g0, CPU side explicit 'heap
+```
+
+`let v' = a` is a **move marker** (explicit transfer of ownership from `a` to `v`) — it is unrelated to `new` and placement.
+
 Shorthands cover the most common cases without writing a qualifier explicitly:
 
 | Boring shorthand | Strict mode (`--mode strict`) | Managed mode (`--mode managed`) | Meaning |
 |------------------|-------------------------------|----------------------------------|---------|
 | `T`  | `T` (stack) | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous — transpiler decides |
-| `T'` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous with indirection — transpiler decides |
+| `T'new` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Non-stack placement, qualifier inferred by transpiler |
 | `T?` | `Option<T>` | `Option<T>` | Optional value |
 | `[T]` | `Vec<T>` | `Vec<T>` | Dynamic array |
 | `{T}` | `HashSet<T>` | `HashSet<T>` | Unordered set |
 | `{K=V}` | `HashMap<K, V>` | `HashMap<K, V>` | Key-value map |
 
-`T` and `T'` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'stack`, `T'heap`, etc.) are **contracts** and are never affected by the mode.
+`T` and `T'new` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'stack`, `T'heap`, etc.) are **contracts** and are never affected by the mode.
 
 In managed mode, `Arc<Mutex<T>>` is used with `--threading multi` (default) and `RefCell<T>` with `--threading single`.
 
@@ -7102,6 +7129,146 @@ This single command produces a binary that:
 | `--instrument` | — | — | stable |
 | `--compile` | — | — | stable |
 | `--rust-options` | — | — | stable |
+
+---
+
+## 33. GPU / CUDA
+
+Boring supports GPU computing through `kernel` structs — a dedicated declaration form that groups device memory fields, an `init` allocator, device-side helpers, and an anonymous entry point (`def ()`).
+
+The full reference is in [`docs/cuda-module.md`](cuda-module.md). This section covers the essentials.
+
+### Quick start
+
+```boring
+kernel Scale:
+    mut [float]'unified buf     # unified host+device DRAM
+
+    init([float]'unified data):
+        buf = data
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        buf[i] *= 2.0
+
+mut k = Scale(data)                          # instantiate — init called
+mut k = kernel(block = 256) k |> .wait      # launch → wait → get result back
+print k.buf[0]
+```
+
+### `kernel` struct
+
+```boring
+kernel Name:
+    <binding> [<type>]'<qualifier> <field>   # field declarations
+    ...
+
+    init(<params>):
+        <body>                               # allocate / initialise fields
+
+    def <helper>(<params>):                  # device-side helper method
+        <body>
+
+    def ():                                  # entry point — invoked once per thread
+        <body>
+```
+
+`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, `'shared`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct.
+
+### GPU memory qualifiers
+
+**Kernel-context** (inside `kernel` struct fields):
+
+| Qualifier | Memory space | Host access |
+|---|---|---|
+| `'unified` | unified DRAM (host + device) | direct |
+| `'global` | device-only DRAM | via `gpu.copy()` |
+| `'shared` | block SRAM (`__shared__`) | no |
+| `'local` | registers / thread-local | no — default |
+| `'const` | constant cache | no |
+
+**Host-context** (bindings outside `kernel` struct):
+
+| Qualifier | Location |
+|---|---|
+| `'gpu'unified` | unified host + device DRAM |
+| `'gpu'global` | device-only DRAM |
+| `'gpu'const` | GPU constant cache |
+
+### Launch expression
+
+```boring
+kernel(block = N) k                         # 1D, N threads per block, 1 block
+kernel(block = N, grid = M) k               # 1D, N threads × M blocks
+kernel(block = (16, 16)) k                  # 2D — grid inferred from kernel shape
+kernel(block = 256, after = h1) k           # ordered after h1
+```
+
+Returns a `KernelHandle`:
+
+```boring
+struct KernelHandle<T>:
+    req bool done()    # true if completed (always true in simulation)
+    req T    wait()    # block until complete, return kernel object
+```
+
+Common pattern with the pipe operator:
+
+```boring
+mut k = kernel(block = 256) k |> .wait     # launch and wait in one expression
+```
+
+### Execution context built-ins
+
+Inside `def ()` and device helpers, `gpu` is available:
+
+| Built-in | CUDA equivalent |
+|---|---|
+| `gpu.thread.x/y/z` | `threadIdx.x/y/z` |
+| `gpu.block.x/y/z` | `blockIdx.x/y/z` |
+| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` |
+| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` |
+| `sync` | `__syncthreads()` |
+
+### `GPU` type
+
+`GPU` is a built-in type for device selection and property queries:
+
+```boring
+let g = GPU(0)
+print "Device: {g.name()} — {g.totalMem() / 1_073_741_824} GB"
+print "SM {g.computeCapability()[0]}.{g.computeCapability()[1]}, warp {g.warpSize()}"
+
+for g in GPU.all():
+    print "[{g.index()}] {g.name()} — {g.freeMem()} bytes free"
+```
+
+| Method | Returns |
+|---|---|
+| `name()` | device model name |
+| `totalMem()` | total VRAM in bytes |
+| `freeMem()` | available VRAM in bytes |
+| `computeCapability()` | `[major, minor]` |
+| `warpSize()` | threads per warp |
+| `maxThreads()` | max threads per block |
+| `maxSharedMem()` | max shared memory per block (bytes) |
+| `index()` | device index |
+
+### Simulation mode
+
+`boring run` executes kernels sequentially on the CPU — each thread's entry point runs in order, `sync` is a no-op, `gpu.thread.x` is the loop index. The same source file works without a GPU, enabling unit tests and CI.
+
+```
+boring run main.br                  # default simulation profile
+boring run --gpu a100 main.br       # simulate A100 device properties
+boring run --gpu h100 main.br       # simulate H100 device properties
+```
+
+Built-in profiles: `default`, `v100`, `a100`, `rtx3090`, `rtx4090`, `h100`. Custom profiles are TOML files (`--gpu path/to/my.toml`).
+
+> **Note:** sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
+
+See [`docs/cuda-module.md`](cuda-module.md) for the full reference: memory safety model, `'shared` SRAM, multi-device, `after =` ordering, atomics, GPU simulation profiles, and CUDA codegen mapping.
 
 ---
 

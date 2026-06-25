@@ -133,6 +133,36 @@ fn main() {
     }
 }
 
+/// Parse `boring run [--gpu <profile>] [file.br]` flags.
+/// Returns (gpu_profile_name, file_path).
+fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
+    let mut gpu: Option<String> = None;
+    let mut file: Option<&str>  = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gpu" => {
+                i += 1;
+                if let Some(name) = args.get(i) {
+                    gpu = Some(name.clone());
+                } else {
+                    eprintln!("error: --gpu requires a profile name");
+                    process::exit(1);
+                }
+            }
+            s if !s.starts_with('-') => {
+                file = Some(args[i].as_str());
+            }
+            other => {
+                eprintln!("error: unknown run flag '{other}'");
+                process::exit(1);
+            }
+        }
+        i += 1;
+    }
+    (gpu, file)
+}
+
 fn run() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -151,9 +181,12 @@ fn run() {
             new_project(name);
         }
         Some("run") => {
-            match args.get(2).map(|s| s.as_str()) {
-                Some(path) => run_file(path),         // boring run file.br
-                None       => run_project(),          // boring run  (uses boring.toml)
+            // Parse optional: --gpu <profile>  before the file path.
+            let run_args = &args[2..];
+            let (gpu_profile_name, file_arg) = parse_run_flags(run_args);
+            match file_arg {
+                Some(path) => run_file(path, gpu_profile_name.as_deref()),
+                None       => run_project(),
             }
         }
         Some("build") => {
@@ -161,7 +194,7 @@ fn run() {
             parse_build_command(build_args);
         }
 
-        Some(path) => run_file(path),
+        Some(path) => run_file(path, None),
         None => {
             print_help();
             process::exit(1);
@@ -176,6 +209,9 @@ fn print_help() {
     eprintln!("    boring new <name>          Create a new project");
     eprintln!("    boring run                 Run the project in the current directory");
     eprintln!("    boring run <file.br>       Run a single file");
+    eprintln!("    boring run --gpu <profile> <file.br>  Run with a GPU simulation profile");
+    eprintln!("                               Built-in profiles: default, v100, a100, rtx3090, rtx4090, h100");
+    eprintln!("                               Custom profile:    --gpu path/to/profile.toml");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
     eprintln!("    boring build --mode managed              Use managed memory mode (Arc<Mutex> defaults)");
@@ -188,6 +224,8 @@ fn print_help() {
                                             Example: --rust-options \"--release\"");
     eprintln!("    boring build --target kernel             Emit a kernel Cargo project from boring.toml");
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
+    eprintln!("    boring build --target cuda               Emit a CUDA Cargo project from boring.toml");
+    eprintln!("    boring build --target cuda <file.br>     Emit a CUDA Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
 }
 
@@ -238,7 +276,7 @@ fn new_project(name: &str) {
 /// `boring run` — run the project described by `boring.toml` in the current directory.
 fn run_project() {
     let (toml, _) = load_project_toml();
-    run_file(&toml.main);
+    run_file(&toml.main, None);
 }
 
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
@@ -259,6 +297,7 @@ fn parse_build_command(build_args: &[String]) {
     use transpiler::{TranspileConfig, TranspileMode, ThreadingMode};
 
     let mut target_kernel = false;
+    let mut target_cuda   = false;
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
     let mut stack_auto_bytes: usize = 256;
@@ -277,14 +316,15 @@ fn parse_build_command(build_args: &[String]) {
                 i += 1;
                 match build_args.get(i).map(|s| s.as_str()) {
                     Some("kernel") => target_kernel = true,
+                    Some("cuda")   => target_cuda   = true,
                     Some(t) => {
                         eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: kernel");
+                        eprintln!("hint:  supported targets: kernel, cuda");
                         process::exit(1);
                     }
                     None => {
                         eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: kernel");
+                        eprintln!("hint:  supported targets: kernel, cuda");
                         process::exit(1);
                     }
                 }
@@ -387,6 +427,23 @@ fn parse_build_command(build_args: &[String]) {
         process::exit(1);
     }
 
+    if target_cuda && threading != ThreadingMode::Multi {
+        eprintln!("error: --threading is not available for the cuda target");
+        process::exit(1);
+    }
+
+    // CUDA target — short-circuit before the general config path.
+    if target_cuda {
+        match file {
+            Some(path) => { emit_cuda(path, "0.1.0"); return; }
+            None => {
+                let (toml, _) = load_project_toml();
+                emit_cuda(&toml.main, &toml.version);
+                return;
+            }
+        }
+    }
+
     let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new() };
 
     if emit_rust {
@@ -452,7 +509,7 @@ fn run_cargo_build(project_dir: &PathBuf, rust_options: &[String]) {
 
 // ─── Core: interpret ──────────────────────────────────────────────────────────
 
-fn run_file(path: &str) {
+fn run_file(path: &str, gpu_profile: Option<&str>) {
     let path = PathBuf::from(path);
 
     let source = match std::fs::read_to_string(&path) {
@@ -480,6 +537,17 @@ fn run_file(path: &str) {
     };
 
     let mut interp = interpreter::Interpreter::new();
+
+    if let Some(name) = gpu_profile {
+        match interpreter::gpu_profile::GpuProfile::load(name) {
+            Ok(profile) => interp.gpu_profile = profile,
+            Err(e) => {
+                eprintln!("error: {e}");
+                eprintln!("available profiles: default, v100, a100, rtx3090, rtx4090, h100");
+                process::exit(1);
+            }
+        }
+    }
 
     // Add the file's directory to the search path for `use` resolution
     if let Some(dir) = path.parent() {
@@ -736,6 +804,89 @@ fn host_target() -> String {
 }
 
 // ─── Core: kernel transpile ───────────────────────────────────────────────────
+
+// ─── Core: CUDA transpile ─────────────────────────────────────────────────────
+
+fn emit_cuda(path: &str, version: &str) {
+    let path = PathBuf::from(path);
+
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+
+    let tokens = match lexer::lex(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            report_error(&path, &source, e.line(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(&path, &source, e.line(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    let stem = path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base_dir.join(format!("{}_cuda", stem));
+
+    let cuda_out = transpiler::cuda::transpile_cuda(&program, &stem, version);
+
+    // Create directory layout.
+    let src_dir     = project_dir.join("src");
+    let kernels_dir = project_dir.join("kernels");
+    for dir in [&src_dir, &kernels_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create '{}': {}", dir.display(), e);
+            process::exit(1);
+        }
+    }
+
+    // src/main.rs
+    let main_rs = src_dir.join("main.rs");
+    if let Err(e) = std::fs::write(&main_rs, &cuda_out.host_rs) {
+        eprintln!("error: cannot write '{}': {}", main_rs.display(), e);
+        process::exit(1);
+    }
+
+    // kernels/main.cu
+    let cu_file = kernels_dir.join("main.cu");
+    if let Err(e) = std::fs::write(&cu_file, &cuda_out.device_cu) {
+        eprintln!("error: cannot write '{}': {}", cu_file.display(), e);
+        process::exit(1);
+    }
+
+    // build.rs
+    let build_rs = project_dir.join("build.rs");
+    if let Err(e) = std::fs::write(&build_rs, &cuda_out.build_rs) {
+        eprintln!("error: cannot write '{}': {}", build_rs.display(), e);
+        process::exit(1);
+    }
+
+    // Cargo.toml
+    let cargo_toml = project_dir.join("Cargo.toml");
+    if let Err(e) = std::fs::write(&cargo_toml, &cuda_out.cargo_toml) {
+        eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
+        process::exit(1);
+    }
+
+    eprintln!("Generated CUDA project at '{}'", project_dir.display());
+    eprintln!("  Requires CUDA toolkit (nvcc) and a CUDA-capable GPU.");
+    eprintln!("  cd {} && cargo build", project_dir.display());
+    if !cuda_out.kernel_names.is_empty() {
+        eprintln!("  Kernels: {}", cuda_out.kernel_names.join(", "));
+    }
+}
 
 fn emit_kernel(path: &str) {
     emit_kernel_with_version(path, "0.1.0");

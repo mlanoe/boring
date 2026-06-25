@@ -21,6 +21,7 @@ pub(crate) mod exec;
 pub(crate) mod eval_expr;
 pub(crate) mod call;
 pub(crate) mod methods;
+pub mod gpu_profile;
 
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -290,6 +291,19 @@ pub enum Value {
         closed: Rc<RefCell<bool>>,
         is_sender: bool,
     },
+    /// GPU kernel handle (simulation mode).
+    /// The kernel has already run sequentially; `done()` returns true, `wait()` returns the value.
+    KernelHandle {
+        result: Box<Value>,
+    },
+    /// GPU kernel struct registered by `kernel Name:`.
+    /// Stores the declaration and the environment at definition time.
+    KernelStruct {
+        decl: crate::ast::KernelDecl,
+        captured: EnvRef,
+    },
+    /// GPU device handle, produced by `GPU(n)` (simulation mode).
+    GpuDevice(usize),
 }
 
 impl PartialEq for Value {
@@ -358,6 +372,9 @@ impl fmt::Debug for Value {
             Value::Index(idx) => write!(f, "Index({:?})", idx),
             Value::Channel { is_sender, .. } => write!(f, "Channel({})", if *is_sender { "sender" } else { "receiver" }),
             Value::OverloadedFn { name, .. } => write!(f, "OverloadedFn({})", name),
+            Value::KernelHandle { result } => write!(f, "KernelHandle({:?})", result),
+            Value::KernelStruct { decl, .. } => write!(f, "KernelStruct({})", decl.name),
+            Value::GpuDevice(n) => write!(f, "GpuDevice({})", n),
         }
     }
 }
@@ -391,6 +408,9 @@ impl Value {
             Value::Index(idx) => idx.type_name().into(),
             Value::Channel { is_sender, .. } => if *is_sender { "Sender".into() } else { "Receiver".into() },
             Value::OverloadedFn { name, .. } => name.clone(),
+            Value::KernelHandle { .. } => "KernelHandle".into(),
+            Value::KernelStruct { decl, .. } => decl.name.clone(),
+            Value::GpuDevice(_) => "GpuDevice".into(),
         }
     }
 }
@@ -477,6 +497,9 @@ impl fmt::Display for Value {
             Value::Index(idx) => write!(f, "{}", idx),
             Value::Channel { is_sender, .. } => write!(f, "<{}>", if *is_sender { "sender" } else { "receiver" }),
             Value::OverloadedFn { name, .. } => write!(f, "<overloaded fn {}>", name),
+            Value::KernelHandle { result } => write!(f, "<KernelHandle: {}>", result),
+            Value::KernelStruct { decl, .. } => write!(f, "<kernel {}>", decl.name),
+            Value::GpuDevice(n) => write!(f, "<GPU {}>", n),
         }
     }
 }
@@ -1431,6 +1454,8 @@ fn register_stdlib(env: &EnvRef) {
 // ─── Interpreter ─────────────────────────────────────────────────────────────
 
 pub struct Interpreter {
+    /// GPU simulation profile — used by `GpuDevice` property evaluation.
+    pub gpu_profile: gpu_profile::GpuProfile,
     pub global: EnvRef,
     pub traits: HashMap<String, TraitDecl>,
     pub enums: HashMap<String, EnumDecl>,  // enum declarations keyed by name
@@ -1499,6 +1524,7 @@ impl Interpreter {
         aliases.insert("Bool".into(),   Type::Bool);
         let global = Env::new_global();
         Self {
+            gpu_profile: gpu_profile::GpuProfile::default(),
             global,
             traits: HashMap::new(),
             enums: HashMap::new(),
@@ -2157,6 +2183,9 @@ impl Interpreter {
                 }
                 Ok(())
             }
+            Item::Kernel(decl) => {
+                self.exec_kernel_decl(decl, env)
+            }
         }
     }
 
@@ -2194,3 +2223,4 @@ impl Default for Interpreter {
 
 #[cfg(test)]
 mod tests;
+mod eval_gpu;

@@ -217,6 +217,12 @@ impl Parser {
                 }
                 Ok(Stmt::Expr(task_expr))
             }
+            // `sync` — GPU thread synchronization barrier (no-op in simulation mode).
+            TokenKind::Sync => {
+                self.advance();
+                self.expect_newline_soft();
+                Ok(Stmt::Comment("sync".to_string())) // no-op: treated as a comment
+            }
             _ => {
                 let line = self.line();
                 // Parse lhs (no assignment — parse_expr doesn't produce Assign nodes)

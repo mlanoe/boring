@@ -68,7 +68,7 @@ struct LPoint:
     pub int y
 
 def void lmain():
-    use Pt as LPoint'
+    use Pt as LPoint'new
     def int describe(Pt p): p.x + p.y
     let p = LPoint(x = 10, y = 32)
     print describe(p)

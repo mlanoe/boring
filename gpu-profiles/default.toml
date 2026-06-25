@@ -1,0 +1,7 @@
+# Generic simulated GPU — used when no --gpu profile is specified.
+name = "Simulated GPU"
+totalMem = 8589934592       # 8 GB
+warpSize = 32
+maxThreads = 1024
+maxSharedMem = 49152        # 48 KB
+computeCapability = [8, 6]

@@ -113,7 +113,7 @@ enum EColorB:
     GreenB
     BlueB
 
-def string namee(EColorB' c):
+def string namee(EColorB'new c):
     match c:
         RedB: "red"
         GreenB: "green"

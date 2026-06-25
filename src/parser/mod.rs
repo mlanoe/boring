@@ -277,6 +277,16 @@ impl Parser {
                     _ => Ok(Item::Stmt(self.parse_stmt()?)),
                 }
             }
+            TokenKind::Kernel => {
+                // `kernel Name:` — GPU kernel struct declaration.
+                // `kernel(...)` is a launch expression — handled in parse_stmt/parse_expr.
+                let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                if matches!(next, Some(TokenKind::Ident(_))) {
+                    Ok(Item::Kernel(self.parse_kernel_decl(is_pub)?))
+                } else {
+                    Ok(Item::Stmt(self.parse_stmt()?))
+                }
+            }
             TokenKind::Struct => Ok(Item::Struct(self.parse_struct_decl(is_pub)?)),
             TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl(is_pub)?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_decl()?)),
@@ -887,6 +897,7 @@ impl Parser {
                             }
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
+                            TokenKind::New => { i += 1; }
                             _ => {}
                         }
                     }
@@ -978,6 +989,7 @@ impl Parser {
                             TokenKind::Guard => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
+                            TokenKind::New => { i += 1; }
                             _ => {}
                         }
                     }
@@ -1135,6 +1147,145 @@ impl Parser {
         self.skip_newlines_and_indent();
         let _ = self.expect(&TokenKind::Gt);
         (params, where_clause)
+    }
+
+    // ─── GPU kernel declaration ───────────────────────────────────────────────
+
+    fn parse_kernel_decl(&mut self, is_pub: bool) -> Result<KernelDecl, ParseError> {
+        let line = self.line();
+        self.expect(&TokenKind::Kernel)?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::Colon)?;
+        self.expect_newline()?;
+        self.expect(&TokenKind::Indent)?;
+
+        let mut fields: Vec<KernelFieldDecl> = Vec::new();
+        let mut inits: Vec<InitDecl> = Vec::new();
+        let mut methods: Vec<FnDecl> = Vec::new();
+
+        loop {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                break;
+            }
+            match self.peek().clone() {
+                TokenKind::Init => {
+                    inits.push(self.parse_init_decl()?);
+                }
+                TokenKind::Def => {
+                    methods.push(self.parse_fn_decl(false, true)?);
+                }
+                TokenKind::Req => {
+                    methods.push(self.parse_fn_decl(false, false)?);
+                }
+                TokenKind::Let | TokenKind::Var => {
+                    fields.push(self.parse_kernel_field()?);
+                }
+                TokenKind::Mut => {
+                    fields.push(self.parse_kernel_field()?);
+                }
+                _ => break,
+            }
+        }
+        self.eat(&TokenKind::Dedent);
+        Ok(KernelDecl { name, is_pub, fields, inits, methods, line })
+    }
+
+    /// Parse a kernel field: `let [float]'unified input` or `mut [float]'shared tile`
+    ///
+    /// The `parse_type()` call consumes the tick `'` but leaves the qualifier ident
+    /// unconsumed (because `"unified"` etc. are not in the standard qualifier table).
+    /// We then pick up the remaining ident to determine the GPU qualifier.
+    fn parse_kernel_field(&mut self) -> Result<KernelFieldDecl, ParseError> {
+        let line = self.line();
+        let binding = match self.peek().clone() {
+            TokenKind::Let => { self.advance(); FieldBinding::Let }
+            TokenKind::Mut => { self.advance(); FieldBinding::Mut }
+            TokenKind::Var => { self.advance(); FieldBinding::Var }
+            _ => return Err(ParseError::Generic {
+                msg: "kernel field must start with let, mut, or var".into(),
+                line,
+            }),
+        };
+
+        // Parse the type — e.g. `[float]'unified`.
+        // parse_type() produces Qualified(inner, GpuUnified/GpuGlobal/...) for GPU qualifiers.
+        let parsed_ty = self.parse_type()?;
+
+        // Extract the GPU qualifier and base type.
+        // Note: `'shared` maps to OwnerQual::Shared (Arc/Rc) in the global qualifier table;
+        // in kernel context it means block SRAM — we accept both spellings.
+        let (qual, base_ty) = match parsed_ty {
+            Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
+            Type::Qualified(inner, OwnerQual::GpuGlobal)  => (GpuQual::Global,  *inner),
+            Type::Qualified(inner, OwnerQual::GpuShared)  => (GpuQual::Shared,  *inner),
+            Type::Qualified(inner, OwnerQual::Shared)     => (GpuQual::Shared,  *inner), // 'shared = block SRAM in kernel
+            Type::Qualified(inner, OwnerQual::GpuLocal)   => (GpuQual::Local,   *inner),
+            Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
+            Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
+            _ => return Err(ParseError::Generic {
+                msg: "kernel field type must have a GPU memory qualifier ('unified, 'global, 'shared, 'local, or 'const)".into(),
+                line,
+            }),
+        };
+
+        let name = self.expect_ident()?;
+        self.expect_newline_soft();
+        Ok(KernelFieldDecl { name, binding, qual, ty: base_ty, line })
+    }
+
+    /// Parse a `kernel(params) expr` launch expression.
+    /// Called from expression parsing when `kernel` is followed by `(`.
+    pub(crate) fn parse_kernel_launch(&mut self, line: usize) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::Kernel)?;
+        self.expect(&TokenKind::LParen)?;
+
+        let mut block: Option<Expr> = None;
+        let mut grid: Option<Expr> = None;
+        let mut smem: Option<Expr> = None;
+        let mut after: Option<Expr> = None;
+        let mut priority: Option<String> = None;
+
+        // Parse named parameters: `block = N, grid = M, smem = {...}, after = h`
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            self.skip_newlines_and_indent();
+            let param_name = match self.peek().clone() {
+                TokenKind::Ident(s) => { self.advance(); s }
+                _ => break,
+            };
+            self.expect(&TokenKind::Eq)?;
+            match param_name.as_str() {
+                "block"    => { block = Some(self.parse_expr()?); }
+                "grid"     => { grid  = Some(self.parse_expr()?); }
+                "smem"     => { smem  = Some(self.parse_expr()?); }
+                "after"    => { after = Some(self.parse_expr()?); }
+                "priority" => {
+                    match self.peek().clone() {
+                        TokenKind::Ident(s) => { self.advance(); priority = Some(s); }
+                        _ => return Err(ParseError::Generic {
+                            msg: "priority must be high, normal, or low".into(),
+                            line: self.line(),
+                        }),
+                    }
+                }
+                _ => { let _ = self.parse_expr()?; } // skip unknown params
+            }
+            if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines_and_indent();
+        }
+        self.expect(&TokenKind::RParen)?;
+
+        let config = Box::new(KernelConfig { block, grid, smem, after, priority, line });
+
+        // Parse the kernel argument — only a primary/postfix expression, NOT a full pipe chain.
+        // `kernel(block=N) k |> .wait` should parse as `(kernel(block=N) k) |> .wait`,
+        // not as `kernel(block=N) (k |> .wait)`.
+        let kernel_expr = self.parse_postfix_top_level()?;
+
+        Ok(Expr {
+            kind: ExprKind::KernelLaunch { config, kernel: Box::new(kernel_expr) },
+            line,
+        })
     }
 
     fn parse_struct_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
@@ -1751,6 +1902,7 @@ impl Parser {
             TokenKind::Pass      => Some("pass".into()),
             TokenKind::Native    => Some("native".into()),
             TokenKind::Mod       => Some("mod".into()),
+            TokenKind::New       => Some("new".into()),
             TokenKind::Bool(b)   => Some(if *b { "True".into() } else { "False".into() }),
             TokenKind::Nil       => Some("Nil".into()),
             _ => None,

@@ -41,6 +41,7 @@ pub enum Item {
     Mod(ModDecl),
     Let(LetStmt),
     Alias(AliasDecl),
+    Kernel(KernelDecl),
     Stmt(Stmt),
 }
 
@@ -212,6 +213,80 @@ pub struct FieldDecl {
     pub transient: bool,
     pub ty: Type,
     pub default: Option<Expr>,
+    pub line: usize,
+}
+
+// ─── GPU / Kernel AST ────────────────────────────────────────────────────────
+
+/// Qualifier for a field inside a `kernel` struct.
+///
+/// In kernel context (device code) the `'gpu` prefix is dropped:
+///   `'unified` — cudaMallocManaged, accessible from host and device
+///   `'global`  — device DRAM, write from host via init, read/write on device
+///   `'shared`  — block SRAM (declared as `__shared__`)
+///   `'local`   — per-thread registers / local mem
+///   `'const`   — read-only constant memory
+///
+/// Host-side GPU fields (rare) use the `'gpu'*` prefixed forms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuQual {
+    Unified,
+    Global,
+    Shared,
+    Local,
+    Const,
+    /// `'actor'global` — device DRAM accessed via atomics on device.
+    /// Behaves like `Global` for memory placement; compound assigns become atomic ops.
+    ActorGlobal,
+}
+
+/// Binding kind for a kernel field: `let`, `mut`, or `var`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldBinding {
+    Let,
+    Mut,
+    Var,
+}
+
+/// A field declaration inside a `kernel` struct.
+#[derive(Debug, Clone)]
+pub struct KernelFieldDecl {
+    pub name: String,
+    pub binding: FieldBinding,
+    pub qual: GpuQual,
+    pub ty: Type,
+    pub line: usize,
+}
+
+/// A `kernel` struct declaration.
+///
+/// Kernel structs differ from regular structs in that:
+/// - Every field has an explicit binding (`let`/`mut`/`var`) and a GPU memory qualifier.
+/// - Only one anonymous `def ()` is allowed (the kernel entry point).
+/// - `init` constructors allocate GPU buffers.
+#[derive(Debug, Clone)]
+pub struct KernelDecl {
+    pub name: String,
+    pub is_pub: bool,
+    pub fields: Vec<KernelFieldDecl>,
+    pub inits: Vec<InitDecl>,
+    pub methods: Vec<FnDecl>,
+    pub line: usize,
+}
+
+/// Launch configuration passed to the `kernel(...)` expression.
+#[derive(Debug, Clone)]
+pub struct KernelConfig {
+    /// Threads per block: int or tuple.
+    pub block: Option<Expr>,
+    /// Blocks per grid: int or tuple (inferred if None).
+    pub grid: Option<Expr>,
+    /// Named dynamic shared-memory partitions: `{name = bytes}`.
+    pub smem: Option<Expr>,
+    /// Ordering dependency: handle or tuple of handles.
+    pub after: Option<Expr>,
+    /// Scheduling priority: `high`, `normal`, or `low` (as string).
+    pub priority: Option<String>,
     pub line: usize,
 }
 
@@ -638,6 +713,16 @@ pub enum ExprKind {
     // Desugars at emit time: if f is in fn_sigs → f(lhs, args), else → lhs.f(args)
     Pipe(Box<Expr>, String, Vec<Arg>),
 
+    /// `new Constructor()` — placement expression, qualifier inferred excluding 'stack.
+    /// `new(arena) Constructor()` — GPU arena placement; arena expression stored but not yet emitted.
+    /// `ctor` is the constructor call expression (e.g. `Counter()`).
+    /// `arena` is the expression inside `new(...)` if present.
+    New { arena: Option<Box<Expr>>, ctor: Box<Expr> },
+
+    /// `kernel(block = N, ...) expr` — GPU kernel launch expression.
+    /// Returns a `KernelHandle<T>` value.
+    KernelLaunch { config: Box<KernelConfig>, kernel: Box<Expr> },
+
     // try expr else default  — calls a throws fn, returns default on exception
     TryElse(Box<Expr>, Box<Expr>),
 
@@ -773,6 +858,10 @@ pub enum OwnerQual {
     /// By default structs are heap-allocated (`Box<T>`); `'stack` opts out of that.
     /// The interpreter treats this identically to `Owned` at runtime (no difference).
     Stack,
+    /// Pseudo-qualifier written as `'new` (or implied by `new Constructor()` on the RHS).
+    /// Means "infer excluding 'stack" — identical inference starting set to the bare `T'` tick.
+    /// Used in delayed-init position: `Counter'new v`.
+    New,
     /// Explicit lifetime annotation for Rust transpilation: `string'a` → `&'a str`.
     /// The interpreter treats this identically to a plain borrow (no runtime enforcement).
     Lifetime(String),
@@ -795,6 +884,16 @@ pub enum OwnerQual {
     /// or binding declaration.  The interpreter treats this like `Borrow` at runtime;
     /// the transpiler emits `&mut T`.
     BorrowMut,
+    /// GPU memory qualifiers.
+    /// Host-side: `T'gpu'unified`, `T'gpu'global`, `T'gpu'const`.
+    /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'shared`, `T'local`, `T'const`.
+    GpuUnified,
+    GpuGlobal,
+    GpuShared,
+    GpuLocal,
+    GpuConst,
+    /// `T'actor'global` — device DRAM with atomic access (kernel-side).
+    GpuActorGlobal,
     /// Qualifier union: `T'stack|heap|actor` — restricts which qualifiers callers may provide.
     /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
     /// validates that every call site provides one of the listed qualifiers.
@@ -896,6 +995,8 @@ impl Type {
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
+            Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
+            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuShared | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal) => false,
         }
     }
 }

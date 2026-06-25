@@ -551,6 +551,19 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         // Write-once / nil-coalescing assign: recurse both sides
         ExprKind::QuestionAssign(target, rhs) => { collect_vars_in(target, out); collect_vars_in(rhs, out); }
 
+        ExprKind::New { arena, ctor } => {
+            if let Some(a) = arena { collect_vars_in(a, out); }
+            collect_vars_in(ctor, out);
+        }
+
+        ExprKind::KernelLaunch { config, kernel } => {
+            if let Some(e) = &config.block { collect_vars_in(e, out); }
+            if let Some(e) = &config.grid  { collect_vars_in(e, out); }
+            if let Some(e) = &config.smem  { collect_vars_in(e, out); }
+            if let Some(e) = &config.after { collect_vars_in(e, out); }
+            collect_vars_in(kernel, out);
+        }
+
         // Leaf nodes (no sub-expressions containing variable references)
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}

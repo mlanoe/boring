@@ -600,6 +600,22 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     # pub let / pub var field
                     let f = parse_field_decl(p)
                     fields.append(FieldDecl(name: f.name, is_pub: true, ty: f.ty, mutable: f.mutable, is_transient: f.is_transient, default: f.default, line: f.line))
+            TokenKind.As:
+                # as TypeName: block — skip conversion block
+                p.advance()
+                while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                    p.advance()
+                if p.peek() == TokenKind.Newline:
+                    p.advance()
+                if p.peek() == TokenKind.Indent:
+                    p.advance()
+                    var depth = 1
+                    while depth > 0 and p.peek() != TokenKind.Eof:
+                        if p.peek() == TokenKind.Indent:
+                            depth = depth + 1
+                        elif p.peek() == TokenKind.Dedent:
+                            depth = depth - 1
+                        p.advance()
             _:
                 fields.append(parse_field_decl(p))
     p.eat(TokenKind.Dedent)

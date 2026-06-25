@@ -53,6 +53,7 @@ impl KernelTranspiler {
             Item::Trait(_) | Item::Ext(_) => {
                 self.line("// TODO: kernel trait/ext");
             }
+            Item::Kernel(_) => { /* GPU kernel struct inside Linux kernel module — not supported */ }
         }
     }
 

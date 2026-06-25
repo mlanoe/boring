@@ -4,6 +4,14 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        // KernelHandle<T> method dispatch — .wait() and .done()
+        if let Value::KernelHandle { result } = &obj {
+            return match method {
+                "wait" => Ok(*result.clone()),
+                "done" => Ok(Value::Bool(true)),
+                _ => Err(err(format!("no method '{}' on KernelHandle", method), line)),
+            };
+        }
         // Future<T> method dispatch — .value() and .wait() as method-call syntax.
         // These mirror the field-access forms `future.value` / `future.wait`.
         if let Value::Future(inner) = &obj {
@@ -977,6 +985,12 @@ impl Interpreter {
 
     pub(crate) fn get_field(&mut self, obj: Value, field: &str, line: usize) -> Eval {
         match obj {
+            // KernelHandle.done() / .wait — simulation: kernel already ran, always done.
+            Value::KernelHandle { result } if field == "done" => {
+                let _ = result; // mark as used
+                Ok(Value::Bool(true))
+            }
+            Value::KernelHandle { result } if field == "wait" => Ok(*result),
             // Future.done() — always true in the interpreter (futures are evaluated eagerly)
             Value::Future(_) if field == "done" => Ok(Value::Bool(true)),
             Value::Future(inner) if field == "value" => {

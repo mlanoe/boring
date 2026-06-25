@@ -257,15 +257,25 @@ impl Parser {
             }
             let line = self.line();
             self.advance(); // consume `|>`
-            // RHS must be an identifier (function or method name)
-            let name = self.expect_ident()?;
+            // RHS: either `.method` (method pipe) or `func` (function pipe).
+            // After a dot, allow keyword-named methods like `.wait`, `.done`.
+            let (name, method_pipe) = if self.eat(&TokenKind::Dot) {
+                (self.expect_ident_or_keyword()?, true)
+            } else {
+                (self.expect_ident()?, false)
+            };
             // Optional argument list
             let args = if self.check(&TokenKind::LParen) {
                 self.parse_call_args()?
             } else {
                 vec![]
             };
-            lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line };
+            if method_pipe {
+                // `lhs |> .method(args)` → `lhs.method(args)` — emit as MethodCall
+                lhs = Expr { kind: ExprKind::MethodCall(Box::new(lhs), name, args), line };
+            } else {
+                lhs = Expr { kind: ExprKind::Pipe(Box::new(lhs), name, args), line };
+            }
         }
         // Consume Dedents corresponding to any Indents we skipped over
         if indent_depth > 0 {
@@ -486,6 +496,24 @@ impl Parser {
                 self.advance();
                 let expr = self.parse_unary()?;
                 Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::BitNot, Box::new(expr)), line })
+            }
+            TokenKind::New => {
+                self.advance();
+                let arena = if matches!(self.peek(), TokenKind::LParen) {
+                    self.advance(); // consume '('
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Some(Box::new(expr))
+                } else {
+                    None
+                };
+                let ctor = self.parse_postfix_top_level()?;
+                Ok(Expr { kind: ExprKind::New { arena, ctor: Box::new(ctor) }, line })
+            }
+            // `kernel(params) expr` — GPU kernel launch expression.
+            // Disambiguated from `kernel Name:` declaration by checking for `(` next.
+            TokenKind::Kernel if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) => {
+                self.parse_kernel_launch(line)
             }
             _ => self.parse_postfix_top_level(),
         }

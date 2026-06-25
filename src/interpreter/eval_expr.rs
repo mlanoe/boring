@@ -214,6 +214,18 @@ impl Interpreter {
                         }
                         return Ok(Value::Str("null".into()));
                     }
+                    // GPU(n) — built-in GPU device handle (simulation mode).
+                    if name.as_str() == "GPU" {
+                        let idx = match args.first() {
+                            Some(a) => match self.eval_expr(&a.value, Rc::clone(&env))? {
+                                Value::Int(n) => n as usize,
+                                Value::Uint(n) => n as usize,
+                                _ => 0,
+                            },
+                            None => 0,
+                        };
+                        return Ok(Value::GpuDevice(idx));
+                    }
                     // print / write / log-level — use `as string:` conversions for Object args
                     if matches!(name.as_str(), "print" | "write" | "error" | "warn" | "info" | "debug" | "trace") {
                         let arg_vals = self.eval_args(args, Rc::clone(&env))?;
@@ -283,6 +295,10 @@ impl Interpreter {
                         let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                         return self.call_fs_method(method, arg_vals, line);
                     }
+                    // GPU.all() — iterate all GPU devices (simulation: a single device).
+                    if v == "GPU" && method == "all" {
+                        return Ok(Value::Array(vec![Value::GpuDevice(0)]));
+                    }
                 }
 
                 // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
@@ -308,6 +324,25 @@ impl Interpreter {
                     }
                 }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                // GPU device property methods — simulation mock values.
+                if let Value::GpuDevice(idx) = &obj {
+                    let idx = *idx;
+                    let p = &self.gpu_profile;
+                    let (cc_major, cc_minor) = p.compute_capability;
+                    return Ok(match method.as_str() {
+                        "name"              => Value::Str(format!("{} (sim {})", p.name, idx)),
+                        "totalMem"          => Value::Int(p.total_mem),
+                        "freeMem"           => Value::Int(p.total_mem),  // nothing else running
+                        "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)]),
+                        "warpSize"          => Value::Int(p.warp_size),
+                        "maxThreads"        => Value::Int(p.max_threads),
+                        "maxSharedMem"      => Value::Int(p.max_shared_mem),
+                        "index"             => Value::Int(idx as i64),
+                        other => return Err(err(
+                            format!("GPU has no property '{other}'"), line,
+                        )),
+                    });
+                }
                 // Enforce: mutating method cannot be called on an immutable (let) binding
                 // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
                 const BUILTIN_NON_MUTATING: &[&str] = &["upgrade"];
@@ -412,6 +447,15 @@ impl Interpreter {
                     env.borrow_mut().invalidate(&name);
                 }
                 Ok(result)
+            }
+
+            ExprKind::New { ctor, .. } => {
+                // Arena placement has no runtime effect — just evaluate the constructor.
+                self.eval_expr(ctor, env)
+            }
+
+            ExprKind::KernelLaunch { config, kernel } => {
+                self.eval_kernel_launch(config, kernel, env)
             }
 
             ExprKind::TryElse(try_expr, default_expr) => {
@@ -1276,6 +1320,10 @@ impl Interpreter {
                 let obj = self.instantiate_struct_labeled(&decl, &captured, args, line)?;
                 Ok(obj)
             }
+            Value::KernelStruct { decl, captured } => {
+                // Kernel struct callable as constructor: calls its `init` if present.
+                self.instantiate_kernel_struct(&decl, &captured, args, line)
+            }
             Value::EnumNamespace { name, variants: _, .. } => {
                 // Calling enum namespace means accessing a variant constructor
                 Err(err(format!("cannot call enum namespace '{}' directly; use .VariantName", name), line))
@@ -1330,7 +1378,8 @@ impl Interpreter {
             Item::Struct(d) => Some((&d.name, d.is_pub)),
             Item::Enum(d)   => Some((&d.name, d.is_pub)),
             Item::Let(d)    => Some((&d.name, d.is_pub)),
-            Item::Mod(d)  => Some((&d.name, false)),
+            Item::Mod(d)    => Some((&d.name, false)),
+            Item::Kernel(d) => Some((&d.name, d.is_pub)),
             Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Ext(_) | Item::Stmt(_) => None,
         }
     }

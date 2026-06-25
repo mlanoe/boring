@@ -3,15 +3,15 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' add(Vec2' rhs):
+    def Vec2'new add(Vec2'new rhs):
         return Vec2(self.x + rhs.x, self.y + rhs.y)
-    def Vec2' sub(Vec2' rhs):
+    def Vec2'new sub(Vec2'new rhs):
         return Vec2(self.x - rhs.x, self.y - rhs.y)
-    def Vec2' mul(float rhs):
+    def Vec2'new mul(float rhs):
         return Vec2(self.x * rhs, self.y * rhs)
-    def Vec2' neg():
+    def Vec2'new neg():
         return Vec2(-self.x, -self.y)
-    req bool eq(Vec2' rhs):
+    req bool eq(Vec2'new rhs):
         return self.x == rhs.x and self.y == rhs.y
 
 let a = Vec2(1.0, 2.0)
@@ -44,7 +44,7 @@ struct Wrapper:
     int val
 
 ext Wrapper:
-    req bool lt(Wrapper' rhs):
+    req bool lt(Wrapper'new rhs):
         return self.val < rhs.val
 
 let w1 = Wrapper(3)
@@ -55,7 +55,7 @@ struct Mod:
     int n
 
 ext Mod:
-    def Mod' rem(Mod' rhs):
+    def Mod'new rem(Mod'new rhs):
         return Mod(self.n % rhs.n)
 
 let m1 = Mod(10)

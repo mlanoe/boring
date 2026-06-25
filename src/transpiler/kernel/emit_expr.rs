@@ -424,6 +424,15 @@ impl KernelTranspiler {
                 let rhs_s = self.emit_expr(rhs);
                 format!("{{ if {lhs_s}.is_none() {{ {lhs_s} = Some({rhs_s}); }} }}", lhs_s = lhs_s, rhs_s = rhs_s)
             }
+            ExprKind::New { ctor, .. } => {
+                // Arena placement: no GPU effect in kernel mode — just emit the constructor.
+                self.emit_expr(ctor)
+            }
+
+            ExprKind::KernelLaunch { .. } => {
+                // GPU kernel launch inside a Linux kernel module — not supported.
+                "/* unsupported: gpu kernel launch in kernel module */".to_string()
+            }
         }
     }
 

@@ -1,0 +1,7 @@
+# NVIDIA H100 SXM5 (80 GB HBM3)
+name = "H100-SXM5-80GB"
+totalMem = 85899345920      # 80 GB
+warpSize = 32
+maxThreads = 2048
+maxSharedMem = 232448       # 227 KB
+computeCapability = [9, 0]
