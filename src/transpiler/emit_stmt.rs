@@ -1186,10 +1186,10 @@ impl Transpiler {
     fn arg_is_heap_var(&self, value: &Expr) -> bool {
         let ExprKind::Var(v) = &value.kind else { return false };
         if let Some(q) = self.inferred_qualifiers.get(v.as_str()) {
-            return matches!(q, OwnerQual::Owned);
+            return matches!(q, OwnerQual::Owned | OwnerQual::New);
         }
         if let Some(ty) = self.var_types.get(v.as_str()) {
-            return matches!(ty, Type::Qualified(_, OwnerQual::Owned));
+            return matches!(ty, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New));
         }
         false
     }
@@ -1436,7 +1436,7 @@ impl Transpiler {
             if let Some(Type::Qualified(inner, qual)) = declared_ty {
                 if let Type::Named(enum_type) = inner.as_ref() {
                     let enum_rust = normalize_type_name(enum_type, self.use_rc_str());
-                    if matches!(qual, OwnerQual::Owned) {
+                    if matches!(qual, OwnerQual::Owned | OwnerQual::New) {
                         return format!("Box::new({}::{})", enum_rust, variant);
                     } else {
                         return format!("{}::{}", enum_rust, variant);
@@ -1566,7 +1566,7 @@ impl Transpiler {
                     });
                 if already_opt { return inner_val; }
                 // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
-                let wrapped = if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned)) {
+                let wrapped = if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) {
                     // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>
                     if self.is_managed_owned_user(inner.as_ref()) {
                         if inner_val.starts_with("Arc::new(std::sync::Mutex::new(")
@@ -1907,7 +1907,7 @@ impl Transpiler {
                 }
             }
             // T'owned (Box<T> in strict, Arc<Mutex<T>>/RefCell<T> in managed): wrap accordingly.
-            Some(ty @ Type::Qualified(_, OwnerQual::Owned)) => {
+            Some(ty @ Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) => {
                 let inner = self.emit_expr(value);
                 if self.is_managed_owned_user(ty) {
                     if inner.starts_with("Arc::new(std::sync::Mutex::new(")
@@ -2225,6 +2225,10 @@ impl Transpiler {
                         } else {
                             self.wrap_managed(&inner)
                         }
+                    } else if matches!(ret_ty, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) {
+                        // Strict mode T'new / T' return: wrap in Box::new().
+                        let inner = self.emit_expr_owned(e);
+                        if inner.starts_with("Box::new(") { inner } else { format!("Box::new({})", inner) }
                     } else {
                         self.emit_expr_owned(e)
                     }
@@ -2856,7 +2860,7 @@ impl Transpiler {
         } else {
             None
         };
-        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Owned)));
+        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Owned | OwnerQual::New)));
         // Shared/actor params are passed as &Rc<T> / &Arc<T> — need double deref to reach T.
         let is_shared_ref_param = if let ExprKind::Var(vname) = &s.subject.kind {
             self.shared_ref_params.contains(vname.as_str())
@@ -3039,8 +3043,21 @@ impl Transpiler {
             MatchBody::Block(stmts) => Self::collect_mutated_bindings(&bound, stmts),
             MatchBody::Expr(_) => std::collections::HashSet::new(),
         };
+        // Detect nested Box<T> variant sub-patterns and rewrite them to temp bindings.
+        // e.g. `Wrap(A(n))` where Wrap's field is Box<NInner> → `Wrap(__boring_b0)` + nested match.
+        let subj_enum_ref2 = self.match_subject_enum.as_deref();
+        let mut box_counter = 0usize;
+        let mut all_nested: Vec<(String, Pattern)> = vec![];
+        let rewritten_pats: Vec<Pattern> = arm.patterns.iter().map(|p| {
+            let (rp, nested) = Self::rewrite_boxed_nested_variant(
+                p, &self.enum_variant_field_types, subj_enum_ref2, &mut box_counter);
+            all_nested.extend(nested);
+            rp
+        }).collect();
+        let effective_pats: &[Pattern] = if all_nested.is_empty() { &arm.patterns } else { &rewritten_pats };
+
         // Emit patterns, promoting mutated bindings to `mut name`.
-        let pats: Vec<String> = arm.patterns.iter().map(|p| {
+        let pats: Vec<String> = effective_pats.iter().map(|p| {
             self.emit_pattern_with_mut(p, &mutated)
         }).collect();
         let guard = arm.guard.as_ref().map(|g| format!(" if {}", self.emit_expr(g))).unwrap_or_default();
@@ -3098,6 +3115,67 @@ impl Transpiler {
         for p in &arm.patterns {
             Self::collect_boxed_bindings(p, &self.enum_variant_field_types, &self.recursive_fields, subj_enum_ref, &mut boxed_bindings);
         }
+        // When there are nested Box<T> variant sub-patterns, wrap the arm in nested matches.
+        // e.g. `Wrap(__boring_b0)` with nested [("__boring_b0", Pattern::Variant("A", [...]))]
+        // emits: `Wrap(__boring_b0) => match __boring_b0.as_ref() { A(n) => body, _ => unreachable!() }`
+        if !all_nested.is_empty() {
+            self.line(&format!("{}{} => {{", pat_s, guard));
+            self.indent += 1;
+            // Emit nested matches, innermost first — each wraps the next.
+            // For simplicity with one level of nesting, just emit one nested match.
+            // Record the bound vars from the nested pattern so emit_body can see them.
+            for (tmp_var, inner_pat) in &all_nested {
+                // Save/restore match_subject_enum for inner context.
+                let inner_enum = if let Pattern::Variant(vname, _) = inner_pat {
+                    // Look up which enum this variant belongs to.
+                    self.enum_variants.get(vname.as_str()).cloned()
+                        .or_else(|| {
+                            self.enum_variant_fields.keys()
+                                .find(|k| k.ends_with(&format!("::{}", vname)))
+                                .and_then(|k| k.split("::").next().map(|s| s.to_string()))
+                        })
+                } else { None };
+                let prev_subj = self.match_subject_enum.clone();
+                self.match_subject_enum = inner_enum;
+                let inner_pat_s = self.emit_pattern(inner_pat);
+                // Collect inner bindings to register in var_types.
+                let mut inner_bound: Vec<String> = Vec::new();
+                Self::collect_pattern_bindings(inner_pat, &mut inner_bound);
+                for b in &inner_bound { self.known_local_vars.insert(b.clone()); }
+                let mut inner_bound_types: Vec<(String, Type)> = Vec::new();
+                Self::collect_pattern_var_types(inner_pat, &self.enum_variant_field_types, self.match_subject_enum.as_deref(), &mut inner_bound_types);
+                for (n, t) in &inner_bound_types { self.var_types.insert(n.clone(), t.clone()); }
+                self.line(&format!("match {}.as_ref() {{", tmp_var));
+                self.indent += 1;
+                // Body of inner arm — temporarily disable in_throws so we don't emit Ok(...).
+                let prev_throws = self.in_throws;
+                self.in_throws = false;
+                let body_s = match &arm.body {
+                    MatchBody::Expr(e) => self.emit_expr(e),
+                    MatchBody::Block(stmts) => {
+                        // For block bodies we need a block expression.
+                        let mut sub = self.make_sub();
+                        sub.fn_return_ty = self.fn_return_ty.clone();
+                        sub.fn_returns_void = self.fn_returns_void;
+                        // Copy inner bound vars into sub.
+                        for (n, t) in &inner_bound_types { sub.var_types.insert(n.clone(), t.clone()); }
+                        sub.emit_body(stmts);
+                        sub.out.trim_end_matches('\n').to_string()
+                    }
+                };
+                self.in_throws = prev_throws;
+                for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
+                self.line(&format!("{} => {},", inner_pat_s, body_s));
+                self.line("_ => unreachable!(),");
+                self.indent -= 1;
+                self.line("}");
+                self.match_subject_enum = prev_subj;
+                for b in &inner_bound { self.known_local_vars.remove(b.as_str()); }
+                for (n, _) in &inner_bound_types { self.var_types.remove(n.as_str()); }
+            }
+            self.indent -= 1;
+            self.line("}");
+        } else {
         match &arm.body {
             MatchBody::Expr(e) => {
                 let expr_s = self.emit_expr(e);
@@ -3145,6 +3223,7 @@ impl Transpiler {
                 self.line("}");
             }
         }
+        } // end else !all_nested.is_empty()
         for b in &bound {
             self.known_local_vars.remove(b.as_str());
         }
@@ -3164,6 +3243,58 @@ impl Transpiler {
             self.managed_refcell_vars.remove(name.as_str());
             self.managed_mutex_vars.remove(name.as_str());
         }
+    }
+
+    /// Rewrite a match pattern that contains nested variant sub-patterns inside Box<T> fields.
+    ///
+    /// When a variant field type is `Box<T>` (OwnerQual::Owned/New) and the sub-pattern is
+    /// itself a non-trivial Variant (not Bind/Wildcard), Rust cannot match directly. We
+    /// replace the sub-pattern with a temp binding `__boring_bN` and return the (binding, original)
+    /// pairs so the caller can emit a nested `match __boring_bN.as_ref() { inner => body }`.
+    fn rewrite_boxed_nested_variant(
+        pat: &Pattern,
+        enum_variant_field_types: &std::collections::HashMap<String, Vec<Type>>,
+        subject_enum: Option<&str>,
+        counter: &mut usize,
+    ) -> (Pattern, Vec<(String, Pattern)>) {
+        let Pattern::Variant(name, fields) = pat else {
+            return (pat.clone(), vec![]);
+        };
+        // Resolve the enum::variant key (same logic as collect_boxed_bindings).
+        let field_tys_key = if enum_variant_field_types.contains_key(name.as_str()) {
+            Some(name.as_str().to_string())
+        } else if !name.contains("::") {
+            let suffix = format!("::{}", name);
+            let subject_key = subject_enum.and_then(|en| {
+                let k = format!("{}::{}", en, name);
+                if enum_variant_field_types.contains_key(k.as_str()) { Some(k) } else { None }
+            });
+            subject_key.or_else(|| {
+                enum_variant_field_types.iter()
+                    .filter(|(k, _)| k.ends_with(&suffix))
+                    .max_by_key(|(_, v)| v.len())
+                    .map(|(k, _)| k.clone())
+            })
+        } else { None };
+        let Some(key) = field_tys_key else {
+            return (pat.clone(), vec![]);
+        };
+        let field_types = &enum_variant_field_types[&key];
+        let mut new_fields = fields.clone();
+        let mut nested: Vec<(String, Pattern)> = vec![];
+        for (i, sub_pat) in fields.iter().enumerate() {
+            let is_box = field_types.get(i)
+                .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)))
+                .unwrap_or(false);
+            let is_nested_variant = matches!(sub_pat, Pattern::Variant(_, _));
+            if is_box && is_nested_variant {
+                let tmp = format!("__boring_b{}", *counter);
+                *counter += 1;
+                new_fields[i] = Pattern::Bind(tmp.clone());
+                nested.push((tmp, sub_pat.clone()));
+            }
+        }
+        (Pattern::Variant(name.clone(), new_fields), nested)
     }
 
     /// Infer types for pattern-bound variables using enum_variant_field_types.

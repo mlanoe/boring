@@ -574,14 +574,28 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
     p.expect(TokenKind.Struct)
     let name_tok = p.expect(TokenKind.Ident(""))
     let name = name_tok.text()
+    # Skip optional generic params: <A, B>
+    if p.eat(TokenKind.Lt):
+        while p.peek() != TokenKind.Gt and p.peek() != TokenKind.Eof:
+            p.advance()
+        p.eat(TokenKind.Gt)
+    # Skip optional protocol conformance: as Protocol, Protocol2
+    if p.eat(TokenKind.As):
+        while p.peek() != TokenKind.Colon and p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+            p.advance()
     p.expect(TokenKind.Colon)
     p.expect(TokenKind.Newline)
     p.expect(TokenKind.Indent)
     var fields = [FieldDecl]{}
     var methods = [FnDecl]{}
     var inits = [InitDecl]{}
+    var setters = [SetDecl]{}
     while p.peek() != TokenKind.Dedent:
         if p.peek() == TokenKind.Eof:
+            break
+        while p.eat(TokenKind.Newline):
+            nil
+        if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
             break
         match p.peek():
             TokenKind.Def:
@@ -600,6 +614,9 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     # pub let / pub var field
                     let f = parse_field_decl(p)
                     fields.append(FieldDecl(name: f.name, is_pub: true, ty: f.ty, mutable: f.mutable, is_transient: f.is_transient, default: f.default, line: f.line))
+            TokenKind.Set:
+                let setter = parse_setter_decl(p)
+                setters.append(setter)
             TokenKind.As:
                 # as TypeName: block — skip conversion block
                 p.advance()
@@ -619,7 +636,7 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
             _:
                 fields.append(parse_field_decl(p))
     p.eat(TokenKind.Dedent)
-    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: [], type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
+    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: setters, type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
 
 def FieldDecl parse_field_decl(mut Parser p) throws:
     let line = p.current_line()
@@ -638,14 +655,28 @@ def FieldDecl parse_field_decl(mut Parser p) throws:
         nil
     FieldDecl(name: name_tok.text(), ty: ty, mutable: mutable, default: default, line: line, is_pub: false, is_transient: false)
 
+def SetDecl parse_setter_decl(mut Parser p) throws:
+    let line = p.current_line()
+    p.expect(TokenKind.Set)
+    let name = parser_expect_ident_or_keyword(p)
+    p.expect(TokenKind.LParen)
+    let param_ty = parse_type(p)
+    let param_name = parser_expect_ident(p)
+    p.expect(TokenKind.RParen)
+    let can_throw = p.eat(TokenKind.Throws)
+    p.expect(TokenKind.Colon)
+    let body = parse_fn_body(p)
+    SetDecl(name: name, param_name: param_name, param_ty: param_ty, is_pub: false, can_throw: can_throw, is_task: false, body: body, line: line)
+
 def InitDecl parse_init_decl(mut Parser p) throws:
     let line = p.current_line()
     p.expect(TokenKind.Init)
     p.expect(TokenKind.LParen)
     var [InitParam] params = []
     while p.peek() != TokenKind.RParen:
+        let is_pub = p.eat(TokenKind.Pub)
         let par = parse_param(p)
-        params.append(InitParam(is_pub: false, mutable: par.mutable, name: par.name, ty: par.ty, default: par.default, line: par.line))
+        params.append(InitParam(is_pub: is_pub, mutable: par.mutable, name: par.name, ty: par.ty, default: par.default, line: par.line))
         if p.peek() != TokenKind.RParen:
             p.expect(TokenKind.Comma)
     p.expect(TokenKind.RParen)
@@ -734,6 +765,35 @@ def Item parse_item(mut Parser p) throws:
             Item.Struct(parse_struct_decl(p, false))
         TokenKind.Enum:
             Item.Enum(parse_enum_decl(p, false))
+        TokenKind.Trait:
+            # Skip trait declaration — not supported at runtime
+            p.advance()
+            while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                p.advance()
+            if p.peek() == TokenKind.Newline:
+                p.advance()
+            if p.peek() == TokenKind.Indent:
+                p.advance()
+                var depth = 1
+                while depth > 0 and p.peek() != TokenKind.Eof:
+                    if p.peek() == TokenKind.Indent:
+                        depth = depth + 1
+                    elif p.peek() == TokenKind.Dedent:
+                        depth = depth - 1
+                    p.advance()
+            Item.Stmt(Stmt.Expr(Expr(kind: ExprKind.Nil, line: 0)))
+        TokenKind.Pub:
+            p.advance()
+            if parser_check(p, "Struct"):
+                Item.Struct(parse_struct_decl(p, true))
+            elif parser_check(p, "Enum"):
+                Item.Enum(parse_enum_decl(p, true))
+            elif parser_check(p, "Def"):
+                Item.Fn(parse_fn_decl_auto(p, true, true))
+            elif parser_check(p, "Req"):
+                Item.Fn(parse_fn_decl_auto(p, true, false))
+            else:
+                Item.Stmt(parse_stmt(p))
         _:
             # Detect fn shorthand: `RetType FnName(` or `[RetType] FnName(`
             if parser_is_fn_shorthand(p):

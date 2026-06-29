@@ -1162,7 +1162,20 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                 Value.Nil: Value.Bool(false)
                 _: Value.Bool(true)
         _:
-            throw "unknown cast target type '{type_name}'"
+            # Named type cast: check if val is already that type or has a field of that type
+            let val_type = val.type_name()
+            if val_type == type_name:
+                return val
+            match val:
+                Value.Object(inner):
+                    # Try field named "base"
+                    let base_opt = inner.get_field("base")
+                    if let bv = base_opt:
+                        if bv.type_name() == type_name:
+                            return bv
+                    throw "cannot cast {val_type} to {type_name}"
+                _:
+                    throw "unknown cast target type '{type_name}'"
 
 # Runtime type check
 req bool value_is_type(Interpreter interp, Value val, TypeRef ty) throws:
@@ -1543,7 +1556,27 @@ def void assign_target(Interpreter interp, Expr target, Value val):
             let obj = eval_expr(interp, obj_expr)
             match obj:
                 Value.Object(inner):
-                    inner.set_field(field_name, val)
+                    # Check for a setter method
+                    let type_name = inner.type_name
+                    let decl_opt = interp.get_struct_decl(type_name)
+                    var setter_called = false
+                    if let decl = decl_opt:
+                        var si = 0
+                        while si < decl.setters.length:
+                            let s = decl.setters[si]
+                            if s.name == field_name:
+                                let child_env = push_scope(interp)
+                                env_define(interp, "self", Value.Object(inner), true)
+                                env_define(interp, s.param_name, val, true)
+                                eval_block(interp, s.body)
+                                pop_scope(interp)
+                                setter_called = true
+                                break
+                            si = si + 1
+                    if not setter_called:
+                        inner.set_field(field_name, val)
+                        # Also sync the env var copy (injected by method dispatch)
+                        interp.current_env.set(field_name, val)
                 _:
                     throw "cannot assign field on non-object"
         ExprKind.Index(obj_expr, idx_expr):
@@ -1585,5 +1618,43 @@ def Value instantiate_struct(Interpreter interp, StructDecl decl, [Value] args):
             if let default_expr = field.default:
                 fval = eval_expr(interp, default_expr)
             fields.append((field.name, fval))
-    let obj = ObjectInner(type_name: decl.name, fields: fields)
-    Value.Object(obj)
+    # Handle init declarations: pub params become fields
+    if decl.inits.length > 0:
+        let init_decl = decl.inits[0]
+        var ipos = 0
+        for param in init_decl.params:
+            var pval = Value.Nil
+            if labeled.has(param.name):
+                pval = labeled[param.name]
+            elif ipos < positional.length:
+                pval = positional[ipos]
+                ipos = ipos + 1
+            else:
+                let param_default = param.default
+                if let default_expr = param_default:
+                    pval = eval_expr(interp, default_expr)
+            fields.append((param.name, pval))
+    let inner = ObjectInner(type_name: decl.name, fields: fields)
+    let result = Value.Object(inner)
+    # Run init body if present
+    if decl.inits.length > 0:
+        let init_decl = decl.inits[0]
+        if init_decl.body.length > 0:
+            let child_env = push_scope(interp)
+            env_define(interp, "self", result, true)
+            var ipos2 = 0
+            for param in init_decl.params:
+                var pval = Value.Nil
+                if labeled.has(param.name):
+                    pval = labeled[param.name]
+                elif ipos2 < positional.length:
+                    pval = positional[ipos2]
+                    ipos2 = ipos2 + 1
+                else:
+                    let param_default2 = param.default
+                    if let default_expr2 = param_default2:
+                        pval = eval_expr(interp, default_expr2)
+                env_define(interp, param.name, pval, param.mutable)
+            eval_block(interp, init_decl.body)
+            pop_scope(interp)
+    result

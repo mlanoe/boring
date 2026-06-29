@@ -61,6 +61,30 @@ impl Parser {
 
     pub(crate) fn parse_inline_stmt_impl(&mut self, stop_at_else: bool) -> Result<Stmt, ParseError> {
         let line = self.line();
+        // Allow let/mut/var/static/lazy bindings in inline positions (e.g. match arm bodies)
+        if matches!(self.peek(), TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static | TokenKind::Lazy) {
+            if self.is_let_destructure() {
+                let _is_static = self.eat(&TokenKind::Static);
+                let binding = match self.peek() {
+                    TokenKind::Mut => BindingKind::Mut,
+                    TokenKind::Var => BindingKind::Var,
+                    TokenKind::Lazy => BindingKind::Lazy,
+                    _ => BindingKind::Let,
+                };
+                self.advance();
+                let saved = self.in_inline_context;
+                self.in_inline_context = true;
+                let result = self.parse_let_destructure(binding, line);
+                self.in_inline_context = saved;
+                return Ok(Stmt::LetDestructure(result?));
+            } else {
+                let saved = self.in_inline_context;
+                self.in_inline_context = true;
+                let result = self.parse_let_stmt();
+                self.in_inline_context = saved;
+                return Ok(Stmt::Let(result?));
+            }
+        }
         // Allow control-flow keywords in inline positions
         if self.check(&TokenKind::Return) {
             self.advance();

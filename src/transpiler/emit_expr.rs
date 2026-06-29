@@ -196,7 +196,7 @@ impl Transpiler {
                             let rs_raw = self.emit_expr(r);
                             let rs = if let Some(ptypes) = param_types {
                                 if let Some(pty) = ptypes.first() {
-                                    if matches!(pty, Type::Qualified(_, OwnerQual::Owned)) {
+                                    if matches!(pty, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) {
                                         // Need to clone before boxing to avoid moving `rs_raw`
                                         // when it's used multiple times (e.g. e3 == e3).
                                         let clone_expr = if rs_raw.ends_with(".clone()") {
@@ -2279,7 +2279,7 @@ impl Transpiler {
     pub(crate) fn emit_constructor(&self, name: &str, args: &[Arg]) -> String {
         let result = self.emit_constructor_inner(name, args);
         // Check if the current function returns T' in managed mode → wrap in managed actor.
-        if let Some(Type::Qualified(inner, OwnerQual::Owned)) = &self.fn_return_ty {
+        if let Some(Type::Qualified(inner, OwnerQual::Owned | OwnerQual::New)) = &self.fn_return_ty {
             if matches!(inner.as_ref(), Type::Named(n) if n == name) {
                 if self.is_managed_owned_user(self.fn_return_ty.as_ref().unwrap()) {
                     return match self.config.threading {
@@ -2308,7 +2308,7 @@ impl Transpiler {
         if let Some(resolved) = self.non_fn_type_aliases.get(name) {
             let resolved = resolved.clone();
             match &resolved {
-                Type::Qualified(inner, OwnerQual::Owned) => {
+                Type::Qualified(inner, OwnerQual::Owned | OwnerQual::New) => {
                     if let Type::Named(inner_name) = inner.as_ref() {
                         let inner_s = self.emit_constructor_inner(inner_name, args);
                         // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>

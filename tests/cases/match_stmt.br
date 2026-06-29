@@ -172,3 +172,58 @@ def int makePoint():
     let p = LPoint(x = 3, y = 4)
     p.x + p.y
 print makePoint()
+
+# let binding inline in match arm — semicolon separator
+let iv = 2
+match iv:
+    1: let r1 = "one"; print r1
+    2: let r2 = "two"; print r2
+    _: let r3 = "other"; print r3
+
+# let binding in block inside match arm
+match iv:
+    1:
+        let b1 = "ONE"
+        print b1
+    2:
+        let b2 = "TWO"
+        print b2
+    _:
+        print "OTHER"
+
+# var binding inline in match arm
+match iv:
+    2:
+        var n = 10
+        n = n + 5
+        print "{n}"
+    _: print "0"
+
+# let with type annotation inline in match arm
+match iv:
+    2: let int typed = 42; print "{typed}"
+    _: print "0"
+
+# let inline in match arm with guard
+let gv = 7
+match gv:
+    x if x > 5: let msg = "big"; print msg
+    _: print "small"
+
+# let inline in enum match arm
+enum MaybeInt:
+    Some(int v)
+    None
+
+let mi = MaybeInt.Some(99)
+match mi:
+    Some(n): let doubled = n * 2; print "{doubled}"
+    None: print "nothing"
+
+# multiple statements via semicolon in block arm
+match iv:
+    2:
+        let a = 3
+        let b = 4
+        print "{a + b}"
+    _: print "0"

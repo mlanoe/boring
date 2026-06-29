@@ -76,11 +76,14 @@ struct Parser {
     /// Must be disabled in condition/iterable positions where `):`  would be
     /// misread as a trailing-closure intro instead of call + body separator.
     pub(crate) allow_trailing_closure: bool,
+    /// When true, `expect_newline_soft` will not consume a `;` token, leaving it
+    /// for `parse_inline_stmts` to use as a statement separator.
+    pub(crate) in_inline_context: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true }
+        Self { tokens, pos: 0, depth: 0, allow_noparen_closure: true, allow_trailing_closure: true, in_inline_context: false }
     }
 
     fn peek(&self) -> &TokenKind {
@@ -175,6 +178,11 @@ impl Parser {
     /// Like expect_newline, but also succeeds when already past the newline
     /// (e.g. after parsing a block-form expression that consumed trailing whitespace).
     fn expect_newline_soft(&mut self) {
+        // In inline context (e.g. match arm inline body), don't consume `;` — it's
+        // the statement separator that `parse_inline_stmts` needs to see.
+        if self.in_inline_context && self.check(&TokenKind::Semicolon) {
+            return;
+        }
         if self.is_newline() || self.check(&TokenKind::Eof) {
             self.skip_newlines();
         }

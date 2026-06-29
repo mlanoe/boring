@@ -1199,7 +1199,7 @@ impl Transpiler {
                 // In managed mode, T' → Arc<Mutex<T>>, so wrap with Arc::new(Mutex::new(...)).
                 let param_ty = f.params.first().and_then(|p| p.ty.as_ref());
                 let param_is_box = param_ty
-                    .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned)))
+                    .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)))
                     .unwrap_or(false);
                 let param_is_managed = param_is_box && param_ty.map(|t|
                     crate::transpiler::Transpiler::is_managed_user_owned(
