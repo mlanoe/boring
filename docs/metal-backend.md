@@ -1,0 +1,119 @@
+# Metal backend
+
+`boring build --target metal` generates a Rust + MSL project that runs GPU kernels on macOS using Apple's Metal framework — a native alternative to `--target cuda` that requires no NVIDIA GPU or CUDA toolkit.
+
+The Boring source is identical: the same `kernel` structs, qualifiers, and `gpu.*` built-ins work unchanged across CUDA and Metal targets.
+
+---
+
+## Motivation
+
+CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal is available on every Mac (M-series and Intel with discrete GPU). On Apple Silicon, unified memory makes `'unified` fields zero-copy between CPU and GPU — a better physical match than `cudaMallocManaged` on x86.
+
+---
+
+## Qualifier mapping
+
+| Boring qualifier | CUDA C | MSL address space |
+|---|---|---|
+| `'unified` | `cudaMallocManaged` | `device` + `MTLStorageMode.shared` (zero-copy on Apple Silicon) |
+| `'global` | `__global__` | `device` |
+| `'shared` | `__shared__` | `threadgroup` |
+| `'local` | registers | thread-private (default) |
+| `'const` scalar | `__constant__ T name;` | `constant T* name [[buffer(N)]]` — dereferenced (`*name`) in body |
+| `'const` fixed array (`[T, N]`) | `__constant__ T name[N];` | `constant T* name [[buffer(N)]]` — accessed as `name[i]` in body |
+
+---
+
+## Built-in mapping
+
+| Boring | CUDA C | MSL |
+|---|---|---|
+| `gpu.thread.x/y/z` | `threadIdx.x/y/z` | `thread_position_in_threadgroup.x/y/z` |
+| `gpu.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` |
+| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` |
+| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` |
+| `sync` | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
+| atomics (`'actor'global`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` etc. |
+
+### MSL kernel signature
+
+CUDA C uses flat parameter lists; MSL uses annotated parameters. The transpiler generates `[[buffer(N)]]` / `[[threadgroup(N)]]` indices automatically:
+
+```msl
+kernel void scale(
+    device float* buf       [[buffer(0)]],
+    threadgroup float* tile [[threadgroup(0)]],
+    uint3 thread_pos        [[thread_position_in_threadgroup]],
+    uint3 block_pos         [[threadgroup_position_in_grid]],
+    uint3 block_dim         [[threads_per_threadgroup]]
+) {
+    uint i = thread_pos.x + block_pos.x * block_dim.x;
+    buf[i] *= 2.0;
+}
+```
+
+---
+
+## MSL compilation
+
+MSL is compiled at runtime via `newLibraryWithSource` — the Metal compiler is built into macOS. No external toolchain (`xcrun`, LLVM) is needed.
+
+The generated project has no `build.rs`. Compilation happens once at app startup. An AOT path (`boring build --target metal --aot`) may be added in a later iteration for workloads where startup latency matters.
+
+---
+
+## `GPU` type on Metal
+
+| Boring method | Metal API |
+|---|---|
+| `name()` | `device.name()` |
+| `totalMem()` | `device.recommendedMaxWorkingSetSize()` |
+| `freeMem()` | total − `device.currentAllocatedSize()` |
+| `computeCapability()` | Metal GPU family tier as `[major, minor]` |
+| `warpSize()` | 32 (conservative default — matches Apple Silicon SIMD group size) |
+| `maxThreads()` | 1024 (conservative default — per pipeline, not device-global) |
+| `maxSharedMem()` | `device.maxThreadgroupMemoryLength()` |
+| `index()` | index passed to `GPU(i)` |
+
+`GPU(0)` → `MTLCreateSystemDefaultDevice()`.
+`GPU.all()` → `MTLCopyAllDevices()`, sorted by index.
+
+---
+
+## Known limitations vs CUDA
+
+| Feature | CUDA | Metal |
+|---|---|---|
+| `print` in kernel | `printf` | silent no-op — no device-side printf in MSL |
+| Float atomics | all GPUs | A13 / M1 and later only |
+| Warp intrinsics | full support | SIMD-group operations (different API) |
+| `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
+| Windows / Linux | yes | macOS only |
+
+---
+
+## Generated project layout
+
+```
+<stem>_metal/
+  src/main.rs          # Rust host code (metal crate v0.29)
+  kernels/main.metal   # MSL device code
+  Cargo.toml           # metal = "0.29", no build.rs
+```
+
+Requires macOS 11+ with a Metal-capable GPU.
+
+```sh
+boring build --target metal main.br
+cd main_metal && cargo build
+```
+
+---
+
+## Implementation notes
+
+- **Host crate**: `metal` v0.29 — simpler API, still maintained.
+- **Buffer index ordering**: unified/global/actor arrays → const fields → local scalars → dynamic shared (`threadgroup`). Device and host use the same fixed order.
+- **Dispatch**: synchronous — `wait_until_completed()` is called inside `__boring_launch`. `after =` is accepted syntactically but has no effect.
+- **Atomics**: `atomicSub` has no MSL equivalent — emitted as `atomic_fetch_add_explicit` with a negated value, `memory_order_relaxed`.

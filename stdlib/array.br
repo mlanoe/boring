@@ -57,7 +57,7 @@ ext Vec<T>:
     req int  count():                   native   # number of elements (also: len, length)
     req bool isEmpty():                 native
     req bool contains(T item):          native
-    req int  sum():                     native   # sum of numeric elements
+    req any  sum():                     native   # sum of numeric elements (int or float, matching element type)
     req any  min():                     native   # minimum numeric value
     req any  max():                     native   # maximum numeric value
 

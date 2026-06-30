@@ -166,3 +166,22 @@ print oelnr
 let oix5 = 5
 let oirr = if oix5 > 3: "big" else "small"
 print oirr
+
+# elif let
+def string oelcheck(int? x, int? y):
+    if let v = x:
+        return "x={v}"
+    elif let v = y, v > 3:
+        return "y={v}>3"
+    else:
+        return "neither"
+
+print oelcheck(42, 5)
+print oelcheck(nil, 5)
+print oelcheck(nil, 2)
+print oelcheck(nil, nil)
+
+# elif let inline
+let int? oelA = nil
+let int? oelB = 7
+if let v = oelA: print "a={v}" elif let v = oelB: print "b={v}" else: print "none"

@@ -18,6 +18,7 @@ impl Transpiler {
     /// to either member are propagated to the whole group.
     pub(crate) fn infer_qualifiers(&mut self, stmts: &[Stmt]) {
         self.inferred_qualifiers.clear();
+        self.task_method_call_vars.clear();
 
         let mut alias_of: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut anonymous_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -104,7 +105,7 @@ impl Transpiler {
         for var_name in &mut_bindings {
             constrain_candidates(
                 &mut candidates, var_name,
-                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                 &alias_of,
             );
         }
@@ -144,6 +145,7 @@ impl Transpiler {
                     }
                     Stmt::IfLet(s) => {
                         collect_actor_lets(transpiler, &s.then_body, out);
+                        for branch in &s.elif_branches { collect_actor_lets(transpiler, &branch.body, out); }
                         if let Some(eb) = &s.else_body { collect_actor_lets(transpiler, eb, out); }
                     }
                     Stmt::While(s) => { collect_actor_lets(transpiler, &s.body, out); }
@@ -204,6 +206,10 @@ impl Transpiler {
         for (var_name, remaining) in &candidates {
             // Only report for roots (not aliases) to avoid duplicate errors.
             let is_alias = alias_of.contains_key(var_name.as_str());
+            // If both a plain qualifier and its 'task variant survived elimination, pick
+            // one based on whether a task-declared method was called on this variable.
+            let mut remaining: Vec<OwnerQual> = remaining.clone();
+            disambiguate_task_variant(&mut remaining, self.task_method_call_vars.contains(var_name.as_str()));
             match remaining.len() {
                 0 if !is_alias => {
                     eprintln!(
@@ -228,12 +234,11 @@ impl Transpiler {
                         continue;
                     }
                     // Multiple candidates remaining: apply priority-ordered fallback.
-                    let is_known_struct = var_struct_types.contains_key(var_name.as_str());
                     let type_size = var_struct_types.get(var_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
                     if let Some(q) = resolve_fallback(
-                        remaining, is_known_struct, false, type_size, self.config.stack_auto_bytes,
+                        &remaining, false, type_size, self.config.stack_auto_bytes,
                     ) {
                         self.inferred_qualifiers.insert(var_name.clone(), q);
                     }
@@ -347,6 +352,14 @@ impl Transpiler {
                 }
                 for st in &s.then_body {
                     self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                for branch in &s.elif_branches {
+                    for clause in &branch.clauses {
+                        self.walk_cond_clause_for_qualifiers(clause, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                    for st in &branch.body {
+                        self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, return_qual, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    }
                 }
                 if let Some(else_body) = &s.else_body {
                     for st in else_body {
@@ -490,7 +503,7 @@ impl Transpiler {
                             }
                             constrain_candidates(
                                 candidates, var_name,
-                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
                             // A def call on a non-mut auto-ref param is a constraint signal
@@ -527,27 +540,31 @@ impl Transpiler {
             // Receiver of method call → needs mutation → {Actor, Guard}.
             // Non-receiver → read-only → {Shared, Actor, Guard}.
             ExprKind::Task(inner) => {
-                self.constrain_task_captures(inner, anonymous_vars, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.constrain_task_captures(inner, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 self.walk_expr_for_qualifiers(inner, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
             }
             ExprKind::TaskWithTimeout(dur, inner) => {
                 self.walk_expr_for_qualifiers(dur, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
-                self.constrain_task_captures(inner, anonymous_vars, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.constrain_task_captures(inner, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 self.walk_expr_for_qualifiers(inner, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
             }
-            // Assignment is a mutation signal: eliminates Shared.
-            // Walks the target recursively to find the root variable:
-            // `x = val`, `x.field = val`, `x[i] = val`, `x.a.b.c = val`, etc.
+            // Assignment is a mutation signal: eliminates Shared — but only for mutation
+            // *through* the value (`x.field = val`, `x[i] = val`, `x.a.b.c = val`), which
+            // requires the pointee to support interior mutability. A plain whole-value
+            // rebind (`x = val`) just replaces the local binding itself and is legal for
+            // `'shared` (Rc/Arc) too, so it must not eliminate it.
             ExprKind::Assign(target, val) => {
-                if let Some(var_name) = mutation_root(target) {
-                    if anonymous_vars.contains(var_name) {
-                        constrain_candidates(
-                            candidates, var_name,
-                            &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
-                            alias_of,
-                        );
-                        if auto_ref_param_vars.contains(var_name) {
-                            has_qualifier_constraint.insert(var_name.to_string());
+                if !matches!(target.kind, ExprKind::Var(_)) {
+                    if let Some(var_name) = mutation_root(target) {
+                        if anonymous_vars.contains(var_name) {
+                            constrain_candidates(
+                                candidates, var_name,
+                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                                alias_of,
+                            );
+                            if auto_ref_param_vars.contains(var_name) {
+                                has_qualifier_constraint.insert(var_name.to_string());
+                            }
                         }
                     }
                 }
@@ -575,7 +592,7 @@ impl Transpiler {
                 use crate::ast::ClosureBody;
                 match body {
                     ClosureBody::Expr(e) => {
-                        self.constrain_task_captures(e, anonymous_vars, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                        self.constrain_task_captures(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                         self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     ClosureBody::Block(stmts) => {
@@ -583,7 +600,7 @@ impl Transpiler {
                             kind: ExprKind::Block(stmts.clone()),
                             line: 0,
                         };
-                        self.constrain_task_captures(&block_expr, anonymous_vars, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                        self.constrain_task_captures(&block_expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                         for st in stmts {
                             self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
                         }
@@ -657,17 +674,22 @@ impl Transpiler {
     /// Constrain qualifiers for variables captured by a task body.
     /// All captured vars must be Arc-based (crossable across async boundaries).
     /// Receivers of method calls additionally need mutation → {Actor, Guard}.
+    /// Both the plain (`Actor`/`Guard`) and `'task` (`ActorTask`/`GuardTask`) variants are
+    /// kept as candidates here — the final pick between them happens in `infer_qualifiers`'s
+    /// resolution loop via `disambiguate_task_variant`, based on whether a `task`-declared
+    /// method was called on the captured variable (recorded here into `task_method_call_vars`).
     fn constrain_task_captures(
         &mut self,
         body: &Expr,
         anonymous_vars: &std::collections::HashSet<String>,
+        var_struct_types: &std::collections::HashMap<String, String>,
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
         auto_ref_param_vars: &std::collections::HashSet<String>,
         has_qualifier_constraint: &mut std::collections::HashSet<String>,
     ) {
         let captured: std::collections::HashSet<String> = collect_var_names(body).into_iter().collect();
-        let receivers = method_receivers(body);
+        let receiver_methods = method_receivers(body);
 
         for var_name in &captured {
             if !anonymous_vars.contains(var_name.as_str()) { continue; }
@@ -675,23 +697,42 @@ impl Transpiler {
             if auto_ref_param_vars.contains(var_name.as_str()) {
                 has_qualifier_constraint.insert(var_name.clone());
             }
-            let compatible: &[OwnerQual] = if receivers.contains(var_name.as_str()) {
-                &[OwnerQual::Actor, OwnerQual::Guard]
+            let called_methods = receiver_methods.get(var_name.as_str());
+            promote_task_variants(candidates, var_name, alias_of);
+            let compatible: &[OwnerQual] = if let Some(methods) = called_methods {
+                if let Some(struct_name) = var_struct_types.get(var_name.as_str()) {
+                    let is_task_call = methods.iter().any(|m| {
+                        self.struct_task_methods.contains(&format!("{}::{}", struct_name, m))
+                    });
+                    if is_task_call {
+                        self.task_method_call_vars.insert(var_name.clone());
+                    }
+                }
+                &[OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask]
             } else {
-                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]
+                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask]
             };
             constrain_candidates(candidates, var_name, compatible, alias_of);
         }
     }
 
     /// Infer qualifiers for private, unqualified struct fields by scanning all method bodies
-    /// in the same struct. The same constraint-elimination algorithm used for local variables
-    /// is applied to `self.field` accesses across all methods.
+    /// in the same struct, plus any `ext` block methods/setters for the same type declared in
+    /// the same file. The same constraint-elimination algorithm used for local variables is
+    /// applied to `self.field` accesses across all of them.
     ///
     /// Results are written directly into `struct_mutex_fields` and `struct_rwlock_fields` so
     /// the existing field-access emission infrastructure handles wrapping/unwrapping automatically.
     /// Only private fields (`is_pub == false`) with no explicit qualifier are considered.
-    pub(crate) fn infer_struct_field_qualifiers(&mut self, s: &crate::ast::StructDecl) {
+    ///
+    /// `ext` blocks in *other* files are not visible here — cross-file inference is out of scope
+    /// (see docs/qualifiers.md).
+    pub(crate) fn infer_struct_field_qualifiers(
+        &mut self,
+        s: &crate::ast::StructDecl,
+        ext_methods: &[&crate::ast::FnDecl],
+        ext_setters: &[&crate::ast::SetDecl],
+    ) {
 
         // Collect private, unqualified fields with their declared inner type name.
         let target_fields: std::collections::HashMap<String, String> = s.fields.iter()
@@ -707,6 +748,8 @@ impl Transpiler {
             .collect();
 
         if target_fields.is_empty() { return; }
+
+        self.task_method_call_fields.clear();
 
         let mut candidates: std::collections::HashMap<String, Vec<OwnerQual>> = target_fields
             .keys()
@@ -734,10 +777,32 @@ impl Transpiler {
                 &mut candidates,
             );
         }
+        for method in ext_methods {
+            self.walk_stmts_for_field_qualifiers(
+                &method.body,
+                &s.name,
+                &target_fields,
+                &empty_alias,
+                &mut candidates,
+            );
+        }
+        for setter in ext_setters {
+            self.walk_stmts_for_field_qualifiers(
+                &setter.body,
+                &s.name,
+                &target_fields,
+                &empty_alias,
+                &mut candidates,
+            );
+        }
 
         // Resolve candidates for struct fields.
         for (field_name, remaining) in &candidates {
             let key = format!("{}::{}", s.name, field_name);
+            // If both a plain qualifier and its 'task variant survived elimination, pick
+            // one based on whether a task-declared method was called on this field.
+            let mut remaining: Vec<OwnerQual> = remaining.clone();
+            disambiguate_task_variant(&mut remaining, self.task_method_call_fields.contains(field_name.as_str()));
             let resolved = match remaining.len() {
                 0 => continue,
                 1 => remaining[0].clone(),
@@ -748,7 +813,7 @@ impl Transpiler {
                     let type_size = target_fields.get(field_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
-                    match resolve_fallback(remaining, true, true, type_size, self.config.stack_auto_bytes) {
+                    match resolve_fallback(&remaining, true, type_size, self.config.stack_auto_bytes) {
                         Some(q) => q,
                         None => continue,
                     }
@@ -869,7 +934,7 @@ impl Transpiler {
                         if !is_req {
                             constrain_candidates(
                                 candidates, field_name,
-                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
                         }
@@ -904,22 +969,35 @@ impl Transpiler {
     }
 
     /// Constrain qualifiers for struct fields captured by a task body.
+    /// Mirrors `constrain_task_captures`: keeps both the plain and `'task` variant as
+    /// candidates, recording a task-method-call signal into `task_method_call_fields` for
+    /// the later `disambiguate_task_variant` tie-break.
     fn constrain_task_field_captures(
-        &self,
+        &mut self,
         body: &Expr,
         target_fields: &std::collections::HashMap<String, String>,
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     ) {
-        let receivers = method_receivers(body);
+        let receiver_methods = method_receivers(body);
         let accessed = self_field_names_in_expr(body);
 
         for field_name in &accessed {
             if !target_fields.contains_key(field_name.as_str()) { continue; }
-            let compatible: &[OwnerQual] = if receivers.contains(field_name.as_str()) {
-                &[OwnerQual::Actor, OwnerQual::Guard]
+            let called_methods = receiver_methods.get(field_name.as_str());
+            promote_task_variants(candidates, field_name, alias_of);
+            let compatible: &[OwnerQual] = if let Some(methods) = called_methods {
+                if let Some(struct_name) = target_fields.get(field_name.as_str()) {
+                    let is_task_call = methods.iter().any(|m| {
+                        self.struct_task_methods.contains(&format!("{}::{}", struct_name, m))
+                    });
+                    if is_task_call {
+                        self.task_method_call_fields.insert(field_name.clone());
+                    }
+                }
+                &[OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask]
             } else {
-                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]
+                &[OwnerQual::Shared, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask]
             };
             constrain_candidates(candidates, field_name, compatible, alias_of);
         }
@@ -1130,6 +1208,63 @@ fn constrain_candidates(
     }
 }
 
+/// Add `ActorTask`/`GuardTask` to a variable's (and its aliases') candidate set wherever
+/// the corresponding plain variant (`Actor`/`Guard`) is already a candidate. Called when a
+/// task/closure capture is detected — both variants remain viable until
+/// `disambiguate_task_variant` picks one at resolution time.
+fn promote_task_variants(
+    candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    var_name: &str,
+    alias_of: &std::collections::HashMap<String, String>,
+) {
+    let root = alias_of.get(var_name).map(|s| s.as_str()).unwrap_or(var_name).to_string();
+    let mut keys: Vec<String> = vec![root.clone()];
+    for (alias, target) in alias_of {
+        if target.as_str() == root.as_str() {
+            keys.push(alias.clone());
+        }
+    }
+    for key in &keys {
+        if let Some(list) = candidates.get_mut(key.as_str()) {
+            if list.iter().any(|q| quals_equal(q, &OwnerQual::Actor))
+                && !list.iter().any(|q| quals_equal(q, &OwnerQual::ActorTask))
+            {
+                list.push(OwnerQual::ActorTask);
+            }
+            if list.iter().any(|q| quals_equal(q, &OwnerQual::Guard))
+                && !list.iter().any(|q| quals_equal(q, &OwnerQual::GuardTask))
+            {
+                list.push(OwnerQual::GuardTask);
+            }
+        }
+    }
+}
+
+/// When both a plain qualifier (`Actor`/`Guard`) and its `'task` variant remain as
+/// candidates after constraint elimination, pick one based on whether a `task`-declared
+/// method was called on the variable (`has_task_call`, from `task_method_call_vars` /
+/// `task_method_call_fields`). This is the tie-break the doc's open question on
+/// `'actor'task` vs `'actor` inference asked for.
+fn disambiguate_task_variant(remaining: &mut Vec<OwnerQual>, has_task_call: bool) {
+    let has_actor = remaining.iter().any(|q| quals_equal(q, &OwnerQual::Actor));
+    let has_actor_task = remaining.iter().any(|q| quals_equal(q, &OwnerQual::ActorTask));
+    if has_actor && has_actor_task {
+        if has_task_call {
+            remaining.retain(|q| !quals_equal(q, &OwnerQual::Actor));
+        } else {
+            remaining.retain(|q| !quals_equal(q, &OwnerQual::ActorTask));
+        }
+    }
+    let has_guard = remaining.iter().any(|q| quals_equal(q, &OwnerQual::Guard));
+    let has_guard_task = remaining.iter().any(|q| quals_equal(q, &OwnerQual::GuardTask));
+    if has_guard && has_guard_task {
+        if has_task_call {
+            remaining.retain(|q| !quals_equal(q, &OwnerQual::Guard));
+        } else {
+            remaining.retain(|q| !quals_equal(q, &OwnerQual::GuardTask));
+        }
+    }
+}
 
 /// For 'shared/'actor/'guard demands, 'stack and 'heap are also acceptable
 /// because a plain T or Box<T> can be wrapped at the call site.
@@ -1142,7 +1277,7 @@ fn coercible_from(demanded: OwnerQual) -> Vec<OwnerQual> {
         OwnerQual::Borrow => all_qualifiers(),
         // Universal mutable borrow: any mutable qualifier ('shared excluded).
         OwnerQual::BorrowMut =>
-            vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard],
+            vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
         _ => vec![demanded],
     }
 }
@@ -1160,18 +1295,14 @@ fn all_qualifiers() -> Vec<OwnerQual> {
 /// Priority-ordered fallback when multiple qualifier candidates remain after constraint
 /// elimination.
 ///
-/// Priority-ordered fallback when multiple qualifier candidates remain after constraint
-/// elimination.
-///
 /// 1. If `Stack` ∈ candidates:
 ///    - struct field (any binding) → `'stack` (bytes are part of parent allocation)
 ///    - local variable, sizeof(T) ≤ stack_auto_bytes → `'stack`
 ///    - type too large → skip `'stack`, go to ordered chain
 ///
-/// 2. Ordered chain: `'heap` > `'shared` > `'actor` > `'guard`
+/// 2. Ordered chain: `'heap` > `'shared` > `'actor`(/`'actor'task`) > `'guard`(/`'guard'task`)
 fn resolve_fallback(
     candidates: &[OwnerQual],
-    _is_known_struct: bool,
     is_struct_field: bool,
     type_size: Option<usize>,
     stack_auto_bytes: usize,
@@ -1179,12 +1310,19 @@ fn resolve_fallback(
     let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
     let fits = type_size.map_or(true, |s| s <= stack_auto_bytes);
 
-    const TAIL: &[OwnerQual] = &[
-        OwnerQual::Owned,
-        OwnerQual::Shared,
-        OwnerQual::Actor,
-        OwnerQual::Guard,
-    ];
+    // Ordered chain: 'heap > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
+    // The 'task variant is checked first at each slot so that it wins when it's the one
+    // that survived constraint elimination (e.g. after `disambiguate_task_variant`) —
+    // by that point at most one of {Actor, ActorTask} and one of {Guard, GuardTask} remain.
+    fn tail_pick(has: &dyn Fn(&OwnerQual) -> bool) -> Option<OwnerQual> {
+        if has(&OwnerQual::Owned) { return Some(OwnerQual::Owned); }
+        if has(&OwnerQual::Shared) { return Some(OwnerQual::Shared); }
+        if has(&OwnerQual::ActorTask) { return Some(OwnerQual::ActorTask); }
+        if has(&OwnerQual::Actor) { return Some(OwnerQual::Actor); }
+        if has(&OwnerQual::GuardTask) { return Some(OwnerQual::GuardTask); }
+        if has(&OwnerQual::Guard) { return Some(OwnerQual::Guard); }
+        None
+    }
 
     // Step 1: 'stack — struct field of any binding, or small local variable.
     if has(&OwnerQual::Stack) {
@@ -1194,11 +1332,11 @@ fn resolve_fallback(
         if fits {
             return Some(OwnerQual::Stack);
         }
-        return TAIL.iter().find(|q| has(q)).cloned();
+        return tail_pick(&has);
     }
 
     // Step 2: neither 'stack nor other stack-allocated in candidates — first from the ordered chain.
-    TAIL.iter().find(|q| has(q)).cloned()
+    tail_pick(&has)
 }
 
 /// Candidate set for T' (tick) variables: indirection is certain, kind is inferred.
@@ -1391,18 +1529,19 @@ fn qual_name(q: &OwnerQual) -> &'static str {
 }
 
 /// Collect variable names that appear as the object (receiver) of a method call
-/// anywhere inside an expression tree.
-fn method_receivers(expr: &Expr) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
+/// anywhere inside an expression tree, along with the set of method names called
+/// on each one (used to detect `task`-method calls for 'actor'task/'guard'task inference).
+fn method_receivers(expr: &Expr) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut out = std::collections::HashMap::new();
     collect_receivers_in_expr(expr, &mut out);
     out
 }
 
-fn collect_receivers_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+fn collect_receivers_in_expr(expr: &Expr, out: &mut std::collections::HashMap<String, std::collections::HashSet<String>>) {
     match &expr.kind {
-        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+        ExprKind::MethodCall(obj, method, args) | ExprKind::OptionalMethodCall(obj, method, args) => {
             if let ExprKind::Var(name) = &obj.kind {
-                out.insert(name.clone());
+                out.entry(name.clone()).or_default().insert(method.clone());
             }
             collect_receivers_in_expr(obj, out);
             for a in args { collect_receivers_in_expr(&a.value, out); }
@@ -1445,7 +1584,7 @@ fn collect_receivers_in_expr(expr: &Expr, out: &mut std::collections::HashSet<St
     }
 }
 
-fn collect_receivers_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+fn collect_receivers_in_stmt(stmt: &Stmt, out: &mut std::collections::HashMap<String, std::collections::HashSet<String>>) {
     match stmt {
         Stmt::Let(s) => { if let Some(v) = &s.value { collect_receivers_in_expr(v, out); } }
         Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {

@@ -13,6 +13,7 @@ struct Interpreter:
     var Value pending_return_val
     var bool has_pending_throw
     var Value pending_throw_val
+    var int next_ref_id = 0
 
     def void set_pending_return(Value v):
         has_pending_return = true
@@ -400,6 +401,15 @@ def void register_stdlib(Interpreter interp):
     env_define(env, "PI", Value.Float(3.141592653589793), false)
     env_define(env, "E", Value.Float(2.718281828459045), false)
 
+    let hashmap_fn = Value.NativeFn("HashMap", Value.Nil)
+    env_define(env, "HashMap", hashmap_fn, false)
+
+    let hashset_fn = Value.NativeFn("HashSet", Value.Nil)
+    env_define(env, "HashSet", hashset_fn, false)
+
+    let vec_fn = Value.NativeFn("Vec", Value.Nil)
+    env_define(env, "Vec", vec_fn, false)
+
 # ─── new_interpreter ──────────────────────────────────────────────────────────
 
 def Interpreter'actor new_interpreter():
@@ -413,6 +423,7 @@ def Interpreter'actor new_interpreter():
         enum_decls = {},
         has_pending_return = false,
         pending_return_val = Value.Nil,
+        next_ref_id = 0,
         has_pending_throw = false,
         pending_throw_val = Value.Nil
     )
@@ -449,7 +460,15 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Use(decl):
             env_define(interp.current_env, "__use__", Value.Nil, true)
         Item.Ext(decl):
-            env_define(interp.global_env, decl.type_name, Value.Nil, false)
+            # Register extension methods on the target type
+            let existing_methods_opt = interp.struct_methods.get(decl.type_name)
+            var all_methods = [FnDecl]{}
+            if let existing = existing_methods_opt:
+                for m in existing:
+                    all_methods.append(m)
+            for m in decl.methods:
+                all_methods.append(m)
+            interp.set_method_decls(decl.type_name, all_methods)
         Item.Mod(decl):
             for sub_item in decl.items:
                 exec_item(interp, sub_item)

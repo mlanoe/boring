@@ -1,0 +1,43 @@
+# saxpy.br — SAXPY on GPU: y[i] = alpha * x[i] + y[i]
+#
+# Classic "Hello World" of GPU computing.
+# The same source runs on all three targets:
+#
+#   boring run saxpy.br                          # interpreted simulation
+#   boring build --target cuda saxpy.br          # CUDA (simulation on macOS without nvidia)
+#   boring build --target metal saxpy.br         # Metal (macOS native)
+
+let N = 16        # small enough to print in full
+let alpha = 2.0
+
+# Print device info
+let g = GPU(0)
+print "Device : {g.name()}"
+print "Memory : {g.totalMem() / 1_073_741_824} GB"
+
+# Input vectors: x = [0..N-1], y = [1.0 * N]
+var [float]'gpu'unified x = [0.0 for ..N]
+var [float]'gpu'unified y = [1.0 for ..N]
+for i in 0..N:
+    x[i] = float(i)
+
+kernel Saxpy:
+    let float          alpha
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float a, [float]'unified xs, [float]'unified ys):
+        alpha = a
+        x    = xs
+        y    = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+mut k = Saxpy(alpha, x, y)
+mut k = kernel(block = N) k |> .wait
+
+print "Results (expected: y[i] = 2*i + 1):"
+for i, v in k.y:
+    print "  y[{i}] = {v}"

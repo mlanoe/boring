@@ -257,6 +257,14 @@ print v
     v = <span class="s">&quot;small&quot;</span>;
 }</code></pre></div>
 <blockquote><strong>Prefer the expression form</strong> when branches are simple: <code>let v = if condition: &quot;big&quot; else: &quot;small&quot;</code></blockquote>
+<h3 id="move-semantics">Move semantics</h3>
+<p>Assigning a non-Copy value to a new binding <strong>moves</strong> it — the source binding becomes inaccessible:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = [<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>]
+<span class="kw">let</span> b = a          <span class="co"># a is moved into b</span>
+print b            <span class="co"># [1, 2, 3]</span>
+print a            <span class="co"># error: use of moved value &#x27;a&#x27;: the value was moved</span>
+                    <span class="co">#        and is no longer accessible — use .clone() to make a copy</span></code></pre></div>
+<ul><li>Copy types (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>, <code>string</code>, <code>nil</code>) are unaffected — assigning them always copies, both bindings stay usable.</li><li>Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment, on rebinding, and when passed by value.</li><li>Call <code>.clone()</code> to make an explicit copy instead of moving: <code>let b = a.clone()</code> leaves <code>a</code> usable.</li><li>There is no explicit move-marker syntax — the transpiler infers moves vs. copies from the value&#x27;s type.</li></ul>
 <hr>
 <h2 id="3-data-types">3. Data Types</h2>
 <h3 id="scalar-types">Scalar types</h3>
@@ -413,12 +421,13 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point:
     <span class="kw">init</span>(<span class="kw">pub</span> <span class="kt">int</span> x, <span class="kw">pub</span> <span class="kt">int</span> y)
 
-<span class="kw">let</span> a = <span class="fn">Point</span>(x = <span class="nb">1</span>, y = <span class="nb">2</span>)
-<span class="kw">let</span> b = a                      <span class="co"># b is the same reference as a</span>
+<span class="kw">let</span> Point<span class="lf">&#x27;shared</span> a = <span class="fn">Point</span>(x = <span class="nb">1</span>, y = <span class="nb">2</span>)
+<span class="kw">let</span> b = a.<span class="fn">clone</span>()              <span class="co"># b is the same reference as a (Rc clone, not a deep copy)</span>
 <span class="kw">let</span> c = <span class="fn">Point</span>(x = <span class="nb">1</span>, y = <span class="nb">2</span>)   <span class="co"># c is a new, distinct object</span>
 
 print <span class="s">"<span class="si">{a === b}</span>"</span>   <span class="co"># true  — same reference</span>
 print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="co"># false — same value, different object</span></code></pre></div>
+<p>Plain assignment (<code>let b = a</code>) <strong>moves</strong> non-Copy values instead of aliasing them (see &quot;Move semantics&quot; above), so aliasing requires a <code>&#x27;shared</code> qualifier plus <code>.clone()</code> to bump the reference count.</p>
 <p>For primitive types (<code>int</code>, <code>float</code>, <code>bool</code>) which have value semantics, <code>===</code> behaves like <code>==</code>.</p>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">Arc</span>::<span class="fn">ptr_eq</span>(&amp;a, &amp;b)   <span class="co">// T&#x27;shared objects (multi-thread)</span>
@@ -690,6 +699,17 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 
 <span class="kw">if</span> <span class="kw">let</span> name, <span class="kw">let</span> age:
     print <span class="s">"<span class="si">{name}</span> is <span class="si">{age}</span>"</span></code></pre></div>
+<h4 id="elif-let"><code>elif let</code></h4>
+<p><code>elif</code> chains onto an <code>if let</code>, with its own comma-separated clause list — tried in order, first match wins:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">if</span> <span class="kw">let</span> v = a:
+    print <span class="s">"a = <span class="si">{v}</span>"</span>
+<span class="kw">elif</span> <span class="kw">let</span> v = b, v &gt; <span class="nb">0</span>:
+    print <span class="s">"b = <span class="si">{v}</span> (positive)"</span>
+<span class="kw">elif</span> c &gt; <span class="nb">10</span>:
+    print <span class="s">"c is large"</span>
+<span class="kw">else</span>:
+    print <span class="s">"nothing matched"</span></code></pre></div>
+<p>A plain boolean <code>elif</code> (no <code>let</code>) is also allowed, as in the <code>c &gt; 10</code> branch above.</p>
 <h3 id="guard"><code>guard</code></h3>
 <p>Early exit if a condition fails:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">check</span>(<span class="kt">int</span> n):
@@ -945,7 +965,7 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <span class="kw">let</span> z: [i64; <span class="nb">3</span>] = [<span class="nb">0i64</span>; <span class="nb">3</span>];</code></pre></div>
 <p><code>N</code> must be a non-negative integer literal — it cannot be a runtime variable. Use <code>[T]</code> (<code>Vec&lt;T&gt;</code>) when the size is dynamic.</p>
 <h4 id="array-methods">Array methods</h4>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>arr.length</code></td><td><code>arr.len()</code></td></tr><tr><td><code>arr.first</code></td><td><code>arr.first().cloned()</code></td></tr><tr><td><code>arr.last</code></td><td><code>arr.last().cloned()</code></td></tr><tr><td><code>arr.push(v)</code></td><td><code>arr.push(v)</code></td></tr><tr><td><code>arr.pop()</code></td><td><code>arr.pop()</code></td></tr><tr><td><code>arr.append(other)</code></td><td><code>arr.extend(other)</code></td></tr><tr><td><code>arr.insert(i, v)</code></td><td><code>arr.insert(i, v)</code></td></tr><tr><td><code>arr.remove(i)</code></td><td><code>arr.remove(i)</code></td></tr><tr><td><code>arr.contains(v)</code></td><td><code>arr.contains(&amp;v)</code></td></tr><tr><td><code>arr.sort()</code></td><td><code>arr.sort()</code></td></tr><tr><td><code>arr.reverse()</code></td><td><code>arr.reverse()</code></td></tr><tr><td><code>arr.map((x): expr)</code></td><td><code>arr.iter().map(|x| expr).collect()</code></td></tr><tr><td><code>arr.filter((x): cond)</code></td><td><code>arr.iter().filter(|x| cond).cloned().collect()</code></td></tr><tr><td><code>arr.reduce(init, (a,b): expr)</code></td><td><code>arr.iter().fold(init, |a,b| expr)</code></td></tr><tr><td><code>arr.any((x): cond)</code></td><td><code>arr.iter().any(|x| cond)</code></td></tr><tr><td><code>arr.all((x): cond)</code></td><td><code>arr.iter().all(|x| cond)</code></td></tr><tr><td><code>arr.join(sep)</code></td><td><code>arr.join(sep)</code></td></tr><tr><td><code>arr.flat()</code></td><td><code>arr.concat()</code></td></tr><tr><td><code>arr.isEmpty</code></td><td><code>arr.is_empty()</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>arr.length</code></td><td><code>arr.len()</code></td></tr><tr><td><code>arr.first()</code></td><td><code>arr.first().cloned()</code></td></tr><tr><td><code>arr.last()</code></td><td><code>arr.last().cloned()</code></td></tr><tr><td><code>arr.push(v)</code></td><td><code>arr.push(v)</code></td></tr><tr><td><code>arr.pop()</code></td><td><code>arr.pop()</code></td></tr><tr><td><code>arr.append(other)</code></td><td><code>arr.extend(other)</code></td></tr><tr><td><code>arr.insert(i, v)</code></td><td><code>arr.insert(i, v)</code></td></tr><tr><td><code>arr.remove(i)</code></td><td><code>arr.remove(i)</code></td></tr><tr><td><code>arr.contains(v)</code></td><td><code>arr.contains(&amp;v)</code></td></tr><tr><td><code>arr.sort()</code></td><td><code>arr.sort()</code></td></tr><tr><td><code>arr.reverse()</code></td><td><code>arr.reverse()</code></td></tr><tr><td><code>arr.map((x): expr)</code></td><td><code>arr.iter().map(|x| expr).collect()</code></td></tr><tr><td><code>arr.filter((x): cond)</code></td><td><code>arr.iter().filter(|x| cond).cloned().collect()</code></td></tr><tr><td><code>arr.reduce(init, (a,b): expr)</code></td><td><code>arr.iter().fold(init, |a,b| expr)</code></td></tr><tr><td><code>arr.any((x): cond)</code></td><td><code>arr.iter().any(|x| cond)</code></td></tr><tr><td><code>arr.all((x): cond)</code></td><td><code>arr.iter().all(|x| cond)</code></td></tr><tr><td><code>arr.join(sep)</code></td><td><code>arr.join(sep)</code></td></tr><tr><td><code>arr.flat()</code></td><td><code>arr.concat()</code></td></tr><tr><td><code>arr.isEmpty()</code></td><td><code>arr.is_empty()</code></td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> doubled  = numbers.<span class="fn">map</span>((n): n * <span class="nb">2</span>)
 <span class="kw">let</span> evens    = numbers.<span class="fn">filter</span>((n): n % <span class="nb">2</span> == <span class="nb">0</span>)
 <span class="kw">let</span> total    = numbers.<span class="fn">reduce</span>(<span class="nb">0</span>, (acc, n): acc + n)</code></pre></div>
@@ -956,7 +976,7 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> scores: <span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, i64&gt; = <span class="kw">HashMap</span>::<span class="fn">from</span>([...]); <span class="co">// literals coerced via .to_arc()</span>
 <span class="kw">let</span> empty_map: <span class="kw">HashMap</span>&lt;i64, i64&gt; = <span class="kw">HashMap</span>::<span class="fn">new</span>();</code></pre></div>
 <h4 id="dictionary-methods">Dictionary methods</h4>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>d.keys()</code></td><td><code>d.keys().cloned().collect()</code></td></tr><tr><td><code>d.values()</code></td><td><code>d.values().cloned().collect()</code></td></tr><tr><td><code>d.contains(k)</code></td><td><code>d.contains_key(&amp;k)</code></td></tr><tr><td><code>d.remove(k)</code></td><td><code>d.remove(&amp;k)</code></td></tr><tr><td><code>d.length</code></td><td><code>d.len()</code></td></tr><tr><td><code>d.isEmpty</code></td><td><code>d.is_empty()</code></td></tr><tr><td><code>d.map((k,v): expr)</code></td><td><code>d.iter().map(|(k,v)| expr).collect()</code></td></tr><tr><td><code>d.filter((k,v): cond)</code></td><td><code>d.into_iter().filter(|(k,v)| cond).collect()</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>d.keys()</code></td><td><code>d.keys().cloned().collect()</code></td></tr><tr><td><code>d.values()</code></td><td><code>d.values().cloned().collect()</code></td></tr><tr><td><code>d.contains(k)</code></td><td><code>d.contains_key(&amp;k)</code></td></tr><tr><td><code>d.remove(k)</code></td><td><code>d.remove(&amp;k)</code></td></tr><tr><td><code>d.length</code></td><td><code>d.len()</code></td></tr><tr><td><code>d.isEmpty()</code></td><td><code>d.is_empty()</code></td></tr><tr><td><code>d.map((k,v): expr)</code></td><td><code>d.iter().map(|(k,v)| expr).collect()</code></td></tr><tr><td><code>d.filter((k,v): cond)</code></td><td><code>d.into_iter().filter(|(k,v)| cond).collect()</code></td></tr></tbody></table>
 <h3 id="sets--t">Sets — <code>{T}</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> {<span class="kt">int</span>} unique = {<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">2</span>, <span class="nb">1</span>}   <span class="co"># deduplicates → {1, 2, 3}</span>
 <span class="kw">let</span> {<span class="kt">int</span>} empty_set = {}</code></pre></div>
@@ -964,7 +984,7 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> unique: <span class="kw">HashSet</span>&lt;i64&gt; = <span class="kw">HashSet</span>::<span class="fn">from</span>([<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>]);
 <span class="kw">let</span> empty_set: <span class="kw">HashSet</span>&lt;i64&gt; = <span class="kw">HashSet</span>::<span class="fn">new</span>();</code></pre></div>
 <h4 id="set-methods">Set methods</h4>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>s.contains(v)</code></td><td><code>s.contains(&amp;v)</code></td></tr><tr><td><code>s.add(v)</code></td><td><code>s.insert(v)</code></td></tr><tr><td><code>s.remove(v)</code></td><td><code>s.remove(&amp;v)</code></td></tr><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.isEmpty</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>s.contains(v)</code></td><td><code>s.contains(&amp;v)</code></td></tr><tr><td><code>s.add(v)</code></td><td><code>s.insert(v)</code></td></tr><tr><td><code>s.remove(v)</code></td><td><code>s.remove(&amp;v)</code></td></tr><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.isEmpty()</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
 <h3 id="index--opaque-collection-cursor">Index — opaque collection cursor</h3>
 <p>Boring provides safe iteration over collections through an opaque <code>Index&lt;T&gt;</code> type. <code>firstIndex()</code> and <code>nextIndex(idx)</code> return <code>nil</code> when the collection is exhausted — no integer arithmetic needed.</p>
 <p><strong>Array example</strong></p>
@@ -2079,7 +2099,7 @@ numbers.filter n: n % <span class="nb">2</span> == <span class="nb">0</span></co
 <span class="co"># equivalent — all yield [&quot;HELLO&quot;, &quot;WORLD&quot;, &quot;BORING&quot;]</span>
 <span class="kw">let</span> a = words.<span class="fn">map</span>((w): w.<span class="fn">upper</span>())
 <span class="kw">let</span> b = words.map (w): w.<span class="fn">upper</span>()
-<span class="kw">let</span> c = words.map :<span class="fn">upper</span>()           <span class="co"># closure shorthand (field/method on arg)</span></code></pre></div>
+<span class="kw">let</span> c = words.<span class="fn">map</span>(:<span class="fn">upper</span>())          <span class="co"># closure shorthand (field/method on arg) — parens required</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>numbers.<span class="fn">iter</span>().<span class="fn">map</span>(|n| n * <span class="nb">2</span>).collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;()
 numbers.<span class="fn">iter</span>().<span class="fn">filter</span>(|n| n % <span class="nb">2</span> == <span class="nb">0</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;()</code></pre></div>
@@ -2771,9 +2791,8 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 <span class="kw">let</span> Counter<span class="lf">&#x27;new</span> v       <span class="co"># delayed init — &#x27;stack excluded</span>
 <span class="kw">let</span> Counter<span class="lf">&#x27;actor</span> v     <span class="co"># delayed init — explicit qualifier</span></code></pre></div>
 <p><code>new</code> also accepts a GPU arena as first argument (see the CUDA section):</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">new</span>(g0) <span class="fn">Counter</span>()         <span class="co"># GPU device g0, CPU side inferred</span>
-<span class="kw">new</span>(<span class="fn">g0</span>(<span class="lf">&#x27;heap</span>)) <span class="fn">Counter</span>()  <span class="co"># GPU device g0, CPU side explicit &#x27;heap</span></code></pre></div>
-<p><code>let v&#x27; = a</code> is a <strong>move marker</strong> (explicit transfer of ownership from <code>a</code> to <code>v</code>) — it is unrelated to <code>new</code> and placement.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">new</span>(g0) <span class="fn">Counter</span>()   <span class="co"># GPU device g0</span></code></pre></div>
+<p>Ownership transfer between bindings is implicit — see &quot;Move semantics&quot; below; there is no explicit move-marker syntax.</p>
 <p>Shorthands cover the most common cases without writing a qualifier explicitly:</p>
 <table><thead><tr><th>Boring shorthand</th><th>Strict mode (<code>--mode strict</code>)</th><th>Managed mode (<code>--mode managed</code>)</th><th>Meaning</th></tr></thead><tbody><tr><td><code>T</code></td><td><code>T</code> (stack)</td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code> / <code>RefCell&lt;T&gt;</code></td><td>Anonymous — transpiler decides</td></tr><tr><td><code>T&#x27;new</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code> / <code>RefCell&lt;T&gt;</code></td><td>Non-stack placement, qualifier inferred by transpiler</td></tr><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Option&lt;T&gt;</code></td><td>Optional value</td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code></td><td>Dynamic array</td></tr><tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td><td>Unordered set</td></tr><tr><td><code>{K=V}</code></td><td><code>HashMap&lt;K, V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td><td>Key-value map</td></tr></tbody></table>
 <p><code>T</code> and <code>T&#x27;new</code> are <strong>anonymous forms</strong> — the transpiler resolves them based on the active flags. Explicit qualifiers (<code>T&#x27;stack</code>, <code>T&#x27;heap</code>, etc.) are <strong>contracts</strong> and are never affected by the mode.</p>
@@ -3300,7 +3319,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="math-constants-also-available-as-identifiers">Math constants (also available as identifiers)</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th><th>Value</th></tr></thead><tbody><tr><td><code>PI</code></td><td><code>std::f64::consts::PI</code></td><td>3.14159…</td></tr><tr><td><code>E</code></td><td><code>std::f64::consts::E</code></td><td>2.71828…</td></tr><tr><td><code>TAU</code></td><td><code>std::f64::consts::TAU</code></td><td>6.28318…</td></tr></tbody></table>
 <h3 id="string-methods">String methods</h3>
-<table><thead><tr><th>Method</th><th>Rust equivalent</th></tr></thead><tbody><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.contains(sub)</code></td><td><code>s.contains(sub)</code></td></tr><tr><td><code>s.startsWith(prefix)</code></td><td><code>s.starts_with(prefix)</code></td></tr><tr><td><code>s.endsWith(suffix)</code></td><td><code>s.ends_with(suffix)</code></td></tr><tr><td><code>s.trim()</code></td><td><code>s.trim().to_string()</code></td></tr><tr><td><code>s.upper()</code> / <code>s.toUpper()</code></td><td><code>s.to_uppercase()</code></td></tr><tr><td><code>s.lower()</code> / <code>s.toLower()</code></td><td><code>s.to_lowercase()</code></td></tr><tr><td><code>s.replace(from, to)</code></td><td><code>s.replace(from, to)</code></td></tr><tr><td><code>s.split(sep)</code></td><td><code>s.split(sep).collect::&lt;Vec&lt;_&gt;&gt;()</code></td></tr><tr><td><code>s.chars()</code></td><td><code>s.chars().collect::&lt;Vec&lt;_&gt;&gt;()</code></td></tr><tr><td><code>s.repeat(n)</code></td><td><code>s.repeat(n)</code></td></tr><tr><td><code>s.isEmpty</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
+<table><thead><tr><th>Method</th><th>Rust equivalent</th></tr></thead><tbody><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.contains(sub)</code></td><td><code>s.contains(sub)</code></td></tr><tr><td><code>s.startsWith(prefix)</code></td><td><code>s.starts_with(prefix)</code></td></tr><tr><td><code>s.endsWith(suffix)</code></td><td><code>s.ends_with(suffix)</code></td></tr><tr><td><code>s.trim()</code></td><td><code>s.trim().to_string()</code></td></tr><tr><td><code>s.upper()</code> / <code>s.toUpper()</code></td><td><code>s.to_uppercase()</code></td></tr><tr><td><code>s.lower()</code> / <code>s.toLower()</code></td><td><code>s.to_lowercase()</code></td></tr><tr><td><code>s.replace(from, to)</code></td><td><code>s.replace(from, to)</code></td></tr><tr><td><code>s.split(sep)</code></td><td><code>s.split(sep).collect::&lt;Vec&lt;_&gt;&gt;()</code></td></tr><tr><td><code>s.chars()</code></td><td><code>s.chars().collect::&lt;Vec&lt;_&gt;&gt;()</code></td></tr><tr><td><code>s.repeat(n)</code></td><td><code>s.repeat(n)</code></td></tr><tr><td><code>s.isEmpty()</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
 <h3 id="ownership">Ownership</h3>
 <table><thead><tr><th>Function</th><th>Description</th></tr></thead><tbody><tr><td><code>drop(x)</code></td><td>Explicitly release ownership of <code>x</code>. Maps to Rust&#x27;s <code>drop()</code>. In the interpreter this is a no-op (reference-counting handles cleanup automatically).</td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> buf = [<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>]
@@ -3313,10 +3332,10 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <p>When either builtin is used, the compiler automatically adds <code>serde</code> (with the <code>derive</code> and <code>rc</code> features) and <code>serde_json</code> to the generated <code>Cargo.toml</code>.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@derive</span>(Serialize, Deserialize)
 <span class="kw">struct</span> User:
-    name: <span class="kt">string</span>
-    age:  <span class="kt">int</span>
+    <span class="kt">string</span> name
+    <span class="kt">int</span> age
 
-<span class="kw">let</span> u = <span class="fn">User</span>(name: <span class="s">"Alice"</span>, age: <span class="nb">30</span>)
+<span class="kw">let</span> u = <span class="fn">User</span>(name = <span class="s">"Alice"</span>, age = <span class="nb">30</span>)
 
 <span class="kw">let</span> s = <span class="fn">json</span>(u)                     <span class="co"># → &#x27;{&quot;name&quot;:&quot;Alice&quot;,&quot;age&quot;:30}&#x27;</span>
 
@@ -3380,7 +3399,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="expressions">Expressions</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>let a, b = join(f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>if let x = a: … elif let y = b: …</code></td><td><code>if let Some(x) = a { … } else if let Some(y) = b { … }</code></td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>
 <h2 id="28-diagnostics">28. Diagnostics</h2>
 <p>Boring prints errors in the same format as <code>rustc</code> — file path, line number, and the source line that caused the problem.</p>
@@ -3755,143 +3774,6 @@ c.<span class="fn">inc</span>()             <span class="co"># def call → elim
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c&#x27;? = <span class="fn">some</span>(<span class="fn">Counter</span>(<span class="nb">0</span>))  <span class="co"># T&#x27;? → restricted set {Owned, Shared, Actor, Guard}</span>
                              <span class="co"># no signal → fallback → Option&lt;Box&lt;Counter&gt;&gt;</span></code></pre></div>
 <p><code>T?</code> with inferred <code>&#x27;actor</code> becomes <code>Option&lt;Arc&lt;Mutex&lt;Counter&gt;&gt;&gt;</code> — the <code>Option</code> wraps the qualified value, not the other way around. Conflict detection works the same as for bare variables.</p>
-<hr>
-<h2 id="31-rust-for-linux-target">31. Rust-for-Linux target</h2>
-<p><code>boring build --target kernel</code> compiles Boring source to <strong>Rust-for-Linux</strong> — the <code>no_std</code> Rust dialect used to write Linux kernel modules, drivers, and subsystems.</p>
-<p>The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath. This chapter describes those differences relative to the standard (tokio) backend.</p>
-<hr>
-<h3 id="why-a-kernel-target">Why a kernel target?</h3>
-<p>The Linux kernel imposes constraints that make the standard Rust backend unusable:</p>
-<ul><li><strong>No <code>std</code></strong> — only <code>core</code> and the <code>kernel</code> crate are available.</li><li><strong>No FPU</strong> — floating-point is disabled unless explicitly guarded.</li><li><strong>No tokio</strong> — no async executor, no <code>JoinHandle</code>, no <code>select!</code>.</li><li><strong>No <code>panic</code></strong> — a panic is a kernel oops/crash.</li><li><strong>Fixed error type</strong> — errors are errno-based (<code>kernel::error::Error</code>), not <code>Box&lt;dyn Error&gt;</code>.</li><li><strong>Bounded allocations</strong> — all channels and streams must have a fixed compile-time capacity.</li></ul>
-<h3 id="activating-the-kernel-target">Activating the kernel target</h3>
-<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target kernel main.br
-<span class="co"># → generates main_kernel/ with src/lib.rs + Cargo.toml</span>
-<span class="co"># Build with: make -C /path/to/linux M=$PWD</span></code></pre></div>
-<p>The kernel backend runs a <strong>validation pass</strong> before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.</p>
-<hr>
-<h3 id="what-changes-vs-the-standard-backend">What changes vs the standard backend</h3>
-<h4 id="primitives">Primitives</h4>
-<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td><code>i64</code> — identical</td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u64</code> — identical</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td><strong>forbidden</strong> — FPU disabled</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>bool</code> — identical</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td><code>kernel::str::CString</code> / <code>&amp;kernel::str::CStr</code></td></tr><tr><td><code>void</code></td><td><code>()</code></td><td><code>()</code> — identical</td></tr></tbody></table>
-<p>String literals are emitted as <code>c_str!(&quot;…&quot;)</code>.</p>
-<h4 id="ownership-qualifiers">Ownership qualifiers</h4>
-<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T, KVmalloc&gt;</code> — kernel allocator</td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code> / <code>Rc&lt;T&gt;</code></td><td><code>kernel::sync::Arc&lt;T&gt;</code> — <code>Rc</code> unavailable in kernel</td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::RwLock&lt;T&gt;&gt;</code></td></tr></tbody></table>
-<h4 id="compound-types">Compound types</h4>
-<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>kernel::prelude::Vec&lt;T&gt;</code></td></tr><tr><td><code>{K: V}</code></td><td><code>HashMap&lt;K,V&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code> — ordered, O(log n), keys must be <code>Ord</code></td></tr><tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;T,()&gt;</code> — same constraints</td></tr></tbody></table>
-<h4 id="error-handling-1">Error handling</h4>
-<p>All errors collapse to <code>kernel::error::Error</code> (errno-based <code>i32</code>). To preserve typed <code>catch</code> branches, declare each custom error type as a distinct nominal type bound to an errno:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">type</span> NetworkError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ENETDOWN)
-<span class="kw">type</span> TimeoutError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ETIMEDOUT)</code></pre></div>
-<p><code>type</code> is required — not <code>use</code>. <code>use</code> creates an alias; <code>type</code> declares a distinct type so the compiler can route <code>catch</code> branches correctly:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
-    page = <span class="fn">fetch_page</span>(url)
-<span class="kw">catch</span> NetworkError e:
-    <span class="fn">log</span>(<span class="s">"network down"</span>)
-<span class="kw">catch</span> TimeoutError e:
-    <span class="fn">log</span>(<span class="s">"timed out"</span>)</code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
-<span class="kw">match</span> <span class="fn">fetch_page</span>(url) {
-    <span class="kw">Ok</span>(page)  =&gt; { … }
-    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ENETDOWN</span>  =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;network down&quot;</span>); }
-    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ETIMEDOUT</span> =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;timed out&quot;</span>); }
-    <span class="kw">Err</span>(e)    =&gt; { … }
-}</code></pre></div>
-<h4 id="print">Print</h4>
-<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>print &quot;…&quot;</code></td><td><code>println!(&quot;…&quot;)</code></td><td><code>kernel::pr_info!(&quot;…\n&quot;)</code></td></tr></tbody></table>
-<hr>
-<h3 id="task-def--work-items"><code>task def</code> — work items</h3>
-<p>In the standard backend, <code>task def</code> compiles to <code>async fn</code> + <code>tokio::spawn</code>. In the kernel backend, it generates a <strong>work item</strong> dispatched on <code>system_wq</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> Page <span class="fn">fetch_page</span>(<span class="kt">string</span> url):
-    <span class="co"># … fetch logic</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">struct</span> <span class="kt">FetchPageWork</span> {
-    url: kernel::str::<span class="kt">CString</span>,
-    result: <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">Mutex</span>&lt;<span class="kw">Option</span>&lt;<span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt;&gt;&gt;&gt;,
-    done_cond: <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">CondVar</span>&gt;,
-    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt;,
-}
-
-<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt; <span class="kw">for</span> <span class="kt">FetchPageWork</span> {
-    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
-        <span class="kw">let</span> r = <span class="fn">fetch_page_body</span>(this.url);
-        *this.result.<span class="fn">lock</span>() = <span class="kw">Some</span>(r);
-        this.done_cond.<span class="fn">notify_all</span>();
-    }
-}
-
-<span class="kw">fn</span> <span class="fn">fetch_page</span>(url: kernel::str::<span class="kt">CString</span>) -&gt; <span class="kt">KernelFuture</span>&lt;<span class="kt">Page</span>&gt; { … }
-<span class="kw">fn</span> <span class="fn">fetch_page_body</span>(url: kernel::str::<span class="kt">CString</span>)
-    -&gt; <span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt; { … }</code></pre></div>
-<p><strong>Constraint on <code>self</code>:</strong> <code>task def</code> as an instance method is only allowed on <code>&#x27;task</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> receivers — the only qualifiers with a lifetime compatible with a work item. <code>T&amp;</code>, <code>T&amp;mut</code>, and <code>T&#x27;</code> are rejected.</p>
-<h4 id="kernelfuturet"><code>KernelFuture&lt;T&gt;</code></h4>
-<p>Every <code>task def</code> returns a <code>KernelFuture&lt;T&gt;</code> instead of a <code>JoinHandle</code>:</p>
-<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>f.wait()</code></td><td><code>f.await</code></td><td><code>f.wait()</code> — blocks the current thread (process context only)</td></tr><tr><td><code>f.done()</code></td><td>—</td><td><code>f.done()</code> — non-blocking poll, returns <code>bool</code></td></tr></tbody></table>
-<p><code>wait()</code> blocks — it must not be called from an IRQ handler or atomic context.</p>
-<h4 id="join"><code>join</code></h4>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = join (<span class="kw">task</span> <span class="fn">f1</span>(), <span class="kw">task</span> <span class="fn">f2</span>())</code></pre></div>
-<p>Both work items are enqueued concurrently; <code>.wait()</code> is called on each in turn. Wall time is <code>max(t1, t2)</code>.</p>
-<hr>
-<h3 id="channel--two-ring-buffer-variants"><code>channel</code> — two ring-buffer variants</h3>
-<p>The kernel backend provides two channel implementations depending on how the capacity is expressed. Both use blocking <code>send()</code> / <code>recv()</code> — valid in process context only.</p>
-<h4 id="channelt-n--const-generic-stack-buffer"><code>channel&lt;T, N&gt;</code> — const-generic, stack buffer</h4>
-<p>The capacity is a compile-time type parameter. The buffer is a fixed-size array <code>[Option&lt;T&gt;; N]</code> allocated inline (no heap). Emits <code>KernelSender&lt;T, N&gt;</code> / <code>KernelReceiver&lt;T, N&gt;</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>, <span class="nb">32</span>&gt;   <span class="co"># const-generic, stack buffer</span>
-tx.<span class="fn">send</span>(<span class="s">"hello"</span>)                   <span class="co"># blocks if full</span>
-<span class="kw">let</span> msg = rx.<span class="fn">recv</span>()                <span class="co"># blocks if empty</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">let</span> (tx, rx) = kernel_channel::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
-tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
-<span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
-<h4 id="channeltcap--runtime-capacity-heap-buffer"><code>channel&lt;T&gt;(cap)</code> — runtime capacity, heap buffer</h4>
-<p>The capacity is a call argument. The buffer is a <code>Vec&lt;Option&lt;T&gt;&gt;</code> pre-allocated on the kernel heap. Emits <code>DynKernelSender&lt;T&gt;</code> / <code>DynKernelReceiver&lt;T&gt;</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">32</span>)   <span class="co"># runtime cap, heap buffer</span>
-tx.<span class="fn">send</span>(<span class="s">"hello"</span>)
-<span class="kw">let</span> msg = rx.<span class="fn">recv</span>()</code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">let</span> (tx, rx) = dyn_kernel_channel::&lt;<span class="kt">CString</span>&gt;(<span class="nb">32</span>);
-tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
-<span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
-<p>Omitting the capacity entirely uses the const-generic variant with <code>N = 2</code> and emits a warning recommending an explicit value.</p>
-<hr>
-<h3 id="stream--sequential-iterator-or-work-item"><code>stream</code> — sequential iterator or Work item</h3>
-<p>The kernel backend applies the same two-strategy rule as the tokio backend.</p>
-<h4 id="sequential-stream">Sequential stream</h4>
-<p>If the body has no <code>wait</code> and no <code>task</code> calls, the stream is emitted as a plain iterator — no workqueue involved. <code>yield</code> → <code>__items.push(...)</code>, returns <code>__items.into_iter()</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span> <span class="kt">int</span> <span class="fn">range</span>(<span class="kt">int</span> n):
-    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
-        <span class="kw">yield</span> i</code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">fn</span> <span class="fn">range</span>(n: i64) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = i64&gt; {
-    <span class="kw">let</span> <span class="kw">mut</span> __items: kernel::prelude::<span class="kw">Vec</span>&lt;i64&gt; = kernel::prelude::<span class="kw">Vec</span>::<span class="fn">new</span>();
-    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0i64..</span>n { __items.<span class="fn">push</span>(i); }
-    __items.<span class="fn">into_iter</span>()
-}</code></pre></div>
-<h4 id="async-stream--work-item--kernelreceivert-n">Async stream — Work item + <code>KernelReceiver&lt;T, N&gt;</code></h4>
-<p>If the body contains <code>wait</code> or <code>task</code> calls, the stream becomes a workqueue work item. The function returns a <code>KernelReceiver&lt;T, N&gt;</code>; the caller consumes values with <code>.recv()</code>. Use <code>stream&lt;N&gt;</code> to set the capacity explicitly (defaults to 2).</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span>&lt;<span class="nb">16</span>&gt; <span class="kt">string</span> <span class="fn">lines</span>(File file):
-    <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">readLines</span>():
-        <span class="kw">yield</span> line</code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel) — three pieces:</span>
-<span class="kw">struct</span> <span class="kt">LinesWork</span> {
-    file: <span class="kt">File</span>,
-    tx:   <span class="kt">KernelSender</span>&lt;<span class="kt">CString</span>, <span class="nb">16</span>&gt;,
-    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">LinesWork</span>&gt;,
-}
-<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">LinesWork</span>&gt; <span class="kw">for</span> <span class="kt">LinesWork</span> {
-    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
-        <span class="kw">for</span> line <span class="kw">in</span> this.file.<span class="fn">read_lines</span>() {
-            this.tx.<span class="fn">send</span>(line);   <span class="co">// blocks if consumer is slow</span>
-        }
-        <span class="co">// tx dropped → signals end-of-stream</span>
-    }
-}
-<span class="kw">fn</span> <span class="fn">lines</span>(file: <span class="kt">File</span>) -&gt; <span class="kt">KernelReceiver</span>&lt;<span class="kt">CString</span>, <span class="nb">16</span>&gt; { … }</code></pre></div>
-<hr>
-<h3 id="forbidden-constructs-and-warnings">Forbidden constructs and warnings</h3>
-<p><strong>Errors</strong> — rejected before emission:</p>
-<table><thead><tr><th>Construct</th><th>Reason</th></tr></thead><tbody><tr><td><code>float</code>, floating-point math</td><td>FPU disabled in kernel context</td></tr><tr><td><code>panic(…)</code></td><td>kernel oops/crash — use <code>throws</code> / <code>Result</code></td></tr><tr><td><code>task def</code> on <code>self</code> with <code>T&amp;</code>, <code>T&amp;mut</code>, <code>T&#x27;</code></td><td>lifetime incompatible with a work item</td></tr></tbody></table>
-<p><strong>Warnings</strong> — emitted with a default, but explicit specification is recommended:</p>
-<table><thead><tr><th>Construct</th><th>Behaviour</th></tr></thead><tbody><tr><td><code>channel&lt;T&gt;</code> without capacity</td><td>defaults to const-generic N=2 — specify <code>channel&lt;T, N&gt;</code> or <code>channel&lt;T&gt;(cap)</code> explicitly</td></tr><tr><td><code>stream</code> without <code>&lt;N&gt;</code> (async body)</td><td>defaults to N=2 — specify <code>stream&lt;N&gt;</code> explicitly</td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Rc&lt;T&gt;</code> replaced by <code>kernel::sync::Arc&lt;T&gt;</code> — <code>Rc</code> is unavailable in <code>no_std</code></td></tr></tbody></table>
-<hr>
 <h2 id="32-debugging--profiling">32. Debugging &amp; Profiling</h2>
 <p>Boring provides several layers of debugging support, from language-level builtins to build flags that activate Rust&#x27;s own tooling.  All flags are orthogonal and composable.</p>
 <table><thead><tr><th>Tool</th><th>Activation</th><th>What it does</th></tr></thead><tbody><tr><td><code>dbg</code>, <code>todo</code>, <code>unreachable</code>, <code>assert</code></td><td>language builtins</td><td>Inspect values and guard invariants at the source level</td></tr><tr><td><code>--mode managed</code></td><td>build flag</td><td>Automatic backtraces + <code>#[track_caller]</code> on every function</td></tr><tr><td><code>--sanitize</code></td><td>build flag</td><td>Detect memory errors and data races via Rust sanitizers</td></tr><tr><td><code>--instrument</code></td><td>build flag</td><td>Per-function call counts and wall-clock timings</td></tr><tr><td><code>--compile</code></td><td>build flag</td><td>Transpile then immediately invoke <code>cargo build</code></td></tr><tr><td><code>--rust-options</code></td><td>build flag</td><td>Pass extra flags to <code>cargo build</code> (implies <code>--compile</code>)</td></tr></tbody></table>
@@ -4005,74 +3887,25 @@ cd main_rust &amp;&amp; cargo +nightly run</code></pre></div>
 <ul><li>Prints full stack traces on every panic (<code>RUST_BACKTRACE=1</code>)</li><li>Reports the exact call site on panics (<code>#[track_caller]</code>)</li><li>Writes <code>boring_coverage.json</code> + <code>boring_trace.json</code> on exit</li></ul>
 <table><thead><tr><th>Flag</th><th>Cargo.toml dep</th><th><code>.cargo/config.toml</code></th><th>Toolchain</th></tr></thead><tbody><tr><td><code>--mode managed</code></td><td>—</td><td><code>[env] RUST_BACKTRACE=1</code></td><td>stable</td></tr><tr><td><code>--sanitize</code></td><td>—</td><td><code>[build] rustflags + target</code></td><td><strong>nightly</strong></td></tr><tr><td><code>--instrument</code></td><td>—</td><td>—</td><td>stable</td></tr><tr><td><code>--compile</code></td><td>—</td><td>—</td><td>stable</td></tr><tr><td><code>--rust-options</code></td><td>—</td><td>—</td><td>stable</td></tr></tbody></table>
 <hr>
-<h2 id="33-gpu--cuda">33. GPU / CUDA</h2>
-<p>Boring supports GPU computing through <code>kernel</code> structs — a dedicated declaration form that groups device memory fields, an <code>init</code> allocator, device-side helpers, and an anonymous entry point (<code>def ()</code>).</p>
-<p>The full reference is in <a href="cuda-module.md">`docs/cuda-module.md`</a>. This section covers the essentials.</p>
-<h3 id="quick-start">Quick start</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Scale:
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span> buf     <span class="co"># unified host+device DRAM</span>
-
-    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;unified</span> data):
-        buf = data
-
-    <span class="kw">def</span> ():
-        <span class="kw">let</span> i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
-        buf[i] *= <span class="nb">2.0</span>
-
-<span class="kw">mut</span> k = <span class="fn">Scale</span>(data)                          <span class="co"># instantiate — init called</span>
-<span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait      <span class="co"># launch → wait → get result back</span>
-print k.buf[<span class="nb">0</span>]</code></pre></div>
-<h3 id="kernel-struct"><code>kernel</code> struct</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Name:
-    &lt;binding&gt; [&lt;<span class="kw">type</span>&gt;]&#x27;&lt;qualifier&gt; &lt;field&gt;   <span class="co"># field declarations</span>
-    ...
-
-    <span class="kw">init</span>(&lt;params&gt;):
-        &lt;body&gt;                               <span class="co"># allocate / initialise fields</span>
-
-    <span class="kw">def</span> &lt;helper&gt;(&lt;params&gt;):                  <span class="co"># device-side helper method</span>
-        &lt;body&gt;
-
-    <span class="kw">def</span> ():                                  <span class="co"># entry point — invoked once per thread</span>
-        &lt;body&gt;</code></pre></div>
-<p><code>let</code>/<code>mut</code>/<code>var</code> are mandatory on every field. GPU memory qualifiers (<code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;shared</code>, <code>&#x27;local</code>, <code>&#x27;const</code>) replace the usual ownership qualifiers inside a <code>kernel</code> struct.</p>
-<h3 id="gpu-memory-qualifiers">GPU memory qualifiers</h3>
-<p><strong>Kernel-context</strong> (inside <code>kernel</code> struct fields):</p>
-<table><thead><tr><th>Qualifier</th><th>Memory space</th><th>Host access</th></tr></thead><tbody><tr><td><code>&#x27;unified</code></td><td>unified DRAM (host + device)</td><td>direct</td></tr><tr><td><code>&#x27;global</code></td><td>device-only DRAM</td><td>via <code>gpu.copy()</code></td></tr><tr><td><code>&#x27;shared</code></td><td>block SRAM (<code>__shared__</code>)</td><td>no</td></tr><tr><td><code>&#x27;local</code></td><td>registers / thread-local</td><td>no — default</td></tr><tr><td><code>&#x27;const</code></td><td>constant cache</td><td>no</td></tr></tbody></table>
-<p><strong>Host-context</strong> (bindings outside <code>kernel</code> struct):</p>
-<table><thead><tr><th>Qualifier</th><th>Location</th></tr></thead><tbody><tr><td><code>&#x27;gpu&#x27;unified</code></td><td>unified host + device DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;global</code></td><td>device-only DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;const</code></td><td>GPU constant cache</td></tr></tbody></table>
-<h3 id="launch-expression">Launch expression</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">kernel</span>(block = N) k                         <span class="co"># 1D, N threads per block, 1 block</span>
-<span class="fn">kernel</span>(block = N, grid = M) k               <span class="co"># 1D, N threads × M blocks</span>
-<span class="fn">kernel</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>)) k                  <span class="co"># 2D — grid inferred from kernel shape</span>
-<span class="fn">kernel</span>(block = <span class="nb">256</span>, after = h1) k           <span class="co"># ordered after h1</span></code></pre></div>
-<p>Returns a <code>KernelHandle</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> KernelHandle&lt;T&gt;:
-    <span class="kw">req</span> <span class="kt">bool</span> <span class="fn">done</span>()    <span class="co"># true if completed (always true in simulation)</span>
-    <span class="kw">req</span> T    <span class="fn">wait</span>()    <span class="co"># block until complete, return kernel object</span></code></pre></div>
-<p>Common pattern with the pipe operator:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait     <span class="co"># launch and wait in one expression</span></code></pre></div>
-<h3 id="execution-context-built-ins">Execution context built-ins</h3>
-<p>Inside <code>def ()</code> and device helpers, <code>gpu</code> is available:</p>
-<table><thead><tr><th>Built-in</th><th>CUDA equivalent</th></tr></thead><tbody><tr><td><code>gpu.thread.x/y/z</code></td><td><code>threadIdx.x/y/z</code></td></tr><tr><td><code>gpu.block.x/y/z</code></td><td><code>blockIdx.x/y/z</code></td></tr><tr><td><code>gpu.block_dim.x/y/z</code></td><td><code>blockDim.x/y/z</code></td></tr><tr><td><code>gpu.grid_dim.x/y/z</code></td><td><code>gridDim.x/y/z</code></td></tr><tr><td><code>sync</code></td><td><code>__syncthreads()</code></td></tr></tbody></table>
-<h3 id="gpu-type"><code>GPU</code> type</h3>
-<p><code>GPU</code> is a built-in type for device selection and property queries:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g = <span class="fn">GPU</span>(<span class="nb">0</span>)
-print <span class="s">"Device: <span class="si">{g.name()}</span> — <span class="si">{g.totalMem() / 1_073_741_824}</span> GB"</span>
-print <span class="s">"SM <span class="si">{g.computeCapability()[0]}</span>.<span class="si">{g.computeCapability()[1]}</span>, warp <span class="si">{g.warpSize()}</span>"</span>
-
-<span class="kw">for</span> g <span class="kw">in</span> GPU.<span class="fn">all</span>():
-    print <span class="s">"[<span class="si">{g.index()}</span>] <span class="si">{g.name()}</span> — <span class="si">{g.freeMem()}</span> bytes free"</span></code></pre></div>
-<table><thead><tr><th>Method</th><th>Returns</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td></tr><tr><td><code>index()</code></td><td>device index</td></tr></tbody></table>
-<h3 id="simulation-mode">Simulation mode</h3>
-<p><code>boring run</code> executes kernels sequentially on the CPU — each thread&#x27;s entry point runs in order, <code>sync</code> is a no-op, <code>gpu.thread.x</code> is the loop index. The same source file works without a GPU, enabling unit tests and CI.</p>
-<div class="code-block"><pre><code>boring run main.br                  # default simulation profile
-boring run --gpu a100 main.br       # simulate A100 device properties
-boring run --gpu h100 main.br       # simulate H100 device properties</code></pre></div>
-<p>Built-in profiles: <code>default</code>, <code>v100</code>, <code>a100</code>, <code>rtx3090</code>, <code>rtx4090</code>, <code>h100</code>. Custom profiles are TOML files (<code>--gpu path/to/my.toml</code>).</p>
-<blockquote><strong>Note:</strong> sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if <code>sync</code> barriers are missing.</blockquote>
-<p>See <a href="cuda-module.md">`docs/cuda-module.md`</a> for the full reference: memory safety model, <code>&#x27;shared</code> SRAM, multi-device, <code>after =</code> ordering, atomics, GPU simulation profiles, and CUDA codegen mapping.</p>
-<hr>
+<h2 id="further-reading">Further Reading</h2>
+<p>The following documents cover topics in greater depth or address areas still under active design.</p>
+<h3 id="ownership-and-qualifiers">Ownership and qualifiers</h3>
+<p><strong><a href="qualifiers.html">Qualifiers — Complete Reference</a></strong> All ownership qualifiers (<code>&#x27;stack</code>, <code>&#x27;heap</code>, <code>&#x27;shared</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code>, <code>&#x27;weak</code>): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (<code>&#x27;stack</code>→<code>&#x27;heap</code>→<code>&#x27;shared</code>→<code>&#x27;actor</code>), parameter passing, zero-annotation inference algorithm, and open design questions.</p>
+<p><strong><a href="binding-mutability.html">Binding and mutability</a></strong> Deep dive into the three binding forms (<code>let</code> / <code>mut</code> / <code>var</code>), their interaction with qualifiers, and how they map to Rust&#x27;s ownership and mutability model.</p>
+<p><strong><a href="new-placement.html">`new` placement operator</a></strong> Explicit placement syntax for arena, heap, and GPU device allocators — <code>new(arena) T(...)</code>. Covers qualifier interaction, GPU device placement, and the full inference override rules.</p>
+<h3 id="gpu-computing">GPU computing</h3>
+<p><strong><a href="gpu-module.html">GPU / CUDA — full reference</a></strong> Complete GPU reference: memory qualifiers, launch expressions, the <code>GPU</code> type, atomics, multi-device dispatch, <code>after =</code> ordering, simulation mode and profiles, CUDA codegen mapping.</p>
+<blockquote><strong>Qualifier inference:</strong> Inside <code>kernel</code> structs, GPU memory qualifiers are optional for scalars and fixed-size arrays. A <code>let</code> scalar or <code>let [T, N]</code> fixed array infers <code>&#x27;const</code> (constant cache); a <code>mut</code>/<code>var</code> scalar or fixed array infers <code>&#x27;local</code> (thread-private). Dynamic arrays (<code>[T]</code>) still require an explicit qualifier. Invalid combinations (<code>[T]&#x27;local</code>, <code>[T]&#x27;const</code>, <code>[T, N]&#x27;unified</code>, <code>[T, N]&#x27;global</code>) are parse errors. See <a href="gpu-module.html#qualifier-inference">Qualifier inference</a> in the full reference.</blockquote>
+<p><strong><a href="cuda-module.html">Boring GPU — CUDA implementation details</a></strong> Low-level CUDA codegen internals: buffer layout, <code>cudarc</code> host API, PTX compilation via <code>build.rs</code>, <code>__shared__</code> SRAM allocation, memory safety model, and roadmap.</p>
+<p><strong><a href="metal-backend.html">Metal backend</a></strong> macOS GPU target (<code>boring build --target metal</code>): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via <code>newLibraryWithSource</code>, limitations vs CUDA.</p>
+<h3 id="compilation-targets">Compilation targets</h3>
+<p><strong><a href="kernel-target.html">Rust-for-Linux target</a></strong> <code>boring build --target kernel</code>: type mapping in <code>no_std</code>, errno-based error handling, <code>task def</code> as workqueue work items, const-generic and heap-allocated channels, sequential and async streams.</p>
+<p><strong><a href="kernel-transpiler-mapping.html">Boring → Rust-for-Linux mapping</a></strong> Architecture of the kernel emission backend: how each Boring construct maps to a specific kernel abstraction, validation pass, and generated crate structure.</p>
+<p><strong><a href="transpilation-modes.html">Transpilation Modes</a></strong> The two orthogonal flags (<code>--threading</code> and <code>--mode</code>) that control memory management and concurrency in the standard Rust backend: <code>single</code> vs <code>multi</code>, <code>managed</code> vs <code>strict</code>.</p>
+<h3 id="language-internals">Language internals</h3>
+<p><strong><a href="interpreter-port-plan.html">Interpreter self-hosting plan</a></strong> How and why the Boring interpreter was rewritten in Boring itself (<code>boring/interpreter/</code>), the porting strategy, and the current implementation status.</p>
+<h3 id="design-drafts-and-exploration">Design drafts and exploration</h3>
+<p><strong><a href="library-distribution.html">Library Distribution Model</a></strong> Design exploration for how Boring packages and libraries are distributed, versioned, and consumed — not yet decided.</p>
 </main>
 <script>
 // Build TOC from headings

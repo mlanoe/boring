@@ -384,7 +384,10 @@ if_stmt         ::= "if" expr ":" fn_body
 
 # Multi-clause if-let: one or more `let` bindings and/or boolean conditions.
 # All clauses must pass (short-circuit); bindings are visible in the `then` body.
+# `elif` branches carry their own clause list, tried in order on failure of the
+# preceding one; an `elif` clause list with no "let" clause is a plain boolean elif.
 if_let_stmt     ::= "if" cond_clause ("," cond_clause)* ":" fn_body
+                    ("elif" cond_clause ("," cond_clause)* ":" fn_body)*
                     ("else" ":"? fn_body)?
 
 cond_clause     ::= "let" pattern "=" expr  # destructuring bind: if let Some(x) = opt:

@@ -48,6 +48,7 @@ enum Value:
     Nil
     Void
     Uninitialized
+    Moved(string name)
     Bool(bool v)
     Int(int n)
     Float(float f)
@@ -72,6 +73,7 @@ enum Value:
             Value.Nil: "nil"
             Value.Void: "void"
             Value.Uninitialized: "uninitialized"
+            Value.Moved(_): "moved"
             Value.Bool(_): "bool"
             Value.Int(_): "int"
             Value.Float(_): "float"
@@ -90,6 +92,15 @@ enum Value:
             Value.Labeled(_, _): "labeled"
             Value.StructDef(n): "struct:{n}"
             Value.EnumDef(n): "enum:{n}"
+
+bool is_copy_value(Value v):
+    match v:
+        Value.Bool(_): true
+        Value.Int(_): true
+        Value.Float(_): true
+        Value.Nil: true
+        Value.Void: true
+        _: false
 
 # ─── Env ──────────────────────────────────────────────────────────────────────
 

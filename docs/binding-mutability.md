@@ -78,24 +78,26 @@ The two levels are therefore:
 
 ## Function parameters
 
-`mut` is allowed in function parameter declarations. The hierarchy `var` ≥ `mut` ≥ `let` applies uniformly — a caller can always pass down the hierarchy, never up. `let` is implicit in parameter declarations — a parameter with no keyword is `let`.
+`mut` is allowed in function parameter declarations. `let` is implicit in parameter declarations — a parameter with no keyword is `let`.
 
-For `'shared`, `mut` is an error:
+Conceptually, the hierarchy `var` ≥ `mut` ≥ `let` is intended to apply: a caller should be able to pass down the hierarchy but never up (e.g. a `let`-bound caller value passed into a `var` parameter would let the callee rebind something the caller declared non-rebindable). For `'shared`, `mut` on a parameter is likewise meant to be rejected, mirroring the binding-level rule above.
+
+**This hierarchy is not currently enforced by the compiler.** There is no cross-check today between a caller's binding kind (`let`/`mut`/`var`) and the callee's parameter binding kind — neither the checker (`src/checker` is presently a minimal stub) nor the transpiler/interpreter validate this. Treat the tables below as the intended convention/design target, not a guarantee backed by a compile error at present:
 
 | Caller | Param `let` | Param `mut` | Param `var` |
 |---|---|---|---|
-| `let` | yes | **error** | **no** |
-| `var` | yes | **error** | yes |
+| `let` | yes | not enforced | not enforced |
+| `var` | yes | not enforced | yes |
 
 **`'actor`, `'guard`, `'stack`, `'heap`** (full three levels):
 
 | Caller | Param `let` | Param `mut` | Param `var` |
 |---|---|---|---|
-| `let` | yes | **no** | **no** |
-| `mut` | yes | yes | **no** |
+| `let` | yes | not enforced | not enforced |
+| `mut` | yes | yes | not enforced |
 | `var` | yes | yes | yes |
 
-`let` → `var` is forbidden across all qualifiers: allowing it would let the callee rebind the caller's variable when combined with reference passing (`&`), violating the `let` non-rebindable contract.
+`let` → `var` is intended to be forbidden across all qualifiers: allowing it would let the callee rebind the caller's variable when combined with reference passing (`&`), violating the `let` non-rebindable contract. As above, this is not currently checked by the compiler.
 
 ## Pass by reference
 
@@ -105,7 +107,7 @@ Adding `&` passes by reference. The binding keyword defines what the callee can 
 |---|---|---|
 | `let T& m` / `T& m` | `&T` | read-only — callee cannot modify content or binding |
 | `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
-| `var T& m` | `&mut Box<T>` / Swift `inout` | callee can rebind the caller's variable |
+| `var T& m` | `&mut T` | callee can rebind the caller's variable |
 
 This is consistent with the general semantics of `let`/`mut`/`var`:
 - `let` — nothing changes
@@ -113,6 +115,8 @@ This is consistent with the general semantics of `let`/`mut`/`var`:
 - `var` — binding changes
 
 `var T&` is rare in practice but unambiguous: it is the only way for a callee to replace what the caller's variable points to. In most cases, returning a value is preferred over `var T&`.
+
+Note: at the Rust level, `mut T&` and `var T&` currently both transpile to the same `&mut T` — there is no distinct `Box`-wrapped representation for `var T&`. The distinction above is about intent (content mutation vs. rebinding) rather than a difference in the generated code.
 
 ## Return types
 
@@ -127,13 +131,15 @@ The `mut` here applies to the **return value**, not to `self`.
 
 ### Receiving a return value
 
-The same hierarchy applies: the caller can always downgrade, never upgrade.
+Conceptually, the same hierarchy is intended to apply: the caller can always downgrade, never upgrade a non-mutable return into a mutable binding.
 
-| Return type | Caller binding | Valid |
+**This is not currently enforced by the compiler.** The `mut` flag on a `def mut`/`req mut` return type is parsed into the AST but is not read back anywhere in the checker, transpiler, or interpreter — so binding a non-`mut`-returning function's result with `mut`/`var` is not currently rejected. The table below describes the intended semantics, not enforced behavior:
+
+| Return type | Caller binding | Intended validity |
 |---|---|---|
 | `T` | `let` | yes |
-| `T` | `mut` | **no** — cannot upgrade to mutable |
-| `T` | `var` | **no** — cannot upgrade to mutable |
+| `T` | `mut` | intended to be invalid — cannot upgrade to mutable (not enforced) |
+| `T` | `var` | intended to be invalid — cannot upgrade to mutable (not enforced) |
 | `mut T` | `let` | yes — caller downgrades to immutable |
 | `mut T` | `mut` | yes |
 | `mut T` | `var` | yes |
@@ -161,7 +167,7 @@ var e  = registry.get_entry()   # ok — rebindable
 ```boring
 def Entry'actor foo()      # caller gets let — cannot mutate despite 'actor
 def mut Entry'actor foo()  # caller gets mutation rights via 'actor
-def mut Entry'shared foo() # error — 'shared forbids mut
+def mut Entry'shared foo() # intended to be an error — 'shared forbids mut (not currently enforced by the compiler)
 ```
 
 ### Method combinations

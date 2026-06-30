@@ -42,12 +42,15 @@ ext Vec<T as Clone> as ArrayIndex:
 
 trait DictIndex:
     type Key as Clone
-    req Self.Key?  first_index()
-    req Self.Key?  next_index(Self.Key k)
-    req Self       remove_at(Self.Key? k)
+    type Value as Clone
+    req Self.Key?   first_index()
+    req Self.Key?   next_index(Self.Key k)
+    req Self        remove_at(Self.Key? k)
+    req Self.Value  get_at(Self.Key k)
 
 ext HashMap<K as Clone+Eq+Hash, V as Clone> as DictIndex:
     type Key = K
+    type Value = V
     req K? first_index():
         self.keys().next().cloned()
     req K? next_index(K k):
@@ -59,6 +62,8 @@ ext HashMap<K as Clone+Eq+Hash, V as Clone> as DictIndex:
         if let key = k:
             m.remove(key)
         m
+    req V get_at(K k):
+        self.get(k).cloned().unwrap()
 
 
 trait SetIndex:

@@ -513,7 +513,7 @@ def FnDecl parse_fn_decl_shorthand(mut Parser p) throws:
     FnDecl(name: name, params: params, return_ty: return_ty, can_throw: can_throw, mutating: true, is_pub: false, body: body, line: line, qualifier: nil, is_task: false, is_stream: false, stream_capacity: nil, is_native: false, throws_ty: nil, type_params: [], where_clause: [], attrs: [])
 
 def bool token_is_fn_name_like(string n):
-    n == "Ident" or n == "Get" or n == "Set" or n == "In" or n == "Mod" or n == "Nil" or n == "Is"
+    n == "Ident" or n == "Get" or n == "Set" or n == "In" or n == "Mod" or n == "Nil" or n == "Is" or n == "Tick"
 
 def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
     let line = p.current_line()
@@ -590,6 +590,7 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
     var methods = [FnDecl]{}
     var inits = [InitDecl]{}
     var setters = [SetDecl]{}
+    var conversions = [AsDecl]{}
     while p.peek() != TokenKind.Dedent:
         if p.peek() == TokenKind.Eof:
             break
@@ -617,26 +618,24 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
             TokenKind.Set:
                 let setter = parse_setter_decl(p)
                 setters.append(setter)
-            TokenKind.As:
-                # as TypeName: block — skip conversion block
+            TokenKind.Transient:
+                # transient field — eat qualifier and parse as regular field
                 p.advance()
-                while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
-                    p.advance()
-                if p.peek() == TokenKind.Newline:
-                    p.advance()
-                if p.peek() == TokenKind.Indent:
-                    p.advance()
-                    var depth = 1
-                    while depth > 0 and p.peek() != TokenKind.Eof:
-                        if p.peek() == TokenKind.Indent:
-                            depth = depth + 1
-                        elif p.peek() == TokenKind.Dedent:
-                            depth = depth - 1
-                        p.advance()
+                let tf = parse_field_decl(p)
+                fields.append(FieldDecl(name: tf.name, is_pub: tf.is_pub, ty: tf.ty, mutable: tf.mutable, is_transient: true, default: tf.default, line: tf.line))
+            TokenKind.As:
+                # as TypeName: body — parse conversion block
+                let as_line = p.current_line()
+                p.advance()
+                let conv_ty = parse_type(p)
+                let can_throw = p.eat(TokenKind.Throws)
+                p.expect(TokenKind.Colon)
+                let conv_body = parse_fn_body(p)
+                conversions.append(AsDecl(is_pub: false, ty: conv_ty, can_throw: can_throw, is_task: false, body: conv_body, line: as_line))
             _:
                 fields.append(parse_field_decl(p))
     p.eat(TokenKind.Dedent)
-    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: setters, type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
+    StructDecl(name: name, fields: fields, methods: methods, inits: inits, line: line, is_pub: is_pub, is_native: false, protocols: [], conversions: conversions, type_params: [], where_clause: [], setters: setters, type_methods: [], type_vars: [], assoc_type_defs: [], attrs: [])
 
 def FieldDecl parse_field_decl(mut Parser p) throws:
     let line = p.current_line()
@@ -698,8 +697,13 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
     p.expect(TokenKind.Indent)
     var variants = [EnumVariant]{}
     var methods = [FnDecl]{}
+    var enum_conversions = [AsDecl]{}
     while p.peek() != TokenKind.Dedent:
         if p.peek() == TokenKind.Eof:
+            break
+        while p.eat(TokenKind.Newline):
+            nil
+        if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
             break
         match p.peek():
             TokenKind.Def:
@@ -715,25 +719,18 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
                 else:
                     variants.append(parse_enum_variant(p))
             TokenKind.As:
-                # as TypeName: block — skip conversion block
+                # as TypeName: body — parse conversion block
+                let eas_line = p.current_line()
                 p.advance()
-                while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
-                    p.advance()
-                if p.peek() == TokenKind.Newline:
-                    p.advance()
-                if p.peek() == TokenKind.Indent:
-                    p.advance()
-                    var depth = 1
-                    while depth > 0 and p.peek() != TokenKind.Eof:
-                        if p.peek() == TokenKind.Indent:
-                            depth = depth + 1
-                        elif p.peek() == TokenKind.Dedent:
-                            depth = depth - 1
-                        p.advance()
+                let econv_ty = parse_type(p)
+                let ecan_throw = p.eat(TokenKind.Throws)
+                p.expect(TokenKind.Colon)
+                let econv_body = parse_fn_body(p)
+                enum_conversions.append(AsDecl(is_pub: false, ty: econv_ty, can_throw: ecan_throw, is_task: false, body: econv_body, line: eas_line))
             _:
                 variants.append(parse_enum_variant(p))
     p.eat(TokenKind.Dedent)
-    EnumDecl(name: name, variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: [], protocols: [], setters: [], conversions: [], attrs: [])
+    EnumDecl(name: name, variants: variants, methods: methods, line: line, is_pub: is_pub, is_native: false, type_params: [], protocols: [], setters: [], conversions: enum_conversions, attrs: [])
 
 def EnumVariant parse_enum_variant(mut Parser p) throws:
     let line = p.current_line()
@@ -765,6 +762,44 @@ def Item parse_item(mut Parser p) throws:
             Item.Struct(parse_struct_decl(p, false))
         TokenKind.Enum:
             Item.Enum(parse_enum_decl(p, false))
+        TokenKind.Ext:
+            # ext TypeName: block — parse as ExtDecl with methods
+            p.advance()
+            let ext_name_tok = p.expect(TokenKind.Ident(""))
+            let ext_name = ext_name_tok.text()
+            # skip optional <T> or as Protocol
+            if p.eat(TokenKind.Lt):
+                while p.peek() != TokenKind.Gt and p.peek() != TokenKind.Eof:
+                    p.advance()
+                p.eat(TokenKind.Gt)
+            if p.eat(TokenKind.As):
+                while p.peek() != TokenKind.Colon and p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                    p.advance()
+            p.expect(TokenKind.Colon)
+            p.expect(TokenKind.Newline)
+            p.expect(TokenKind.Indent)
+            var ext_methods = [FnDecl]{}
+            while p.peek() != TokenKind.Dedent and p.peek() != TokenKind.Eof:
+                while p.eat(TokenKind.Newline):
+                    nil
+                if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
+                    break
+                if parser_check(p, "Def"):
+                    ext_methods.append(parse_fn_decl(p, false, true))
+                elif parser_check(p, "Req"):
+                    ext_methods.append(parse_fn_decl(p, false, false))
+                elif parser_check(p, "Pub"):
+                    p.advance()
+                    if parser_check(p, "Def"):
+                        ext_methods.append(parse_fn_decl(p, true, true))
+                    elif parser_check(p, "Req"):
+                        ext_methods.append(parse_fn_decl(p, true, false))
+                    else:
+                        p.advance()
+                else:
+                    p.advance()
+            p.eat(TokenKind.Dedent)
+            Item.Ext(ExtDecl(type_name: ext_name, type_args: [], type_params: [], where_clause: [], traits: [], methods: ext_methods, setters: [], conversions: [], assoc_type_defs: [], line: 0))
         TokenKind.Trait:
             # Skip trait declaration — not supported at runtime
             p.advance()
@@ -781,6 +816,24 @@ def Item parse_item(mut Parser p) throws:
                     elif p.peek() == TokenKind.Dedent:
                         depth = depth - 1
                     p.advance()
+            Item.Stmt(Stmt.Expr(Expr(kind: ExprKind.Nil, line: 0)))
+        TokenKind.Type:
+            # type Name as BaseType — create a struct wrapper
+            let nt_line = p.current_line()
+            p.advance()
+            let nt_name_tok = p.expect(TokenKind.Ident(""))
+            let nt_name = nt_name_tok.text()
+            p.expect(TokenKind.As)
+            let nt_base_ty = parse_type(p)
+            while p.eat(TokenKind.Newline):
+                nil
+            let nt_field = FieldDecl(name: "value", is_pub: true, ty: nt_base_ty, mutable: false, is_transient: false, default: nil, line: nt_line)
+            Item.Struct(StructDecl(name: nt_name, fields: [nt_field], methods: [], inits: [], line: nt_line, is_pub: false, is_native: false, protocols: [], conversions: [], type_params: [], where_clause: [], setters: [], type_methods: [], type_vars: [], assoc_type_defs: [], attrs: []))
+        TokenKind.Use:
+            # top-level `use` — skip until end of line
+            p.advance()
+            while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+                p.advance()
             Item.Stmt(Stmt.Expr(Expr(kind: ExprKind.Nil, line: 0)))
         TokenKind.Pub:
             p.advance()
@@ -959,7 +1012,7 @@ def Expr make_else_expr(Expr expr, Expr default, int line):
 def Expr make_do_expr([Stmt] stmts, int line):
     Expr(kind: ExprKind.Do(stmts), line: line)
 
-def LetStmt make_let_stmt(bool mutable, bool is_pub, bool is_static, string name, Type? ty, Expr? value, bool is_move, int line):
+def LetStmt make_let_stmt(bool mutable, bool is_pub, bool is_static, string name, Type? ty, Expr? value, int line):
     LetStmt(
         mutable: mutable,
         is_pub: is_pub,
@@ -968,7 +1021,6 @@ def LetStmt make_let_stmt(bool mutable, bool is_pub, bool is_static, string name
         name: name,
         ty: ty,
         value: value,
-        is_move: is_move,
         line: line
     )
 
@@ -1476,7 +1528,76 @@ def GuardStmt parse_guard_stmt(mut Parser p) throws:
     GuardStmt(cond: cond, else_body: body, line: line)
 
 def [Stmt] parse_defer_stmt(mut Parser p) throws:
-    parse_block(p)
+    parser_expect(p, "Defer")
+    parser_expect(p, "Colon")
+    parse_fn_body(p)
+
+def IfLetStmt parse_if_let_stmt_rest(mut Parser p, int line) throws:
+    var clauses = []
+    var parsing_clauses = true
+    while parsing_clauses:
+        let pat = parse_pattern(p)
+        if parser_check(p, "Colon") or parser_check(p, "Comma") or parser_check(p, "Newline"):
+            match pat:
+                Pattern.Bind(name):
+                    let self_expr = make_var_expr(name, p.current_line())
+                    clauses.append(CondClause.Let(name, self_expr))
+                _:
+                    clauses.append(CondClause.LetPat(pat, make_nil_expr(p.current_line())))
+            if parser_check(p, "Colon") or parser_check(p, "Newline"):
+                parsing_clauses = false
+            else:
+                parser_eat(p, "Comma")
+                if parser_eat(p, "Let"):
+                    nil
+                else:
+                    let guard_expr = parse_or(p)
+                    clauses.append(CondClause.Expr(guard_expr))
+                    parsing_clauses = false
+        else:
+            parser_expect(p, "Eq")
+            let saved = parser_get_allow_noparen_closure(p)
+            parser_set_allow_noparen_closure(p, false)
+            parser_set_allow_trailing_closure(p, false)
+            let expr = parse_or(p)
+            parser_set_allow_noparen_closure(p, saved)
+            parser_set_allow_trailing_closure(p, true)
+            match pat:
+                Pattern.Bind(name): clauses.append(CondClause.Let(name, expr))
+                _: clauses.append(CondClause.LetPat(pat, expr))
+        if parser_eat(p, "Comma"):
+            if parser_eat(p, "Let"):
+                nil
+            else:
+                let guard_expr = parse_or(p)
+                clauses.append(CondClause.Expr(guard_expr))
+                parsing_clauses = false
+        else:
+            parsing_clauses = false
+    parser_expect(p, "Colon")
+    let then_body = parse_fn_body(p)
+    var [Stmt]? else_body = nil
+    parser_skip_newlines(p)
+    if parser_check(p, "Elif"):
+        p.advance()
+        if parser_eat(p, "Let"):
+            let int rest_line = p.current_line()
+            let elif_stmt = parse_if_let_stmt_rest(p, rest_line)
+            else_body = [stmt_if_let(elif_stmt)]
+        else:
+            let cond = parse_or(p)
+            parser_expect(p, "Colon")
+            let elif_body = parse_fn_body(p)
+            var [Stmt]? elif_else = nil
+            parser_skip_newlines(p)
+            if parser_eat(p, "Else"):
+                elif_else = parse_else_body_stmts(p)
+            let elif_branch = IfBranch(cond: cond, body: elif_body)
+            let elif_if_stmt = make_if_stmt([elif_branch], elif_else, p.current_line())
+            else_body = [Stmt.If(elif_if_stmt)]
+    elif parser_eat(p, "Else"):
+        else_body = parse_else_body_stmts(p)
+    IfLetStmt(clauses: clauses, then_body: then_body, else_body: else_body, line: line)
 
 def IfLetStmt parse_if_let_stmt(mut Parser p) throws:
     let line = p.current_line()
@@ -1529,7 +1650,24 @@ def IfLetStmt parse_if_let_stmt(mut Parser p) throws:
     let then_body = parse_fn_body(p)
     var [Stmt]? else_body = nil
     parser_skip_newlines(p)
-    if parser_eat(p, "Else"):
+    if parser_check(p, "Elif"):
+        p.advance()
+        if parser_eat(p, "Let"):
+            let int rest_line = p.current_line()
+            let elif_stmt = parse_if_let_stmt_rest(p, rest_line)
+            else_body = [stmt_if_let(elif_stmt)]
+        else:
+            let cond = parse_or(p)
+            parser_expect(p, "Colon")
+            let elif_body = parse_fn_body(p)
+            var [Stmt]? elif_else = nil
+            parser_skip_newlines(p)
+            if parser_eat(p, "Else"):
+                elif_else = parse_else_body_stmts(p)
+            let elif_branch = IfBranch(cond: cond, body: elif_body)
+            let elif_if_stmt = make_if_stmt([elif_branch], elif_else, p.current_line())
+            else_body = [Stmt.If(elif_if_stmt)]
+    elif parser_eat(p, "Else"):
         else_body = parse_else_body_stmts(p)
     IfLetStmt(clauses: clauses, then_body: then_body, else_body: else_body, line: line)
 
@@ -1680,6 +1818,12 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
     if name == "error":
         let v = args[0] else Value.Nil
         throw val_to_string(v)
+    if name == "HashMap":
+        return Value.Dict([])
+    if name == "HashSet":
+        return Value.Set([])
+    if name == "Vec":
+        return Value.Array([])
     throw "call_native: native function '{name}' not supported"
 
 def ThrowsTask parse_closure_modifiers(mut Parser p) throws:
@@ -1703,7 +1847,7 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         return base
     # Only consume the ident if it's a known qualifier keyword
     let peeked_name = parser_peek_ident(p)
-    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "stack" and peeked_name != "heap" and peeked_name != "weak":
+    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "stack" and peeked_name != "heap" and peeked_name != "weak" and peeked_name != "new":
         return base
     let qual_name = parser_expect_ident(p)
     let qual = match qual_name:
@@ -1712,6 +1856,7 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         "guard": OwnerQual.Guard
         "stack": OwnerQual.Stack
         "heap": OwnerQual.Owned
+        "new": OwnerQual.Owned
         "weak": OwnerQual.Weak
         _: OwnerQual.Actor
     let qualified = Type.Qualified(base, qual)

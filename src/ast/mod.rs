@@ -500,8 +500,17 @@ pub struct IfLetStmt {
     /// All must succeed for the `then` body to execute.
     pub clauses: Vec<CondClause>,
     pub then_body: Vec<Stmt>,
+    /// `elif let ...:` / `elif ...:` branches, tried in order if `clauses` fails.
+    pub elif_branches: Vec<IfLetBranch>,
     pub else_body: Option<Vec<Stmt>>,
     pub line: usize,
+}
+
+/// One `elif` branch of an `if let` chain: its own clause list plus body.
+#[derive(Debug, Clone)]
+pub struct IfLetBranch {
+    pub clauses: Vec<CondClause>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone)]
@@ -513,9 +522,6 @@ pub struct LetStmt {
     pub ty: Option<Type>,
     /// `None` for deferred initialisation: `let v` / `var v` without `= expr`.
     pub value: Option<Expr>,
-    /// `let b' = a`  — move ownership from `a` into `b`; `a` becomes invalid after this.
-    /// Without `'`, the default is a borrow: `let b = a` gives `b: T` (reference).
-    pub is_move: bool,
     /// `true` for `lazy` bindings — deferred, write-once via `?=`.
     pub is_lazy: bool,
     pub line: usize,
@@ -944,6 +950,16 @@ pub enum Type {
     AssocOf(Box<Type>, String),
 }
 
+/// Copy-ness of a single owner qualifier, matching the rules in `Type::is_copy`.
+/// Used to evaluate the members of an `OwnerQual::Union` (`'stack|actor`, `'mut`, ...).
+fn owner_qual_is_copy(q: &OwnerQual) -> bool {
+    match q {
+        OwnerQual::Owned | OwnerQual::Stack => false,
+        OwnerQual::Union(quals) => quals.iter().all(owner_qual_is_copy),
+        _ => true,
+    }
+}
+
 impl Type {
     pub fn is_copy(&self) -> bool {
         match self {
@@ -956,6 +972,9 @@ impl Type {
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => false,
             // Lifetime refs and borrows of smart pointers are copy at the borrow level
             Type::Qualified(_, OwnerQual::Lifetime(_) | OwnerQual::BorrowShared | OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
+            // A qualifier union is only Copy if every member qualifier it allows is Copy —
+            // e.g. `'stack|actor` includes 'stack (move-only), so the union as a whole is not Copy.
+            Type::Qualified(_, OwnerQual::Union(quals)) => quals.iter().all(owner_qual_is_copy),
             // All other qualifiers give copy/shared semantics
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased

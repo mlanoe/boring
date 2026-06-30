@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Boring → Rust-for-Linux mapping</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="boring--rust-for-linux-mapping">Boring → Rust-for-Linux mapping</h1>
+<p>This document describes how Boring language constructs map to Rust-for-Linux kernel abstractions, and the architecture of the kernel emission backend (<code>--target kernel</code>).</p>
+<hr>
+<h2 id="primitives">Primitives</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td><code>i64</code></td><td>✅</td><td>identical</td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u64</code></td><td>✅</td><td>identical</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>—</td><td>❌</td><td>FPU disabled in kernel — forbidden, use integer arithmetic</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>bool</code></td><td>✅</td><td>identical</td></tr><tr><td><code>string</code></td><td><code>Rc&lt;str&gt;</code> (<code>--threading single</code>) / <code>Arc&lt;str&gt;</code> (<code>--threading multi</code>)</td><td><code>kernel::str::CStr</code> / <code>CString</code></td><td>⚠️</td><td>C-compatible kernel strings; literals emitted as <code>c_str!(&quot;…&quot;)</code></td></tr><tr><td><code>void</code></td><td><code>()</code></td><td><code>()</code></td><td>✅</td><td>identical</td></tr></tbody></table>
+<hr>
+<h2 id="compound-types">Compound types</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Option&lt;T&gt;</code></td><td>✅</td><td>available in <code>core::</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>kernel::prelude::Vec&lt;T&gt;</code></td><td>✅</td><td>kernel allocator used</td></tr><tr><td><code>{K=V}</code></td><td><code>HashMap&lt;K,V&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>⚠️</td><td>ordered, O(log n) vs O(1); keys must implement <code>Ord</code></td></tr><tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;T,()&gt;</code></td><td>⚠️</td><td>set emulated via RBTree with <code>()</code> value; keys must implement <code>Ord</code></td></tr><tr><td><code>(T, U)</code></td><td>tuples</td><td><code>core::</code> tuples</td><td>✅</td><td></td></tr><tr><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T, KernelAllocator&gt;</code></td><td>⚠️</td><td>different allocator, same semantics</td></tr></tbody></table>
+<hr>
+<h2 id="ownership-qualifiers">Ownership qualifiers</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T&gt;</code></td><td>✅</td><td>kernel allocator</td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Rc&lt;T&gt;</code> (single) / <code>Arc&lt;T&gt;</code> (multi)</td><td><code>Arc&lt;T&gt;</code></td><td>✅</td><td><code>&#x27;task</code>/<code>&#x27;auto</code> are deprecated aliases removed in favor of <code>&#x27;shared</code></td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (single) / <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> (multi)</td><td><code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code></td><td>✅</td><td></td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::RwLock&lt;T&gt;&gt;</code></td><td>✅</td><td></td></tr><tr><td><code>T&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code></td><td><code>Weak&lt;T&gt;</code></td><td>✅</td><td>no <code>kernel::sync</code> namespacing — plain <code>Weak&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> (multi) / <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (single)</td><td>❌ not implemented</td><td>❌</td><td>no <code>OwnerQual::ActorTask</code>/<code>GuardTask</code> match arm in the kernel emitter; falls through to the catch-all <code>&amp;T</code></td></tr><tr><td><code>T&#x27;stack</code></td><td><code>T</code></td><td><code>T</code></td><td>✅</td><td></td></tr><tr><td><code>T&amp;</code> / <code>var T&amp;</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td>✅</td><td></td></tr></tbody></table>
+<hr>
+<h2 id="functions-and-error-handling">Functions and error handling</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>throws</code></td><td><code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code></td><td><code>Result&lt;T, kernel::error::Error&gt;</code></td><td>⚠️</td><td>fixed errno-based error type</td></tr><tr><td><code>throws MyError</code></td><td><code>Result&lt;T, MyError&gt;</code></td><td><code>Result&lt;T, kernel::error::Error&gt;</code></td><td>❌</td><td><code>type MyError as kernel.error.Error(ERRNO)</code> errno-binding syntax is <strong>not implemented</strong> — see section below</td></tr><tr><td><code>try / catch</code></td><td>pattern matching</td><td>pattern matching</td><td>✅</td><td></td></tr><tr><td><code>catch MyError</code></td><td>typed catch branch</td><td><code>Err(e) if e.code() == ERRNO =&gt;</code></td><td>❌</td><td>aspirational — see section below</td></tr><tr><td><code>guard … else throw</code></td><td>early return</td><td>early return</td><td>✅</td><td></td></tr></tbody></table>
+<h3 id="kernel-error-type-binding--not-implemented-aspirational-design">Kernel error type binding — NOT IMPLEMENTED (aspirational design)</h3>
+<p>In the kernel backend all errors collapse to <code>kernel::error::Error</code> (an errno <code>i32</code>). The design below sketches how typed <code>catch</code> branches <em>could</em> be preserved by declaring each custom error type as a distinct nominal type bound to a specific errno — but <strong>none of this is implemented today</strong>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">type</span> NetworkError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ENETDOWN)
+<span class="kw">type</span> TimeoutError <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ETIMEDOUT)
+<span class="kw">type</span> NoMemError   <span class="kw">as</span> kernel.error.<span class="fn">Error</span>(ENOMEM)</code></pre></div>
+<p>There is no parser or transpiler support for this <code>type X as kernel.error.Error(ERRNO)</code> form. <code>src/parser/parse_type.rs</code> would parse <code>kernel.error.Error(ENETDOWN)</code> as a dotted type name followed by a parenthesized parameter list, i.e. a function-type constructor (<code>Type::Fn</code>), not an errno-binding declaration — so this syntax does not currently parse the way this example implies, and no code extracts or stores an errno from it.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
+    page = <span class="fn">fetch_page</span>(url)
+<span class="kw">catch</span> NetworkError e:
+    <span class="fn">log</span>(<span class="s">"network down"</span>)
+<span class="kw">catch</span> TimeoutError e:
+    <span class="fn">log</span>(<span class="s">"timed out"</span>)</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Aspirational — not what the kernel backend currently generates</span>
+<span class="kw">match</span> <span class="fn">fetch_page</span>(url) {
+    <span class="kw">Ok</span>(page)  =&gt; { … }
+    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ENETDOWN</span>  =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;network down&quot;</span>); }
+    <span class="kw">Err</span>(e) <span class="kw">if</span> e.<span class="fn">code</span>() == <span class="kt">ETIMEDOUT</span> =&gt; { <span class="fm">pr_info!</span>(<span class="s">&quot;timed out&quot;</span>); }
+    <span class="kw">Err</span>(e)    =&gt; { … }
+}</code></pre></div>
+<p><strong>Current actual behavior:</strong> <code>src/validator/kernel.rs</code> emits an unconditional warning on every <code>catch TypeName</code> clause reminding the user to declare the type this way — it does <strong>not</strong> check whether <code>TypeName</code> actually has such a declaration, and it never rejects a <code>catch</code> clause. There is also no stdlib of pre-declared common kernel errors (<code>NoMemError</code>, <code>InvalidArgError</code>, <code>NoDevError</code>…) today.</p>
+<hr>
+<h2 id="async--concurrency">Async / concurrency</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>task def</code></td><td><code>async fn</code> + tokio</td><td>struct <code>XxxWork: Work</code> + <code>KernelFuture&lt;T&gt;</code></td><td>⚠️</td><td>see section below</td></tr><tr><td><code>task expr</code></td><td><code>tokio::spawn</code></td><td><code>system_wq.enqueue(work)</code></td><td>✅</td><td></td></tr><tr><td><code>join</code> / <code>let a, b = (task f1(), task f2()).map(:value)</code></td><td><code>tokio::join!</code></td><td>sequential <code>.wait()</code> on concurrent work items</td><td>✅</td><td>both items enqueued first — wall time is max(t1, t2)</td></tr><tr><td><code>stream</code> (sequential)</td><td><code>impl Iterator</code></td><td><code>impl Iterator</code></td><td>✅</td><td>body without <code>wait</code>/<code>task</code> — eager, no workqueue</td></tr><tr><td><code>stream</code> (async) / <code>stream&lt;N&gt;</code></td><td><code>async_stream::Stream</code></td><td><code>Work</code> item + <code>KernelReceiver&lt;T, N&gt;</code></td><td>⚠️</td><td>N defaults to 2 — see section below</td></tr><tr><td><code>channel&lt;T, N&gt;</code></td><td><code>tokio::sync::mpsc</code></td><td><code>KernelSender/Receiver&lt;T, N&gt;</code> — stack buffer <code>[Option&lt;T&gt;; N]</code></td><td>⚠️</td><td>const-generic capacity — see section below</td></tr><tr><td><code>channel&lt;T&gt;(cap)</code></td><td><code>tokio::sync::mpsc</code></td><td><code>DynKernelSender/Receiver&lt;T&gt;</code> — heap buffer <code>Vec&lt;Option&lt;T&gt;&gt;</code></td><td>⚠️</td><td>runtime capacity — see section below</td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot</code></td><td>kernel oneshot prelude (<code>emit_kernel_oneshot_prelude</code>)</td><td>✅</td><td>single-value, single-consumer channel</td></tr><tr><td><code>watch&lt;T&gt;(initial)</code></td><td><code>tokio::sync::watch</code></td><td>kernel watch prelude (<code>emit_kernel_watch_prelude</code>)</td><td>✅</td><td>latest-value broadcast with initial value</td></tr><tr><td><code>broadcast&lt;T, N&gt;</code></td><td><code>tokio::sync::broadcast</code></td><td>kernel static broadcast prelude (<code>emit_kernel_broadcast_prelude</code>)</td><td>✅</td><td>const-generic capacity</td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast</code></td><td>kernel dynamic broadcast prelude (<code>emit_kernel_dyn_broadcast_prelude</code>)</td><td>✅</td><td>runtime capacity</td></tr><tr><td><code>wait Duration</code></td><td><code>tokio::sleep</code></td><td><code>kernel::delay::coarse_sleep</code></td><td>⚠️</td><td>blocking, no await</td></tr><tr><td><code>Future&lt;T&gt;</code></td><td><code>tokio::JoinHandle</code></td><td><code>KernelFuture&lt;T&gt;</code></td><td>⚠️</td><td>blocking — <code>.wait()</code> in process context only</td></tr><tr><td><code>future.done()</code></td><td><code>Arc&lt;Mutex&lt;Option&lt;T&gt;&gt;&gt;</code> + <code>try_lock</code></td><td><code>try_lock</code> + <code>is_some</code></td><td>✅</td><td>non-blocking poll</td></tr></tbody></table>
+<h3 id="task-def--work--kernelfuturet"><code>task def</code> → <code>Work</code> + <code>KernelFuture&lt;T&gt;</code></h3>
+<p>A <code>task def</code> designates a method that may take time or block on a resource. In the kernel this maps to a work item dispatched on <code>system_wq</code>.</p>
+<p><strong>Constraint on <code>self</code>:</strong> <code>task def</code> as an instance method is restricted to <code>&#x27;task</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> — the only qualifiers with a lifetime compatible with a work item. <code>T&amp;</code>, <code>T&amp;mut</code>, and <code>T&#x27;</code> are rejected at validation. This mirrors the constraint already enforced in the tokio backend.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="fn">fetch_page</span>(url: <span class="kt">string</span>) -&gt; Page: …</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
+<span class="kw">struct</span> <span class="kt">FetchPageWork</span> {
+    url:      <span class="kt">CString</span>,
+    result:   <span class="kw">Arc</span>&lt;<span class="kt">Mutex</span>&lt;<span class="kw">Option</span>&lt;<span class="kw">Result</span>&lt;<span class="kt">Page</span>, <span class="kt">Error</span>&gt;&gt;&gt;&gt;,
+    done_cond: <span class="kw">Arc</span>&lt;<span class="kt">CondVar</span>&gt;,
+    work:     <span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt;,
+}
+
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span> <span class="kw">for</span> <span class="kt">FetchPageWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
+        <span class="kw">let</span> r = <span class="fn">fetch_page_body</span>(&amp;this.url);
+        *this.result.<span class="fn">lock</span>() = <span class="kw">Some</span>(r);
+        this.done_cond.<span class="fn">notify_all</span>();
+    }
+}
+
+<span class="co">// Call site: `task fetch_page(&quot;…&quot;)` emits:</span>
+<span class="kw">let</span> work   = <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="kt">FetchPageWork</span>::<span class="fn">new</span>(url));
+<span class="kw">let</span> future = work.<span class="fn">kernel_future</span>();
+system_wq.<span class="fn">enqueue</span>(work);
+future   <span class="co">// : KernelFuture&lt;Page&gt;</span></code></pre></div>
+<h3 id="kernelfuturet--interface"><code>KernelFuture&lt;T&gt;</code> — interface</h3>
+<p><code>Future&lt;T&gt;</code> exposes two methods, symmetrically implemented across both backends:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">impl</span>&lt;<span class="kt">T</span>&gt; <span class="kt">KernelFuture</span>&lt;<span class="kt">T</span>&gt; {
+    <span class="co">// Non-blocking poll — Boring: future.done()</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">done</span>(&amp;<span class="kw">self</span>) -&gt; bool {
+        <span class="kw">self</span>.result.<span class="fn">try_lock</span>().<span class="fn">map</span>(|g| g.<span class="fn">is_some</span>()).<span class="fn">unwrap_or</span>(<span class="kw">false</span>)
+    }
+
+    <span class="co">// Blocking wait — Boring: future.wait()  (process context only)</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">wait</span>(<span class="kw">self</span>) -&gt; <span class="kw">Result</span>&lt;<span class="kt">T</span>, <span class="kt">Error</span>&gt; {
+        <span class="kw">let</span> <span class="kw">mut</span> guard = <span class="kw">self</span>.result.<span class="fn">lock</span>();
+        <span class="kw">self</span>.done_cond.<span class="fn">wait_while</span>(&amp;<span class="kw">mut</span> guard, |r| r.<span class="fn">is_none</span>());
+        guard.<span class="fn">take</span>().<span class="fn">unwrap</span>()
+    }
+}</code></pre></div>
+<p>On the tokio side, <code>done()</code> is implemented identically via <code>Arc&lt;Mutex&lt;Option&lt;T&gt;&gt;&gt;</code> + <code>try_lock</code>. Both backends are symmetric, allowing developers to compose freely from these two primitives.</p>
+<h3 id="channel--ring-buffer-two-variants"><code>channel</code> → ring buffer (two variants)</h3>
+<p>The kernel backend provides two channel implementations depending on how the capacity is expressed.</p>
+<h4 id="channelt-n--const-generic-stack-allocated-buffer"><code>channel&lt;T, N&gt;</code> — const-generic, stack-allocated buffer</h4>
+<p>When the capacity is given as a <strong>type parameter</strong> (<code>channel&lt;T, N&gt;</code>), the buffer is a fixed-size array <code>[Option&lt;T&gt;; N]</code> stored inline in the struct (no heap allocation). <code>N</code> must be a compile-time constant.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>, <span class="nb">32</span>&gt;   <span class="co"># const-generic, stack buffer</span>
+tx.<span class="fn">send</span>(<span class="s">"hello"</span>)
+<span class="kw">let</span> msg = rx.<span class="fn">recv</span>()</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
+<span class="kw">let</span> (tx, rx) = kernel_channel::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
+
+tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
+<span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
+<p><code>KernelChan&lt;T, const N: usize&gt;</code> is emitted as a prelude:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">KernelChan</span>&lt;<span class="kt">T</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt; {
+    buf:       [<span class="kw">Option</span>&lt;<span class="kt">T</span>&gt;; <span class="kt">N</span>],
+    read_idx:  usize,
+    write_idx: usize,
+    count:     usize,
+}
+<span class="co">// KernelSender / KernelReceiver wrap Arc&lt;Mutex&lt;KernelChan&lt;T, N&gt;&gt;&gt;</span>
+<span class="co">// + two CondVars (not_empty, not_full).</span>
+<span class="co">// send() blocks on not_full; recv() blocks on not_empty.</span></code></pre></div>
+<h4 id="channeltcap--runtime-capacity-heap-allocated-buffer"><code>channel&lt;T&gt;(cap)</code> — runtime capacity, heap-allocated buffer</h4>
+<p>When the capacity is given as a <strong>call argument</strong> (<code>channel&lt;T&gt;(cap)</code>), the buffer is a <code>Vec&lt;Option&lt;T&gt;&gt;</code> pre-allocated to <code>cap</code> on the kernel heap. The capacity is a runtime value.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">32</span>)   <span class="co"># runtime cap, heap buffer</span>
+tx.<span class="fn">send</span>(<span class="s">"hello"</span>)
+<span class="kw">let</span> msg = rx.<span class="fn">recv</span>()</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
+<span class="kw">let</span> (tx, rx) = dyn_kernel_channel::&lt;<span class="kt">CString</span>&gt;(<span class="nb">32</span>);
+
+tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
+<span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
+<p><code>DynKernelChan&lt;T&gt;</code> is emitted as a prelude — same blocking semantics as the const-generic variant, but the buffer size is stored as a <code>cap: usize</code> field.</p>
+<table><thead><tr><th>Variant</th><th>Boring syntax</th><th>Buffer</th><th>Rust type emitted</th></tr></thead><tbody><tr><td>Const-generic</td><td><code>channel&lt;T, N&gt;</code></td><td><code>[Option&lt;T&gt;; N]</code> — stack</td><td><code>KernelSender&lt;T, N&gt;</code> / <code>KernelReceiver&lt;T, N&gt;</code></td></tr><tr><td>Dynamic</td><td><code>channel&lt;T&gt;(cap)</code></td><td><code>Vec&lt;Option&lt;T&gt;&gt;</code> — heap</td><td><code>DynKernelSender&lt;T&gt;</code> / <code>DynKernelReceiver&lt;T&gt;</code></td></tr></tbody></table>
+<p>Both variants share the same API at the Boring level (<code>tx.send(v)</code>, <code>rx.recv()</code>). When the capacity is omitted entirely, the const-generic variant is used with a default of <strong>2</strong>.</p>
+<h3 id="stream--sequential-iterator-or-work-item"><code>stream</code> → sequential iterator or Work item</h3>
+<p>The kernel backend applies the same two-strategy rule as the tokio backend.</p>
+<h4 id="sequential-stream--impl-iterator">Sequential stream — <code>impl Iterator</code></h4>
+<p>If the body contains no <code>wait</code> and no <code>task</code> calls, the stream is emitted as a plain iterator. <code>yield</code> statements become <code>__items.push(...)</code> calls; the function returns <code>__items.into_iter()</code> after the body completes. No workqueue involved.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span> <span class="kt">int</span> <span class="fn">range</span>(<span class="kt">int</span> n):
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
+        <span class="kw">yield</span> i</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated</span>
+<span class="kw">fn</span> <span class="fn">range</span>(n: i64) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = i64&gt; {
+    <span class="kw">let</span> <span class="kw">mut</span> __items: kernel::prelude::<span class="kw">Vec</span>&lt;i64&gt; = kernel::prelude::<span class="kw">Vec</span>::<span class="fn">new</span>();
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0i64..</span>n {
+        __items.<span class="fn">push</span>(i);
+    }
+    __items.<span class="fn">into_iter</span>()
+}</code></pre></div>
+<h4 id="async-stream--work-item--kernelreceivert-n">Async stream — Work item + <code>KernelReceiver&lt;T, N&gt;</code></h4>
+<p>If the body contains <code>wait</code> or <code>task</code> calls, the stream is emitted as a workqueue work item. The function returns a <code>KernelReceiver&lt;T, N&gt;</code> — the caller pulls values with <code>.recv()</code>. The capacity defaults to <strong>2</strong>; use <code>stream&lt;N&gt;</code> to set it explicitly.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span>&lt;<span class="nb">32</span>&gt; <span class="kt">string</span> <span class="fn">read_lines</span>(<span class="kt">string</span> path):
+    <span class="kw">let</span> file = File.<span class="fn">open</span>(path)
+    <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">lines</span>():
+        <span class="kw">yield</span> line</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated — three pieces emitted by the transpiler:</span>
+
+<span class="co">// 1. Work item struct</span>
+<span class="kw">struct</span> <span class="kt">ReadLinesWork</span> {
+    path: <span class="kt">CString</span>,
+    tx:   <span class="kt">KernelSender</span>&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;,
+    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt;,
+}
+
+<span class="co">// 2. impl Work — body runs in the workqueue; yield → this.tx.send(...)</span>
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt; <span class="kw">for</span> <span class="kt">ReadLinesWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
+        <span class="kw">let</span> file = <span class="kt">File</span>::<span class="fn">open</span>(&amp;this.path);
+        <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">lines</span>() {
+            this.tx.<span class="fn">send</span>(line);   <span class="co">// blocks if consumer is slow</span>
+        }
+        <span class="co">// tx dropped here → signals end-of-stream to receiver</span>
+    }
+}
+
+<span class="co">// 3. Public function — creates the channel, enqueues the work, returns rx</span>
+<span class="kw">fn</span> <span class="fn">read_lines</span>(path: <span class="kt">CString</span>) -&gt; <span class="kt">KernelReceiver</span>&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt; {
+    <span class="kw">let</span> (tx, rx) = kernel_channel::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
+    <span class="kw">let</span> work = <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="kt">ReadLinesWork</span> { path, tx, work: kernel::workqueue::<span class="kt">Work</span>::<span class="fn">new</span>() });
+    kernel::workqueue::<span class="fn">system</span>().<span class="fn">enqueue</span>(<span class="kw">Arc</span>::<span class="fn">clone</span>(&amp;work));
+    rx
+}</code></pre></div>
+<table><thead><tr><th>Strategy</th><th>Condition</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Sequential</td><td>No <code>wait</code>, no <code>task</code></td><td><code>impl Iterator&lt;Item = T&gt;</code> — eager, no workqueue</td></tr><tr><td>Async</td><td>Has <code>wait</code> or <code>task</code></td><td><code>KernelReceiver&lt;T, N&gt;</code> — <code>Work</code> item on <code>system_wq</code></td></tr></tbody></table>
+<hr>
+<h2 id="stdlib">Stdlib</h2>
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><code>print!</code></td><td><code>println!</code></td><td><code>kernel::pr_info!</code></td><td>⚠️</td><td>always emitted as <code>pr_info!</code> — there is no <code>pr_err!</code>/severity routing today</td></tr><tr><td><code>assert_eq!</code></td><td><code>assert_eq!</code></td><td>plain Rust <code>assert_eq!</code></td><td>❌</td><td>no kernel-specific override exists; <code>kernel::build_assert!</code>/<code>WARN_ON</code> mapping is aspirational, not implemented</td></tr><tr><td><code>panic(msg)</code></td><td><code>panic!</code></td><td>—</td><td>❌</td><td>kernel oops/crash — forbidden, use <code>throws</code> / <code>Result</code></td></tr><tr><td>Math (<code>sqrt</code>, <code>sin</code>…)</td><td><code>std::f64</code></td><td>—</td><td>❌</td><td>FPU disabled — forbidden</td></tr><tr><td><code>Vec</code> methods</td><td><code>std::vec</code></td><td><code>kernel::prelude::Vec</code></td><td>⚠️</td><td>slightly different API</td></tr><tr><td><code>HashMap</code></td><td><code>std::collections</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>⚠️</td><td>ordered, O(log n), keys must implement <code>Ord</code></td></tr></tbody></table>
+<hr>
+<h2 id="summary">Summary</h2>
+<h3 id="maps-directly-60-of-the-language">Maps directly (~60% of the language)</h3>
+<ul><li>All primitives except <code>float</code></li><li>Ownership qualifiers (<code>Box</code>, <code>Arc</code>, <code>Mutex</code>, <code>RwLock</code>)</li><li>Structs, enums, traits, generics</li><li>Pattern matching, control flow</li><li>Error handling (with error type adaptation)</li><li><code>Vec</code>, tuples, <code>Option</code></li><li><code>task def</code>, <code>Future&lt;T&gt;</code>, <code>join</code>, <code>channel&lt;T,N&gt;</code> / <code>channel&lt;T&gt;(cap)</code>, <code>stream</code> (sequential + async)</li><li><code>oneshot&lt;T&gt;()</code>, <code>watch&lt;T&gt;(initial)</code>, <code>broadcast&lt;T,N&gt;</code> / <code>broadcast&lt;T&gt;(cap)</code></li></ul>
+<h3 id="requires-adaptation">Requires adaptation</h3>
+<ul><li><code>string</code> → kernel <code>CStr</code> / <code>CString</code>; literals → <code>c_str!(&quot;…&quot;)</code></li><li><code>{K=V}</code> / <code>{T}</code> → <code>RBTree&lt;K,V&gt;</code> / <code>RBTree&lt;T,()&gt;</code> — ordered, O(log n), keys must be <code>Ord</code></li><li><code>throws MyError</code> → typed errno binding is <strong>not implemented</strong>; all errors collapse to <code>kernel::error::Error</code></li><li><code>print!</code> → always <code>pr_info!</code>; <code>assert_eq!</code> has no kernel override (plain Rust <code>assert_eq!</code>)</li><li><code>Box&lt;T&gt;</code> → kernel allocator</li><li><code>HashMap</code> / <code>HashSet</code> → <code>RBTree</code> — ordered, O(log n), keys must implement <code>Ord</code></li></ul>
+<h3 id="forbidden">Forbidden</h3>
+<ul><li><code>float</code> and floating-point math — FPU disabled</li><li><code>panic</code> — kernel oops/crash; use <code>throws</code> / <code>Result</code> instead</li><li><code>task def</code> on <code>self</code> with <code>T&amp;</code>, <code>T&amp;mut</code>, or <code>T&#x27;</code> — lifetime incompatible with a work item</li><li><code>channel&lt;T&gt;</code> without explicit capacity — defaults to const-generic N=2; explicit capacity recommended for production code</li></ul>
+<hr>
+<h2 id="transpiler-architecture">Transpiler architecture</h2>
+<p>A second emission backend within the same binary — parser, AST, and typing passes are shared and untouched.</p>
+<div class="code-block"><pre><code>src/
+  validator/
+    kernel.rs          # validation pass: rejects forbidden constructs with explicit errors
+  transpiler/
+    mod.rs             # existing — unchanged
+    emit_top.rs        # existing — unchanged
+    emit_stmt.rs       # existing — unchanged
+    emit_expr.rs       # existing — unchanged
+    helpers.rs         # existing — unchanged
+    kernel/
+      mod.rs           # entry point, selected by --target kernel
+      emit_top.rs      # struct/impl/fn declarations, Work item generation
+      emit_stmt.rs     # statements, task expr, channel, yield
+      emit_expr.rs     # expressions, string literal → c_str!, method calls
+      helpers.rs       # KernelFuture&lt;T&gt;, KernelChan&lt;T&gt; runtime types</code></pre></div>
+<p>The <code>--target kernel</code> flag activates the kernel validator then the kernel emitter. The standard backend (<code>--target rust</code>, default) is not modified.</p>
+<h2 id="implementation-order">Implementation order</h2>
+<ol><li><strong>Validation pass</strong> — reject <code>float</code>, <code>panic</code>, <code>T&amp;</code>/<code>T&amp;mut</code> on <code>task def</code>; warn on <code>channel</code>/<code>stream</code> without explicit capacity</li><li><strong>Primitives and types</strong> — <code>emit_kernel_top.rs</code>: structs, enums, ownership qualifiers, error type binding</li><li><strong><code>KernelFuture&lt;T&gt;</code></strong> — <code>task def</code> → <code>Work</code> item generation, <code>.done()</code> / <code>.wait()</code></li><li><strong><code>KernelChan&lt;T, N&gt;</code></strong> — ring buffer, <code>send()</code> / <code>recv()</code></li><li><strong><code>stream&lt;N&gt; def</code></strong> — built on top of <code>KernelChan</code></li><li><strong>Kernel stdlib</strong> — <code>no_std</code>-compatible subset: <code>pr_info!</code>, <code>WARN_ON</code>, <code>RBTree</code> wrappers, pre-declared error types</li></ol>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

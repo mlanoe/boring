@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Transpilation Modes</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="transpilation-modes">Transpilation Modes</h1>
+<p>Two orthogonal flags control how the transpiler handles memory management and concurrency:</p>
+<div class="code-block"><pre><code>boring build --mode strict|managed     # memory management (default: strict)
+boring build --threading single|multi  # concurrency model (default: multi)</code></pre></div>
+<p>The flags are independent — any combination is valid. <code>--threading</code> is not available with <code>--target kernel</code>, which has its own concurrency model.</p>
+<hr>
+<h2 id="qualifier-vocabulary">Qualifier vocabulary</h2>
+<p>Explicit qualifiers are <strong>contracts</strong> — neither <code>--mode</code> nor <code>--threading</code> affects them.</p>
+<table><thead><tr><th>Qualifier</th><th><code>--threading multi</code> (default)</th><th><code>--threading single</code></th></tr></thead><tbody><tr><td><code>T&#x27;stack</code></td><td><code>T</code></td><td><code>T</code></td></tr><tr><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code></td><td><code>Rc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard&#x27;task</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;shared&#x27;weak</code></td><td><code>std::sync::Weak&lt;T&gt;</code></td><td><code>Weak&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td><code>std::sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td><td><code>Weak&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td><code>std::sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td><td><code>Weak&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;option</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code></td><td><code>Rc&lt;str&gt;</code></td></tr></tbody></table>
+<p><code>T&#x27;shared&#x27;weak</code>, <code>T&#x27;actor&#x27;weak</code>, <code>T&#x27;guard&#x27;weak</code> are weak non-owning pointers that do not prevent the pointee from being dropped.</p>
+<p><code>T&#x27;guard</code> in single-thread maps to <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (same as <code>T&#x27;actor</code>) — <code>RefCell</code> has no read/write distinction. The qualifier is preserved as documentation of intent; no warning is emitted.</p>
+<p><code>T&#x27;actor&#x27;task</code> and <code>T&#x27;guard&#x27;task</code> use Tokio&#x27;s async-aware mutexes under <code>--threading multi</code>. Under <code>--threading single</code> they fall back to <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (same as <code>T&#x27;actor</code>/<code>T&#x27;guard</code>) — access goes through <code>.borrow()</code>/<code>.borrow_mut()</code> instead of <code>.lock().await</code>. This is not an error; the <code>&#x27;task</code> hint is simply moot when there is no async mutex to use.</p>
+<hr>
+<h2 id="anonymous-forms--t-and-t">Anonymous forms — <code>T</code> and <code>T&#x27;</code></h2>
+<p>Both forms delegate the memory decision to the inference pass, then to the active flags as a last resort.</p>
+<table><thead><tr><th>Form</th><th>Meaning</th></tr></thead><tbody><tr><td><code>T</code></td><td>Anonymous — inference decides; fallback to flags</td></tr><tr><td><code>T&#x27;</code></td><td>Anonymous with indirection hint — inference decides; fallback <code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td>Always <code>Option&lt;T&gt;</code> — flag-independent</td></tr></tbody></table>
+<p>The difference between <code>T</code> and <code>T&#x27;</code>: <code>T&#x27;</code> restricts the inference candidate set to <code>{Owned, Shared, Actor, Guard}</code> (Stack and Const are excluded). If inference cannot resolve a unique qualifier, the fallback is <code>&#x27;heap</code> instead of <code>&#x27;stack</code>.</p>
+<p>See <a href="qualifiers.html">qualifiers.md</a> — <strong>Inference</strong> section — for the full inference algorithm.</p>
+<h3 id="resolution-after-inference">Resolution after inference</h3>
+<table><thead><tr><th></th><th><code>--threading multi</code></th><th><code>--threading single</code></th></tr></thead><tbody><tr><td><strong><code>--mode strict</code></strong></td><td><code>T</code> → <code>T</code>, <code>T&#x27;</code> → <code>Box&lt;T&gt;</code></td><td><code>T</code> → <code>T</code>, <code>T&#x27;</code> → <code>Box&lt;T&gt;</code></td></tr><tr><td><strong><code>--mode managed</code></strong></td><td><code>T</code>/<code>T&#x27;</code> → <code>Arc&lt;Mutex&lt;T&gt;&gt;</code></td><td><code>T</code>/<code>T&#x27;</code> → <code>RefCell&lt;T&gt;</code></td></tr></tbody></table>
+<p>Threading does not affect the <code>T</code>/<code>T&#x27;</code> fallback in strict mode — stack and heap are thread-agnostic. It only matters in managed mode and for explicit <code>T&#x27;shared</code>, <code>T&#x27;actor</code>, <code>T&#x27;guard</code> qualifiers.</p>
+<hr>
+<h2 id="inference-priority-table">Inference priority table</h2>
+<p>Before applying flag defaults, the transpiler runs a series of inference passes. Each pass has a fixed priority; the first pass that resolves a qualifier wins.</p>
+<table><thead><tr><th>Priority</th><th>Situation</th><th>Result</th></tr></thead><tbody><tr><td>1</td><td>Explicit qualifier written by the developer</td><td>as written</td></tr><tr><td>2</td><td>Recursive type position</td><td><code>Box&lt;T&gt;</code> inserted on the recursive field/variant</td></tr><tr><td>3</td><td><code>dyn Trait</code> position</td><td><code>Box&lt;dyn Trait&gt;</code></td></tr><tr><td>4</td><td>Use-site qualifier inference</td><td>qualifier demanded by call sites — all modes</td></tr><tr><td>5</td><td><code>sizeof(T) &gt; --stack-auto-bytes</code> in strict mode</td><td><code>T</code> promoted to <code>Box&lt;T&gt;</code></td></tr></tbody></table>
+<p>Priorities 2–3 are correctness constraints — they are never overridden. Priority 4 (use-site inference) runs before size-based decisions and applies in all flag combinations. Priority 5 applies only in <code>--mode strict</code> when priority 4 yields no result. Flag defaults are applied last.</p>
+<hr>
+<h2 id="--mode-strict-default"><code>--mode strict</code> (default)</h2>
+<p>Targets production code. After inference, unresolved anonymous forms:</p>
+<ul><li><code>T</code> → plain <code>T</code> (stack, single owner)</li><li><code>T&#x27;</code> → <code>Box&lt;T&gt;</code></li></ul>
+<hr>
+<h2 id="--mode-managed"><code>--mode managed</code></h2>
+<p>Targets prototyping and scripting. After inference, both <code>T</code> and <code>T&#x27;</code> map to the thread-appropriate wrapped type — <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> with <code>--threading multi</code>, <code>RefCell&lt;T&gt;</code> with <code>--threading single</code>.</p>
+<p><strong>Managed mode and field access.</strong> <code>std::sync::Mutex</code> is non-reentrant. Accessing the same managed variable&#x27;s fields multiple times in one expression would normally require multiple <code>lock()</code> calls, causing deadlock. The transpiler avoids this by emitting a shadow guard immediately after each managed variable is declared:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated Rust — managed + multi</span>
+<span class="kw">let</span> ap = <span class="kw">Arc</span>::<span class="fn">new</span>(std::sync::<span class="kt">Mutex</span>::<span class="fn">new</span>(<span class="kt">APoint</span> { x: <span class="nb">3</span>, y: <span class="nb">4</span> }));
+<span class="kw">let</span> <span class="kw">mut</span> __ap_mg = ap.<span class="fn">lock</span>().<span class="fn">unwrap</span>();   <span class="co">// shadow guard — emitted automatically</span>
+<span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, (__ap_mg.x + __ap_mg.y)); <span class="co">// uses guard, not ap.lock() twice</span></code></pre></div>
+<p>The shadow guard is emitted for both function parameters and local <code>T</code>/<code>T&#x27;</code> declarations, but only under <code>--threading multi</code> (where the managed wrapper is <code>Mutex</code>). Under <code>--threading single</code> the managed wrapper is <code>RefCell</code>, which supports independent <code>.borrow()</code>/<code>.borrow_mut()</code> calls without a deadlock risk, so no shadow guard is emitted — field accesses go through <code>managed_refcell_vars</code>-based <code>.borrow()</code>/<code>.borrow_mut()</code> calls directly instead.</p>
+<p><strong>Typical workflow:</strong></p>
+<div class="code-block"><pre><code># Phase 1 — prototype without explicit ownership
+boring build --mode managed
+
+# Phase 2 — annotate hot paths, switch to strict
+boring build --mode strict</code></pre></div>
+<hr>
+<h2 id="--threading-single--runtime-and-limitations"><code>--threading single</code> — runtime and limitations</h2>
+<p><code>--threading single</code> emits to <code>&lt;project&gt;_rust_single/</code> instead of <code>&lt;project&gt;_rust/</code>, so both builds can coexist side by side in the same directory.</p>
+<h3 id="tokio-runtime">Tokio runtime</h3>
+<p><code>--threading single</code> generates a <code>current_thread</code> Tokio runtime:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[tokio::main(flavor = &quot;current_thread&quot;)]</span>
+<span class="kw">async</span> <span class="kw">fn</span> <span class="fn">main</span>() { ... }</code></pre></div>
+<p>Everything runs on the main thread cooperatively. <code>Rc&lt;T&gt;</code> and <code>RefCell&lt;T&gt;</code> are safe because there is no other thread for values to escape to. <code>spawn</code> is replaced by <code>spawn_local</code>, which accepts <code>!Send</code> futures.</p>
+<h3 id="channels--send-constraint">Channels — <code>!Send</code> constraint</h3>
+<p>Even in <code>current_thread</code> mode, Tokio channels (<code>mpsc</code>, <code>oneshot</code>, <code>broadcast</code>) require <code>T: Send</code> on the values they carry — this is a generic bound in Tokio&#x27;s API, not a runtime requirement. <code>Rc&lt;T&gt;</code> and <code>RefCell&lt;T&gt;</code> cannot be sent through a channel even if there is only one thread.</p>
+<p>Consequences:</p>
+<ul><li><code>Rc&lt;T&gt;</code> and <code>RefCell&lt;T&gt;</code> are usable <strong>within a task</strong> — fields, local variables, intra-task computation.</li><li>As soon as a value must <strong>cross a task boundary</strong> (channel, stream, <code>spawn_local</code> with a moved value containing <code>Rc</code>), it must be <code>Send</code>. The <code>T&#x27;shared</code>/<code>T&#x27;actor</code> qualifiers on communicated types effectively resolve to <code>Arc</code>/<code>Mutex</code> even in single-thread mode.</li></ul>
+<p>The transpiler uses the <strong><code>local-channel</code></strong> crate (v0.1.5) for <code>!Send</code> async channels in <code>LocalSet</code>/<code>current_thread</code> contexts:</p>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>[dependencies]
+local-channel = &quot;0.1&quot;</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">use</span> local_channel::mpsc;
+
+<span class="kw">let</span> (tx, <span class="kw">mut</span> rx) = mpsc::<span class="fn">channel</span>();
+<span class="fn">spawn_local</span>(<span class="kw">async</span> <span class="kw">move</span> { tx.<span class="fn">send</span>(<span class="nb">42</span>).<span class="fn">unwrap</span>(); });
+<span class="fn">spawn_local</span>(<span class="kw">async</span> <span class="kw">move</span> {
+    <span class="kw">while</span> <span class="kw">let</span> <span class="kw">Some</span>(val) = rx.<span class="fn">next</span>().<span class="kw">await</span> { <span class="fm">println!</span>(<span class="s">&quot;{val}&quot;</span>); }
+});</code></pre></div>
+<h3 id="streams">Streams</h3>
+<p>Two sub-cases depending on the stream body:</p>
+<table><thead><tr><th>Case</th><th>Detection</th><th>Implementation</th><th>All targets</th></tr></thead><tbody><tr><td>In-memory stream</td><td>no <code>await</code>, no I/O in body</td><td><code>impl Iterator&lt;Item = T&gt;</code></td><td>✓</td></tr><tr><td>Async source (I/O, timer)</td><td><code>await</code> or I/O call present</td><td>target-specific (see below)</td><td></td></tr></tbody></table>
+<table><thead><tr><th>Target</th><th>Async stream implementation</th></tr></thead><tbody><tr><td>multi-thread</td><td><code>tokio::sync::mpsc</code> channel + <code>spawn</code></td></tr><tr><td>single-thread</td><td><code>local-channel</code> + <code>spawn_local</code> / <code>LocalSet</code></td></tr><tr><td>kernel</td><td><code>KernelChan&lt;T, N&gt;</code> ring buffer + <code>system_wq</code> work item</td></tr></tbody></table>
+<h3 id="why-rc-is-not-made-send">Why <code>Rc</code> is not made <code>Send</code></h3>
+<p><code>Rc</code> is defined in the Rust stdlib — its <code>!Send</code> impl cannot be overridden from outside. A newtype with <code>unsafe impl Send</code> is technically possible but introduces unsoundness if generated code is ever used as a library dependency in a multi-thread context.</p>
+<p><code>!Send</code> is a deliberate invariant. The correct answer is <code>LocalSet</code> + <code>spawn_local</code> + <code>local-channel</code>, which keeps the compiler as the safety guarantor.</p>
+<hr>
+<h2 id="size-based-auto-boxing-strict-mode-only">Size-based auto-boxing (strict mode only)</h2>
+<p>When use-site inference (priority 5) does not resolve a qualifier for an anonymous <code>T</code>, the transpiler falls back to a size-based decision:</p>
+<table><thead><tr><th>Estimated size</th><th>Action</th></tr></thead><tbody><tr><td>≤ <code>--stack-auto-bytes</code> (default: 256 B)</td><td>leave as <code>T</code> (stack)</td></tr><tr><td>&gt; <code>--stack-auto-bytes</code></td><td>silently promote to <code>Box&lt;T&gt;</code></td></tr></tbody></table>
+<p>Configurable: <code>boring build --stack-auto-bytes N</code>.</p>
+<p><strong>Suppressed for bare <code>T</code> struct fields, regardless of rebindability.</strong> When a struct field uses the bare anonymous form <code>T</code> (no qualifier), size-based promotion does not apply and no warning is emitted — this holds for <code>let</code>, <code>mut</code>, and <code>var</code> fields alike. A struct field is always inline in the parent&#x27;s allocation — boxing it would add an indirection without reducing the parent&#x27;s layout.</p>
+<p>This suppression applies only to bare <code>T</code>. A <code>T&#x27;</code> field (indirection hint) is <strong>not</strong> suppressed: its fallback remains <code>&#x27;heap</code> (<code>Box&lt;T&gt;</code>) regardless of size, because the developer explicitly requested indirection.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> BigData:
+    <span class="kw">let</span> <span class="kt">float</span>[<span class="nb">256</span>] samples    <span class="co"># 2048 bytes — bare T, no Box, no warning; inline in BigData</span>
+    <span class="kw">let</span> <span class="kt">string</span> name
+
+<span class="kw">struct</span> Wrapper:
+    <span class="kw">var</span> BigData inner         <span class="co"># bare T (var too) — sizeof(BigData) folds into sizeof(Wrapper), no promotion</span>
+    <span class="kw">let</span> BigData&#x27; backup       <span class="co"># T&#x27; — always Box&lt;BigData&gt;, even on a let field</span></code></pre></div>
+<h2 id="enum-size-warnings-strict-mode-only">Enum size warnings (strict mode only)</h2>
+<div class="code-block"><pre><code># Level 1 — overall enum too large
+warning: `Message` is 260 bytes on the stack (largest variant: `Data`);
+         consider `Message&#x27;heap` to heap-allocate the whole enum
+
+# Level 2 — one variant disproportionate
+warning: variant `Data` (256 bytes) dominates `Message` (4 bytes median);
+         consider boxing the payload: Data(u8[256]&#x27;heap)</code></pre></div>
+<p>Level 2 keeps the enum on the stack while boxing only the heavy payload.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

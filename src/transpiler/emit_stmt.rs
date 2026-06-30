@@ -2436,7 +2436,8 @@ impl Transpiler {
 
     pub(crate) fn emit_if_let(&mut self, s: &IfLetStmt, is_last: bool) {
         // Track if-let bindings as known locals; also track actor-typed bindings.
-        for clause in &s.clauses {
+        // Covers the initial clauses as well as every `elif let` branch's clauses.
+        for clause in s.clauses.iter().chain(s.elif_branches.iter().flat_map(|b| b.clauses.iter())) {
             match clause {
                 CondClause::Let(name, expr) => {
                     self.known_local_vars.insert(name.clone());
@@ -2498,6 +2499,17 @@ impl Transpiler {
             self.emit_loop_body(&s.then_body);
         }
         self.indent -= 1;
+        for branch in &s.elif_branches {
+            let elif_cond_s = self.emit_cond_clauses(&branch.clauses);
+            self.line(&format!("}} else if {} {{", elif_cond_s));
+            self.indent += 1;
+            if use_value_body {
+                self.emit_body(&branch.body);
+            } else {
+                self.emit_loop_body(&branch.body);
+            }
+            self.indent -= 1;
+        }
         if let Some(else_body) = &s.else_body {
             self.line("} else {");
             self.indent += 1;

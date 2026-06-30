@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Library Distribution Model</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="library-distribution-model">Library Distribution Model</h1>
+<blockquote><strong>Status: Draft</strong> — This document explores the design space. No decision is final.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>When a Boring library is distributed to third parties, two structural constraints must be satisfied simultaneously:</p>
+<ol><li><strong>Stack allocation</strong> — to place a struct on the stack (qualifier <code>&#x27;stack</code>), the compiler must know its exact size at compile time. This requires the full struct layout, including private fields.</li><li><strong>Generics</strong> — monomorphization requires access to the source of generic functions and types. There is no way to pre-compile all instantiations.</li></ol>
+<p>These two constraints both push toward distributing source code, or at minimum a rich interface representation that includes struct layouts and generic bodies.</p>
+<h2 id="how-other-languages-handle-this">How Other Languages Handle This</h2>
+<h3 id="c--c">C / C++</h3>
+<p>Headers (<code>.h</code> / <code>.hpp</code>) separate interface from implementation. Template definitions live in headers too, since they must be visible at instantiation sites.</p>
+<p><strong>Advantages</strong>: explicit contract, implementation can be distributed as binary (<code>.a</code>, <code>.so</code>).</p>
+<p><strong>Drawbacks</strong>:</p>
+<ul><li>Headers leak internal struct members even when they are private — the caller must see the layout to compute sizes.</li><li>Template implementations are fully exposed.</li><li>Header/source duplication is a maintenance burden.</li></ul>
+<h3 id="java">Java</h3>
+<p>Source and declarations are unified. The compiler emits <code>.class</code> bytecode, which serves as the distribution artifact.</p>
+<p><strong>Advantages</strong>: clean separation between contract and implementation; bytecode is the unit of distribution.</p>
+<p><strong>Drawbacks</strong>:</p>
+<ul><li>Generics use type erasure — no monomorphization, performance is limited.</li><li>Stack allocation of value types is limited (Project Valhalla is attempting to fix this).</li><li>Everything is on the heap by default; the caller never needs to know struct sizes.</li></ul>
+<h3 id="rust">Rust</h3>
+<p>Source is the distribution unit (via <code>crates.io</code> or direct path). The compiler performs monomorphization at the call site from source. Visibility is controlled with <code>pub</code> / <code>pub(crate)</code> — not by hiding source.</p>
+<p><strong>Advantages</strong>: solves both constraints naturally; no format duplication.</p>
+<p><strong>Drawbacks</strong>:</p>
+<ul><li>Full source is visible to consumers (confidentiality / copyright concern).</li><li>Compile times grow because dependency source is recompiled per target.</li></ul>
+<h3 id="swift">Swift</h3>
+<p>Swift introduced <code>.swiftinterface</code> files: a stable, textual interface derived from source. Struct layouts are included (so stack allocation works). Private members are represented as opaque stored properties with their size and alignment preserved but names and types hidden.</p>
+<p><strong>Advantages</strong>: solves the confidentiality problem while satisfying stack-layout requirements; generics are handled via source inclusion in the module.</p>
+<p><strong>Drawbacks</strong>:</p>
+<ul><li>Added toolchain complexity; interface files must be regenerated on every ABI-relevant change.</li><li>Generics still require source access for full monomorphization.</li></ul>
+<h2 id="constraints-specific-to-boring">Constraints Specific to Boring</h2>
+<p>Boring transpiles to Rust. The natural distribution unit is therefore a <strong>Rust crate</strong>, produced by <code>boring build</code>. This means:</p>
+<ul><li>The Rust output is distributable as-is, following Rust&#x27;s own ecosystem conventions.</li><li>A consumer who only has the compiled Rust crate gets monomorphization and stack allocation for free — those are Rust&#x27;s concerns at that point.</li></ul>
+<p>The question of whether to also distribute the <strong>Boring source</strong> (<code>.br</code> files) is separate from whether the generated Rust crate works correctly.</p>
+<h2 id="current-position">Current Position</h2>
+<p><strong>Follow Rust.</strong> For now, Boring inherits Rust&#x27;s distribution model:</p>
+<ul><li><code>boring build</code> produces a Rust crate (source + <code>Cargo.toml</code>).</li><li>Distribution of the Rust crate follows standard Rust conventions.</li><li>Visibility in Boring (<code>pub</code> / private) maps directly to Rust visibility and is enforced there.</li><li>No Boring-specific interface format (<code>.bri</code>) is planned.</li></ul>
+<p>This is not a loss: since Boring transpiles to Rust, a consumer who receives the Rust crate already has all the information the Rust compiler needs. The Boring source layer is only relevant if the consumer wants to use Boring tooling directly (e.g. IDE support, Boring-level documentation).</p>
+<h2 id="header--binary-distribution-confidentiality-without-full-source">Header + Binary Distribution (Confidentiality Without Full Source)</h2>
+<p>For libraries that meet all three conditions — no generics, no <code>&#x27;stack</code> structs with inferred layout, and all qualifiers written explicitly (no inference) — it would be theoretically possible to ship a <strong>header file</strong> (public declarations only) paired with a <strong>compiled binary</strong>, without exposing any Boring source.</p>
+<p>The header would use existing Boring syntax. Two candidates exist:</p>
+<ul><li><code>native</code> — already supported for FFI declarations; reusing it for &quot;pre-compiled Boring&quot; would be consistent syntactically but conflates two distinct concepts.</li><li><code>extern</code> — a clean alternative that signals &quot;implementation provided externally, not transpiled here.&quot;</li></ul>
+<p>Either way, a consumer would link against the binary rather than recompile the library.</p>
+<h3 id="the-rust-abi-blocker">The Rust ABI blocker</h3>
+<p>This approach is <strong>currently blocked</strong> by Rust itself. Rust does not guarantee a stable ABI between compiler versions. There is no way to link a pre-compiled Rust artifact against a different <code>rustc</code> version without risking breakage — symbol mangling, struct layout, calling conventions can all change between releases.</p>
+<p>Concretely: a library author compiles with <code>rustc 1.X</code>, ships the binary; a consumer compiles their code with <code>rustc 1.Y</code> and links against it. There is no guarantee this works.</p>
+<p>Until Rust stabilises an ABI (e.g. via the <a href="https://github.com/rust-lang/rust/issues/111423">Stable ABI initiative</a> or a project like <code>abi_stable</code>), this distribution model is not viable for general use. It could work in a controlled environment where library author and consumer pin the exact same <code>rustc</code> version, but that is too fragile to be a supported Boring feature.</p>
+<p><strong>Current conclusion</strong>: header + binary distribution is a valid design direction but depends on an upstream Rust prerequisite. Revisit when Rust ABI stabilisation progresses.</p>
+<h2 id="possible-future-direction-bri-interface-files">Possible Future Direction: <code>.bri</code> Interface Files</h2>
+<p>If confidentiality of the Boring source becomes a real requirement, a <code>.bri</code> (Boring Interface) format could be introduced, inspired by Swift&#x27;s <code>.swiftinterface</code>:</p>
+<ul><li>Public struct declarations with full field layout (required for <code>&#x27;stack</code>).</li><li>Private fields replaced by opaque placeholders preserving size and alignment.</li><li>Generic function and type signatures with their bodies (required for monomorphization).</li><li>Private implementation details stripped.</li></ul>
+<p>This is a significant toolchain investment and is <strong>not planned</strong> until there is a concrete use case.</p>
+<h2 id="qualifier-inference-and-cross-file-analysis">Qualifier Inference and Cross-File Analysis</h2>
+<p>Including full Boring source (<code>.br</code> files) alongside the generated Rust crate unlocks a class of analyses that are impossible from the Rust layer alone.</p>
+<h3 id="qualifier-propagation-across-library-boundaries">Qualifier propagation across library boundaries</h3>
+<p>The Boring transpiler infers qualifiers (<code>&#x27;stack</code>, <code>&#x27;heap</code>, <code>&#x27;shared</code>, <code>&#x27;actor</code>, …) from usage context. When a library function returns a value whose qualifier depends on how <em>its</em> dependencies are qualified, the transpiler needs to see the full call graph to propagate constraints correctly.</p>
+<p>Without source, a consumer importing the library sees only Rust types (<code>Box&lt;T&gt;</code>, <code>Arc&lt;T&gt;</code>, …) — the qualifier intent is erased. With source, the transpiler can:</p>
+<ul><li>Re-infer qualifiers end-to-end across the library boundary.</li><li>Detect qualifier conflicts early (e.g. a <code>&#x27;stack</code> expectation colliding with a <code>&#x27;heap</code> return).</li><li>Produce more precise diagnostics that name the originating <code>.br</code> file and line, not a generated Rust artifact.</li></ul>
+<h3 id="cross-file-analyses-enabled-by-full-source-inclusion">Cross-file analyses enabled by full source inclusion</h3>
+<table><thead><tr><th>Analysis</th><th>Why it needs cross-file source</th></tr></thead><tbody><tr><td>Qualifier flow</td><td>A qualifier constraint in file A may originate from a type defined in file B</td></tr><tr><td>Mutability audit</td><td><code>mut</code> / <code>var</code> discipline across a module boundary is invisible from compiled Rust</td></tr><tr><td>Ownership cycle detection</td><td><code>&#x27;shared</code> / <code>&#x27;actor</code> graphs span files; cycle detection requires the full graph</td></tr><tr><td>Dead-code elimination</td><td>Accurate reachability requires knowing which <code>.br</code> symbols are referenced across files</td></tr><tr><td>Documentation generation</td><td>Boring-level doc comments and inferred qualifiers are not preserved in generated Rust</td></tr></tbody></table>
+<p>These analyses are additive — they do not block the current &quot;follow Rust&quot; position, but they provide a concrete reason to preserve <code>.br</code> sources when distributing libraries, even when confidentiality is not a concern.</p>
+<h2 id="summary">Summary</h2>
+<table><thead><tr><th>Concern</th><th>Solution</th></tr></thead><tbody><tr><td>Stack allocation (<code>&#x27;stack</code>)</td><td>Struct layout must be visible → follow Rust, expose layout in generated crate</td></tr><tr><td>Generics / monomorphization</td><td>Source required → follow Rust, ship generated Rust source</td></tr><tr><td>Qualifier inference across boundaries</td><td>Full <code>.br</code> source enables cross-file propagation and precise diagnostics</td></tr><tr><td>Cross-file analyses</td><td>Mutability audit, ownership cycles, dead-code — all require full source graph</td></tr><tr><td>Confidentiality of <code>.br</code> source</td><td>Not a current constraint → revisit if <code>.bri</code> becomes necessary</td></tr><tr><td>Copyright of Boring source</td><td>Orthogonal to the compiler; a licensing concern, not a language design concern</td></tr></tbody></table>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

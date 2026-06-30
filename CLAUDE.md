@@ -14,8 +14,12 @@ Boring is a high-level language that transpiles to Rust. Source files use `.br` 
 
 ```boring
 let x = 42              # immutable binding, immutable instance
-mut x = 42              # fixed binding, mutable instance
 var x = 42              # rebindable, mutable (qualifier permitting)
+
+struct Counter:
+    var int value = 0
+mut c = Counter(0)      # fixed binding, mutable instance — `mut` is rejected on
+                         # primitives (int/uint/float/bool): use `var` for those
 ```
 
 ## Functions
@@ -75,9 +79,9 @@ let int'stack n = 10
 | `mut` | no | yes |
 | `var` | yes | depends on qualifier |
 
-Qualifier constraints: `mut 'shared` → compile error. `var 'guard` → warning.
+Qualifier constraints: `mut 'shared` → compile error in `boring build` (not enforced by `boring run`). `var 'guard` compiles cleanly with no warning today.
 
-Parameter passing hierarchy: `var` ≥ `mut` ≥ `let` (caller can pass down, never up).
+Parameter passing hierarchy (`var` ≥ `mut` ≥ `let`, caller can pass down, never up) is the intended design but is **not currently enforced** — passing a `let` binding into a `var` parameter compiles and runs without error.
 
 ## Enums
 

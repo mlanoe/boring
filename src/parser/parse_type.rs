@@ -445,9 +445,9 @@ pub(crate) fn expr_to_param(expr: &Expr, line: usize) -> Param {
 
 pub(crate) fn check_no_return(stmts: &[Stmt], context: &str) -> Result<(), ParseError> {
     for stmt in stmts {
-        if matches!(stmt, Stmt::Return(_)) {
+        if let Stmt::Return(ret) = stmt {
             return Err(ParseError::Generic {
-                line: 0,
+                line: ret.line,
                 msg: format!("last expression (no 'return' allowed in {})", context),
             });
         }

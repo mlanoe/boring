@@ -1,6 +1,6 @@
-# Boring — `new` placement operator — design draft
+# Boring — `new` placement operator
 
-> Status: implemented. Integrated into `book.md`.
+> Status: syntax and binding/placement semantics implemented. Transpilation is partial — see "Transpilation" section below for current vs. planned behavior. Integrated into `book.md`.
 
 ---
 
@@ -50,26 +50,19 @@ let Counter'actor v           # explicit qualifier
 
 ```boring
 def T new(Constructor<T>)               # qualifier inferred, excluding 'stack
-def T new(Arena& arena, Constructor<T>) # GPU placement, CPU qualifier encoded in arena
+def T new(Arena& arena, Constructor<T>) # GPU placement, CPU qualifier from binding
 ```
 
-`GPU` implements `Arena` — a device value is a valid placement context. `Arena` is a compile-time constraint, not a runtime value.
+There is no `Arena` trait in the implementation. `GPU(n)` is a built-in runtime device handle (recognized ad hoc by the interpreter and by the CUDA/Metal backends); there is currently no generic/trait-based mechanism a user type could implement to become a valid `new(...)` placement target. The `Arena&` signature above describes the intended API shape, not an implemented constraint.
 
 ### Examples
 
 ```boring
-new Counter()             # qualifier inferred, excluding 'stack
-new(g0) Counter()         # GPU device g0, CPU side inferred
-new(g0('heap)) Counter()  # GPU device g0, CPU side explicit 'heap
+new Counter()       # qualifier inferred, excluding 'stack
+new(g0) Scale(n)    # GPU device g0 — only works when Scale is a `kernel`-declared type
 ```
 
-The CPU-side qualifier for GPU placement is passed to the arena expression. `GPU` only accepts `'stack` or `'heap` — shared qualifiers (`'actor`, `'guard`, `'shared`) are a compile error at the `g0(...)` call site.
-
-```boring
-g0           # CPU side inferred ('stack)
-g0('heap)    # CPU side explicit 'heap
-g0('actor)   # ERROR — GPU arena only accepts 'stack or 'heap
-```
+> Note: `new(arena) X(...)` only produces device placement when `X` is declared with `kernel`. For an ordinary `struct` such as `Counter`, the arena argument is currently ignored and `new(g0) Counter()` transpiles identically to `Counter()`, with no placement effect.
 
 ---
 
@@ -87,16 +80,23 @@ g0('actor)   # ERROR — GPU arena only accepts 'stack or 'heap
 
 `v'qualifier` on an initialized binding is the concise form for explicit qualifiers when the type is obvious from the constructor. `Type'qualifier` is reserved for delayed init, where the type cannot be inferred.
 
+
 ### Named arenas rejected
 
 `let a = arena(g0, 'heap)` then `new(a) Scale(n)` was considered and **rejected** — storing an `Arena` in a variable would make placement runtime-dependent, preventing Rust type emission.
 
 ### Future qualifiers
 
-`new(arena)` is the extension point for CUDA-specific qualifiers (`'gpu.*` CPU-side, device-side qualifiers). These are specified in the CUDA draft.
+`new(arena)` is the extension point for CUDA-specific qualifiers (`'gpu.*` CPU-side, device-side qualifiers). These are specified in the CUDA module reference.
 
 ---
 
 ## Transpilation
 
-`new(...)` is resolved entirely at compile time. It maps to Rust's `Allocator` trait and parameterised smart pointers (`Box<T, A>`, `Vec<T, A>`). No runtime dispatch — the placement strategy is a type-level constraint, erased after monomorphisation.
+Current implementation status (not yet the design above):
+
+- Generic backend: `new(...)` is not yet emitted specially — the arena is discarded and the constructor call is emitted as-is (`src/transpiler/emit_expr.rs`, `ExprKind::New`).
+- CUDA/Metal host backends: `new(arena) X(...)` is rewritten to `X::new(<device-expr>, args...)?` only when `X` is a registered `kernel` type (`src/transpiler/cuda/host.rs`, `src/transpiler/metal/host.rs`). This is a hand-written codegen rule, not a generic allocator mechanism. For any non-kernel type the arena is ignored and the plain constructor call is emitted.
+- Interpreter: arena placement has no runtime effect; `new(...)` evaluates the constructor normally (`src/interpreter/eval_expr.rs`).
+
+There is no use of Rust's `Allocator` trait or parameterised smart pointers (`Box<T, A>`, `Vec<T, A>`) anywhere in the codebase. A compile-time, allocator-trait-based mechanism is the long-term direction but is **not yet implemented** — treat it as planned, not current behavior.

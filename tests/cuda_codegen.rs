@@ -635,3 +635,29 @@ let _cc = g.computeCapability()
     assert!(rs.contains(".compute_capability()?"),
         "expected .compute_capability()? for GPU compute property;\ngot:\n{rs}");
 }
+
+// ─── saxpy example ────────────────────────────────────────────────────────────
+
+#[test]
+fn example_saxpy() {
+    let src = std::fs::read_to_string("examples/saxpy.br").expect("examples/saxpy.br not found");
+    let (cu, rs) = cuda_codegen("saxpy_example", &src);
+
+    // Device kernel
+    assert!(cu.contains("__global__ void Saxpy_kernel("), "missing Saxpy_kernel;\ngot:\n{cu}");
+    assert!(cu.contains("const double alpha"),            "missing const scalar alpha;\ngot:\n{cu}");
+    assert!(cu.contains("const double* x"),              "missing x param;\ngot:\n{cu}");
+    assert!(cu.contains("double* y"),                    "missing y param;\ngot:\n{cu}");
+    assert!(cu.contains("y[i] = ((alpha * x[i]) + y[i])"), "missing saxpy body;\ngot:\n{cu}");
+
+    // Host struct
+    assert!(rs.contains("struct Saxpy"),          "missing struct Saxpy;\ngot:\n{rs}");
+    assert!(rs.contains("alpha: CudaSlice<f64>"), "missing alpha field;\ngot:\n{rs}");
+    assert!(rs.contains("x: CudaSlice<f64>"),    "missing x field;\ngot:\n{rs}");
+    assert!(rs.contains("y: CudaSlice<f64>"),    "missing y field;\ngot:\n{rs}");
+
+    // Host main: print, float cast, enumerate loop
+    assert!(rs.contains("println!("),                      "print not translated to println!;\ngot:\n{rs}");
+    assert!(rs.contains("as f64)"),                        "float() cast not translated;\ngot:\n{rs}");
+    assert!(rs.contains(".iter().enumerate()"),            "for i,v not translated to enumerate;\ngot:\n{rs}");
+}

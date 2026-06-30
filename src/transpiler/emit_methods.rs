@@ -1639,19 +1639,20 @@ impl Transpiler {
                     // Literal string first arg: pass through as a raw Rust format string.
                     // The `{}` holes in it are Rust format placeholders — do NOT escape them.
                     let fmt_str = match &first.kind {
-                        ExprKind::Str(s) => Some(escape_str_macro(s)),
+                        ExprKind::Str(s) => Some((escape_str_macro(s), Vec::new())),
                         ExprKind::StringInterp(segs) => {
-                            // Boring interpolation: rebuild as Rust format string.
-                            // Literal `{}` segments pass through as `{}` (placeholder).
+                            // Boring interpolation: rebuild as Rust format string, along
+                            // with the emitted expression for each `{}` / `{:spec}` hole.
                             Some(self.build_macro_format_string(segs))
                         }
                         _ => None,
                     };
-                    if let Some(fmt) = fmt_str {
-                        return if rest.is_empty() {
+                    if let Some((fmt, interp_args)) = fmt_str {
+                        let all_args: Vec<String> = interp_args.into_iter().chain(rest).collect();
+                        return if all_args.is_empty() {
                             format!("{}!(\"{}\")", name, fmt)
                         } else {
-                            format!("{}!(\"{}\", {})", name, fmt, rest.join(", "))
+                            format!("{}!(\"{}\", {})", name, fmt, all_args.join(", "))
                         };
                     }
                 }
@@ -1731,11 +1732,13 @@ impl Transpiler {
         (fmt, args)
     }
 
-    /// Build the format string portion of a macro call (println!, format!, etc.).
+    /// Build the format string portion of a macro call (println!, format!, etc.),
+    /// along with the emitted Rust expressions for each `{}` / `{:spec}` placeholder.
     /// Unlike build_format_string, literal `{}` segments are passed through as `{}`
     /// (Rust format placeholders) rather than being escaped to `{{}}`.
-    pub(crate) fn build_macro_format_string(&self, segs: &[StringSegment]) -> String {
+    pub(crate) fn build_macro_format_string(&self, segs: &[StringSegment]) -> (String, Vec<String>) {
         let mut fmt = String::new();
+        let mut args = Vec::new();
         for seg in segs {
             match seg {
                 StringSegment::Lit(s) => {
@@ -1749,16 +1752,18 @@ impl Transpiler {
                         }
                     }
                 }
-                StringSegment::Expr(_) => {
+                StringSegment::Expr(e) => {
                     // Boring interpolation inside a macro format string → keep as {}
                     fmt.push_str("{}");
+                    args.push(self.emit_expr(e));
                 }
-                StringSegment::FormattedExpr(_, spec) => {
+                StringSegment::FormattedExpr(e, spec) => {
                     fmt.push_str(&format!("{{:{}}}", spec));
+                    args.push(self.emit_expr(e));
                 }
             }
         }
-        fmt
+        (fmt, args)
     }
 
     /// Build a Rust format string + combined arg list for positional print:
@@ -2006,6 +2011,7 @@ impl Transpiler {
             struct_rwlock_fields: self.struct_rwlock_fields.clone(),
             struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
+            struct_task_methods: self.struct_task_methods.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
             fn_returns_void: self.fn_returns_void,
@@ -2092,6 +2098,8 @@ impl Transpiler {
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
+            task_method_call_vars: std::collections::HashSet::new(),
+            task_method_call_fields: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             loaded: self.loaded.clone(),
             prelude_emitted: self.prelude_emitted,

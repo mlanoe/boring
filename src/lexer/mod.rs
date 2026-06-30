@@ -102,9 +102,12 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
                         '"'  => { result.push('\\'); result.push('"'); }
                         '\n' => { result.push('\\'); result.push('n'); }
                         '\r' => { result.push('\\'); result.push('r'); }
-                        // Backslashes and `{}`/`{{`/`}}` are left intact so that
-                        // lex_string handles escape sequences and interpolation holes
-                        // exactly as it would for a regular string.
+                        // A literal backslash typed by the user (e.g. in a Windows path
+                        // or a regex) must survive as a literal backslash — escape it so
+                        // lex_string's own escape processing (`\n`, `\t`, ...) does not
+                        // reinterpret it. `{}`/`{{`/`}}` are left intact so lex_string
+                        // still handles interpolation holes exactly as for a regular string.
+                        '\\' => { result.push('\\'); result.push('\\'); }
                         other => result.push(other),
                     }
                 }
@@ -213,6 +216,8 @@ pub enum LexError {
     MixedIndentation { line: usize },
     #[error("line {line}: dedent does not match any outer indentation level")]
     InvalidDedent { line: usize },
+    #[error("line {line}: integer literal out of range")]
+    IntegerOverflow { line: usize },
 }
 
 impl LexError {
@@ -222,6 +227,7 @@ impl LexError {
             LexError::UnterminatedString { line } => *line,
             LexError::MixedIndentation { line } => *line,
             LexError::InvalidDedent { line } => *line,
+            LexError::IntegerOverflow { line } => *line,
         }
     }
 
@@ -231,6 +237,7 @@ impl LexError {
             LexError::UnterminatedString { .. } => "unterminated string literal".to_string(),
             LexError::MixedIndentation { .. } => "inconsistent indentation (mixed tabs and spaces)".to_string(),
             LexError::InvalidDedent { .. } => "dedent does not match any outer indentation level".to_string(),
+            LexError::IntegerOverflow { .. } => "integer literal out of range".to_string(),
         }
     }
 }
@@ -252,11 +259,17 @@ pub enum RawInterpPart {
 /// `{expr:spec}` → `("expr", Some("spec"))`, `{expr}` → `("expr", None)`.
 fn split_hole_fmt(s: &str) -> (&str, Option<&str>) {
     let mut depth: i32 = 0;
-    for (i, c) in s.char_indices() {
+    let mut in_str = false;
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
         match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ':' if depth == 0 => {
+            '\\' if in_str => {
+                chars.next();
+            }
+            '"' => in_str = !in_str,
+            '(' | '[' | '{' if !in_str => depth += 1,
+            ')' | ']' | '}' if !in_str => depth -= 1,
+            ':' if depth == 0 && !in_str => {
                 let fmt = s[i + 1..].trim_start();
                 return if fmt.is_empty() { (s, None) } else { (&s[..i], Some(fmt)) };
             }
@@ -668,7 +681,7 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
             }
         }
         '"' => lex_string(chars, line)?,
-        c if c.is_ascii_digit() => lex_number(c, chars)?,
+        c if c.is_ascii_digit() => lex_number(c, chars, line)?,
         c if c.is_alphabetic() || c == '_' => {
             let s = lex_ident(c, chars);
             keyword_or_ident(s)
@@ -697,11 +710,22 @@ fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexErr
                     }
                     let mut inner = String::new();
                     let mut depth = 0usize;
+                    let mut in_hole_str = false;
                     loop {
                         match chars.next() {
                             None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line }),
-                            Some((_, '{')) => { depth += 1; inner.push('{'); }
-                            Some((_, '}')) => {
+                            Some((_, '\\')) if in_hole_str => {
+                                inner.push('\\');
+                                if let Some((_, c2)) = chars.next() {
+                                    inner.push(c2);
+                                }
+                            }
+                            Some((_, '"')) => {
+                                in_hole_str = !in_hole_str;
+                                inner.push('"');
+                            }
+                            Some((_, '{')) if !in_hole_str => { depth += 1; inner.push('{'); }
+                            Some((_, '}')) if !in_hole_str => {
                                 if depth == 0 { break; }
                                 depth -= 1;
                                 inner.push('}');
@@ -771,7 +795,7 @@ fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexErr
     }
 }
 
-fn lex_number(first: char, chars: &mut CharIter<'_>) -> Result<TokenKind, LexError> {
+fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexError> {
     // Hex / binary / octal prefix: 0x, 0b, 0o
     if first == '0' {
         let prefix = chars.peek().map(|(_, c)| *c);
@@ -779,19 +803,22 @@ fn lex_number(first: char, chars: &mut CharIter<'_>) -> Result<TokenKind, LexErr
             Some('x') | Some('X') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| c.is_ascii_hexdigit());
-                let val = u64::from_str_radix(&digits, 16).unwrap_or(0) as i64;
+                let val = u64::from_str_radix(&digits, 16)
+                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             Some('b') | Some('B') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0' | '1'));
-                let val = u64::from_str_radix(&digits, 2).unwrap_or(0) as i64;
+                let val = u64::from_str_radix(&digits, 2)
+                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             Some('o') | Some('O') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0'..='7'));
-                let val = u64::from_str_radix(&digits, 8).unwrap_or(0) as i64;
+                let val = u64::from_str_radix(&digits, 8)
+                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             _ => {}
@@ -823,10 +850,10 @@ fn lex_number(first: char, chars: &mut CharIter<'_>) -> Result<TokenKind, LexErr
                     s.push(chars.next().unwrap().1);
                 }
             }
-            return Ok(TokenKind::Float(s.parse().unwrap()));
+            return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line });
         }
     }
-    Ok(TokenKind::Int(s.parse().unwrap()))
+    s.parse().map(TokenKind::Int).map_err(|_| LexError::IntegerOverflow { line })
 }
 
 /// Collect digits (skipping `_` separators) while `pred` matches.

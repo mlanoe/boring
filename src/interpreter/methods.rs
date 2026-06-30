@@ -140,6 +140,11 @@ impl Interpreter {
             };
         }
 
+        // `.clone()` — universal deep copy for all non-primitive types.
+        if method == "clone" && args.is_empty() {
+            return Ok(obj);
+        }
+
         // Struct method dispatch
         match obj.clone() {
             Value::Object(inner_rc) => {
@@ -1271,6 +1276,14 @@ impl Interpreter {
                             line,
                         ));
                     }
+                    // `var T'shared` is reassignable but has no interior mutability
+                    // (Arc<T> — same restriction as calling a mutating method on it).
+                    if !env.borrow().is_actor(binding_name) && env.borrow().is_shared(binding_name) {
+                        return Err(err(
+                            format!("cannot assign to field '{}' on shared binding '{}' — use T'actor for interior mutability", field, binding_name),
+                            line,
+                        ));
+                    }
                 }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 match obj {
@@ -1361,8 +1374,12 @@ impl Interpreter {
                 }
             }
             ExprKind::Index(obj_expr, idx_expr) => {
-                let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
+                // Evaluate the object before the index — matches the real evaluation
+                // order of `obj[idx] = val` in the transpiled Rust (and left-to-right
+                // evaluation in general), so side effects in `obj`/`idx` fire in the
+                // order the source implies.
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
                 match obj {
                     Value::Array(mut arr) => {
                         let pos: usize = match idx {

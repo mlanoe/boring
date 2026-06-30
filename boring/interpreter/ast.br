@@ -281,7 +281,6 @@ struct LetStmt:
     string name
     Type? ty
     Expr? value
-    bool is_move
     int line
 
 struct ReturnStmt:

@@ -215,6 +215,8 @@ pub enum Value {
     /// Declared but not yet assigned: `let v` / `var v` without `= expr`.
     /// Any read of this value before assignment is a runtime error.
     Uninitialized,
+    /// Value was moved out of this binding. Any subsequent read is a runtime error.
+    Moved(String),
     Nil,
     /// Unit value returned by void functions — distinct from Nil.
     Void,
@@ -347,6 +349,7 @@ impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Uninitialized => write!(f, "Uninitialized"),
+            Value::Moved(name) => write!(f, "Moved({:?})", name),
             Value::Nil => write!(f, "Nil"),
             Value::Void => write!(f, "Void"),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
@@ -383,6 +386,7 @@ impl Value {
     pub fn type_name(&self) -> String {
         match self {
             Value::Uninitialized => "Uninitialized".into(),
+            Value::Moved(_) => "moved".into(),
             Value::Nil => "Nil".into(),
             Value::Void => "Void".into(),
             Value::Bool(_) => "Bool".into(),
@@ -419,6 +423,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Uninitialized => write!(f, "<uninitialized>"),
+            Value::Moved(name) => write!(f, "<moved:{}>", name),
             Value::Nil => write!(f, "nil"),
             Value::Void => write!(f, "void"),
             Value::Bool(b) => write!(f, "{}", b),
@@ -713,6 +718,17 @@ impl Env {
             self.actor_bindings.remove(name);
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().invalidate(name);
+        }
+    }
+
+    /// Mark a variable as moved: keep the name in scope so reads produce a "use of moved value"
+    /// error instead of the less informative "undefined variable" error.
+    pub fn set_moved(&mut self, name: &str) {
+        if self.vars.contains_key(name) {
+            self.vars.insert(name.to_string(), Value::Moved(name.to_string()));
+            self.mutable.remove(name);
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow_mut().set_moved(name);
         }
     }
 
@@ -2016,13 +2032,16 @@ impl Interpreter {
                         env.borrow_mut().mark_actor(&stmt.name);
                     }
                 }
-                // `let b' = a` — move: only meaningful for owned (non-copy) values.
-                // For T'copy / T'shared / T'local, the source is NOT invalidated.
-                if stmt.is_move && !val_is_copy {
-                    env.borrow_mut().mark_owned_var(&stmt.name);
+                // Move semantics: `let b = a` moves non-copy values by default.
+                // Copy types (int, float, bool, nil, void, string) are copied, not moved.
+                // Borrow annotations (`T&`) alias rather than move.
+                let is_borrow = stmt.ty.as_ref().map(|ty| {
+                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
+                }).unwrap_or(false);
+                if !val_is_copy && !is_borrow {
                     if let Some(v) = &stmt.value {
                         if let ExprKind::Var(src) = &v.kind {
-                            env.borrow_mut().invalidate(src.as_str());
+                            env.borrow_mut().set_moved(src.as_str());
                         }
                     }
                 }

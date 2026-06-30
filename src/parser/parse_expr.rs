@@ -18,7 +18,24 @@ impl Parser {
 
     pub(crate) fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         // Assignment is a statement only — expressions never produce Assign nodes
-        self.parse_else_expr()
+        //
+        // Every recursive sub-expression (parenthesized groups, array/tuple elements,
+        // call arguments, ...) re-enters here, so guarding this single chokepoint bounds
+        // the whole expression-parsing recursion (deeply nested `((((...))))`,
+        // `[[[[...]]]]`, etc.) against a stack-overflow crash, the same way the `not`-chain
+        // guard in `parse_not` bounds unary-`not` recursion.
+        let line = self.line();
+        self.depth += 1;
+        if self.depth > crate::parser::MAX_EXPR_DEPTH {
+            self.depth -= 1;
+            return Err(ParseError::Generic {
+                line,
+                msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
+            });
+        }
+        let result = self.parse_else_expr();
+        self.depth -= 1;
+        result
     }
 
     /// Parse a single statement for inline body positions (match arms, if-let inline,
@@ -506,20 +523,26 @@ impl Parser {
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         match self.peek().clone() {
-            TokenKind::Minus => {
+            TokenKind::Minus | TokenKind::Bang | TokenKind::Tilde => {
+                let op = match self.peek() {
+                    TokenKind::Minus => UnaryOp::Neg,
+                    TokenKind::Bang => UnaryOp::Not,
+                    _ => UnaryOp::BitNot,
+                };
                 self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Neg, Box::new(expr)), line })
-            }
-            TokenKind::Bang => {
-                self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::Not, Box::new(expr)), line })
-            }
-            TokenKind::Tilde => {
-                self.advance();
-                let expr = self.parse_unary()?;
-                Ok(Expr { kind: ExprKind::UnaryOp(UnaryOp::BitNot, Box::new(expr)), line })
+                // Guard: `----x` / `!!!!x` / `~~~~x` chains recurse directly, one frame
+                // per operator — same bound as the `not`-chain guard in `parse_not`.
+                self.depth += 1;
+                if self.depth > crate::parser::MAX_EXPR_DEPTH {
+                    self.depth -= 1;
+                    return Err(ParseError::Generic {
+                        line,
+                        msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
+                    });
+                }
+                let expr = self.parse_unary();
+                self.depth -= 1;
+                Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line })
             }
             TokenKind::New => {
                 self.advance();

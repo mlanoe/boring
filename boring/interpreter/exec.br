@@ -120,10 +120,17 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
     match stmt:
         Let(s):
             var val = Uninitialized
+            var string? move_source = nil
             if let expr = s.value:
+                match expr.kind:
+                    ExprKind.Var(src): move_source = some(src)
+                    _: nil
                 val = eval_expr(interp, expr)
                 if interp.has_pending_throw:
                     return ThrowSignal(interp.take_pending_throw())
+                if let src = move_source:
+                    if not is_copy_value(val):
+                        interp.current_env.force_set(src, Value.Moved(""))
             if s.mutable:
                 interp.current_env.define_mut(s.name, val)
             else:
@@ -573,10 +580,20 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
         Pattern.None:
             match val:
                 Value.Nil: true
+                Value.EnumVariant(stype, svariant, sfields):
+                    svariant == "None" or svariant == "none"
                 _: false
         Pattern.Some(inner):
             match val:
                 Value.Nil: false
+                Value.EnumVariant(stype, svariant, sfields):
+                    if svariant == "Some" or svariant == "some":
+                        if sfields.length == 1:
+                            match_pattern(sfields[0], inner, env)
+                        else:
+                            match_pattern(Value.Tuple(sfields), inner, env)
+                    else:
+                        false
                 _: match_pattern(val, inner, env)
         Pattern.Lit(lit):
             match lit:
@@ -821,6 +838,7 @@ def string value_type_name(Value val):
         Labeled(_, _): "labeled"
         StructDef(n): "struct:{n}"
         EnumDef(n): "enum:{n}"
+        Moved(_): "moved"
 
 def string value_to_string(Value val):
     match val:
@@ -853,6 +871,22 @@ def bool value_equals(Value a, Value b):
         Str(x):
             match b:
                 Str(y): x == y
+                _: false
+        Set(xa):
+            match b:
+                Set(ya):
+                    if xa.length != ya.length:
+                        false
+                    else:
+                        var all_found = true
+                        for elem in xa:
+                            var found = false
+                            for other in ya:
+                                if value_equals(elem, other):
+                                    found = true
+                            if not found:
+                                all_found = false
+                        all_found
                 _: false
         _: false
 

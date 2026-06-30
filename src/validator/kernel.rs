@@ -466,6 +466,21 @@ impl KernelValidator {
                 for s in &if_let.then_body {
                     self.check_stmt(s);
                 }
+                for branch in &if_let.elif_branches {
+                    for clause in &branch.clauses {
+                        match clause {
+                            crate::ast::CondClause::Expr(e) => self.check_expr(e),
+                            crate::ast::CondClause::Let(_, e) => self.check_expr(e),
+                            crate::ast::CondClause::LetPat(pat, e) => {
+                                self.check_pattern(pat, if_let.line);
+                                self.check_expr(e);
+                            }
+                        }
+                    }
+                    for s in &branch.body {
+                        self.check_stmt(s);
+                    }
+                }
                 if let Some(else_body) = &if_let.else_body {
                     for s in else_body {
                         self.check_stmt(s);
@@ -818,39 +833,104 @@ impl KernelValidator {
     ///
     /// Rule (Item 8): `'shared` and `'local` fields are block-/thread-local device
     /// memory and cannot be written from a host-side `init` constructor.  Any
-    /// assignment in an `init` body whose LHS names such a field is an error.
+    /// assignment in an `init` body whose LHS names such a field is an error, no
+    /// matter how deeply it is nested inside `if`/`for`/`match`/etc.
     fn check_kernel(&mut self, k: &crate::ast::KernelDecl) {
-        use crate::ast::GpuQual;
+        for field in &k.fields {
+            self.check_type(&field.ty, field.line);
+        }
         for init in &k.inits {
+            for param in &init.params {
+                if let Some(ty) = &param.ty {
+                    self.check_type(ty, param.line);
+                }
+                if let Some(def) = &param.default {
+                    self.check_expr(def);
+                }
+            }
             for stmt in &init.body {
-                if let Stmt::Expr(e) = stmt {
-                    if let ExprKind::Assign(lhs, _) = &e.kind {
-                        // LHS may be `field` or `field[idx]` or `self.field`.
-                        let target = match &lhs.kind {
-                            ExprKind::Var(n) => Some(n.clone()),
-                            ExprKind::Index(base, _) => {
-                                if let ExprKind::Var(n) = &base.kind { Some(n.clone()) } else { None }
-                            }
-                            ExprKind::Field(_, f) => Some(f.clone()),
-                            _ => None,
-                        };
-                        if let Some(name) = target {
-                            if let Some(field) = k.fields.iter().find(|f| f.name == name) {
-                                if matches!(field.qual, GpuQual::Shared | GpuQual::Local) {
-                                    let kind = if matches!(field.qual, GpuQual::Shared) { "'shared" } else { "'local" };
-                                    self.error(
-                                        e.line,
-                                        format!(
-                                            "cannot assign to {kind} field '{name}' in an init constructor — \
-                                             {kind} memory is device-local and not accessible from the host"
-                                        ),
-                                    );
-                                }
-                            }
-                        }
+                self.check_kernel_init_stmt(stmt, k);
+                self.check_stmt(stmt);
+            }
+        }
+        for method in &k.methods {
+            self.check_fn(method);
+        }
+    }
+
+    /// Recursively walk an `init` body statement (descending into `if`/`for`/`while`/
+    /// `match`/`try`/etc. bodies) looking for assignments to `'shared`/`'local` fields.
+    fn check_kernel_init_stmt(&mut self, stmt: &Stmt, k: &crate::ast::KernelDecl) {
+        use crate::ast::GpuQual;
+        let check_assign_target = |this: &mut Self, lhs: &Expr, line: usize| {
+            // LHS may be `field` or `field[idx]` or `self.field`.
+            let target = match &lhs.kind {
+                ExprKind::Var(n) => Some(n.clone()),
+                ExprKind::Index(base, _) => {
+                    if let ExprKind::Var(n) = &base.kind { Some(n.clone()) } else { None }
+                }
+                ExprKind::Field(_, f) => Some(f.clone()),
+                _ => None,
+            };
+            if let Some(name) = target {
+                if let Some(field) = k.fields.iter().find(|f| f.name == name) {
+                    if matches!(field.qual, GpuQual::Shared | GpuQual::Local) {
+                        let kind = if matches!(field.qual, GpuQual::Shared) { "'shared" } else { "'local" };
+                        this.error(
+                            line,
+                            format!(
+                                "cannot assign to {kind} field '{name}' in an init constructor — \
+                                 {kind} memory is device-local and not accessible from the host"
+                            ),
+                        );
                     }
                 }
             }
+        };
+        match stmt {
+            Stmt::Expr(e) => {
+                if let ExprKind::Assign(lhs, _) = &e.kind {
+                    check_assign_target(self, lhs, e.line);
+                }
+            }
+            Stmt::If(if_stmt) => {
+                for (_, body) in &if_stmt.branches {
+                    for s in body { self.check_kernel_init_stmt(s, k); }
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for s in else_body { self.check_kernel_init_stmt(s, k); }
+                }
+            }
+            Stmt::IfLet(if_let) => {
+                for s in &if_let.then_body { self.check_kernel_init_stmt(s, k); }
+                for branch in &if_let.elif_branches {
+                    for s in &branch.body { self.check_kernel_init_stmt(s, k); }
+                }
+                if let Some(else_body) = &if_let.else_body {
+                    for s in else_body { self.check_kernel_init_stmt(s, k); }
+                }
+            }
+            Stmt::Match(m) => {
+                for arm in &m.arms {
+                    if let MatchBody::Block(stmts) = &arm.body {
+                        for s in stmts { self.check_kernel_init_stmt(s, k); }
+                    }
+                }
+            }
+            Stmt::While(w) => { for s in &w.body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::WhileLet(w) => { for s in &w.body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::DoWhile(d) => { for s in &d.body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::Loop(l) => { for s in &l.body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::For(f) => { for s in &f.body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::Guard(g) => { for s in &g.else_body { self.check_kernel_init_stmt(s, k); } }
+            Stmt::Try(try_stmt) => {
+                for s in &try_stmt.body { self.check_kernel_init_stmt(s, k); }
+                for clause in &try_stmt.catch_clauses {
+                    for s in &clause.body { self.check_kernel_init_stmt(s, k); }
+                }
+            }
+            Stmt::Defer(stmts) => { for s in stmts { self.check_kernel_init_stmt(s, k); } }
+            _ => {}
         }
     }
 }

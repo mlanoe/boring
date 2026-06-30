@@ -2476,6 +2476,8 @@ impl Transpiler {
                         .and_then(|fs| fs.iter().find(|(n, _)| n == label))
                         .map(|(_, ty)| ty);
                     let mutex_key = format!("{}::{}", name, label);
+                    // Same wrapping regardless of whether the qualifier is explicit (`T'actor`)
+                    // or inferred from usage — both populate these sets identically.
                     let val = if self.struct_mutex_fields.contains(&mutex_key) {
                         // If the value is already an actor/rc variable, just clone the Rc pointer.
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
@@ -2495,6 +2497,48 @@ impl Transpiler {
                             crate::transpiler::ThreadingMode::Single =>
                                 format!("Rc::new(RefCell::new({}))", raw),
                         }
+                        }
+                    } else if self.struct_mutex_task_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::mutex_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_actor_task_new(&raw)
+                        }
+                    } else if self.struct_rwlock_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_guard_new(&raw)
+                        }
+                    } else if self.struct_rwlock_task_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()));
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_guard_task_new(&raw)
                         }
                     } else if self.recursive_fields.contains(&mutex_key) {
                         // Recursive struct field — wrap in Box::new() at construction site.
@@ -2546,14 +2590,39 @@ impl Transpiler {
                     }
                 }
             }
+            // Same, for the 'actor'task / 'guard / 'guard'task variants.
+            for key in &self.struct_mutex_task_fields.clone() {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        fields.push(format!("{}: {}", field_name, self.emit_actor_task_new("Default::default()")));
+                    }
+                }
+            }
+            for key in &self.struct_rwlock_fields.clone() {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        fields.push(format!("{}: {}", field_name, self.emit_guard_new("Default::default()")));
+                    }
+                }
+            }
+            for key in &self.struct_rwlock_task_fields.clone() {
+                if let Some(field_name) = key.strip_prefix(&format!("{}::", name)) {
+                    if !provided.contains(field_name) {
+                        fields.push(format!("{}: {}", field_name, self.emit_guard_task_new("Default::default()")));
+                    }
+                }
+            }
             // Append regular optional/T'auto/T'weak fields not provided — default to None.
             if let Some(known_fields) = self.struct_fields.get(name).cloned() {
                 for (fname, fty) in &known_fields {
                     if !provided.contains(fname.as_str()) {
-                        // Skip transient and mutex fields already handled above.
+                        // Skip transient and mutex/rwlock fields already handled above.
                         let tkey = format!("{}::{}", name, fname);
                         if self.transient_fields.contains_key(&tkey)
                             || self.struct_mutex_fields.contains(&tkey)
+                            || self.struct_mutex_task_fields.contains(&tkey)
+                            || self.struct_rwlock_fields.contains(&tkey)
+                            || self.struct_rwlock_task_fields.contains(&tkey)
                         {
                             continue;
                         }

@@ -39,6 +39,9 @@ impl Interpreter {
                     if matches!(val, Value::Uninitialized) {
                         return Err(err(format!("variable '{}' used before being assigned", name), line));
                     }
+                    if let Value::Moved(src) = &val {
+                        return Err(err(format!("use of moved value '{}': the value was moved and is no longer accessible — use .clone() to make a copy", src), line));
+                    }
                     return Ok(val);
                 }
                 // If the name is a type alias pointing to a struct or enum, return
@@ -345,7 +348,7 @@ impl Interpreter {
                 }
                 // Enforce: mutating method cannot be called on an immutable (let) binding
                 // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
-                const BUILTIN_NON_MUTATING: &[&str] = &["upgrade"];
+                const BUILTIN_NON_MUTATING: &[&str] = &["upgrade", "clone"];
                 if let ExprKind::Var(binding_name) = &obj_expr.kind {
                     if !BUILTIN_NON_MUTATING.contains(&method.as_str()) {
                         if let Value::Object(inner_rc) = &obj {
@@ -972,7 +975,7 @@ impl Interpreter {
 
         match op {
             BinOp::Add => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Err(err("cannot add negative Int to Uint", line)) }
@@ -1003,7 +1006,7 @@ impl Interpreter {
                 }
             },
             BinOp::Sub => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(b))),
                 (Value::Uint(a), Value::Uint(b)) => {
                     if b > a { Err(err("uint subtraction underflow", line)) }
                     else { Ok(Value::Uint(a - b)) }
@@ -1026,7 +1029,7 @@ impl Interpreter {
                 }
             },
             BinOp::Mul => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Err(err("cannot multiply Uint by negative Int", line)) }

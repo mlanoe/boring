@@ -300,9 +300,8 @@ impl Parser {
             _ => { self.advance(); BindingKind::Let } // let
         };
         // `let name = value`         — no type annotation, borrow by default
-        // `let name' = value`        — no type annotation, move (tick without qualifier)
         // `let type name = value`    — explicit type annotation (boring convention)
-        let (name, ty, _is_move) = if self.is_type_start_before_ident() {
+        let (name, ty) = if self.is_type_start_before_ident() {
             let base = self.parse_type()?;
             let ty = self.parse_type_qualifier(base)?;
             // `var T&` / `mut T&` → absorb mutability into the borrow type
@@ -319,20 +318,12 @@ impl Parser {
             } else {
                 ty
             };
-            (name, Some(ty), false)
+            (name, Some(ty))
         } else {
             let name = self.expect_ident()?;
             if self.check(&TokenKind::Tick) {
                 let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 match &next_kind {
-                    // `name' = value` → move marker (tick immediately before `=`)
-                    Some(TokenKind::Eq) => {
-                        self.advance(); // consume tick
-                        self.expect(&TokenKind::Eq)?;
-                        let value = self.parse_expr()?;
-                        self.expect_newline_soft();
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty: None, value: Some(value), is_move: true, is_lazy: false, line });
-                    }
                     // `name'qualifier = Ctor(...)` → qualifier on variable, type inferred from RHS
                     Some(TokenKind::Ident(_)) | Some(TokenKind::Task) | Some(TokenKind::Guard) => {
                         // Do NOT advance here — parse_type_qualifier consumes the tick + qualifier itself.
@@ -351,27 +342,27 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, is_lazy: false, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line });
                     }
                     _ => {}
                 }
             }
-            (name, None, false)
+            (name, None)
         };
         // `lazy T name` — deferred write-once binding, no initializer allowed.
         if matches!(binding, BindingKind::Lazy) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, is_lazy: true, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: true, line });
         }
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_move: false, is_lazy: false, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: false, line });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_move: false, is_lazy: false, line })
+        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line })
     }
 
     /// Parse the binding list of a destructuring `let`.
@@ -582,6 +573,20 @@ impl Parser {
         Ok(clauses)
     }
 
+    /// Parse a single `elif`/`elif let` branch (the `Elif` token has already been consumed).
+    /// Supports both `elif let x = a, y > 0:` and a plain `elif y > 0:` (no `let`).
+    fn parse_if_let_elif_branch(&mut self) -> Result<IfLetBranch, ParseError> {
+        let clauses = self.parse_cond_clauses(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Colon)?;
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            self.parse_inline_stmts_if_body()?
+        } else {
+            self.expect_newline()?;
+            self.parse_block()?
+        };
+        Ok(IfLetBranch { clauses, body })
+    }
+
     pub(crate) fn parse_if_let_stmt(&mut self) -> Result<IfLetStmt, ParseError> {
         let line = self.line();
         self.expect(&TokenKind::If)?;
@@ -590,28 +595,64 @@ impl Parser {
         self.expect(&TokenKind::Colon)?;
 
         if !self.is_newline() && !self.check(&TokenKind::Eof) {
-            // Inline: `if let n = expr: body [else body]`
-            let then_body = self.parse_inline_stmts()?;
+            // Inline: `if let n = expr: body [elif let ...: body]* [else body]`
+            let then_body = self.parse_inline_stmts_if_body()?;
+            let mut elif_branches = Vec::new();
             let mut else_body = None;
-            if self.check(&TokenKind::Else) {
-                self.advance();
-                self.eat(&TokenKind::Colon);
-                else_body = Some(self.parse_inline_stmts()?);
+            loop {
+                if self.check(&TokenKind::Elif) {
+                    self.advance();
+                    elif_branches.push(self.parse_if_let_elif_branch()?);
+                } else if self.check(&TokenKind::Else) {
+                    self.advance();
+                    self.eat(&TokenKind::Colon);
+                    else_body = Some(self.parse_inline_stmts()?);
+                    break;
+                } else {
+                    break;
+                }
             }
-            self.expect_newline_soft();
-            return Ok(IfLetStmt { clauses, then_body, else_body, line });
+            if else_body.is_none() {
+                self.expect_newline()?;
+                loop {
+                    self.skip_newlines();
+                    if self.check(&TokenKind::Elif) {
+                        self.advance();
+                        elif_branches.push(self.parse_if_let_elif_branch()?);
+                    } else if self.check(&TokenKind::Else) {
+                        self.advance();
+                        self.eat(&TokenKind::Colon);
+                        else_body = Some(self.parse_else_body_stmts()?);
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+            } else if self.is_newline() || self.check(&TokenKind::Eof) {
+                self.expect_newline_soft();
+            }
+            return Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line });
         }
 
         self.expect_newline()?;
         let then_body = self.parse_block()?;
+        let mut elif_branches = Vec::new();
         let mut else_body = None;
-        self.skip_newlines();
-        if self.check(&TokenKind::Else) {
-            self.advance();
-            self.eat(&TokenKind::Colon);
-            else_body = Some(self.parse_else_body_stmts()?);
+        loop {
+            self.skip_newlines();
+            if self.check(&TokenKind::Elif) {
+                self.advance();
+                elif_branches.push(self.parse_if_let_elif_branch()?);
+            } else if self.check(&TokenKind::Else) {
+                self.advance();
+                self.eat(&TokenKind::Colon);
+                else_body = Some(self.parse_else_body_stmts()?);
+                break;
+            } else {
+                break;
+            }
         }
-        Ok(IfLetStmt { clauses, then_body, else_body, line })
+        Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line })
     }
 
     pub(crate) fn parse_match_stmt(&mut self) -> Result<MatchStmt, ParseError> {

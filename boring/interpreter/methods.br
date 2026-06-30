@@ -1,5 +1,23 @@
 # == BUILT-IN METHODS ==
 
+def bool value_lt(Value a, Value b):
+    match a:
+        Value.Int(x):
+            match b:
+                Value.Int(y): x < y
+                Value.Float(y): (x as float) < y
+                _: false
+        Value.Float(x):
+            match b:
+                Value.Int(y): x < (y as float)
+                Value.Float(y): x < y
+                _: false
+        Value.Str(x):
+            match b:
+                Value.Str(y): x < y
+                _: false
+        _: false
+
 def string val_type_name(Value v):
     match v:
         Value.Int(_): "int"
@@ -209,6 +227,21 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                         Value.Nil
                     else:
                         arr[arr.length - 1]
+                "firstIndex":
+                    if arr.length == 0:
+                        Value.Nil
+                    else:
+                        Value.Int(0)
+                "nextIndex":
+                    let cur = args[0] else Value.Nil
+                    match cur:
+                        Value.Int(i):
+                            let next = i + 1
+                            if next < arr.length:
+                                Value.Int(next)
+                            else:
+                                Value.Nil
+                        _: Value.Nil
                 "contains":
                     let target = args[0] else Value.Nil
                     Value.Bool(arr.contains(target))
@@ -267,24 +300,22 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                         let k = call_value(interp, closure, [arr[i]])
                         keys.append(k)
                         i = i + 1
-                    var indices = []
-                    var j = 0
-                    while j < arr.length:
-                        indices.append(Value.Int(j))
-                        j = j + 1
-                    let sorted_indices = indices.sortedBy((idx_val):
-                        match idx_val:
-                            Value.Int(idx): keys[idx]
-                            _: Value.Nil
-                    )
-                    var result = []
-                    var k = 0
-                    while k < sorted_indices.length:
-                        match sorted_indices[k]:
-                            Value.Int(idx): result.append(arr[idx])
-                            _: throw "sortedBy: internal error"
-                        k = k + 1
-                    Value.Array(result)
+                    # Build sorted copy of arr using insertion sort on keys
+                    var sorted_arr = arr
+                    var sorted_keys = keys
+                    var si = 1
+                    while si < sorted_arr.length:
+                        var sj = si
+                        while sj > 0 and value_lt(sorted_keys[sj], sorted_keys[sj - 1]):
+                            let tmp_v = sorted_arr[sj]
+                            sorted_arr[sj] = sorted_arr[sj - 1]
+                            sorted_arr[sj - 1] = tmp_v
+                            let tmp_k = sorted_keys[sj]
+                            sorted_keys[sj] = sorted_keys[sj - 1]
+                            sorted_keys[sj - 1] = tmp_k
+                            sj = sj - 1
+                        si = si + 1
+                    Value.Array(sorted_arr)
                 "reversed":
                     var result = arr
                     result = result.reversed()
@@ -542,6 +573,22 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                     else:
                         new_pairs.append((key, val))
                     Value.Dict(new_pairs)
+                "put":
+                    let key = args[0] else Value.Nil
+                    let val = args[1] else Value.Nil
+                    var new_pairs = pairs
+                    var update_idx = -1
+                    var i = 0
+                    while i < new_pairs.length:
+                        let pair = new_pairs[i]
+                        if pair.0 == key:
+                            update_idx = i
+                        i = i + 1
+                    if update_idx >= 0:
+                        new_pairs[update_idx] = (key, val)
+                    else:
+                        new_pairs.append((key, val))
+                    Value.Dict(new_pairs)
                 "contains":
                     let key = args[0] else Value.Nil
                     var found = false
@@ -614,6 +661,58 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                         _: throw "merge: expected dict argument"
                 "isEmpty":
                     Value.Bool(pairs.length == 0)
+                "filter":
+                    let closure = args[0] else Value.Nil
+                    var result = []
+                    var fi = 0
+                    while fi < pairs.length:
+                        let pk = pairs[fi].0
+                        let pv = pairs[fi].1
+                        let r = call_value(interp, closure, [pk, pv])
+                        match r:
+                            Value.Bool(b):
+                                if b:
+                                    result.append(pairs[fi])
+                            _: throw "dict.filter: predicate must return bool"
+                        fi = fi + 1
+                    Value.Dict(result)
+                "map":
+                    let closure = args[0] else Value.Nil
+                    var result = []
+                    var mi = 0
+                    while mi < pairs.length:
+                        let pk = pairs[mi].0
+                        let pv = pairs[mi].1
+                        let r = call_value(interp, closure, [pk, pv])
+                        result.append((pairs[mi].0, r))
+                        mi = mi + 1
+                    Value.Dict(result)
+                "any":
+                    let closure = args[0] else Value.Nil
+                    var found = false
+                    var ai = 0
+                    while ai < pairs.length:
+                        let pk = pairs[ai].0
+                        let pv = pairs[ai].1
+                        let r = call_value(interp, closure, [pk, pv])
+                        match r:
+                            Value.Bool(true): found = true
+                            _: nil
+                        ai = ai + 1
+                    Value.Bool(found)
+                "all":
+                    let closure = args[0] else Value.Nil
+                    var all_ok = true
+                    var alli = 0
+                    while alli < pairs.length:
+                        let pk = pairs[alli].0
+                        let pv = pairs[alli].1
+                        let r = call_value(interp, closure, [pk, pv])
+                        match r:
+                            Value.Bool(false): all_ok = false
+                            _: nil
+                        alli = alli + 1
+                    Value.Bool(all_ok)
                 _:
                     throw "unknown method {method_name} on {recv_type}"
 
@@ -817,6 +916,13 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                     match idx_val:
                         Value.Int(i): elems[i] else Value.Nil
                         _: throw "tuple.get: expected int"
+                "map":
+                    let fn_val = args[0] else Value.Nil
+                    var result = []
+                    for elem in elems:
+                        let mapped = call_value(interp, fn_val, [elem])
+                        result.append(mapped)
+                    Value.Tuple(result)
                 _:
                     throw "unknown method {method_name} on tuple"
 

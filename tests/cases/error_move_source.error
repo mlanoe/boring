@@ -1,1 +1,1 @@
-undefined variable 'a'
+use of moved value 'a'

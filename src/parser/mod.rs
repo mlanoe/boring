@@ -1224,15 +1224,57 @@ impl Parser {
         // Note: `'shared` maps to OwnerQual::Shared (Arc/Rc) in the global qualifier table;
         // in kernel context it means block SRAM — we accept both spellings.
         let (qual, base_ty) = match parsed_ty {
+            Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _)) => {
+                return Err(ParseError::Generic {
+                    msg: "fixed-size arrays cannot use 'unified or 'global — the size is implicit from the init parameter; use '[T]'unified or '[T]'global instead".into(),
+                    line,
+                });
+            }
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
             Type::Qualified(inner, OwnerQual::GpuGlobal)  => (GpuQual::Global,  *inner),
             Type::Qualified(inner, OwnerQual::GpuShared)  => (GpuQual::Shared,  *inner),
             Type::Qualified(inner, OwnerQual::Shared)     => (GpuQual::Shared,  *inner), // 'shared = block SRAM in kernel
-            Type::Qualified(inner, OwnerQual::GpuLocal)   => (GpuQual::Local,   *inner),
+            Type::Qualified(inner, OwnerQual::GpuLocal) => {
+                // '[T]'local is not representable on GPU — unsized thread-local arrays don't exist.
+                if matches!(*inner, Type::Array(_)) {
+                    return Err(ParseError::Generic {
+                        msg: "'local does not support dynamic arrays — use a fixed-size '[T, N]'local or choose 'unified/'global".into(),
+                        line,
+                    });
+                }
+                (GpuQual::Local, *inner)
+            }
+            Type::Qualified(inner, OwnerQual::GpuConst) if matches!(*inner, Type::Array(_)) => {
+                return Err(ParseError::Generic {
+                    msg: "'const does not support dynamic arrays — use a fixed-size '[T, N]'const for lookup tables".into(),
+                    line,
+                });
+            }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
             Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
+            // Unqualified scalar → infer from binding:
+            //   let scalar  → 'const  (read-only constant cache)
+            //   mut/var scalar → 'local (mutable thread-private register)
+            unqualified if !matches!(unqualified, Type::Array(_) | Type::ArrayN(_, _)) => {
+                let qual = match binding {
+                    FieldBinding::Let => GpuQual::Const,
+                    FieldBinding::Mut | FieldBinding::Var => GpuQual::Local,
+                };
+                (qual, unqualified)
+            }
+            // Unqualified fixed array [T, N]: infer from binding.
+            //   let [T, N] → 'const (read-only lookup table in constant cache)
+            //   mut/var [T, N] → 'local (thread-private stack array)
+            // Dynamic [T] stays an error: 'unified vs 'global is a semantic choice.
+            Type::ArrayN(_, _) => {
+                let qual = match binding {
+                    FieldBinding::Let => GpuQual::Const,
+                    FieldBinding::Mut | FieldBinding::Var => GpuQual::Local,
+                };
+                (qual, parsed_ty)
+            }
             _ => return Err(ParseError::Generic {
-                msg: "kernel field type must have a GPU memory qualifier ('unified, 'global, 'shared, 'local, or 'const)".into(),
+                msg: "kernel array field must have an explicit GPU memory qualifier ('unified, 'global, 'shared, or 'local)".into(),
                 line,
             }),
         };
@@ -1633,6 +1675,9 @@ impl Parser {
                     match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                         Some(TokenKind::Def) => methods.push(self.parse_fn_decl(false, true)?),
                         Some(TokenKind::Req) => methods.push(self.parse_fn_decl(false, false)?),
+                        _ if self.is_task_fn_shorthand() => methods.push(self.parse_fn_decl(false, true)?),
+                        // Void shorthand in body context: `task name(...)` — unambiguous
+                        Some(TokenKind::Ident(_)) => methods.push(self.parse_fn_decl(false, true)?),
                         _ => break,
                     }
                 }

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Binding and mutability in Boring</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="binding-and-mutability-in-boring">Binding and mutability in Boring</h1>
+<h2 id="concepts">Concepts</h2>
+<p>Two orthogonal axes:</p>
+<ul><li><strong>Rebindable</strong>: the variable can point to a different instance</li><li><strong>Mutable</strong>: the pointed instance can be modified</li></ul>
+<h2 id="keywords">Keywords</h2>
+<table><thead><tr><th>Syntax</th><th>Rebindable</th><th>Mutable</th></tr></thead><tbody><tr><td><code>let</code></td><td>no</td><td>no</td></tr><tr><td><code>mut</code></td><td>no</td><td>yes</td></tr><tr><td><code>var</code></td><td>yes</td><td>depends on qualifier</td></tr></tbody></table>
+<p>The progression is intentionally graduated from most rigid to most permissive.</p>
+<h2 id="qualifiers">Qualifiers</h2>
+<p>Qualifiers are placed after the type (<code>let T&#x27;stack a</code>) or after the variable name if the type is inferred (<code>let a&#x27;stack</code>).</p>
+<p>They carry three kinds of information: the Rust mapping, the passing semantics between variables, and constraints on mutability. The decision is always made at the <strong>usage site</strong>, not at the struct declaration — the transpiler inserts <code>.clone()</code> as needed.</p>
+<table><thead><tr><th>Qualifier</th><th>Rust impl</th><th>Passing semantics</th><th>Mutability</th></tr></thead><tbody><tr><td><code>&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td><td>pointer shared</td><td>forbidden</td></tr><tr><td><code>&#x27;actor</code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> (multi) / <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (single)</td><td>pointer shared</td><td>allowed</td></tr><tr><td><code>&#x27;guard</code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code> (multi) / <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> (single)</td><td>pointer shared</td><td>under lock only</td></tr><tr><td><code>&#x27;stack</code></td><td><code>T</code> on stack</td><td>move</td><td>determined by <code>let</code>/<code>mut</code>/<code>var</code></td></tr><tr><td><code>&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td><td>move</td><td>determined by <code>let</code>/<code>mut</code>/<code>var</code></td></tr><tr><td><code>&#x27;weak</code></td><td><code>sync::Weak&lt;T&gt;</code> (multi) / <code>Rc::Weak&lt;T&gt;</code> (single)</td><td>non-owning pointer</td><td>none (no interior mutability)</td></tr></tbody></table>
+<p><code>&#x27;weak</code> is a compound qualifier used with an owning qualifier: <code>T&#x27;shared&#x27;weak</code>, <code>T&#x27;actor&#x27;weak</code>, <code>T&#x27;guard&#x27;weak</code>. It holds a non-owning reference to the inner value of the corresponding owning smart pointer and must be upgraded before use.</p>
+<blockquote><strong><code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code>:</strong> these are multi-thread only qualifiers (<code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> and <code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> respectively) and do not fall back to a single-thread form. They require explicit annotation inside <code>task</code> functions — qualifier inference does not automatically promote <code>&#x27;actor</code> or <code>&#x27;guard</code> to their <code>&#x27;task</code> variants.</blockquote>
+<p><code>&#x27;stack</code> and <code>&#x27;heap</code> are the only qualifiers where <code>mut</code> has its full meaning — and where compiler optimizations from <code>mut</code> are most impactful.</p>
+<h2 id="valid-combinations">Valid combinations</h2>
+<table><thead><tr><th>Binding</th><th><code>&#x27;shared</code></th><th><code>&#x27;actor</code></th><th><code>&#x27;guard</code></th><th><code>&#x27;stack</code></th><th><code>&#x27;heap</code></th></tr></thead><tbody><tr><td><code>let</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>mut</code></td><td><strong>error</strong></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>var</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr></tbody></table>
+<p><code>mut</code> with <code>&#x27;shared</code> is an error because <code>&#x27;shared</code> is an immutable reference-counted pointer — there is no instance to mutate through it directly.</p>
+<h2 id="type-level-immutability">Type-level immutability</h2>
+<p>A type that exposes no <code>def</code> method is immutable by design — the developer intentionally chose not to allow mutation. In that case:</p>
+<ul><li><code>mut</code> on such a type is redundant: no mutation is possible regardless. The compiler may emit a warning.</li><li><code>var</code> becomes purely rebindable: the binding can point to a different instance, but neither instance can be mutated.</li></ul>
+<p>This mirrors how Java works: <code>final</code> controls rebindability only, and immutability is a contract enforced by the type itself (exposing no mutating methods).</p>
+<p>The two levels are therefore:</p>
+<ol><li><strong>Declaration site</strong> (<code>let</code> / <code>mut</code> / <code>var</code>) — controls rebindability and signals mutation intent</li><li><strong>Type definition</strong> — controls whether mutation is actually possible</li></ol>
+<h2 id="why-mut-matters">Why <code>mut</code> matters</h2>
+<p><code>let</code> and <code>var</code> are sufficient to write correct Boring code. <code>mut</code> is an optional precision that unlocks compiler optimizations:</p>
+<ul><li><strong>Alias analysis</strong> — the compiler knows the pointer never changes. It can safely assume that all accesses through this variable always refer to the same memory location, enabling more aggressive optimizations across the binding&#x27;s scope.</li></ul>
+<ul><li><strong>Loop-invariant code motion</strong> — a <code>mut</code> binding used inside a loop has a stable base address. The compiler can hoist pointer dereferences and bounds checks out of the loop body.</li></ul>
+<ul><li><strong>Register allocation</strong> — a fixed binding can be kept in a register for its entire scope. With <code>var</code>, the compiler must conservatively reload the pointer from memory on each access in case it was rebound.</li></ul>
+<ul><li><strong>Devirtualization / inlining</strong> — if <code>mut T a</code> points to a concrete type, the compiler can inline or devirtualize method calls knowing the target never changes.</li></ul>
+<p><code>var</code> forces the compiler to be pessimistic on all of the above, even when the binding is never actually rebound in practice.</p>
+<h2 id="function-parameters">Function parameters</h2>
+<p><code>mut</code> is allowed in function parameter declarations. <code>let</code> is implicit in parameter declarations — a parameter with no keyword is <code>let</code>.</p>
+<p>Conceptually, the hierarchy <code>var</code> ≥ <code>mut</code> ≥ <code>let</code> is intended to apply: a caller should be able to pass down the hierarchy but never up (e.g. a <code>let</code>-bound caller value passed into a <code>var</code> parameter would let the callee rebind something the caller declared non-rebindable). For <code>&#x27;shared</code>, <code>mut</code> on a parameter is likewise meant to be rejected, mirroring the binding-level rule above.</p>
+<p><strong>This hierarchy is not currently enforced by the compiler.</strong> There is no cross-check today between a caller&#x27;s binding kind (<code>let</code>/<code>mut</code>/<code>var</code>) and the callee&#x27;s parameter binding kind — neither the checker (<code>src/checker</code> is presently a minimal stub) nor the transpiler/interpreter validate this. Treat the tables below as the intended convention/design target, not a guarantee backed by a compile error at present:</p>
+<table><thead><tr><th>Caller</th><th>Param <code>let</code></th><th>Param <code>mut</code></th><th>Param <code>var</code></th></tr></thead><tbody><tr><td><code>let</code></td><td>yes</td><td>not enforced</td><td>not enforced</td></tr><tr><td><code>var</code></td><td>yes</td><td>not enforced</td><td>yes</td></tr></tbody></table>
+<p><strong><code>&#x27;actor</code>, <code>&#x27;guard</code>, <code>&#x27;stack</code>, <code>&#x27;heap</code></strong> (full three levels):</p>
+<table><thead><tr><th>Caller</th><th>Param <code>let</code></th><th>Param <code>mut</code></th><th>Param <code>var</code></th></tr></thead><tbody><tr><td><code>let</code></td><td>yes</td><td>not enforced</td><td>not enforced</td></tr><tr><td><code>mut</code></td><td>yes</td><td>yes</td><td>not enforced</td></tr><tr><td><code>var</code></td><td>yes</td><td>yes</td><td>yes</td></tr></tbody></table>
+<p><code>let</code> → <code>var</code> is intended to be forbidden across all qualifiers: allowing it would let the callee rebind the caller&#x27;s variable when combined with reference passing (<code>&amp;</code>), violating the <code>let</code> non-rebindable contract. As above, this is not currently checked by the compiler.</p>
+<h2 id="pass-by-reference">Pass by reference</h2>
+<p>Adding <code>&amp;</code> passes by reference. The binding keyword defines what the callee can do with the reference:</p>
+<table><thead><tr><th>Syntax</th><th>Rust equivalent</th><th>Semantics</th></tr></thead><tbody><tr><td><code>let T&amp; m</code> / <code>T&amp; m</code></td><td><code>&amp;T</code></td><td>read-only — callee cannot modify content or binding</td></tr><tr><td><code>mut T&amp; m</code></td><td><code>&amp;mut T</code></td><td>callee can modify the content of the caller&#x27;s instance</td></tr><tr><td><code>var T&amp; m</code></td><td><code>&amp;mut T</code></td><td>callee can rebind the caller&#x27;s variable</td></tr></tbody></table>
+<p>This is consistent with the general semantics of <code>let</code>/<code>mut</code>/<code>var</code>:</p>
+<ul><li><code>let</code> — nothing changes</li><li><code>mut</code> — content changes</li><li><code>var</code> — binding changes</li></ul>
+<p><code>var T&amp;</code> is rare in practice but unambiguous: it is the only way for a callee to replace what the caller&#x27;s variable points to. In most cases, returning a value is preferred over <code>var T&amp;</code>.</p>
+<p>Note: at the Rust level, <code>mut T&amp;</code> and <code>var T&amp;</code> currently both transpile to the same <code>&amp;mut T</code> — there is no distinct <code>Box</code>-wrapped representation for <code>var T&amp;</code>. The distinction above is about intent (content mutation vs. rebinding) rather than a difference in the generated code.</p>
+<h2 id="return-types">Return types</h2>
+<p>A function or method can return a mutable instance using <code>mut</code> after the <code>def</code>/<code>req</code> keyword:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kw">mut</span> T <span class="fn">foo</span>()       <span class="co"># returns a mutable instance</span>
+<span class="kw">req</span> <span class="kw">mut</span> T <span class="fn">get</span>()       <span class="co"># req: does not modify self, returns a mutable instance</span></code></pre></div>
+<p>The <code>mut</code> here applies to the <strong>return value</strong>, not to <code>self</code>.</p>
+<h3 id="receiving-a-return-value">Receiving a return value</h3>
+<p>Conceptually, the same hierarchy is intended to apply: the caller can always downgrade, never upgrade a non-mutable return into a mutable binding.</p>
+<p><strong>This is not currently enforced by the compiler.</strong> The <code>mut</code> flag on a <code>def mut</code>/<code>req mut</code> return type is parsed into the AST but is not read back anywhere in the checker, transpiler, or interpreter — so binding a non-<code>mut</code>-returning function&#x27;s result with <code>mut</code>/<code>var</code> is not currently rejected. The table below describes the intended semantics, not enforced behavior:</p>
+<table><thead><tr><th>Return type</th><th>Caller binding</th><th>Intended validity</th></tr></thead><tbody><tr><td><code>T</code></td><td><code>let</code></td><td>yes</td></tr><tr><td><code>T</code></td><td><code>mut</code></td><td>intended to be invalid — cannot upgrade to mutable (not enforced)</td></tr><tr><td><code>T</code></td><td><code>var</code></td><td>intended to be invalid — cannot upgrade to mutable (not enforced)</td></tr><tr><td><code>mut T</code></td><td><code>let</code></td><td>yes — caller downgrades to immutable</td></tr><tr><td><code>mut T</code></td><td><code>mut</code></td><td>yes</td></tr><tr><td><code>mut T</code></td><td><code>var</code></td><td>yes</td></tr></tbody></table>
+<h3 id="req-mut--the-factory-pattern"><code>req mut</code> — the factory pattern</h3>
+<p><code>req mut</code> makes sense when the method constructs and returns a <strong>new instance</strong> that does not belong to <code>self</code>. The typical use case is a factory:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Registry:
+    <span class="kw">req</span> <span class="kw">mut</span> Entry <span class="fn">get_entry</span>():
+        <span class="fn">Entry</span>(...)      <span class="co"># fresh instance, fully owned by the caller</span></code></pre></div>
+<p>The caller receives full ownership and can choose any binding:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> e  = registry.<span class="fn">get_entry</span>()   <span class="co"># ok — immutable view</span>
+<span class="kw">mut</span> e  = registry.<span class="fn">get_entry</span>()   <span class="co"># ok — mutable instance</span>
+<span class="kw">var</span> e  = registry.<span class="fn">get_entry</span>()   <span class="co"># ok — rebindable</span></code></pre></div>
+<p><code>mut</code> is still required even for qualifier-typed returns — the qualifier defines <em>how</em> mutation works, <code>mut</code> defines <em>whether</em> the caller receives mutation rights:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> Entry<span class="lf">&#x27;actor</span> <span class="fn">foo</span>()      <span class="co"># caller gets let — cannot mutate despite &#x27;actor</span>
+<span class="kw">def</span> <span class="kw">mut</span> Entry<span class="lf">&#x27;actor</span> <span class="fn">foo</span>()  <span class="co"># caller gets mutation rights via &#x27;actor</span>
+<span class="kw">def</span> <span class="kw">mut</span> Entry<span class="lf">&#x27;shared</span> <span class="fn">foo</span>() <span class="co"># intended to be an error — &#x27;shared forbids mut (not currently enforced by the compiler)</span></code></pre></div>
+<h3 id="method-combinations">Method combinations</h3>
+<table><thead><tr><th>Declaration</th><th>Modifies self</th><th>Returns mutable</th></tr></thead><tbody><tr><td><code>req T foo()</code></td><td>no</td><td>no</td></tr><tr><td><code>req mut T foo()</code></td><td>no</td><td>yes — typically a factory</td></tr><tr><td><code>def T foo()</code></td><td>yes</td><td>no</td></tr><tr><td><code>def mut T foo()</code></td><td>yes</td><td>yes</td></tr></tbody></table>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

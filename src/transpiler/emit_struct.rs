@@ -61,17 +61,30 @@ impl Transpiler {
                 self.emit_mutex_type(inner)
             } else {
                 let rec_key = format!("{}::{}", s.name, f.name);
-                let fmut = if f.mutable { "/* var */ " } else { "" };
-                if self.recursive_fields.contains(&rec_key) {
-                    // Recursive struct field — wrap in Box<> to break the infinite-size cycle.
-                    match &f.ty {
-                        Type::Optional(inner) =>
-                            format!("{}Option<Box<{}>>", fmut, self.emit_type(inner)),
-                        other =>
-                            format!("{}Box<{}>", fmut, self.emit_type(other)),
-                    }
+                // Inferred actor/guard qualifier (from method/ext-block usage, no explicit
+                // annotation on the field) — wrap the declared type to match the access
+                // pattern (`.lock()`/`.read()`/`.write()`) that inference already assumes.
+                if self.struct_mutex_fields.contains(&rec_key) {
+                    self.emit_actor_type(&f.ty)
+                } else if self.struct_mutex_task_fields.contains(&rec_key) {
+                    self.emit_actor_task_type(&f.ty)
+                } else if self.struct_rwlock_fields.contains(&rec_key) {
+                    self.emit_guard_type(&f.ty)
+                } else if self.struct_rwlock_task_fields.contains(&rec_key) {
+                    self.emit_guard_task_type(&f.ty)
                 } else {
-                    format!("{}{}", fmut, self.emit_field_type(&f.ty, f.mutable))
+                    let fmut = if f.mutable { "/* var */ " } else { "" };
+                    if self.recursive_fields.contains(&rec_key) {
+                        // Recursive struct field — wrap in Box<> to break the infinite-size cycle.
+                        match &f.ty {
+                            Type::Optional(inner) =>
+                                format!("{}Option<Box<{}>>", fmut, self.emit_type(inner)),
+                            other =>
+                                format!("{}Box<{}>", fmut, self.emit_type(other)),
+                        }
+                    } else {
+                        format!("{}{}", fmut, self.emit_field_type(&f.ty, f.mutable))
+                    }
                 }
             };
             self.line(&format!("{}{}: {},", fvis, f.name, ty_s));
@@ -158,12 +171,23 @@ impl Transpiler {
                 let struct_name_ref = s.name.clone();
                 let key = format!("{}::{}", struct_name_ref, f.name);
                 let is_transient = self.transient_fields.contains_key(&key);
-                let is_mutex = Self::is_mutex_binding(f.mutable, &f.ty);
+                // These sets cover both explicit (`T'actor`) and inferred qualifiers.
+                let is_actor = self.struct_mutex_fields.contains(&key);
+                let is_actor_task = self.struct_mutex_task_fields.contains(&key);
+                let is_guard = self.struct_rwlock_fields.contains(&key);
+                let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
                 if let Some(def) = &f.default {
-                    if is_mutex {
-                        let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
+                    if is_actor || is_actor_task {
+                        // Inferred fields carry the bare inner type already; explicit
+                        // `T'actor`/`T'actor'task` fields need unwrapping via mutex_inner.
+                        let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
                         let raw = self.emit_let_value(Some(inner), def);
-                        let init = self.emit_actor_new(&raw);
+                        let init = if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) };
+                        self.line(&format!("{}: {},", f.name, init));
+                    } else if is_guard || is_guard_task {
+                        let inner = Self::rwlock_inner(&f.ty).unwrap_or(&f.ty);
+                        let raw = self.emit_let_value(Some(inner), def);
+                        let init = if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) };
                         self.line(&format!("{}: {},", f.name, init));
                     } else {
                         let val = self.emit_let_value(Some(&f.ty), def);
@@ -469,10 +493,20 @@ impl Transpiler {
             for f in fields {
                 if !init.params.iter().any(|p| p.name == f.name) {
                     if let Some(def) = &f.default {
-                        if Self::is_mutex_binding(f.mutable, &f.ty) {
-                            let inner = Self::mutex_inner(&f.ty).expect("invariant: is_mutex_binding implies mutex_inner is Some");
+                        let key = format!("{}::{}", struct_name, f.name);
+                        let is_actor = self.struct_mutex_fields.contains(&key);
+                        let is_actor_task = self.struct_mutex_task_fields.contains(&key);
+                        let is_guard = self.struct_rwlock_fields.contains(&key);
+                        let is_guard_task = self.struct_rwlock_task_fields.contains(&key);
+                        if is_actor || is_actor_task {
+                            let inner = Self::mutex_inner(&f.ty).unwrap_or(&f.ty);
                             let raw = self.emit_let_value(Some(inner), def);
-                            let init = self.emit_actor_new(&raw);
+                            let init = if is_actor_task { self.emit_actor_task_new(&raw) } else { self.emit_actor_new(&raw) };
+                            self.line(&format!("{}: {},", f.name, init));
+                        } else if is_guard || is_guard_task {
+                            let inner = Self::rwlock_inner(&f.ty).unwrap_or(&f.ty);
+                            let raw = self.emit_let_value(Some(inner), def);
+                            let init = if is_guard_task { self.emit_guard_task_new(&raw) } else { self.emit_guard_new(&raw) };
                             self.line(&format!("{}: {},", f.name, init));
                         } else {
                             let val = self.emit_let_value(Some(&f.ty), def);

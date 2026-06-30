@@ -533,10 +533,34 @@ window.addEventListener('scroll', () => {{
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def build_file(src: Path, dest: Path, title: str,
+def extract_title(md: str, fallback: str) -> str:
+    """Return the first # heading, or fallback."""
+    for line in md.splitlines():
+        m = re.match(r'^#\s+(.+)$', line)
+        if m:
+            return m.group(1).strip()
+    return fallback
+
+
+def rewrite_md_links(md: str, known: set) -> str:
+    """Rewrite [text](foo.md) → [text](foo.html) for known docs."""
+    def replace(m):
+        text, url = m.group(1), m.group(2)
+        if url.endswith('.md') and Path(url).name.replace('.md', '') in known:
+            url = url[:-3] + '.html'
+        return f'[{text}]({url})'
+    return re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace, md)
+
+
+def build_file(src: Path, dest: Path, title: str = "",
                sidebar_title: str = "Boring Language",
-               sidebar_sub: str = "Preview · Beta") -> None:
-    md   = src.read_text(encoding="utf-8")
+               sidebar_sub: str = "Beta",
+               known_docs: set = None) -> None:
+    md = src.read_text(encoding="utf-8")
+    if known_docs:
+        md = rewrite_md_links(md, known_docs)
+    if not title:
+        title = "Boring — " + extract_title(md, src.stem)
     body = convert(md)
     out  = TEMPLATE.format(css=CSS, body=body,
                            title=title,
@@ -547,20 +571,40 @@ def build_file(src: Path, dest: Path, title: str,
 
 
 def main():
+    # Collect all .md stems in docs/ so link rewriting knows which ones exist.
+    doc_stems = {p.stem for p in DOCS.glob("*.md")} | {"README"}
+
+    # book.md — explicit title and labels
     build_file(
         src=DOCS / "book.md",
         dest=DOCS / "book.html",
         title="The Boring Programming Language — Language Book",
         sidebar_title="Boring Language",
         sidebar_sub="Language Book · Beta",
+        known_docs=doc_stems,
     )
+
+    # README
     build_file(
         src=ROOT / "README.md",
         dest=ROOT / "README.html",
         title="The new programming language is Boring",
         sidebar_title="Boring",
         sidebar_sub="Overview",
+        known_docs=doc_stems,
     )
+
+    # All other .md files — title and sidebar auto-extracted from # heading
+    skip = {"book"}
+    for src in sorted(DOCS.glob("*.md")):
+        if src.stem in skip:
+            continue
+        build_file(
+            src=src,
+            dest=src.with_suffix(".html"),
+            sidebar_sub="Beta",
+            known_docs=doc_stems,
+        )
 
 
 if __name__ == "__main__":

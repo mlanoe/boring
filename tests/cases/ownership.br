@@ -7,21 +7,21 @@ struct OBox:
     init(pub int val)
 
 let ob1 = OBox(val = 42)
-let ob2' = ob1
+let ob2 = ob1
 print ob2.val
 
 struct ODog:
     init(pub string name)
 
 let od1 = ODog(name = "Rex")
-let od2' = od1
+let od2 = od1
 print od2.name
 
 struct OPoint:
     init(pub var int x, pub var int y)
 
 let op1 = OPoint(x = 1, y = 2)
-var op2' = op1
+var op2 = op1
 op2.x = 10
 print op2.x
 
@@ -30,13 +30,13 @@ struct OToken:
 
 def int transfer():
     let a2 = OToken(id = 7)
-    let b2' = a2
+    let b2 = a2
     return b2.id
 
 print transfer()
 
 let copya = 99
-let copyb' = copya
+let copyb = copya
 print copya
 print copyb
 

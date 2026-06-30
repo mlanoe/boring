@@ -13,7 +13,7 @@ and the architecture of the kernel emission backend (`--target kernel`).
 | `uint` | `u64` | `u64` | ✅ | identical |
 | `float` | `f64` | — | ❌ | FPU disabled in kernel — forbidden, use integer arithmetic |
 | `bool` | `bool` | `bool` | ✅ | identical |
-| `string` | `Arc<str>` | `kernel::str::CStr` / `CString` | ⚠️ | C-compatible kernel strings; literals emitted as `c_str!("…")` |
+| `string` | `Rc<str>` (`--threading single`) / `Arc<str>` (`--threading multi`) | `kernel::str::CStr` / `CString` | ⚠️ | C-compatible kernel strings; literals emitted as `c_str!("…")` |
 | `void` | `()` | `()` | ✅ | identical |
 
 ---
@@ -24,7 +24,7 @@ and the architecture of the kernel emission backend (`--target kernel`).
 |--------|----------|-------------|--------|-------|
 | `T?` | `Option<T>` | `Option<T>` | ✅ | available in `core::` |
 | `[T]` | `Vec<T>` | `kernel::prelude::Vec<T>` | ✅ | kernel allocator used |
-| `{K: V}` | `HashMap<K,V>` | `kernel::rbtree::RBTree<K,V>` | ⚠️ | ordered, O(log n) vs O(1); keys must implement `Ord` |
+| `{K=V}` | `HashMap<K,V>` | `kernel::rbtree::RBTree<K,V>` | ⚠️ | ordered, O(log n) vs O(1); keys must implement `Ord` |
 | `{T}` | `HashSet<T>` | `kernel::rbtree::RBTree<T,()>` | ⚠️ | set emulated via RBTree with `()` value; keys must implement `Ord` |
 | `(T, U)` | tuples | `core::` tuples | ✅ | |
 | `Box<T>` | `Box<T>` | `Box<T, KernelAllocator>` | ⚠️ | different allocator, same semantics |
@@ -36,10 +36,11 @@ and the architecture of the kernel emission backend (`--target kernel`).
 | Boring | Rust std | Rust-kernel | Status | Notes |
 |--------|----------|-------------|--------|-------|
 | `T'` | `Box<T>` | `Box<T>` | ✅ | kernel allocator |
-| `T'task` | `Arc<T>` | `kernel::sync::Arc` | ✅ | |
-| `T'actor` | `Arc<Mutex<T>>` | `kernel::sync::Mutex` | ✅ | |
-| `T'guard` | `Arc<RwLock<T>>` | `kernel::sync::RwLock` | ✅ | |
-| `T'weak` | `Weak<T>` | via `kernel::sync::Arc` | ✅ | |
+| `T'shared` | `Rc<T>` (single) / `Arc<T>` (multi) | `Arc<T>` | ✅ | `'task`/`'auto` are deprecated aliases removed in favor of `'shared` |
+| `T'actor` | `Rc<RefCell<T>>` (single) / `Arc<Mutex<T>>` (multi) | `Arc<kernel::sync::Mutex<T>>` | ✅ | |
+| `T'guard` | `Arc<RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` | ✅ | |
+| `T'weak` | `Weak<T>` | `Weak<T>` | ✅ | no `kernel::sync` namespacing — plain `Weak<T>` |
+| `T'actor'task` | `Arc<tokio::sync::Mutex<T>>` (multi) / `Rc<RefCell<T>>` (single) | ❌ not implemented | ❌ | no `OwnerQual::ActorTask`/`GuardTask` match arm in the kernel emitter; falls through to the catch-all `&T` |
 | `T'stack` | `T` | `T` | ✅ | |
 | `T&` / `var T&` | `&T` / `&mut T` | `&T` / `&mut T` | ✅ | |
 
@@ -50,16 +51,17 @@ and the architecture of the kernel emission backend (`--target kernel`).
 | Boring | Rust std | Rust-kernel | Status | Notes |
 |--------|----------|-------------|--------|-------|
 | `throws` | `Result<T, Box<dyn Error>>` | `Result<T, kernel::error::Error>` | ⚠️ | fixed errno-based error type |
-| `throws MyError` | `Result<T, MyError>` | `Result<T, kernel::error::Error>` | ⚠️ | requires `type MyError as kernel.error.Error(ERRNO)` |
+| `throws MyError` | `Result<T, MyError>` | `Result<T, kernel::error::Error>` | ❌ | `type MyError as kernel.error.Error(ERRNO)` errno-binding syntax is **not implemented** — see section below |
 | `try / catch` | pattern matching | pattern matching | ✅ | |
-| `catch MyError` | typed catch branch | `Err(e) if e.code() == ERRNO =>` | ⚠️ | requires errno binding — see section below |
+| `catch MyError` | typed catch branch | `Err(e) if e.code() == ERRNO =>` | ❌ | aspirational — see section below |
 | `guard … else throw` | early return | early return | ✅ | |
 
-### Kernel error type binding
+### Kernel error type binding — NOT IMPLEMENTED (aspirational design)
 
 In the kernel backend all errors collapse to `kernel::error::Error` (an errno `i32`).
-To preserve typed `catch` branches, each custom error type must be declared as a distinct
-nominal type bound to a specific errno:
+The design below sketches how typed `catch` branches *could* be preserved by declaring
+each custom error type as a distinct nominal type bound to a specific errno — but
+**none of this is implemented today**:
 
 ```boring
 type NetworkError as kernel.error.Error(ENETDOWN)
@@ -67,9 +69,11 @@ type TimeoutError as kernel.error.Error(ETIMEDOUT)
 type NoMemError   as kernel.error.Error(ENOMEM)
 ```
 
-`type` is required — not `use`. `use` creates an alias: `NetworkError` and `TimeoutError`
-would be the same type, indistinguishable at `catch`. `type` declares a nominally distinct
-type, letting the compiler route each `catch` branch to the correct errno guard:
+There is no parser or transpiler support for this `type X as kernel.error.Error(ERRNO)`
+form. `src/parser/parse_type.rs` would parse `kernel.error.Error(ENETDOWN)` as a dotted
+type name followed by a parenthesized parameter list, i.e. a function-type constructor
+(`Type::Fn`), not an errno-binding declaration — so this syntax does not currently parse
+the way this example implies, and no code extracts or stores an errno from it.
 
 ```boring
 try:
@@ -81,7 +85,7 @@ catch TimeoutError e:
 ```
 
 ```rust
-// Generated
+// Aspirational — not what the kernel backend currently generates
 match fetch_page(url) {
     Ok(page)  => { … }
     Err(e) if e.code() == ENETDOWN  => { pr_info!("network down"); }
@@ -90,9 +94,11 @@ match fetch_page(url) {
 }
 ```
 
-The validation pass rejects any `catch MyError` where `MyError` has no
-`type … as kernel.error.Error(…)` declaration. A stdlib of pre-declared common
-kernel errors (`NoMemError`, `InvalidArgError`, `NoDevError`…) covers most cases.
+**Current actual behavior:** `src/validator/kernel.rs` emits an unconditional warning on
+every `catch TypeName` clause reminding the user to declare the type this way — it does
+**not** check whether `TypeName` actually has such a declaration, and it never rejects a
+`catch` clause. There is also no stdlib of pre-declared common kernel errors
+(`NoMemError`, `InvalidArgError`, `NoDevError`…) today.
 
 ---
 
@@ -107,6 +113,10 @@ kernel errors (`NoMemError`, `InvalidArgError`, `NoDevError`…) covers most cas
 | `stream` (async) / `stream<N>` | `async_stream::Stream` | `Work` item + `KernelReceiver<T, N>` | ⚠️ | N defaults to 2 — see section below |
 | `channel<T, N>` | `tokio::sync::mpsc` | `KernelSender/Receiver<T, N>` — stack buffer `[Option<T>; N]` | ⚠️ | const-generic capacity — see section below |
 | `channel<T>(cap)` | `tokio::sync::mpsc` | `DynKernelSender/Receiver<T>` — heap buffer `Vec<Option<T>>` | ⚠️ | runtime capacity — see section below |
+| `oneshot<T>()` | `tokio::sync::oneshot` | kernel oneshot prelude (`emit_kernel_oneshot_prelude`) | ✅ | single-value, single-consumer channel |
+| `watch<T>(initial)` | `tokio::sync::watch` | kernel watch prelude (`emit_kernel_watch_prelude`) | ✅ | latest-value broadcast with initial value |
+| `broadcast<T, N>` | `tokio::sync::broadcast` | kernel static broadcast prelude (`emit_kernel_broadcast_prelude`) | ✅ | const-generic capacity |
+| `broadcast<T>(cap)` | `tokio::sync::broadcast` | kernel dynamic broadcast prelude (`emit_kernel_dyn_broadcast_prelude`) | ✅ | runtime capacity |
 | `wait Duration` | `tokio::sleep` | `kernel::delay::coarse_sleep` | ⚠️ | blocking, no await |
 | `Future<T>` | `tokio::JoinHandle` | `KernelFuture<T>` | ⚠️ | blocking — `.wait()` in process context only |
 | `future.done()` | `Arc<Mutex<Option<T>>>` + `try_lock` | `try_lock` + `is_some` | ✅ | non-blocking poll |
@@ -312,8 +322,8 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 
 | Boring | Rust std | Rust-kernel | Status | Notes |
 |--------|----------|-------------|--------|-------|
-| `print!` | `println!` | `pr_info!` / `pr_err!` | ⚠️ | different kernel macros |
-| `assert_eq!` | `assert_eq!` | `kernel::build_assert!` | ⚠️ | panics forbidden → `WARN_ON` |
+| `print!` | `println!` | `kernel::pr_info!` | ⚠️ | always emitted as `pr_info!` — there is no `pr_err!`/severity routing today |
+| `assert_eq!` | `assert_eq!` | plain Rust `assert_eq!` | ❌ | no kernel-specific override exists; `kernel::build_assert!`/`WARN_ON` mapping is aspirational, not implemented |
 | `panic(msg)` | `panic!` | — | ❌ | kernel oops/crash — forbidden, use `throws` / `Result` |
 | Math (`sqrt`, `sin`…) | `std::f64` | — | ❌ | FPU disabled — forbidden |
 | `Vec` methods | `std::vec` | `kernel::prelude::Vec` | ⚠️ | slightly different API |
@@ -332,13 +342,14 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 - Error handling (with error type adaptation)
 - `Vec`, tuples, `Option`
 - `task def`, `Future<T>`, `join`, `channel<T,N>` / `channel<T>(cap)`, `stream` (sequential + async)
+- `oneshot<T>()`, `watch<T>(initial)`, `broadcast<T,N>` / `broadcast<T>(cap)`
 
 ### Requires adaptation
 
 - `string` → kernel `CStr` / `CString`; literals → `c_str!("…")`
-- `{K: V}` / `{T}` → `RBTree<K,V>` / `RBTree<T,()>` — ordered, O(log n), keys must be `Ord`
-- `throws MyError` → requires `type MyError as kernel.error.Error(ERRNO)` declaration
-- `print!` / assertions → kernel macros
+- `{K=V}` / `{T}` → `RBTree<K,V>` / `RBTree<T,()>` — ordered, O(log n), keys must be `Ord`
+- `throws MyError` → typed errno binding is **not implemented**; all errors collapse to `kernel::error::Error`
+- `print!` → always `pr_info!`; `assert_eq!` has no kernel override (plain Rust `assert_eq!`)
 - `Box<T>` → kernel allocator
 - `HashMap` / `HashSet` → `RBTree` — ordered, O(log n), keys must implement `Ord`
 

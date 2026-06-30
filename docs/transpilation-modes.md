@@ -22,8 +22,8 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 | `T'shared`         | `Arc<T>`                             | `Rc<T>`                    |
 | `T'actor`          | `Arc<std::sync::Mutex<T>>`           | `Rc<RefCell<T>>`           |
 | `T'guard`          | `Arc<std::sync::RwLock<T>>`          | `Rc<RefCell<T>>`           |
-| `T'actor'task`     | `Arc<tokio::sync::Mutex<T>>`         | not supported              |
-| `T'guard'task`     | `Arc<tokio::sync::RwLock<T>>`        | not supported              |
+| `T'actor'task`     | `Arc<tokio::sync::Mutex<T>>`         | `Rc<RefCell<T>>`           |
+| `T'guard'task`     | `Arc<tokio::sync::RwLock<T>>`        | `Rc<RefCell<T>>`           |
 | `T'shared'weak`    | `std::sync::Weak<T>`                 | `Weak<T>`                  |
 | `T'actor'weak`     | `std::sync::Weak<Mutex<T>>`          | `Weak<RefCell<T>>`         |
 | `T'guard'weak`     | `std::sync::Weak<RwLock<T>>`         | `Weak<RefCell<T>>`         |
@@ -34,7 +34,7 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 
 `T'guard` in single-thread maps to `Rc<RefCell<T>>` (same as `T'actor`) — `RefCell` has no read/write distinction. The qualifier is preserved as documentation of intent; no warning is emitted.
 
-`T'actor'task` and `T'guard'task` use Tokio's async-aware mutexes. They require `--threading multi` and an async (task) context; using them with `--threading single` is a compile error.
+`T'actor'task` and `T'guard'task` use Tokio's async-aware mutexes under `--threading multi`. Under `--threading single` they fall back to `Rc<RefCell<T>>` (same as `T'actor`/`T'guard`) — access goes through `.borrow()`/`.borrow_mut()` instead of `.lock().await`. This is not an error; the `'task` hint is simply moot when there is no async mutex to use.
 
 ---
 
@@ -50,7 +50,7 @@ Both forms delegate the memory decision to the inference pass, then to the activ
 
 The difference between `T` and `T'`: `T'` restricts the inference candidate set to `{Owned, Shared, Actor, Guard}` (Stack and Const are excluded). If inference cannot resolve a unique qualifier, the fallback is `'heap` instead of `'stack`.
 
-See [qualifier-inference.md](qualifier-inference.md) for the full inference algorithm.
+See [qualifiers.md](qualifiers.html) — **Inference** section — for the full inference algorithm.
 
 ### Resolution after inference
 
@@ -101,7 +101,7 @@ let mut __ap_mg = ap.lock().unwrap();   // shadow guard — emitted automaticall
 println!("{}", (__ap_mg.x + __ap_mg.y)); // uses guard, not ap.lock() twice
 ```
 
-The shadow guard is emitted for both function parameters and local `T`/`T'` declarations.
+The shadow guard is emitted for both function parameters and local `T`/`T'` declarations, but only under `--threading multi` (where the managed wrapper is `Mutex`). Under `--threading single` the managed wrapper is `RefCell`, which supports independent `.borrow()`/`.borrow_mut()` calls without a deadlock risk, so no shadow guard is emitted — field accesses go through `managed_refcell_vars`-based `.borrow()`/`.borrow_mut()` calls directly instead.
 
 **Typical workflow:**
 
@@ -190,7 +190,7 @@ When use-site inference (priority 5) does not resolve a qualifier for an anonymo
 
 Configurable: `boring build --stack-auto-bytes N`.
 
-**Suppressed for non-rebindable `T` struct fields.** When a struct field uses the bare anonymous form `T` (no qualifier) with a `let` or `mut` binding, size-based promotion does not apply and no warning is emitted. A struct field is always inline in the parent's allocation — boxing it would add an indirection without reducing the parent's layout.
+**Suppressed for bare `T` struct fields, regardless of rebindability.** When a struct field uses the bare anonymous form `T` (no qualifier), size-based promotion does not apply and no warning is emitted — this holds for `let`, `mut`, and `var` fields alike. A struct field is always inline in the parent's allocation — boxing it would add an indirection without reducing the parent's layout.
 
 This suppression applies only to bare `T`. A `T'` field (indirection hint) is **not** suppressed: its fallback remains `'heap` (`Box<T>`) regardless of size, because the developer explicitly requested indirection.
 
@@ -200,7 +200,7 @@ struct BigData:
     let string name
 
 struct Wrapper:
-    let BigData inner         # bare T — sizeof(BigData) folds into sizeof(Wrapper), no promotion
+    var BigData inner         # bare T (var too) — sizeof(BigData) folds into sizeof(Wrapper), no promotion
     let BigData' backup       # T' — always Box<BigData>, even on a let field
 ```
 

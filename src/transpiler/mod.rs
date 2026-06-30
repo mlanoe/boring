@@ -26,6 +26,7 @@ pub(crate) mod helpers;
 pub(crate) use helpers::*;
 pub mod kernel;
 pub mod cuda;
+pub mod metal;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 
@@ -321,6 +322,10 @@ struct Transpiler {
     /// "StructName::method_name" for methods that are non-mutating (`req`).
     /// Used by 'guard dispatch to choose `.read()` vs `.write()`.
     pub(crate) struct_req_methods: std::collections::HashSet<String>,
+    /// "StructName::method_name" for methods declared `task`.
+    /// Used by qualifier inference to disambiguate 'actor'task/'guard'task from
+    /// 'actor/'guard when a task-captured variable has a task method called on it.
+    pub(crate) struct_task_methods: std::collections::HashSet<String>,
     /// Struct types that implement the iterator protocol: a `def T? next():` method.
     /// When the iterable of a `for` loop is one of these types, the transpiler emits
     /// `while let Some(x) = __iter.next()` instead of `.into_iter()`.
@@ -570,6 +575,15 @@ struct Transpiler {
     /// call whose declared return type is `'actor` or `'guard`. Populated by a pre-pass
     /// in `infer_qualifiers` and consumed by `walk_expr_for_qualifiers`. Cleared each call.
     pub(crate) infer_local_actor_vars: std::collections::HashSet<String>,
+    /// Local variables (task/closure captures) on which a `task`-declared method was called
+    /// during the current function's qualifier-inference pass. When both the plain and
+    /// `'task` variant of 'actor/'guard remain candidates, presence in this set picks the
+    /// `'task` variant. Cleared each call to `infer_qualifiers`.
+    pub(crate) task_method_call_vars: std::collections::HashSet<String>,
+    /// Struct field names (bare, unqualified within `infer_struct_field_qualifiers`'s scope)
+    /// on which a `task`-declared method was called during struct field qualifier inference.
+    /// Same purpose as `task_method_call_vars` but for `self.field` captures. Cleared per struct.
+    pub(crate) task_method_call_fields: std::collections::HashSet<String>,
     /// Local variables declared with `lazy` — hold `OnceCell<T>`.
     /// `?=` on these emits `name.get_or_init(|| rhs)`.
     /// Reads of these variables emit `*name.get().expect("name used before lazy init")`.
@@ -648,6 +662,7 @@ impl Transpiler {
             struct_rwlock_fields: std::collections::HashSet::new(),
             struct_rwlock_task_fields: std::collections::HashSet::new(),
             struct_req_methods: std::collections::HashSet::new(),
+            struct_task_methods: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
             fn_returns_void: false,
@@ -738,6 +753,8 @@ impl Transpiler {
             struct_method_throws: std::collections::HashSet::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
             infer_local_actor_vars: std::collections::HashSet::new(),
+            task_method_call_vars: std::collections::HashSet::new(),
+            task_method_call_fields: std::collections::HashSet::new(),
             lazy_vars: std::collections::HashSet::new(),
             lazy_var_types: std::collections::HashMap::new(),
             callable_structs: std::collections::HashSet::new(),
@@ -1018,7 +1035,9 @@ impl Transpiler {
              \x20       if let Some(i) = i { if i < v.len() { v.remove(i); } }\n\
              \x20       v\n\
              \x20   }\n\
-             \x20   fn get_at(&self, i: Option<usize>) -> T { self[i.unwrap()].clone() }\n\
+             \x20   fn get_at(&self, i: Option<usize>) -> T {\n\
+             \x20       self[i.expect(\"get_at called with no index (empty collection or exhausted cursor)\")].clone()\n\
+             \x20   }\n\
              }\n\
              trait BoringDictIndex<K: Clone + Eq + std::hash::Hash, V: Clone> {\n\
              \x20   fn first_index(&self) -> Option<K>;\n\
@@ -1055,7 +1074,10 @@ impl Transpiler {
              \x20       if let Some(e) = elem { s.remove(&e); }\n\
              \x20       s\n\
              \x20   }\n\
-             \x20   fn get_at(&self, i: Option<usize>) -> T { self.iter().nth(i.unwrap()).cloned().unwrap() }\n\
+             \x20   fn get_at(&self, i: Option<usize>) -> T {\n\
+             \x20       let i = i.expect(\"get_at called with no index (empty collection or exhausted cursor)\");\n\
+             \x20       self.iter().nth(i).cloned().expect(\"get_at index out of range\")\n\
+             \x20   }\n\
              }\n\n\
              // BoringFmt — displays Vec<T: Display> as [a, b, c] (no debug quotes on strings).\n\
              struct BoringFmt<'a, T: std::fmt::Display>(pub &'a [T]);\n\
@@ -1539,6 +1561,20 @@ impl Transpiler {
             }
         }
 
+        // Index `ext` block methods/setters by type name up front (order-independent), so
+        // struct field qualifier inference below can see ext methods regardless of whether
+        // the `ext` block appears before or after the `struct` in this file.
+        let mut ext_methods_by_type: std::collections::HashMap<&str, Vec<&crate::ast::FnDecl>> =
+            std::collections::HashMap::new();
+        let mut ext_setters_by_type: std::collections::HashMap<&str, Vec<&crate::ast::SetDecl>> =
+            std::collections::HashMap::new();
+        for item in &program.items {
+            if let Item::Ext(e) = item {
+                ext_methods_by_type.entry(e.type_name.as_str()).or_default().extend(&e.methods);
+                ext_setters_by_type.entry(e.type_name.as_str()).or_default().extend(&e.setters);
+            }
+        }
+
         for item in &program.items {
             match item {
                 Item::Enum(e) => {
@@ -1757,6 +1793,9 @@ impl Transpiler {
                         if !m.mutating {
                             self.struct_req_methods.insert(format!("{}::{}", s.name, m.name));
                         }
+                        if m.task {
+                            self.struct_task_methods.insert(format!("{}::{}", s.name, m.name));
+                        }
                     }
                     // Iterator protocol: a struct with `def T? next():` is iterable.
                     // `for x in obj:` desugars to `while let Some(x) = __iter.next()`.
@@ -1792,7 +1831,12 @@ impl Transpiler {
                     }
                     // Infer qualifiers for private unqualified fields from method body usage.
                     // Must run after struct_req_methods is populated (used for def/req detection).
-                    self.infer_struct_field_qualifiers(s);
+                    // Also include same-file `ext` block methods/setters for this type.
+                    let empty_methods: Vec<&crate::ast::FnDecl> = Vec::new();
+                    let empty_setters: Vec<&crate::ast::SetDecl> = Vec::new();
+                    let ext_methods = ext_methods_by_type.get(s.name.as_str()).unwrap_or(&empty_methods);
+                    let ext_setters = ext_setters_by_type.get(s.name.as_str()).unwrap_or(&empty_setters);
+                    self.infer_struct_field_qualifiers(s, ext_methods, ext_setters);
                 }
                 Item::Ext(e) => {
                     // Collect arc-qualified types from ext method params.

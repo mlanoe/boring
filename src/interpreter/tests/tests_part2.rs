@@ -187,13 +187,13 @@ let _neq = a == {1, 2}
 
 #[test]
 fn test_is_reference_identity() {
-    // Dog b = a → b and a share the same instance
+    // Dog b = a.clone() → b and a share the same instance
     let src = r#"
 struct Dog:
     string name
 
 let a = Dog(name = "Rex")
-let b = a
+let b = a.clone()
 let _same = b is a
 let c = Dog(name = "Rex")
 let _diff = c is a
@@ -1111,13 +1111,13 @@ let b = a
 
 #[test]
 fn test_let_move_transfers_value() {
-    // `let b' = a` on a struct — b gets the object
+    // `let b = a` on a struct — implicit move — b gets the object
     let src = r#"
 struct Box:
     init(pub int val)
 
 let a = Box(val = 42)
-let b' = a
+let b = a
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
@@ -1126,17 +1126,17 @@ let b' = a
 
 #[test]
 fn test_let_move_invalidates_source() {
-    // `let b' = a` on a struct — source `a` is invalidated after the move
+    // `let b = a` on a struct — source `a` is invalidated after the move
     let src = r#"
 struct Box:
     init(pub int val)
 
 let a = Box(val = 42)
-let b' = a
+let b = a
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
-    assert_eq!(get_var(&interp, "a"), Value::Nil); // removed from env
+    assert!(matches!(get_var(&interp, "a"), Value::Moved(_)));
 }
 
 #[test]
@@ -1148,7 +1148,7 @@ struct Box:
 
 def int bad():
     let a = Box(val = 42)
-    let b' = a
+    let b = a
     return a.val
 
 let result = bad()
@@ -1165,30 +1165,30 @@ struct Dog:
     init(pub string name)
 
 let a = Dog(name = "Rex")
-let b' = a
+let b = a
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
-    assert_eq!(get_var(&interp, "a"), Value::Nil);
+    assert!(matches!(get_var(&interp, "a"), Value::Moved(_)));
     assert!(matches!(get_var(&interp, "b"), Value::Object(_)));
 }
 
 #[test]
 fn test_var_move_mutable() {
-    // `var b' = a` — mutable move: source invalidated, binding is mutable
+    // `var b = a` — mutable move: source invalidated, binding is mutable
     let src = r#"
 struct Point:
     init(pub var int x, pub var int y)
 
 let a = Point(x = 1, y = 2)
-var b' = a
+var b = a
 b.x = 10
 let result = b.x
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "result"), Value::Int(10));
-    assert_eq!(get_var(&interp, "a"), Value::Nil);
+    assert!(matches!(get_var(&interp, "a"), Value::Moved(_)));
 }
 
 #[test]
@@ -1200,7 +1200,7 @@ struct Token:
 
 def int transfer():
     let a = Token(id = 7)
-    let b' = a
+    let b = a
     return b.id
 
 let result = transfer()
@@ -1212,15 +1212,32 @@ let result = transfer()
 
 #[test]
 fn test_let_move_copy_type_noop() {
-    // `let b' = a` on a copy type (int): a is NOT invalidated — move is a no-op for copy types
+    // `let b = a` on a copy type (int): a is NOT invalidated — copy types are never moved
     let src = r#"
 let a = 99
-let b' = a
+let b = a
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "b"), Value::Int(99));
     assert_eq!(get_var(&interp, "a"), Value::Int(99)); // still valid — copy, not moved
+}
+
+#[test]
+fn test_let_clone_keeps_source_accessible() {
+    // `.clone()` performs an explicit deep copy — source remains accessible
+    let src = r#"
+struct Box:
+    init(pub int val)
+
+let a = Box(val = 42)
+let b = a.clone()
+let result = a.val
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "result"), Value::Int(42));
+    assert!(matches!(get_var(&interp, "b"), Value::Object(_)));
 }
 
 // ─── T'shared'weak / T'actor'weak — compound weak references ──────

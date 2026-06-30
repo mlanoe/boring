@@ -13,7 +13,8 @@
 > - CUDA codegen (`boring build --target cuda`) — **implemented** (single-GPU, 1D grids)
 > - D2H readback — **implemented** (`k.buf` → `read_buf()?` inferred automatically)
 > - Dynamic `smem_bytes` — **implemented** (inferred from `'shared` array fields)
-> - Automatic grid sizing, 2D/3D grids, `after =` + streams, atomics via `'actor'global` — **implemented** (CUDA codegen + interpreter)
+> - Automatic 1D grid sizing from a `[T]'global`/`'unified` array field's length, 2D/3D grids via tuple `block=`, `after =` + streams, atomics via `'actor'global` (`+=`/`-=`/`|=`/`&=`/`^=` only) — **implemented** (CUDA codegen + interpreter)
+> - `'actor'unified`, `'actor'shared`, `atomicMin`/`atomicMax`/`atomicExch` auto-transpile, `atomic.cas(...)`, `warp.size`/`warp.lane`/`warp.sync`, `gpu.const(...)`, `.shape`-based grid inference, must-use `KernelHandle`, kernel-qualifier rejection, `--peer-access`, typed `Gpu*Error`s — **not yet implemented** (see inline notes below)
 > - Multi-GPU (`new(g) K(...)`, `GPU.all()`), `GPU` built-in type with device properties — **implemented**
 > - `'shared` / `'local` in `init` → validation error, `print` in kernel → `printf` — **implemented**
 > - dtod inference (no explicit copy) — **not yet implemented**
@@ -167,7 +168,7 @@ for batch in batches:
 
 Inside the kernel, device threads access `'global` buffers concurrently. Boring cannot verify the absence of data races between threads. The `kernel` body is an **implicit unsafe zone** for device-side memory access.
 
-`sync` and `atomic.cas` are the programmer's tools in this zone.
+`sync` and `'actor'global` compound-assign atomics are the programmer's tools in this zone today; `atomic.cas` is planned but not yet implemented (see [Atomics](#atomics--actor-on-kernel-fields)).
 
 ### `'shared` — lifetime enforced by the type system
 
@@ -215,7 +216,7 @@ Inline kernels (anonymous block at the call site) are not supported: the body wo
 
 A kernel launch returns a `KernelHandle`. Calling `.wait` blocks until execution completes. The kernel object retains ownership of its `'global` fields — results are read directly from the kernel object after `.wait`.
 
-**Qualifier constraints on kernel struct instances.** `kernel(...)` moves the instance into the handle — ownership must be unambiguous. `'shared` (`Rc<T>`), `'actor` (`Rc<RefCell<T>>`), and `'guard` (`Mutex<T>`) are all rejected: none of them allow moving out. Only `'stack` (owned value) and `'heap` (`Box<T>`) are valid. This matters for qualifier inference: the transpiler must reject shared-ownership qualifiers on kernel struct bindings.
+**Qualifier constraints on kernel struct instances (planned, not yet implemented).** `kernel(...)` moves the instance into the handle — ownership must be unambiguous, so the design intends to reject `'shared` (`Rc<T>`), `'actor` (`Rc<RefCell<T>>`), and `'guard` (`Mutex<T>`) bindings, since none of them allow moving out, leaving only `'stack` (owned value) and `'heap` (`Box<T>`) as valid. **This check does not exist today** — `check_kernel`/`KernelLaunch` handling in `src/validator/kernel.rs` only recurses into the launch config's sub-expressions and does not inspect the qualifier of the kernel-struct value being launched, and the qualifier inference pass (`src/transpiler/infer_qualifiers.rs`) has no kernel-specific logic either. Passing a `'shared`/`'actor`/`'guard`-qualified kernel struct to `kernel(...)` is not currently rejected at compile time.
 
 **`'stack` vs `'heap` inference.** A kernel struct whose fields are `'unified` or `'global` holds only GPU buffer *handles* (pointers + metadata) on the CPU side — the bulk of the data lives in device memory. The struct's CPU footprint is therefore small regardless of the buffer sizes, which biases the inference toward `'stack`. The transpiler must not count GPU buffer capacity when estimating struct size for stack/heap placement.
 
@@ -340,13 +341,15 @@ mut k = kernel(block = 256) k |> .wait
 
 `kernel(...)` returns a `KernelHandle<T>` where `T` is the kernel struct type. The handle owns the kernel object until `.wait` is called.
 
+Illustrative interface (pseudocode — `eq` is not a real Boring method-modifier keyword; only `req`, `def`, `mut`, `var`, `let` are recognized modifiers):
+
 ```boring
 struct KernelHandle<T>:
-    eq bool done()       # non-blocking — true if the kernel has completed
+    req bool done()      # non-blocking — true if the kernel has completed
     req T wait()         # blocking — waits for completion and returns the kernel object
 ```
 
-`.wait` is the only way to recover the kernel object. Dropping the handle without calling `.wait` is a compile-time error (must-use).
+`.wait` is the only way to recover the kernel object. **Planned, not yet implemented:** dropping the handle without calling `.wait` is intended to be a compile-time error (must-use) — no such diagnostic exists today, and the generated Rust `KernelHandle<T>` struct (`src/transpiler/cuda/host.rs`) has no `#[must_use]` attribute, so a dropped handle currently compiles silently.
 
 ### `GPU`
 
@@ -411,11 +414,15 @@ kernel(block = (16, 16), grid = (w/16, h/16)) k            # explicit grid
 kernel(block = (8, 8, 8)) k
 ```
 
-**Grid inference rules:**
+**Grid inference rules (current implementation):**
 
-- Type with `.shape` (e.g. `Image`, `Volume`) → `grid = ceil(shape / block)` per dimension
-- `[T]'global` 1D → `grid = ceil(len(buf) / block)`
-- Otherwise → `grid` is required; omitting it is a compile-time error
+- `[T]'global` / `'unified` 1D array field → `grid = ceil(len(buf) / block)`
+- Otherwise, if `grid` is omitted, the transpiler currently defaults to `grid = (1, 1, 1)` rather than raising an error — this is likely a footgun rather than intended behavior, so always pass `grid` explicitly unless relying on 1D array inference.
+
+**Planned, not yet implemented:**
+
+- Type with `.shape` (e.g. `Image`, `Volume`) → `grid = ceil(shape / block)` per dimension. No `.shape`-based inference exists in the transpiler today, and there are no built-in `Image`/`Volume` types.
+- Omitting `grid` when no inference rule applies raising a compile-time error (see current fallback behavior above).
 
 ---
 
@@ -440,11 +447,18 @@ The execution context fields:
 | `gpu.block.x/y/z` | `blockIdx` | block index within grid |
 | `gpu.block_dim.x/y/z` | `blockDim` | threads per block |
 | `gpu.grid_dim.x/y/z` | `gridDim` | blocks per grid |
+| `sync` | `__syncthreads()` | block-level barrier keyword |
+
+**Planned, not yet implemented** — no `warp` namespace or `atomic` namespace exists inside a kernel body today:
+
+| Field | CUDA | Description |
+|---|---|---|
 | `warp.size` | `warpSize` | threads per warp (typically 32) |
 | `warp.lane` | `threadIdx.x % warpSize` | thread index within warp |
-| `sync` | `__syncthreads()` | block-level barrier keyword |
 | `warp.sync` | `__syncwarp()` | warp-level barrier keyword |
 | `atomic.cas(ref, exp, new)` | `atomicCAS` | compare-and-swap |
+
+The only currently implemented warp-related builtin is the host-side `GPU.warpSize()` device-property method (see [`GPU`](#gpu)) — it is not usable inside a kernel body.
 
 `.x`, `.y`, `.z` address the three spatial dimensions. Most kernels use only `.x` (1D data); image kernels use `.x` and `.y`; volume kernels use all three.
 
@@ -454,8 +468,10 @@ The execution context fields:
 gpu.thread   — thread index within block
 gpu.block    — block index within grid
 gpu.block_dim / gpu.grid_dim — dimensions
-warp         — subgroup of 32 threads within a block (CUDA-only)
 sync         — block-level barrier keyword
+
+# planned, not yet implemented:
+warp         — subgroup of 32 threads within a block (CUDA-only)
 warp.sync    — warp-level barrier keyword (CUDA-only)
 atomic.cas   — explicit compare-and-swap
 ```
@@ -493,14 +509,20 @@ Read-only broadcast memory, hardware-enforced. Written from the host only. Usefu
 ```boring
 # value known at compile time
 let [float]'gpu'const weights = [1.0, 2.0, 3.0]
+```
 
+`'gpu'const` is incompatible with `mut` and `var` — only `let` is valid today.
+
+**Planned, not yet implemented.** A lazy upload pattern combining the generic `lazy`/`?=` syntax with a GPU-specific constant-memory upload call:
+
+```boring
 # computed once, then frozen
 lazy [float]'gpu'const weights
 weights ?= gpu.const(compute_weights())   # first call — upload
 weights ?= gpu.const(compute_weights())   # subsequent calls — no-op
 ```
 
-`'gpu'const` is incompatible with `mut` and `var` — only `let` and `lazy` are valid.
+`lazy` and `?=` exist generically in Boring, but `gpu.const(...)` as a callable builtin does not exist in the interpreter or transpiler yet — `GpuConst` is currently only a field-qualifier enum variant, not a callable.
 
 ---
 
@@ -508,12 +530,11 @@ weights ?= gpu.const(compute_weights())   # subsequent calls — no-op
 
 Single-GPU by default. Multi-device is opt-in via `in device` at instantiation — the device is a `GPU` value, static or dynamic.
 
-> Device placement uses `new(arena)`. See `docs/new-placement-draft.md` for the full design.
+> Device placement uses `new(arena)`. See [`new-placement.md`](new-placement.html) for the full reference.
 >
 > ```boring
-> Scale(n)             # single GPU, CPU qualifier inferred
-> new(g0) Scale(n)     # GPU device g0, CPU side inferred ('stack)
-> new(g0('heap)) Scale(n)  # GPU device g0, CPU side explicit 'heap
+> Scale(n)         # single GPU, qualifier inferred
+> new(g0) Scale(n) # explicit device placement
 > ```
 
 ```boring
@@ -545,7 +566,7 @@ for h in handles:
 
 The device is propagated automatically to all fields allocated in `init`. A device mismatch between a kernel and its fields is a launch-time error.
 
-Cross-device dependencies use `after =` as for single-device — the runtime synchronises via `cudaStreamWaitEvent` if peer access is enabled, otherwise via the host.
+Cross-device dependencies use `after =` as for single-device syntactically, but **the peer-access-aware synchronisation described below is planned, not yet implemented** — `after =` codegen in `src/transpiler/cuda/host.rs` currently only handles same-stream/handle dependencies with no device-mismatch branching, `cudaStreamWaitEvent` cross-device codegen, or peer-access detection.
 
 ```boring
 let h0 = kernel(block = 256) ka
@@ -708,14 +729,14 @@ h3.wait
 
 `after =` replaces the need to explicitly name streams for ordering — the runtime deduces which operations can share a stream from the dependency graph.
 
-**Cross-device dependencies:**
+**Cross-device dependencies (design target — planned, not yet implemented except for the same-device case):**
 
 | Dependency | Implementation | Notes |
 |---|---|---|
-| same device | CUDA event | native, zero CPU involvement |
-| device 0 → device 1 | `cudaStreamWaitEvent` cross-device | requires peer access |
-| device 0 → device 1 (no peer access) | host-mediated | correct but adds CPU sync |
-| GPU kernel → CPU | host-mediated | always possible |
+| same device | CUDA event | native, zero CPU involvement — implemented |
+| device 0 → device 1 | `cudaStreamWaitEvent` cross-device | requires peer access — planned, not yet implemented |
+| device 0 → device 1 (no peer access) | host-mediated | correct but adds CPU sync — planned, not yet implemented |
+| GPU kernel → CPU | host-mediated | always possible — planned, not yet implemented |
 
 ```boring
 let g0 = GPU(0)
@@ -730,9 +751,9 @@ let h2 = kernel(block = 256, after = h1) kb
 mut kb = h2.wait
 ```
 
-**Compiler warnings:**
+**Compiler warnings (planned, not yet implemented):**
 
-- Cross-device `after =` without `--peer-access` flag → warning: dependency may be host-mediated
+- Cross-device `after =` without `--peer-access` flag → warning: dependency may be host-mediated. **No `--peer-access` CLI flag is registered** in `src/main.rs` today, and no cross-device dependency detection or warning logic exists in the transpiler.
 - Cyclic `after =` graph → compile-time error
 
 ### Cooperative cancellation
@@ -817,8 +838,8 @@ Built-in profiles are embedded in the `boring` binary (no install-time path requ
 | kernel launch | sequential loop over all threads |
 | `gpu.thread.x/y/z`, `gpu.block.x/y/z`… | loop variables |
 | `sync` | no-op |
-| `'actor` fields | plain arithmetic (no contention) |
-| `atomic.cas` | plain compare-and-swap (no contention) |
+| `'actor'global` fields | plain arithmetic (no contention) |
+| `atomic.cas` (planned, not yet implemented) | plain compare-and-swap (no contention) |
 | `kernel(...)` dispatch | sequential loop over all threads |
 | `kernel(...)` streams | no-op — single-threaded sequential |
 | `after =` | sequential execution in declaration order |
@@ -833,7 +854,7 @@ Built-in profiles are embedded in the `boring` binary (no install-time path requ
 **What simulation does not validate:**
 - **Race conditions** — sequential execution hides all data races between threads. A kernel that is correct in simulation may be incorrect on real hardware.
 - **`sync` necessity** — no reordering occurs, so missing barriers are invisible.
-- **`'actor` / `atomic.cas` correctness** — no concurrent writes, so atomics degrade to plain reads/writes without exposing contention bugs.
+- **`'actor'global` / `atomic.cas` correctness** — no concurrent writes, so atomics degrade to plain reads/writes without exposing contention bugs (`atomic.cas` itself is planned, not yet implemented).
 - **Performance** — thousands of GPU threads execute sequentially; timings are not representative.
 
 Simulation mode validates **logic**, not **concurrent correctness**. Race condition testing requires real GPU hardware or a dedicated thread-level simulator.
@@ -842,28 +863,30 @@ Simulation mode validates **logic**, not **concurrent correctness**. Race condit
 
 ## Atomics — `'actor` on kernel fields
 
-`'actor` means "safe concurrent access" — the mechanism depends on context:
+`'actor` means "safe concurrent access" — the mechanism depends on context. **Currently only `'actor'global` is implemented.** `'actor'unified`, `'actor'shared`, and a host-side `'actor'gpu'unified` are design-stage only: the parser's `'actor` qualifier accepts only `'task` or `'global` as the following suffix (see `src/parser/parse_type.rs`); any other suffix, including `'unified` and `'shared`, is a parse error today.
 
-| Context | Qualifier | Implementation |
-|---|---|---|
-| CPU host | `'actor'gpu'unified` | host/device barrier — waits for kernel completion |
-| GPU kernel | `'actor'unified` | atomic instructions on unified memory |
-| GPU kernel | `'actor'global` | atomic instructions on device DRAM |
-| GPU kernel | `'actor'shared` | atomic instructions on block SRAM |
+| Context | Qualifier | Implementation | Status |
+|---|---|---|---|
+| CPU host | `'actor'gpu'unified` | host/device barrier — waits for kernel completion | planned, not yet implemented |
+| GPU kernel | `'actor'unified` | atomic instructions on unified memory | planned, not yet implemented |
+| GPU kernel | `'actor'global` | atomic instructions on device DRAM | **implemented** |
+| GPU kernel | `'actor'shared` | atomic instructions on block SRAM | planned, not yet implemented |
 
-Inside a kernel, `'actor` generates atomic instructions automatically. Only `atomic.cas` remains explicit.
+Inside a kernel, `'actor'global` fields generate atomic instructions automatically for compound assignment. `atomic.cas` as an explicit builtin is **planned, not yet implemented** — see below.
 
-| Field declaration | Location | Atomic scope |
-|---|---|---|
-| `mut [int]'actor'unified bins` | unified DRAM | all threads, all blocks |
-| `mut [int]'actor'global bins` | DRAM device | all threads, all blocks |
-| `mut [int, 256]'actor'shared local_bins` | block SRAM | threads of the same block |
+| Field declaration | Location | Atomic scope | Status |
+|---|---|---|---|
+| `mut [int]'actor'unified bins` | unified DRAM | all threads, all blocks | planned, not yet implemented |
+| `mut [int]'actor'global bins` | DRAM device | all threads, all blocks | **implemented** |
+| `mut [int, 256]'actor'shared local_bins` | block SRAM | threads of the same block | planned, not yet implemented |
+
+The following example illustrates the target design once `'actor'shared` lands. Today, only the `bins` (`'actor'global`) line transpiles to an atomic; `local_bins` would need to be a plain `'shared` field with explicit `sync` instead:
 
 ```boring
 kernel Histogram:
     let [float]'global              input
     mut [int]'actor'global          bins            # global — atomic across all blocks
-    mut [int, 256]'actor'shared     local_bins      # atomic within block
+    mut [int, 256]'actor'shared     local_bins      # atomic within block (planned, not yet implemented)
 
     def ():
         local_bins[gpu.thread.x] = 0
@@ -872,35 +895,38 @@ kernel Histogram:
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         if i < len(input):
             let bucket = int(input[i] * 10.0)
-            local_bins[bucket] += 1   # → atomicAdd on SRAM — fast, no inter-block contention
+            local_bins[bucket] += 1   # planned: → atomicAdd on SRAM — fast, no inter-block contention
 
         sync
         bins[gpu.thread.x] += local_bins[gpu.thread.x]   # → atomicAdd on DRAM — once per block
 ```
 
-**Operations transpiled automatically:**
+**Operations transpiled automatically on `'actor'global` fields today:**
 
-| Boring | CUDA |
-|---|---|
-| `x += v` | `atomicAdd(&x, v)` |
-| `x -= v` | `atomicSub(&x, v)` |
-| `x = min(x, v)` | `atomicMin(&x, v)` |
-| `x = max(x, v)` | `atomicMax(&x, v)` |
-| `x = v` | `atomicExch(&x, v)` |
+| Boring | CUDA | Status |
+|---|---|---|
+| `x += v` | `atomicAdd(&x, v)` | implemented |
+| `x -= v` | `atomicSub(&x, v)` | implemented |
+| `x \|= v` | `atomicOr(&x, v)` | implemented |
+| `x &= v` | `atomicAnd(&x, v)` | implemented |
+| `x ^= v` | `atomicXor(&x, v)` | implemented |
+| `x = min(x, v)` | `atomicMin(&x, v)` | planned, not yet implemented |
+| `x = max(x, v)` | `atomicMax(&x, v)` | planned, not yet implemented |
+| `x = v` | `atomicExch(&x, v)` | planned, not yet implemented |
 
-Compare-and-swap remains explicit — its structure (expected value + new value) has no natural operator mapping:
+**(Planned, not yet implemented.)** Compare-and-swap as an explicit builtin — its structure (expected value + new value) has no natural operator mapping. There is currently no `atomic` namespace or `.cas` method in the lexer, parser, interpreter, or transpiler:
 
 ```boring
-atomic.cas(ref, expected, new)   # only explicit atomic remaining
+atomic.cas(ref, expected, new)   # planned — not yet implemented
 ```
 
-**`'actor'shared` vs `sync`**
+**`'actor'shared` vs `sync` (planned, not yet implemented)**
 
-`sync` coordinates threads across a full barrier — all writes visible to all threads after the barrier. `'actor` on a `'shared` field is useful when threads write to the **same slot** without a barrier being possible between writes:
+`sync` coordinates threads across a full barrier — all writes visible to all threads after the barrier. The design intent is for `'actor` on a `'shared` field to allow threads to write to the **same slot** without a barrier being possible between writes, but `'actor'shared` does not exist yet — only plain `'shared` is available today:
 
 ```boring
 mut [int, 256]'shared       tile    # plain — sync required between write and read
-mut [int, 256]'actor'shared tile    # atomic — concurrent writes to same slot safe without barrier
+mut [int, 256]'actor'shared tile    # planned — atomic, concurrent writes to same slot safe without barrier
 ```
 
 In simulate mode, `'actor` fields use plain arithmetic (no contention).
@@ -909,20 +935,17 @@ In simulate mode, `'actor` fields use plain arithmetic (no contention).
 
 ## Placement — `new(...)`
 
-`new` is implemented — see `docs/new-placement-draft.md` for the full reference. GPU-relevant forms:
+`new` is implemented — see [`new-placement.md`](new-placement.html) for the full reference. GPU-relevant forms:
 
 ```boring
-new(g0) Scale(n)          # GPU device g0, CPU side inferred ('stack)
-new(g0('heap)) Scale(n)   # GPU device g0, CPU side explicit 'heap
+new(g0) Scale(n)   # explicit device placement
 ```
-
-The CPU qualifier is encoded in the arena expression `g0(...)`. `GPU` only accepts `'stack` or `'heap` — shared qualifiers (`'actor`, `'guard`) are a compile error at the `g0(...)` call site.
-
-> **To revisit.** Integration of `'gpu.*` CPU-side qualifiers with `new(arena)` — once the CUDA backend is implemented.
 
 ---
 
 ## Error handling
+
+**Planned, not yet implemented.** None of the typed error names below (`GpuLaunchError`, `GpuOutOfMemory`, `GpuIllegalAccess`, `GpuStackOverflow`, `GpuTimeout`, `GpuDeviceLost`) exist anywhere in the codebase today, and there is no block-size/launch-config validation in `src/validator/kernel.rs` or `src/interpreter/eval_gpu.rs` — oversized `block` values are not currently checked at all. The design below describes the intended error model.
 
 CUDA errors fall into two categories that map to the two observation points of a `KernelHandle`.
 

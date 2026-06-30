@@ -260,6 +260,23 @@ if condition {
 > **Prefer the expression form** when branches are simple:
 > `let v = if condition: "big" else: "small"`
 
+### Move semantics
+
+Assigning a non-Copy value to a new binding **moves** it — the source binding becomes inaccessible:
+
+```boring
+let a = [1, 2, 3]
+let b = a          # a is moved into b
+print b            # [1, 2, 3]
+print a            # error: use of moved value 'a': the value was moved
+                    #        and is no longer accessible — use .clone() to make a copy
+```
+
+- Copy types (`int`, `uint`, `float`, `bool`, `string`, `nil`) are unaffected — assigning them always copies, both bindings stay usable.
+- Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment, on rebinding, and when passed by value.
+- Call `.clone()` to make an explicit copy instead of moving: `let b = a.clone()` leaves `a` usable.
+- There is no explicit move-marker syntax — the transpiler infers moves vs. copies from the value's type.
+
 ---
 
 ## 3. Data Types
@@ -558,13 +575,15 @@ Supported cast targets: `int`, `uint`, `float`, `string`, `bool`, and any type t
 struct Point:
     init(pub int x, pub int y)
 
-let a = Point(x = 1, y = 2)
-let b = a                      # b is the same reference as a
+let Point'shared a = Point(x = 1, y = 2)
+let b = a.clone()              # b is the same reference as a (Rc clone, not a deep copy)
 let c = Point(x = 1, y = 2)   # c is a new, distinct object
 
 print "{a === b}"   # true  — same reference
 print "{a === c}"   # false — same value, different object
 ```
+
+Plain assignment (`let b = a`) **moves** non-Copy values instead of aliasing them (see "Move semantics" above), so aliasing requires a `'shared` qualifier plus `.clone()` to bump the reference count.
 
 For primitive types (`int`, `float`, `bool`) which have value semantics, `===` behaves like `==`.
 
@@ -1029,6 +1048,23 @@ if let name, let age:
     print "{name} is {age}"
 ```
 
+#### `elif let`
+
+`elif` chains onto an `if let`, with its own comma-separated clause list — tried in order, first match wins:
+
+```boring
+if let v = a:
+    print "a = {v}"
+elif let v = b, v > 0:
+    print "b = {v} (positive)"
+elif c > 10:
+    print "c is large"
+else:
+    print "nothing matched"
+```
+
+A plain boolean `elif` (no `let`) is also allowed, as in the `c > 10` branch above.
+
 ### `guard`
 
 Early exit if a condition fails:
@@ -1488,8 +1524,8 @@ let z: [i64; 3] = [0i64; 3];
 | Boring                      | Rust                              |
 |-----------------------------|-----------------------------------|
 | `arr.length`                | `arr.len()`                       |
-| `arr.first`                 | `arr.first().cloned()`            |
-| `arr.last`                  | `arr.last().cloned()`             |
+| `arr.first()`                | `arr.first().cloned()`            |
+| `arr.last()`                 | `arr.last().cloned()`             |
 | `arr.push(v)`               | `arr.push(v)`                     |
 | `arr.pop()`                 | `arr.pop()`                       |
 | `arr.append(other)`         | `arr.extend(other)`               |
@@ -1505,7 +1541,7 @@ let z: [i64; 3] = [0i64; 3];
 | `arr.all((x): cond)`        | `arr.iter().all(\|x\| cond)`      |
 | `arr.join(sep)`             | `arr.join(sep)`                   |
 | `arr.flat()`                | `arr.concat()`                    |
-| `arr.isEmpty`               | `arr.is_empty()`                  |
+| `arr.isEmpty()`             | `arr.is_empty()`                  |
 
 ```boring
 let doubled  = numbers.map((n): n * 2)
@@ -1535,7 +1571,7 @@ let empty_map: HashMap<i64, i64> = HashMap::new();
 | `d.contains(k)`             | `d.contains_key(&k)`              |
 | `d.remove(k)`               | `d.remove(&k)`                    |
 | `d.length`                  | `d.len()`                         |
-| `d.isEmpty`                 | `d.is_empty()`                    |
+| `d.isEmpty()`               | `d.is_empty()`                    |
 | `d.map((k,v): expr)`        | `d.iter().map(\|(k,v)\| expr).collect()` |
 | `d.filter((k,v): cond)`     | `d.into_iter().filter(\|(k,v)\| cond).collect()` |
 
@@ -1560,7 +1596,7 @@ let empty_set: HashSet<i64> = HashSet::new();
 | `s.add(v)`            | `s.insert(v)`                 |
 | `s.remove(v)`         | `s.remove(&v)`                |
 | `s.length`            | `s.len()`                     |
-| `s.isEmpty`           | `s.is_empty()`                |
+| `s.isEmpty()`         | `s.is_empty()`                |
 
 ### Index — opaque collection cursor
 
@@ -3361,7 +3397,7 @@ let words = ["hello", "world", "boring"]
 # equivalent — all yield ["HELLO", "WORLD", "BORING"]
 let a = words.map((w): w.upper())
 let b = words.map (w): w.upper()
-let c = words.map :upper()           # closure shorthand (field/method on arg)
+let c = words.map(:upper())          # closure shorthand (field/method on arg) — parens required
 ```
 
 **Rust equivalent**
@@ -4558,11 +4594,10 @@ let Counter'actor v     # delayed init — explicit qualifier
 `new` also accepts a GPU arena as first argument (see the CUDA section):
 
 ```boring
-new(g0) Counter()         # GPU device g0, CPU side inferred
-new(g0('heap)) Counter()  # GPU device g0, CPU side explicit 'heap
+new(g0) Counter()   # GPU device g0
 ```
 
-`let v' = a` is a **move marker** (explicit transfer of ownership from `a` to `v`) — it is unrelated to `new` and placement.
+Ownership transfer between bindings is implicit — see "Move semantics" below; there is no explicit move-marker syntax.
 
 Shorthands cover the most common cases without writing a qualifier explicitly:
 
@@ -5593,7 +5628,7 @@ def main() throws:
 | `s.split(sep)`               | `s.split(sep).collect::<Vec<_>>()`   |
 | `s.chars()`                  | `s.chars().collect::<Vec<_>>()`      |
 | `s.repeat(n)`                | `s.repeat(n)`                        |
-| `s.isEmpty`                  | `s.is_empty()`                       |
+| `s.isEmpty()`                | `s.is_empty()`                       |
 
 ### Ownership
 
@@ -5623,10 +5658,10 @@ features) and `serde_json` to the generated `Cargo.toml`.
 ```boring
 @derive(Serialize, Deserialize)
 struct User:
-    name: string
-    age:  int
+    string name
+    int age
 
-let u = User(name: "Alice", age: 30)
+let u = User(name = "Alice", age = 30)
 
 let s = json(u)                     # → '{"name":"Alice","age":30}'
 
@@ -5884,6 +5919,7 @@ unreachable("variant {v} should have been handled above")
 | `if c: a elif c2: b else d`    | `if c { a } else if c2 { b } else { d }` |
 | `if let x = opt:`              | `if let Some(x) = opt {`               |
 | `if let x:`                    | `if let Some(x) = x {` (shorthand)     |
+| `if let x = a: … elif let y = b: …` | `if let Some(x) = a { … } else if let Some(y) = b { … }` |
 | `while let x = expr:`         | `while let Some(x) = expr {`           |
 | `guard c else return v`       | `if !c { return v; }`                  |
 | `guard let x = opt else return v` | `let Some(x) = opt else { return v; };` |
@@ -6610,279 +6646,6 @@ let c'? = some(Counter(0))  # T'? → restricted set {Owned, Shared, Actor, Guar
 
 `T?` with inferred `'actor` becomes `Option<Arc<Mutex<Counter>>>` — the `Option` wraps the qualified value, not the other way around. Conflict detection works the same as for bare variables.
 
----
-
-## 31. Rust-for-Linux target
-
-`boring build --target kernel` compiles Boring source to **Rust-for-Linux** — the `no_std` Rust dialect used to write Linux kernel modules, drivers, and subsystems.
-
-The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath. This chapter describes those differences relative to the standard (tokio) backend.
-
----
-
-### Why a kernel target?
-
-The Linux kernel imposes constraints that make the standard Rust backend unusable:
-
-- **No `std`** — only `core` and the `kernel` crate are available.
-- **No FPU** — floating-point is disabled unless explicitly guarded.
-- **No tokio** — no async executor, no `JoinHandle`, no `select!`.
-- **No `panic`** — a panic is a kernel oops/crash.
-- **Fixed error type** — errors are errno-based (`kernel::error::Error`), not `Box<dyn Error>`.
-- **Bounded allocations** — all channels and streams must have a fixed compile-time capacity.
-
-### Activating the kernel target
-
-```sh
-boring build --target kernel main.br
-# → generates main_kernel/ with src/lib.rs + Cargo.toml
-# Build with: make -C /path/to/linux M=$PWD
-```
-
-The kernel backend runs a **validation pass** before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.
-
----
-
-### What changes vs the standard backend
-
-#### Primitives
-
-| Boring | Rust std | Rust-kernel |
-|--------|----------|-------------|
-| `int` | `i64` | `i64` — identical |
-| `uint` | `u64` | `u64` — identical |
-| `float` | `f64` | **forbidden** — FPU disabled |
-| `bool` | `bool` | `bool` — identical |
-| `string` | `Arc<str>` | `kernel::str::CString` / `&kernel::str::CStr` |
-| `void` | `()` | `()` — identical |
-
-String literals are emitted as `c_str!("…")`.
-
-#### Ownership qualifiers
-
-| Boring | Rust std | Rust-kernel |
-|--------|----------|-------------|
-| `T'` | `Box<T>` | `Box<T, KVmalloc>` — kernel allocator |
-| `T'shared` | `Arc<T>` / `Rc<T>` | `kernel::sync::Arc<T>` — `Rc` unavailable in kernel |
-| `T'actor` | `Arc<tokio::sync::Mutex<T>>` | `Arc<kernel::sync::Mutex<T>>` |
-| `T'guard` | `Arc<tokio::sync::RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` |
-
-#### Compound types
-
-| Boring | Rust std | Rust-kernel |
-|--------|----------|-------------|
-| `[T]` | `Vec<T>` | `kernel::prelude::Vec<T>` |
-| `{K: V}` | `HashMap<K,V>` | `kernel::rbtree::RBTree<K,V>` — ordered, O(log n), keys must be `Ord` |
-| `{T}` | `HashSet<T>` | `kernel::rbtree::RBTree<T,()>` — same constraints |
-
-#### Error handling
-
-All errors collapse to `kernel::error::Error` (errno-based `i32`). To preserve typed `catch` branches, declare each custom error type as a distinct nominal type bound to an errno:
-
-```boring
-type NetworkError as kernel.error.Error(ENETDOWN)
-type TimeoutError as kernel.error.Error(ETIMEDOUT)
-```
-
-`type` is required — not `use`. `use` creates an alias; `type` declares a distinct type so the compiler can route `catch` branches correctly:
-
-```boring
-try:
-    page = fetch_page(url)
-catch NetworkError e:
-    log("network down")
-catch TimeoutError e:
-    log("timed out")
-```
-
-```rust
-// Generated
-match fetch_page(url) {
-    Ok(page)  => { … }
-    Err(e) if e.code() == ENETDOWN  => { pr_info!("network down"); }
-    Err(e) if e.code() == ETIMEDOUT => { pr_info!("timed out"); }
-    Err(e)    => { … }
-}
-```
-
-#### Print
-
-| Boring | Rust std | Rust-kernel |
-|--------|----------|-------------|
-| `print "…"` | `println!("…")` | `kernel::pr_info!("…\n")` |
-
----
-
-### `task def` — work items
-
-In the standard backend, `task def` compiles to `async fn` + `tokio::spawn`.
-In the kernel backend, it generates a **work item** dispatched on `system_wq`:
-
-```boring
-task def Page fetch_page(string url):
-    # … fetch logic
-```
-
-```rust
-// Generated (kernel)
-struct FetchPageWork {
-    url: kernel::str::CString,
-    result: Arc<kernel::sync::Mutex<Option<Result<Page, kernel::error::Error>>>>,
-    done_cond: Arc<kernel::sync::CondVar>,
-    work: kernel::workqueue::Work<FetchPageWork>,
-}
-
-impl kernel::workqueue::Work<FetchPageWork> for FetchPageWork {
-    fn run(this: Arc<Self>) {
-        let r = fetch_page_body(this.url);
-        *this.result.lock() = Some(r);
-        this.done_cond.notify_all();
-    }
-}
-
-fn fetch_page(url: kernel::str::CString) -> KernelFuture<Page> { … }
-fn fetch_page_body(url: kernel::str::CString)
-    -> Result<Page, kernel::error::Error> { … }
-```
-
-**Constraint on `self`:** `task def` as an instance method is only allowed on `'task`, `'actor`, and `'guard` receivers — the only qualifiers with a lifetime compatible with a work item. `T&`, `T&mut`, and `T'` are rejected.
-
-#### `KernelFuture<T>`
-
-Every `task def` returns a `KernelFuture<T>` instead of a `JoinHandle`:
-
-| Boring | Rust std | Rust-kernel |
-|--------|----------|-------------|
-| `f.wait()` | `f.await` | `f.wait()` — blocks the current thread (process context only) |
-| `f.done()` | — | `f.done()` — non-blocking poll, returns `bool` |
-
-`wait()` blocks — it must not be called from an IRQ handler or atomic context.
-
-#### `join`
-
-```boring
-let a, b = join (task f1(), task f2())
-```
-
-Both work items are enqueued concurrently; `.wait()` is called on each in turn. Wall time is `max(t1, t2)`.
-
----
-
-### `channel` — two ring-buffer variants
-
-The kernel backend provides two channel implementations depending on how the capacity is expressed. Both use blocking `send()` / `recv()` — valid in process context only.
-
-#### `channel<T, N>` — const-generic, stack buffer
-
-The capacity is a compile-time type parameter. The buffer is a fixed-size array `[Option<T>; N]` allocated inline (no heap). Emits `KernelSender<T, N>` / `KernelReceiver<T, N>`.
-
-```boring
-let tx, rx = channel<string, 32>   # const-generic, stack buffer
-tx.send("hello")                   # blocks if full
-let msg = rx.recv()                # blocks if empty
-```
-
-```rust
-// Generated (kernel)
-let (tx, rx) = kernel_channel::<CString, 32>();
-tx.send(c_str!("hello"));
-let msg = rx.recv();
-```
-
-#### `channel<T>(cap)` — runtime capacity, heap buffer
-
-The capacity is a call argument. The buffer is a `Vec<Option<T>>` pre-allocated on the kernel heap. Emits `DynKernelSender<T>` / `DynKernelReceiver<T>`.
-
-```boring
-let tx, rx = channel<string>(32)   # runtime cap, heap buffer
-tx.send("hello")
-let msg = rx.recv()
-```
-
-```rust
-// Generated (kernel)
-let (tx, rx) = dyn_kernel_channel::<CString>(32);
-tx.send(c_str!("hello"));
-let msg = rx.recv();
-```
-
-Omitting the capacity entirely uses the const-generic variant with `N = 2` and emits a warning recommending an explicit value.
-
----
-
-### `stream` — sequential iterator or Work item
-
-The kernel backend applies the same two-strategy rule as the tokio backend.
-
-#### Sequential stream
-
-If the body has no `wait` and no `task` calls, the stream is emitted as a plain iterator — no workqueue involved. `yield` → `__items.push(...)`, returns `__items.into_iter()`.
-
-```boring
-stream int range(int n):
-    for i in 0..n:
-        yield i
-```
-
-```rust
-// Generated (kernel)
-fn range(n: i64) -> impl Iterator<Item = i64> {
-    let mut __items: kernel::prelude::Vec<i64> = kernel::prelude::Vec::new();
-    for i in 0i64..n { __items.push(i); }
-    __items.into_iter()
-}
-```
-
-#### Async stream — Work item + `KernelReceiver<T, N>`
-
-If the body contains `wait` or `task` calls, the stream becomes a workqueue work item. The function returns a `KernelReceiver<T, N>`; the caller consumes values with `.recv()`. Use `stream<N>` to set the capacity explicitly (defaults to 2).
-
-```boring
-stream<16> string lines(File file):
-    for line in file.readLines():
-        yield line
-```
-
-```rust
-// Generated (kernel) — three pieces:
-struct LinesWork {
-    file: File,
-    tx:   KernelSender<CString, 16>,
-    work: kernel::workqueue::Work<LinesWork>,
-}
-impl kernel::workqueue::Work<LinesWork> for LinesWork {
-    fn run(this: Arc<Self>) {
-        for line in this.file.read_lines() {
-            this.tx.send(line);   // blocks if consumer is slow
-        }
-        // tx dropped → signals end-of-stream
-    }
-}
-fn lines(file: File) -> KernelReceiver<CString, 16> { … }
-```
-
----
-
-### Forbidden constructs and warnings
-
-**Errors** — rejected before emission:
-
-| Construct | Reason |
-|-----------|--------|
-| `float`, floating-point math | FPU disabled in kernel context |
-| `panic(…)` | kernel oops/crash — use `throws` / `Result` |
-| `task def` on `self` with `T&`, `T&mut`, `T'` | lifetime incompatible with a work item |
-
-**Warnings** — emitted with a default, but explicit specification is recommended:
-
-| Construct | Behaviour |
-|-----------|-----------|
-| `channel<T>` without capacity | defaults to const-generic N=2 — specify `channel<T, N>` or `channel<T>(cap)` explicitly |
-| `stream` without `<N>` (async body) | defaults to N=2 — specify `stream<N>` explicitly |
-| `T'shared` | `Rc<T>` replaced by `kernel::sync::Arc<T>` — `Rc` is unavailable in `no_std` |
-
----
-
 ## 32. Debugging & Profiling
 
 Boring provides several layers of debugging support, from language-level builtins to build flags that activate Rust's own tooling.  All flags are orthogonal and composable.
@@ -7132,143 +6895,51 @@ This single command produces a binary that:
 
 ---
 
-## 33. GPU / CUDA
+## Further Reading
 
-Boring supports GPU computing through `kernel` structs — a dedicated declaration form that groups device memory fields, an `init` allocator, device-side helpers, and an anonymous entry point (`def ()`).
+The following documents cover topics in greater depth or address areas still under active design.
 
-The full reference is in [`docs/cuda-module.md`](cuda-module.md). This section covers the essentials.
+### Ownership and qualifiers
 
-### Quick start
+**[Qualifiers — Complete Reference](qualifiers.html)**
+All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and open design questions.
 
-```boring
-kernel Scale:
-    mut [float]'unified buf     # unified host+device DRAM
+**[Binding and mutability](binding-mutability.html)**
+Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
 
-    init([float]'unified data):
-        buf = data
+**[`new` placement operator](new-placement.html)**
+Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
 
-    def ():
-        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
-        buf[i] *= 2.0
+### GPU computing
 
-mut k = Scale(data)                          # instantiate — init called
-mut k = kernel(block = 256) k |> .wait      # launch → wait → get result back
-print k.buf[0]
-```
+**[GPU / CUDA — full reference](gpu-module.html)**
+Complete GPU reference: memory qualifiers, launch expressions, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, simulation mode and profiles, CUDA codegen mapping.
 
-### `kernel` struct
+> **Qualifier inference:** Inside `kernel` structs, GPU memory qualifiers are optional for scalars and fixed-size arrays. A `let` scalar or `let [T, N]` fixed array infers `'const` (constant cache); a `mut`/`var` scalar or fixed array infers `'local` (thread-private). Dynamic arrays (`[T]`) still require an explicit qualifier. Invalid combinations (`[T]'local`, `[T]'const`, `[T, N]'unified`, `[T, N]'global`) are parse errors. See [Qualifier inference](gpu-module.html#qualifier-inference) in the full reference.
 
-```boring
-kernel Name:
-    <binding> [<type>]'<qualifier> <field>   # field declarations
-    ...
+**[Boring GPU — CUDA implementation details](cuda-module.html)**
+Low-level CUDA codegen internals: buffer layout, `cudarc` host API, PTX compilation via `build.rs`, `__shared__` SRAM allocation, memory safety model, and roadmap.
 
-    init(<params>):
-        <body>                               # allocate / initialise fields
+**[Metal backend](metal-backend.html)**
+macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.
 
-    def <helper>(<params>):                  # device-side helper method
-        <body>
+### Compilation targets
 
-    def ():                                  # entry point — invoked once per thread
-        <body>
-```
+**[Rust-for-Linux target](kernel-target.html)**
+`boring build --target kernel`: type mapping in `no_std`, errno-based error handling, `task def` as workqueue work items, const-generic and heap-allocated channels, sequential and async streams.
 
-`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, `'shared`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct.
+**[Boring → Rust-for-Linux mapping](kernel-transpiler-mapping.html)**
+Architecture of the kernel emission backend: how each Boring construct maps to a specific kernel abstraction, validation pass, and generated crate structure.
 
-### GPU memory qualifiers
+**[Transpilation Modes](transpilation-modes.html)**
+The two orthogonal flags (`--threading` and `--mode`) that control memory management and concurrency in the standard Rust backend: `single` vs `multi`, `managed` vs `strict`.
 
-**Kernel-context** (inside `kernel` struct fields):
+### Language internals
 
-| Qualifier | Memory space | Host access |
-|---|---|---|
-| `'unified` | unified DRAM (host + device) | direct |
-| `'global` | device-only DRAM | via `gpu.copy()` |
-| `'shared` | block SRAM (`__shared__`) | no |
-| `'local` | registers / thread-local | no — default |
-| `'const` | constant cache | no |
+**[Interpreter self-hosting plan](interpreter-port-plan.html)**
+How and why the Boring interpreter was rewritten in Boring itself (`boring/interpreter/`), the porting strategy, and the current implementation status.
 
-**Host-context** (bindings outside `kernel` struct):
+### Design drafts and exploration
 
-| Qualifier | Location |
-|---|---|
-| `'gpu'unified` | unified host + device DRAM |
-| `'gpu'global` | device-only DRAM |
-| `'gpu'const` | GPU constant cache |
-
-### Launch expression
-
-```boring
-kernel(block = N) k                         # 1D, N threads per block, 1 block
-kernel(block = N, grid = M) k               # 1D, N threads × M blocks
-kernel(block = (16, 16)) k                  # 2D — grid inferred from kernel shape
-kernel(block = 256, after = h1) k           # ordered after h1
-```
-
-Returns a `KernelHandle`:
-
-```boring
-struct KernelHandle<T>:
-    req bool done()    # true if completed (always true in simulation)
-    req T    wait()    # block until complete, return kernel object
-```
-
-Common pattern with the pipe operator:
-
-```boring
-mut k = kernel(block = 256) k |> .wait     # launch and wait in one expression
-```
-
-### Execution context built-ins
-
-Inside `def ()` and device helpers, `gpu` is available:
-
-| Built-in | CUDA equivalent |
-|---|---|
-| `gpu.thread.x/y/z` | `threadIdx.x/y/z` |
-| `gpu.block.x/y/z` | `blockIdx.x/y/z` |
-| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` |
-| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` |
-| `sync` | `__syncthreads()` |
-
-### `GPU` type
-
-`GPU` is a built-in type for device selection and property queries:
-
-```boring
-let g = GPU(0)
-print "Device: {g.name()} — {g.totalMem() / 1_073_741_824} GB"
-print "SM {g.computeCapability()[0]}.{g.computeCapability()[1]}, warp {g.warpSize()}"
-
-for g in GPU.all():
-    print "[{g.index()}] {g.name()} — {g.freeMem()} bytes free"
-```
-
-| Method | Returns |
-|---|---|
-| `name()` | device model name |
-| `totalMem()` | total VRAM in bytes |
-| `freeMem()` | available VRAM in bytes |
-| `computeCapability()` | `[major, minor]` |
-| `warpSize()` | threads per warp |
-| `maxThreads()` | max threads per block |
-| `maxSharedMem()` | max shared memory per block (bytes) |
-| `index()` | device index |
-
-### Simulation mode
-
-`boring run` executes kernels sequentially on the CPU — each thread's entry point runs in order, `sync` is a no-op, `gpu.thread.x` is the loop index. The same source file works without a GPU, enabling unit tests and CI.
-
-```
-boring run main.br                  # default simulation profile
-boring run --gpu a100 main.br       # simulate A100 device properties
-boring run --gpu h100 main.br       # simulate H100 device properties
-```
-
-Built-in profiles: `default`, `v100`, `a100`, `rtx3090`, `rtx4090`, `h100`. Custom profiles are TOML files (`--gpu path/to/my.toml`).
-
-> **Note:** sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
-
-See [`docs/cuda-module.md`](cuda-module.md) for the full reference: memory safety model, `'shared` SRAM, multi-device, `after =` ordering, atomics, GPU simulation profiles, and CUDA codegen mapping.
-
----
-
+**[Library Distribution Model](library-distribution.html)**
+Design exploration for how Boring packages and libraries are distributed, versioned, and consumed — not yet decided.

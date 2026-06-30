@@ -3,7 +3,7 @@ struct Box:
 
 def int bad():
     let a = Box(val = 42)
-    let b' = a
+    let b = a
     return a.val
 
 let result = bad()

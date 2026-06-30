@@ -56,6 +56,8 @@ def Value eval_expr(Interpreter interp, Expr expr):
                 match val:
                     Value.Uninitialized:
                         throw "variable '{name}' used before being assigned"
+                    Value.Moved(_src):
+                        throw "use of moved value '{name}'"
                     _:
                         val
             else:
@@ -88,6 +90,12 @@ def Value eval_expr(Interpreter interp, Expr expr):
                             Value.Int(0 - n)
                         Value.Float(f):
                             Value.Float(0.0 - f)
+                        Value.Object(neg_inner):
+                            let neg_method_opt = interp.find_method(neg_inner.type_name, "neg")
+                            if let _ = neg_method_opt:
+                                call_method(interp, Value.Object(neg_inner), "neg", [])
+                            else:
+                                throw "cannot negate {neg_inner.type_name}"
                         _:
                             throw "cannot negate {val.type_name()}"
                 UnaryOp.Not:
@@ -132,6 +140,10 @@ def Value eval_expr(Interpreter interp, Expr expr):
                                 new_arr.remove(actual_idx)
                                 assign_target(interp, recv_expr, Value.Array(new_arr))
                             _: nil
+                    Value.Dict(_):
+                        assign_target(interp, recv_expr, result)
+                    Value.Set(_):
+                        assign_target(interp, recv_expr, result)
                     _: nil
             elif method == "push" or method == "append":
                 match result:
@@ -141,12 +153,34 @@ def Value eval_expr(Interpreter interp, Expr expr):
                 match result:
                     Value.Array(_): assign_target(interp, recv_expr, result)
                     _: nil
+            elif method == "set" or method == "put":
+                match result:
+                    Value.Dict(_): assign_target(interp, recv_expr, result)
+                    _: nil
+            elif method == "add":
+                match result:
+                    Value.Set(_): assign_target(interp, recv_expr, result)
+                    _: nil
             result
 
         # Field access
         ExprKind.Field(obj_expr, field_name):
             let obj = eval_expr(interp, obj_expr)
             get_field(interp, obj, field_name)
+
+        ExprKind.OptionalField(obj_expr, field_name):
+            let obj = eval_expr(interp, obj_expr)
+            match obj:
+                Value.Nil: Value.Nil
+                _: get_field(interp, obj, field_name)
+
+        ExprKind.OptionalMethodCall(recv_expr, method, args):
+            let recv = eval_expr(interp, recv_expr)
+            match recv:
+                Value.Nil: Value.Nil
+                _:
+                    let arg_vals = eval_args(interp, args)
+                    call_method(interp, recv, method, arg_vals)
 
         # Index access
         ExprKind.Index(obj_expr, idx_expr):
@@ -416,10 +450,19 @@ def [Value] eval_args(Interpreter interp, [Arg] args):
     var vals = []
     for arg in args:
         let v = eval_expr(interp, arg.value)
-        if let label = arg.label:
-            vals.append(Value.Labeled(label, v))
+        if arg.spread:
+            # Spread: expand struct fields as labeled args
+            match v:
+                Value.Object(spread_inner):
+                    for field in spread_inner.fields:
+                        vals.append(Value.Labeled(field.0, field.1))
+                _: vals.append(v)
         else:
-            vals.append(v)
+            let label_opt = arg.label
+            if let label = label_opt:
+                vals.append(Value.Labeled(label, v))
+            else:
+                vals.append(v)
     vals
 
 # Binary operation dispatch
@@ -457,7 +500,47 @@ def Value eval_binop(Interpreter interp, BinOp op, Expr lhs, Expr rhs):
         _:
             let l = eval_expr(interp, lhs)
             let r = eval_expr(interp, rhs)
-            apply_binop(op, l, r)
+            # Operator overloading: dispatch to struct methods
+            var string? ov_method = nil
+            if op == BinOp.Add: ov_method = "add"
+            elif op == BinOp.Sub: ov_method = "sub"
+            elif op == BinOp.Mul: ov_method = "mul"
+            elif op == BinOp.Div: ov_method = "div"
+            elif op == BinOp.Rem: ov_method = "rem"
+            elif op == BinOp.Eq or op == BinOp.NotEq: ov_method = "eq"
+            elif op == BinOp.Lt: ov_method = "lt"
+            elif op == BinOp.Gt: ov_method = "gt"
+            elif op == BinOp.LtEq: ov_method = "le"
+            elif op == BinOp.GtEq: ov_method = "ge"
+            if let mname = ov_method:
+                match l:
+                    Value.Object(ov_inner):
+                        let ov_found = interp.find_method(ov_inner.type_name, mname)
+                        if let _ = ov_found:
+                            # Recompute the method name to avoid a move issue
+                            var string ov_call_name = "eq"
+                            if op == BinOp.Add: ov_call_name = "add"
+                            elif op == BinOp.Sub: ov_call_name = "sub"
+                            elif op == BinOp.Mul: ov_call_name = "mul"
+                            elif op == BinOp.Div: ov_call_name = "div"
+                            elif op == BinOp.Rem: ov_call_name = "rem"
+                            elif op == BinOp.Lt: ov_call_name = "lt"
+                            elif op == BinOp.Gt: ov_call_name = "gt"
+                            elif op == BinOp.LtEq: ov_call_name = "le"
+                            elif op == BinOp.GtEq: ov_call_name = "ge"
+                            let raw = call_method(interp, Value.Object(ov_inner), ov_call_name, [r])
+                            if op == BinOp.NotEq:
+                                match raw:
+                                    Value.Bool(b): Value.Bool(not b)
+                                    _: raw
+                            else:
+                                raw
+                        else:
+                            apply_binop(op, Value.Object(ov_inner), r)
+                    _:
+                        apply_binop(op, l, r)
+            else:
+                apply_binop(op, l, r)
 
 # Apply a binary operator to two already-evaluated values
 def Value apply_binop(BinOp op, Value l, Value r):
@@ -655,6 +738,24 @@ def Value apply_binop(BinOp op, Value l, Value r):
                     Value.Bool(l.type_name() == type_name)
                 Value.EnumDef(type_name):
                     Value.Bool(l.type_name() == type_name)
+                Value.Object(r_inner):
+                    match l:
+                        Value.Object(l_inner):
+                            let lid_val = l_inner.get_field("__ref_id")
+                            let rid_val = r_inner.get_field("__ref_id")
+                            if let lid = lid_val:
+                                if let rid = rid_val:
+                                    match lid:
+                                        Value.Int(li):
+                                            match rid:
+                                                Value.Int(ri): Value.Bool(li == ri)
+                                                _: Value.Bool(false)
+                                        _: Value.Bool(false)
+                                else:
+                                    Value.Bool(false)
+                            else:
+                                Value.Bool(false)
+                        _: Value.Bool(false)
                 _:
                     Value.Bool(l.type_name() == r.type_name())
         BinOp.IsNot:
@@ -665,6 +766,24 @@ def Value apply_binop(BinOp op, Value l, Value r):
                     Value.Bool(l.type_name() != type_name)
                 Value.EnumDef(type_name):
                     Value.Bool(l.type_name() != type_name)
+                Value.Object(r_inner):
+                    match l:
+                        Value.Object(l_inner):
+                            let lid_val2 = l_inner.get_field("__ref_id")
+                            let rid_val2 = r_inner.get_field("__ref_id")
+                            if let lid2 = lid_val2:
+                                if let rid2 = rid_val2:
+                                    match lid2:
+                                        Value.Int(li2):
+                                            match rid2:
+                                                Value.Int(ri2): Value.Bool(li2 != ri2)
+                                                _: Value.Bool(true)
+                                        _: Value.Bool(true)
+                                else:
+                                    Value.Bool(true)
+                            else:
+                                Value.Bool(true)
+                        _: Value.Bool(true)
                 _:
                     Value.Bool(l.type_name() != r.type_name())
         BinOp.RefEq:
@@ -750,12 +869,34 @@ def Value get_field(Interpreter interp, Value obj, string field_name):
             else if field_name == "variant":
                 Value.Str(variant)
             else:
-                # Try calling as a zero-arg enum method
-                let method_opt = interp.find_method(type_name, field_name)
-                if let _ = method_opt:
-                    call_method(interp, Value.EnumVariant(type_name, variant, fields), field_name, [])
+                # Try named field on enum variant
+                let edecl_opt = interp.get_enum_decl(type_name)
+                var named_field_val = Value.Nil
+                var named_field_found = false
+                if let edecl = edecl_opt:
+                    var vi = 0
+                    while vi < edecl.variants.length:
+                        let ev = edecl.variants[vi]
+                        if ev.name == variant:
+                            var fi = 0
+                            while fi < ev.fields.length:
+                                let vf = ev.fields[fi]
+                                let vf_name_opt = vf.name
+                                if let vf_name = vf_name_opt:
+                                    if vf_name == field_name and fi < fields.length:
+                                        named_field_val = fields[fi]
+                                        named_field_found = true
+                                fi = fi + 1
+                        vi = vi + 1
+                if named_field_found:
+                    named_field_val
                 else:
-                    throw "cannot access field '{field_name}' on enum variant"
+                    # Try calling as a zero-arg enum method
+                    let method_opt = interp.find_method(type_name, field_name)
+                    if let _ = method_opt:
+                        call_method(interp, Value.EnumVariant(type_name, variant, fields), field_name, [])
+                    else:
+                        throw "cannot access field '{field_name}' on enum variant"
         Value.Str(s):
             if field_name == "length":
                 Value.Int(s.length)
@@ -766,6 +907,16 @@ def Value get_field(Interpreter interp, Value obj, string field_name):
                 Value.Int(items.length)
             else:
                 throw "no field '{field_name}' on array"
+        Value.Set(items):
+            if field_name == "length":
+                Value.Int(items.length)
+            else:
+                throw "no field '{field_name}' on set"
+        Value.Dict(entries):
+            if field_name == "length":
+                Value.Int(entries.length)
+            else:
+                throw "no field '{field_name}' on dict"
         Value.Tuple(elems):
             get_tuple_field(elems, field_name)
         Value.Nil:
@@ -850,8 +1001,26 @@ def Value call_method(Interpreter interp, Value recv, string method, [Value] arg
             call_int_method(n, method, args)
         Value.Float(f):
             call_float_method(f, method, args)
+        Value.Tuple(elems):
+            call_tuple_method(interp, elems, method, args)
         _:
             throw "no method '{method}' on {recv_type2}"
+
+def Value call_tuple_method(Interpreter interp, [Value] elems, string method, [Value] args):
+    match method:
+        "map":
+            if args.length != 1:
+                throw "map takes 1 argument"
+            let fn_val = args[0]
+            var result = []
+            for elem in elems:
+                let mapped = call_value(interp, fn_val, [elem])
+                result.append(mapped)
+            Value.Tuple(result)
+        "length":
+            Value.Int(elems.length)
+        _:
+            throw "no method '{method}' on tuple"
 
 def bool string_gt(string a, string b):
     a > b
@@ -1140,8 +1309,8 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                     if let v = n:
                         Value.Int(v)
                     else:
-                        throw "cannot cast string to int"
-                _: throw "cannot cast {val.type_name()} to int"
+                        Value.Nil
+                _: Value.Nil
         "float":
             match val:
                 Value.Float(f): Value.Float(f)
@@ -1151,16 +1320,79 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                     if let v = f:
                         Value.Float(v)
                     else:
-                        throw "cannot cast string to float"
-                _: throw "cannot cast {val.type_name()} to float"
+                        Value.Nil
+                _: Value.Nil
         "string":
-            Value.Str(display_value(interp, val))
+            # Check for as string: conversion block on objects or enums
+            match val:
+                Value.Object(inner):
+                    let obj_type = inner.type_name
+                    let decl_opt = interp.get_struct_decl(obj_type)
+                    var conv_result = Value.Nil
+                    var found_conv = false
+                    if let decl = decl_opt:
+                        var ci = 0
+                        while ci < decl.conversions.length:
+                            let conv = decl.conversions[ci]
+                            let conv_type_name = match conv.ty:
+                                Type.Str: "string"
+                                Type.Named(n): n
+                                _: ""
+                            if conv_type_name == "string":
+                                let child_env = push_scope(interp)
+                                env_define(interp, "self", Value.Object(inner), false)
+                                for field in inner.fields:
+                                    env_define(interp, field.0, field.1, false)
+                                conv_result = eval_block(interp, conv.body)
+                                pop_scope(interp)
+                                found_conv = true
+                                break
+                            ci = ci + 1
+                    if found_conv:
+                        conv_result
+                    else:
+                        Value.Str(display_value(interp, Value.Object(inner)))
+                Value.EnumVariant(enum_type_name, variant, enum_fields):
+                    let self_enum_val = Value.EnumVariant(enum_type_name, variant, enum_fields)
+                    let edecl_opt = interp.get_enum_decl(enum_type_name)
+                    var efound_conv = false
+                    var econv_result = Value.Nil
+                    if let edecl = edecl_opt:
+                        var eci = 0
+                        while eci < edecl.conversions.length:
+                            let econv = edecl.conversions[eci]
+                            let econv_type_name = match econv.ty:
+                                Type.Str: "string"
+                                Type.Named(n): n
+                                _: ""
+                            if econv_type_name == "string" and not efound_conv:
+                                efound_conv = true
+                                let echild_env = push_scope(interp)
+                                env_define(interp, "self", self_enum_val, false)
+                                econv_result = eval_block(interp, econv.body)
+                                pop_scope(interp)
+                            eci = eci + 1
+                    if efound_conv:
+                        econv_result
+                    else:
+                        Value.Str("{enum_type_name}.{variant}")
+                _:
+                    Value.Str(display_value(interp, val))
+        "uint":
+            match val:
+                Value.Int(n): Value.Int(n)
+                Value.Float(f): Value.Int(f as int)
+                Value.Object(uint_inner):
+                    let uv_opt = uint_inner.get_field("value")
+                    if let uv = uv_opt:
+                        cast_value(interp, uv, Type.Uint)
+                    else:
+                        throw "cannot cast {uint_inner.type_name} to uint"
+                _: throw "cannot cast to uint"
         "bool":
             match val:
                 Value.Bool(b): Value.Bool(b)
-                Value.Int(n): Value.Bool(n != 0)
-                Value.Nil: Value.Bool(false)
-                _: Value.Bool(true)
+                _: Value.Nil
         _:
             # Named type cast: check if val is already that type or has a field of that type
             let val_type = val.type_name()
@@ -1168,11 +1400,17 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                 return val
             match val:
                 Value.Object(inner):
-                    # Try field named "base"
+                    # Try field named "base" or "value" (for newtypes), with recursive cast
                     let base_opt = inner.get_field("base")
                     if let bv = base_opt:
                         if bv.type_name() == type_name:
                             return bv
+                    let value_opt = inner.get_field("value")
+                    if let vv = value_opt:
+                        if vv.type_name() == type_name:
+                            return vv
+                        # Try casting the underlying value to the target named type
+                        return cast_value(interp, vv, Type.Named(type_name))
                     throw "cannot cast {val_type} to {type_name}"
                 _:
                     throw "unknown cast target type '{type_name}'"
@@ -1231,7 +1469,15 @@ req string display_value(Interpreter interp, Value val):
                 i = i + 1
             result + "}}"
         Value.Object(obj):
-            obj.type_name.clone()
+            # Newtype: single visible 'value' field → display underlying value
+            var visible_obj_fields = []
+            for f in obj.fields:
+                if not f.0.starts_with("__"):
+                    visible_obj_fields.append(f)
+            if visible_obj_fields.length == 1 and visible_obj_fields[0].0 == "value":
+                display_value(interp, visible_obj_fields[0].1)
+            else:
+                obj.type_name.clone()
         Value.EnumVariant(type_name, variant, fields):
             if fields.length == 0:
                 "{type_name}.{variant}"
@@ -1388,6 +1634,11 @@ def Value eval_stmt_as_expr(Interpreter interp, Stmt stmt):
     match stmt:
         Stmt.Expr(e):
             eval_expr(interp, e)
+        Stmt.Return(ret_stmt):
+            if let e = ret_stmt.value:
+                eval_expr(interp, e)
+            else:
+                Value.Nil
         Stmt.If(s):
             exec_stmt(interp, Stmt.If(s))
             Value.Nil
@@ -1406,7 +1657,13 @@ def Value eval_match_body(Interpreter interp, MatchBody body):
 
 def Value eval_match(Interpreter interp, Value subject, [MatchArm] arms):
     for arm in arms:
-        let [Binding]? matched = try_match_pattern(interp, subject, arm.patterns[0])
+        # Try all or-patterns
+        var [Binding]? matched = nil
+        for pat in arm.patterns:
+            let m = try_match_pattern(interp, subject, pat)
+            if let _ = m:
+                matched = m
+                break
         if let bindings = matched:
             if let guard_cond = arm.match_guard:
                 let child = push_scope(interp)
@@ -1478,14 +1735,19 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                 Value.Object(inner):
                     # Struct destructure: MPoint(x, y) pattern on an object
                     if inner.type_name == variant:
+                        # Filter out hidden fields (prefixed with __)
+                        var visible_fields = []
+                        for f in inner.fields:
+                            if not f.0.starts_with("__"):
+                                visible_fields.append(f)
                         if sub_patterns.length == 0:
                             []
-                        else if sub_patterns.length == inner.fields.length:
+                        else if sub_patterns.length == visible_fields.length:
                             var [Binding] all_bindings = []
                             var ok = true
                             var i = 0
                             while i < sub_patterns.length:
-                                let fv = inner.fields[i].1
+                                let fv = visible_fields[i].1
                                 let [Binding]? sub_match = try_match_pattern(interp, fv, sub_patterns[i])
                                 if let sb = sub_match:
                                     for b in sb:
@@ -1591,6 +1853,19 @@ def void assign_target(Interpreter interp, Expr target, Value val):
                             items[i] = val
                         _:
                             throw "array index must be Int"
+                    assign_target(interp, obj_expr, Value.Array(items))
+                Value.Dict(entries):
+                    var new_entries = entries
+                    var found = false
+                    var di = 0
+                    while di < new_entries.length:
+                        if new_entries[di].0 == idx:
+                            new_entries[di] = (idx, val)
+                            found = true
+                        di = di + 1
+                    if not found:
+                        new_entries.append((idx, val))
+                    assign_target(interp, obj_expr, Value.Dict(new_entries))
                 _:
                     throw "cannot index-assign into {obj.type_name()}"
         _:
@@ -1634,27 +1909,40 @@ def Value instantiate_struct(Interpreter interp, StructDecl decl, [Value] args):
                 if let default_expr = param_default:
                     pval = eval_expr(interp, default_expr)
             fields.append((param.name, pval))
+    let ref_id = interp.next_ref_id
+    interp.next_ref_id = ref_id + 1
+    fields.append(("__ref_id", Value.Int(ref_id)))
     let inner = ObjectInner(type_name: decl.name, fields: fields)
     let result = Value.Object(inner)
     # Run init body if present
     if decl.inits.length > 0:
         let init_decl = decl.inits[0]
         if init_decl.body.length > 0:
-            let child_env = push_scope(interp)
-            env_define(interp, "self", result, true)
-            var ipos2 = 0
-            for param in init_decl.params:
-                var pval = Value.Nil
-                if labeled.has(param.name):
-                    pval = labeled[param.name]
-                elif ipos2 < positional.length:
-                    pval = positional[ipos2]
-                    ipos2 = ipos2 + 1
-                else:
-                    let param_default2 = param.default
-                    if let default_expr2 = param_default2:
-                        pval = eval_expr(interp, default_expr2)
-                env_define(interp, param.name, pval, param.mutable)
-            eval_block(interp, init_decl.body)
-            pop_scope(interp)
+            match result:
+                Value.Object(init_inner):
+                    let child_env = push_scope(interp)
+                    env_define(interp, "self", Value.Object(init_inner), true)
+                    for field in init_inner.fields:
+                        env_define(interp, field.0, field.1, true)
+                    var ipos2 = 0
+                    for param in init_decl.params:
+                        var pval = Value.Nil
+                        if labeled.has(param.name):
+                            pval = labeled[param.name]
+                        elif ipos2 < positional.length:
+                            pval = positional[ipos2]
+                            ipos2 = ipos2 + 1
+                        else:
+                            let param_default2 = param.default
+                            if let default_expr2 = param_default2:
+                                pval = eval_expr(interp, default_expr2)
+                        env_define(interp, param.name, pval, param.mutable)
+                    eval_block(interp, init_decl.body)
+                    for field in init_inner.fields:
+                        let updated_opt = interp.current_env.get(field.0)
+                        if let updated_val = updated_opt:
+                            init_inner.set_field(field.0, updated_val)
+                    pop_scope(interp)
+                    return Value.Object(init_inner)
+                _: nil
     result

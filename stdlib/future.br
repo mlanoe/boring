@@ -66,4 +66,4 @@ ext Future<T>:
 
     # Signal cancellation. The task will receive Error.Cancelled the next time
     # it awaits something. Any subsequent call to `f.value` throws Error.Cancelled.
-    void cancel(): native
+    req void cancel(): native

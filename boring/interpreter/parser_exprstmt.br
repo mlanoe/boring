@@ -13,9 +13,15 @@ def Stmt parse_inline_if_body(mut Parser p) throws:
 
 def [Stmt] parse_inline_stmts(mut Parser p) throws:
     var stmts = [parse_inline_stmt(p)]
-    while parser_check(p, "Semicolon"):
-        parser_advance(p)
-        if parser_is_newline(p) or parser_check(p, "Eof"):
+    while true:
+        if parser_check(p, "Semicolon"):
+            parser_advance(p)
+        if parser_is_newline(p) or parser_check(p, "Eof") or parser_check(p, "Dedent") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace") or parser_check(p, "While") or parser_check(p, "Else") or parser_check(p, "Elif"):
+            break
+        if not parser_check(p, "Semicolon") and (parser_is_newline(p) or parser_check(p, "Eof")):
+            break
+        # stop if no progress (Newline, Dedent, or end)
+        if parser_check(p, "Newline"):
             break
         stmts.append(parse_inline_stmt(p))
     stmts
@@ -73,6 +79,8 @@ def string? multiplicative_op_from_peek(mut Parser p):
 
 def Stmt parse_inline_stmt_impl(mut Parser p, bool stop_at_else) throws:
     let line = parser_line(p)
+    if parser_check(p, "Let") or parser_check(p, "Var") or parser_check(p, "Mut"):
+        return parse_stmt(p)
     if parser_check(p, "Return"):
         parser_advance(p)
         let Expr? value = if parser_is_newline(p) or parser_check(p, "Eof"):
@@ -1116,7 +1124,7 @@ def LetStmt parse_let_stmt_pub(mut Parser p, bool is_pub) throws:
             (parser_expect_ident(p), nil)
         let (string lz_name, Type? lz_ty) = name_ty
         parser_expect_newline_soft(p)
-        return LetStmt(mutable: false, is_pub: is_pub, is_static: is_static, is_lazy: true, name: lz_name, ty: lz_ty, value: nil, is_move: false, line: line)
+        return LetStmt(mutable: false, is_pub: is_pub, is_static: is_static, is_lazy: true, name: lz_name, ty: lz_ty, value: nil, line: line)
     let name_ty = if parser_is_type_start_before_ident(p):
         let base = parse_type(p)
         let ty = parse_type_qualifier(p, base)
@@ -1132,29 +1140,23 @@ def LetStmt parse_let_stmt_pub(mut Parser p, bool is_pub) throws:
         let name = parser_expect_ident(p)
         if parser_check(p, "Tick"):
             let next_kind = token_kind_name(parser_peek_token_at(p, 1).kind)
-            if next_kind == "Eq":
-                parser_advance(p)
-                parser_expect(p, "Eq")
-                let value = parse_expr(p)
-                parser_expect_newline_soft(p)
-                return make_let_stmt(mutable, is_pub, is_static, name, nil, value, true, line)
-            elif next_kind == "Ident" or next_kind == "Task" or next_kind == "Guard":
+            if next_kind == "Ident" or next_kind == "Task" or next_kind == "Guard":
                 let placeholder = type_named("_")
                 let qualified = parse_type_qualifier(p, placeholder)
                 parser_expect(p, "Eq")
                 let value = parse_expr(p)
                 parser_expect_newline_soft(p)
                 let ty = infer_type_from_constructor(qualified, value)
-                return make_let_stmt(mutable, is_pub, is_static, name, ty, value, false, line)
+                return make_let_stmt(mutable, is_pub, is_static, name, ty, value, line)
         (name, nil)
     let (string nt_name, Type? nt_ty) = name_ty
     if not parser_check(p, "Eq"):
         parser_expect_newline_soft(p)
-        return make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, nil, false, line)
+        return make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, nil, line)
     parser_expect(p, "Eq")
     let value = parse_expr(p)
     parser_expect_newline_soft(p)
-    make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, value, false, line)
+    make_let_stmt(mutable, is_pub, is_static, nt_name, nt_ty, value, line)
 
 def LetDestructureStmt parse_let_destructure(mut Parser p, bool mutable, int line) throws:
     let parens = parser_eat(p, "LParen")

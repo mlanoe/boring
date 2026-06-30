@@ -119,13 +119,15 @@ impl Interpreter {
                         target_env.borrow_mut().mark_owned_var(&s.name);
                     }
                 }
-                // `let b' = a` — move: only meaningful for owned (non-copy) values.
-                // For T'copy / T'shared / T'local, `let b = a` already gives
-                // the right semantics; the `'` is a no-op and the source is NOT invalidated.
-                if s.is_move && !val_is_copy {
-                    target_env.borrow_mut().mark_owned_var(&s.name);
+                // Move by default: `let b = a` moves non-copy values.
+                // Primitive and shared types (Int, Float, Bool, Str, Nil) are Copy and are not moved.
+                // Borrow annotations (`T&`, `var T& ref = p`) alias rather than move.
+                let is_borrow = s.ty.as_ref().map(|ty| {
+                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
+                }).unwrap_or(false);
+                if !val_is_copy && !is_borrow {
                     if let ExprKind::Var(src) = &s_val.kind {
-                        env.borrow_mut().invalidate(src);
+                        env.borrow_mut().set_moved(src);
                     }
                 }
                 Ok(())
@@ -368,8 +370,15 @@ impl Interpreter {
     pub(crate) fn exec_if_let(&mut self, s: &IfLetStmt, env: EnvRef) -> Result<(), Signal> {
         let child = Env::child(Rc::clone(&env));
         if self.eval_cond_clauses(&s.clauses, &child)? {
-            self.exec_block(&s.then_body, child)?;
-        } else if let Some(else_body) = &s.else_body {
+            return self.exec_block(&s.then_body, child);
+        }
+        for branch in &s.elif_branches {
+            let elif_child = Env::child(Rc::clone(&env));
+            if self.eval_cond_clauses(&branch.clauses, &elif_child)? {
+                return self.exec_block(&branch.body, elif_child);
+            }
+        }
+        if let Some(else_body) = &s.else_body {
             let else_child = Env::child(Rc::clone(&env));
             self.exec_block(else_body, else_child)?;
         }
