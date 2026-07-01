@@ -116,16 +116,35 @@ print "Hello, {name}!"
 | `uint` | `u64` |
 | `float` | `f64` |
 | `bool` | `bool` |
-| `string` | `Arc<str>` (default) or `&'static str` (strict mode, literals only) |
+| `string` | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread) — or `&'static str` in strict mode (literals only) |
 | `[T]` | `Vec<T>` |
-| `{K: V}` | `HashMap<K, V>` |
+| `{K=V}` | `HashMap<K, V>` — **not** `{K: V}`, that's a different (ordered) map used only in kernel/GPU code |
+| `{T}` | `HashSet<T>` |
 
 ### `string` implementation
 
-- **Default mode**: `Arc<str>` — enables sharing and arbitrary value lifetimes.
+- **Default mode**: `Rc<str>` (`--threading single`) or `Arc<str>` (`--threading multi`) — enables sharing and arbitrary value lifetimes.
 - **Strict mode**: `&'static str` — restricted to compile-time string literals; forbidden for computed or interpolated values.
 
 The mode is inferred by the transpiler from usage context; there is no explicit qualifier to force it.
+
+## Collections
+
+Dict and set literals/types use `=`, **not** `:` — a common mistake:
+
+```boring
+let [int] arr = [1, 2, 3]
+let {string=int} scores = {"Alice" = 90, "Bob" = 85}   # NOT {"Alice": 90} — that's not valid syntax
+let {int} unique = {1, 2, 3}                            # set — deduplicates
+```
+
+Index assignment (`arr[i] = v`, `dict[k] = v`) mutates in place and requires a `var`/`mut` binding — `let` raises `cannot assign to immutable variable`. Dict assignment inserts the key if absent, updates it otherwise. Sets are **not** index-assignable (`s[i] = v` is a compile/runtime error) — use `s.add(v)` / `s.remove(v)`.
+
+```boring
+var {string=int} md = {"a" = 1}
+md["x"] = 99     # insert
+md["a"] = 100    # update
+```
 
 ## Project structure
 
