@@ -36,6 +36,8 @@ def string val_type_name(Value v):
         _: "unknown"
 
 def Value call_method(Interpreter interp, Value recv, string method_name, [Value] args):
+    if method_name == "clone" and args.length == 0:
+        return recv
     let recv_type = recv.type_name()
     match recv:
         Value.Str(s):
@@ -927,6 +929,23 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                     throw "unknown method {method_name} on tuple"
 
         Value.Object(inner):
+            # Channel TX send method
+            if inner.type_name == "__ChannelTx__" and method_name == "send":
+                let ch_id_opt = inner.get_field("__ch_id__")
+                if let ch_id_val = ch_id_opt:
+                    let ch_key = match ch_id_val:
+                        Value.Str(s): s
+                        _: ""
+                    if ch_key != "":
+                        let val_to_send = args[0] else Value.Nil
+                        let queue_opt = interp.channel_queues.get(ch_key)
+                        if let queue = queue_opt:
+                            var mut_queue = queue
+                            mut_queue.append(val_to_send)
+                            var {string=[Value]} cq = interp.channel_queues
+                            cq[ch_key] = mut_queue
+                            interp.channel_queues = cq
+                return Value.Nil
             # Struct method call
             let type_name = inner.type_name.clone()
             let method_decl_opt = interp.find_method(type_name, method_name)
@@ -950,6 +969,9 @@ def Value call_method(Interpreter interp, Value recv, string method_name, [Value
                 pop_scope(interp)
                 result
             else:
+                # `upgrade()` on weak ref — in the interpreter all refs are strong, just return self
+                if method_name == "upgrade":
+                    return Value.Object(inner)
                 throw "unknown method {method_name} on {type_name}"
 
         Value.EnumDef(type_name):

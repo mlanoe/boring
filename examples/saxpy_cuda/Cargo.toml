@@ -1,0 +1,11 @@
+[package]
+name = "saxpy"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "saxpy"
+path = "src/main.rs"
+
+[dependencies]
+cudarc = { version = "0.19", features = ["driver", "nvrtc"] }

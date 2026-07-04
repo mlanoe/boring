@@ -15,6 +15,7 @@ item            ::= attr* "pub"? use_decl
                   | attr* "pub"? enum_decl
                   | attr* "pub"? trait_decl
                   | ext_decl
+                  | kernel_decl      # GPU kernel struct (--target cuda / --target metal)
                   | mod_decl
                   | alias_decl       # top-level type alias: `use Name as Type`
                   | let_stmt
@@ -89,7 +90,7 @@ mod_path        ::= IDENT ("." IDENT)*
 #   HashMap / BTreeMap  →  {K=V}  (Dict)
 #   HashSet / BTreeSet  →  {T}    (Set)
 #   Vec / VecDeque      →  [T]    (Array)
-#   string              →  Arc<String>
+#   string              →  Arc<str>
 #   Box, Rc, Arc, Option, Result  →  opaque
 #   Duration, Instant   →  opaque time types (see wait / timeout)
 #
@@ -295,6 +296,69 @@ ext_member      ::= "pub"? fn_decl
                   | as_decl
                   | assoc_type_decl   # associated type definition
                   | type_method_sig   # type-level method signature
+
+# ─── GPU kernel structs ───────────────────────────────────────────────────────
+#
+# `kernel` structs declare GPU-resident data and the entry-point thread body.
+# They transpile to CUDA C (--target cuda) or MSL (--target metal).
+#
+# Declaration form:
+#   kernel Name:
+#       <binding> [<type>]['<gpu_qual>] <field>     # field with optional GPU qualifier
+#       ...
+#       init(<params>):                              # host-side allocator
+#           <body>
+#       def <helper>(<params>):                      # device-side helper method
+#           <body>
+#       def ():                                      # entry point — one call per thread
+#           <body>
+#
+# Launch form (host side):
+#   kernel(<launch_args>) expr                       # returns KernelHandle<T>
+#   kernel(<launch_args>) expr |> .wait              # launch and block until done
+#
+# Launch args:
+#   block = <int>          — threads per block (1-D); required
+#   grid  = <int>          — blocks per grid (1-D); optional, auto-inferred from data size
+#   block = (<int>, <int>, <int>)  — 3-D block dimensions
+#   grid  = (<int>, <int>, <int>)  — 3-D grid dimensions
+#
+# GPU built-ins (device side only, no `use` needed):
+#   gpu.thread.x / .y / .z      — thread index within block
+#   gpu.block.x  / .y / .z      — block index within grid
+#   gpu.block_dim.x / .y / .z   — block dimensions
+#   gpu.grid_dim.x  / .y / .z   — grid dimensions
+#   sync                         — barrier: wait for all threads in the block
+#
+# GPU memory qualifiers (kernel-context only — replace standard ownership qualifiers):
+#
+#   'unified  — unified DRAM (host + device); host can read/write directly.
+#               On Apple Silicon (Metal), zero-copy. On CUDA x86: cudaMallocManaged.
+#   'global   — device-only DRAM; host accesses via gpu.copy(). CUDA: __global__.
+#   'shared   — block SRAM shared by all threads in a block. CUDA: __shared__. MSL: threadgroup.
+#   'local    — thread-private (registers). CUDA: local variables. MSL: default.
+#   'const    — constant cache; read-only. CUDA: __constant__. MSL: constant buffer.
+#
+# Qualifier inference for kernel fields (explicit qualifier may be omitted):
+#   let T field       →  'const   (scalar `let` → constant cache)
+#   mut T field       →  'local   (scalar `mut`/`var` → thread-private register)
+#   var T field       →  'local   (idem)
+#   let [T, N] field  →  'const   (fixed array `let` → constant cache)
+#   mut [T, N] field  →  'local   (fixed array `mut`/`var` → thread-private)
+#   Dynamic [T] always requires an explicit qualifier ('unified, 'global, or 'shared).
+#
+# Host-side binding qualifiers for kernel results (outside kernel struct):
+#   T'unified  — returned slice lives in unified memory; accessible on both host and device
+
+kernel_decl     ::= "kernel" IDENT ":" NEWLINE INDENT
+                      kernel_member+
+                    DEDENT
+
+kernel_member   ::= kernel_field_decl
+                  | init_decl
+                  | fn_decl
+
+kernel_field_decl ::= ("let" | "mut" | "var") type IDENT NEWLINE
 
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
 mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
@@ -699,15 +763,14 @@ type            ::= primitive_type
 #   T' /  T'heap    →  Box<T>              heap-owned, exclusive move
 #   T'copy          →  T (Copy)            copied on every use: int, float, bool, …
 #   T'const         →  &'static T          compile-time constant / string literal
-#   T'auto          →  Rc<T>              ref-counted, single-thread
-#   T'task          →  Arc<T>             ref-counted, thread-safe (read-only sharing)
+#   T'shared        →  Rc<T>              ref-counted, single-thread
 #   T'actor         →  Arc<Mutex<T>>      shared mutable; all accesses auto-locked
 #   T'guard         →  Arc<RwLock<T>>     concurrent reads, exclusive writes
-#   T'weak          →  Weak<T>            non-owning; .upgrade() → T'auto?
+#   T'weak          →  Weak<T>            non-owning; .upgrade() → T'shared?
 #
 # Built-in type aliases (use these instead of explicit qualifiers):
 #   str    →  String'const  →  &str
-#   string →  String'task   →  Arc<str>
+#   string →  String'shared →  Arc<str>  (single-thread: Rc<str>; multi-thread: Arc<str>)
 #   int    →  Int'copy      →  i64
 #   uint   →  Uint'copy     →  u64
 #   float  →  Float'copy    →  f64
@@ -726,13 +789,12 @@ owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "
 #   T&              →  &T             plain immutable borrow
 #   var T&          →  &mut T         mutable borrow (`var` prefix absorbed into type)
 #   T&heap          →  &Box<T>        borrow a heap value
-#   T&auto          →  &Rc<T>         borrow an Rc (use sparingly)
-#   T&task          →  &Arc<T>        borrow an Arc (use sparingly)
+#   T&shared        →  &Rc<T>         borrow an Rc (use sparingly)
 #   T&option        →  &Option<T>     borrow an optional
 #   T&weak          →  &Weak<T>       borrow a weak pointer
 #   T&a             →  &'a T          borrow with explicit lifetime 'a
 #
-# Alias pattern: `use NodeRef as Node'task;  def walk(NodeRef& n):`
+# Alias pattern: `use NodeRef as Node'shared;  def walk(NodeRef& n):`
 # → the `&` after an alias resolves to the smart-pointer borrow of the aliased type.
 #
 # Lifetime letter is a single ASCII lowercase letter: a, b, c, …
@@ -955,6 +1017,7 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # break, continue, self, init,
 # try, catch, throw, throws, defer,
 # task, set, wait, join, channel,
+# kernel,
 # Note: `select` was removed in 0.3.0 — use Future.done() polling instead.
 # true, false, nil, is,
 # native, stream, yield, static, void, pass, mod,
@@ -968,6 +1031,10 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   boring build <file.br>                 — standard Rust + tokio (default)
 #   boring build --target kernel <file.br> — Rust-for-Linux (no_std + kernel crates)
 #   boring build --target kernel           — kernel project from boring.toml
+#   boring build --target cuda <file.br>   — CUDA GPU backend (cudarc + PTX via nvcc)
+#   boring build --target cuda             — CUDA project from boring.toml
+#   boring build --target metal <file.br>  — Metal GPU backend (macOS, MSL compiled at runtime)
+#   boring build --target metal            — Metal project from boring.toml
 #   boring build --emit-rust <file.br>     — print generated Rust to stdout, no project created
 #
 # Debugging and profiling flags (orthogonal, composable, stable unless noted):

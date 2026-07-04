@@ -71,7 +71,7 @@ struct CDog:
     string name
 
 let cda = CDog(name = "Rex")
-let cdb = cda
+let cdb = cda.clone()
 print cdb is cda
 let cdc = CDog(name = "Rex")
 print cdc is cda

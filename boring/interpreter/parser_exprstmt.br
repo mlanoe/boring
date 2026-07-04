@@ -495,6 +495,9 @@ def Expr parse_primary(mut Parser p) throws:
     if parser_check(p, "Void"):
         parser_advance(p)
         return make_void_expr(line)
+    if parser_check(p, "Pass"):
+        parser_advance(p)
+        return make_nil_expr(line)
     if parser_check(p, "SelfKw"):
         parser_advance(p)
         return make_var_expr("self", line)
@@ -543,7 +546,7 @@ def Expr parse_primary(mut Parser p) throws:
                 acc = make_method_call(acc, next, args, line)
             else:
                 acc = make_field_expr(acc, next, line)
-        let body_op = shorthand_binop_from_peek(p)
+        let body_op = colon_closure_binop_from_peek(p)
         var body_expr = acc
         if let op = body_op:
             parser_advance(p)
@@ -771,7 +774,11 @@ def [StringSegment] resolve_interp(mut Parser p, [RawInterpPart] parts, int line
                     segments.append(segment_expr(expr))
             HoleFormatted(code, fmt):
                 if string_trim(code) == "":
-                    segments.append(segment_lit("{:{fmt}}"))
+                    var spec_text = "{{"
+                    spec_text = spec_text + ":"
+                    spec_text = spec_text + fmt
+                    spec_text = spec_text + "}}"
+                    segments.append(segment_lit(spec_text))
                 else:
                     let hole_tokens = lex(code)
                     let sub_parser = make_parser(hole_tokens)
@@ -915,6 +922,10 @@ def [Stmt] parse_block(mut Parser p) throws:
     stmts
 
 def [Stmt] parse_fn_body(mut Parser p) throws:
+    if parser_check(p, "Native"):
+        parser_advance(p)
+        parser_expect_newline_soft(p)
+        return []
     if parser_is_newline(p) or parser_check(p, "Comment"):
         parse_block(p)
     else:
@@ -1042,9 +1053,13 @@ def Stmt parse_stmt(mut Parser p) throws:
     if parser_check(p, "Use"):
         let after_ident = parser_token_at_offset_is(p, 2, "As")
         if after_ident:
+            parser_advance(p)  # consume `use`
             return stmt_alias(parse_alias_decl(p))
         else:
-            throw "use inside a function body must be a type alias: `use Name as Type`"
+            # skip entire `use` line (import-style, not alias)
+            while not parser_is_newline(p) and not parser_check(p, "Eof"):
+                parser_advance(p)
+            return stmt_expr(make_nil_expr(parser_line(p)), parser_line(p))
     if parser_check(p, "Pub"):
         parser_advance(p)
         if parser_check(p, "Static") or parser_check(p, "Let") or parser_check(p, "Var"):

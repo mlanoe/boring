@@ -179,4 +179,7 @@ struct Token:
             TokenKind.Native: "native"
             TokenKind.Pass: "pass"
             TokenKind.With: "with"
+            TokenKind.Wait: "wait"
+            TokenKind.Task: "task"
+            TokenKind.Void: "void"
             _: ""

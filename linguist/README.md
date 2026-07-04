@@ -11,6 +11,7 @@ This directory contains everything needed to submit Boring to
 | `samples/hello.br` | Basics: bindings, functions, structs, enums, collections |
 | `samples/traits.br` | Traits, generics, closures, pipe operator, error handling |
 | `samples/async.br` | Async tasks, channels, ownership qualifiers, streams, modules |
+| `samples/gpu.br` | GPU kernel structs, CUDA/Metal targets, GPU memory qualifiers |
 | `languages.yml` | Block to insert into `lib/linguist/languages.yml` |
 
 ## Submission steps

@@ -420,6 +420,32 @@ impl Transpiler {
                 }
             }
         }
+        // Actor local-var field mutating method: `actor_var.field.method(args)`.
+        // When `actor_var` is `T'actor` (Rc<RefCell<T>> / Arc<Mutex<T>>), field reads use
+        // `borrow()` / `lock().unwrap()`, but *mutating* method calls on those fields need
+        // write access. Emit `actor_var.borrow_mut().field.method(args)` (single) or
+        // `actor_var.lock().unwrap().field.method(args)` (multi).
+        // Only applies to methods that require `&mut self` on the field — read-only methods
+        // (get, len, contains, …) fall through to more specific handlers below.
+        const ACTOR_FIELD_MUTATING: &[&str] = &[
+            "append", "add", "push", "extend", "insert", "set", "remove", "remove_at",
+            "pop", "clear", "sort", "sort_by", "reverse", "shuffle", "dedup",
+            "retain", "truncate", "drain",
+        ];
+        if ACTOR_FIELD_MUTATING.contains(&method) {
+            if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
+                if let ExprKind::Var(v) = &inner_obj.kind {
+                    if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                        let (rust_method, extra_wrap) = map_method(method, args.len());
+                        let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                        let guard = self.mutex_var_write(v, v);
+                        let call = format!("{}.{}.{}({})", guard, field_name, rust_method, args_s.join(", "));
+                        let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                        return call;
+                    }
+                }
+            }
+        }
         // Special case: read_line(string_arc_var) — Arc<str> is immutable so we use a
         // temporary String buffer then assign back.
         // tokio BufReader (local var) → async (.await.unwrap_or(0))

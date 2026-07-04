@@ -14,6 +14,10 @@ struct Interpreter:
     var bool has_pending_throw
     var Value pending_throw_val
     var int next_ref_id = 0
+    var {string=[Value]} channel_queues = {}
+    var int next_channel_id = 0
+    var bool in_stream_fn = false
+    var [Value] stream_yields = []
 
     def void set_pending_return(Value v):
         has_pending_return = true
@@ -401,6 +405,9 @@ def void register_stdlib(Interpreter interp):
     env_define(env, "PI", Value.Float(3.141592653589793), false)
     env_define(env, "E", Value.Float(2.718281828459045), false)
 
+    for math_fn in ["sin", "cos", "tan", "round", "floor", "ceil", "pow", "log", "ln", "log2", "log10"]:
+        env_define(env, math_fn, Value.NativeFn(math_fn, Value.Nil), false)
+
     let hashmap_fn = Value.NativeFn("HashMap", Value.Nil)
     env_define(env, "HashMap", hashmap_fn, false)
 
@@ -409,6 +416,16 @@ def void register_stdlib(Interpreter interp):
 
     let vec_fn = Value.NativeFn("Vec", Value.Nil)
     env_define(env, "Vec", vec_fn, false)
+
+    env_define(env, "channel", Value.NativeFn("channel", Value.Nil), false)
+    env_define(env, "drop", Value.NativeFn("drop", Value.Nil), false)
+
+    # Result constructors: Ok(v) and Err(e)
+    env_define(env, "Ok", Value.EnumVariant("Result", "Ok", []), false)
+    env_define(env, "Err", Value.EnumVariant("Result", "Err", []), false)
+    # Option constructors: Some(v)
+    env_define(env, "Some", Value.EnumVariant("Option", "Some", []), false)
+    env_define(env, "None", Value.EnumVariant("Option", "None", []), false)
 
 # ─── new_interpreter ──────────────────────────────────────────────────────────
 
@@ -425,7 +442,11 @@ def Interpreter'actor new_interpreter():
         pending_return_val = Value.Nil,
         next_ref_id = 0,
         has_pending_throw = false,
-        pending_throw_val = Value.Nil
+        pending_throw_val = Value.Nil,
+        channel_queues = {},
+        next_channel_id = 0,
+        in_stream_fn = false,
+        stream_yields = []
     )
     register_stdlib(interp)
     interp
@@ -442,7 +463,21 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Struct(decl):
             let sname = decl.name
             interp.set_struct_decl(sname, decl)
-            interp.set_method_decls(sname, decl.methods)
+            # Collect own methods into final list; build a comma-separated name index
+            var all_struct_methods = [FnDecl]{}
+            var own_names_str = ","
+            for m in decl.methods:
+                own_names_str = own_names_str + m.name + ","
+                all_struct_methods.append(m)
+            # Merge trait default implementations for each declared protocol
+            for proto_name in decl.protocols:
+                let trait_key = "__trait__" + proto_name
+                let trait_methods_opt = interp.struct_methods.get(trait_key)
+                if let trait_methods = trait_methods_opt:
+                    for tm in trait_methods:
+                        if not own_names_str.contains("," + tm.name + ","):
+                            all_struct_methods.append(tm)
+            interp.set_method_decls(sname, all_struct_methods)
             env_define(interp.global_env, sname, Value.StructDef(sname), false)
         Item.Enum(decl):
             let ename = decl.name
@@ -451,23 +486,47 @@ def void exec_item(mut Interpreter interp, Item item):
             env_define(interp.global_env, ename, Value.EnumDef(ename), false)
         Item.Trait(decl):
             env_define(interp.global_env, decl.name, Value.Nil, false)
+            # Store default implementations under a special key for later lookup
+            if decl.defaults.length > 0:
+                interp.set_method_decls("__trait__" + decl.name, decl.defaults)
         Item.Let(stmt):
-            env_define(interp.current_env, stmt.name, Value.Uninitialized, true)
+            if stmt.is_lazy:
+                interp.current_env.define_lazy(stmt.name)
+            else:
+                env_define(interp.current_env, stmt.name, Value.Uninitialized, true)
         Item.Alias(decl):
-            env_define(interp.global_env, decl.name, Value.Nil, false)
+            # Resolve the aliased type — look up the base type name in the env
+            let alias_type_name = match decl.ty:
+                Type.Named(n): n
+                Type.Qualified(inner, _):
+                    match inner:
+                        Type.Named(n2): n2
+                        _: ""
+                _: ""
+            let alias_val = if alias_type_name.length > 0:
+                let found = interp.global_env.get(alias_type_name)
+                found else Value.Nil
+            else:
+                Value.Nil
+            env_define(interp.global_env, decl.name, alias_val, false)
         Item.Stmt(stmt):
             exec_stmt(interp, stmt)
         Item.Use(decl):
             env_define(interp.current_env, "__use__", Value.Nil, true)
         Item.Ext(decl):
-            # Register extension methods on the target type
+            # Register extension methods on the target type; ext overrides struct methods
             let existing_methods_opt = interp.struct_methods.get(decl.type_name)
             var all_methods = [FnDecl]{}
+            # Build name index of ext methods for fast dedup check
+            var ext_names_str = ","
+            for m in decl.methods:
+                ext_names_str = ext_names_str + m.name + ","
+                all_methods.append(m)
+            # Append existing methods that are not overridden by ext
             if let existing = existing_methods_opt:
                 for m in existing:
-                    all_methods.append(m)
-            for m in decl.methods:
-                all_methods.append(m)
+                    if not ext_names_str.contains("," + m.name + ","):
+                        all_methods.append(m)
             interp.set_method_decls(decl.type_name, all_methods)
         Item.Mod(decl):
             for sub_item in decl.items:

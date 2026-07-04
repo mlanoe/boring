@@ -1,0 +1,77 @@
+# Boring language sample — GPU kernel structs (CUDA / Metal)
+# Build with: boring build --target cuda   or   boring build --target metal
+
+# ── SAXPY: y = alpha * x + y ──────────────────────────────────────────────────
+
+kernel Saxpy:
+    let float alpha             # 'const inferred — scalar let → constant cache
+    let [float]'global x        # device-only read array
+    mut [float]'global y        # device-only write array
+
+    init(float a, [float] xs, [float] ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+let n = 1024
+let xs = (0..n).map((i): i as float)
+let ys = (0..n).map((_): 1.0)
+
+mut k = Saxpy(2.0, xs, ys)
+mut k = kernel(block = 256) k |> .wait
+
+print "y[0] = {k.y[0]}"    # 1.0
+print "y[1] = {k.y[1]}"    # 3.0
+
+# ── Shared-memory tile reduction ───────────────────────────────────────────────
+
+kernel TileSum:
+    let [float]'global  data
+    mut [float]'unified result
+    mut [float, 256]'shared tile    # block SRAM — 256 floats per block
+
+    init([float] data, [float]'unified result):
+        self.data   = data
+        self.result = result
+
+    def ():
+        let i    = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        let tid  = gpu.thread.x
+        tile[tid] = data[i]
+        sync                        # barrier — wait for all threads in block
+
+        var stride = gpu.block_dim.x / 2
+        while stride > 0:
+            if tid < stride:
+                tile[tid] = tile[tid] + tile[tid + stride]
+            sync
+            stride = stride / 2
+
+        if tid == 0:
+            result[gpu.block.x] = tile[0]
+
+let data    = (0..1024).map((i): i as float)
+mut partial = [float]'unified([0.0] * 4)
+
+mut ts = TileSum(data, partial)
+mut ts = kernel(block = 256, grid = 4) ts |> .wait
+
+let total = partial.reduce(0.0, (acc, v): acc + v)
+print "sum = {total}"
+
+# ── Ownership qualifiers on host side ─────────────────────────────────────────
+
+# T'unified  — readable on both host and device (zero-copy on Apple Silicon)
+let [float]'unified shared_buf = [0.0] * 512
+
+# Regular task qualifier for async orchestration across GPU launches
+task void pipeline(float alpha):
+    mut s = Saxpy(alpha, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
+    mut s = kernel(block = 3) s |> .wait
+    print "done: y[0]={s.y[0]}"
+
+task pipeline(2.5) |> .wait

@@ -5,6 +5,71 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.0] — 2026-07-04 *(interpreter: 65/65 tests passing)*
+
+### Added (post-release)
+
+- **Self-hosted interpreter — streams, channels, tasks, generics complete** — the interpreter now passes all 65 test cases:
+  - **`stream` functions** — `exec_stream_fn` collects all `yield` values into an array; `Yield` statements inside a stream body append to `interp.stream_yields` instead of returning a `YieldSignal`; `for` loops over stream results work transparently.
+  - **`channel<T>(N)`** — `channel` expressions create a sender/receiver pair backed by `interp.channel_queues` (a `{string=[Value]}` map keyed by a unique channel ID). `tx.send(v)` appends to the queue; `for n in rx:` drains it via `eval_channel_rx_for` / `collect_iterable_with_interp`.
+  - **`task` expressions** — evaluated synchronously in the interpreter; the result is returned immediately as a plain value (no actual concurrency).
+  - **Generic calls `f<T>(args)`** — `ExprKind.GenericCall` is handled: type arguments are ignored and the call is evaluated as a regular function call.
+  - **`parser_peek_is_generic_call`** — detects `Name<Type>(` at the current position (checks offsets 1–4 for `Lt`, a type-like token, and `Gt`/`LParen`).
+
+- **Transpiler fix — dict field index-assignment** — `self.field[k] = v` where `field` is a `{K=V}` dict was falling through to the array-index path, emitting `self.field[(k) as usize]` instead of `self.field.insert(k, v)`. The transpiler now matches the same codegen as local dict variables.
+
+### Added
+
+- **GPU kernel structs — CUDA and Metal backends** — `kernel` structs declare device-resident data (fields with GPU memory qualifiers), a host-side `init` allocator, optional device-side helpers, and an anonymous entry-point `def ()` executed once per thread. The same source compiles unchanged to both backends:
+  - `boring build --target cuda` — emits a Rust + cudarc project with a PTX kernel compiled via `nvcc`.
+  - `boring build --target metal` — emits a Rust + Metal project with MSL compiled at runtime via `newLibraryWithSource` (no toolchain beyond macOS required).
+  - Launch syntax: `kernel(block = 256) k` returns a `KernelHandle<T>`; `|> .wait` synchronises and returns the updated struct.
+  - GPU memory qualifiers (`'unified`, `'global`, `'shared`, `'local`, `'const`) replace standard ownership qualifiers inside `kernel` struct fields. Scalar `let`/`mut`/`var` fields infer their qualifier automatically.
+  - GPU built-ins available device-side without `use`: `gpu.thread.x/y/z`, `gpu.block.x/y/z`, `gpu.block_dim.x/y/z`, `gpu.grid_dim.x/y/z`, `sync`.
+  - `gpu-profiles/` directory — pre-tuned block/grid defaults for common GPUs (A100, H100, RTX 3090/4090, V100).
+
+- **Qualifier inference for `kernel` struct fields** — the transpiler infers `'const` for scalar/fixed-array `let` fields and `'local` for `mut`/`var` fields; explicit qualifiers remain valid and always take precedence. Dynamic `[T]` fields still require an explicit qualifier.
+
+- **Self-hosted interpreter — major expansion** — the Boring-in-Boring interpreter (`boring/interpreter/`) received a large batch of new capabilities:
+  - **Macro call evaluation** — `vec!`, `format!`, `println!`, `print!`, `concat!`, `assert!`, `assert_eq!` are fully evaluated by the interpreter.
+  - **Trailing closure detection** — `parser_peek_is_trailing_closure` and `parser_peek_is_trailing_closure_no_paren` are now implemented; the parser correctly distinguishes trailing `(params): body` from regular argument lists.
+  - **Typed closure detection** — `parser_peek_is_typed_closure` delegates to `parser_is_type_start_before_ident`; borrow-annotated types (`T&`) are handled in the type-start lookahead.
+  - **Pipe operator `|>`** — `ExprKind.Pipe` is evaluated: tries a free function first, falls back to a method call on the left-hand value.
+  - **`task` and `join` expressions** — `ExprKind.Task`, `ExprKind.TaskWithTimeout`, `ExprKind.JoinAll` are handled (interpreter runs them synchronously).
+  - **`as`-cast conversions** — `try_call_conversion_method` looks for a `__as__<typename>` method; struct-to-float and struct-to-string extension methods are resolved.
+  - **`clone()` method** — returns the receiver value unchanged (interpreter has no move semantics).
+  - **`upgrade()` on weak refs** — returns `self` (all interpreter refs are strong).
+  - **Math functions in stdlib** — `sin`, `cos`, `tan`, `round`, `floor`, `ceil`, `pow`, `log`, `ln`, `log2`, `log10` registered as native functions.
+  - **`Ok`/`Err`/`Some`/`None` constructors** — registered as enum-variant values in the global environment.
+  - **Trait default methods** — when a struct declares conformance to a trait, default implementations from the trait declaration are merged into the struct's method table (own methods take priority).
+  - **Lazy binding** — `stmt.is_lazy` is checked; lazy variables are registered with `define_lazy` instead of a concrete initial value.
+  - **`ExprKind.Void`** — evaluates to `Value.Nil`.
+  - **Parser: macro-call detection** — `parser_peek_is_macro_call` now correctly detects `name!` by checking that the next token is `Bang`.
+  - **Parser: `parser_skip_to_offset` fix** — reads `p.pos` into a local before adding the offset (avoids a double-read of the actor-guarded field).
+  - **Parser: keyword identifiers expanded** — `Wait`, `Task`, and `Use` are now accepted as valid identifiers where an identifier-or-keyword is expected.
+
+### Changed
+
+- **`spec/grammar.bnf`** — comprehensive update:
+  - Ownership qualifier table: replaced deprecated `'auto` and `'task` with `'shared`; `T'weak.upgrade()` return type corrected to `T'shared?`; builtin alias `string` updated from `String'task` to `String'shared`.
+  - Borrow qualifier table: removed `T&auto` and `T&task`; added `T&shared`.
+  - Native type comment: `string → Arc<String>` corrected to `Arc<str>`.
+  - New `kernel_decl` / `kernel_member` / `kernel_field_decl` rules added; `kernel_decl` added to `item`.
+  - New GPU kernel struct section: full documentation of GPU memory qualifiers, qualifier inference, launch syntax, and GPU built-ins.
+  - Emission targets: `--target cuda` and `--target metal` documented.
+  - `kernel` added to the reserved keywords list.
+- **`linguist/Boring.tmLanguage.json`** — `kernel` added to `declaration-keywords` pattern.
+- **`linguist/samples/gpu.br`** — new sample file demonstrating SAXPY, shared-memory tile reduction, and host-side qualifier usage.
+- **`tests/cases/collections.br`** — struct copy test updated to use explicit `.clone()` (was relying on implicit copy semantics, which now requires a `mut` binding).
+- **`tests/cases/triple_string.expected`** — leading blank lines removed; triple-quoted strings no longer emit extra newlines before the content.
+
+### Fixed
+
+- **Metal codegen** — GPU qualifier inference now correctly handles `kernel` struct fields in `ext` blocks; `'actor` and `'guard` fields are wrapped at both declaration and construction sites.
+- **Qualifier inference** — `'actor'task` and `'guard'task` are disambiguated from plain `'actor`/`'guard` via a task-method-call signal; prevents spurious `Arc<Mutex<Arc<Mutex<T>>>>` double-wrapping.
+
+---
+
 ## [0.7.0] — 2026-06-18
 
 ### Added

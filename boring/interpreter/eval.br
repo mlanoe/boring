@@ -49,6 +49,85 @@ def Value eval_expr(Interpreter interp, Expr expr):
         ExprKind.Nil:
             Value.Nil
 
+        ExprKind.Void:
+            Value.Nil
+
+        # Macro calls: format!, vec!, etc.
+        ExprKind.MacroCall(macro_name, macro_args):
+            let evaled_args = macro_args.map((a): eval_expr(interp, a))
+            if macro_name == "vec":
+                Value.Array(evaled_args)
+            elif macro_name == "format" or macro_name == "println" or macro_name == "print":
+                var formatted = ""
+                if macro_args.length == 0:
+                    formatted = ""
+                else:
+                    match macro_args[0].kind:
+                        ExprKind.StringInterp(segments):
+                            var arg_idx = 1
+                            for seg in segments:
+                                match seg:
+                                    StringSegment.Lit(text):
+                                        if text == "{}":
+                                            if arg_idx < evaled_args.length:
+                                                formatted = formatted + display_value(interp, evaled_args[arg_idx])
+                                                arg_idx = arg_idx + 1
+                                        elif text.length > 2 and text.slice(1, 2) == ":":
+                                            if arg_idx < evaled_args.length:
+                                                let spec = text.slice(2, text.length - 1)
+                                                formatted = formatted + format_value(interp, evaled_args[arg_idx], spec)
+                                                arg_idx = arg_idx + 1
+                                        else:
+                                            formatted = formatted + text
+                                    StringSegment.Expr(e):
+                                        formatted = formatted + display_value(interp, eval_expr(interp, e))
+                                    StringSegment.FormattedExpr(e, fmt_spec):
+                                        formatted = formatted + format_value(interp, eval_expr(interp, e), fmt_spec)
+                        _:
+                            formatted = display_value(interp, evaled_args[0])
+                if macro_name == "format":
+                    Value.Str(formatted)
+                elif macro_name == "println":
+                    print formatted
+                    Value.Nil
+                else:
+                    write formatted
+                    Value.Nil
+            elif macro_name == "concat":
+                var result = ""
+                for v in evaled_args:
+                    result = result + display_value(interp, v)
+                Value.Str(result)
+            elif macro_name == "assert":
+                if evaled_args.length > 0:
+                    let cond = evaled_args[0]
+                    match cond:
+                        Value.Bool(false): throw "assertion failed"
+                        _: nil
+                Value.Nil
+            elif macro_name == "assert_eq":
+                if evaled_args.length >= 2:
+                    if not values_equal(evaled_args[0], evaled_args[1]):
+                        throw "assert_eq failed"
+                Value.Nil
+            elif macro_name == "assert_ne":
+                if evaled_args.length >= 2:
+                    if values_equal(evaled_args[0], evaled_args[1]):
+                        throw "assert_ne failed"
+                Value.Nil
+            elif macro_name == "panic":
+                let msg = if evaled_args.length > 0: display_value(interp, evaled_args[0]) else: "panic"
+                throw msg
+            elif macro_name == "todo":
+                throw "not implemented"
+            elif macro_name == "dbg":
+                if evaled_args.length > 0:
+                    evaled_args[0]
+                else:
+                    Value.Nil
+            else:
+                Value.Nil
+
         # Variable lookup
         ExprKind.Var(name):
             let result = interp.current_env.get(name)
@@ -112,6 +191,25 @@ def Value eval_expr(Interpreter interp, Expr expr):
             let callee = eval_expr(interp, callee_expr)
             let arg_vals = eval_args(interp, args)
             call_value(interp, callee, arg_vals)
+
+        ExprKind.GenericCall(callee_expr2, _type_args, gen_args):
+            # Ignore type args — evaluate as a regular call
+            let gen_callee = eval_expr(interp, callee_expr2)
+            let gen_arg_vals = eval_args(interp, gen_args)
+            call_value(interp, gen_callee, gen_arg_vals)
+
+        # Pipe: `lhs |> name(args)` — free function if one exists, else method call.
+        ExprKind.Pipe(left, method, args):
+            let obj = eval_expr(interp, left)
+            let extra_args = eval_args(interp, args)
+            let fn_decl_opt = interp.get_fn_decl(method)
+            if let fn_decl = fn_decl_opt:
+                var all_args = [obj]
+                for a in extra_args:
+                    all_args.append(a)
+                call_fn(interp, fn_decl, all_args, nil)
+            else:
+                call_method(interp, obj, method, extra_args)
 
         # Method call
         ExprKind.MethodCall(recv_expr, method, args):
@@ -269,9 +367,9 @@ def Value eval_expr(Interpreter interp, Expr expr):
                     StringSegment.Expr(e):
                         let v = eval_expr(interp, e)
                         result = result + display_value(interp, v)
-                    StringSegment.FormattedExpr(e, _):
+                    StringSegment.FormattedExpr(e, fmt_spec):
                         let v = eval_expr(interp, e)
-                        result = result + display_value(interp, v)
+                        result = result + format_value(interp, v, fmt_spec)
             Value.Str(result)
 
         # Closure
@@ -433,6 +531,29 @@ def Value eval_expr(Interpreter interp, Expr expr):
 
         ExprKind.Block(stmts):
             eval_block(interp, stmts)
+
+        ExprKind.Task(inner):
+            # Synchronous task: evaluate immediately, wrap in {value: result, wait: nil}
+            let task_val = eval_expr(interp, inner)
+            let task_obj = make_object("__Task__", [("value", task_val), ("wait", Value.Nil)])
+            Value.Object(task_obj)
+
+        ExprKind.TaskWithTimeout(timeout_expr, inner):
+            let task_val2 = eval_expr(interp, inner)
+            let task_obj2 = make_object("__Task__", [("value", task_val2), ("wait", Value.Nil)])
+            Value.Object(task_obj2)
+
+        ExprKind.JoinAll(exprs):
+            var results = [Value]{}
+            for e in exprs:
+                let join_val = eval_expr(interp, e)
+                # Extract .value from task objects synchronously
+                let tn = task_obj_type_name(join_val)
+                if tn == "__Task__":
+                    results.append(task_obj_get_value(join_val))
+                else:
+                    results.append(join_val)
+            Value.Array(results)
 
         _:
             throw "unhandled expression kind"
@@ -830,6 +951,9 @@ req int compare_values(Value l, Value r):
                     else: 0
                 _:
                     throw "cannot compare String and {r.type_name()}"
+        Value.NativeFn(_, _): 0
+        Value.Fn(_, _): 0
+        Value.Closure(_, _, _): 0
         _:
             throw "cannot compare {l.type_name()} and {r.type_name()}"
 
@@ -1159,6 +1283,30 @@ def Value call_string_method(string s, string method, [Value] args):
                             throw "replace second argument must be string"
                 _:
                     throw "replace first argument must be string"
+        "indexOf":
+            if args.length != 1:
+                throw "indexOf takes 1 argument"
+            match args[0]:
+                Value.Str(sub):
+                    let idx = s.indexOf(sub)
+                    if let v = idx:
+                        Value.Int(v)
+                    else:
+                        Value.Nil
+                _:
+                    throw "indexOf argument must be string"
+        "slice":
+            if args.length != 2:
+                throw "slice takes 2 arguments"
+            match args[0]:
+                Value.Int(start):
+                    match args[1]:
+                        Value.Int(end):
+                            Value.Str(s.slice(start, end))
+                        _:
+                            throw "slice end must be int"
+                _:
+                    throw "slice start must be int"
         "parse_int":
             let n = s.parse_int()
             if let v = n:
@@ -1288,6 +1436,28 @@ def Value call_float_method(float f, string method, [Value] args):
         _:
             throw "no method '{method}' on Float"
 
+# Try calling __as__<typename> method for explicit type conversions
+def Value? try_call_conversion_method(Interpreter interp, Value val, string type_name):
+    let method_name = "__as__" + type_name
+    match val:
+        Value.Object(inner):
+            let methods_opt = interp.struct_methods.get(inner.type_name)
+            if let methods = methods_opt:
+                var mi = 0
+                while mi < methods.length:
+                    let m = methods[mi]
+                    if m.name == method_name:
+                        let child_env = push_scope(interp)
+                        env_define(interp, "self", Value.Object(inner.clone()), false)
+                        for field in inner.fields:
+                            env_define(interp, field.0, field.1, false)
+                        let result = eval_block(interp, m.body)
+                        pop_scope(interp)
+                        return result
+                    mi = mi + 1
+            nil
+        _: nil
+
 # Type cast
 def Value cast_value(Interpreter interp, Value val, Type ty):
     let type_name = match ty:
@@ -1321,6 +1491,13 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                         Value.Float(v)
                     else:
                         Value.Nil
+                Value.Object(finner):
+                    # Try __as__float conversion method
+                    let fconv_opt = try_call_conversion_method(interp, Value.Object(finner), "float")
+                    if let fv = fconv_opt:
+                        fv
+                    else:
+                        Value.Nil
                 _: Value.Nil
         "string":
             # Check for as string: conversion block on objects or enums
@@ -1351,7 +1528,12 @@ def Value cast_value(Interpreter interp, Value val, Type ty):
                     if found_conv:
                         conv_result
                     else:
-                        Value.Str(display_value(interp, Value.Object(inner)))
+                        # Also check for __as__string extension method
+                        let str_ext_opt = try_call_conversion_method(interp, Value.Object(inner), "string")
+                        if let str_ext_val = str_ext_opt:
+                            str_ext_val
+                        else:
+                            Value.Str(display_value(interp, Value.Object(inner)))
                 Value.EnumVariant(enum_type_name, variant, enum_fields):
                     let self_enum_val = Value.EnumVariant(enum_type_name, variant, enum_fields)
                     let edecl_opt = interp.get_enum_decl(enum_type_name)
@@ -1442,6 +1624,166 @@ req bool value_is_type(Interpreter interp, Value val, TypeRef ty) throws:
         _:
             val.type_name() == type_name
 
+# Apply a format spec string to a value
+req string format_value(Interpreter interp, Value val, string spec):
+    if spec == "":
+        return display_value(interp, val)
+    let chars = spec.chars()
+    let n = chars.length
+    var i = 0
+    var flag_plus = false
+    var flag_zero = false
+    var width = 0
+    var precision = -1
+    var type_char = ""
+    # Parse flags
+    if i < n and chars[i] == "+":
+        flag_plus = true
+        i += 1
+    if i < n and chars[i] == "0":
+        flag_zero = true
+        i += 1
+    # Parse width
+    while i < n and chars[i] >= "0" and chars[i] <= "9":
+        width = width * 10 + (ord(chars[i]) - ord("0"))
+        i += 1
+    # Parse precision
+    if i < n and chars[i] == ".":
+        i += 1
+        precision = 0
+        while i < n and chars[i] >= "0" and chars[i] <= "9":
+            precision = precision * 10 + (ord(chars[i]) - ord("0"))
+            i += 1
+    # Parse type
+    if i < n:
+        type_char = chars[i]
+        i += 1
+    # Format the value
+    var raw = ""
+    match val:
+        Value.Int(nv):
+            if type_char == "x":
+                raw = int_to_hex(nv)
+            else:
+                raw = "{nv}"
+            if flag_plus and nv >= 0:
+                raw = "+" + raw
+        Value.Float(fv):
+            if type_char == "e":
+                raw = float_to_scientific(fv, precision)
+            elif precision >= 0:
+                raw = float_to_fixed(fv, precision)
+            else:
+                raw = "{fv}"
+            if flag_plus and fv >= 0.0:
+                raw = "+" + raw
+        _:
+            raw = display_value(interp, val)
+    # Apply width padding
+    if width > raw.length:
+        let pad_count = width - raw.length
+        var pad = ""
+        var pi = 0
+        while pi < pad_count:
+            if flag_zero:
+                pad = pad + "0"
+            else:
+                pad = pad + " "
+            pi += 1
+        if flag_zero and (raw.startsWith("-") or raw.startsWith("+")):
+            raw = raw.slice(0, 1) + pad + raw.slice(1, raw.length)
+        else:
+            raw = pad + raw
+    raw
+
+req string int_to_hex(int n):
+    if n == 0:
+        return "0"
+    var result = ""
+    var v = n
+    if v < 0:
+        v = 0 - v
+    while v > 0:
+        let digit = v % 16
+        if digit < 10:
+            result = "{digit}" + result
+        elif digit == 10: result = "a" + result
+        elif digit == 11: result = "b" + result
+        elif digit == 12: result = "c" + result
+        elif digit == 13: result = "d" + result
+        elif digit == 14: result = "e" + result
+        else: result = "f" + result
+        v = v / 16
+    if n < 0:
+        result = "-" + result
+    result
+
+req string int_to_binary(int n):
+    if n == 0:
+        return "0"
+    var result = ""
+    var v = n
+    while v > 0:
+        let b = v % 2
+        result = "{b}" + result
+        v = v / 2
+    result
+
+req string float_to_fixed(float f, int prec):
+    if prec == 0:
+        let rounded = float_round_int(f)
+        return "{rounded}"
+    let factor = int_pow10(prec)
+    let shifted = float_round_int(f * (factor as float))
+    let int_part = shifted / factor
+    var frac_part = shifted % factor
+    if frac_part < 0:
+        frac_part = 0 - frac_part
+    var frac_str = "{frac_part}"
+    while frac_str.length < prec:
+        frac_str = "0" + frac_str
+    if int_part < 0 and shifted > 0 - factor:
+        "0.{frac_str}"
+    else:
+        "{int_part}.{frac_str}"
+
+req int float_round_int(float f):
+    let fi = f as int
+    let diff = f - (fi as float)
+    if diff >= 0.5:
+        fi + 1
+    else:
+        fi
+
+req int int_pow10(int exp):
+    var result = 1
+    var i = 0
+    while i < exp:
+        result = result * 10
+        i += 1
+    result
+
+req string float_to_scientific(float f, int prec):
+    if f == 0.0:
+        if prec > 0:
+            var zeros = ""
+            var zi = 0
+            while zi < prec:
+                zeros = zeros + "0"
+                zi += 1
+            return "0.{zeros}e0"
+        return "0e0"
+    var v = f
+    var exp = 0
+    while v >= 10.0:
+        v = v / 10.0
+        exp += 1
+    while v > 0.0 and v < 1.0:
+        v = v * 10.0
+        exp -= 1
+    let mantissa = if prec >= 0: float_to_fixed(v, prec) else: "{v}"
+    "{mantissa}e{exp}"
+
 # Display a value as string for interpolation
 req string display_value(Interpreter interp, Value val):
     match val:
@@ -1511,6 +1853,36 @@ def Value call_enum_method(Interpreter interp, string type_name, string variant,
     else:
         throw "no method '{method}' on enum '{type_name}'"
 
+def ObjectInner make_object(string type_name, [(string, Value)] fields):
+    ObjectInner(type_name: type_name, fields: fields)
+
+def void eval_channel_rx_for(Interpreter interp, ObjectInner rx_inner, string var_name, [Stmt] body):
+    let ch_id_opt = rx_inner.get_field("__ch_id__")
+    if let ch_id_val = ch_id_opt:
+        let ch_key = match ch_id_val:
+            Value.Str(s): s
+            _: ""
+        if ch_key != "":
+            let queue_opt = interp.channel_queues.get(ch_key)
+            if let rx_items = queue_opt:
+                for rx_item in rx_items:
+                    let child_rx = push_scope(interp)
+                    env_define(interp, var_name, rx_item, false)
+                    eval_block(interp, body)
+                    pop_scope(interp)
+
+def string task_obj_type_name(Value v):
+    match v:
+        Value.Object(inner): inner.type_name
+        _: ""
+
+def Value task_obj_get_value(Value v):
+    match v:
+        Value.Object(inner):
+            let vopt = inner.get_field("value")
+            if let fv = vopt: fv else: Value.Nil
+        _: v
+
 def Value call_object_method(Interpreter interp, ObjectInner obj, string method, [Value] args):
     let type_name = obj.type_name
     let method_decl_opt = interp.find_method(type_name, method)
@@ -1533,9 +1905,23 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, Env? captured_env, [Value
     let saved_env = interp.current_env
     interp.current_env = new_env(captured_env)
     var i = 0
-    while i < decl.params.length and i < args.length:
+    while i < decl.params.length:
         let param = decl.params[i]
-        env_define(interp, param.name, args[i], param.mutable)
+        if param.variadic:
+            # Collect all remaining args into an array
+            var rest = [Value]{}
+            var j = i
+            while j < args.length:
+                rest.append(args[j])
+                j = j + 1
+            env_define(interp, param.name, Value.Array(rest), param.mutable)
+            break
+        elif i < args.length:
+            env_define(interp, param.name, args[i], param.mutable)
+        else:
+            if let def_expr = param.default:
+                let def_val = eval_expr(interp, def_expr)
+                env_define(interp, param.name, def_val, param.mutable)
         i = i + 1
     let result = eval_block(interp, decl.body)
     interp.current_env = saved_env
@@ -1618,6 +2004,11 @@ def void exec_stmt(Interpreter interp, Stmt stmt):
                         eval_block(interp, body)
                         pop_scope(interp)
                         n = n + 1
+                Value.Object(rx_inner):
+                    # ChannelRx iteration — drain the channel queue
+                    if rx_inner.type_name != "__ChannelRx__":
+                        throw "for loop requires iterable, got {iter_val.type_name()}"
+                    eval_channel_rx_for(interp, rx_inner, var_name, body)
                 _:
                     throw "for loop requires iterable, got {iter_val.type_name()}"
         Stmt.Assign(target, expr):
@@ -1809,11 +2200,14 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
 def void assign_target(Interpreter interp, Expr target, Value val):
     match target.kind:
         ExprKind.Var(name):
-            if interp.current_env.is_lazy(name):
+            if name == "_":
+                nil  # discard binding — ignore
+            elif interp.current_env.is_lazy(name):
                 throw "cannot use '=' on lazy binding '{name}' — use '?=' instead"
-            let ok = interp.current_env.set(name, val)
-            if not ok:
-                throw "cannot assign to immutable variable '{name}'"
+            else:
+                let ok = interp.current_env.set(name, val)
+                if not ok:
+                    throw "cannot assign to immutable variable '{name}'"
         ExprKind.Field(obj_expr, field_name):
             let obj = eval_expr(interp, obj_expr)
             match obj:

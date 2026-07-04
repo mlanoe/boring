@@ -1,0 +1,11 @@
+[package]
+name = "saxpy"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "saxpy"
+path = "src/main.rs"
+
+[dependencies]
+metal = "0.29"

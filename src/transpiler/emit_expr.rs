@@ -504,6 +504,21 @@ impl Transpiler {
                             return format!("{}.insert({}, {})", dict_name, key_owned, val_s);
                         }
                     }
+                    // self.field[key] = val → self.field.insert(key_owned, val)
+                    if let ExprKind::Field(inner_obj, field_name) = &dict_obj.kind {
+                        if matches!(&inner_obj.kind, ExprKind::Var(v) if v == "self") {
+                            let is_dict_field = self.self_type.as_ref()
+                                .and_then(|t| self.struct_fields.get(t))
+                                .and_then(|fields| fields.iter().find(|(n, _)| n == field_name))
+                                .map(|(_, ty)| matches!(ty, Type::Dict(..)))
+                                .unwrap_or(false);
+                            if is_dict_field {
+                                let key_owned = self.emit_dict_key_owned(key);
+                                let val_s = self.emit_expr_owned(value);
+                                return format!("self.{}.insert({}, {})", field_name, key_owned, val_s);
+                            }
+                        }
+                    }
                 }
                 // emit_expr_owned wraps string literals in Arc::from; falls through for other types
                 // For index LHS (arr[i] = v), emit without .clone() since we're writing not reading.

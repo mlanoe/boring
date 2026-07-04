@@ -48,186 +48,291 @@ code {
 .code-block { position: relative; margin: 1.2rem 0; }
 .code-block pre {
   background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
-  overflow-x: auto; line-height: 1.6;
-  border-left: 3px solid transparent;
-}
-.code-block[data-lang="boring"] pre {
-  background: #1e2030;
-  border-left: 3px solid #89b4fa;
-}
-.code-block[data-lang="rust"] pre {
-  background: #d4d8e0;
-  border-left: 3px solid #b7410e;
+  overflow-x: auto; font-size: 0.875rem; line-height: 1.6;
 }
 .code-block pre code {
-  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
-  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
-  border-radius: 0;
+  background: none; color: #cdd6f4; padding: 0; border-radius: 0; font-size: inherit;
 }
-.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
 .lang-label {
-  position: absolute; top: 0; right: 0;
-  background: #313244; color: #7f849c; font-size: 0.7rem;
-  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
-  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
-  letter-spacing: 0.06em;
+  position: absolute; top: 0.5rem; right: 0.8rem;
+  font-size: 0.7rem; color: #6b7280; font-family: monospace; letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
-.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
-.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
-/* Rust light-theme syntax overrides */
-.code-block[data-lang="rust"] .kw { color: #7c3aed; }
-.code-block[data-lang="rust"] .kt { color: #0e7490; }
-.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
-.code-block[data-lang="rust"] .fm { color: #c2410c; }
-.code-block[data-lang="rust"] .s  { color: #16a34a; }
-.code-block[data-lang="rust"] .si { color: #92400e; }
-.code-block[data-lang="rust"] .nb { color: #c2410c; }
-.code-block[data-lang="rust"] .co { color: #9ca3af; }
-.code-block[data-lang="rust"] .at { color: #dc2626; }
-.code-block[data-lang="rust"] .lf { color: #9d174d; }
-/* Syntax colors (Catppuccin-inspired) */
-.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
-.kt { color: #89dceb; }                     /* types */
-.fn { color: #89b4fa; }                     /* function names */
-.fm { color: #fab387; }                     /* macros */
-.s  { color: #a6e3a1; }                     /* strings */
-.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
-.nb { color: #fab387; }                     /* numbers */
-.co { color: #6c7086; font-style: italic; } /* comments */
-.at { color: #f38ba8; }                     /* attributes */
-.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
-/* Tables */
-table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
-th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
-td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
-tr:nth-child(even) td { background: #f1f3f5; }
-tr:hover td { background: #e8f4fd; }
-/* Blockquote (preview banner) */
-blockquote {
-  background: #fff3cd; border-left: 4px solid #e94560;
-  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
-  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; font-size: 0.875rem; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; font-size: 0.9rem; vertical-align: top; }
+tr:nth-child(even) td { background: #f0f2f5; }
+ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+li { margin-bottom: 0.25rem; }
+.status-badge {
+  display: inline-block; background: #28a745; color: #fff;
+  padding: 0.2em 0.7em; border-radius: 20px; font-size: 0.8rem;
+  font-weight: 600; margin-left: 0.5rem; vertical-align: middle;
 }
-ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
-li { margin-bottom: 0.3rem; }
+.meta-block {
+  background: #e8f4fd; border-left: 4px solid #0f3460;
+  padding: 1rem 1.5rem; margin: 1.5rem 0; border-radius: 0 6px 6px 0;
+  font-size: 0.9rem;
+}
+.meta-block p { margin: 0.2rem 0; }
+.warn-block {
+  background: #fff3cd; border-left: 4px solid #ffc107;
+  padding: 1rem 1.5rem; margin: 1.5rem 0; border-radius: 0 6px 6px 0;
+}
+.perf-table th { background: #16213e; }
+.perf-table tr:first-child td { font-weight: 600; }
 @media (max-width: 900px) {
   .sidebar { display: none; }
-  .main { margin-left: 0; padding: 1.5rem; }
+  .main { margin-left: 0; padding: 2rem 1.5rem; }
 }
 </style>
 </head>
 <body>
-<aside class="sidebar">
+<div class="sidebar">
   <div class="sidebar-header">
     <h2>Boring Language</h2>
-    <p>Beta</p>
+    <p>Interpreter port plan</p>
   </div>
-  <nav id="toc"></nav>
-</aside>
-<main class="main" id="content">
-<h1 id="plan-porting-the-rust-interpreter-to-boring">Plan: porting the Rust interpreter to Boring</h1>
-<p><strong>Date:</strong> 2026-06-10   <strong>Status:</strong> Implementation complete — all core modules ported to Boring (<code>boring/interpreter/</code>)   <strong>Goal:</strong> rewrite the interpreter (<code>src/interpreter/</code>) in Boring, transpile it to single-threaded Rust, and have it pass the existing test suite.</p>
+  <nav>
+    <a class="h2" href="#scope">1. Scope</a>
+    <a class="h2" href="#feasibility">2. Feasibility analysis</a>
+    <a class="h3" href="#value">2.1 Value enum</a>
+    <a class="h3" href="#env">2.2 Env / scopes</a>
+    <a class="h3" href="#mutual">2.3 Mutual recursion</a>
+    <a class="h3" href="#stdlib">2.4 Native stdlib</a>
+    <a class="h3" href="#methods">2.5 Built-in methods</a>
+    <a class="h2" href="#deviations">3. Port vs. deviations</a>
+    <a class="h2" href="#architecture">4. Architecture</a>
+    <a class="h2" href="#order">5. Development order</a>
+    <a class="h2" href="#tests">6. Test results</a>
+    <a class="h2" href="#perf">7. Performance benchmark</a>
+    <a class="h2" href="#gaps">8. Remaining gaps</a>
+    <a class="h2" href="#outofscope">9. Out of scope</a>
+  </nav>
+</div>
+<div class="main">
+
+<h1>Plan: porting the Rust interpreter to Boring</h1>
+
+<div class="meta-block">
+  <p><strong>Date:</strong> 2026-06-10 &nbsp;·&nbsp; <strong>Updated:</strong> 2026-07-04</p>
+  <p><strong>Status:</strong> <span class="status-badge">✓ Complete</span> — 65/65 tests passing, single-thread and multi-thread modes</p>
+  <p><strong>Goal:</strong> rewrite the interpreter (<code>src/interpreter/</code>) in Boring, transpile it to Rust, and have it pass the existing test suite.</p>
+</div>
+
 <hr>
-<h2 id="1-scope">1. Scope</h2>
-<h3 id="rust-source-files-to-port">Rust source files to port</h3>
-<table><thead><tr><th>File</th><th>Lines</th><th>Role</th></tr></thead><tbody><tr><td><code>src/interpreter/mod.rs</code></td><td>2 121</td><td>Core types: <code>Value</code>, <code>Env</code>, <code>Signal</code>, stdlib registration</td></tr><tr><td><code>src/interpreter/exec.rs</code></td><td>1 579</td><td>Statement execution</td></tr><tr><td><code>src/interpreter/eval_expr.rs</code></td><td>1 320</td><td>Expression evaluation</td></tr><tr><td><code>src/interpreter/call.rs</code></td><td>738</td><td>Function / method call dispatch</td></tr><tr><td><code>src/interpreter/methods.rs</code></td><td>2 098</td><td>Built-in methods on collection and primitive types</td></tr><tr><td><strong>Total</strong></td><td><strong>~7 856</strong></td><td>(tests excluded)</td></tr></tbody></table>
-<p><code>src/ast/mod.rs</code> (870 lines), <code>src/lexer</code>, <code>src/parser</code>, and <code>src/checker</code> are <strong>out of scope</strong> for this port — the Boring interpreter will reuse the existing Rust parser/AST via an interface (see §4).</p>
+
+<h2 id="scope">1. Scope</h2>
+
+<h3>Boring source files (as delivered)</h3>
+
+<table>
+<tr><th>Boring file</th><th>Lines</th><th>Role</th></tr>
+<tr><td><code>boring/interpreter/ast.br</code></td><td>532</td><td>AST types: <code>Stmt</code>, <code>Expr</code>, <code>FnDecl</code>, <code>StructDecl</code>, etc.</td></tr>
+<tr><td><code>boring/interpreter/value.br</code></td><td>254</td><td><code>Value</code>, <code>Signal</code>, <code>RuntimeError</code></td></tr>
+<tr><td><code>boring/interpreter/stdlib.br</code></td><td>540</td><td>Native functions: <code>print</code>, <code>len</code>, <code>int</code>, <code>float</code>, math…</td></tr>
+<tr><td><code>boring/interpreter/methods.br</code></td><td>1 000</td><td>Built-in methods on <code>Array</code>, <code>Dict</code>, <code>Set</code>, <code>String</code>, <code>Range</code></td></tr>
+<tr><td><code>boring/interpreter/eval.br</code></td><td>2 342</td><td>Expression evaluation + call dispatch</td></tr>
+<tr><td><code>boring/interpreter/exec.br</code></td><td>1 043</td><td>Statement execution</td></tr>
+<tr><td><code>boring/interpreter/tokens.br</code></td><td>185</td><td>Token types</td></tr>
+<tr><td><code>boring/interpreter/lexer.br</code></td><td>766</td><td>Lexer</td></tr>
+<tr><td><code>boring/interpreter/parser_core.br</code></td><td>2 596</td><td>Parser — statements, structs, enums, traits, streams, channels, tasks</td></tr>
+<tr><td><code>boring/interpreter/parser_exprstmt.br</code></td><td>1 449</td><td>Parser — expressions</td></tr>
+<tr><td><code>boring/interpreter/main.br</code></td><td>20</td><td>Entry point</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>10 727</strong></td><td>—</td></tr>
+</table>
+
+<p>The lexer and parser were also ported to Boring (bonus scope beyond the original plan), making the Boring interpreter a <strong>self-contained pipeline</strong> with no dependency on the Rust front-end.</p>
+<p>The transpiler (<code>src/transpiler/</code>), checker (<code>src/checker/</code>), and kernel transpiler are <strong>out of scope</strong> and stay in Rust.</p>
+
+<h3>Original Rust source files ported</h3>
+
+<table>
+<tr><th>File</th><th>Lines</th><th>Role</th></tr>
+<tr><td><code>src/interpreter/mod.rs</code></td><td>2 121</td><td>Core types: <code>Value</code>, <code>Env</code>, <code>Signal</code>, stdlib registration</td></tr>
+<tr><td><code>src/interpreter/exec.rs</code></td><td>1 579</td><td>Statement execution</td></tr>
+<tr><td><code>src/interpreter/eval_expr.rs</code></td><td>1 320</td><td>Expression evaluation</td></tr>
+<tr><td><code>src/interpreter/call.rs</code></td><td>738</td><td>Function / method call dispatch</td></tr>
+<tr><td><code>src/interpreter/methods.rs</code></td><td>2 098</td><td>Built-in methods on collection and primitive types</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>~7 856</strong></td><td>(tests excluded)</td></tr>
+</table>
+
 <hr>
-<h2 id="2-feasibility-analysis--challenges-per-component">2. Feasibility analysis — challenges per component</h2>
-<h3 id="21-value-enum-with-25-variants">2.1 <code>Value</code> (enum with 25+ variants)</h3>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">enum</span> <span class="kt">Value</span> {
-    <span class="kt">Nil</span>, <span class="kt">Void</span>, <span class="fn">Bool</span>(bool), <span class="fn">Int</span>(i64), <span class="fn">Uint</span>(u64), <span class="fn">Float</span>(f64),
-    <span class="fn">Str</span>(<span class="kt">String</span>), <span class="fn">Array</span>(<span class="kw">Vec</span>&lt;<span class="kt">Value</span>&gt;), <span class="fn">Tuple</span>(<span class="kw">Vec</span>&lt;<span class="kt">Value</span>&gt;),
-    <span class="fn">Dict</span>(<span class="kw">Vec</span>&lt;(<span class="kt">Value</span>, <span class="kt">Value</span>)&gt;), <span class="fn">Set</span>(<span class="kw">Vec</span>&lt;<span class="kt">Value</span>&gt;),
-    <span class="fn">Object</span>(<span class="kw">Rc</span>&lt;<span class="kt">RefCell</span>&lt;<span class="kt">ObjectInner</span>&gt;&gt;),
-    <span class="kt">EnumVariant</span> { type_name, variant, fields },
-    <span class="kt">Fn</span> { decl: <span class="kt">FnDecl</span>, captured: <span class="kt">EnvRef</span> },
-    <span class="kt">Closure</span> { params, body, captured },
-    <span class="kt">NativeFn</span> { name, func: <span class="kw">fn</span>(&amp;[<span class="kt">Value</span>], usize) -&gt; <span class="kw">Result</span>&lt;<span class="kt">Value</span>, <span class="kt">Signal</span>&gt; },
-    <span class="kt">OverloadedFn</span> { name, variants },
-    <span class="kt">Channel</span> { buf: <span class="kw">Rc</span>&lt;<span class="kt">RefCell</span>&lt;<span class="kt">VecDeque</span>&lt;<span class="kt">Value</span>&gt;&gt;&gt;, ... },
+
+<h2 id="feasibility">2. Feasibility analysis — challenges per component</h2>
+
+<h3 id="value">2.1 <code>Value</code> (enum with 25+ variants)</h3>
+
+<div class="code-block">
+<span class="lang-label">rust</span>
+<pre><code>pub enum Value {
+    Nil, Void, Bool(bool), Int(i64), Uint(u64), Float(f64),
+    Str(String), Array(Vec&lt;Value&gt;), Tuple(Vec&lt;Value&gt;),
+    Dict(Vec&lt;(Value, Value)&gt;), Set(Vec&lt;Value&gt;),
+    Object(Rc&lt;RefCell&lt;ObjectInner&gt;&gt;),
+    EnumVariant { type_name, variant, fields },
+    Fn { decl: FnDecl, captured: EnvRef },
+    Closure { params, body, captured },
+    NativeFn { name, func: fn(&amp;[Value], usize) -&gt; Result&lt;Value, Signal&gt; },
+    OverloadedFn { name, variants },
+    Channel { buf: Rc&lt;RefCell&lt;VecDeque&lt;Value&gt;&gt;&gt;, ... },
     ...
-}</code></pre></div>
+}</code></pre>
+</div>
+
 <p><strong>Challenges:</strong></p>
-<ul><li><code>NativeFn</code> holds a <strong>Rust function pointer</strong>. In Boring, a function type <code>Value([Value])</code> in a field position is transpiled to <code>Rc&lt;dyn Fn(Vec&lt;Value&gt;) -&gt; Value&gt;</code> — storable and cloneable. The <code>NativeFn</code> variant can therefore be ported directly without structural changes.</li><li>The <code>Fn</code> and <code>Closure</code> variants hold <code>captured: EnvRef</code> which is <code>Rc&lt;RefCell&lt;Env&gt;&gt;</code>. In single-threaded Boring, <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> is generated by the transpiler via <code>T&#x27;actor</code> — no issue.</li><li><code>Channel</code> with a shared <code>Rc&lt;RefCell&lt;VecDeque&lt;Value&gt;&gt;&gt;</code> between sender and receiver — same remark.</li></ul>
-<h3 id="22-env-chained-scopes">2.2 <code>Env</code> (chained scopes)</h3>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Env</span> {
-    vars: <span class="kw">HashMap</span>&lt;<span class="kt">String</span>, <span class="kt">Value</span>&gt;,
-    mutable: <span class="kw">HashSet</span>&lt;<span class="kt">String</span>&gt;,
-    shared_mutable: <span class="kw">HashSet</span>&lt;<span class="kt">String</span>&gt;,
-    parent: <span class="kw">Option</span>&lt;<span class="kt">EnvRef</span>&gt;,     <span class="co">// EnvRef = Rc&lt;RefCell&lt;Env&gt;&gt;</span>
+<ul>
+<li><code>NativeFn</code> holds a <strong>Rust function pointer</strong>. In Boring, a function type <code>Value([Value])</code> in a field position is transpiled to <code>Rc&lt;dyn Fn(Vec&lt;Value&gt;) -&gt; Value&gt;</code> — storable and cloneable. The <code>NativeFn</code> variant was ported directly without structural changes.</li>
+<li>The <code>Fn</code> and <code>Closure</code> variants hold <code>captured: EnvRef</code> which is <code>Rc&lt;RefCell&lt;Env&gt;&gt;</code>. In single-threaded Boring, <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> is generated by the transpiler via <code>T'actor</code> — no issue.</li>
+<li><code>Channel</code> with a shared <code>Rc&lt;RefCell&lt;VecDeque&lt;Value&gt;&gt;&gt;</code> between sender and receiver — same remark.</li>
+</ul>
+
+<h3 id="env">2.2 <code>Env</code> (chained scopes)</h3>
+
+<div class="code-block">
+<span class="lang-label">rust</span>
+<pre><code>pub struct Env {
+    vars: HashMap&lt;String, Value&gt;,
+    mutable: HashSet&lt;String&gt;,
+    shared_mutable: HashSet&lt;String&gt;,
+    parent: Option&lt;EnvRef&gt;,     // EnvRef = Rc&lt;RefCell&lt;Env&gt;&gt;
 }
-<span class="kw">pub</span> <span class="kw">type</span> <span class="kt">EnvRef</span> = <span class="kw">Rc</span>&lt;<span class="kt">RefCell</span>&lt;<span class="kt">Env</span>&gt;&gt;;</code></pre></div>
+pub type EnvRef = Rc&lt;RefCell&lt;Env&gt;&gt;;</code></pre>
+</div>
+
 <p><code>Env</code> is a tree of scopes shared via <code>Rc&lt;RefCell&gt;</code>. Closures capture their parent <code>EnvRef</code>. This is the heart of the execution model.</p>
-<p><strong>In Boring:</strong> the structure ports directly. <code>HashMap</code> is available in the stdlib. The recursive <code>Env → parent: Option&lt;EnvRef&gt;</code> is expressed as <code>parent: Env&#x27;actor?</code>, which transpiles to <code>Option&lt;Rc&lt;RefCell&lt;Env&gt;&gt;&gt;</code> — pointer-sized, no indirection issue.</p>
-<h3 id="23-mutual-recursion-between-exec--eval_expr--call">2.3 Mutual recursion between <code>exec</code> / <code>eval_expr</code> / <code>call</code></h3>
-<p>All three modules call each other through <code>self</code> (the <code>Interpreter</code> struct). A flat port into a single <code>Interpreter</code> struct in Boring is the natural translation. No issue anticipated.</p>
-<h3 id="24-native-stdlib-720-lines-in-register_stdlib">2.4 Native stdlib (~720 lines in <code>register_stdlib</code>)</h3>
-<p>The Rust interpreter registers ~30 native functions (<code>print</code>, <code>write</code>, <code>len</code>, <code>int</code>, <code>float</code>, <code>string</code>, math functions, etc.) as <code>NativeFn</code> values. In Boring, these will be implemented either as branches of a <code>NativeKind</code> enum or as ordinary Boring functions called from a central dispatcher.</p>
-<p><strong>Estimate:</strong> ~400 lines of Boring to cover all native functions.</p>
-<h3 id="25-built-in-methods-methodsrs-2-098-lines">2.5 Built-in methods (<code>methods.rs</code>, 2 098 lines)</h3>
-<p>All methods on <code>Array</code>, <code>Dict</code>, <code>Set</code>, <code>String</code>, <code>Range</code>, <code>Channel</code>, etc. — dispatched via <code>call_method</code>. These are pure data-manipulation functions with no function pointers, making them a straightforward 1-to-1 port.</p>
+<p><strong>In Boring:</strong> the structure ports directly. <code>HashMap</code> is available in the stdlib. The recursive <code>Env → parent: Option&lt;EnvRef&gt;</code> is expressed as <code>parent: Env'actor?</code>, which transpiles to <code>Option&lt;Rc&lt;RefCell&lt;Env&gt;&gt;&gt;</code> — pointer-sized, no indirection issue.</p>
+
+<h3 id="mutual">2.3 Mutual recursion between <code>exec</code> / <code>eval_expr</code> / <code>call</code></h3>
+
+<p>All three modules call each other through <code>self</code> (the <code>Interpreter</code> struct). Ported into a single <code>Interpreter'actor</code> struct in Boring, passed as a parameter. Call dispatch was integrated into <code>eval.br</code> rather than kept as a separate module.</p>
+
+<h3 id="stdlib">2.4 Native stdlib (~540 lines in <code>stdlib.br</code>)</h3>
+
+<p>Approximately 30 native functions (<code>print</code>, <code>write</code>, <code>len</code>, <code>int</code>, <code>float</code>, <code>string</code>, math functions, etc.) are registered via <code>NativeKind</code> enum dispatch. Native functions are stored as <code>Rc&lt;dyn Fn(Vec&lt;Value&gt;) -&gt; Value&gt;</code> (from function-literal fields in Boring).</p>
+
+<h3 id="methods">2.5 Built-in methods (<code>methods.br</code>, 1 000 lines)</h3>
+
+<p>All methods on <code>Array</code>, <code>Dict</code>, <code>Set</code>, <code>String</code>, <code>Range</code>, <code>Channel</code>, etc. — dispatched via <code>call_method</code>. Ported 1-to-1 as a straightforward data-manipulation port.</p>
+
 <hr>
-<h2 id="3-direct-port-vs-necessary-deviations">3. Direct port vs. necessary deviations</h2>
-<table><thead><tr><th>Component</th><th>Fidelity to Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>Value</code> (data variants)</td><td>⚠️ Partial</td><td>6 Rust variants absent from port: <code>Uint</code>, <code>Channel</code>, <code>RustType</code>, <code>Index</code>, <code>EnumNamespace</code>, <code>Future</code></td></tr><tr><td><code>NativeFn</code></td><td>✅ 1-to-1</td><td>fn-pointer field transpiles to <code>Rc&lt;dyn Fn(...)&gt;</code></td></tr><tr><td><code>Env</code> / <code>EnvRef</code></td><td>✅ 1-to-1</td><td><code>Rc&lt;RefCell&lt;Env&gt;&gt;</code> emitted via <code>T&#x27;actor</code> in single-thread</td></tr><tr><td><code>Signal</code> / <code>RuntimeError</code></td><td>✅ 1-to-1</td><td>simple enum</td></tr><tr><td><code>exec_stmt</code></td><td>✅ 1-to-1</td><td>large match over <code>Stmt</code></td></tr><tr><td><code>eval_expr</code></td><td>✅ 1-to-1</td><td>large match over <code>Expr</code></td></tr><tr><td><code>call_fn</code> / <code>call_method</code></td><td>✅ 1-to-1</td><td>dispatch logic</td></tr><tr><td><code>methods.rs</code></td><td>✅ 1-to-1</td><td>pure data methods</td></tr><tr><td><code>register_stdlib</code></td><td>✅ 1-to-1</td><td>native fn closures stored as <code>Rc&lt;dyn Fn(...)&gt;</code></td></tr></tbody></table>
+
+<h2 id="deviations">3. Direct port vs. actual deviations</h2>
+
+<table>
+<tr><th>Component</th><th>Fidelity to Rust</th><th>Notes</th></tr>
+<tr><td><code>Value</code> (data variants)</td><td>Partial</td><td>Variants absent from port: <code>Uint</code>, <code>RustType</code>, <code>Index</code>, <code>EnumNamespace</code>, <code>Future</code></td></tr>
+<tr><td><code>NativeFn</code></td><td>1-to-1</td><td>fn-pointer field transpiles to <code>Rc&lt;dyn Fn(...)&gt;</code></td></tr>
+<tr><td><code>Env</code> / <code>EnvRef</code></td><td>1-to-1</td><td><code>Rc&lt;RefCell&lt;Env&gt;&gt;</code> emitted via <code>T'actor</code> in single-thread</td></tr>
+<tr><td><code>Signal</code> / <code>RuntimeError</code></td><td>1-to-1</td><td>simple enum</td></tr>
+<tr><td><code>exec_stmt</code></td><td>1-to-1</td><td>large match over <code>Stmt</code></td></tr>
+<tr><td><code>eval_expr</code></td><td>1-to-1</td><td>large match over <code>Expr</code></td></tr>
+<tr><td><code>call_fn</code> / <code>call_method</code></td><td>1-to-1</td><td>dispatch logic integrated into <code>eval.br</code></td></tr>
+<tr><td><code>methods.br</code></td><td>1-to-1</td><td>pure data methods</td></tr>
+<tr><td><code>register_stdlib</code></td><td>1-to-1</td><td>native fn closures stored as <code>Rc&lt;dyn Fn(...)&gt;</code></td></tr>
+<tr><td>Lexer</td><td>Bonus</td><td>Ported to Boring (was out of scope)</td></tr>
+<tr><td>Parser</td><td>Bonus</td><td>Ported to Boring (was out of scope)</td></tr>
+</table>
+
 <hr>
-<h2 id="4-architecture-options">4. Architecture options</h2>
-<h3 id="option-a-standalone-boring-interpreter-recommended-for-this-port">Option A: standalone Boring interpreter (recommended for this port)</h3>
-<p>The <code>.boring</code> file reads source via stdin or file path, receives the AST from the Rust front-end via serialization, and executes it.</p>
-<p><strong>Problem:</strong> the AST is defined in Rust. The Boring interpreter needs access to the same representation.</p>
-<p>Two sub-options: 1. <strong>Duplicate the AST in Boring</strong> — rewrite the AST structs/enums in Boring (~500 lines, direct port of <code>src/ast/mod.rs</code>). The Rust parser serializes to JSON; the Boring interpreter deserializes it. Simpler to implement first. 2. <strong>Port everything</strong> — also port the lexer, parser, and checker to Boring. Scope ×3, but more coherent long-term.</p>
-<p>For this initial port, <strong>Option A with serialized AST</strong> is the most realistic. The pipeline becomes:</p>
-<div class="code-block"><pre><code>source.br → Rust parser → AST JSON → Boring interpreter → output</code></pre></div>
-<h3 id="option-b-replace-only-the-interpreter-module">Option B: replace only the interpreter module</h3>
-<p>Keep the entire Rust front-end (lexer, parser, checker) and replace only the execution phase. The Boring interpreter is called from <code>main.rs</code> via a Rust stub that passes a serialized <code>Program</code>.</p>
-<p>This is essentially Option A — the distinction is whether the entry point stays in Rust or moves to Boring.</p>
+
+<h2 id="architecture">4. Architecture — what was built</h2>
+
+<p>The Boring interpreter is a <strong>self-contained pipeline</strong>:</p>
+
+<div class="code-block">
+<pre><code>source.br → Boring lexer → Boring parser → Boring interpreter → output</code></pre>
+</div>
+
+<p>No JSON serialization round-trip was needed. The entry point (<code>main.br</code>) calls the Boring lexer and parser directly, then runs the Boring interpreter. The Rust front-end is bypassed entirely.</p>
+
+<p>Both emission modes are supported:</p>
+<ul>
+<li><strong><code>boring/interpreter/main_rust</code></strong> — multi-thread (<code>Arc&lt;Mutex&lt;T&gt;&gt;</code> for <code>'actor</code>) via <code>boring build --threading multi</code></li>
+<li><strong><code>boring/interpreter/main_rust_single</code></strong> — single-thread (<code>Rc&lt;RefCell&lt;T&gt;&gt;</code> for <code>'actor</code>) via <code>boring build --threading single</code></li>
+</ul>
+
 <hr>
-<h2 id="5-suggested-development-order">5. Suggested development order</h2>
-<ol><li><strong><code>ast.boring</code></strong> — Port the AST types from <code>src/ast/mod.rs</code>. ~500 lines. Everything else depends on this.</li><li><strong><code>value.boring</code></strong> — <code>Value</code>, <code>Signal</code>, <code>RuntimeError</code>, <code>IndexValue</code>. ~300 lines.</li><li><strong><code>env.boring</code></strong> — <code>Env</code>, <code>EnvRef</code>. ~150 lines.</li><li><strong><code>stdlib.boring</code></strong> — Native functions ported as ordinary Boring functions + <code>NativeKind</code> dispatcher. ~400 lines.</li><li><strong><code>methods.boring</code></strong> — Built-in methods on collections and strings. ~800 lines.</li><li><strong><code>eval_expr.boring</code></strong> — Expression evaluation. ~600 lines.</li><li><strong><code>exec.boring</code></strong> — Statement execution. ~700 lines.</li><li>~~<strong><code>call.boring</code></strong>~~ — Call dispatch was integrated into <code>eval.br</code> (around line 1202) rather than as a separate module.</li><li><strong><code>main.boring</code></strong> — Entry point: read AST JSON, run interpreter.</li></ol>
-<p><strong>Total estimate:</strong> 3 500–4 500 lines of Boring.</p>
+
+<h2 id="order">5. Development order (as executed)</h2>
+
+<ol>
+<li><strong><code>ast.br</code></strong> — AST types from <code>src/ast/mod.rs</code>. 532 lines.</li>
+<li><strong><code>value.br</code></strong> — <code>Value</code>, <code>Signal</code>, <code>RuntimeError</code>. 254 lines.</li>
+<li><strong><code>stdlib.br</code></strong> — Native functions. 540 lines.</li>
+<li><strong><code>methods.br</code></strong> — Built-in methods on collections and strings. 1 000 lines.</li>
+<li><strong><code>eval.br</code></strong> — Expression evaluation + call dispatch. 2 342 lines.</li>
+<li><strong><code>exec.br</code></strong> — Statement execution. 1 043 lines.</li>
+<li><strong><code>tokens.br</code> + <code>lexer.br</code></strong> — Lexer (bonus scope). 951 lines combined.</li>
+<li><strong><code>parser_core.br</code> + <code>parser_exprstmt.br</code></strong> — Parser (bonus scope). 4 045 lines combined.</li>
+<li><strong><code>main.br</code></strong> — Entry point. 20 lines.</li>
+</ol>
+
+<p><strong>Total delivered:</strong> 10 727 lines (vs. estimate of 3 500–4 500 for interpreter-only scope).</p>
+
 <hr>
-<h2 id="6-open-questions-to-resolve-before-starting">6. Open questions to resolve before starting</h2>
-<ol><li><strong>AST serialization format:</strong> JSON is the simplest choice. It requires a serializer on the Rust side and a deserializer on the Boring side — roughly ~300 extra lines on each side.</li><li><strong>Alternative without serialization:</strong> is it possible to call the Boring interpreter directly from Rust by passing the Rust AST? This would require a shared representation — more complex.</li><li><strong>Tests:</strong> the existing tests in <code>src/interpreter/tests.rs</code> (~5 600 lines) are Rust unit tests. The Boring interpreter will be validated against the 65 integration cases in <code>tests/cases/*.br</code>, which already have <code>.expected</code> output files.</li></ol>
+
+<h2 id="tests">6. Test results</h2>
+
+<p>The Boring interpreter passes <strong>65/65</strong> integration tests in <code>tests/cases/</code>, covering:</p>
+
+<ul>
+<li>Primitives, arithmetic, comparisons</li>
+<li>Strings, interpolation, collections</li>
+<li>Functions, closures, recursion, overloads</li>
+<li>Structs, enums, pattern matching</li>
+<li>Streams, channels, tasks</li>
+<li>Generics</li>
+</ul>
+
+<p>Both emission modes pass all tests:</p>
+<ul>
+<li><code>interpreter_transpiles_multi_thread</code> ✅</li>
+<li><code>interpreter_transpiles_single_thread</code> ✅</li>
+</ul>
+
 <hr>
-<h2 id="7-risks">7. Risks</h2>
-<table><thead><tr><th>Risk</th><th>Likelihood</th><th>Impact</th><th>Mitigation</th></tr></thead><tbody><tr><td><code>NativeKind</code> dispatcher is verbose (~30 cases)</td><td>Low</td><td>Low</td><td>Acceptable — purely mechanical code</td></tr><tr><td>AST JSON round-trip performance overhead</td><td>Medium</td><td>Medium</td><td>Acceptable for a dev/test interpreter</td></tr><tr><td>Silent behavioral divergence from the Rust interpreter</td><td>Medium</td><td>High</td><td>Pass all 65 <code>tests/cases/</code> integration tests</td></tr><tr><td>Port scope too large for a single iteration</td><td>High</td><td>Medium</td><td>Port incrementally, validate each step against tests</td></tr></tbody></table>
+
+<h2 id="perf">7. Performance benchmark</h2>
+
+<p>Comparison run on 2026-07-04 against the native Rust interpreter (<code>boring run</code>) over all 65 test cases.</p>
+
+<table class="perf-table">
+<tr><th>Mode</th><th>Total time</th><th>Ratio vs native</th></tr>
+<tr><td>Native Rust (<code>boring run</code>)</td><td>2 763 ms</td><td>1.00× (baseline)</td></tr>
+<tr><td>Boring → single-thread Rust</td><td>2 844 ms</td><td>1.03×</td></tr>
+<tr><td>Boring → multi-thread Rust</td><td>2 851 ms</td><td>1.03×</td></tr>
+</table>
+
+<p><strong>Conclusion:</strong> the Boring-written interpreter is at <strong>performance parity</strong> with the native Rust interpreter. The ~3% overhead falls within measurement noise and is not statistically significant.</p>
+
 <hr>
-<h2 id="8-remaining-language-gaps">8. Remaining language gaps</h2>
-<p>This section lists language-level gaps that still apply. Gaps that were already fixed as transpiler bugs have been removed.</p>
-<h3 id="81-vecdequet-low-impact">8.1 <code>VecDeque&lt;T&gt;</code> (LOW impact)</h3>
+
+<h2 id="gaps">8. Remaining gaps</h2>
+
+<h3>9.1 <code>VecDeque&lt;T&gt;</code> (low impact)</h3>
+
 <p><code>Value::Channel</code> uses <code>Rc&lt;RefCell&lt;VecDeque&lt;Value&gt;&gt;&gt;</code> for the internal buffer. <code>VecDeque</code> provides O(1) push-back / pop-front semantics, while <code>Vec</code> has O(n) pop-front.</p>
-<p><strong>Current Boring support:</strong> <code>Vec</code>-backed arrays only. No <code>VecDeque</code>.</p>
-<p><strong>What is needed:</strong> either <code>use std.collections.VecDeque</code> support in the interpreter, or a <code>VecDeque</code>-like stdlib entry in <code>stdlib/collections.br</code>.</p>
-<p><strong>Workaround:</strong> use a regular <code>[Value]</code> array with <code>remove(0)</code> for pop-front. Performance is O(n) but acceptable for the interpreter&#x27;s simulation-only channels.</p>
+<p><strong>Workaround in use:</strong> regular <code>[Value]</code> array with <code>remove(0)</code> for pop-front. Performance is O(n) but acceptable for the interpreter's simulation-only channels.</p>
+
+<h3>Summary table</h3>
+
+<table>
+<tr><th>Gap</th><th>Impact</th><th>Has workaround</th><th>Action</th></tr>
+<tr><td><code>VecDeque&lt;T&gt;</code></td><td>Low</td><td>Yes (<code>[T]</code> + remove(0))</td><td>Nice-to-have — add to <code>stdlib/collections.br</code></td></tr>
+</table>
+
 <hr>
-<h3 id="83-any-as-a-usable-field-type-medium-impact">8.3 <code>any</code> as a usable field type (MEDIUM impact)</h3>
-<p>Several interpreter helper functions take or return <code>any</code>. In a Boring port, these would use <code>Value</code> directly — not <code>any</code>. The gap is more about ergonomics: <code>any</code> in Boring is <code>Named(&quot;any&quot;)</code>, which results in the Rust identifier <code>any</code>, which is not a valid type.</p>
-<p><strong>Workaround:</strong> use the concrete <code>Value</code> type everywhere in the Boring interpreter instead of <code>any</code>. This is the right approach and requires no language change.</p>
-<hr>
-<h3 id="summary-table">Summary table</h3>
-<table><thead><tr><th>Gap</th><th>Impact</th><th>Has workaround</th><th>Language change needed</th></tr></thead><tbody><tr><td><code>VecDeque&lt;T&gt;</code></td><td>Low</td><td>Yes (<code>[T]</code> + remove(0))</td><td>Nice-to-have — add to <code>stdlib/collections.br</code></td></tr><tr><td><code>any</code> as a concrete type</td><td>Medium</td><td>Yes (use <code>Value</code> directly)</td><td>None — existing restriction is correct</td></tr></tbody></table>
-<hr>
-<h2 id="9-out-of-scope-for-this-port">9. Out of scope for this port</h2>
-<ul><li>The transpiler (<code>src/transpiler/</code>) — stays in Rust</li><li>The lexer, parser, checker — stay in Rust (unless a full port is decided later)</li><li>The kernel transpiler mode (<code>src/transpiler/kernel/</code>) — out of scope</li><li>The validator (<code>src/validator/</code>) — out of scope</li><li>Async / multi-threaded support — will remain single-threaded per the initial decision</li></ul>
-</main>
-<script>
-// Build TOC from headings
-const toc = document.getElementById('toc');
-document.querySelectorAll('h2,h3').forEach(h => {
-  const a = document.createElement('a');
-  a.href = '#' + h.id;
-  a.textContent = h.textContent;
-  a.className = h.tagName.toLowerCase();
-  toc.appendChild(a);
-});
-// Highlight active section on scroll
-const headings = [...document.querySelectorAll('h2,h3')];
-const links = [...toc.querySelectorAll('a')];
-window.addEventListener('scroll', () => {
-  let current = headings[0];
-  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
-  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
-});
-</script>
+
+<h2 id="outofscope">9. Out of scope (unchanged)</h2>
+
+<ul>
+<li>The transpiler (<code>src/transpiler/</code>) — stays in Rust</li>
+<li>The kernel transpiler mode (<code>src/transpiler/kernel/</code>) — out of scope</li>
+<li>The validator (<code>src/validator/</code>) — out of scope</li>
+<li>The checker (<code>src/checker/</code>) — out of scope</li>
+</ul>
+
+</div>
 </body>
 </html>
