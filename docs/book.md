@@ -2,8 +2,6 @@
 
 Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled with `boring build`.
 
-One of Boring's core goals is **zero-annotation ownership**: the compiler infers the right memory strategy from how values are actually used — whether they live on the stack, the heap, or behind shared or mutable references — without requiring the developer to annotate every variable. You get Rust's safety and performance guarantees without writing `Arc<Mutex<T>>` by hand. When the compiler cannot determine a unique strategy from context, it falls back to sensible defaults, and explicit annotations are always available as an escape hatch. See [Qualifier Inference](#30-qualifier-inference) for the full picture.
-
 ---
 
 ## Table of Contents
