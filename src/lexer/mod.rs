@@ -231,6 +231,8 @@ impl LexError {
         }
     }
 
+    pub fn col(&self) -> usize { 0 }
+
     pub fn msg(&self) -> String {
         match self {
             LexError::UnexpectedChar { ch, .. } => format!("unexpected character '{}'", ch),
@@ -246,6 +248,7 @@ impl LexError {
 pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -386,7 +389,7 @@ impl<'a> Lexer<'a> {
             let trimmed = raw.trim_start();
             if trimmed.is_empty() {
                 if paren_depth == 0 {
-                    tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+                    tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
                 }
                 i += 1;
                 continue;
@@ -402,12 +405,12 @@ impl<'a> Lexer<'a> {
                         let top = *self.indent_stack.last().unwrap();
                         if top <= comment_indent { break; }
                         self.indent_stack.pop();
-                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line });
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
                     }
                 }
                 let text = trimmed[1..].trim().to_string();
-                tokens.push(Token { kind: TokenKind::Comment(text), line: self.line });
-                tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+                tokens.push(Token { kind: TokenKind::Comment(text), line: self.line, col: 1 });
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
                 i += 1;
                 continue;
             }
@@ -429,7 +432,7 @@ impl<'a> Lexer<'a> {
                 let cur_indent = *self.indent_stack.last().unwrap();
                 if line_indent > cur_indent {
                     self.indent_stack.push(line_indent);
-                    tokens.push(Token { kind: TokenKind::Indent, line: self.line });
+                    tokens.push(Token { kind: TokenKind::Indent, line: self.line, col: 1 });
                 } else if line_indent < cur_indent {
                     loop {
                         let top = *self.indent_stack.last().unwrap();
@@ -438,7 +441,7 @@ impl<'a> Lexer<'a> {
                             return Err(LexError::InvalidDedent { line: self.line });
                         }
                         self.indent_stack.pop();
-                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line });
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
                     }
                 }
             }
@@ -469,16 +472,16 @@ impl<'a> Lexer<'a> {
             tokens.extend(line_tokens);
             // Emit newline when at top level or when ending a colon-block line inside parens.
             if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
-                tokens.push(Token { kind: TokenKind::Newline, line: self.line });
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
             }
             i += 1;
         }
         // Close all open indents
         while self.indent_stack.len() > 1 {
             self.indent_stack.pop();
-            tokens.push(Token { kind: TokenKind::Dedent, line: self.line });
+            tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
         }
-        tokens.push(Token { kind: TokenKind::Eof, line: self.line });
+        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: 1 });
         Ok(tokens)
     }
 }
@@ -560,7 +563,8 @@ fn lex_line(content: &str, line: usize) -> Result<Vec<Token>, LexError> {
 }
 
 fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
-    let (_, ch) = chars.next().unwrap();
+    let (byte_offset, ch) = chars.next().unwrap();
+    let col = byte_offset + 1; // 1-indexed
     let kind = match ch {
         '(' => TokenKind::LParen,
         ')' => TokenKind::RParen,
@@ -688,7 +692,7 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
         }
         other => return Err(LexError::UnexpectedChar { line, ch: other }),
     };
-    Ok(Token { kind, line })
+    Ok(Token { kind, line, col })
 }
 
 fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexError> {

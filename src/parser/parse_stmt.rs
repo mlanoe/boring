@@ -182,7 +182,7 @@ impl Parser {
                     Ok(Stmt::Alias(self.parse_alias_decl()?))
                 } else {
                     Err(ParseError::Generic {
-                        line: self.line(),
+                        line: self.line(), col: self.col(),
                         msg: "use inside a function body must be a type alias: `use Name as Type`".into(),
                     })
                 }
@@ -566,7 +566,7 @@ impl Parser {
         self.allow_trailing_closure = saved_tc;
         if !self.check(stop) {
             return Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: format!("expected {:?} after condition clauses, got {:?}", stop, self.peek()),
             });
         }
@@ -869,7 +869,7 @@ impl Parser {
                 Ok(Pattern::Lit(LitPattern::Nil))
             }
             _ => Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: format!("expected pattern, got {:?}", self.peek()),
             }),
         }

@@ -1925,6 +1925,18 @@ impl Transpiler {
             }
             _ => {
                 let s = self.emit_expr(value);
+                // Implicit clone for 'shared / 'actor / 'guard: cloning an Rc/Arc is just a
+                // refcount increment, not a deep copy — assignment is always an alias.
+                // 'stack and 'heap are owned types; move is the default there.
+                if let ExprKind::Var(v) = &value.kind {
+                    if self.arc_vars.contains(v.as_str()) && !s.ends_with(".clone()") {
+                        return if self.rc_vars.contains(v.as_str()) {
+                            format!("Rc::clone(&{})", v)
+                        } else {
+                            format!("Arc::clone(&{})", v)
+                        };
+                    }
+                }
                 // If the value is a variable that holds a struct (non-Arc) type, clone it
                 // to avoid a move. In Boring, assignment always copies; Rust structs need .clone().
                 // Exception: `var` params are `&mut T` — don't clone, pass the reference directly.

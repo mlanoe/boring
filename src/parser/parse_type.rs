@@ -183,7 +183,7 @@ impl Parser {
                     let n = match self.peek().clone() {
                         TokenKind::Int(n) if n >= 0 => { self.advance(); n as usize }
                         _ => return Err(ParseError::Generic {
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                             msg: "expected integer literal for fixed-size array length".into(),
                         }),
                     };
@@ -218,7 +218,7 @@ impl Parser {
                 }
             }
             _ => Err(ParseError::Generic {
-                line,
+                line, col: self.col(),
                 msg: format!("expected type, got {:?}", self.peek()),
             }),
         }
@@ -309,18 +309,18 @@ impl Parser {
                                 "const"   => { self.advance(); OwnerQual::GpuConst }
                                 _ => return Err(ParseError::Generic {
                                     msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
-                                    line: self.line(),
+                                    line: self.line(), col: self.col(),
                                 }),
                             },
                             _ => return Err(ParseError::Generic {
                                 msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
-                                line: self.line(),
+                                line: self.line(), col: self.col(),
                             }),
                         }
                     } else {
                         return Err(ParseError::Generic {
                             msg: "'gpu must be followed by 'unified, 'global, or 'const".into(),
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                         });
                     }
                 }
@@ -330,7 +330,7 @@ impl Parser {
                     if self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
-                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line() }); }
+                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line(), col: self.col() }); }
                     } else {
                         OwnerQual::Actor
                     }
@@ -350,7 +350,7 @@ impl Parser {
                 // `T'guard'task` → GuardTask
                 if self.eat(&TokenKind::Tick) {
                     if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::GuardTask }
-                    else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line() }); }
+                    else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line(), col: self.col() }); }
                 } else {
                     OwnerQual::Guard
                 }
@@ -447,7 +447,7 @@ pub(crate) fn check_no_return(stmts: &[Stmt], context: &str) -> Result<(), Parse
     for stmt in stmts {
         if let Stmt::Return(ret) = stmt {
             return Err(ParseError::Generic {
-                line: ret.line,
+                line: ret.line, col: 0,
                 msg: format!("last expression (no 'return' allowed in {})", context),
             });
         }

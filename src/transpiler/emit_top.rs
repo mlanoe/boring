@@ -574,10 +574,10 @@ impl Transpiler {
                     let sname = self_ty.unwrap_or("");
                     if !sname.is_empty() && !self.arc_qualified_types.contains(sname) {
                         eprintln!(
-                            "error: `task fn` method '{}::{}' requires '{}' to be used with a \
+                            "error line {}: `task fn` method '{}::{}' requires '{}' to be used with a \
                              'task, 'actor, or 'guard qualifier at least once in the program \
                              (no arc-qualified binding found)",
-                            sname, f.name, sname
+                            f.line, sname, f.name, sname
                         );
                         std::process::exit(1);
                     }
@@ -1016,9 +1016,9 @@ impl Transpiler {
             && (base_item_ty.contains("Rc<") || base_item_ty.contains("RefCell<"))
         {
             eprintln!(
-                "warning: stream `{}` item type `{}` is !Send in single-thread mode; \
+                "warning line {}: stream `{}` item type `{}` is !Send in single-thread mode; \
                  stream<N> requires Send on the item type",
-                f.name, base_item_ty
+                f.line, f.name, base_item_ty
             );
         }
 

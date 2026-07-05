@@ -2005,9 +2005,23 @@ impl Interpreter {
                 } else { val };
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
-                let is_shared_var = stmt.binding.is_mutable() && stmt.ty.as_ref().map(|ty| {
+                let is_shared_ty = stmt.ty.as_ref().map(|ty| {
                     matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Shared))
                 }).unwrap_or(false);
+                let is_actor_ty = stmt.ty.as_ref().map(|ty| {
+                    matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                }).unwrap_or(false);
+                // Propagate shared/actor status from source when no type annotation.
+                let src_var_name = stmt.value.as_ref().and_then(|v| {
+                    if let ExprKind::Var(s) = &v.kind { Some(s.clone()) } else { None }
+                });
+                let src_is_shared = !is_shared_ty && !is_actor_ty && src_var_name.as_ref()
+                    .map(|s| env.borrow().is_shared(s.as_str()))
+                    .unwrap_or(false);
+                let src_is_actor = !is_shared_ty && !is_actor_ty && src_var_name.as_ref()
+                    .map(|s| env.borrow().is_actor(s.as_str()))
+                    .unwrap_or(false);
+                let is_shared_var = stmt.binding.is_mutable() && (is_shared_ty || src_is_shared);
                 if is_shared_var {
                     env.borrow_mut().define_shared_mut(&stmt.name, val);
                 } else if stmt.binding.is_mutable() {
@@ -2028,17 +2042,33 @@ impl Interpreter {
                         env.borrow_mut().mark_owned_var(&stmt.name);
                     }
                     // Interior-mutable qualifiers: def methods allowed on let bindings.
-                    if matches!(resolved, Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)) {
+                    if is_actor_ty {
                         env.borrow_mut().mark_actor(&stmt.name);
                     }
+                    // let T'shared: add to shared_bindings (def methods forbidden, no move on assign).
+                    if is_shared_ty {
+                        env.borrow_mut().shared_bindings.insert(stmt.name.clone());
+                    }
+                }
+                // Propagate shared/actor to dest when inferred from source.
+                if src_is_shared {
+                    env.borrow_mut().shared_bindings.insert(stmt.name.clone());
+                }
+                if src_is_actor {
+                    env.borrow_mut().mark_actor(&stmt.name);
                 }
                 // Move semantics: `let b = a` moves non-copy values by default.
                 // Copy types (int, float, bool, nil, void, string) are copied, not moved.
                 // Borrow annotations (`T&`) alias rather than move.
+                // 'shared/'actor/'guard bindings are reference-counted — assignment is an alias,
+                // not a move. Both source and dest remain valid.
                 let is_borrow = stmt.ty.as_ref().map(|ty| {
                     matches!(self.resolve_type(ty), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared))
                 }).unwrap_or(false);
-                if !val_is_copy && !is_borrow {
+                let src_is_rc_like = src_var_name.as_ref().map(|s| {
+                    env.borrow().is_shared(s.as_str()) || env.borrow().is_actor(s.as_str())
+                }).unwrap_or(false);
+                if !val_is_copy && !is_borrow && !src_is_rc_like {
                     if let Some(v) = &stmt.value {
                         if let ExprKind::Var(src) = &v.kind {
                             env.borrow_mut().set_moved(src.as_str());

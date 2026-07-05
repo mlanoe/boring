@@ -1491,7 +1491,7 @@ impl Transpiler {
                                     .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz)))
                                     .max_by_key(|(_, sz)| *sz)
                                     .map(|(n, _)| n).unwrap_or("?");
-                                eprintln!("warning: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.name, total_size, largest, e.name);
+                                eprintln!("warning line {}: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.line, e.name, total_size, largest, e.name);
                             }
                             // Disproportionate variant warning: one variant dominates the median.
                             if known_sizes.len() > 1 {
@@ -1510,8 +1510,8 @@ impl Transpiler {
                                         format!("{}({})", dom_name, fts.join(", "))
                                     };
                                     eprintln!(
-                                        "warning: variant `{}` ({} bytes) dominates `{}` ({} bytes median);\n         consider boxing the payload: {}",
-                                        dom_name, dom_size, e.name, median, field_ty_s
+                                        "warning line {}: variant `{}` ({} bytes) dominates `{}` ({} bytes median);\n         consider boxing the payload: {}",
+                                        e.line, dom_name, dom_size, e.name, median, field_ty_s
                                     );
                                 }
                             }
@@ -1534,7 +1534,7 @@ impl Transpiler {
                         let auto_bytes = self.config.stack_auto_bytes;
                         if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
                             if size > auto_bytes {
-                                eprintln!("warning: `{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.name, size, s.name);
+                                eprintln!("warning line {}: `{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.line, s.name, size, s.name);
                             }
                         }
                     }
@@ -1740,9 +1740,9 @@ impl Transpiler {
                             for existing in method_variants.iter() {
                                 if let Some(n) = overloads_conflict(existing, m) {
                                     eprintln!(
-                                        "error: ambiguous overload for method '{}::{}' — \
+                                        "error line {}: ambiguous overload for method '{}::{}' — \
                                          both match a call with {} argument(s)",
-                                        s.name, m.name, n
+                                        m.line, s.name, m.name, n
                                     );
                                     std::process::exit(1);
                                 }
@@ -1891,8 +1891,8 @@ impl Transpiler {
                             for existing in method_variants.iter() {
                                 if let Some(n) = overloads_conflict(existing, m) {
                                     eprintln!(
-                                        "error: ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
-                                        tname, m.name, n
+                                        "error line {}: ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
+                                        m.line, tname, m.name, n
                                     );
                                     std::process::exit(1);
                                 }
@@ -2040,9 +2040,9 @@ impl Transpiler {
                         })
                         .collect::<Vec<_>>().join(", ");
                     eprintln!(
-                        "error: ambiguous overload for '{}' — \
+                        "error line {}: ambiguous overload for '{}' — \
                          '{}({})' and '{}({})' both match a call with {} argument(s)",
-                        f.name, f.name, b_sig, existing.name, a_sig, conflict_arity
+                        f.line, f.name, f.name, b_sig, existing.name, a_sig, conflict_arity
                     );
                     std::process::exit(1);
                 }

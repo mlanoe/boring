@@ -212,10 +212,12 @@ impl Transpiler {
             disambiguate_task_variant(&mut remaining, self.task_method_call_vars.contains(var_name.as_str()));
             match remaining.len() {
                 0 if !is_alias => {
+                    let line = self.fn_current_param_lines.get(var_name.as_str()).copied().unwrap_or(0);
+                    let loc = if line > 0 { format!(" line {}", line) } else { String::new() };
                     eprintln!(
-                        "error: `{}` has no valid qualifier — usage constraints are incompatible\n  \
+                        "error{}: `{}` has no valid qualifier — usage constraints are incompatible\n  \
                          fix: annotate `{}` explicitly",
-                        var_name, var_name
+                        loc, var_name, var_name
                     );
                 }
                 1 => {
@@ -495,10 +497,12 @@ impl Transpiler {
                             let is_mut_param = self.fn_current_params_mut.contains(var_name.as_str());
                             // Error: def call on immutable auto-ref parameter.
                             if is_auto_ref_param && !is_mut_param {
+                                let line = self.fn_current_param_lines.get(var_name.as_str()).copied().unwrap_or(0);
+                                let loc = if line > 0 { format!(" line {}", line) } else { String::new() };
                                 eprintln!(
-                                    "error: parameter `{}` is immutable but `{}` is a `def` method \
+                                    "error{}: parameter `{}` is immutable but `{}` is a `def` method \
                                      — declare `mut {} n`",
-                                    var_name, method, var_name
+                                    loc, var_name, method, var_name
                                 );
                             }
                             constrain_candidates(

@@ -31,19 +31,24 @@ use std::process;
 /// 5 | let z = x + y
 ///   |
 /// ```
-fn report_error(path: &Path, source: &str, line: usize, message: &str) {
+fn report_error(path: &Path, source: &str, line: usize, col: usize, message: &str) {
     eprintln!("error: {}", message);
     if line == 0 {
         eprintln!(" --> {}", path.display());
         return;
     }
-    eprintln!(" --> {}:{}", path.display(), line);
+    let col_s = if col > 0 { format!(":{}", col) } else { String::new() };
+    eprintln!(" --> {}:{}{}", path.display(), line, col_s);
     let width = line.to_string().len();
     let pad   = " ".repeat(width);
     eprintln!("{} |", pad);
     let src_line = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
     eprintln!("{} | {}", line, src_line);
-    eprintln!("{} |", pad);
+    if col > 0 {
+        eprintln!("{} | {}^", pad, " ".repeat(col.saturating_sub(1)));
+    } else {
+        eprintln!("{} |", pad);
+    }
 }
 
 // ─── boring.toml ─────────────────────────────────────────────────────────────
@@ -545,7 +550,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -553,7 +558,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -584,7 +589,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     }
 
     if let Err(e) = interp.exec_program(&program) {
-        report_error(&path, &source, e.line, &e.message);
+        report_error(&path, &source, e.line, 0, &e.message);
         process::exit(1);
     }
 }
@@ -607,11 +612,11 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     };
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
-        Err(e) => { report_error(&path, &source, e.line(), &e.msg()); process::exit(1); }
+        Err(e) => { report_error(&path, &source, e.line(), e.col(), &e.msg()); process::exit(1); }
     };
     let program = match parser::parse(tokens) {
         Ok(p) => p,
-        Err(e) => { report_error(&path, &source, e.line(), &e.msg()); process::exit(1); }
+        Err(e) => { report_error(&path, &source, e.line(), e.col(), &e.msg()); process::exit(1); }
     };
     let out = transpiler::transpile_with_config(&program, config);
     print!("{}", out.code);
@@ -652,7 +657,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -660,7 +665,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -843,7 +848,7 @@ fn emit_cuda(path: &str, version: &str) {
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -851,7 +856,7 @@ fn emit_cuda(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -924,7 +929,7 @@ fn emit_metal(path: &str, version: &str) {
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -932,7 +937,7 @@ fn emit_metal(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -1002,7 +1007,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     let tokens = match lexer::lex(&source) {
         Ok(t) => t,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };
@@ -1010,7 +1015,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), &e.msg());
             process::exit(1);
         }
     };

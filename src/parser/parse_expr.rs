@@ -29,7 +29,7 @@ impl Parser {
         if self.depth > crate::parser::MAX_EXPR_DEPTH {
             self.depth -= 1;
             return Err(ParseError::Generic {
-                line,
+                line, col: self.col(),
                 msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
             });
         }
@@ -253,7 +253,7 @@ impl Parser {
             //   try? f()                — convert Result to Option (nil on error)
             //   try: … catch: …         — statement with typed catch
             return Err(ParseError::Generic {
-                line,
+                line, col: self.col(),
                 msg: format!(
                     "'try expr' requires an else clause or '?' — use:\n  \
                      try f() else default     (expression with fallback)\n  \
@@ -384,7 +384,7 @@ impl Parser {
             if self.depth > crate::parser::MAX_EXPR_DEPTH {
                 self.depth -= 1;
                 return Err(ParseError::Generic {
-                    line,
+                    line, col: self.col(),
                     msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
                 });
             }
@@ -536,7 +536,7 @@ impl Parser {
                 if self.depth > crate::parser::MAX_EXPR_DEPTH {
                     self.depth -= 1;
                     return Err(ParseError::Generic {
-                        line,
+                        line, col: self.col(),
                         msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH),
                     });
                 }
@@ -981,7 +981,7 @@ impl Parser {
             }
             if i < self.tokens.len() && self.tokens[i].kind == TokenKind::Dot {
                 return Err(ParseError::Generic {
-                    line,
+                    line, col: self.col(),
                     msg: "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()".into(),
                 });
             }
@@ -1013,7 +1013,7 @@ impl Parser {
             }
             if i < self.tokens.len() && self.tokens[i].kind == TokenKind::Dot {
                 return Err(ParseError::Generic {
-                    line,
+                    line, col: self.col(),
                     msg: "multiline trailing body cannot be chained — use parentheses: f(args, ():\n    body).next()".into(),
                 });
             }
@@ -1075,7 +1075,7 @@ impl Parser {
         // Check: multiline trailing closure cannot be chained
         if matches!(body, ClosureBody::Block(_)) && matches!(self.peek(), TokenKind::Dot) {
             return Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: "multiline trailing closure cannot be chained — use parentheses: f((x):\n    body).next()".into(),
             });
         }
@@ -1495,7 +1495,7 @@ impl Parser {
                 Ok(Expr { kind: ExprKind::Var("wait".to_string()), line })
             }
             _ => Err(ParseError::Generic {
-                line,
+                line, col: self.col(),
                 msg: format!("unexpected token in expression: {:?}", self.peek()),
             }),
         }
@@ -1510,7 +1510,7 @@ impl Parser {
             TokenKind::LBracket => (TokenKind::LBracket, TokenKind::RBracket),
             TokenKind::LBrace   => (TokenKind::LBrace,   TokenKind::RBrace),
             other => return Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: format!("expected '(', '[', or '{{' after '!' in macro call, got {:?}", other),
             }),
         };
@@ -1588,10 +1588,7 @@ impl Parser {
                         let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
                         let mut sub_parser = Parser::new(hole_tokens);
                         sub_parser.skip_newlines();
-                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic {
-                            line,
-                            msg: format!("in string interpolation: {}", e),
-                        })?;
+                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic { line, col: 0, msg: format!("in string interpolation: {}", e) })?;
                         segments.push(StringSegment::Expr(Box::new(expr)));
                     }
                 }
@@ -1602,10 +1599,7 @@ impl Parser {
                         let hole_tokens = lex(&code).map_err(ParseError::Lex)?;
                         let mut sub_parser = Parser::new(hole_tokens);
                         sub_parser.skip_newlines();
-                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic {
-                            line,
-                            msg: format!("in string interpolation: {}", e),
-                        })?;
+                        let expr = sub_parser.parse_expr().map_err(|e| ParseError::Generic { line, col: 0, msg: format!("in string interpolation: {}", e) })?;
                         segments.push(StringSegment::FormattedExpr(Box::new(expr), fmt));
                     }
                 }
@@ -1648,7 +1642,7 @@ impl Parser {
             // Inline expression — forbid `return`
             if self.check(&TokenKind::Return) {
                 return Err(ParseError::Generic {
-                    line: self.line(),
+                    line: self.line(), col: self.col(),
                     msg: "last expression (no 'return' allowed in closure)".to_string(),
                 });
             }
@@ -1737,17 +1731,17 @@ impl Parser {
                 } else {
                     Err(ParseError::Generic {
                         msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
-                        line,
+                        line, col: self.col(),
                     })
                 }
             }
             ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
                 msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
-                line,
+                line, col: self.col(),
             }),
             _ => Err(ParseError::Generic {
                 msg: "expected `..n` or `0..n` in array comprehension".to_string(),
-                line,
+                line, col: self.col(),
             }),
         }
     }

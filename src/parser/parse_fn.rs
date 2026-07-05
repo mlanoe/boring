@@ -82,7 +82,7 @@ impl Parser {
                         "parameter '{}' in 'def {}' has no type annotation — add a type (e.g. 'int {}')",
                         p.name, name, p.name
                     ),
-                    line: p.line,
+                    line: p.line, col: 0,
                 });
             }
         }
@@ -380,7 +380,7 @@ impl Parser {
     /// `is_pub` is already consumed by the caller; `type` token is NOT yet consumed.
     pub(crate) fn parse_type_member(&mut self, is_pub: bool) -> Result<TypeMemberKind, ParseError> {
         use crate::ast::{TypeMethod, TypeMethodKind, TypeVar};
-        let line = self.line();
+        let (line, col) = (self.line(), self.col());
         self.expect(&TokenKind::Type)?;
         match self.peek().clone() {
             // ── type var / type let ───────────────────────────────────────────
@@ -442,7 +442,7 @@ impl Parser {
             }
             other => Err(ParseError::Generic {
                 msg: format!("expected 'def', 'req', 'set', 'var', or 'let' after 'type', got {:?}", other),
-                line,
+                line, col,
             }),
         }
     }

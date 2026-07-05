@@ -31,8 +31,8 @@ enum Either<L, R> { Left(L), Right(R) }
 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("line {line}: {msg}")]
-    Generic { line: usize, msg: String },
+    #[error("line {line}:{col}: {msg}")]
+    Generic { line: usize, col: usize, msg: String },
     #[error("lex error: {0}")]
     Lex(#[from] LexError),
 }
@@ -42,6 +42,13 @@ impl ParseError {
         match self {
             ParseError::Generic { line, .. } => *line,
             ParseError::Lex(e) => e.line(),
+        }
+    }
+
+    pub fn col(&self) -> usize {
+        match self {
+            ParseError::Generic { col, .. } => *col,
+            ParseError::Lex(_) => 0,
         }
     }
 
@@ -94,6 +101,10 @@ impl Parser {
         self.tokens[self.pos].line
     }
 
+    fn col(&self) -> usize {
+        self.tokens[self.pos].col
+    }
+
     fn advance(&mut self) -> &Token {
         let t = &self.tokens[self.pos];
         if self.pos + 1 < self.tokens.len() {
@@ -139,8 +150,8 @@ impl Parser {
             Ok(self.advance())
         } else {
             Err(ParseError::Generic {
-                line: self.line(),
-                msg: format!("expected {:?}, got {:?}", kind, self.peek()),
+                line: self.line(), col: self.col(),
+                                msg: format!("expected {:?}, got {:?}", kind, self.peek()),
             })
         }
     }
@@ -169,8 +180,8 @@ impl Parser {
             Ok(())
         } else {
             Err(ParseError::Generic {
-                line: self.line(),
-                msg: format!("expected newline, got {:?}", self.peek()),
+                line: self.line(), col: self.col(),
+                                msg: format!("expected newline, got {:?}", self.peek()),
             })
         }
     }
@@ -1205,14 +1216,14 @@ impl Parser {
     /// unconsumed (because `"unified"` etc. are not in the standard qualifier table).
     /// We then pick up the remaining ident to determine the GPU qualifier.
     fn parse_kernel_field(&mut self) -> Result<KernelFieldDecl, ParseError> {
-        let line = self.line();
+        let (line, col) = (self.line(), self.col());
         let binding = match self.peek().clone() {
             TokenKind::Let => { self.advance(); FieldBinding::Let }
             TokenKind::Mut => { self.advance(); FieldBinding::Mut }
             TokenKind::Var => { self.advance(); FieldBinding::Var }
             _ => return Err(ParseError::Generic {
                 msg: "kernel field must start with let, mut, or var".into(),
-                line,
+                line, col,
             }),
         };
 
@@ -1227,7 +1238,7 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _)) => {
                 return Err(ParseError::Generic {
                     msg: "fixed-size arrays cannot use 'unified or 'global — the size is implicit from the init parameter; use '[T]'unified or '[T]'global instead".into(),
-                    line,
+                    line, col,
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
@@ -1239,7 +1250,7 @@ impl Parser {
                 if matches!(*inner, Type::Array(_)) {
                     return Err(ParseError::Generic {
                         msg: "'local does not support dynamic arrays — use a fixed-size '[T, N]'local or choose 'unified/'global".into(),
-                        line,
+                        line, col,
                     });
                 }
                 (GpuQual::Local, *inner)
@@ -1247,7 +1258,7 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuConst) if matches!(*inner, Type::Array(_)) => {
                 return Err(ParseError::Generic {
                     msg: "'const does not support dynamic arrays — use a fixed-size '[T, N]'const for lookup tables".into(),
-                    line,
+                    line, col,
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
@@ -1275,7 +1286,7 @@ impl Parser {
             }
             _ => return Err(ParseError::Generic {
                 msg: "kernel array field must have an explicit GPU memory qualifier ('unified, 'global, 'shared, or 'local)".into(),
-                line,
+                line, col,
             }),
         };
 
@@ -1314,7 +1325,7 @@ impl Parser {
                         TokenKind::Ident(s) => { self.advance(); priority = Some(s); }
                         _ => return Err(ParseError::Generic {
                             msg: "priority must be high, normal, or low".into(),
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                         }),
                     }
                 }
@@ -1576,7 +1587,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::Generic {
                             msg: "unexpected 'type' in ext body (only 'type Name = T' is allowed)".into(),
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                         });
                     }
                 }
@@ -1596,7 +1607,7 @@ impl Parser {
                             _ if self.is_task_fn_shorthand() => methods.push(self.parse_fn_decl(true, true)?),
                             _ => return Err(ParseError::Generic {
                                 msg: "expected 'def', 'req', or return type after 'pub task' in ext body".into(),
-                                line: self.line(),
+                                line: self.line(), col: self.col(),
                             }),
                         }
                     } else if matches!(next, Some(TokenKind::Set)) {
@@ -1607,7 +1618,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::Generic {
                             msg: "expected 'def', 'req', 'task', 'set', or 'as' after 'pub' in ext body".into(),
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                         });
                     }
                 }
@@ -1617,7 +1628,7 @@ impl Parser {
                 _ => {
                     return Err(ParseError::Generic {
                         msg: format!("unexpected token in ext body: {:?}", self.peek()),
-                        line: self.line(),
+                        line: self.line(), col: self.col(),
                     });
                 }
             }
@@ -1711,7 +1722,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::Generic {
                             msg: "expected 'def', 'req', 'set', or 'as' after 'pub' in enum body".into(),
-                            line: self.line(),
+                            line: self.line(), col: self.col(),
                         });
                     }
                 }
@@ -1874,7 +1885,7 @@ impl Parser {
                 Ok("set".to_string())
             }
             other => Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: format!("expected identifier, got {:?}", other),
             }),
         }
@@ -1892,7 +1903,7 @@ impl Parser {
             Ok(s)
         } else {
             Err(ParseError::Generic {
-                line: self.line(),
+                line: self.line(), col: self.col(),
                 msg: format!("expected identifier, got {:?}", self.peek()),
             })
         }

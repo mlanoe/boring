@@ -1845,9 +1845,9 @@ impl Transpiler {
                     for v in &arc_captures {
                         if self.rc_vars.contains(*v) {
                             eprintln!(
-                                "warning: `spawn_local` captures `{}` which is Rc<T> (a !Send type); \
+                                "warning line {}: `spawn_local` captures `{}` which is Rc<T> (a !Send type); \
                                  Rc values cannot be sent across task boundaries",
-                                v
+                                expr.line, v
                             );
                         }
                     }
