@@ -822,10 +822,17 @@ impl Transpiler {
         // Track Arc<T> variables (string, T'shared, T'actor, T'guard) — must be cloned before
         // being moved into an `async move {}` block so the outer binding stays valid.
         if let Some(ty) = &s.ty {
-            if Self::is_string_type(ty) || Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) {
+            // Resolve named type aliases (e.g. `use ONode as OTree'shared`) before classifying.
+            let resolved_ty: Option<&Type> = if let Type::Named(n) = ty {
+                self.non_fn_type_aliases.get(n.as_str()).map(|t| t as &Type)
+            } else {
+                None
+            };
+            let effective_ty = resolved_ty.unwrap_or(ty);
+            if Self::is_string_type(effective_ty) || Self::is_arc_qualified(effective_ty) || Self::is_rc_qualified(effective_ty) {
                 self.arc_vars.insert(s.name.clone());
                 // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone (not Arc::clone).
-                if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                if Self::is_rc_qualified(effective_ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     self.rc_vars.insert(s.name.clone());
                 }
             }

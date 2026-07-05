@@ -1477,6 +1477,18 @@ impl Transpiler {
                     Some(Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)) => Some(inner.as_ref()),
                     _ => None,
                 };
+                // When borrow_inner is a named alias that resolves to a smart-pointer type
+                // (e.g. `ONode& n` where `ONode = OTree'shared = Rc<OTree>`), the Rust param
+                // is `&Rc<OTree>`, not `&OTree`. Detect this early and pass `&var` directly.
+                let borrow_inner_is_smart_ptr = borrow_inner.map(|bi| {
+                    if let Type::Named(n) = bi {
+                        matches!(
+                            self.non_fn_type_aliases.get(n.as_str()),
+                            Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard
+                                | OwnerQual::ActorTask | OwnerQual::GuardTask))
+                        )
+                    } else { false }
+                }).unwrap_or(false);
                 let emit_ty = borrow_inner.map(Some).unwrap_or(param_ty);
                 let emitted = coerced.unwrap_or_else(|| self.emit_let_value(emit_ty, &a.value));
                 // Strip a trailing `.clone()` added by emit_let_value for struct variables when
@@ -1538,6 +1550,22 @@ impl Transpiler {
                 let emitted = if matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))) {
                     let mutable = matches!(param_ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
                     let ref_prefix = if mutable { "&mut " } else { "&" };
+                    // borrow_inner is a smart-pointer alias (e.g. ONode = OTree'shared).
+                    // The Rust param is &Rc<T>, so pass `&var` directly — no clone, no deref.
+                    if borrow_inner_is_smart_ptr {
+                        let base = if let ExprKind::Var(vname) = &a.value.kind {
+                            vname.as_str().to_owned()
+                        } else {
+                            emitted.strip_prefix("Rc::clone(&")
+                                .and_then(|s| s.strip_suffix(')'))
+                                .or_else(|| emitted.strip_prefix("Arc::clone(&").and_then(|s| s.strip_suffix(')')))
+                                .unwrap_or(&emitted)
+                                .to_owned()
+                        };
+                        result.push(format!("{}{}", ref_prefix, base));
+                        i += 1;
+                        continue;
+                    }
                     let _actor_placeholder;
                     let _guard_placeholder;
                     let _shared_placeholder;
@@ -1576,11 +1604,12 @@ impl Transpiler {
                         }
                     }
                     match arg_qual {
-                        Some(Type::Qualified(_, OwnerQual::Stack)) |
+                        Some(Type::Qualified(_, OwnerQual::Stack)) =>
+                            format!("{}{}", ref_prefix, emitted),   // &val (T on stack, no deref needed)
                         Some(Type::Qualified(_, OwnerQual::Owned)) =>
-                            format!("{}*{}", ref_prefix, emitted),  // &*box_val or plain &val
+                            format!("{}*{}", ref_prefix, emitted),  // &*box_val (Box<T> → T)
                         Some(Type::Qualified(_, OwnerQual::Shared)) =>
-                            format!("{}**{}", ref_prefix, emitted), // &**arc
+                            format!("{}*{}", ref_prefix, emitted), // &*rc (Rc<T>/Arc<T> → T, one deref)
                         Some(Type::Qualified(_, OwnerQual::Actor)) => {
                             // Q5: MutexGuard held across .await — reject the combination.
                             if self.task_fns.contains(fn_name) {
@@ -1644,8 +1673,17 @@ impl Transpiler {
                         Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
                     ) || is_unqualified_actor_source_param(param_ty, &self.actor_source_types);
                     if is_actor_or_guard {
-                        if emitted.starts_with('&') || emitted.starts_with("Arc::") || emitted.starts_with("Rc::") {
+                        if emitted.starts_with('&') {
+                            // Already a reference — pass through.
                             emitted
+                        } else if let Some(inner) = emitted.strip_prefix("Rc::clone(&").and_then(|s| s.strip_suffix(')'))
+                            .or_else(|| emitted.strip_prefix("Arc::clone(&").and_then(|s| s.strip_suffix(')')))
+                        {
+                            // Rc::clone(&x) / Arc::clone(&x) → &x (borrow without refcount bump).
+                            format!("&{}", inner)
+                        } else if emitted.starts_with("Arc::") || emitted.starts_with("Rc::") {
+                            // Other Rc::/Arc:: expressions (e.g. Rc::new(...)): take a reference.
+                            format!("&{}", emitted)
                         } else {
                             let base = emitted.strip_suffix(".clone()").unwrap_or(&emitted);
                             format!("&{}", base)

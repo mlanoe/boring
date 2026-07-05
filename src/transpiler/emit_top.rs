@@ -1162,6 +1162,8 @@ impl Transpiler {
                     Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask) => format!("&{}", ty_s),
                     Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => format!("&{}", ty_s),
                     Type::Qualified(_, OwnerQual::Shared | OwnerQual::Weak) => ty_s,
+                    // Borrow/BorrowMut already carry their own &/&mut — don't double-wrap.
+                    Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut) => ty_s,
                     _ if p.rebindable => format!("&mut {}", ty_s),
                     _ => ty_s,
                 };
