@@ -972,6 +972,12 @@ impl Transpiler {
                     if self.rc_vars.contains(src.as_str()) {
                         self.rc_vars.insert(s.name.clone());
                     }
+                } else if self.var_rwlock_types.contains(src.as_str()) {
+                    self.var_rwlock_types.insert(s.name.clone());
+                    self.arc_vars.insert(s.name.clone());
+                    if self.rc_vars.contains(src.as_str()) {
+                        self.rc_vars.insert(s.name.clone());
+                    }
                 } else if self.var_rwlock_task_types.contains(src.as_str()) {
                     self.var_rwlock_task_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());

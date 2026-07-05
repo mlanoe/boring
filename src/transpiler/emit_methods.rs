@@ -1471,7 +1471,22 @@ impl Transpiler {
                         );
                     }
                 }
-                let emitted = coerced.unwrap_or_else(|| self.emit_let_value(param_ty, &a.value));
+                // For Borrow/BorrowMut params, pass the inner type to emit_let_value so it does
+                // not prepend a `&` — the Borrow branch below is responsible for adding `&`.
+                let borrow_inner: Option<&Type> = match param_ty {
+                    Some(Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut)) => Some(inner.as_ref()),
+                    _ => None,
+                };
+                let emit_ty = borrow_inner.map(Some).unwrap_or(param_ty);
+                let emitted = coerced.unwrap_or_else(|| self.emit_let_value(emit_ty, &a.value));
+                // Strip a trailing `.clone()` added by emit_let_value for struct variables when
+                // the param is Borrow/BorrowMut — the Borrow branch below provides the `&`, so
+                // cloning just before taking a reference is wasteful.
+                let emitted = if borrow_inner.is_some() {
+                    emitted.strip_suffix(".clone()").map(str::to_owned).unwrap_or(emitted)
+                } else {
+                    emitted
+                };
                 // Auto-clone: boring has value semantics (no moves).
                 // Field accesses can never be moved out of a struct in Rust; non-Copy variables
                 // may be used again after the call. Add .clone() unless:
@@ -1487,7 +1502,9 @@ impl Transpiler {
                     && !emitted.starts_with("Vec::")
                     && !emitted.starts_with("{ let __g")
                     && !param_ty_is_copy(param_ty)
-                    && !param_rebindable;
+                    && !param_rebindable
+                    // Borrow params take a reference — no clone needed, the Borrow branch adds `&`.
+                    && !matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)));
                 let emitted = if emitted_needs_clone {
                     match &a.value.kind {
                         ExprKind::Field(..) => format!("{}.clone()", emitted),
@@ -2012,6 +2029,9 @@ impl Transpiler {
             display_types: self.display_types.clone(),
             task_fns: self.task_fns.clone(),
             instance_task_methods: self.instance_task_methods.clone(),
+            struct_task_methods: self.struct_task_methods.clone(),
+            task_method_call_fields: std::collections::HashSet::new(),
+            task_method_call_vars: std::collections::HashSet::new(),
             task_vars: self.task_vars.clone(),
             throws_fn_params: self.throws_fn_params.clone(),
             arc_vars: self.arc_vars.clone(),
@@ -2037,7 +2057,6 @@ impl Transpiler {
             struct_rwlock_fields: self.struct_rwlock_fields.clone(),
             struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
-            struct_task_methods: self.struct_task_methods.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
             fn_returns_void: self.fn_returns_void,
@@ -2124,8 +2143,6 @@ impl Transpiler {
             struct_method_throws: self.struct_method_throws.clone(),
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
-            task_method_call_vars: std::collections::HashSet::new(),
-            task_method_call_fields: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
             loaded: self.loaded.clone(),
             prelude_emitted: self.prelude_emitted,
