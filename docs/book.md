@@ -6902,7 +6902,7 @@ The following documents cover topics in greater depth or address areas still und
 ### Ownership and qualifiers
 
 **[Qualifiers — Complete Reference](qualifiers.html)**
-All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and open design questions.
+All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
 
 **[Binding and mutability](binding-mutability.html)**
 Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
@@ -6913,12 +6913,12 @@ Explicit placement syntax for arena, heap, and GPU device allocators — `new(ar
 ### GPU computing
 
 **[GPU / CUDA — full reference](gpu-module.html)**
-Complete GPU reference: memory qualifiers, launch expressions, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, simulation mode and profiles, CUDA codegen mapping.
+Complete GPU reference: memory qualifiers, launch expressions, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
 
 > **Qualifier inference:** Inside `kernel` structs, GPU memory qualifiers are optional for scalars and fixed-size arrays. A `let` scalar or `let [T, N]` fixed array infers `'const` (constant cache); a `mut`/`var` scalar or fixed array infers `'local` (thread-private). Dynamic arrays (`[T]`) still require an explicit qualifier. Invalid combinations (`[T]'local`, `[T]'const`, `[T, N]'unified`, `[T, N]'global`) are parse errors. See [Qualifier inference](gpu-module.html#qualifier-inference) in the full reference.
 
 **[Boring GPU — CUDA implementation details](cuda-module.html)**
-Low-level CUDA codegen internals: buffer layout, `cudarc` host API, PTX compilation via `build.rs`, `__shared__` SRAM allocation, memory safety model, and roadmap.
+Low-level CUDA codegen internals: generated file layout, `cudarc` host API, PTX compilation via `build.rs`, Boring construct to CUDA C mapping, and known limitations.
 
 **[Metal backend](metal-backend.html)**
 macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.
@@ -6926,10 +6926,7 @@ macOS GPU target (`boring build --target metal`): qualifier → MSL address spac
 ### Compilation targets
 
 **[Rust-for-Linux target](kernel-target.html)**
-`boring build --target kernel`: type mapping in `no_std`, errno-based error handling, `task def` as workqueue work items, const-generic and heap-allocated channels, sequential and async streams.
-
-**[Boring → Rust-for-Linux mapping](kernel-transpiler-mapping.html)**
-Architecture of the kernel emission backend: how each Boring construct maps to a specific kernel abstraction, validation pass, and generated crate structure.
+`boring build --target kernel`: type mapping in `no_std`, errno-based error handling, `task def` as workqueue work items, const-generic and heap-allocated channels, sequential and async streams, and the kernel emission backend architecture.
 
 **[Transpilation Modes](transpilation-modes.html)**
 The two orthogonal flags (`--threading` and `--mode`) that control memory management and concurrency in the standard Rust backend: `single` vs `multi`, `managed` vs `strict`.

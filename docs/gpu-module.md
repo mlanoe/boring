@@ -1,8 +1,10 @@
-# GPU / CUDA — full reference
+# GPU computing — language reference
 
 Boring supports GPU computing through `kernel` structs — a dedicated declaration form that groups device memory fields, an `init` allocator, device-side helpers, and an anonymous entry point (`def ()`).
 
 For the Metal backend (macOS), see [`metal-backend.md`](metal-backend.html).
+
+For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see [`cuda-module.md`](cuda-module.html).
 
 ---
 
@@ -19,8 +21,8 @@ kernel Scale:
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         buf[i] *= 2.0
 
-mut k = Scale(data)                          # instantiate — init called
-mut k = kernel(block = 256) k |> .wait      # launch → wait → get result back
+mut k = Scale(data)
+mut k = kernel(block = 256) k |> .wait
 print k.buf[0]
 ```
 
@@ -30,16 +32,15 @@ print k.buf[0]
 
 ```boring
 kernel Name:
-    <binding> [<type>]['<qualifier>] <field>  # qualifier optional for scalars and fixed arrays
-    ...
+    <binding> [<type>]['<qualifier>] <field>
 
     init(<params>):
-        <body>                               # allocate / initialise fields
-
-    def <helper>(<params>):                  # device-side helper method
         <body>
 
-    def ():                                  # entry point — invoked once per thread
+    def <helper>(<params>):
+        <body>
+
+    def ():
         <body>
 ```
 
@@ -72,7 +73,7 @@ Inside a `kernel` struct, the qualifier may be omitted for scalars and fixed-siz
 | `mut [float, 8] tile` | `'local` | fixed array `mut`/`var` → thread-private |
 | `var [int, 4] buf` | `'local` | idem |
 
-Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let float alpha`; `let [float, 4]'const lut` is equivalent to `let [float, 4] lut`). Dynamic arrays (`[T]`) must still carry an explicit qualifier.
+Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let float alpha`). Dynamic arrays (`[T]`) must still carry an explicit qualifier.
 
 **Invalid combinations** — parse errors:
 
@@ -80,18 +81,18 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 |---|---|
 | `[T]'local` | Dynamic arrays cannot be thread-local on GPU |
 | `[T]'const` | Constant cache requires a compile-time size — use `[T, N]` |
-| `[T, N]'unified` | Fixed arrays cannot use `'unified` (size implicit from init) |
+| `[T, N]'unified` | Fixed arrays cannot use `'unified` |
 | `[T, N]'global` | Fixed arrays cannot use `'global` |
 
 **Valid qualifier × field-type matrix:**
 
 | | `'unified` | `'global` | `'shared` | `'local` | `'const` |
 |---|---|---|---|---|---|
-| `[T]` dynamic | ✅ explicit | ✅ explicit | ✅ explicit | ❌ error | ❌ error |
-| `[T, N]` fixed | ❌ error | ❌ error | ✅ explicit | ✅ inferred (`mut`/`var`) | ✅ inferred (`let`) |
-| scalar | — | — | — | ✅ inferred (`mut`/`var`) | ✅ inferred (`let`) |
+| `[T]` dynamic | explicit | explicit | explicit | error | error |
+| `[T, N]` fixed | error | error | explicit | inferred (`mut`/`var`) | inferred (`let`) |
+| scalar | — | — | — | inferred (`mut`/`var`) | inferred (`let`) |
 
-> **Key point:** `'const` and `'local` are never written in practice — they are always inferred. `'unified`, `'global`, and `'shared` are always explicit (semantic choice the transpiler cannot infer).
+> `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and `'shared` are always explicit.
 
 ---
 
@@ -108,27 +109,39 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 ## Launch expression
 
 ```boring
-kernel(block = N) k                         # 1D, N threads per block, 1 block
-kernel(block = N, grid = M) k               # 1D, N threads × M blocks
-kernel(block = (16, 16)) k                  # 2D — grid inferred from kernel shape
-kernel(block = 256, after = h1) k           # ordered after h1
-kernel(block = 256, smem = {tile = 4096}) k # named dynamic shared-memory partitions
-kernel(block = 256, priority = high) k      # scheduling priority: high, normal, low
+kernel(block = N) k
+kernel(block = N, grid = M) k
+kernel(block = (16, 16)) k
+kernel(block = 256, after = h1) k
+kernel(block = 256, smem = {tile = 4096}) k
+kernel(block = 256, priority = high) k
 ```
 
 Returns a `KernelHandle`:
 
 ```boring
 struct KernelHandle<T>:
-    req bool done()    # true if completed (always true in simulation)
-    req T    wait()    # block until complete, return kernel object
+    req bool done()
+    req T    wait()
 ```
 
 Common pattern with the pipe operator:
 
 ```boring
-mut k = kernel(block = 256) k |> .wait     # launch and wait in one expression
+mut k = kernel(block = 256) k |> .wait
 ```
+
+### Dispatch parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
+| `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted (1D) |
+| `smem` | `{string = int}` | no | named dynamic `'shared` partitions and their byte sizes |
+| `after` | handle or `[handle]` | no | kernel starts after all listed handles complete |
+| `priority` | `high` / `normal` / `low` | no | stream scheduling priority — default `normal` |
+
+Device is bound at instantiation (`new(g) Scale(n)`), not at dispatch.
 
 ---
 
@@ -136,13 +149,13 @@ mut k = kernel(block = 256) k |> .wait     # launch and wait in one expression
 
 Inside `def ()` and device helpers, `gpu` is available:
 
-| Built-in | CUDA equivalent |
+| Built-in | Description |
 |---|---|
-| `gpu.thread.x/y/z` | `threadIdx.x/y/z` |
-| `gpu.block.x/y/z` | `blockIdx.x/y/z` |
-| `gpu.block_dim.x/y/z` | `blockDim.x/y/z` |
-| `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` |
-| `sync` | `__syncthreads()` |
+| `gpu.thread.x/y/z` | thread index within block |
+| `gpu.block.x/y/z` | block index within grid |
+| `gpu.block_dim.x/y/z` | threads per block |
+| `gpu.grid_dim.x/y/z` | blocks per grid |
+| `sync` | block-level barrier |
 
 ---
 
@@ -176,26 +189,26 @@ for g in GPU.all():
 
 ### `'unified` — zero-copy host/device
 
-`'unified` fields use `cudaMallocManaged`. Host and device access the same physical memory; no explicit `H2D`/`D2H` copy is needed. Concurrent access from both sides during kernel execution is undefined behaviour — guard with `wait()` before reading on the host.
+`'unified` fields share physical memory between host and device. No explicit H2D/D2H copy is needed. Guard with `wait()` before reading on the host after a launch.
 
 ### `'global` — device-only
 
 `'global` fields live in device DRAM. Host reads/writes require explicit `gpu.copy()`:
 
 ```boring
-gpu.copy(k.result, host_buf)    # D2H — copies device field to host array
-gpu.copy(host_buf, k.input)     # H2D — copies host array to device field
+gpu.copy(k.result, host_buf)    # D2H
+gpu.copy(host_buf, k.input)     # H2D
 ```
 
 ### `'shared` — block SRAM
 
-`'shared` fields are allocated in per-block shared memory (`__shared__`). Use `sync` between producer and consumer threads in the same block.
+`'shared` fields are allocated in per-block shared memory. Use `sync` between producer and consumer threads in the same block.
 
 ```boring
 kernel Reduce:
     mut [float]'unified input
     mut float'unified   result
-    mut [float]'shared  tile    # block SRAM — size set via launch `smem = {tile = bytes}`
+    mut [float]'shared  tile
 
     def ():
         let tid = gpu.thread.x
@@ -208,26 +221,61 @@ kernel Reduce:
             result = sum
 ```
 
----
+### Ownership and launch
 
-## Multi-device
-
-> **Not yet implemented.** The `GPU` type can enumerate and query devices (see below), but the launch expression has no `device =` parameter — there is currently no way to dispatch a `kernel(...)` launch to a specific GPU. All launches run on the default device.
-
-### `after =` ordering
+`kernel(...)` moves the kernel object into the handle. `.wait` returns it. This prevents host access to the kernel's fields while the device is running.
 
 ```boring
-let h0 = kernel(block = 256) k0
-let h1 = kernel(block = 256, after = h0) k1   # k1 starts after k0 completes
+mut k = Scale(1024)
+k.buf[0] = 1.0
+let h = kernel(block = 256) k    # k moved into h
+mut k = h.wait                   # k returned after completion
+print k.buf[0]
 ```
 
-`after =` accepts a single handle or a list: `after = [h0, h1]`.
+The kernel is reusable — `.wait` returns the same object:
+
+```boring
+var k = Scale(1024)
+for batch in batches:
+    for i in ..n: k.buf[i] = batch[i]
+    k = kernel(block = 256) k |> .wait
+    results.push(k.buf[0])
+```
+
+### `'shared` field rules
+
+`'shared` fields cannot escape the kernel body. The compiler rejects:
+
+- returning a `'shared` value from a kernel
+- storing a `'shared` value in a field accessible from the host
+- passing a `'shared` reference outside the kernel invocation scope
+
+### Dynamic `'shared` — size from launch
+
+```boring
+kernel Reduce:
+    mut [float]'shared tile    # size from smem at launch
+
+    def (): ...
+
+mut k = Reduce(n)
+mut k = kernel(block = 256, smem = {tile = 256 * 4}) k |> .wait
+```
+
+Multiple named partitions:
+
+```boring
+mut k = kernel(block = 256, smem = {tile = 256 * 4, flags = 64 * 4}) k |> .wait
+```
+
+The transpiler generates the byte-offset arithmetic automatically.
 
 ---
 
 ## Atomics
 
-Tag a field with `'actor'global` to enable atomic operations. Atomic codegen only applies to **indexed** access into an `'actor'global` array field — a bare scalar field compound-assign is emitted as a regular, non-atomic read-modify-write:
+Tag a field with `'actor'global` to enable atomic operations on indexed access:
 
 ```boring
 kernel Histogram:
@@ -237,19 +285,47 @@ kernel Histogram:
         counts[bucket] += 1     # compiled to atomicAdd
 ```
 
-Supported atomic operations: `+= -= &= |= ^=` (compiled to `atomicAdd` / `atomicSub` / `atomicAnd` / `atomicOr` / `atomicXor`). `*=`, `/=`, and `%=` are not supported as atomics. There is no `swap()` or `compareSwap()` method.
+Supported atomic operations: `+= -= &= |= ^=`.
+
+---
+
+## Multi-device
+
+Device placement is controlled at construction time with `new(gpu)`:
+
+```boring
+let g0 = GPU(0)
+let g1 = GPU(1)
+
+let k0 = new(g0) Scale(input)
+let k1 = new(g1) Scale(input)
+
+kernel(block = 256) k0
+kernel(block = 256) k1
+```
+
+`GPU.count()` returns the number of available devices.
+
+### `after =` ordering
+
+```boring
+let h0 = kernel(block = 256) k0
+let h1 = kernel(block = 256, after = h0) k1
+```
+
+`after =` accepts a single handle or a list: `after = [h0, h1]`.
 
 ---
 
 ## Simulation mode
 
-`boring run` executes kernels sequentially on the CPU — each thread's entry point runs in order, `sync` is a no-op, `gpu.thread.x` is the loop index. The same source file works without a GPU, enabling unit tests and CI.
+`boring run` executes kernels sequentially on the CPU — same source file, no GPU required.
 
 ```sh
-boring run main.br                  # default simulation profile
-boring run --gpu a100 main.br       # simulate A100 device properties
-boring run --gpu h100 main.br       # simulate H100 device properties
-boring run --gpu path/to/my.toml main.br   # custom profile
+boring run main.br
+boring run --gpu a100 main.br
+boring run --gpu h100 main.br
+boring run --gpu path/to/my.toml main.br
 ```
 
 ### Built-in profiles
@@ -267,68 +343,19 @@ boring run --gpu path/to/my.toml main.br   # custom profile
 
 ```toml
 name = "My GPU"
-totalMem = 8589934592   # bytes
+totalMem = 8589934592
 warpSize = 32
 maxThreads = 1024
 maxSharedMem = 49152
 computeCapability = [8, 6]
 ```
 
-> **Note:** sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
+> Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
 
 ---
 
 ## CUDA codegen
 
-`boring build --target cuda` generates a Cargo project with:
+`boring build --target cuda` generates a Cargo project with Rust host code, CUDA C device code, and a `build.rs` that invokes `nvcc`. Requires the CUDA toolkit and a CUDA-capable GPU.
 
-- `src/main.rs` — Rust host code using the `cudarc` crate
-- `kernels/main.cu` — CUDA C device code
-- `build.rs` — invokes `nvcc` to compile `.cu` → PTX
-- `Cargo.toml`
-
-Requires the CUDA toolkit (`nvcc`) and a CUDA-capable GPU.
-
-### CUDA C mapping
-
-| Boring | CUDA C |
-|---|---|
-| `gpu.thread.x` | `threadIdx.x` |
-| `gpu.block.x` | `blockIdx.x` |
-| `gpu.block_dim.x` | `blockDim.x` |
-| `gpu.grid_dim.x` | `gridDim.x` |
-| `sync` | `__syncthreads()` |
-| `'unified` field | `cudaMallocManaged` |
-| `'global` field | `cudaMalloc` |
-| `'shared` field | `__shared__` |
-| `'const` scalar field | `__constant__ T name;` (file scope) |
-| `'const` fixed array field (`[T, N]`) | `__constant__ T name[N];` (file scope) |
-| atomic `[i] += ` on `'actor'global` | `atomicAdd` |
-| `print` in kernel | `printf` |
-
-#### `[T, N]'const` codegen detail
-
-A `let [T, N]` field (inferred `'const`) is emitted as a file-scope `__constant__` array — **not** as a kernel parameter. Device code accesses it directly by name:
-
-```boring
-kernel Lookup:
-    let [float, 4] lut = [0.0, 0.25, 0.5, 1.0]   # inferred 'const
-    mut [float]'unified output
-
-    def ():
-        let i = gpu.thread.x
-        output[i] = lut[i % 4]
-```
-
-Generated CUDA C (excerpt):
-
-```cuda
-__constant__ float lut[4];   // file scope — not a kernel parameter
-
-__global__ void lookup(float* output) {
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    output[i] = lut[i % 4];
-}
-```
-
-The constant array is uploaded once via `cudaMemcpyToSymbol` before launch and remains cached across all threads in the block.
+For the full mapping of Boring constructs to CUDA C, generated file layout, and backend limitations, see [`cuda-module.md`](cuda-module.html).

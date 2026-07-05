@@ -1,8 +1,5 @@
 # Qualifiers — Complete Reference
 
-> **Status: implemented** for `'actor`, `'guard`, `'actor'task`, `'guard'task`, `'shared`, `'weak`, `'stack`, `'heap`.
-> Sections marked ⚠️ are open questions or future work.
-
 ---
 
 ## Overview
@@ -545,7 +542,7 @@ struct Service:
 
 **Generics are not inferred.** `[Counter]` is `Vec<Counter>` and `[Counter'actor]` is `Vec<Arc<Mutex<Counter>>>` — these are distinct Rust types. The qualifier must be written explicitly in the element position.
 
-**Cross-file inference is not planned** — see the open questions section.
+**Cross-file inference is not supported** — see the known limitations section.
 
 ### Qualifier unions and groups
 
@@ -634,17 +631,19 @@ Primitives (`int`, `uint`, `float`, `bool`) have no meaningful qualifier — the
 
 ---
 
-## Open questions
+## Known limitations
 
-### ⚠️ Cross-file struct field inference
+### Cross-file struct field inference
 
-The current struct field inference scans only the methods defined in the same file as the struct. Full cross-file inference would require a two-phase compilation model (parse all → infer globally → emit). Given that:
+Struct field inference scans only the methods defined in the **same file** as the struct. Qualifiers used by callers in other files are not visible to the inferrer.
 
-- Mutable fields already require an explicit `mut` or `var` keyword; adding a qualifier annotation is a small additional step,
-- `'stack` / `'heap` field qualifiers are part of the module API and should not be silently changed by remote usage signals,
-- The two-phase pipeline would complicate incremental builds,
+This is a deliberate constraint, not a gap to fill later:
 
-the decision is to **keep cross-file inference out of scope** and document explicit annotation as the expected pattern for field qualifiers that depend on external callers.
+- Mutable fields already require an explicit `mut` or `var` keyword; adding a qualifier annotation is a small additional step.
+- `'stack` / `'heap` field qualifiers are part of the module API and must not be silently changed by remote usage signals.
+- Full cross-file inference would require a two-phase compilation model (parse all → infer globally → emit), which complicates incremental builds.
+
+**Expected pattern:** write explicit qualifier annotations on fields whose qualifier depends on external callers. The inference handles everything within a file automatically.
 
 ---
 
