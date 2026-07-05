@@ -264,7 +264,7 @@ print v
 print b            <span class="co"># [1, 2, 3]</span>
 print a            <span class="co"># error: use of moved value &#x27;a&#x27;: the value was moved</span>
                     <span class="co">#        and is no longer accessible — use .clone() to make a copy</span></code></pre></div>
-<ul><li>Copy types (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>, <code>string</code>, <code>nil</code>) are unaffected — assigning them always copies, both bindings stay usable.</li><li>Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment, on rebinding, and when passed by value.</li><li>Call <code>.clone()</code> to make an explicit copy instead of moving: <code>let b = a.clone()</code> leaves <code>a</code> usable.</li><li>There is no explicit move-marker syntax — the transpiler infers moves vs. copies from the value&#x27;s type.</li></ul>
+<ul><li>Copy types (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>, <code>string</code>, <code>nil</code>) are unaffected — assigning them always copies, both bindings stay usable.</li><li>Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment and rebinding. <strong>Function parameters are an exception</strong> — the transpiler passes them by reference automatically, so calling a function never moves a value.</li><li>For <code>&#x27;shared</code>/<code>&#x27;actor</code>/<code>&#x27;guard</code> bindings, assignment is an implicit alias (no move, no deep copy — just a refcount increment). Both bindings remain valid.</li><li>For other non-Copy types, call <code>.clone()</code> to make an explicit deep copy instead of moving: <code>let b = a.clone()</code> leaves <code>a</code> usable.</li><li>There is no explicit move-marker syntax — the transpiler infers moves vs. copies from the value&#x27;s type.</li></ul>
 <hr>
 <h2 id="3-data-types">3. Data Types</h2>
 <h3 id="scalar-types">Scalar types</h3>
@@ -422,12 +422,13 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
     <span class="kw">init</span>(<span class="kw">pub</span> <span class="kt">int</span> x, <span class="kw">pub</span> <span class="kt">int</span> y)
 
 <span class="kw">let</span> Point<span class="lf">&#x27;shared</span> a = <span class="fn">Point</span>(x = <span class="nb">1</span>, y = <span class="nb">2</span>)
-<span class="kw">let</span> b = a.<span class="fn">clone</span>()              <span class="co"># b is the same reference as a (Rc clone, not a deep copy)</span>
+<span class="kw">let</span> b = a                      <span class="co"># b is an alias of a — same reference (implicit Rc/Arc clone)</span>
 <span class="kw">let</span> c = <span class="fn">Point</span>(x = <span class="nb">1</span>, y = <span class="nb">2</span>)   <span class="co"># c is a new, distinct object</span>
 
 print <span class="s">"<span class="si">{a === b}</span>"</span>   <span class="co"># true  — same reference</span>
 print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="co"># false — same value, different object</span></code></pre></div>
-<p>Plain assignment (<code>let b = a</code>) <strong>moves</strong> non-Copy values instead of aliasing them (see &quot;Move semantics&quot; above), so aliasing requires a <code>&#x27;shared</code> qualifier plus <code>.clone()</code> to bump the reference count.</p>
+<p>For <code>&#x27;shared</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> qualifiers, assignment is always an <strong>implicit alias</strong> — the reference count is incremented automatically, and both bindings stay valid. No <code>.clone()</code> needed.</p>
+<p>For unqualified structs and <code>&#x27;stack</code>/<code>&#x27;heap</code> types, plain assignment <strong>moves</strong> the value (see &quot;Move semantics&quot; above).</p>
 <p>For primitive types (<code>int</code>, <code>float</code>, <code>bool</code>) which have value semantics, <code>===</code> behaves like <code>==</code>.</p>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">Arc</span>::<span class="fn">ptr_eq</span>(&amp;a, &amp;b)   <span class="co">// T&#x27;shared objects (multi-thread)</span>
@@ -546,6 +547,30 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <span class="co">// boring compiles labeled calls to positional in declaration order.</span>
 <span class="fn">greet</span>(<span class="s">&quot;Alice&quot;</span>.<span class="fn">into</span>(), <span class="s">&quot;Hello&quot;</span>.<span class="fn">into</span>())
 <span class="fn">greet</span>(<span class="s">&quot;Bob&quot;</span>.<span class="fn">into</span>(), <span class="s">&quot;Hi&quot;</span>.<span class="fn">into</span>())   <span class="co">// reordered to declaration order</span></code></pre></div>
+<h3 id="pass-by-reference--automatic">Pass-by-reference — automatic</h3>
+<p>Structs, enums, arrays, dicts, and sets are <strong>always passed by reference</strong> — you never write <code>&amp;</code>. The transpiler injects <code>&amp;</code> automatically; the caller keeps ownership and the value is never copied.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+
+<span class="kt">float</span> <span class="fn">length</span>(Point p):          <span class="co"># p is &amp;Point in Rust — no annotation needed</span>
+    (p.x * p.x + p.y * p.y)
+
+<span class="kw">def</span> <span class="fn">print_points</span>(Point a, Point b):
+    print <span class="s">"(<span class="si">{a.x}</span>, <span class="si">{a.y}</span>) and (<span class="si">{b.x}</span>, <span class="si">{b.y}</span>)"</span>
+
+<span class="kw">let</span> p = <span class="fn">Point</span>(<span class="nb">3.0</span>, <span class="nb">4.0</span>)
+<span class="kw">let</span> q = <span class="fn">Point</span>(<span class="nb">0.0</span>, <span class="nb">1.0</span>)
+<span class="kw">let</span> l = <span class="fn">length</span>(p)               <span class="co"># passes &amp;p</span>
+<span class="fn">print_points</span>(p, q)              <span class="co"># both available after the call — no move</span></code></pre></div>
+<p><strong>Rust equivalent</strong> (generated automatically)</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">length</span>(p: &amp;<span class="kt">Point</span>) -&gt; f64 { p.x * p.x + p.y * p.y }
+<span class="kw">fn</span> <span class="fn">print_points</span>(a: &amp;<span class="kt">Point</span>, b: &amp;<span class="kt">Point</span>) { ... }
+
+<span class="fn">length</span>(&amp;p);
+<span class="fn">print_points</span>(&amp;p, &amp;q);</code></pre></div>
+<p>Primitive types (<code>int</code>, <code>float</code>, <code>bool</code>, <code>uint</code>) are <code>Copy</code> in Rust — they are always passed by value, with no overhead.</p>
+<blockquote>When you need to <strong>modify</strong> the caller&#x27;s variable, use <code>var</code> (see below). When you need to <strong>share ownership</strong> across threads or store the value, use a qualifier (<code>&#x27;shared</code>, <code>&#x27;actor</code>, etc.).</blockquote>
 <h3 id="mutable-parameters--var">Mutable parameters — <code>var</code></h3>
 <p>Prefix a parameter with <code>var</code> to allow the callee to modify the caller&#x27;s variable. The transpiler passes the argument by <code>&amp;mut</code> — changes to the parameter are visible at the call site.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">add_one</span>(<span class="kw">var</span> <span class="kt">int</span> x):
@@ -2830,7 +2855,8 @@ c = c2        <span class="co"># OK — reassign the Arc/Rc pointer</span>
 c.<span class="fn">get</span>()       <span class="co"># OK — req (non-mutating) methods work fine</span>
 <span class="co"># c.inc()     # ERROR — def methods are forbidden on T&#x27;shared even with var</span>
               <span class="co">#         use T&#x27;actor for shared mutable state</span></code></pre></div>
-<h3 id="reference-syntax">Reference syntax — <code>&amp;</code></h3>
+<h3 id="explicit-borrow-syntax--t">Explicit borrow syntax — <code>T&amp;</code></h3>
+<blockquote><strong>You rarely need this.</strong> Structs and enums are already passed by reference automatically (see <a href="#pass-by-reference--automatic">Pass-by-reference — automatic</a>). Reach for <code>T&amp;</code> only when you need an explicit lifetime annotation or must lock in the borrow convention regardless of how the function body evolves.</blockquote>
 <p>Borrows are written with <code>&amp;</code> directly after the type name. The binding keyword defines what the callee can do with the reference:</p>
 <table><thead><tr><th>Syntax</th><th>Rust type</th><th>Semantics</th></tr></thead><tbody><tr><td><code>T&amp; m</code> / <code>let T&amp; m</code></td><td><code>&amp;T</code></td><td>read-only — callee cannot modify content or binding</td></tr><tr><td><code>mut T&amp; m</code></td><td><code>&amp;mut T</code></td><td>callee can modify the content of the caller&#x27;s instance</td></tr><tr><td><code>var T m</code></td><td><code>&amp;mut T</code></td><td>callee can modify the caller&#x27;s variable — equivalent to <code>mut T&amp; m</code> without the explicit borrow syntax</td></tr></tbody></table>
 <table><thead><tr><th>Form</th><th>Rust type</th><th>Notes</th></tr></thead><tbody><tr><td><code>T&amp;</code></td><td><code>&amp;T</code></td><td>Universal borrow — coerced from any qualifier</td></tr><tr><td><code>mut T&amp;</code></td><td><code>&amp;mut T</code></td><td>Mutable universal borrow</td></tr><tr><td><code>T?&amp;</code></td><td><code>&amp;Option&lt;T&gt;</code></td><td>Borrow an optional</td></tr><tr><td><code>T&amp;a</code></td><td><code>&amp;&#x27;a T</code></td><td>Borrow with explicit lifetime</td></tr></tbody></table>

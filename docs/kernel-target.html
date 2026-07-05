@@ -59,14 +59,6 @@ code {
   background: #d4d8e0;
   border-left: 3px solid #b7410e;
 }
-.code-block[data-lang="sh"] pre {
-  background: #1e2030;
-  border-left: 3px solid #444;
-}
-.code-block[data-lang="text"] pre {
-  background: #1e2030;
-  border-left: 3px solid #6c7086;
-}
 .code-block pre code {
   font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
   font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
@@ -82,8 +74,6 @@ code {
 }
 .code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
 .code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
-.code-block[data-lang="sh"]     .lang-label { background: #2a2a3a; color: #7f849c; }
-.code-block[data-lang="text"]   .lang-label { background: #2a2a3a; color: #7f849c; }
 /* Rust light-theme syntax overrides */
 .code-block[data-lang="rust"] .kw { color: #7c3aed; }
 .code-block[data-lang="rust"] .kt { color: #0e7490; }
@@ -112,7 +102,7 @@ th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
 td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
 tr:nth-child(even) td { background: #f1f3f5; }
 tr:hover td { background: #e8f4fd; }
-/* Blockquote */
+/* Blockquote (preview banner) */
 blockquote {
   background: #fff3cd; border-left: 4px solid #e94560;
   padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
@@ -130,265 +120,140 @@ li { margin-bottom: 0.3rem; }
 <aside class="sidebar">
   <div class="sidebar-header">
     <h2>Boring Language</h2>
-    <p>Kernel target</p>
+    <p>Beta</p>
   </div>
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-
-<h1 id="rust-for-linux-target">Boring — Rust-for-Linux target</h1>
-
+<h1 id="rust-for-linux-target">Rust-for-Linux target</h1>
 <p><code>boring build --target kernel</code> compiles Boring source to <strong>Rust-for-Linux</strong> — the <code>no_std</code> Rust dialect used to write Linux kernel modules, drivers, and subsystems.</p>
 <p>The same language applies: structs, enums, traits, ownership qualifiers, error handling, tasks, channels, streams. What changes is the mapping underneath.</p>
-
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target kernel main.br
 <span class="co"># → generates main_kernel/ with src/lib.rs + Cargo.toml</span>
 <span class="co"># Build with: make -C /path/to/linux M=$PWD</span></code></pre></div>
-
 <p>The kernel backend runs a <strong>validation pass</strong> before emission. It rejects incompatible constructs with explicit error messages and warns on constructs that need attention.</p>
-
 <hr>
-
 <h2 id="constraints">Constraints</h2>
-
 <p>The Linux kernel imposes constraints that make the standard Rust backend unusable:</p>
-<ul>
-  <li><strong>No <code>std</code></strong> — only <code>core</code> and the <code>kernel</code> crate are available.</li>
-  <li><strong>No FPU</strong> — floating-point is disabled on real hardware.</li>
-  <li><strong>No tokio</strong> — no async executor, no <code>JoinHandle</code>, no <code>select!</code>.</li>
-  <li><strong>No <code>panic</code></strong> — a panic is a kernel oops/crash.</li>
-  <li><strong>Fixed error type</strong> — errors are errno-based (<code>kernel::error::Error</code>), not <code>Box&lt;dyn Error&gt;</code>.</li>
-  <li><strong>Bounded allocations</strong> — all channels and streams must have a fixed compile-time capacity.</li>
-</ul>
-
+<ul><li><strong>No <code>std</code></strong> — only <code>core</code> and the <code>kernel</code> crate are available.</li><li><strong>No FPU</strong> — floating-point is disabled on real hardware.</li><li><strong>No tokio</strong> — no async executor, no <code>JoinHandle</code>, no <code>select!</code>.</li><li><strong>No <code>panic</code></strong> — a panic is a kernel oops/crash.</li><li><strong>Fixed error type</strong> — errors are errno-based (<code>kernel::error::Error</code>), not <code>Box&lt;dyn Error&gt;</code>.</li><li><strong>Bounded allocations</strong> — all channels and streams must have a fixed compile-time capacity.</li></ul>
 <hr>
-
 <h2 id="type-mapping">Type mapping</h2>
-
 <h3 id="primitives">Primitives</h3>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>int</code></td><td><code>i64</code></td><td><code>i64</code></td><td>identical</td></tr>
-    <tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u64</code></td><td>identical</td></tr>
-    <tr><td><code>float</code></td><td><code>f64</code></td><td>—</td><td>FPU disabled — forbidden</td></tr>
-    <tr><td><code>bool</code></td><td><code>bool</code></td><td><code>bool</code></td><td>identical</td></tr>
-    <tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code> / <code>Rc&lt;str&gt;</code></td><td><code>kernel::str::CStr</code> / <code>CString</code></td><td>literals emitted as <code>c_str!("…")</code></td></tr>
-    <tr><td><code>void</code></td><td><code>()</code></td><td><code>()</code></td><td>identical</td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td><code>i64</code></td><td>identical</td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u64</code></td><td>identical</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>—</td><td>FPU disabled — forbidden</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>bool</code></td><td>identical</td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code> / <code>Rc&lt;str&gt;</code></td><td><code>kernel::str::CStr</code> / <code>CString</code></td><td>literals emitted as <code>c_str!(&quot;…&quot;)</code></td></tr><tr><td><code>void</code></td><td><code>()</code></td><td><code>()</code></td><td>identical</td></tr></tbody></table>
 <h3 id="compound-types">Compound types</h3>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Option&lt;T&gt;</code></td><td>available in <code>core::</code></td></tr>
-    <tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>kernel::prelude::Vec&lt;T&gt;</code></td><td>kernel allocator</td></tr>
-    <tr><td><code>{K=V}</code></td><td><code>HashMap&lt;K,V&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>ordered, O(log n); keys must implement <code>Ord</code></td></tr>
-    <tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;T,()&gt;</code></td><td>set via RBTree with <code>()</code> value; keys must implement <code>Ord</code></td></tr>
-    <tr><td><code>(T, U)</code></td><td>tuples</td><td><code>core::</code> tuples</td><td></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr></thead><tbody><tr><td><code>T?</code></td><td><code>Option&lt;T&gt;</code></td><td><code>Option&lt;T&gt;</code></td><td>available in <code>core::</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>kernel::prelude::Vec&lt;T&gt;</code></td><td>kernel allocator</td></tr><tr><td><code>{K=V}</code></td><td><code>HashMap&lt;K,V&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>ordered, O(log n); keys must implement <code>Ord</code></td></tr><tr><td><code>{T}</code></td><td><code>HashSet&lt;T&gt;</code></td><td><code>kernel::rbtree::RBTree&lt;T,()&gt;</code></td><td>set via RBTree with <code>()</code> value; keys must implement <code>Ord</code></td></tr><tr><td><code>(T, U)</code></td><td>tuples</td><td><code>core::</code> tuples</td><td></td></tr></tbody></table>
 <h3 id="ownership-qualifiers">Ownership qualifiers</h3>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>T'</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T, KVmalloc&gt;</code></td><td>kernel allocator</td></tr>
-    <tr><td><code>T'shared</code></td><td><code>Arc&lt;T&gt;</code> / <code>Rc&lt;T&gt;</code></td><td><code>Arc&lt;T&gt;</code> (<code>kernel::prelude::Arc</code>)</td><td><code>Rc</code> unavailable in <code>no_std</code></td></tr>
-    <tr><td><code>T'actor</code></td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code> / <code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code></td><td></td></tr>
-    <tr><td><code>T'guard</code></td><td><code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::RwLock&lt;T&gt;&gt;</code></td><td></td></tr>
-    <tr><td><code>T'weak</code></td><td><code>Weak&lt;T&gt;</code></td><td><code>Weak&lt;T&gt;</code></td><td></td></tr>
-    <tr><td><code>T'stack</code></td><td><code>T</code></td><td><code>T</code></td><td></td></tr>
-    <tr><td><code>T&amp;</code> / <code>var T&amp;</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr></thead><tbody><tr><td><code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T, KVmalloc&gt;</code></td><td>kernel allocator</td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code> / <code>Rc&lt;T&gt;</code></td><td><code>Arc&lt;T&gt;</code> (<code>kernel::prelude::Arc</code>)</td><td><code>Rc</code> unavailable in <code>no_std</code></td></tr><tr><td><code>T&#x27;actor</code></td><td><code>Arc&lt;Mutex&lt;T&gt;&gt;</code> / <code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::Mutex&lt;T&gt;&gt;</code></td><td></td></tr><tr><td><code>T&#x27;guard</code></td><td><code>Arc&lt;RwLock&lt;T&gt;&gt;</code></td><td><code>Arc&lt;kernel::sync::RwLock&lt;T&gt;&gt;</code></td><td></td></tr><tr><td><code>T&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code></td><td><code>Weak&lt;T&gt;</code></td><td></td></tr><tr><td><code>T&#x27;stack</code></td><td><code>T</code></td><td><code>T</code></td><td></td></tr><tr><td><code>T&amp;</code> / <code>var T&amp;</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td><code>&amp;T</code> / <code>&amp;mut T</code></td><td></td></tr></tbody></table>
 <h3 id="print">Print</h3>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>print "…"</code></td><td><code>println!("…")</code></td><td><code>kernel::pr_info!("…\n")</code></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>print &quot;…&quot;</code></td><td><code>println!(&quot;…&quot;)</code></td><td><code>kernel::pr_info!(&quot;…\n&quot;)</code></td></tr></tbody></table>
 <hr>
-
 <h2 id="error-handling">Error handling</h2>
-
 <p>All errors collapse to <code>kernel::error::Error</code> (errno-based <code>i32</code>).</p>
 <p><code>throws</code> without a type produces <code>Result&lt;T, kernel::error::Error&gt;</code>. Typed <code>catch</code> branches are a known limitation — see <a href="#known-limitations">Known limitations</a>.</p>
-
 <hr>
-
-<h2 id="task-def-work-items"><code>task def</code> — work items</h2>
-
+<h2 id="task-def--work-items"><code>task def</code> — work items</h2>
 <p>In the standard backend, <code>task def</code> compiles to <code>async fn</code> + <code>tokio::spawn</code>. In the kernel backend it generates a <strong>work item</strong> dispatched on <code>system_wq</code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kt">Page</span> <span class="fn">fetch_page</span>(<span class="kt">string</span> url):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> Page <span class="fn">fetch_page</span>(<span class="kt">string</span> url):
     <span class="co"># fetch logic</span></code></pre></div>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
 <span class="kw">struct</span> <span class="kt">FetchPageWork</span> {
-    url:       <span class="kt">kernel</span>::<span class="kt">str</span>::<span class="kt">CString</span>,
-    result:    <span class="kt">Arc</span>&lt;<span class="kt">kernel</span>::<span class="kt">sync</span>::<span class="kt">Mutex</span>&lt;<span class="kt">Option</span>&lt;<span class="kt">Result</span>&lt;<span class="kt">Page</span>, <span class="kt">kernel</span>::<span class="kt">error</span>::<span class="kt">Error</span>&gt;&gt;&gt;&gt;,
-    done_cond: <span class="kt">Arc</span>&lt;<span class="kt">kernel</span>::<span class="kt">sync</span>::<span class="kt">CondVar</span>&gt;,
-    work:      <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt;,
+    url:       kernel::str::<span class="kt">CString</span>,
+    result:    <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">Mutex</span>&lt;<span class="kw">Option</span>&lt;<span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt;&gt;&gt;&gt;,
+    done_cond: <span class="kw">Arc</span>&lt;kernel::sync::<span class="kt">CondVar</span>&gt;,
+    work:      kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt;,
 }
 
-<span class="kw">impl</span> <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt; <span class="kw">for</span> <span class="kt">FetchPageWork</span> {
-    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kt">Arc</span>&lt;<span class="kt">Self</span>&gt;) {
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">FetchPageWork</span>&gt; <span class="kw">for</span> <span class="kt">FetchPageWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
         <span class="kw">let</span> r = <span class="fn">fetch_page_body</span>(this.url.<span class="fn">clone</span>());
-        *this.result.<span class="fn">lock</span>() = <span class="kt">Some</span>(r);
+        *this.result.<span class="fn">lock</span>() = <span class="kw">Some</span>(r);
         this.done_cond.<span class="fn">notify_all</span>();
     }
 }
 
 <span class="kw">fn</span> <span class="fn">fetch_page</span>(url: <span class="kt">CString</span>) -&gt; <span class="kt">KernelFuture</span>&lt;<span class="kt">Page</span>&gt; { … }
-<span class="kw">fn</span> <span class="fn">fetch_page_body</span>(url: <span class="kt">CString</span>) -&gt; <span class="kt">Result</span>&lt;<span class="kt">Page</span>, <span class="kt">kernel</span>::<span class="kt">error</span>::<span class="kt">Error</span>&gt; { … }</code></pre></div>
-
-<p><strong>Constraint on <code>self</code>:</strong> <code>task def</code> as an instance method is only allowed on <code>'shared</code>, <code>'actor</code>, and <code>'guard</code> receivers — the only qualifiers with a lifetime compatible with a work item. <code>T&amp;</code>, <code>T&amp;mut</code>, and <code>T'</code> are rejected by the validator.</p>
-
-<h3 id="kernelfuture"><code>KernelFuture&lt;T&gt;</code></h3>
-
+<span class="kw">fn</span> <span class="fn">fetch_page_body</span>(url: <span class="kt">CString</span>) -&gt; <span class="kw">Result</span>&lt;<span class="kt">Page</span>, kernel::error::<span class="kt">Error</span>&gt; { … }</code></pre></div>
+<p><strong>Constraint on <code>self</code>:</strong> <code>task def</code> as an instance method is only allowed on <code>&#x27;shared</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> receivers — the only qualifiers with a lifetime compatible with a work item. <code>T&amp;</code>, <code>T&amp;mut</code>, and <code>T&#x27;</code> are rejected by the validator.</p>
+<h3 id="kernelfuturet"><code>KernelFuture&lt;T&gt;</code></h3>
 <p>Every <code>task def</code> returns a <code>KernelFuture&lt;T&gt;</code> instead of a tokio <code>JoinHandle</code>:</p>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>f.wait()</code></td><td><code>f.await</code></td><td>blocks the current thread (process context only)</td></tr>
-    <tr><td><code>f.done()</code></td><td>—</td><td>non-blocking poll, returns <code>bool</code></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>f.wait()</code></td><td><code>f.await</code></td><td>blocks the current thread (process context only)</td></tr><tr><td><code>f.done()</code></td><td>—</td><td>non-blocking poll, returns <code>bool</code></td></tr></tbody></table>
 <p><code>wait()</code> must not be called from an IRQ handler or atomic context.</p>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">impl</span>&lt;<span class="kt">T</span>&gt; <span class="kt">KernelFuture</span>&lt;<span class="kt">T</span>&gt; {
-    <span class="kw">pub fn</span> <span class="fn">done</span>(&amp;<span class="kw">self</span>) -&gt; <span class="kt">bool</span> {
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">done</span>(&amp;<span class="kw">self</span>) -&gt; bool {
         <span class="kw">self</span>.result.<span class="fn">try_lock</span>().<span class="fn">map</span>(|g| g.<span class="fn">is_some</span>()).<span class="fn">unwrap_or</span>(<span class="kw">false</span>)
     }
 
-    <span class="kw">pub fn</span> <span class="fn">wait</span>(<span class="kw">self</span>) -&gt; <span class="kt">Result</span>&lt;<span class="kt">T</span>, <span class="kt">kernel</span>::<span class="kt">error</span>::<span class="kt">Error</span>&gt; {
-        <span class="kw">let mut</span> guard = <span class="kw">self</span>.result.<span class="fn">lock</span>();
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">wait</span>(<span class="kw">self</span>) -&gt; <span class="kw">Result</span>&lt;<span class="kt">T</span>, kernel::error::<span class="kt">Error</span>&gt; {
+        <span class="kw">let</span> <span class="kw">mut</span> guard = <span class="kw">self</span>.result.<span class="fn">lock</span>();
         <span class="kw">self</span>.done_cond.<span class="fn">wait_while</span>(&amp;<span class="kw">mut</span> guard, |r| r.<span class="fn">is_none</span>());
         guard.<span class="fn">take</span>().<span class="fn">unwrap</span>()
     }
 }</code></pre></div>
-
 <h3 id="join"><code>join</code></h3>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = <span class="kw">join</span> (<span class="kw">task</span> <span class="fn">f1</span>(), <span class="kw">task</span> <span class="fn">f2</span>())</code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = join (<span class="kw">task</span> <span class="fn">f1</span>(), <span class="kw">task</span> <span class="fn">f2</span>())</code></pre></div>
 <p>Both work items are enqueued concurrently; <code>.wait()</code> is called on each in turn. Wall time is <code>max(t1, t2)</code>.</p>
-
 <hr>
-
-<h2 id="channel-ring-buffer-variants"><code>channel</code> — two ring-buffer variants</h2>
-
+<h2 id="channel--two-ring-buffer-variants"><code>channel</code> — two ring-buffer variants</h2>
 <p>Both variants use blocking <code>send()</code> / <code>recv()</code> — valid in process context only.</p>
-
-<h3 id="channel-t-n-const-generic-stack-buffer"><code>channel&lt;T, N&gt;</code> — const-generic, stack buffer</h3>
-
+<h3 id="channelt-n--const-generic-stack-buffer"><code>channel&lt;T, N&gt;</code> — const-generic, stack buffer</h3>
 <p>The capacity is a compile-time type parameter. The buffer is a fixed-size array <code>[Option&lt;T&gt;; N]</code> allocated inline — no heap allocation.</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="fn">channel</span>&lt;<span class="kt">string</span>, <span class="nb">32</span>&gt;   <span class="co"># const-generic, stack buffer</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>, <span class="nb">32</span>&gt;   <span class="co"># const-generic, stack buffer</span>
 tx.<span class="fn">send</span>(<span class="s">"hello"</span>)                   <span class="co"># blocks if full</span>
 <span class="kw">let</span> msg = rx.<span class="fn">recv</span>()                <span class="co"># blocks if empty</span></code></pre></div>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">let</span> (tx, rx) = <span class="fn">kernel_channel</span>::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
-tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">"hello"</span>));
+<span class="kw">let</span> (tx, rx) = kernel_channel::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
+tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
 <span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
-
 <p><code>KernelChan&lt;T, const N: usize&gt;</code> is emitted as a prelude:</p>
-
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub struct</span> <span class="kt">KernelChan</span>&lt;<span class="kt">T</span>, <span class="kw">const</span> N: <span class="kt">usize</span>&gt; {
-    buf:       [<span class="kt">Option</span>&lt;<span class="kt">T</span>&gt;; N],
-    read_idx:  <span class="kt">usize</span>,
-    write_idx: <span class="kt">usize</span>,
-    count:     <span class="kt">usize</span>,
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">KernelChan</span>&lt;<span class="kt">T</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt; {
+    buf:       [<span class="kw">Option</span>&lt;<span class="kt">T</span>&gt;; <span class="kt">N</span>],
+    read_idx:  usize,
+    write_idx: usize,
+    count:     usize,
 }
 <span class="co">// KernelSender / KernelReceiver wrap Arc&lt;Mutex&lt;KernelChan&lt;T, N&gt;&gt;&gt;</span>
 <span class="co">// + two CondVars (not_empty, not_full).</span>
 <span class="co">// send() blocks on not_full; recv() blocks on not_empty.</span></code></pre></div>
-
-<h3 id="channel-t-cap-runtime-capacity-heap-buffer"><code>channel&lt;T&gt;(cap)</code> — runtime capacity, heap buffer</h3>
-
+<h3 id="channeltcap--runtime-capacity-heap-buffer"><code>channel&lt;T&gt;(cap)</code> — runtime capacity, heap buffer</h3>
 <p>The capacity is a call argument. The buffer is a <code>Vec&lt;Option&lt;T&gt;&gt;</code> pre-allocated on the kernel heap.</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="fn">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">32</span>)   <span class="co"># runtime cap, heap buffer</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">string</span>&gt;(<span class="nb">32</span>)   <span class="co"># runtime cap, heap buffer</span>
 tx.<span class="fn">send</span>(<span class="s">"hello"</span>)
 <span class="kw">let</span> msg = rx.<span class="fn">recv</span>()</code></pre></div>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">let</span> (tx, rx) = <span class="fn">dyn_kernel_channel</span>::&lt;<span class="kt">CString</span>&gt;(<span class="nb">32</span>);
-tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">"hello"</span>));
+<span class="kw">let</span> (tx, rx) = dyn_kernel_channel::&lt;<span class="kt">CString</span>&gt;(<span class="nb">32</span>);
+tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&quot;hello&quot;</span>));
 <span class="kw">let</span> msg = rx.<span class="fn">recv</span>();</code></pre></div>
-
-<table>
-  <thead>
-    <tr><th>Variant</th><th>Boring syntax</th><th>Buffer</th><th>Rust types</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>Const-generic</td><td><code>channel&lt;T, N&gt;</code></td><td><code>[Option&lt;T&gt;; N]</code> — stack</td><td><code>KernelSender&lt;T, N&gt;</code> / <code>KernelReceiver&lt;T, N&gt;</code></td></tr>
-    <tr><td>Dynamic</td><td><code>channel&lt;T&gt;(cap)</code></td><td><code>Vec&lt;Option&lt;T&gt;&gt;</code> — heap</td><td><code>DynKernelSender&lt;T&gt;</code> / <code>DynKernelReceiver&lt;T&gt;</code></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Variant</th><th>Boring syntax</th><th>Buffer</th><th>Rust types</th></tr></thead><tbody><tr><td>Const-generic</td><td><code>channel&lt;T, N&gt;</code></td><td><code>[Option&lt;T&gt;; N]</code> — stack</td><td><code>KernelSender&lt;T, N&gt;</code> / <code>KernelReceiver&lt;T, N&gt;</code></td></tr><tr><td>Dynamic</td><td><code>channel&lt;T&gt;(cap)</code></td><td><code>Vec&lt;Option&lt;T&gt;&gt;</code> — heap</td><td><code>DynKernelSender&lt;T&gt;</code> / <code>DynKernelReceiver&lt;T&gt;</code></td></tr></tbody></table>
 <p>Omitting the capacity uses the heap variant with a fallback of <code>cap = 2</code> and emits a warning — specify the capacity explicitly in production code.</p>
-
 <hr>
-
-<h2 id="stream-sequential-or-async"><code>stream</code> — sequential iterator or work item</h2>
-
+<h2 id="stream--sequential-iterator-or-work-item"><code>stream</code> — sequential iterator or work item</h2>
 <h3 id="sequential-stream">Sequential stream</h3>
-
 <p>If the body has no <code>wait</code> and no <code>task</code> calls, the stream compiles to a plain iterator — no workqueue involved.</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span> <span class="kt">int</span> <span class="fn">range</span>(<span class="kt">int</span> n):
-    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0</span>..n:
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
         <span class="kw">yield</span> i</code></pre></div>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel)</span>
-<span class="kw">fn</span> <span class="fn">range</span>(n: <span class="kt">i64</span>) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;Item = <span class="kt">i64</span>&gt; {
-    <span class="kw">let mut</span> __items: <span class="kt">kernel</span>::<span class="kt">prelude</span>::<span class="kt">Vec</span>&lt;<span class="kt">i64</span>&gt; = <span class="kt">kernel</span>::<span class="kt">prelude</span>::<span class="kt">Vec</span>::<span class="fn">new</span>();
-    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0</span><span class="kt">i64</span>..n { __items.<span class="fn">push</span>(i); }
+<span class="kw">fn</span> <span class="fn">range</span>(n: i64) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = i64&gt; {
+    <span class="kw">let</span> <span class="kw">mut</span> __items: kernel::prelude::<span class="kw">Vec</span>&lt;i64&gt; = kernel::prelude::<span class="kw">Vec</span>::<span class="fn">new</span>();
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0i64..</span>n { __items.<span class="fn">push</span>(i); }
     __items.<span class="fn">into_iter</span>()
 }</code></pre></div>
-
-<h3 id="async-stream-work-item">Async stream — work item + <code>KernelReceiver&lt;T, N&gt;</code></h3>
-
+<h3 id="async-stream--work-item--kernelreceivert-n">Async stream — work item + <code>KernelReceiver&lt;T, N&gt;</code></h3>
 <p>If the body contains <code>wait</code> or <code>task</code> calls, the stream becomes a work item. The function returns a <code>KernelReceiver&lt;T, N&gt;</code>; the caller pulls values with <code>.recv()</code>. Use <code>stream&lt;N&gt;</code> to set the capacity explicitly (defaults to 2).</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">stream</span>&lt;<span class="nb">32</span>&gt; <span class="kt">string</span> <span class="fn">read_lines</span>(<span class="kt">string</span> path):
-    <span class="kw">let</span> file = <span class="kt">File</span>.<span class="fn">open</span>(path)
+    <span class="kw">let</span> file = File.<span class="fn">open</span>(path)
     <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">lines</span>():
         <span class="kw">yield</span> line</code></pre></div>
-
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Generated (kernel) — three pieces:</span>
 
 <span class="kw">struct</span> <span class="kt">ReadLinesWork</span> {
     path: <span class="kt">CString</span>,
     tx:   <span class="kt">KernelSender</span>&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;,
-    work: <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt;,
+    work: kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt;,
 }
 
-<span class="kw">impl</span> <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt; <span class="kw">for</span> <span class="kt">ReadLinesWork</span> {
-    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kt">Arc</span>&lt;<span class="kt">Self</span>&gt;) {
+<span class="kw">impl</span> kernel::workqueue::<span class="kt">Work</span>&lt;<span class="kt">ReadLinesWork</span>&gt; <span class="kw">for</span> <span class="kt">ReadLinesWork</span> {
+    <span class="kw">fn</span> <span class="fn">run</span>(this: <span class="kw">Arc</span>&lt;<span class="kw">Self</span>&gt;) {
         <span class="kw">let</span> file = <span class="kt">File</span>::<span class="fn">open</span>(&amp;this.path);
         <span class="kw">for</span> line <span class="kw">in</span> file.<span class="fn">lines</span>() {
             this.tx.<span class="fn">send</span>(line);
@@ -398,117 +263,41 @@ tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">"
 }
 
 <span class="kw">fn</span> <span class="fn">read_lines</span>(path: <span class="kt">CString</span>) -&gt; <span class="kt">KernelReceiver</span>&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt; {
-    <span class="kw">let</span> (tx, rx) = <span class="fn">kernel_channel</span>::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
-    <span class="kw">let</span> work = <span class="kt">Arc</span>::<span class="fn">new</span>(<span class="kt">ReadLinesWork</span> { path, tx, work: <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="kt">Work</span>::<span class="fn">new</span>() });
-    <span class="kt">kernel</span>::<span class="kt">workqueue</span>::<span class="fn">system</span>().<span class="fn">enqueue</span>(<span class="kt">Arc</span>::<span class="fn">clone</span>(&amp;work));
+    <span class="kw">let</span> (tx, rx) = kernel_channel::&lt;<span class="kt">CString</span>, <span class="nb">32</span>&gt;();
+    <span class="kw">let</span> work = <span class="kw">Arc</span>::<span class="fn">new</span>(<span class="kt">ReadLinesWork</span> { path, tx, work: kernel::workqueue::<span class="kt">Work</span>::<span class="fn">new</span>() });
+    kernel::workqueue::<span class="fn">system</span>().<span class="fn">enqueue</span>(<span class="kw">Arc</span>::<span class="fn">clone</span>(&amp;work));
     rx
 }</code></pre></div>
-
-<table>
-  <thead>
-    <tr><th>Strategy</th><th>Condition</th><th>Rust emitted</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>Sequential</td><td>No <code>wait</code>, no <code>task</code></td><td><code>impl Iterator&lt;Item = T&gt;</code></td></tr>
-    <tr><td>Async</td><td>Has <code>wait</code> or <code>task</code></td><td><code>KernelReceiver&lt;T, N&gt;</code> via <code>Work</code> on <code>system_wq</code></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Strategy</th><th>Condition</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Sequential</td><td>No <code>wait</code>, no <code>task</code></td><td><code>impl Iterator&lt;Item = T&gt;</code></td></tr><tr><td>Async</td><td>Has <code>wait</code> or <code>task</code></td><td><code>KernelReceiver&lt;T, N&gt;</code> via <code>Work</code> on <code>system_wq</code></td></tr></tbody></table>
 <hr>
-
 <h2 id="other-concurrency-primitives">Other concurrency primitives</h2>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust-kernel</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>oneshot&lt;T&gt;()</code></td><td>kernel oneshot prelude</td></tr>
-    <tr><td><code>watch&lt;T&gt;(initial)</code></td><td>kernel watch prelude — latest-value broadcast</td></tr>
-    <tr><td><code>broadcast&lt;T, N&gt;</code></td><td>kernel static broadcast prelude</td></tr>
-    <tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td>kernel dynamic broadcast prelude</td></tr>
-    <tr><td><code>wait Duration</code></td><td><code>kernel::delay::coarse_sleep</code> — blocking, no await</td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust-kernel</th></tr></thead><tbody><tr><td><code>oneshot&lt;T&gt;()</code></td><td>kernel oneshot prelude</td></tr><tr><td><code>watch&lt;T&gt;(initial)</code></td><td>kernel watch prelude — latest-value broadcast</td></tr><tr><td><code>broadcast&lt;T, N&gt;</code></td><td>kernel static broadcast prelude</td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td>kernel dynamic broadcast prelude</td></tr><tr><td><code>wait Duration</code></td><td><code>kernel::delay::coarse_sleep</code> — blocking, no await</td></tr></tbody></table>
 <hr>
-
 <h2 id="stdlib">Stdlib</h2>
-
-<table>
-  <thead>
-    <tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>print "…"</code></td><td><code>println!</code></td><td><code>kernel::pr_info!</code></td><td>always <code>pr_info!</code> — no severity routing</td></tr>
-    <tr><td><code>assert_eq!</code></td><td><code>assert_eq!</code></td><td>plain <code>assert_eq!</code></td><td>no <code>WARN_ON</code> mapping</td></tr>
-    <tr><td><code>panic(…)</code></td><td><code>panic!</code></td><td>—</td><td>forbidden — use <code>throws</code> / <code>Result</code></td></tr>
-    <tr><td>math (<code>sqrt</code>, <code>sin</code>…)</td><td><code>std::f64</code></td><td>—</td><td>forbidden — FPU disabled</td></tr>
-    <tr><td><code>Vec</code> methods</td><td><code>std::vec</code></td><td><code>kernel::prelude::Vec</code></td><td>slightly different API</td></tr>
-    <tr><td><code>{K=V}</code></td><td><code>HashMap</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>ordered, O(log n)</td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Boring</th><th>Rust std</th><th>Rust-kernel</th><th>Notes</th></tr></thead><tbody><tr><td><code>print &quot;…&quot;</code></td><td><code>println!</code></td><td><code>kernel::pr_info!</code></td><td>always <code>pr_info!</code> — no severity routing</td></tr><tr><td><code>assert_eq!</code></td><td><code>assert_eq!</code></td><td>plain <code>assert_eq!</code></td><td>no <code>WARN_ON</code> mapping</td></tr><tr><td><code>panic(…)</code></td><td><code>panic!</code></td><td>—</td><td>forbidden — use <code>throws</code> / <code>Result</code></td></tr><tr><td>math (<code>sqrt</code>, <code>sin</code>…)</td><td><code>std::f64</code></td><td>—</td><td>forbidden — FPU disabled</td></tr><tr><td><code>Vec</code> methods</td><td><code>std::vec</code></td><td><code>kernel::prelude::Vec</code></td><td>slightly different API</td></tr><tr><td><code>{K=V}</code></td><td><code>HashMap</code></td><td><code>kernel::rbtree::RBTree&lt;K,V&gt;</code></td><td>ordered, O(log n)</td></tr></tbody></table>
 <hr>
-
 <h2 id="forbidden-constructs">Forbidden constructs</h2>
-
 <p><strong>Errors</strong> — rejected before emission:</p>
-
-<table>
-  <thead>
-    <tr><th>Construct</th><th>Reason</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>float</code>, floating-point math</td><td>FPU disabled</td></tr>
-    <tr><td><code>panic(…)</code></td><td>kernel oops/crash — use <code>throws</code> / <code>Result</code></td></tr>
-    <tr><td><code>task def</code> on <code>self</code> with <code>T&amp;</code>, <code>T&amp;mut</code>, <code>T'</code></td><td>lifetime incompatible with a work item</td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Construct</th><th>Reason</th></tr></thead><tbody><tr><td><code>float</code>, floating-point math</td><td>FPU disabled</td></tr><tr><td><code>panic(…)</code></td><td>kernel oops/crash — use <code>throws</code> / <code>Result</code></td></tr><tr><td><code>task def</code> on <code>self</code> with <code>T&amp;</code>, <code>T&amp;mut</code>, <code>T&#x27;</code></td><td>lifetime incompatible with a work item</td></tr></tbody></table>
 <p><strong>Warnings</strong> — emitted, but explicit specification is recommended:</p>
-
-<table>
-  <thead>
-    <tr><th>Construct</th><th>Behaviour</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>channel&lt;T&gt;</code> without capacity</td><td>defaults to heap variant with <code>cap = 2</code></td></tr>
-    <tr><td><code>stream</code> without <code>&lt;N&gt;</code> (async body)</td><td>defaults to <code>N = 2</code></td></tr>
-    <tr><td><code>T'shared</code></td><td><code>Rc&lt;T&gt;</code> replaced by <code>Arc&lt;T&gt;</code> — <code>Rc</code> unavailable in <code>no_std</code></td></tr>
-  </tbody>
-</table>
-
+<table><thead><tr><th>Construct</th><th>Behaviour</th></tr></thead><tbody><tr><td><code>channel&lt;T&gt;</code> without capacity</td><td>defaults to heap variant with <code>cap = 2</code></td></tr><tr><td><code>stream</code> without <code>&lt;N&gt;</code> (async body)</td><td>defaults to <code>N = 2</code></td></tr><tr><td><code>T&#x27;shared</code></td><td><code>Rc&lt;T&gt;</code> replaced by <code>Arc&lt;T&gt;</code> — <code>Rc</code> unavailable in <code>no_std</code></td></tr></tbody></table>
 <hr>
-
 <h2 id="known-limitations">Known limitations</h2>
-
-<ul>
-  <li><strong><code>float</code> detection is incomplete</strong> — the validator rejects float literals and a fixed list of float math builtins, but a <code>float</code>-typed parameter or binding with no literal passes validation and is emitted as <code>f64</code> with a comment marker. Treat <code>float</code> as unsupported regardless.</li>
-  <li><strong>Typed <code>catch</code> branches</strong> — <code>throws MyError</code> and <code>catch MyError</code> are not implemented. The <code>type X as kernel.error.Error(ERRNO)</code> errno-binding syntax is not recognized by the parser. All errors collapse to <code>kernel::error::Error</code>; <code>catch</code> clauses are silently dropped in generated code.</li>
-  <li><strong><code>'actor'task</code> / <code>'guard'task</code></strong> — these qualifiers have no match arm in the kernel emitter and fall through to <code>&amp;T</code>. Use plain <code>'actor</code> / <code>'guard</code> in kernel context.</li>
-  <li><strong><code>assert_eq!</code></strong> — no kernel-specific override; plain <code>assert_eq!</code> is emitted without mapping to <code>WARN_ON</code> or <code>kernel::build_assert!</code>.</li>
-</ul>
-
+<ul><li><strong><code>float</code> detection is incomplete</strong> — the validator rejects float literals and a fixed list of float math builtins, but a <code>float</code>-typed parameter or binding with no literal passes validation and is emitted as <code>f64</code> with a comment marker. Treat <code>float</code> as unsupported regardless.</li><li><strong>Typed <code>catch</code> branches</strong> — <code>throws MyError</code> and <code>catch MyError</code> are not implemented. The <code>type X as kernel.error.Error(ERRNO)</code> errno-binding syntax is not recognized by the parser. All errors collapse to <code>kernel::error::Error</code>; <code>catch</code> clauses are silently dropped in generated code.</li><li><strong><code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code></strong> — these qualifiers have no match arm in the kernel emitter and fall through to <code>&amp;T</code>. Use plain <code>&#x27;actor</code> / <code>&#x27;guard</code> in kernel context.</li><li><strong><code>assert_eq!</code></strong> — no kernel-specific override; plain <code>assert_eq!</code> is emitted without mapping to <code>WARN_ON</code> or <code>kernel::build_assert!</code>.</li></ul>
 <hr>
-
 <h2 id="transpiler-architecture">Transpiler architecture</h2>
-
 <p>A second emission backend within the same binary — parser, AST, and typing passes are shared and untouched.</p>
-
-<div class="code-block" data-lang="text"><span class="lang-label">text</span><pre><code>src/
+<div class="code-block"><pre><code>src/
   validator/
-    kernel.rs          <span class="co"># validation pass: rejects forbidden constructs</span>
+    kernel.rs          # validation pass: rejects forbidden constructs
   transpiler/
     kernel/
-      mod.rs           <span class="co"># entry point, selected by --target kernel</span>
-      emit_top.rs      <span class="co"># struct/impl/fn declarations, Work item generation</span>
-      emit_stmt.rs     <span class="co"># statements, task expr, channel, yield</span>
-      emit_expr.rs     <span class="co"># expressions, string literal → c_str!, method calls</span>
-      helpers.rs       <span class="co"># KernelFuture&lt;T&gt;, KernelChan&lt;T&gt; runtime types</span></code></pre></div>
-
+      mod.rs           # entry point, selected by --target kernel
+      emit_top.rs      # struct/impl/fn declarations, Work item generation
+      emit_stmt.rs     # statements, task expr, channel, yield
+      emit_expr.rs     # expressions, string literal → c_str!, method calls
+      helpers.rs       # KernelFuture&lt;T&gt;, KernelChan&lt;T&gt; runtime types</code></pre></div>
 <p>The <code>--target kernel</code> flag activates the kernel validator then the kernel emitter. The standard backend (<code>--target rust</code>, default) is not modified.</p>
-
 </main>
 <script>
 // Build TOC from headings

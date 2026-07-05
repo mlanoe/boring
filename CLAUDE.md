@@ -42,6 +42,13 @@ req mut T get():                # read-only method, returns a mutable instance
 - `def` — mutating method, callable on `var` bindings only → `&mut self`
 - `def mut` / `req mut` — the `mut` after the keyword applies to the **return value**, not `self`
 
+### Parameter passing
+
+- **Structs, enums, arrays, dicts, sets** — always passed by reference (`&T`) automatically. Never write `&`. The caller keeps ownership.
+- **Primitives** (`int`, `float`, `bool`, `uint`) — passed by value (Copy types), no overhead.
+- **`var` param** — passes `&mut T`; changes are visible at the call site.
+- **`T&` explicit borrow** — advanced only; needed only for explicit lifetime annotations.
+
 ## Structs
 
 ```boring

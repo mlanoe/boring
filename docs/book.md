@@ -273,8 +273,9 @@ print a            # error: use of moved value 'a': the value was moved
 ```
 
 - Copy types (`int`, `uint`, `float`, `bool`, `string`, `nil`) are unaffected — assigning them always copies, both bindings stay usable.
-- Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment, on rebinding, and when passed by value.
-- Call `.clone()` to make an explicit copy instead of moving: `let b = a.clone()` leaves `a` usable.
+- Non-Copy types (structs, arrays, dicts, sets, enums, tuples) are moved on assignment and rebinding. **Function parameters are an exception** — the transpiler passes them by reference automatically, so calling a function never moves a value.
+- For `'shared`/`'actor`/`'guard` bindings, assignment is an implicit alias (no move, no deep copy — just a refcount increment). Both bindings remain valid.
+- For other non-Copy types, call `.clone()` to make an explicit deep copy instead of moving: `let b = a.clone()` leaves `a` usable.
 - There is no explicit move-marker syntax — the transpiler infers moves vs. copies from the value's type.
 
 ---
@@ -576,14 +577,16 @@ struct Point:
     init(pub int x, pub int y)
 
 let Point'shared a = Point(x = 1, y = 2)
-let b = a.clone()              # b is the same reference as a (Rc clone, not a deep copy)
+let b = a                      # b is an alias of a — same reference (implicit Rc/Arc clone)
 let c = Point(x = 1, y = 2)   # c is a new, distinct object
 
 print "{a === b}"   # true  — same reference
 print "{a === c}"   # false — same value, different object
 ```
 
-Plain assignment (`let b = a`) **moves** non-Copy values instead of aliasing them (see "Move semantics" above), so aliasing requires a `'shared` qualifier plus `.clone()` to bump the reference count.
+For `'shared`, `'actor`, and `'guard` qualifiers, assignment is always an **implicit alias** — the reference count is incremented automatically, and both bindings stay valid. No `.clone()` needed.
+
+For unqualified structs and `'stack`/`'heap` types, plain assignment **moves** the value (see "Move semantics" above).
 
 For primitive types (`int`, `float`, `bool`) which have value semantics, `===` behaves like `==`.
 
@@ -784,6 +787,40 @@ format_num(255, base = 16, pad = true)
 greet("Alice".into(), "Hello".into())
 greet("Bob".into(), "Hi".into())   // reordered to declaration order
 ```
+
+### Pass-by-reference — automatic
+
+Structs, enums, arrays, dicts, and sets are **always passed by reference** — you never write `&`. The transpiler injects `&` automatically; the caller keeps ownership and the value is never copied.
+
+```boring
+struct Point:
+    float x
+    float y
+
+float length(Point p):          # p is &Point in Rust — no annotation needed
+    (p.x * p.x + p.y * p.y)
+
+def print_points(Point a, Point b):
+    print "({a.x}, {a.y}) and ({b.x}, {b.y})"
+
+let p = Point(3.0, 4.0)
+let q = Point(0.0, 1.0)
+let l = length(p)               # passes &p
+print_points(p, q)              # both available after the call — no move
+```
+
+**Rust equivalent** (generated automatically)
+```rust
+fn length(p: &Point) -> f64 { p.x * p.x + p.y * p.y }
+fn print_points(a: &Point, b: &Point) { ... }
+
+length(&p);
+print_points(&p, &q);
+```
+
+Primitive types (`int`, `float`, `bool`, `uint`) are `Copy` in Rust — they are always passed by value, with no overhead.
+
+> When you need to **modify** the caller's variable, use `var` (see below). When you need to **share ownership** across threads or store the value, use a qualifier (`'shared`, `'actor`, etc.).
 
 ### Mutable parameters — `var`
 
@@ -4711,7 +4748,9 @@ c.get()       # OK — req (non-mutating) methods work fine
               #         use T'actor for shared mutable state
 ```
 
-### Reference syntax — `&`
+### Explicit borrow syntax — `T&`
+
+> **You rarely need this.** Structs and enums are already passed by reference automatically (see [Pass-by-reference — automatic](#pass-by-reference--automatic)). Reach for `T&` only when you need an explicit lifetime annotation or must lock in the borrow convention regardless of how the function body evolves.
 
 Borrows are written with `&` directly after the type name. The binding keyword defines what the callee can do with the reference:
 

@@ -1100,3 +1100,16 @@ mod tests {
         }));
     }
 }
+
+#[cfg(test)]
+mod _tmp_verify {
+    use super::*;
+    #[test]
+    fn tmp_check_triple_backslash() {
+        let src = "\"\"\"\nC:\\Users\\name\n\"\"\"";
+        let toks = lex(src).unwrap();
+        for t in &toks {
+            println!("{:?}", t);
+        }
+    }
+}

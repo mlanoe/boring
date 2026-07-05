@@ -102,7 +102,7 @@ th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
 td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
 tr:nth-child(even) td { background: #f1f3f5; }
 tr:hover td { background: #e8f4fd; }
-/* Blockquote */
+/* Blockquote (preview banner) */
 blockquote {
   background: #fff3cd; border-left: 4px solid #e94560;
   padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
@@ -120,738 +120,335 @@ li { margin-bottom: 0.3rem; }
 <aside class="sidebar">
   <div class="sidebar-header">
     <h2>Boring Language</h2>
-    <p>Qualifiers — Complete Reference</p>
+    <p>Beta</p>
   </div>
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-
-<h1 id="qualifiers-complete-reference">Boring — Qualifiers — Complete Reference</h1>
-
+<h1 id="qualifiers--complete-reference">Qualifiers — Complete Reference</h1>
 <hr>
-
 <h2 id="overview">Overview</h2>
-
 <p>Every Boring type carries an optional <strong>qualifier</strong> that describes how the value is stored and shared at runtime. The qualifier is written after the type name, separated by a tick:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'actor</span>  c = <span class="fn">Counter</span>()   <span class="co"># Arc&lt;Mutex&lt;Counter&gt;&gt;</span>
-<span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'shared</span> r = <span class="fn">Counter</span>()   <span class="co"># Arc&lt;Counter&gt;</span>
-<span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'stack</span>  s = <span class="fn">Counter</span>()   <span class="co"># Counter  (on the stack)</span></code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Counter<span class="lf">&#x27;actor</span>  c = <span class="fn">Counter</span>()   <span class="co"># Arc&lt;Mutex&lt;Counter&gt;&gt;</span>
+<span class="kw">let</span> Counter<span class="lf">&#x27;shared</span> r = <span class="fn">Counter</span>()   <span class="co"># Arc&lt;Counter&gt;</span>
+<span class="kw">let</span> Counter<span class="lf">&#x27;stack</span>  s = <span class="fn">Counter</span>()   <span class="co"># Counter  (on the stack)</span></code></pre></div>
 <p>Qualifiers are resolved at transpile time. The interpreter ignores them (all values are reference-counted by the runtime). In generated Rust the qualifier determines the exact wrapper type.</p>
-
 <hr>
-
 <h2 id="qualifier-table">Qualifier table</h2>
-
-<table>
-<thead><tr><th>Boring</th><th>Rust (multi-thread)</th><th>Rust (single-thread)</th><th>Mutable</th><th>Notes</th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'stack</span></code></td><td><code>T</code></td><td><code>T</code></td><td>via <code><span class="kw">mut</span></code> binding</td><td>Rust default, no wrapper</td></tr>
-<tr><td><code><span class="lf">'heap</span></code> / <code>T'</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T&gt;</code></td><td>via <code><span class="kw">mut</span></code> binding</td><td>heap-allocated, exclusive</td></tr>
-<tr><td><code><span class="lf">'shared</span></code></td><td><code>Arc&lt;T&gt;</code></td><td><code>Rc&lt;T&gt;</code></td><td>no</td><td>read-only shared ownership</td></tr>
-<tr><td><code><span class="lf">'actor</span></code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>sync, no tokio required</td></tr>
-<tr><td><code><span class="lf">'actor'task</span></code> / <code><span class="lf">'task</span></code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>async context</td></tr>
-<tr><td><code><span class="lf">'guard</span></code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>reader-writer, sync</td></tr>
-<tr><td><code><span class="lf">'guard'task</span></code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>async context</td></tr>
-<tr><td><code><span class="lf">'weak</span></code></td><td><code>Weak&lt;T&gt;</code> / <code>sync::Weak&lt;T&gt;</code></td><td><code>Rc::Weak&lt;T&gt;</code></td><td>no</td><td>non-owning, inferred from RHS</td></tr>
-</tbody>
-</table>
-
-<p><code><span class="lf">'actor'task</span></code> is an alias for <code><span class="lf">'task</span></code>. Both produce the tokio async lock.</p>
-
+<table><thead><tr><th>Boring</th><th>Rust (multi-thread)</th><th>Rust (single-thread)</th><th>Mutable</th><th>Notes</th></tr></thead><tbody><tr><td><code>&#x27;stack</code></td><td><code>T</code></td><td><code>T</code></td><td>via <code>mut</code> binding</td><td>Rust default, no wrapper</td></tr><tr><td><code>&#x27;heap</code> / <code>T&#x27;</code></td><td><code>Box&lt;T&gt;</code></td><td><code>Box&lt;T&gt;</code></td><td>via <code>mut</code> binding</td><td>heap-allocated, exclusive</td></tr><tr><td><code>&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code></td><td><code>Rc&lt;T&gt;</code></td><td>no</td><td>read-only shared ownership</td></tr><tr><td><code>&#x27;actor</code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>sync, no tokio required</td></tr><tr><td><code>&#x27;actor&#x27;task</code> / <code>&#x27;task</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>async context</td></tr><tr><td><code>&#x27;guard</code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>reader-writer, sync</td></tr><tr><td><code>&#x27;guard&#x27;task</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td><td>interior mutability</td><td>async context</td></tr><tr><td><code>&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code> / <code>sync::Weak&lt;T&gt;</code></td><td><code>Rc::Weak&lt;T&gt;</code></td><td>no</td><td>non-owning, inferred from RHS</td></tr></tbody></table>
+<p><code>&#x27;actor&#x27;task</code> is an alias for <code>&#x27;task</code>. Both produce the tokio async lock.</p>
 <hr>
-
-<h2 id="binding-qualifier-interaction">Binding &times; qualifier interaction</h2>
-
-<table>
-<thead><tr><th>Syntax</th><th>Qualifier constraint</th><th>Notes</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kw">let</span> x<span class="lf">'actor</span> = &hellip;</code></td><td><code><span class="lf">'actor</span></code></td><td>immutable binding, interior mutability via lock</td></tr>
-<tr><td><code><span class="kw">mut</span> x<span class="lf">'actor</span> = &hellip;</code></td><td><code><span class="lf">'actor</span></code></td><td>mutable binding (same Arc, rebindable)</td></tr>
-<tr><td><code><span class="kw">var</span> x<span class="lf">'actor</span> = &hellip;</code></td><td><code><span class="lf">'actor</span></code></td><td>rebindable Arc pointer</td></tr>
-<tr><td><code><span class="kw">let</span> x<span class="lf">'shared</span> = &hellip;</code></td><td><code><span class="lf">'shared</span></code></td><td>read-only, no <code>def</code> methods</td></tr>
-<tr><td><code><span class="kw">mut</span> x<span class="lf">'shared</span></code></td><td>compile error</td><td><code><span class="lf">'shared</span></code> + mutability is incoherent</td></tr>
-</tbody>
-</table>
-
-<h3 id="actor-and-guard-on-let-bindings"><code>'actor</code> and <code>'guard</code> on <code>let</code> bindings</h3>
-
-<p><code><span class="kw">let</span></code> bindings are normally immutable. <code><span class="lf">'actor</span></code> and <code><span class="lf">'guard</span></code> are exceptions: they provide <strong>interior mutability</strong>, so <code><span class="kw">def</span></code> methods may be called even on a <code><span class="kw">let</span></code>-bound variable. The lock/borrow is acquired automatically.</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'actor</span> c = <span class="fn">Counter</span>()
+<h2 id="binding--qualifier-interaction">Binding × qualifier interaction</h2>
+<table><thead><tr><th>Syntax</th><th>Qualifier constraint</th><th>Notes</th></tr></thead><tbody><tr><td><code>let x&#x27;actor = …</code></td><td><code>&#x27;actor</code></td><td>immutable binding, interior mutability via lock</td></tr><tr><td><code>mut x&#x27;actor = …</code></td><td><code>&#x27;actor</code></td><td>mutable binding (same Arc, rebindable)</td></tr><tr><td><code>var x&#x27;actor = …</code></td><td><code>&#x27;actor</code></td><td>rebindable Arc pointer</td></tr><tr><td><code>let x&#x27;shared = …</code></td><td><code>&#x27;shared</code></td><td>read-only, no <code>def</code> methods</td></tr><tr><td><code>mut x&#x27;shared</code></td><td>compile error</td><td><code>&#x27;shared</code> + mutability is incoherent</td></tr></tbody></table>
+<h3 id="actor-and-guard-on-let-bindings"><code>&#x27;actor</code> and <code>&#x27;guard</code> on <code>let</code> bindings</h3>
+<p><code>let</code> bindings are normally immutable. <code>&#x27;actor</code> and <code>&#x27;guard</code> are exceptions: they provide <strong>interior mutability</strong>, so <code>def</code> methods may be called even on a <code>let</code>-bound variable. The lock/borrow is acquired automatically.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Counter<span class="lf">&#x27;actor</span> c = <span class="fn">Counter</span>()
 c.<span class="fn">inc</span>()    <span class="co"># OK — def method, interior mutability via Mutex</span>
 c.<span class="fn">inc</span>()
-<span class="fn">print</span> c.<span class="fn">get</span>()    <span class="co"># &#x2192; 2</span></code></pre></div>
-
-<p>This is distinct from <code><span class="kw">var</span></code>/<code><span class="kw">mut</span></code> binding mutability &mdash; the <code><span class="kw">let</span></code> binding is not rebindable, but the inner value is mutable through the lock.</p>
-
+print c.<span class="fn">get</span>()    <span class="co"># → 2</span></code></pre></div>
+<p>This is distinct from <code>var</code>/<code>mut</code> binding mutability — the <code>let</code> binding is not rebindable, but the inner value is mutable through the lock.</p>
 <hr>
-
 <h2 id="sync-vs-async-variants">Sync vs async variants</h2>
-
-<p>Use <code><span class="lf">'actor</span></code> / <code><span class="lf">'guard</span></code> when the code does not use <code>.await</code> while the lock is held:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'actor</span> c = <span class="fn">Counter</span>()
-c.<span class="fn">inc</span>()                   <span class="co"># std::sync::Mutex &mdash; no await needed</span></code></pre></div>
-
-<p>Use <code><span class="lf">'actor'task</span></code> / <code><span class="lf">'task</span></code> or <code><span class="lf">'guard'task</span></code> inside <code>task</code> functions when you need to hold the lock across <code>.await</code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kt">void</span> <span class="fn">worker</span>(<span class="kt">Counter</span><span class="lf">'task</span> c):
-    c.<span class="fn">inc</span>()               <span class="co"># tokio::sync::Mutex &mdash; .lock().await</span>
+<p>Use <code>&#x27;actor</code> / <code>&#x27;guard</code> when the code does not use <code>.await</code> while the lock is held:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Counter<span class="lf">&#x27;actor</span> c = <span class="fn">Counter</span>()
+c.<span class="fn">inc</span>()                   <span class="co"># std::sync::Mutex — no await needed</span></code></pre></div>
+<p>Use <code>&#x27;actor&#x27;task</code> / <code>&#x27;task</code> or <code>&#x27;guard&#x27;task</code> inside <code>task</code> functions when you need to hold the lock across <code>.await</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kw">def</span> <span class="kw">void</span> <span class="fn">worker</span>(Counter<span class="lf">&#x27;task</span> c):
+    c.<span class="fn">inc</span>()               <span class="co"># tokio::sync::Mutex — .lock().await</span>
     <span class="fn">wait</span>(Duration.<span class="fn">fromMillis</span>(<span class="nb">100</span>))
-    <span class="fn">print</span> c.<span class="fn">get</span>()</code></pre></div>
-
-<p><strong>Why the distinction matters in Rust:</strong> <code>std::sync::MutexGuard</code> is <code>!Send</code> &mdash; you cannot hold it across an <code>.await</code> point without making the future <code>!Send</code>. <code>tokio::sync::MutexGuard</code> is <code>Send</code>, designed for async use.</p>
-
-<table>
-<thead><tr><th>Qualifier</th><th>Lock type</th><th>Hold across <code>.await</code>?</th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'actor</span></code></td><td><code>std::sync::Mutex</code></td><td>&#10060;</td></tr>
-<tr><td><code><span class="lf">'actor'task</span></code> / <code><span class="lf">'task</span></code></td><td><code>tokio::sync::Mutex</code></td><td>&#10003;</td></tr>
-<tr><td><code><span class="lf">'guard</span></code></td><td><code>std::sync::RwLock</code></td><td>&#10060;</td></tr>
-<tr><td><code><span class="lf">'guard'task</span></code></td><td><code>tokio::sync::RwLock</code></td><td>&#10003;</td></tr>
-</tbody>
-</table>
-
-<h3 id="inferring-task-variants">Inferring <code>'actor'task</code> / <code>'guard'task</code> from task-method calls</h3>
-
-<p>When a variable (or <code>self.field</code>) is captured by a <code>task</code> expression or closure and used as a method receiver, the inference pass keeps <strong>both</strong> the plain (<code><span class="lf">'actor</span></code>/<code><span class="lf">'guard</span></code>) and <code><span class="lf">'task</span></code> (<code><span class="lf">'actor'task</span></code>/<code><span class="lf">'guard'task</span></code>) variant as candidates instead of jumping straight to the sync lock. It then looks at which methods are actually called on the captured variable inside that body:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Counter</span>:
+    print c.<span class="fn">get</span>()</code></pre></div>
+<p><strong>Why the distinction matters in Rust:</strong> <code>std::sync::MutexGuard</code> is <code>!Send</code> — you cannot hold it across an <code>.await</code> point without making the future <code>!Send</code>. <code>tokio::sync::MutexGuard</code> is <code>Send</code>, designed for async use.</p>
+<table><thead><tr><th>Qualifier</th><th>Lock type</th><th>Hold across <code>.await</code>?</th></tr></thead><tbody><tr><td><code>&#x27;actor</code></td><td><code>std::sync::Mutex</code></td><td>❌</td></tr><tr><td><code>&#x27;actor&#x27;task</code> / <code>&#x27;task</code></td><td><code>tokio::sync::Mutex</code></td><td>✅</td></tr><tr><td><code>&#x27;guard</code></td><td><code>std::sync::RwLock</code></td><td>❌</td></tr><tr><td><code>&#x27;guard&#x27;task</code></td><td><code>tokio::sync::RwLock</code></td><td>✅</td></tr></tbody></table>
+<h3 id="inferring-actortask--guardtask-from-task-method-calls">Inferring <code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code> from task-method calls</h3>
+<p>When a variable (or <code>self.field</code>) is captured by a <code>task</code> expression or closure and used as a method receiver, the inference pass keeps <strong>both</strong> the plain (<code>&#x27;actor</code>/<code>&#x27;guard</code>) and <code>&#x27;task</code> (<code>&#x27;actor&#x27;task</code>/<code>&#x27;guard&#x27;task</code>) variant as candidates instead of jumping straight to the sync lock. It then looks at which methods are actually called on the captured variable inside that body:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
-    <span class="kw">task</span> <span class="kw">def</span> <span class="fn">inc</span>():          <span class="co"># declared `task` &#x2192; needs the tokio lock</span>
+    <span class="kw">task</span> <span class="kw">def</span> <span class="fn">inc</span>():          <span class="co"># declared `task` → needs the tokio lock</span>
         value += <span class="nb">1</span>
 
-<span class="kw">def</span> <span class="kt">void</span> <span class="fn">run</span>(<span class="kt">Counter</span> c):
-    <span class="kw">task</span> c.<span class="fn">inc</span>()              <span class="co"># c infers 'actor'task &mdash; Arc&lt;tokio::sync::Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Counter</span>:
+<span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>(Counter c):
+    <span class="kw">task</span> c.<span class="fn">inc</span>()              <span class="co"># c infers &#x27;actor&#x27;task — Arc&lt;tokio::sync::Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
     <span class="kw">def</span> <span class="fn">inc</span>():                <span class="co"># plain `def`, not `task`</span>
         value += <span class="nb">1</span>
 
-<span class="kw">def</span> <span class="kt">void</span> <span class="fn">run</span>(<span class="kt">Counter</span> c):
-    <span class="kw">task</span> c.<span class="fn">inc</span>()              <span class="co"># c infers 'actor &mdash; Arc&lt;std::sync::Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
-
-<p>If any method called on the captured variable is itself declared <code>task</code>, the inferrer picks <code><span class="lf">'actor'task</span></code> (or <code><span class="lf">'guard'task</span></code> if the receiver is otherwise constrained to a reader-writer lock); if none are, it falls back to the plain sync variant. This only resolves the ambiguity when the disambiguating signal is a method call &mdash; a task body that reads/writes the captured value without calling a <code>task</code> method, then separately awaits something unrelated while still holding the lock, still needs an explicit <code><span class="lf">'actor'task</span></code>/<code><span class="lf">'guard'task</span></code> annotation.</p>
-
+<span class="kw">def</span> <span class="kw">void</span> <span class="fn">run</span>(Counter c):
+    <span class="kw">task</span> c.<span class="fn">inc</span>()              <span class="co"># c infers &#x27;actor&#x27; — Arc&lt;std::sync::Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
+<p>If any method called on the captured variable is itself declared <code>task</code>, the inferrer picks <code>&#x27;actor&#x27;task</code> (or <code>&#x27;guard&#x27;task</code> if the receiver is otherwise constrained to a reader-writer lock); if none are, it falls back to the plain sync variant. This only resolves the ambiguity when the disambiguating signal is a method call — a task body that reads/writes the captured value without calling a <code>task</code> method, then separately awaits something unrelated while still holding the lock, still needs an explicit <code>&#x27;actor&#x27;task</code>/<code>&#x27;guard&#x27;task</code> annotation.</p>
 <hr>
-
 <h2 id="method-dispatch">Method dispatch</h2>
-
 <h3 id="on-local-variables">On local variables</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Store<span class="lf">&#x27;guard</span> s = <span class="fn">Store</span>()
+s.<span class="fn">write</span>(<span class="nb">42</span>)      <span class="co"># def → RwLock::write().unwrap()</span>
+s.<span class="fn">read</span>()         <span class="co"># req → RwLock::read().unwrap()</span>
 
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">Store</span><span class="lf">'guard</span> s = <span class="fn">Store</span>()
-s.<span class="fn">write</span>(<span class="nb">42</span>)      <span class="co"># def &#x2192; RwLock::write().unwrap()</span>
-s.<span class="fn">read</span>()         <span class="co"># req &#x2192; RwLock::read().unwrap()</span>
-
-<span class="kw">let</span> <span class="kt">Store</span><span class="lf">'guard'task</span> st = <span class="fn">Store</span>()
-st.<span class="fn">write</span>(<span class="nb">42</span>)     <span class="co"># def &#x2192; RwLock::write().await</span>
-st.<span class="fn">read</span>()        <span class="co"># req &#x2192; RwLock::read().await</span></code></pre></div>
-
-<p>The transpiler distinguishes <code><span class="kw">req</span></code> (read-only, <code>&amp;self</code>) from <code><span class="kw">def</span></code> (mutating, <code>&amp;mut self</code>) to select the appropriate lock mode:</p>
-
-<table>
-<thead><tr><th>Method kind</th><th><code><span class="lf">'actor</span></code></th><th><code><span class="lf">'actor'task</span></code></th><th><code><span class="lf">'guard</span></code></th><th><code><span class="lf">'guard'task</span></code></th></tr></thead>
-<tbody>
-<tr><td><code><span class="kw">req</span></code></td><td><code>lock().unwrap()</code></td><td><code>lock().await</code></td><td><code>read().unwrap()</code></td><td><code>read().await</code></td></tr>
-<tr><td><code><span class="kw">def</span></code></td><td><code>lock().unwrap()</code></td><td><code>lock().await</code></td><td><code>write().unwrap()</code></td><td><code>write().await</code></td></tr>
-</tbody>
-</table>
-
+<span class="kw">let</span> Store<span class="lf">&#x27;guard</span><span class="lf">&#x27;task</span> st = <span class="fn">Store</span>()
+st.<span class="fn">write</span>(<span class="nb">42</span>)     <span class="co"># def → RwLock::write().await</span>
+st.<span class="fn">read</span>()        <span class="co"># req → RwLock::read().await</span></code></pre></div>
+<p>The transpiler distinguishes <code>req</code> (read-only, <code>&amp;self</code>) from <code>def</code> (mutating, <code>&amp;mut self</code>) to select the appropriate lock mode:</p>
+<table><thead><tr><th>Method kind</th><th><code>&#x27;actor</code></th><th><code>&#x27;actor&#x27;task</code></th><th><code>&#x27;guard</code></th><th><code>&#x27;guard&#x27;task</code></th></tr></thead><tbody><tr><td><code>req</code></td><td><code>lock().unwrap()</code></td><td><code>lock().await</code></td><td><code>read().unwrap()</code></td><td><code>read().await</code></td></tr><tr><td><code>def</code></td><td><code>lock().unwrap()</code></td><td><code>lock().await</code></td><td><code>write().unwrap()</code></td><td><code>write().await</code></td></tr></tbody></table>
 <h3 id="on-struct-fields">On struct fields</h3>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Node</span>:
-    <span class="kt">Counter</span><span class="lf">'actor</span> stats
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Node:
+    Counter<span class="lf">&#x27;actor</span> stats
 
     <span class="kw">def</span> <span class="fn">record</span>():
         stats.<span class="fn">inc</span>()     <span class="co"># self.stats.lock().unwrap().inc()</span>
 
     <span class="kw">req</span> <span class="kt">int</span> <span class="fn">total</span>():
         stats.<span class="fn">get</span>()     <span class="co"># self.stats.lock().unwrap().get()</span></code></pre></div>
-
-<p>Field dispatch follows the same <code><span class="kw">req</span></code>/<code><span class="kw">def</span></code> split as local variables.</p>
-
+<p>Field dispatch follows the same <code>req</code>/<code>def</code> split as local variables.</p>
 <h3 id="field-reads-non-method">Field reads (non-method)</h3>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Tag</span>:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Tag:
     <span class="kt">string</span> label
 
-<span class="kw">let</span> <span class="kt">Tag</span><span class="lf">'guard</span> t = <span class="fn">Tag</span>(label = <span class="s">"x"</span>)
-<span class="fn">print</span> t.label            <span class="co"># t.read().unwrap().label</span></code></pre></div>
-
-<p>Direct field access on an <code><span class="lf">'actor</span></code> or <code><span class="lf">'guard</span></code> variable always acquires the appropriate lock.</p>
-
+<span class="kw">let</span> Tag<span class="lf">&#x27;guard</span> t = <span class="fn">Tag</span>(label = <span class="s">"x"</span>)
+print t.label            <span class="co"># t.read().unwrap().label</span></code></pre></div>
+<p>Direct field access on an <code>&#x27;actor</code> or <code>&#x27;guard</code> variable always acquires the appropriate lock.</p>
 <hr>
-
 <h2 id="move-semantics">Move semantics</h2>
-
-<p>By default, assigning a value moves it &mdash; the source binding becomes invalid after the assignment. This applies to all qualifiers.</p>
-
+<p>By default, assigning a value moves it — the source binding becomes invalid after the assignment. This applies to all qualifiers.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b = a          <span class="co"># a is moved into b &mdash; a is no longer accessible</span></code></pre></div>
-
+<span class="kw">let</span> b = a          <span class="co"># a is moved into b — a is no longer accessible</span></code></pre></div>
 <p>To share a value without moving it, call <code>.clone()</code> explicitly:</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b = a.<span class="fn">clone</span>()  <span class="co"># deep copy &mdash; a and b are independent</span></code></pre></div>
-
+<span class="kw">let</span> b = a.<span class="fn">clone</span>()  <span class="co"># deep copy — a and b are independent</span></code></pre></div>
 <h3 id="clone-semantics-by-qualifier">Clone semantics by qualifier</h3>
-
-<table>
-<thead><tr><th>Qualifier</th><th><code>.clone()</code> cost</th><th>Result</th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'stack</span></code></td><td>deep copy &mdash; allocates new value</td><td>independent copy</td></tr>
-<tr><td><code><span class="lf">'heap</span></code></td><td>deep copy &mdash; allocates new <code>Box&lt;T&gt;</code> + clones content</td><td>independent heap allocation</td></tr>
-<tr><td><code><span class="lf">'shared</span></code></td><td>O(1) &mdash; increments <code>Arc</code> refcount</td><td>shared reference to the same value</td></tr>
-<tr><td><code><span class="lf">'actor</span></code></td><td>O(1) &mdash; increments <code>Arc</code> refcount</td><td>shared reference to the same mutex</td></tr>
-<tr><td><code><span class="lf">'guard</span></code></td><td>O(1) &mdash; increments <code>Arc</code> refcount</td><td>shared reference to the same rwlock</td></tr>
-</tbody>
-</table>
-
-<p>For <code><span class="lf">'shared</span></code>, <code><span class="lf">'actor</span></code>, and <code><span class="lf">'guard</span></code>, <code>.clone()</code> is cheap &mdash; it clones the pointer, not the data. All clones refer to the same underlying value.</p>
-
+<table><thead><tr><th>Qualifier</th><th><code>.clone()</code> cost</th><th>Result</th></tr></thead><tbody><tr><td><code>&#x27;stack</code></td><td>deep copy — allocates new value</td><td>independent copy</td></tr><tr><td><code>&#x27;heap</code></td><td>deep copy — allocates new <code>Box&lt;T&gt;</code> + clones content</td><td>independent heap allocation</td></tr><tr><td><code>&#x27;shared</code></td><td>O(1) — increments <code>Arc</code> refcount</td><td>shared reference to the same value</td></tr><tr><td><code>&#x27;actor</code></td><td>O(1) — increments <code>Arc</code> refcount</td><td>shared reference to the same mutex</td></tr><tr><td><code>&#x27;guard</code></td><td>O(1) — increments <code>Arc</code> refcount</td><td>shared reference to the same rwlock</td></tr></tbody></table>
+<p>For <code>&#x27;shared</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code>, <code>.clone()</code> is cheap — it clones the pointer, not the data. All clones refer to the same underlying value.</p>
 <hr>
-
 <h2 id="qualifier-upgrade-coercions">Qualifier upgrade coercions</h2>
-
-<p>A value can be promoted to a richer qualifier at construction time. These are <strong>explicit</strong> coercions &mdash; the developer calls them when moving a value from one ownership context to another.</p>
-
+<p>A value can be promoted to a richer qualifier at construction time. These are <strong>explicit</strong> coercions — the developer calls them when moving a value from one ownership context to another.</p>
 <h3 id="upgrade-table">Upgrade table</h3>
-
-<table>
-<thead><tr><th>From</th><th>To</th><th>Boring</th><th>Rust emitted</th><th>Notes</th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'stack</span></code></td><td><code><span class="lf">'heap</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'heap</span> = a</code></td><td><code>Box::new(a)</code></td><td>move into heap</td></tr>
-<tr><td><code><span class="lf">'stack</span></code></td><td><code><span class="lf">'shared</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'shared</span> = a</code></td><td><code>Arc::new(a.clone())</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr>
-<tr><td><code><span class="lf">'stack</span></code></td><td><code><span class="lf">'actor</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'actor</span> = a</code></td><td><code>Arc::new(std::sync::Mutex::new(a.clone()))</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr>
-<tr><td><code><span class="lf">'stack</span></code></td><td><code><span class="lf">'guard</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'guard</span> = a</code></td><td><code>Arc::new(std::sync::RwLock::new(a.clone()))</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr>
-<tr><td><code><span class="lf">'heap</span></code></td><td><code><span class="lf">'shared</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'shared</span> = a</code></td><td><code>Arc::from(a)</code></td><td>no double allocation &mdash; Rust optimisation</td></tr>
-<tr><td><code><span class="lf">'heap</span></code></td><td><code><span class="lf">'actor</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'actor</span> = a</code></td><td><code>Arc::new(Mutex::new(*a))</code></td><td>unboxes then wraps</td></tr>
-<tr><td><code><span class="lf">'heap</span></code></td><td><code><span class="lf">'guard</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'guard</span> = a</code></td><td><code>Arc::new(RwLock::new(*a))</code></td><td>unboxes then wraps</td></tr>
-<tr><td><code><span class="lf">'heap</span></code></td><td><code><span class="lf">'stack</span></code></td><td><code><span class="kw">let</span> b<span class="lf">'stack</span> = a</code></td><td><code>a.clone()</code></td><td>clones the boxed value; <code>a</code> remains a valid, unmoved <code>Box&lt;Counter&gt;</code> in the emitted Rust</td></tr>
-</tbody>
-</table>
-
-<p>At the Boring-semantics level, all upgrades consume the source value &mdash; the interpreter marks the source binding as moved, and reading it afterward raises &ldquo;use of moved value&rdquo;. However, this is not always a move in the <em>emitted Rust</em>: for <code><span class="lf">'stack</span></code> &rarr; <code><span class="lf">'shared</span></code>/<code><span class="lf">'actor</span></code>/<code><span class="lf">'guard</span></code> and <code><span class="lf">'heap</span></code> &rarr; <code><span class="lf">'stack</span></code>, the transpiler emits <code>.clone()</code> on the source, so the original Rust variable remains alive and valid under the hood even though Boring forbids reading it. <code>Arc::from(box_val)</code> (used for <code><span class="lf">'heap</span></code> &rarr; <code><span class="lf">'shared</span></code>) is the idiomatic Rust way to convert <code>Box&lt;T&gt;</code> into <code>Arc&lt;T&gt;</code> without a double allocation &mdash; the <code>Arc</code> reuses the existing heap allocation, and this is the one upgrade that is a true move in the emitted Rust.</p>
-
+<table><thead><tr><th>From</th><th>To</th><th>Boring</th><th>Rust emitted</th><th>Notes</th></tr></thead><tbody><tr><td><code>&#x27;stack</code></td><td><code>&#x27;heap</code></td><td><code>let b&#x27;heap = a</code></td><td><code>Box::new(a)</code></td><td>move into heap</td></tr><tr><td><code>&#x27;stack</code></td><td><code>&#x27;shared</code></td><td><code>let b&#x27;shared = a</code></td><td><code>Arc::new(a.clone())</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr><tr><td><code>&#x27;stack</code></td><td><code>&#x27;actor</code></td><td><code>let b&#x27;actor = a</code></td><td><code>Arc::new(std::sync::Mutex::new(a.clone()))</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr><tr><td><code>&#x27;stack</code></td><td><code>&#x27;guard</code></td><td><code>let b&#x27;guard = a</code></td><td><code>Arc::new(std::sync::RwLock::new(a.clone()))</code></td><td>source is cloned, not moved, in the emitted Rust</td></tr><tr><td><code>&#x27;heap</code></td><td><code>&#x27;shared</code></td><td><code>let b&#x27;shared = a</code></td><td><code>Arc::from(a)</code></td><td>no double allocation — Rust optimisation</td></tr><tr><td><code>&#x27;heap</code></td><td><code>&#x27;actor</code></td><td><code>let b&#x27;actor = a</code></td><td><code>Arc::new(Mutex::new(*a))</code></td><td>unboxes then wraps</td></tr><tr><td><code>&#x27;heap</code></td><td><code>&#x27;guard</code></td><td><code>let b&#x27;guard = a</code></td><td><code>Arc::new(RwLock::new(*a))</code></td><td>unboxes then wraps</td></tr><tr><td><code>&#x27;heap</code></td><td><code>&#x27;stack</code></td><td><code>let b&#x27;stack = a</code></td><td><code>a.clone()</code></td><td>clones the boxed value; <code>a</code> remains a valid, unmoved <code>Box&lt;Counter&gt;</code> in the emitted Rust</td></tr></tbody></table>
+<p>At the Boring-semantics level, all upgrades consume the source value — the interpreter marks the source binding as moved, and reading it afterward raises &quot;use of moved value&quot;. However, this is not always a move in the <em>emitted Rust</em>: for <code>&#x27;stack</code> → <code>&#x27;shared</code>/<code>&#x27;actor</code>/<code>&#x27;guard</code> and <code>&#x27;heap</code> → <code>&#x27;stack</code>, the transpiler emits <code>.clone()</code> on the source, so the original Rust variable remains alive and valid under the hood even though Boring forbids reading it. <code>Arc::from(box_val)</code> (used for <code>&#x27;heap</code> → <code>&#x27;shared</code>) is the idiomatic Rust way to convert <code>Box&lt;T&gt;</code> into <code>Arc&lt;T&gt;</code> without a double allocation — the <code>Arc</code> reuses the existing heap allocation, and this is the one upgrade that is a true move in the emitted Rust.</p>
 <h3 id="downgrade">Downgrade</h3>
-
-<p>Downgrades (e.g. <code><span class="lf">'shared</span></code> &rarr; <code><span class="lf">'stack</span></code>) are not available implicitly. Shared references (<code>Arc</code>) cannot be converted back to owned values without an explicit <code>.clone()</code> or <code>.try_unwrap()</code> (which fails if other references exist).</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a<span class="lf">'shared</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b = a.<span class="fn">clone</span>()    <span class="co"># Arc::clone &mdash; b is still 'shared (Arc&lt;Counter&gt;), sharing the same value as a</span></code></pre></div>
-
-<p><code>.clone()</code> on a <code><span class="lf">'shared</span></code> value is a pointer clone (see the clone-cost table above), not a deep copy &mdash; there is no implicit way to obtain an independent <code><span class="lf">'stack</span></code> copy from a <code><span class="lf">'shared</span></code> value. To get one, deref and clone the inner value explicitly (e.g. via a method that returns an owned copy).</p>
-
+<p>Downgrades (e.g. <code>&#x27;shared</code> → <code>&#x27;stack</code>) are not available implicitly. Shared references (<code>Arc</code>) cannot be converted back to owned values without an explicit <code>.clone()</code> or <code>.try_unwrap()</code> (which fails if other references exist).</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a<span class="lf">&#x27;shared</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> b = a.<span class="fn">clone</span>()    <span class="co"># Arc::clone — b is still &#x27;shared (Arc&lt;Counter&gt;), sharing the same value as a</span></code></pre></div>
+<p><code>.clone()</code> on an <code>&#x27;shared</code> value is a pointer clone (see the clone-cost table above), not a deep copy — there is no implicit way to obtain an independent <code>&#x27;stack</code> copy from an <code>&#x27;shared</code> value. To get one, deref and clone the inner value explicitly (e.g. via a method that returns an owned copy).</p>
 <hr>
-
 <h2 id="parameter-passing">Parameter passing</h2>
-
 <h3 id="full-parameter-table">Full parameter table</h3>
-
-<table>
-<thead><tr><th>Parameter syntax</th><th>Rust emitted</th><th>Semantics</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kt">Counter</span> c</code></td><td>inferred &mdash; see <a href="#inference">Inference</a></td><td>qualifier inferred from body; or <code>Counter&amp;</code> / <code>mut Counter&amp;</code> if no storage signal</td></tr>
-<tr><td><code><span class="kw">mut</span> <span class="kt">Counter</span> c</code></td><td>inferred &mdash; see <a href="#inference">Inference</a></td><td>mutable; infers <code>mut Counter&amp;</code> if no storage, mutable qualifier otherwise</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'stack</span> c</code></td><td><code>Counter</code></td><td>move (or copy for primitives)</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'heap</span> c</code></td><td><code>Box&lt;Counter&gt;</code></td><td>move</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'shared</span> c</code></td><td><code>&amp;Arc&lt;Counter&gt;</code></td><td>auto-ref, transparent to the developer</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'actor</span> c</code></td><td><code>&amp;Arc&lt;Mutex&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee controls lock granularity</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'guard</span> c</code></td><td><code>&amp;Arc&lt;RwLock&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee controls lock granularity</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'shared'weak</span> c</code></td><td><code>&amp;Weak&lt;Counter&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'actor'weak</span> c</code></td><td><code>&amp;Weak&lt;Mutex&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr>
-<tr><td><code><span class="kt">Counter</span><span class="lf">'guard'weak</span> c</code></td><td><code>&amp;Weak&lt;RwLock&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr>
-<tr><td><code><span class="kt">Counter</span>&amp; c</code></td><td><code>&amp;Counter</code></td><td>universal borrow, any qualifier, no move, no storage</td></tr>
-<tr><td><code><span class="kw">mut</span> <span class="kt">Counter</span>&amp; c</code></td><td><code>&amp;mut Counter</code></td><td>universal mutable borrow, any mutable qualifier</td></tr>
-</tbody>
-</table>
-
-<p><code><span class="lf">'stack</span></code> and <code><span class="lf">'heap</span></code> follow standard Rust move semantics. <code><span class="lf">'shared</span></code>, <code><span class="lf">'actor</span></code>, and <code><span class="lf">'guard</span></code> are always passed by reference &mdash; the reference is fully transparent to the developer, who writes and reads these parameters as owned values.</p>
-
-<h3 id="auto-ref">Auto-ref for <code>'shared</code>, <code>'actor</code>, <code>'guard</code></h3>
-
+<table><thead><tr><th>Parameter syntax</th><th>Rust emitted</th><th>Semantics</th></tr></thead><tbody><tr><td><code>Counter c</code></td><td>inferred — see <a href="#inference">Inference</a></td><td>qualifier inferred from body; or <code>Counter&amp;</code> / <code>mut Counter&amp;</code> if no storage signal</td></tr><tr><td><code>mut Counter c</code></td><td>inferred — see <a href="#inference">Inference</a></td><td>mutable; infers <code>mut Counter&amp;</code> if no storage, mutable qualifier otherwise</td></tr><tr><td><code>Counter&#x27;stack c</code></td><td><code>Counter</code></td><td>move (or copy for primitives)</td></tr><tr><td><code>Counter&#x27;heap c</code></td><td><code>Box&lt;Counter&gt;</code></td><td>move</td></tr><tr><td><code>Counter&#x27;shared c</code></td><td><code>&amp;Arc&lt;Counter&gt;</code></td><td>auto-ref, transparent to the developer</td></tr><tr><td><code>Counter&#x27;actor c</code></td><td><code>&amp;Arc&lt;Mutex&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee controls lock granularity</td></tr><tr><td><code>Counter&#x27;guard c</code></td><td><code>&amp;Arc&lt;RwLock&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee controls lock granularity</td></tr><tr><td><code>Counter&#x27;shared&#x27;weak c</code></td><td><code>&amp;Weak&lt;Counter&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr><tr><td><code>Counter&#x27;actor&#x27;weak c</code></td><td><code>&amp;Weak&lt;Mutex&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr><tr><td><code>Counter&#x27;guard&#x27;weak c</code></td><td><code>&amp;Weak&lt;RwLock&lt;Counter&gt;&gt;</code></td><td>auto-ref, callee calls <code>.upgrade()</code> explicitly</td></tr><tr><td><code>Counter&amp; c</code></td><td><code>&amp;Counter</code></td><td>universal borrow, any qualifier, no move, no storage</td></tr><tr><td><code>mut Counter&amp; c</code></td><td><code>&amp;mut Counter</code></td><td>universal mutable borrow, any mutable qualifier</td></tr></tbody></table>
+<p><code>&#x27;stack</code> and <code>&#x27;heap</code> follow standard Rust move semantics. <code>&#x27;shared</code>, <code>&#x27;actor</code>, and <code>&#x27;guard</code> are always passed by reference — the reference is fully transparent to the developer, who writes and reads these parameters as owned values.</p>
+<h3 id="auto-ref-for-shared-actor-guard">Auto-ref for <code>&#x27;shared</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code></h3>
 <p>The rationale: moving an <code>Arc</code> silently increments the reference counter, a cost invisible in the source. A reference suffices in the vast majority of call sites. The auto-ref convention makes this the default.</p>
-
 <p>The transpiler inserts <code>Arc::clone</code> (or <code>Rc::clone</code> in single-thread mode) automatically whenever a reference parameter is used in an owned position: field assignment, <code>let</code> bindings, <code>match</code> and <code>if let</code> bindings, tuple construction, and call-site arguments.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Processor:
+    Counter<span class="lf">&#x27;actor</span> counter
 
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Processor</span>:
-    <span class="kt">Counter</span><span class="lf">'actor</span> counter
+<span class="kw">def</span> <span class="kw">init</span>(Counter<span class="lf">&#x27;actor</span> c):
+    counter = c              <span class="co"># field assign → Arc::clone(c)</span>
+    <span class="kw">let</span> x = c                <span class="co"># let binding → Arc::clone(c)</span></code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">store</span>(Counter<span class="lf">&#x27;actor</span> c):
+    …
 
-<span class="kw">def</span> <span class="fn">init</span>(<span class="kt">Counter</span><span class="lf">'actor</span> c):
-    counter = c              <span class="co"># field assign &#x2192; Arc::clone(c)</span>
-    <span class="kw">let</span> x = c                <span class="co"># let binding &#x2192; Arc::clone(c)</span></code></pre></div>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">store</span>(<span class="kt">Counter</span><span class="lf">'actor</span> c):
-    &hellip;
-
-<span class="kw">let</span> x<span class="lf">'actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> x<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="fn">store</span>(x)     <span class="co"># Arc::clone(&amp;x) at call site</span>
-<span class="fn">store</span>(x)     <span class="co"># x is still valid &mdash; clone was inserted, not a move</span></code></pre></div>
-
+<span class="fn">store</span>(x)     <span class="co"># x is still valid — clone was inserted, not a move</span></code></pre></div>
 <h3 id="var-out-parameters"><code>var</code> out-parameters</h3>
-
-<p><code><span class="kw">var</span></code> on a parameter signals an out-parameter &mdash; the callee can rebind the caller&rsquo;s variable:</p>
-
-<table>
-<thead><tr><th>Parameter</th><th>Rust emitted</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'stack</span> c</code></td><td><code>&amp;mut Counter</code></td></tr>
-<tr><td><code><span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'heap</span> c</code></td><td><code>&amp;mut Box&lt;Counter&gt;</code></td></tr>
-<tr><td><code><span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'shared</span> c</code></td><td><code>&amp;mut Arc&lt;Counter&gt;</code></td></tr>
-<tr><td><code><span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'actor</span> c</code></td><td><code>&amp;mut Arc&lt;Mutex&lt;Counter&gt;&gt;</code></td></tr>
-<tr><td><code><span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'guard</span> c</code></td><td><code>&amp;mut Arc&lt;RwLock&lt;Counter&gt;&gt;</code></td></tr>
-</tbody>
-</table>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">swap</span>(<span class="kw">var</span> <span class="kt">Counter</span><span class="lf">'actor</span> c):
+<p><code>var</code> on a parameter signals an out-parameter — the callee can rebind the caller&#x27;s variable:</p>
+<table><thead><tr><th>Parameter</th><th>Rust emitted</th></tr></thead><tbody><tr><td><code>var Counter&#x27;stack c</code></td><td><code>&amp;mut Counter</code></td></tr><tr><td><code>var Counter&#x27;heap c</code></td><td><code>&amp;mut Box&lt;Counter&gt;</code></td></tr><tr><td><code>var Counter&#x27;shared c</code></td><td><code>&amp;mut Arc&lt;Counter&gt;</code></td></tr><tr><td><code>var Counter&#x27;actor c</code></td><td><code>&amp;mut Arc&lt;Mutex&lt;Counter&gt;&gt;</code></td></tr><tr><td><code>var Counter&#x27;guard c</code></td><td><code>&amp;mut Arc&lt;RwLock&lt;Counter&gt;&gt;</code></td></tr></tbody></table>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">swap</span>(<span class="kw">var</span> Counter<span class="lf">&#x27;actor</span> c):
     c = <span class="fn">Counter</span>(<span class="nb">1</span>)
 
-<span class="kw">var</span> v<span class="lf">'actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">var</span> v<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="fn">swap</span>(v)   <span class="co"># call site emits: swap(&amp;mut v)</span></code></pre></div>
+<h3 id="counter--universal-borrow"><code>Counter&amp;</code> — universal borrow</h3>
+<p><code>Counter&amp;</code> always produces <code>&amp;Counter</code>, regardless of which qualifier the caller holds. The transpiler unwraps the qualifier at the call site:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="fn">display</span>(Counter&amp; c):
+    print c.value
 
-<h3 id="universal-borrow"><code>Counter&amp;</code> &mdash; universal borrow</h3>
-
-<p><code><span class="kt">Counter</span>&amp;</code> always produces <code>&amp;Counter</code>, regardless of which qualifier the caller holds. The transpiler unwraps the qualifier at the call site:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="fn">display</span>(<span class="kt">Counter</span>&amp; c):
-    <span class="fn">print</span> c.value
-
-<span class="kw">let</span> a<span class="lf">'stack</span>  = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b<span class="lf">'actor</span>  = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> c<span class="lf">'heap</span>   = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> d<span class="lf">'shared</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> a<span class="lf">&#x27;stack</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> b<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> c<span class="lf">&#x27;heap</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> d<span class="lf">&#x27;shared</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 
 <span class="fn">display</span>(a)   <span class="co"># &amp;a</span>
 <span class="fn">display</span>(b)   <span class="co"># { let g = b.lock()?; display(&amp;*g) }</span>
 <span class="fn">display</span>(c)   <span class="co"># &amp;**c</span>
-<span class="fn">display</span>(d)   <span class="co"># &amp;**d  &mdash; Arc&lt;T&gt; derefs to T, no lock needed</span></code></pre></div>
-
-<p>The caller never writes the lock &mdash; it is implicit and scoped to the call.</p>
-
-<h4 id="counter-vs-actor-parameter"><code>Counter&amp;</code> vs <code>Counter'actor</code> as parameter</h4>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Counter&amp; c &mdash; transpiler acquires the lock, passes &amp;Counter</span>
+<span class="fn">display</span>(d)   <span class="co"># &amp;**d  — Arc&lt;T&gt; derefs to T, no lock needed</span></code></pre></div>
+<p>The caller never writes the lock — it is implicit and scoped to the call.</p>
+<h4 id="counter-vs-counteractor-as-parameter"><code>Counter&amp;</code> vs <code>Counter&#x27;actor</code> as parameter</h4>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Counter&amp; c — transpiler acquires the lock, passes &amp;Counter</span>
 <span class="co"># lock held for the entire duration of the call</span>
-<span class="kw">def</span> <span class="fn">process_batch</span>(<span class="kt">Counter</span>&amp; c):
+<span class="kw">def</span> <span class="fn">process_batch</span>(Counter&amp; c):
     <span class="kw">for</span> item <span class="kw">in</span> batch:
         c.value += item
 
-<span class="co"># Counter'actor c &mdash; callee receives &amp;Arc&lt;Mutex&lt;Counter&gt;&gt;</span>
+<span class="co"># Counter&#x27;actor c — callee receives &amp;Arc&lt;Mutex&lt;Counter&gt;&gt;</span>
 <span class="co"># callee controls lock granularity</span>
-<span class="kw">def</span> <span class="fn">process_batch</span>(<span class="kt">Counter</span><span class="lf">'actor</span> c):
+<span class="kw">def</span> <span class="fn">process_batch</span>(Counter<span class="lf">&#x27;actor</span> c):
     <span class="kw">for</span> item <span class="kw">in</span> batch:
         <span class="kw">let</span> g = c.<span class="fn">lock</span>()
         g.value += item
         <span class="co"># lock released here, not at end of call</span></code></pre></div>
-
 <h4 id="mutable-coercion">Mutable coercion</h4>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">reset</span>(<span class="kw">mut</span> <span class="kt">Counter</span>&amp; c):
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">reset</span>(<span class="kw">mut</span> Counter&amp; c):
     c.value = <span class="nb">0</span>
 
-<span class="kw">mut</span> a<span class="lf">'stack</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b<span class="lf">'actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">mut</span> a<span class="lf">&#x27;stack</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">let</span> b<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 
 <span class="fn">reset</span>(a)   <span class="co"># &amp;mut a</span>
 <span class="fn">reset</span>(b)   <span class="co"># { let mut g = b.lock()?; reset(&amp;mut *g) }</span></code></pre></div>
-
-<p><code><span class="lf">'shared</span></code> (<code>Arc&lt;T&gt;</code> without interior mutability) cannot produce <code>&amp;mut T</code> &mdash; passing a <code><span class="kt">Counter</span><span class="lf">'shared</span></code> to a <code><span class="kw">mut</span> <span class="kt">Counter</span>&amp;</code> parameter is a compile error.</p>
-
+<p><code>&#x27;shared</code> (<code>Arc&lt;T&gt;</code> without interior mutability) cannot produce <code>&amp;mut T</code> — passing a <code>Counter&#x27;shared</code> to a <code>mut Counter&amp;</code> parameter is a compile error.</p>
 <h4 id="lock-scope-and-guard-lifetime">Lock scope and guard lifetime</h4>
-
-<p>When the argument is <code><span class="lf">'actor</span></code> or <code><span class="lf">'guard</span></code> and the parameter is <code><span class="kt">Counter</span>&amp;</code>, the transpiler generates a temporary binding:</p>
-
+<p>When the argument is <code>&#x27;actor</code> or <code>&#x27;guard</code> and the parameter is <code>Counter&amp;</code>, the transpiler generates a temporary binding:</p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// display(b) where b: Arc&lt;Mutex&lt;Counter&gt;&gt;</span>
 {
     <span class="kw">let</span> __g = b.<span class="fn">lock</span>()?;
     <span class="fn">display</span>(&amp;*__g);
 }   <span class="co">// lock released here</span></code></pre></div>
-
-<p>For <code><span class="lf">'guard</span></code>, a <code><span class="kt">Counter</span>&amp;</code> parameter uses <code>read()</code> (shared read lock); <code><span class="kw">mut</span> <span class="kt">Counter</span>&amp;</code> uses <code>write()</code> (exclusive write lock).</p>
-
-<h4 id="struct-method-parameters">Struct and enum method parameters</h4>
-
-<p>Universal borrow inference is <strong>disabled</strong> for parameters of <code><span class="kw">req</span></code> and <code><span class="kw">def</span></code> methods defined on a struct or enum. Use the explicit <code><span class="kt">Counter</span>&amp; n</code> form to get universal borrowing in a method parameter.</p>
-
+<p>For <code>&#x27;guard</code>, a <code>Counter&amp;</code> parameter uses <code>read()</code> (shared read lock); <code>mut Counter&amp;</code> uses <code>write()</code> (exclusive write lock).</p>
+<h4 id="struct-and-enum-method-parameters">Struct and enum method parameters</h4>
+<p>Universal borrow inference is <strong>disabled</strong> for parameters of <code>req</code> and <code>def</code> methods defined on a struct or enum. Use the explicit <code>Counter&amp; n</code> form to get universal borrowing in a method parameter.</p>
 <h4 id="error-conditions">Error conditions</h4>
+<div class="code-block"><pre><code>error: cannot pass `x` (weak reference) to a non-weak parameter — weak references may be
+       invalid. Call .upgrade() first and handle the Option.
 
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co">error: cannot pass `x` (weak reference) to a non-weak parameter &mdash; weak references may be</span>
-<span class="co">       invalid. Call .upgrade() first and handle the Option.</span>
+error: cannot pass `x` (&#x27;shared) to `mut Counter&amp;` — &#x27;shared does not support mutable
+       references. Use &#x27;actor (Arc&lt;Mutex&lt;T&gt;&gt;) or &#x27;guard (Arc&lt;RwLock&lt;T&gt;&gt;) instead.
 
-<span class="co">error: cannot pass `x` ('shared) to `mut Counter&amp;` &mdash; 'shared does not support mutable</span>
-<span class="co">       references. Use 'actor (Arc&lt;Mutex&lt;T&gt;&gt;) or 'guard (Arc&lt;RwLock&lt;T&gt;&gt;) instead.</span>
-
-<span class="co">error: cannot pass 'actor argument to `mut Counter&amp;` in async function `f` &mdash; holding a</span>
-<span class="co">       MutexGuard across .await makes the future !Send. Acquire the lock inside the</span>
-<span class="co">       callee body instead.</span></code></pre></div>
-
+error: cannot pass &#x27;actor argument to `mut Counter&amp;` in async function `f` — holding a
+       MutexGuard across .await makes the future !Send. Acquire the lock inside the
+       callee body instead.</code></pre></div>
 <hr>
-
 <h2 id="inference">Inference</h2>
-
-<p>Boring&rsquo;s qualifier inference works from usage signals &mdash; in most programs you never write qualifiers. The zero-annotation goal: qualifier-free Boring code emits the same Rust as hand-annotated code.</p>
-
+<p>Boring&#x27;s qualifier inference works from usage signals — in most programs you never write qualifiers. The zero-annotation goal: qualifier-free Boring code emits the same Rust as hand-annotated code.</p>
 <h3 id="constraint-elimination">Constraint elimination</h3>
-
 <p>Each unqualified local variable starts with a candidate set of all possible qualifiers. Every usage signal narrows the set by eliminating incompatible qualifiers. When exactly one candidate remains it is chosen. When none remain the constraints are contradictory and a compile error is reported. When several remain a size-based fallback resolves the tie.</p>
-
 <h4 id="candidate-sets">Candidate sets</h4>
-
-<table>
-<thead><tr><th>Declaration form</th><th>Initial candidate set</th><th>Fallback (multiple remaining)</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kt">T</span></code> (bare, no qualifier)</td><td><code>{Stack, Owned, Shared, Actor, Guard}</code></td><td>priority-ordered fallback (see below)</td></tr>
-<tr><td><code><span class="kt">T</span>'</code> (tick, indirection hint)</td><td><code>{Owned, Shared, Actor, Guard}</code></td><td><code><span class="lf">'heap</span></code> (<code>Box&lt;T&gt;</code>)</td></tr>
-<tr><td><code><span class="kt">T</span>?</code> (optional, bare)</td><td><code>{Stack, Owned, Shared, Actor, Guard}</code></td><td>same priority-ordered fallback</td></tr>
-<tr><td><code><span class="kt">T</span>'?</code> (optional tick)</td><td><code>{Owned, Shared, Actor, Guard}</code></td><td><code>Option&lt;Box&lt;T&gt;&gt;</code></td></tr>
-</tbody>
-</table>
-
-<p><code><span class="kt">T</span>'</code> and <code><span class="kt">T</span>'?</code> restrict the initial set to indirection qualifiers. For optional forms, the inferred qualifier is applied to the <strong>inner type</strong> of the <code>Option</code> &mdash; <code><span class="kt">T</span>?</code> with inferred <code><span class="lf">'actor</span></code> emits <code>Option&lt;Arc&lt;Mutex&lt;T&gt;&gt;&gt;</code>, not <code>Arc&lt;Mutex&lt;Option&lt;T&gt;&gt;&gt;</code>.</p>
-
+<table><thead><tr><th>Declaration form</th><th>Initial candidate set</th><th>Fallback (multiple remaining)</th></tr></thead><tbody><tr><td><code>T</code> (bare, no qualifier)</td><td><code>{Stack, Owned, Shared, Actor, Guard}</code></td><td>priority-ordered fallback (see below)</td></tr><tr><td><code>T&#x27;</code> (tick, indirection hint)</td><td><code>{Owned, Shared, Actor, Guard}</code></td><td><code>&#x27;heap</code> (<code>Box&lt;T&gt;</code>)</td></tr><tr><td><code>T?</code> (optional, bare)</td><td><code>{Stack, Owned, Shared, Actor, Guard}</code></td><td>same priority-ordered fallback</td></tr><tr><td><code>T&#x27;?</code> (optional tick)</td><td><code>{Owned, Shared, Actor, Guard}</code></td><td><code>Option&lt;Box&lt;T&gt;&gt;</code></td></tr></tbody></table>
+<p><code>T&#x27;</code> and <code>T&#x27;?</code> restrict the initial set to indirection qualifiers. For optional forms, the inferred qualifier is applied to the <strong>inner type</strong> of the <code>Option</code> — <code>T?</code> with inferred <code>&#x27;actor</code> emits <code>Option&lt;Arc&lt;Mutex&lt;T&gt;&gt;&gt;</code>, not <code>Arc&lt;Mutex&lt;Option&lt;T&gt;&gt;&gt;</code>.</p>
 <h4 id="signal-table">Signal table</h4>
-
-<table>
-<thead><tr><th>Signal</th><th>Compatible qualifiers</th></tr></thead>
-<tbody>
-<tr><td>Call site demanding <code><span class="kt">T</span><span class="lf">'shared</span></code></td><td><code>{Shared}</code></td></tr>
-<tr><td>Call site demanding <code><span class="kt">T</span><span class="lf">'actor</span></code></td><td><code>{Actor}</code></td></tr>
-<tr><td>Call site demanding <code><span class="kt">T</span><span class="lf">'guard</span></code></td><td><code>{Guard}</code></td></tr>
-<tr><td>Call site demanding <code><span class="kt">T</span><span class="lf">'stack</span></code></td><td><code>{Stack}</code></td></tr>
-<tr><td>Call site demanding <code><span class="kt">T</span><span class="lf">'heap</span></code></td><td><code>{Owned}</code></td></tr>
-<tr><td><code><span class="kw">def</span></code> method call on the variable</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr>
-<tr><td><code><span class="kw">mut</span></code> binding (<code><span class="kw">mut</span> x = &hellip;</code>)</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr>
-<tr><td><code><span class="kw">var</span></code> binding reassigned (<code>x = &hellip;</code>, <code>x.field = &hellip;</code>, <code>x.a.b.c = &hellip;</code>, <code>x[i] = &hellip;</code>)</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr>
-<tr><td>Closure capturing <code>x</code> as method receiver</td><td><code>{Actor, Guard}</code></td></tr>
-<tr><td>Closure capturing <code>x</code> read-only</td><td><code>{Shared, Actor, Guard}</code></td></tr>
-<tr><td><code>set</code> property setter body</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr>
-<tr><td>Task capture as method receiver</td><td><code>{Actor, Guard}</code></td></tr>
-<tr><td>Task capture, read-only</td><td><code>{Shared, Actor, Guard}</code></td></tr>
-<tr><td><code><span class="kw">req</span></code> method call</td><td><em>(no constraint &mdash; all qualifiers remain)</em></td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Signal</th><th>Compatible qualifiers</th></tr></thead><tbody><tr><td>Call site demanding <code>T&#x27;shared</code></td><td><code>{Shared}</code></td></tr><tr><td>Call site demanding <code>T&#x27;actor</code></td><td><code>{Actor}</code></td></tr><tr><td>Call site demanding <code>T&#x27;guard</code></td><td><code>{Guard}</code></td></tr><tr><td>Call site demanding <code>T&#x27;stack</code></td><td><code>{Stack}</code></td></tr><tr><td>Call site demanding <code>T&#x27;heap</code></td><td><code>{Owned}</code></td></tr><tr><td><code>def</code> method call on the variable</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td><code>mut</code> binding (<code>mut x = …</code>)</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td><code>var</code> binding reassigned (<code>x = …</code>, <code>x.field = …</code>, <code>x.a.b.c = …</code>, <code>x[i] = …</code>)</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td>Closure capturing <code>x</code> as method receiver</td><td><code>{Actor, Guard}</code></td></tr><tr><td>Closure capturing <code>x</code> read-only</td><td><code>{Shared, Actor, Guard}</code></td></tr><tr><td><code>set</code> property setter body</td><td><code>{Stack, Owned, Actor, Guard}</code></td></tr><tr><td>Task capture as method receiver</td><td><code>{Actor, Guard}</code></td></tr><tr><td>Task capture, read-only</td><td><code>{Shared, Actor, Guard}</code></td></tr><tr><td><code>req</code> method call</td><td><em>(no constraint — all qualifiers remain)</em></td></tr></tbody></table>
 <p>Each signal intersects the current candidate set. The order of signals does not matter.</p>
-
 <h4 id="priority-ordered-fallback">Priority-ordered fallback</h4>
-
 <p>When the candidate set still contains multiple qualifiers after all signals are applied:</p>
-
-<p><strong>Step 1 &mdash; <code><span class="lf">'stack</span></code> candidate</strong></p>
-
-<table>
-<thead><tr><th>Context</th><th>Decision</th></tr></thead>
-<tbody>
-<tr><td>Struct field (any binding)</td><td><code><span class="lf">'stack</span></code> &mdash; field bytes are part of the parent allocation</td></tr>
-<tr><td>Local variable, sizeof(T) &le; <code>--stack-auto-bytes</code></td><td><code><span class="lf">'stack</span></code></td></tr>
-<tr><td>Local variable, sizeof(T) &gt; <code>--stack-auto-bytes</code></td><td>skip <code><span class="lf">'stack</span></code>; continue to step 2</td></tr>
-</tbody>
-</table>
-
+<p><strong>Step 1 — <code>&#x27;stack</code> candidate</strong></p>
+<table><thead><tr><th>Context</th><th>Decision</th></tr></thead><tbody><tr><td>Struct field (any binding)</td><td><code>&#x27;stack</code> — field bytes are part of the parent allocation</td></tr><tr><td>Local variable, sizeof(T) ≤ <code>--stack-auto-bytes</code></td><td><code>&#x27;stack</code></td></tr><tr><td>Local variable, sizeof(T) &gt; <code>--stack-auto-bytes</code></td><td>skip <code>&#x27;stack</code>; continue to step 2</td></tr></tbody></table>
 <p>The threshold is configurable: <code>boring build --stack-auto-bytes 512</code> (default: 256 bytes).</p>
-
-<p><strong>Step 2 &mdash; ordered chain</strong></p>
-
-<p>If <code><span class="lf">'stack</span></code> was not selected, pick the first qualifier from the remaining set:</p>
-
-<p><code><span class="lf">'heap</span></code> &gt; <code><span class="lf">'shared</span></code> &gt; <code><span class="lf">'actor</span></code> &gt; <code><span class="lf">'guard</span></code></p>
-
-<h3 id="inference-examples">Examples</h3>
-
+<p><strong>Step 2 — ordered chain</strong></p>
+<p>If <code>&#x27;stack</code> was not selected, pick the first qualifier from the remaining set:</p>
+<p><code>&#x27;heap</code> &gt; <code>&#x27;shared</code> &gt; <code>&#x27;actor</code> &gt; <code>&#x27;guard</code></p>
+<h3 id="examples">Examples</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="fn">share_read</span>(c)           <span class="co"># expects Counter'shared &#x2192; c infers 'shared</span></code></pre></div>
-
+<span class="fn">share_read</span>(c)           <span class="co"># expects Counter&#x27;shared → c infers &#x27;shared</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
-c.<span class="fn">inc</span>()                 <span class="co"># def call &#x2192; {Stack, Owned, Actor, Guard}</span>
-                        <span class="co"># no further signal &#x2192; size fallback &#x2192; 'stack (if small)</span></code></pre></div>
-
+c.<span class="fn">inc</span>()                 <span class="co"># def call → {Stack, Owned, Actor, Guard}</span>
+                        <span class="co"># no further signal → size fallback → &#x27;stack (if small)</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)
-c.<span class="fn">inc</span>()                 <span class="co"># def call &#x2192; {Stack, Owned, Actor, Guard}</span>
-<span class="fn">share_read</span>(c)           <span class="co"># 'shared &#x2192; intersect &#x2192; {}  &#x2192; ERROR</span></code></pre></div>
-
+c.<span class="fn">inc</span>()                 <span class="co"># def call → {Stack, Owned, Actor, Guard}</span>
+<span class="fn">share_read</span>(c)           <span class="co"># &#x27;shared → intersect → {}  → ERROR</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="fn">Counter</span>(<span class="nb">0</span>)
-<span class="kw">let</span> b = a               <span class="co"># b is an alias of a &mdash; same qualifier group</span>
-<span class="fn">spawn_actor</span>(b)          <span class="co"># demands 'actor &#x2192; both a and b infer 'actor</span></code></pre></div>
-
-<h3 id="universal-borrow-inference">Universal borrow as inference output</h3>
-
-<p>When a parameter has no explicit qualifier and no storage signals, the inference can resolve to a universal borrow (<code><span class="kt">Counter</span>&amp;</code> or <code><span class="kw">mut</span> <span class="kt">Counter</span>&amp;</code>) &mdash; evaluated before the priority-ordered fallback.</p>
-
-<p><strong>Storage signals</strong> prevent universal borrow inference: field assignment, return with ownership qualifier, closure/task capture, field destructuring (<code><span class="kw">let</span> x = n.field</code>).</p>
-
+<span class="kw">let</span> b = a               <span class="co"># b is an alias of a — same qualifier group</span>
+<span class="fn">spawn_actor</span>(b)          <span class="co"># demands &#x27;actor → both a and b infer &#x27;actor</span></code></pre></div>
+<h3 id="universal-borrow-as-inference-output">Universal borrow as inference output</h3>
+<p>When a parameter has no explicit qualifier and no storage signals, the inference can resolve to a universal borrow (<code>Counter&amp;</code> or <code>mut Counter&amp;</code>) — evaluated before the priority-ordered fallback.</p>
+<p><strong>Storage signals</strong> prevent universal borrow inference: field assignment, return with ownership qualifier, closure/task capture, field destructuring (<code>let x = n.field</code>).</p>
 <p><strong>Qualifier demand signals</strong> also prevent it: passing to a function parameter with an explicit qualifier.</p>
+<table><thead><tr><th>Declaration</th><th>Signals</th><th>Inferred form</th><th>Rust emitted</th></tr></thead><tbody><tr><td><code>Counter n</code></td><td>none</td><td><code>Counter&amp;</code></td><td><code>&amp;Counter</code></td></tr><tr><td><code>mut Counter n</code></td><td>none</td><td><code>mut Counter&amp;</code></td><td><code>&amp;mut Counter</code></td></tr><tr><td><code>Counter n</code></td><td>qualifier demand</td><td>qualifier via constraints</td><td>—</td></tr><tr><td><code>Counter n</code></td><td>storage</td><td>qualifier via constraints</td><td>—</td></tr></tbody></table>
+<p>The <code>mut</code> keyword is <strong>not inferred</strong> — it must be written explicitly.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="fn">display</span>(Counter n):
+    print n.value
+<span class="co"># no storage, read-only → infers Counter&amp; → fn display(n: &amp;Counter)</span>
 
-<table>
-<thead><tr><th>Declaration</th><th>Signals</th><th>Inferred form</th><th>Rust emitted</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kt">Counter</span> n</code></td><td>none</td><td><code><span class="kt">Counter</span>&amp;</code></td><td><code>&amp;Counter</code></td></tr>
-<tr><td><code><span class="kw">mut</span> <span class="kt">Counter</span> n</code></td><td>none</td><td><code><span class="kw">mut</span> <span class="kt">Counter</span>&amp;</code></td><td><code>&amp;mut Counter</code></td></tr>
-<tr><td><code><span class="kt">Counter</span> n</code></td><td>qualifier demand</td><td>qualifier via constraints</td><td>&mdash;</td></tr>
-<tr><td><code><span class="kt">Counter</span> n</code></td><td>storage</td><td>qualifier via constraints</td><td>&mdash;</td></tr>
-</tbody>
-</table>
-
-<p>The <code><span class="kw">mut</span></code> keyword is <strong>not inferred</strong> &mdash; it must be written explicitly.</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="fn">display</span>(<span class="kt">Counter</span> n):
-    <span class="fn">print</span> n.value
-<span class="co"># no storage, read-only &#x2192; infers Counter&amp; &#x2192; fn display(n: &amp;Counter)</span>
-
-<span class="kw">def</span> <span class="fn">reset</span>(<span class="kw">mut</span> <span class="kt">Counter</span> n):
+<span class="kw">def</span> <span class="fn">reset</span>(<span class="kw">mut</span> Counter n):
     n.value = <span class="nb">0</span>
-<span class="co"># no storage, mutable &#x2192; infers mut Counter&amp; &#x2192; fn reset(n: &amp;mut Counter)</span></code></pre></div>
-
-<p>Lock acquisition at call sites works the same way as explicit <code><span class="kt">Counter</span>&amp;</code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> b<span class="lf">'actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="co"># no storage, mutable → infers mut Counter&amp; → fn reset(n: &amp;mut Counter)</span></code></pre></div>
+<p>Lock acquisition at call sites works the same way as explicit <code>Counter&amp;</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> b<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 <span class="fn">display</span>(b)
 <span class="co"># emits: { let __g = b.lock()?; display(&amp;*__g); }</span></code></pre></div>
-
 <h3 id="parameter-auto-apply">Parameter auto-apply</h3>
-
 <p>A pre-inference pass runs <code>infer_qualifiers</code> on the function body before emitting parameters. <code>emit_param</code> then consults <code>inferred_qualifiers</code> and applies the resolved qualifier automatically:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(<span class="kt">Counter</span> c):   <span class="co"># no qualifier written</span>
-    <span class="fn">spawn_actor</span>(c)        <span class="co"># demands 'actor &#x2192; inferred for c</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(Counter c):   <span class="co"># no qualifier written</span>
+    <span class="fn">spawn_actor</span>(c)        <span class="co"># demands &#x27;actor → inferred for c</span>
 <span class="co"># emits: fn process(c: Arc&lt;Mutex&lt;Counter&gt;&gt;)</span></code></pre></div>
-
 <h3 id="cross-function-propagation">Cross-function propagation</h3>
-
 <p>After each function body is emitted, <code>fn_sigs</code> is updated with the inferred parameter qualifiers. Functions defined later in the file that call this function see the qualified signature and propagate the constraint.</p>
+<p><strong><code>&#x27;stack</code> is not propagated</strong> — it would poison callers with a spurious constraint from file-ordering artifacts.</p>
+<p><strong>Return-type–driven parameter inference:</strong> when a constructor returns <code>T&#x27;actor</code>, the transpiler records <code>T</code> as an actor source type. Subsequent bare <code>T</code> parameters automatically infer <code>&#x27;actor</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> Interpreter<span class="lf">&#x27;actor</span> <span class="fn">new_interpreter</span>():
+    …
 
-<p><strong><code><span class="lf">'stack</span></code> is not propagated</strong> &mdash; it would poison callers with a spurious constraint from file-ordering artifacts.</p>
-
-<p><strong>Return-type&ndash;driven parameter inference:</strong> when a constructor returns <code><span class="kt">T</span><span class="lf">'actor</span></code>, the transpiler records <code><span class="kt">T</span></code> as an actor source type. Subsequent bare <code><span class="kt">T</span></code> parameters automatically infer <code><span class="lf">'actor</span></code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">Interpreter</span><span class="lf">'actor</span> <span class="fn">new_interpreter</span>():
-    &hellip;
-
-<span class="kw">def</span> <span class="kt">Value</span> <span class="fn">eval_expr</span>(<span class="kt">Interpreter</span> interp, <span class="kt">Expr</span> e):
-    <span class="co"># interp infers 'actor because Interpreter is an actor source type</span>
-    &hellip;</code></pre></div>
-
+<span class="kw">def</span> Value <span class="fn">eval_expr</span>(Interpreter interp, Expr e):
+    <span class="co"># interp infers &#x27;actor because Interpreter is an actor source type</span>
+    …</code></pre></div>
 <h3 id="struct-field-inference">Struct field inference</h3>
-
 <p>The same constraint-elimination algorithm applies to struct fields. A pre-pass scans all method bodies of the struct for <code>self.field</code> access patterns:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">Service</span>:
-    <span class="kt">Counter</span> stats        <span class="co"># no qualifier</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Service:
+    Counter stats        <span class="co"># no qualifier</span>
 
     <span class="kw">def</span> <span class="fn">record</span>():
-        <span class="fn">spawn_actor</span>(stats)   <span class="co"># demands 'actor &#x2192; stats infers 'actor &#x2192; Arc&lt;Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
-
-<p><strong>Generics are not inferred.</strong> <code>[<span class="kt">Counter</span>]</code> is <code>Vec&lt;Counter&gt;</code> and <code>[<span class="kt">Counter</span><span class="lf">'actor</span>]</code> is <code>Vec&lt;Arc&lt;Mutex&lt;Counter&gt;&gt;&gt;</code> &mdash; these are distinct Rust types. The qualifier must be written explicitly in the element position.</p>
-
-<p><strong>Cross-file inference is not supported</strong> &mdash; see the known limitations section.</p>
-
-<h3 id="qualifier-unions">Qualifier unions and groups</h3>
-
+        <span class="fn">spawn_actor</span>(stats)   <span class="co"># demands &#x27;actor → stats infers &#x27;actor → Arc&lt;Mutex&lt;Counter&gt;&gt;</span></code></pre></div>
+<p><strong>Generics are not inferred.</strong> <code>[Counter]</code> is <code>Vec&lt;Counter&gt;</code> and <code>[Counter&#x27;actor]</code> is <code>Vec&lt;Arc&lt;Mutex&lt;Counter&gt;&gt;&gt;</code> — these are distinct Rust types. The qualifier must be written explicitly in the element position.</p>
+<p><strong>Cross-file inference is not supported</strong> — see the known limitations section.</p>
+<h3 id="qualifier-unions-and-groups">Qualifier unions and groups</h3>
 <p>A parameter can accept a restricted but not singleton set of qualifiers using a pipe-separated union:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(<span class="kt">Counter</span><span class="lf">'stack|heap</span> c):   <span class="co"># accepts 'stack or 'heap, not 'shared or 'actor</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">process</span>(Counter<span class="lf">&#x27;stack</span>|heap c):   <span class="co"># accepts &#x27;stack or &#x27;heap, not &#x27;shared or &#x27;actor</span>
     c.<span class="fn">inc</span>()</code></pre></div>
-
 <p>Named qualifier groups expand to the corresponding member sets:</p>
-
-<table>
-<thead><tr><th>Group</th><th>Members</th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'one</span></code></td><td><code><span class="lf">'stack</span></code>, <code><span class="lf">'heap</span></code></td></tr>
-<tr><td><code><span class="lf">'many</span></code></td><td><code><span class="lf">'shared</span></code>, <code><span class="lf">'actor</span></code>, <code><span class="lf">'guard</span></code></td></tr>
-<tr><td><code><span class="lf">'mut</span></code></td><td><code><span class="lf">'stack</span></code>, <code><span class="lf">'heap</span></code>, <code><span class="lf">'actor</span></code>, <code><span class="lf">'guard</span></code></td></tr>
-<tr><td><code><span class="lf">'req</span></code></td><td><code><span class="lf">'shared</span></code></td></tr>
-</tbody>
-</table>
-
-<p><strong>Scope: parameters only.</strong> Qualifier groups are not useful on local variables &mdash; the inference starting set already covers the same information.</p>
-
-<h3 id="explicit-annotation">Explicit annotation &mdash; escape hatch</h3>
-
+<table><thead><tr><th>Group</th><th>Members</th></tr></thead><tbody><tr><td><code>&#x27;one</code></td><td><code>&#x27;stack</code>, <code>&#x27;heap</code></td></tr><tr><td><code>&#x27;many</code></td><td><code>&#x27;shared</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code></td></tr><tr><td><code>&#x27;mut</code></td><td><code>&#x27;stack</code>, <code>&#x27;heap</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code></td></tr><tr><td><code>&#x27;req</code></td><td><code>&#x27;shared</code></td></tr></tbody></table>
+<p><strong>Scope: parameters only.</strong> Qualifier groups are not useful on local variables — the inference starting set already covers the same information.</p>
+<h3 id="explicit-annotation--escape-hatch">Explicit annotation — escape hatch</h3>
 <p>When inference cannot resolve a qualifier, an explicit annotation overrides everything:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'actor</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)   <span class="co"># explicit &mdash; inference is skipped for c</span></code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> Counter<span class="lf">&#x27;actor</span> c = <span class="fn">Counter</span>(<span class="nb">0</span>)   <span class="co"># explicit — inference is skipped for c</span></code></pre></div>
 <hr>
-
-<h2 id="single-thread-vs-multi-thread">Single-thread vs multi-thread mode</h2>
-
+<h2 id="single-thread-vs-multi-thread-mode">Single-thread vs multi-thread mode</h2>
 <p>The <code>--threading single</code> / <code>--threading multi</code> flag (default: multi) selects the wrapper implementation:</p>
-
-<table>
-<thead><tr><th>Qualifier</th><th><code>--threading multi</code></th><th><code>--threading single</code></th></tr></thead>
-<tbody>
-<tr><td><code><span class="lf">'shared</span></code></td><td><code>Arc&lt;T&gt;</code></td><td><code>Rc&lt;T&gt;</code></td></tr>
-<tr><td><code><span class="lf">'actor</span></code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr>
-<tr><td><code><span class="lf">'guard</span></code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr>
-<tr><td><code><span class="lf">'actor'task</span></code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr>
-<tr><td><code><span class="lf">'guard'task</span></code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr>
-</tbody>
-</table>
-
-<p>In single-thread mode <code><span class="lf">'actor</span></code> and <code><span class="lf">'guard</span></code> both map to <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> &mdash; there is no semantic difference between reader and writer locks in a single-threaded context. The same collapse applies to the <code><span class="lf">'task</span></code> variants: single-thread mode still runs under a tokio <code>current_thread</code> runtime (<code>#[tokio::main(flavor = "current_thread")]</code>, <code>tokio::task::spawn_local</code>), but since everything runs on one thread there is no need for <code>Send + Sync</code> locks, so <code><span class="lf">'actor'task</span></code> / <code><span class="lf">'guard'task</span></code> reuse plain <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> instead of the tokio async locks.</p>
-
+<table><thead><tr><th>Qualifier</th><th><code>--threading multi</code></th><th><code>--threading single</code></th></tr></thead><tbody><tr><td><code>&#x27;shared</code></td><td><code>Arc&lt;T&gt;</code></td><td><code>Rc&lt;T&gt;</code></td></tr><tr><td><code>&#x27;actor</code></td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>&#x27;guard</code></td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>&#x27;actor&#x27;task</code></td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr><tr><td><code>&#x27;guard&#x27;task</code></td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code></td><td><code>Rc&lt;RefCell&lt;T&gt;&gt;</code></td></tr></tbody></table>
+<p>In single-thread mode <code>&#x27;actor</code> and <code>&#x27;guard</code> both map to <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> — there is no semantic difference between reader and writer locks in a single-threaded context. The same collapse applies to the <code>&#x27;task</code> variants: single-thread mode still runs under a tokio <code>current_thread</code> runtime (<code>#[tokio::main(flavor = &quot;current_thread&quot;)]</code>, <code>tokio::task::spawn_local</code>), but since everything runs on one thread there is no need for <code>Send + Sync</code> locks, so <code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code> reuse plain <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> instead of the tokio async locks.</p>
 <hr>
-
-<h2 id="weak-references"><code>'weak</code> references</h2>
-
-<p>A <code><span class="lf">'weak</span></code> qualifier produces a non-owning reference. The base qualifier is inferred from the right-hand side:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a<span class="lf">'shared</span>  = <span class="fn">Resource</span>(label = <span class="s">"hello"</span>)
-<span class="kw">let</span> b<span class="lf">'weak</span>    = a        <span class="co"># Weak&lt;Resource&gt; &mdash; inferred from a&rsquo;s 'shared qualifier</span>
+<h2 id="weak-references"><code>&#x27;weak</code> references</h2>
+<p>A <code>&#x27;weak</code> qualifier produces a non-owning reference. The base qualifier is inferred from the right-hand side:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a<span class="lf">&#x27;shared</span>  = <span class="fn">Resource</span>(label = <span class="s">"hello"</span>)
+<span class="kw">let</span> b<span class="lf">&#x27;weak</span>    = a        <span class="co"># Weak&lt;Resource&gt; — inferred from a&#x27;s &#x27;shared qualifier</span>
 
 <span class="kw">let</span> r = b.<span class="fn">upgrade</span>()
-<span class="fn">print</span> r.label            <span class="co"># "hello"</span></code></pre></div>
-
+print r.label            <span class="co"># &quot;hello&quot;</span></code></pre></div>
 <p>Explicit compound forms for type annotations and function signatures:</p>
-
-<table>
-<thead><tr><th>Boring</th><th>Rust</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kt">T</span><span class="lf">'shared'weak</span></code></td><td><code>Weak&lt;T&gt;</code> (rc) or <code>sync::Weak&lt;T&gt;</code> (arc)</td></tr>
-<tr><td><code><span class="kt">T</span><span class="lf">'actor'weak</span></code></td><td><code>sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td></tr>
-<tr><td><code><span class="kt">T</span><span class="lf">'guard'weak</span></code></td><td><code>sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td></tr>
-</tbody>
-</table>
-
-<p>Passing a <code><span class="lf">'weak</span></code> value to any non-weak parameter is a compile error &mdash; the transpiler requires an explicit <code>.upgrade()</code>.</p>
-
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>T&#x27;shared&#x27;weak</code></td><td><code>Weak&lt;T&gt;</code> (rc) or <code>sync::Weak&lt;T&gt;</code> (arc)</td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td><code>sync::Weak&lt;Mutex&lt;T&gt;&gt;</code></td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td><code>sync::Weak&lt;RwLock&lt;T&gt;&gt;</code></td></tr></tbody></table>
+<p>Passing a <code>&#x27;weak</code> value to any non-weak parameter is a compile error — the transpiler requires an explicit <code>.upgrade()</code>.</p>
 <hr>
-
 <h2 id="string-and-primitive-types"><code>string</code> and primitive types</h2>
-
-<p>Primitives (<code><span class="kt">int</span></code>, <code><span class="kt">uint</span></code>, <code><span class="kt">float</span></code>, <code><span class="kt">bool</span></code>) have no meaningful qualifier &mdash; they are always <code>Copy</code> in Rust. The bare names are the canonical form:</p>
-
-<table>
-<thead><tr><th>Boring</th><th>Rust</th></tr></thead>
-<tbody>
-<tr><td><code><span class="kt">int</span></code></td><td><code>i64</code></td></tr>
-<tr><td><code><span class="kt">uint</span></code></td><td><code>u64</code></td></tr>
-<tr><td><code><span class="kt">float</span></code></td><td><code>f64</code></td></tr>
-<tr><td><code><span class="kt">bool</span></code></td><td><code>bool</code></td></tr>
-<tr><td><code><span class="kt">str</span></code></td><td><code>&amp;str</code></td></tr>
-<tr><td><code><span class="kt">string</span></code></td><td><code>Arc&lt;str&gt;</code> (multi-thread) / <code>Rc&lt;str&gt;</code> (single-thread) / <code>&amp;'static str</code> (literals, strict mode)</td></tr>
-</tbody>
-</table>
-
-<p><code><span class="kt">string</span></code> uses <code>Arc&lt;str&gt;</code> to enable arbitrary value lifetimes and sharing. In single-thread mode it uses <code>Rc&lt;str&gt;</code>. Strict mode restricts <code><span class="kt">string</span></code> to compile-time literals only (<code>&amp;'static str</code>); computed or interpolated values require explicit annotation.</p>
-
+<p>Primitives (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>) have no meaningful qualifier — they are always <code>Copy</code> in Rust. The bare names are the canonical form:</p>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td></tr><tr><td><code>uint</code></td><td><code>u64</code></td></tr><tr><td><code>float</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>bool</code></td></tr><tr><td><code>str</code></td><td><code>&amp;str</code></td></tr><tr><td><code>string</code></td><td><code>Arc&lt;str&gt;</code> (multi-thread) / <code>Rc&lt;str&gt;</code> (single-thread) / <code>&amp;&#x27;static str</code> (literals, strict mode)</td></tr></tbody></table>
+<p><code>string</code> uses <code>Arc&lt;str&gt;</code> to enable arbitrary value lifetimes and sharing. In single-thread mode it uses <code>Rc&lt;str&gt;</code>. Strict mode restricts <code>string</code> to compile-time literals only (<code>&amp;&#x27;static str</code>); computed or interpolated values require explicit annotation.</p>
 <hr>
-
 <h2 id="known-limitations">Known limitations</h2>
-
 <h3 id="cross-file-struct-field-inference">Cross-file struct field inference</h3>
-
 <p>Struct field inference scans only the methods defined in the <strong>same file</strong> as the struct. Qualifiers used by callers in other files are not visible to the inferrer.</p>
-
 <p>This is a deliberate constraint, not a gap to fill later:</p>
-
-<ul>
-<li>Mutable fields already require an explicit <code><span class="kw">mut</span></code> or <code><span class="kw">var</span></code> keyword; adding a qualifier annotation is a small additional step.</li>
-<li><code><span class="lf">'stack</span></code> / <code><span class="lf">'heap</span></code> field qualifiers are part of the module API and must not be silently changed by remote usage signals.</li>
-<li>Full cross-file inference would require a two-phase compilation model (parse all &rarr; infer globally &rarr; emit), which complicates incremental builds.</li>
-</ul>
-
+<ul><li>Mutable fields already require an explicit <code>mut</code> or <code>var</code> keyword; adding a qualifier annotation is a small additional step.</li><li><code>&#x27;stack</code> / <code>&#x27;heap</code> field qualifiers are part of the module API and must not be silently changed by remote usage signals.</li><li>Full cross-file inference would require a two-phase compilation model (parse all → infer globally → emit), which complicates incremental builds.</li></ul>
 <p><strong>Expected pattern:</strong> write explicit qualifier annotations on fields whose qualifier depends on external callers. The inference handles everything within a file automatically.</p>
-
 <hr>
-
 <h2 id="implementation-notes">Implementation notes</h2>
-
 <h3 id="tracking-sets">Tracking sets</h3>
-
 <p>The transpiler maintains four sets per scope for dispatch:</p>
-
-<table>
-<thead><tr><th>Set</th><th>Contents</th></tr></thead>
-<tbody>
-<tr><td><code>var_mutex_types</code></td><td>local vars with <code><span class="lf">'actor</span></code></td></tr>
-<tr><td><code>var_mutex_task_types</code></td><td>local vars with <code><span class="lf">'actor'task</span></code> / <code><span class="lf">'task</span></code></td></tr>
-<tr><td><code>var_rwlock_types</code></td><td>local vars with <code><span class="lf">'guard</span></code></td></tr>
-<tr><td><code>var_rwlock_task_types</code></td><td>local vars with <code><span class="lf">'guard'task</span></code></td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Set</th><th>Contents</th></tr></thead><tbody><tr><td><code>var_mutex_types</code></td><td>local vars with <code>&#x27;actor</code></td></tr><tr><td><code>var_mutex_task_types</code></td><td>local vars with <code>&#x27;actor&#x27;task</code> / <code>&#x27;task</code></td></tr><tr><td><code>var_rwlock_types</code></td><td>local vars with <code>&#x27;guard</code></td></tr><tr><td><code>var_rwlock_task_types</code></td><td>local vars with <code>&#x27;guard&#x27;task</code></td></tr></tbody></table>
 <p>Parallel sets exist for struct fields (<code>struct_mutex_fields</code>, <code>struct_mutex_task_fields</code>, <code>struct_rwlock_fields</code>, <code>struct_rwlock_task_fields</code>).</p>
-
 <p>These sets are populated during statement emission and propagated into sub-transpilers (method bodies) via <code>make_sub()</code>.</p>
-
 <h3 id="dispatch-helpers">Dispatch helpers</h3>
-
-<table>
-<thead><tr><th>Helper</th><th>Emits</th></tr></thead>
-<tbody>
-<tr><td><code>mutex_var_read(var, expr)</code></td><td><code>var.lock().unwrap().expr</code> or <code>.await</code></td></tr>
-<tr><td><code>mutex_var_write(var, expr)</code></td><td>same, write guard</td></tr>
-<tr><td><code>mutex_field_read(key, expr)</code></td><td>field via read lock</td></tr>
-<tr><td><code>mutex_field_write(key, expr)</code></td><td>field via write lock</td></tr>
-<tr><td><code>rwlock_field_read(key, expr)</code></td><td>field via <code>read()</code></td></tr>
-<tr><td><code>rwlock_field_write(key, expr)</code></td><td>field via <code>write()</code></td></tr>
-<tr><td><code>guard_read_access(v)</code></td><td><code>v.read().unwrap()</code></td></tr>
-<tr><td><code>guard_write_guard(v)</code></td><td><code>v.write().unwrap()</code></td></tr>
-<tr><td><code>guard_task_read_access(v)</code></td><td><code>v.read().await</code></td></tr>
-<tr><td><code>guard_task_write_guard(v)</code></td><td><code>v.write().await</code></td></tr>
-</tbody>
-</table>
-
-<h3 id="parser-lookahead">Parser lookahead for compound qualifiers</h3>
-
-<p><code><span class="lf">'actor'task</span></code> and <code><span class="lf">'guard'task</span></code> are two-token qualifiers. The <code>is_type_start_before_ident()</code> lookahead was extended to consume both tokens so that <code><span class="kw">let</span> <span class="kt">Counter</span><span class="lf">'actor'task</span> c = &hellip;</code> is parsed as a type annotation rather than an expression.</p>
-
-<h3 id="interior-mutability-interpreter">Interior mutability in the interpreter</h3>
-
-<p>The interpreter&rsquo;s <code>Env</code> tracks <code>actor_bindings: HashSet&lt;String&gt;</code> &mdash; variables declared with an interior-mutable qualifier. Calls to <code><span class="kw">def</span></code> methods on these variables skip the &ldquo;cannot call mutating method on immutable binding&rdquo; check, matching the transpiler&rsquo;s semantics.</p>
-
+<table><thead><tr><th>Helper</th><th>Emits</th></tr></thead><tbody><tr><td><code>mutex_var_read(var, expr)</code></td><td><code>var.lock().unwrap().expr</code> or <code>.await</code></td></tr><tr><td><code>mutex_var_write(var, expr)</code></td><td>same, write guard</td></tr><tr><td><code>mutex_field_read(key, expr)</code></td><td>field via read lock</td></tr><tr><td><code>mutex_field_write(key, expr)</code></td><td>field via write lock</td></tr><tr><td><code>rwlock_field_read(key, expr)</code></td><td>field via <code>read()</code></td></tr><tr><td><code>rwlock_field_write(key, expr)</code></td><td>field via <code>write()</code></td></tr><tr><td><code>guard_read_access(v)</code></td><td><code>v.read().unwrap()</code></td></tr><tr><td><code>guard_write_guard(v)</code></td><td><code>v.write().unwrap()</code></td></tr><tr><td><code>guard_task_read_access(v)</code></td><td><code>v.read().await</code></td></tr><tr><td><code>guard_task_write_guard(v)</code></td><td><code>v.write().await</code></td></tr></tbody></table>
+<h3 id="parser-lookahead-for-compound-qualifiers">Parser lookahead for compound qualifiers</h3>
+<p><code>&#x27;actor&#x27;task</code> and <code>&#x27;guard&#x27;task</code> are two-token qualifiers. The <code>is_type_start_before_ident()</code> lookahead was extended to consume both tokens so that <code>let Counter&#x27;actor&#x27;task c = …</code> is parsed as a type annotation rather than an expression.</p>
+<h3 id="interior-mutability-in-the-interpreter">Interior mutability in the interpreter</h3>
+<p>The interpreter&#x27;s <code>Env</code> tracks <code>actor_bindings: HashSet&lt;String&gt;</code> — variables declared with an interior-mutable qualifier. Calls to <code>def</code> methods on these variables skip the &quot;cannot call mutating method on immutable binding&quot; check, matching the transpiler&#x27;s semantics.</p>
 <h3 id="inference-implementation-status">Inference implementation status</h3>
-
-<table>
-<thead><tr><th>Case</th><th>Status</th></tr></thead>
-<tbody>
-<tr><td>Local variable, call-site demand</td><td>&#10003; implemented</td></tr>
-<tr><td>Local variable, return-type demand</td><td>&#10003; implemented</td></tr>
-<tr><td>Local variable, task capture</td><td>&#10003; implemented</td></tr>
-<tr><td>Local variable, alias propagation</td><td>&#10003; implemented</td></tr>
-<tr><td><code>T'</code> (tick) variables with inference</td><td>&#10003; implemented</td></tr>
-<tr><td><code><span class="kw">mut</span></code> keyword as mutation signal</td><td>&#10003; implemented</td></tr>
-<tr><td><code><span class="kw">var</span></code> reassignment as mutation signal (incl. nested fields)</td><td>&#10003; implemented</td></tr>
-<tr><td><code>set</code> setter body as mutation signal (struct fields)</td><td>&#10003; implemented</td></tr>
-<tr><td>Closure captures (receiver / read-only)</td><td>&#10003; implemented</td></tr>
-<tr><td>Mutation + sharing conflict &rarr; conflict error</td><td>&#10003; implemented</td></tr>
-<tr><td>Qualifier union validation</td><td>&#10003; implemented</td></tr>
-<tr><td>Parameter qualifier auto-apply</td><td>&#10003; implemented</td></tr>
-<tr><td>Universal borrow inference (free functions only)</td><td>&#10003; implemented</td></tr>
-<tr><td>Universal borrow &mdash; field-destructuring suppression</td><td>&#10003; implemented</td></tr>
-<tr><td>Universal borrow &mdash; disabled for struct/enum method params</td><td>&#10003; implemented</td></tr>
-<tr><td>Universal borrow &mdash; task capture suppresses auto-ref</td><td>&#10003; implemented</td></tr>
-<tr><td>Cross-function propagation</td><td>&#10003; implemented (single forward pass)</td></tr>
-<tr><td>Struct field inference (all fields, single-file)</td><td>&#10003; implemented</td></tr>
-<tr><td>Optional (<code>T?</code>, <code>T'?</code>) inner-type inference</td><td>&#10003; implemented</td></tr>
-<tr><td><code><span class="lf">'actor'task</span></code>/<code><span class="lf">'guard'task</span></code> vs <code><span class="lf">'actor</span></code>/<code><span class="lf">'guard</span></code> disambiguation (task-method-call signal)</td><td>&#10003; implemented</td></tr>
-<tr><td>Cross-file inference</td><td>not implemented</td></tr>
-<tr><td>Fixed-point propagation (mutual recursion)</td><td>not implemented</td></tr>
-</tbody>
-</table>
-
-<blockquote><strong>Note on <code><span class="lf">'actor'task</span></code> / <code><span class="lf">'guard'task</span></code>:</strong> inference picks the <code><span class="lf">'task</span></code> variant when a <code>task</code>-declared method is called on the captured variable/field (see &ldquo;Inferring <code>'actor'task</code> / <code>'guard'task</code> from task-method calls&rdquo; above); otherwise it falls back to the plain sync variant. A task body that needs the async lock without calling a <code>task</code> method on the captured value itself still requires an explicit annotation.</blockquote>
-
+<table><thead><tr><th>Case</th><th>Status</th></tr></thead><tbody><tr><td>Local variable, call-site demand</td><td>✅ implemented</td></tr><tr><td>Local variable, return-type demand</td><td>✅ implemented</td></tr><tr><td>Local variable, task capture</td><td>✅ implemented</td></tr><tr><td>Local variable, alias propagation</td><td>✅ implemented</td></tr><tr><td><code>T&#x27;</code> (tick) variables with inference</td><td>✅ implemented</td></tr><tr><td><code>mut</code> keyword as mutation signal</td><td>✅ implemented</td></tr><tr><td><code>var</code> reassignment as mutation signal (incl. nested fields)</td><td>✅ implemented</td></tr><tr><td><code>set</code> setter body as mutation signal (struct fields)</td><td>✅ implemented</td></tr><tr><td>Closure captures (receiver / read-only)</td><td>✅ implemented</td></tr><tr><td>Mutation + sharing conflict → conflict error</td><td>✅ implemented</td></tr><tr><td>Qualifier union validation</td><td>✅ implemented</td></tr><tr><td>Parameter qualifier auto-apply</td><td>✅ implemented</td></tr><tr><td>Universal borrow inference (free functions only)</td><td>✅ implemented</td></tr><tr><td>Universal borrow — field-destructuring suppression</td><td>✅ implemented</td></tr><tr><td>Universal borrow — disabled for struct/enum method params</td><td>✅ implemented</td></tr><tr><td>Universal borrow — task capture suppresses auto-ref</td><td>✅ implemented</td></tr><tr><td>Cross-function propagation</td><td>✅ implemented (single forward pass)</td></tr><tr><td>Struct field inference (all fields, single-file)</td><td>✅ implemented</td></tr><tr><td>Optional (<code>T?</code>, <code>T&#x27;?</code>) inner-type inference</td><td>✅ implemented</td></tr><tr><td><code>&#x27;actor&#x27;task</code>/<code>&#x27;guard&#x27;task</code> vs <code>&#x27;actor</code>/<code>&#x27;guard</code> disambiguation (task-method-call signal)</td><td>✅ implemented</td></tr><tr><td>Cross-file inference</td><td>not implemented</td></tr><tr><td>Fixed-point propagation (mutual recursion)</td><td>not implemented</td></tr></tbody></table>
+<blockquote><strong>Note on <code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code>:</strong> inference picks the <code>&#x27;task</code> variant when a <code>task</code>-declared method is called on the captured variable/field (see &quot;Inferring <code>&#x27;actor&#x27;task</code> / <code>&#x27;guard&#x27;task</code> from task-method calls&quot; above); otherwise it falls back to the plain sync variant. A task body that needs the async lock without calling a <code>task</code> method on the captured value itself still requires an explicit annotation.</blockquote>
 <h3 id="rust-research-directions">Rust research directions</h3>
-
-<h4 id="polonius">Polonius &mdash; next-generation borrow checker</h4>
-
-<p>Polonius replaces NLL with a path-based analysis that eliminates false positives. Targeting stabilisation in 2026 H2. Some patterns today requiring <code><span class="lf">'actor</span></code> may become expressible with <code><span class="lf">'stack</span></code> or <code><span class="lf">'heap</span></code> under Polonius.</p>
-
-<h4 id="view-types">View types / field projections</h4>
-
-<p>Feature gate <code>view_types</code> on nightly (tracking <a href="https://github.com/rust-lang/rust/issues/155938">#155938</a>) &mdash; functions declare which struct fields they borrow, giving the borrow checker field-level visibility. Aligns with Boring&rsquo;s per-field qualifier model.</p>
-
-<h4 id="beyond-the-ref">&ldquo;Beyond the &amp;&rdquo; umbrella goal (2026)</h4>
-
-<p>Groups <code>&amp;pin</code> references, field projections, and reborrow traits (<code>Reborrow</code>, <code>CoerceShared</code>). <code>CoerceShared</code> could give <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> first-class reborrow semantics, making <code><span class="lf">'actor</span></code> emission more transparent at the Rust level.</p>
-
+<h4 id="polonius--next-generation-borrow-checker">Polonius — next-generation borrow checker</h4>
+<p>Polonius replaces NLL with a path-based analysis that eliminates false positives. Targeting stabilisation in 2026 H2. Some patterns today requiring <code>&#x27;actor</code> may become expressible with <code>&#x27;stack</code> or <code>&#x27;heap</code> under Polonius.</p>
+<h4 id="view-types--field-projections">View types / field projections</h4>
+<p>Feature gate <code>view_types</code> on nightly (tracking <a href="https://github.com/rust-lang/rust/issues/155938">#155938</a>) — functions declare which struct fields they borrow, giving the borrow checker field-level visibility. Aligns with Boring&#x27;s per-field qualifier model.</p>
+<h4 id="beyond-the--umbrella-goal-2026">&quot;Beyond the &amp;&quot; umbrella goal (2026)</h4>
+<p>Groups <code>&amp;pin</code> references, field projections, and reborrow traits (<code>Reborrow</code>, <code>CoerceShared</code>). <code>CoerceShared</code> could give <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> first-class reborrow semantics, making <code>&#x27;actor</code> emission more transparent at the Rust level.</p>
 </main>
 <script>
 // Build TOC from headings

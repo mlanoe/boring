@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boring — GPU computing language reference</title>
+<title>Boring — GPU computing — language reference</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -102,7 +102,7 @@ th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
 td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
 tr:nth-child(even) td { background: #f1f3f5; }
 tr:hover td { background: #e8f4fd; }
-/* Blockquote */
+/* Blockquote (preview banner) */
 blockquote {
   background: #fff3cd; border-left: 4px solid #e94560;
   padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
@@ -120,26 +120,21 @@ li { margin-bottom: 0.3rem; }
 <aside class="sidebar">
   <div class="sidebar-header">
     <h2>Boring Language</h2>
-    <p>GPU computing reference</p>
+    <p>Beta</p>
   </div>
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-
-<h1 id="gpu-computing-language-reference">GPU computing — language reference</h1>
-
+<h1 id="gpu-computing--language-reference">GPU computing — language reference</h1>
 <p>Boring supports GPU computing through <code>kernel</code> structs — a dedicated declaration form that groups device memory fields, an <code>init</code> allocator, device-side helpers, and an anonymous entry point (<code>def ()</code>).</p>
-<p>For the Metal backend (macOS), see <a href="metal-backend.html">metal-backend.md</a>.</p>
-<p>For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see <a href="cuda-module.html">cuda-module.md</a>.</p>
-
+<p>For the Metal backend (macOS), see <a href="metal-backend.html">`metal-backend.md`</a>.</p>
+<p>For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see <a href="cuda-module.html">`cuda-module.md`</a>.</p>
 <hr>
-
 <h2 id="quick-start">Quick start</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Scale:
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span> buf     <span class="co"># unified host+device DRAM</span>
 
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> <span class="kt">Scale</span>:
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">'unified</span> buf     <span class="co"># unified host+device DRAM</span>
-
-    <span class="fn">init</span>([<span class="kt">float</span>]<span class="lf">'unified</span> data):
+    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;unified</span> data):
         buf = data
 
     <span class="kw">def</span> ():
@@ -147,17 +142,14 @@ li { margin-bottom: 0.3rem; }
         buf[i] *= <span class="nb">2.0</span>
 
 <span class="kw">mut</span> k = <span class="fn">Scale</span>(data)
-<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait
-<span class="fn">print</span> k.buf[<span class="nb">0</span>]</code></pre></div>
-
+<span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait
+print k.buf[<span class="nb">0</span>]</code></pre></div>
 <hr>
-
 <h2 id="kernel-struct"><code>kernel</code> struct</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Name:
+    &lt;binding&gt; [&lt;<span class="kw">type</span>&gt;][&#x27;&lt;qualifier&gt;] &lt;field&gt;
 
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Name:
-    &lt;binding&gt; [&lt;type&gt;][<span class="lf">'&lt;qualifier&gt;</span>] &lt;field&gt;
-
-    <span class="fn">init</span>(&lt;params&gt;):
+    <span class="kw">init</span>(&lt;params&gt;):
         &lt;body&gt;
 
     <span class="kw">def</span> &lt;helper&gt;(&lt;params&gt;):
@@ -165,319 +157,151 @@ li { margin-bottom: 0.3rem; }
 
     <span class="kw">def</span> ():
         &lt;body&gt;</code></pre></div>
-
-<p><code>let</code>/<code>mut</code>/<code>var</code> are mandatory on every field. GPU memory qualifiers (<code>'unified</code>, <code>'global</code>, <code>'shared</code>, <code>'local</code>, <code>'const</code>) replace the usual ownership qualifiers inside a <code>kernel</code> struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see <a href="#qualifier-inference">Qualifier inference</a> below).</p>
-
+<p><code>let</code>/<code>mut</code>/<code>var</code> are mandatory on every field. GPU memory qualifiers (<code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;shared</code>, <code>&#x27;local</code>, <code>&#x27;const</code>) replace the usual ownership qualifiers inside a <code>kernel</code> struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see <a href="#qualifier-inference">Qualifier inference</a> below).</p>
 <hr>
-
 <h2 id="gpu-memory-qualifiers">GPU memory qualifiers</h2>
-
 <p><strong>Kernel-context</strong> (inside <code>kernel</code> struct fields):</p>
-
-<table>
-<thead><tr><th>Qualifier</th><th>Memory space</th><th>Host access</th></tr></thead>
-<tbody>
-<tr><td><code>'unified</code></td><td>unified DRAM (host + device)</td><td>direct</td></tr>
-<tr><td><code>'global</code></td><td>device-only DRAM</td><td>via <code>gpu.copy()</code></td></tr>
-<tr><td><code>'shared</code></td><td>block SRAM (<code>__shared__</code>)</td><td>no</td></tr>
-<tr><td><code>'local</code></td><td>registers / thread-local</td><td>no — default</td></tr>
-<tr><td><code>'const</code></td><td>constant cache</td><td>no</td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Qualifier</th><th>Memory space</th><th>Host access</th></tr></thead><tbody><tr><td><code>&#x27;unified</code></td><td>unified DRAM (host + device)</td><td>direct</td></tr><tr><td><code>&#x27;global</code></td><td>device-only DRAM</td><td>via <code>gpu.copy()</code></td></tr><tr><td><code>&#x27;shared</code></td><td>block SRAM (<code>__shared__</code>)</td><td>no</td></tr><tr><td><code>&#x27;local</code></td><td>registers / thread-local</td><td>no — default</td></tr><tr><td><code>&#x27;const</code></td><td>constant cache</td><td>no</td></tr></tbody></table>
 <h3 id="qualifier-inference">Qualifier inference</h3>
-
 <p>Inside a <code>kernel</code> struct, the qualifier may be omitted for scalars and fixed-size arrays. The transpiler infers it from the binding keyword:</p>
-
-<table>
-<thead><tr><th>Declaration</th><th>Inferred qualifier</th><th>Rule</th></tr></thead>
-<tbody>
-<tr><td><code>let float alpha</code></td><td><code>'const</code></td><td>scalar <code>let</code> → constant cache</td></tr>
-<tr><td><code>mut float acc</code></td><td><code>'local</code></td><td>scalar <code>mut</code>/<code>var</code> → thread-private register</td></tr>
-<tr><td><code>var int step</code></td><td><code>'local</code></td><td>idem</td></tr>
-<tr><td><code>let [float, 4] lut</code></td><td><code>'const</code></td><td>fixed array <code>let</code> → constant cache</td></tr>
-<tr><td><code>mut [float, 8] tile</code></td><td><code>'local</code></td><td>fixed array <code>mut</code>/<code>var</code> → thread-private</td></tr>
-<tr><td><code>var [int, 4] buf</code></td><td><code>'local</code></td><td>idem</td></tr>
-</tbody>
-</table>
-
-<p>Explicit qualifiers remain valid (<code>let float'const alpha</code> is equivalent to <code>let float alpha</code>). Dynamic arrays (<code>[T]</code>) must still carry an explicit qualifier.</p>
-
+<table><thead><tr><th>Declaration</th><th>Inferred qualifier</th><th>Rule</th></tr></thead><tbody><tr><td><code>let float alpha</code></td><td><code>&#x27;const</code></td><td>scalar <code>let</code> → constant cache</td></tr><tr><td><code>mut float acc</code></td><td><code>&#x27;local</code></td><td>scalar <code>mut</code>/<code>var</code> → thread-private register</td></tr><tr><td><code>var int step</code></td><td><code>&#x27;local</code></td><td>idem</td></tr><tr><td><code>let [float, 4] lut</code></td><td><code>&#x27;const</code></td><td>fixed array <code>let</code> → constant cache</td></tr><tr><td><code>mut [float, 8] tile</code></td><td><code>&#x27;local</code></td><td>fixed array <code>mut</code>/<code>var</code> → thread-private</td></tr><tr><td><code>var [int, 4] buf</code></td><td><code>&#x27;local</code></td><td>idem</td></tr></tbody></table>
+<p>Explicit qualifiers remain valid (<code>let float&#x27;const alpha</code> is equivalent to <code>let float alpha</code>). Dynamic arrays (<code>[T]</code>) must still carry an explicit qualifier.</p>
 <p><strong>Invalid combinations</strong> — parse errors:</p>
-
-<table>
-<thead><tr><th>Combination</th><th>Error</th></tr></thead>
-<tbody>
-<tr><td><code>[T]'local</code></td><td>Dynamic arrays cannot be thread-local on GPU</td></tr>
-<tr><td><code>[T]'const</code></td><td>Constant cache requires a compile-time size — use <code>[T, N]</code></td></tr>
-<tr><td><code>[T, N]'unified</code></td><td>Fixed arrays cannot use <code>'unified</code></td></tr>
-<tr><td><code>[T, N]'global</code></td><td>Fixed arrays cannot use <code>'global</code></td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Combination</th><th>Error</th></tr></thead><tbody><tr><td><code>[T]&#x27;local</code></td><td>Dynamic arrays cannot be thread-local on GPU</td></tr><tr><td><code>[T]&#x27;const</code></td><td>Constant cache requires a compile-time size — use <code>[T, N]</code></td></tr><tr><td><code>[T, N]&#x27;unified</code></td><td>Fixed arrays cannot use <code>&#x27;unified</code></td></tr><tr><td><code>[T, N]&#x27;global</code></td><td>Fixed arrays cannot use <code>&#x27;global</code></td></tr></tbody></table>
 <p><strong>Valid qualifier × field-type matrix:</strong></p>
-
-<table>
-<thead><tr><th></th><th><code>'unified</code></th><th><code>'global</code></th><th><code>'shared</code></th><th><code>'local</code></th><th><code>'const</code></th></tr></thead>
-<tbody>
-<tr><td><code>[T]</code> dynamic</td><td>explicit</td><td>explicit</td><td>explicit</td><td>error</td><td>error</td></tr>
-<tr><td><code>[T, N]</code> fixed</td><td>error</td><td>error</td><td>explicit</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr>
-<tr><td>scalar</td><td>—</td><td>—</td><td>—</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr>
-</tbody>
-</table>
-
-<blockquote><code>'const</code> and <code>'local</code> are always inferred and rarely written explicitly. <code>'unified</code>, <code>'global</code>, and <code>'shared</code> are always explicit.</blockquote>
-
-<p><strong>Host-context</strong> (bindings outside <code>kernel</code> struct):</p>
-
-<table>
-<thead><tr><th>Qualifier</th><th>Location</th></tr></thead>
-<tbody>
-<tr><td><code>'gpu'unified</code></td><td>unified host + device DRAM</td></tr>
-<tr><td><code>'gpu'global</code></td><td>device-only DRAM</td></tr>
-<tr><td><code>'gpu'const</code></td><td>GPU constant cache</td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th></th><th><code>&#x27;unified</code></th><th><code>&#x27;global</code></th><th><code>&#x27;shared</code></th><th><code>&#x27;local</code></th><th><code>&#x27;const</code></th></tr></thead><tbody><tr><td><code>[T]</code> dynamic</td><td>explicit</td><td>explicit</td><td>explicit</td><td>error</td><td>error</td></tr><tr><td><code>[T, N]</code> fixed</td><td>error</td><td>error</td><td>explicit</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr><tr><td>scalar</td><td>—</td><td>—</td><td>—</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr></tbody></table>
+<blockquote><code>&#x27;const</code> and <code>&#x27;local</code> are always inferred and rarely written explicitly. <code>&#x27;unified</code>, <code>&#x27;global</code>, and <code>&#x27;shared</code> are always explicit.</blockquote>
 <hr>
-
+<p><strong>Host-context</strong> (bindings outside <code>kernel</code> struct):</p>
+<table><thead><tr><th>Qualifier</th><th>Location</th></tr></thead><tbody><tr><td><code>&#x27;gpu&#x27;unified</code></td><td>unified host + device DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;global</code></td><td>device-only DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;const</code></td><td>GPU constant cache</td></tr></tbody></table>
+<hr>
 <h2 id="launch-expression">Launch expression</h2>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>(block = N) k
-<span class="kw">kernel</span>(block = N, grid = M) k
-<span class="kw">kernel</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>)) k
-<span class="kw">kernel</span>(block = <span class="nb">256</span>, after = h1) k
-<span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">4096</span>}) k
-<span class="kw">kernel</span>(block = <span class="nb">256</span>, priority = high) k</code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">kernel</span>(block = N) k
+<span class="fn">kernel</span>(block = N, grid = M) k
+<span class="fn">kernel</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>)) k
+<span class="fn">kernel</span>(block = <span class="nb">256</span>, after = h1) k
+<span class="fn">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">4096</span>}) k
+<span class="fn">kernel</span>(block = <span class="nb">256</span>, priority = high) k</code></pre></div>
 <p>Returns a <code>KernelHandle</code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> <span class="kt">KernelHandle</span>&lt;T&gt;:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> KernelHandle&lt;T&gt;:
     <span class="kw">req</span> <span class="kt">bool</span> <span class="fn">done</span>()
     <span class="kw">req</span> T    <span class="fn">wait</span>()</code></pre></div>
-
 <p>Common pattern with the pipe operator:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait</code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait</code></pre></div>
 <h3 id="dispatch-parameters">Dispatch parameters</h3>
-
-<table>
-<thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-<tbody>
-<tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block</td></tr>
-<tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from field length if omitted (1D)</td></tr>
-<tr><td><code>smem</code></td><td><code>{string = int}</code></td><td>no</td><td>named dynamic <code>'shared</code> partitions and their byte sizes</td></tr>
-<tr><td><code>after</code></td><td>handle or <code>[handle]</code></td><td>no</td><td>kernel starts after all listed handles complete</td></tr>
-<tr><td><code>priority</code></td><td><code>high</code> / <code>normal</code> / <code>low</code></td><td>no</td><td>stream scheduling priority — default <code>normal</code></td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block</td></tr><tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from field length if omitted (1D)</td></tr><tr><td><code>smem</code></td><td><code>{string = int}</code></td><td>no</td><td>named dynamic <code>&#x27;shared</code> partitions and their byte sizes</td></tr><tr><td><code>after</code></td><td>handle or <code>[handle]</code></td><td>no</td><td>kernel starts after all listed handles complete</td></tr><tr><td><code>priority</code></td><td><code>high</code> / <code>normal</code> / <code>low</code></td><td>no</td><td>stream scheduling priority — default <code>normal</code></td></tr></tbody></table>
 <p>Device is bound at instantiation (<code>new(g) Scale(n)</code>), not at dispatch.</p>
-
 <hr>
-
-<h2 id="execution-context-builtins">Execution context built-ins</h2>
-
+<h2 id="execution-context-built-ins">Execution context built-ins</h2>
 <p>Inside <code>def ()</code> and device helpers, <code>gpu</code> is available:</p>
-
-<table>
-<thead><tr><th>Built-in</th><th>Description</th></tr></thead>
-<tbody>
-<tr><td><code>gpu.thread.x/y/z</code></td><td>thread index within block</td></tr>
-<tr><td><code>gpu.block.x/y/z</code></td><td>block index within grid</td></tr>
-<tr><td><code>gpu.block_dim.x/y/z</code></td><td>threads per block</td></tr>
-<tr><td><code>gpu.grid_dim.x/y/z</code></td><td>blocks per grid</td></tr>
-<tr><td><code>sync</code></td><td>block-level barrier</td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Built-in</th><th>Description</th></tr></thead><tbody><tr><td><code>gpu.thread.x/y/z</code></td><td>thread index within block</td></tr><tr><td><code>gpu.block.x/y/z</code></td><td>block index within grid</td></tr><tr><td><code>gpu.block_dim.x/y/z</code></td><td>threads per block</td></tr><tr><td><code>gpu.grid_dim.x/y/z</code></td><td>blocks per grid</td></tr><tr><td><code>sync</code></td><td>block-level barrier</td></tr></tbody></table>
 <hr>
-
 <h2 id="gpu-type"><code>GPU</code> type</h2>
-
 <p><code>GPU</code> is a built-in type for device selection and property queries:</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g = <span class="fn">GPU</span>(<span class="nb">0</span>)
-<span class="fn">print</span> <span class="s">"Device: {g.name()} — {g.totalMem() / 1_073_741_824} GB"</span>
-<span class="fn">print</span> <span class="s">"SM {g.computeCapability()[0]}.{g.computeCapability()[1]}, warp {g.warpSize()}"</span>
+print <span class="s">"Device: <span class="si">{g.name()}</span> — <span class="si">{g.totalMem() / 1_073_741_824}</span> GB"</span>
+print <span class="s">"SM <span class="si">{g.computeCapability()[0]}</span>.<span class="si">{g.computeCapability()[1]}</span>, warp <span class="si">{g.warpSize()}</span>"</span>
 
-<span class="kw">for</span> g <span class="kw">in</span> GPU.all():
-    <span class="fn">print</span> <span class="s">"[{g.index()}] {g.name()} — {g.freeMem()} bytes free"</span></code></pre></div>
-
-<table>
-<thead><tr><th>Method</th><th>Returns</th></tr></thead>
-<tbody>
-<tr><td><code>name()</code></td><td>device model name</td></tr>
-<tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td></tr>
-<tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td></tr>
-<tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td></tr>
-<tr><td><code>warpSize()</code></td><td>threads per warp</td></tr>
-<tr><td><code>maxThreads()</code></td><td>max threads per block</td></tr>
-<tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td></tr>
-<tr><td><code>index()</code></td><td>device index</td></tr>
-</tbody>
-</table>
-
+<span class="kw">for</span> g <span class="kw">in</span> GPU.<span class="fn">all</span>():
+    print <span class="s">"[<span class="si">{g.index()}</span>] <span class="si">{g.name()}</span> — <span class="si">{g.freeMem()}</span> bytes free"</span></code></pre></div>
+<table><thead><tr><th>Method</th><th>Returns</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td></tr><tr><td><code>index()</code></td><td>device index</td></tr></tbody></table>
 <hr>
-
 <h2 id="memory-safety-model">Memory safety model</h2>
-
-<h3 id="unified-zero-copy"><code>'unified</code> — zero-copy host/device</h3>
-
-<p><code>'unified</code> fields share physical memory between host and device. No explicit H2D/D2H copy is needed. Guard with <code>wait()</code> before reading on the host after a launch.</p>
-
-<h3 id="global-device-only"><code>'global</code> — device-only</h3>
-
-<p><code>'global</code> fields live in device DRAM. Host reads/writes require explicit <code>gpu.copy()</code>:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>gpu.copy(k.result, host_buf)    <span class="co"># D2H</span>
-gpu.copy(host_buf, k.input)     <span class="co"># H2D</span></code></pre></div>
-
-<h3 id="shared-block-sram"><code>'shared</code> — block SRAM</h3>
-
-<p><code>'shared</code> fields are allocated in per-block shared memory. Use <code>sync</code> between producer and consumer threads in the same block.</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> <span class="kt">Reduce</span>:
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">'unified</span> input
-    <span class="kw">mut</span> <span class="kt">float</span><span class="lf">'unified</span>   result
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">'shared</span>  tile
+<h3 id="unified--zero-copy-hostdevice"><code>&#x27;unified</code> — zero-copy host/device</h3>
+<p><code>&#x27;unified</code> fields share physical memory between host and device. No explicit H2D/D2H copy is needed. Guard with <code>wait()</code> before reading on the host after a launch.</p>
+<h3 id="global--device-only"><code>&#x27;global</code> — device-only</h3>
+<p><code>&#x27;global</code> fields live in device DRAM. Host reads/writes require explicit <code>gpu.copy()</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>gpu.<span class="fn">copy</span>(k.result, host_buf)    <span class="co"># D2H</span>
+gpu.<span class="fn">copy</span>(host_buf, k.input)     <span class="co"># H2D</span></code></pre></div>
+<h3 id="shared--block-sram"><code>&#x27;shared</code> — block SRAM</h3>
+<p><code>&#x27;shared</code> fields are allocated in per-block shared memory. Use <code>sync</code> between producer and consumer threads in the same block.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Reduce:
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span> input
+    <span class="kw">mut</span> <span class="kt">float</span><span class="lf">&#x27;unified</span>   result
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;shared</span>  tile
 
     <span class="kw">def</span> ():
         <span class="kw">let</span> tid = gpu.thread.x
         tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
-        <span class="kw">sync</span>
+        sync
         <span class="kw">if</span> tid == <span class="nb">0</span>:
             <span class="kw">var</span> <span class="kt">float</span> sum = <span class="nb">0.0</span>
             <span class="kw">for</span> v <span class="kw">in</span> tile:
                 sum += v
             result = sum</code></pre></div>
-
 <h3 id="ownership-and-launch">Ownership and launch</h3>
-
-<p><code>kernel(...)</code> moves the kernel object into the handle. <code>.wait</code> returns it. This prevents host access to the kernel's fields while the device is running.</p>
-
+<p><code>kernel(...)</code> moves the kernel object into the handle. <code>.wait</code> returns it. This prevents host access to the kernel&#x27;s fields while the device is running.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">Scale</span>(<span class="nb">1024</span>)
 k.buf[<span class="nb">0</span>] = <span class="nb">1.0</span>
-<span class="kw">let</span> h = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k    <span class="co"># k moved into h</span>
+<span class="kw">let</span> h = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k    <span class="co"># k moved into h</span>
 <span class="kw">mut</span> k = h.wait                   <span class="co"># k returned after completion</span>
-<span class="fn">print</span> k.buf[<span class="nb">0</span>]</code></pre></div>
-
+print k.buf[<span class="nb">0</span>]</code></pre></div>
 <p>The kernel is reusable — <code>.wait</code> returns the same object:</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> k = <span class="fn">Scale</span>(<span class="nb">1024</span>)
 <span class="kw">for</span> batch <span class="kw">in</span> batches:
     <span class="kw">for</span> i <span class="kw">in</span> ..n: k.buf[i] = batch[i]
-    k = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait
+    k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait
     results.<span class="fn">push</span>(k.buf[<span class="nb">0</span>])</code></pre></div>
-
-<h3 id="shared-field-rules"><code>'shared</code> field rules</h3>
-
-<p><code>'shared</code> fields cannot escape the kernel body. The compiler rejects:</p>
-<ul>
-  <li>returning a <code>'shared</code> value from a kernel</li>
-  <li>storing a <code>'shared</code> value in a field accessible from the host</li>
-  <li>passing a <code>'shared</code> reference outside the kernel invocation scope</li>
-</ul>
-
-<h3 id="dynamic-shared-size-from-launch">Dynamic <code>'shared</code> — size from launch</h3>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> <span class="kt">Reduce</span>:
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">'shared</span> tile    <span class="co"># size from smem at launch</span>
+<h3 id="shared-field-rules"><code>&#x27;shared</code> field rules</h3>
+<p><code>&#x27;shared</code> fields cannot escape the kernel body. The compiler rejects:</p>
+<ul><li>returning a <code>&#x27;shared</code> value from a kernel</li><li>storing a <code>&#x27;shared</code> value in a field accessible from the host</li><li>passing a <code>&#x27;shared</code> reference outside the kernel invocation scope</li></ul>
+<h3 id="dynamic-shared--size-from-launch">Dynamic <code>&#x27;shared</code> — size from launch</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Reduce:
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;shared</span> tile    <span class="co"># size from smem at launch</span>
 
     <span class="kw">def</span> (): ...
 
 <span class="kw">mut</span> k = <span class="fn">Reduce</span>(n)
-<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
-
+<span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
 <p>Multiple named partitions:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>, flags = <span class="nb">64</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
-
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>, flags = <span class="nb">64</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
 <p>The transpiler generates the byte-offset arithmetic automatically.</p>
-
 <hr>
-
 <h2 id="atomics">Atomics</h2>
-
-<p>Tag a field with <code>'actor'global</code> to enable atomic operations on indexed access:</p>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> <span class="kt">Histogram</span>:
-    <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">'actor'global</span> counts = [<span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>]
+<p>Tag a field with <code>&#x27;actor&#x27;global</code> to enable atomic operations on indexed access:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Histogram:
+    <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">&#x27;actor</span><span class="lf">&#x27;global</span> counts = [<span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>]
 
     <span class="kw">def</span> ():
         counts[bucket] += <span class="nb">1</span>     <span class="co"># compiled to atomicAdd</span></code></pre></div>
-
 <p>Supported atomic operations: <code>+= -= &amp;= |= ^=</code>.</p>
-
 <hr>
-
 <h2 id="multi-device">Multi-device</h2>
-
 <p>Device placement is controlled at construction time with <code>new(gpu)</code>:</p>
-
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g0 = <span class="fn">GPU</span>(<span class="nb">0</span>)
 <span class="kw">let</span> g1 = <span class="fn">GPU</span>(<span class="nb">1</span>)
 
 <span class="kw">let</span> k0 = <span class="kw">new</span>(g0) <span class="fn">Scale</span>(input)
 <span class="kw">let</span> k1 = <span class="kw">new</span>(g1) <span class="fn">Scale</span>(input)
 
-<span class="kw">kernel</span>(block = <span class="nb">256</span>) k0
-<span class="kw">kernel</span>(block = <span class="nb">256</span>) k1</code></pre></div>
-
+<span class="fn">kernel</span>(block = <span class="nb">256</span>) k0
+<span class="fn">kernel</span>(block = <span class="nb">256</span>) k1</code></pre></div>
 <p><code>GPU.count()</code> returns the number of available devices.</p>
-
-<h3 id="after-ordering"><code>after =</code> ordering</h3>
-
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h0 = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k0
-<span class="kw">let</span> h1 = <span class="kw">kernel</span>(block = <span class="nb">256</span>, after = h0) k1</code></pre></div>
-
+<h3 id="after--ordering"><code>after =</code> ordering</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h0 = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k0
+<span class="kw">let</span> h1 = <span class="fn">kernel</span>(block = <span class="nb">256</span>, after = h0) k1</code></pre></div>
 <p><code>after =</code> accepts a single handle or a list: <code>after = [h0, h1]</code>.</p>
-
 <hr>
-
 <h2 id="simulation-mode">Simulation mode</h2>
-
 <p><code>boring run</code> executes kernels sequentially on the CPU — same source file, no GPU required.</p>
-
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring run main.br
 boring run --gpu a100 main.br
 boring run --gpu h100 main.br
 boring run --gpu path/to/my.toml main.br</code></pre></div>
-
 <h3 id="built-in-profiles">Built-in profiles</h3>
-
-<table>
-<thead><tr><th>Name</th><th>GPU</th><th>VRAM</th><th>SM</th></tr></thead>
-<tbody>
-<tr><td><code>default</code></td><td>generic</td><td>8 GB</td><td>8.6</td></tr>
-<tr><td><code>v100</code></td><td>Tesla V100 SXM2</td><td>16 GB</td><td>7.0</td></tr>
-<tr><td><code>a100</code></td><td>A100 SXM4</td><td>80 GB</td><td>8.0</td></tr>
-<tr><td><code>rtx3090</code></td><td>RTX 3090</td><td>24 GB</td><td>8.6</td></tr>
-<tr><td><code>rtx4090</code></td><td>RTX 4090</td><td>24 GB</td><td>8.9</td></tr>
-<tr><td><code>h100</code></td><td>H100 SXM5</td><td>80 GB</td><td>9.0</td></tr>
-</tbody>
-</table>
-
+<table><thead><tr><th>Name</th><th>GPU</th><th>VRAM</th><th>SM</th></tr></thead><tbody><tr><td><code>default</code></td><td>generic</td><td>8 GB</td><td>8.6</td></tr><tr><td><code>v100</code></td><td>Tesla V100 SXM2</td><td>16 GB</td><td>7.0</td></tr><tr><td><code>a100</code></td><td>A100 SXM4</td><td>80 GB</td><td>8.0</td></tr><tr><td><code>rtx3090</code></td><td>RTX 3090</td><td>24 GB</td><td>8.6</td></tr><tr><td><code>rtx4090</code></td><td>RTX 4090</td><td>24 GB</td><td>8.9</td></tr><tr><td><code>h100</code></td><td>H100 SXM5</td><td>80 GB</td><td>9.0</td></tr></tbody></table>
 <h3 id="custom-toml-profile">Custom TOML profile</h3>
-
-<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>name = "My GPU"
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>name = &quot;My GPU&quot;
 totalMem = 8589934592
 warpSize = 32
 maxThreads = 1024
 maxSharedMem = 49152
 computeCapability = [8, 6]</code></pre></div>
-
 <blockquote>Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if <code>sync</code> barriers are missing.</blockquote>
-
 <hr>
-
 <h2 id="cuda-codegen">CUDA codegen</h2>
-
 <p><code>boring build --target cuda</code> generates a Cargo project with Rust host code, CUDA C device code, and a <code>build.rs</code> that invokes <code>nvcc</code>. Requires the CUDA toolkit and a CUDA-capable GPU.</p>
-
-<p>For the full mapping of Boring constructs to CUDA C, generated file layout, and backend limitations, see <a href="cuda-module.html">cuda-module.md</a>.</p>
-
+<p>For the full mapping of Boring constructs to CUDA C, generated file layout, and backend limitations, see <a href="cuda-module.html">`cuda-module.md`</a>.</p>
 </main>
 <script>
 // Build TOC from headings
