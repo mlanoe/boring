@@ -5984,43 +5984,51 @@ unreachable("variant {v} should have been handled above")
 
 ## 28. Diagnostics
 
-Boring prints errors in the same format as `rustc` — file path, line number, and the source line that caused the problem.
+Boring prints errors in the same format as `rustc` — file path, line number, column, the source line, and a caret pointing at the exact token.
 
 ### Error format
 
 ```
 error: <message>
- --> path/to/file.br:<line>
+ --> path/to/file.br:<line>:<col>
   |
 N | source line text
-  |
+  |   ^^^
 ```
+
+The caret (`^`) spans the width of the offending token. Single-character tokens produce one `^`; identifiers and literals produce as many `^` as the token is wide.
 
 Example — accessing an undefined variable:
 
 ```
-error: undefined variable 'conter'
- --> hello.br:3
+error: undefined variable 'conter' — did you mean 'counter'?
+ --> hello.br:3:7
   |
 3 | print conter
-  |
+  |       ^^^^^^
 ```
 
 ### "Did you mean?"
 
-When an undefined variable name is close to a name in scope, Boring suggests the likely intended name:
+When an undefined variable name is close to a name in scope, Boring suggests the likely intended name. The suggestion uses edit distance: a name is proposed only if it differs by at most `max(2, len ÷ 3)` characters from the unknown identifier.
+
+### Warnings
+
+Warnings use the same format but print in yellow with a `warning:` prefix instead of `error:`:
 
 ```
-error: undefined variable 'conter' — did you mean 'counter'?
- --> hello.br:3
+warning: `BigStruct` is 320 bytes on the stack; consider `BigStruct'heap` to heap-allocate
+ --> main.br:12:1
   |
-3 | print conter
-  |
+12 | struct BigStruct:
+   | ^
 ```
 
-The suggestion uses edit distance: a name is proposed only if it differs by at most `max(2, len ÷ 3)` characters from the unknown identifier.
+### Multiple errors
 
-Parse errors (unexpected token, unterminated string, bad indentation) and runtime errors (type mismatches, uncaught throws) all use the same format.
+The lexer collects **all** errors in a single pass before stopping, so a file with several bad characters reports each one individually rather than stopping at the first.
+
+Parse errors (unexpected token, unterminated string, bad indentation) and runtime errors (type mismatches, array index out of bounds, division by zero, uncaught throws) all use the same format.
 
 ---
 

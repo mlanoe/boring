@@ -3427,28 +3427,32 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>if let x = a: … elif let y = b: …</code></td><td><code>if let Some(x) = a { … } else if let Some(y) = b { … }</code></td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>
 <h2 id="28-diagnostics">28. Diagnostics</h2>
-<p>Boring prints errors in the same format as <code>rustc</code> — file path, line number, and the source line that caused the problem.</p>
+<p>Boring prints errors in the same format as <code>rustc</code> — file path, line number, column, the source line, and a caret pointing at the exact token.</p>
 <h3 id="error-format">Error format</h3>
 <div class="code-block"><pre><code>error: &lt;message&gt;
- --&gt; path/to/file.br:&lt;line&gt;
+ --&gt; path/to/file.br:&lt;line&gt;:&lt;col&gt;
   |
 N | source line text
-  |</code></pre></div>
+  |   ^^^</code></pre></div>
+<p>The caret (<code>^</code>) spans the width of the offending token. Single-character tokens produce one <code>^</code>; identifiers and literals produce as many <code>^</code> as the token is wide.</p>
 <p>Example — accessing an undefined variable:</p>
-<div class="code-block"><pre><code>error: undefined variable &#x27;conter&#x27;
- --&gt; hello.br:3
-  |
-3 | print conter
-  |</code></pre></div>
-<h3 id="did-you-mean">&quot;Did you mean?&quot;</h3>
-<p>When an undefined variable name is close to a name in scope, Boring suggests the likely intended name:</p>
 <div class="code-block"><pre><code>error: undefined variable &#x27;conter&#x27; — did you mean &#x27;counter&#x27;?
- --&gt; hello.br:3
+ --&gt; hello.br:3:7
   |
 3 | print conter
-  |</code></pre></div>
-<p>The suggestion uses edit distance: a name is proposed only if it differs by at most <code>max(2, len ÷ 3)</code> characters from the unknown identifier.</p>
-<p>Parse errors (unexpected token, unterminated string, bad indentation) and runtime errors (type mismatches, uncaught throws) all use the same format.</p>
+  |       ^^^^^^</code></pre></div>
+<h3 id="did-you-mean">&quot;Did you mean?&quot;</h3>
+<p>When an undefined variable name is close to a name in scope, Boring suggests the likely intended name. The suggestion uses edit distance: a name is proposed only if it differs by at most <code>max(2, len ÷ 3)</code> characters from the unknown identifier.</p>
+<h3 id="warnings">Warnings</h3>
+<p>Warnings use the same format but print in yellow with a <code>warning:</code> prefix instead of <code>error:</code>:</p>
+<div class="code-block"><pre><code>warning: `BigStruct` is 320 bytes on the stack; consider `BigStruct&#x27;heap` to heap-allocate
+ --&gt; main.br:12:1
+  |
+12 | struct BigStruct:
+   | ^</code></pre></div>
+<h3 id="multiple-errors">Multiple errors</h3>
+<p>The lexer collects <strong>all</strong> errors in a single pass before stopping, so a file with several bad characters reports each one individually rather than stopping at the first.</p>
+<p>Parse errors (unexpected token, unterminated string, bad indentation) and runtime errors (type mismatches, array index out of bounds, division by zero, uncaught throws) all use the same format.</p>
 <hr>
 <h2 id="29-advanced">29. Advanced</h2>
 <p>This chapter covers features you will rarely need in everyday code. They exist for performance tuning, low-level Rust interop, or unusual architectural patterns. Feel free to skip it until a specific need arises.</p>
