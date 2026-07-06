@@ -16,6 +16,15 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
     Lexer::new(&preprocessed).tokenize()
 }
 
+/// Like `lex`, but accumulates all recoverable errors instead of stopping at the first one.
+/// Errors on a given line are collected and the lexer continues on the next line.
+/// Fatal structural errors (mixed indentation, invalid dedent) still stop immediately.
+/// Returns `Err(Vec<LexError>)` if any errors were found, `Ok(Vec<Token>)` otherwise.
+pub fn lex_all(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
+    let preprocessed = preprocess_triple_strings(source).map_err(|e| vec![e])?;
+    Lexer::new(&preprocessed).tokenize_all()
+}
+
 /// Expand `"""..."""` triple-quoted strings into regular `"..."` single-line strings
 /// before the line-by-line tokeniser runs.
 ///
@@ -91,7 +100,7 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
                 }
 
                 if !closed {
-                    return Err(LexError::UnterminatedString { line: start_line });
+                    return Err(LexError::UnterminatedString { line: start_line, col: 1 });
                 }
 
                 // Dedent and encode as a single-line string token.
@@ -209,29 +218,39 @@ fn dedent_triple(raw: &str) -> String {
 #[derive(Debug, Error)]
 pub enum LexError {
     #[error("line {line}: unexpected character '{ch}'")]
-    UnexpectedChar { line: usize, ch: char },
+    UnexpectedChar { line: usize, col: usize, ch: char },
     #[error("line {line}: unterminated string literal")]
-    UnterminatedString { line: usize },
+    UnterminatedString { line: usize, col: usize },
     #[error("line {line}: inconsistent indentation (mixed tabs and spaces)")]
     MixedIndentation { line: usize },
     #[error("line {line}: dedent does not match any outer indentation level")]
     InvalidDedent { line: usize },
     #[error("line {line}: integer literal out of range")]
-    IntegerOverflow { line: usize },
+    IntegerOverflow { line: usize, col: usize },
 }
 
 impl LexError {
     pub fn line(&self) -> usize {
         match self {
             LexError::UnexpectedChar { line, .. } => *line,
-            LexError::UnterminatedString { line } => *line,
+            LexError::UnterminatedString { line, .. } => *line,
             LexError::MixedIndentation { line } => *line,
             LexError::InvalidDedent { line } => *line,
-            LexError::IntegerOverflow { line } => *line,
+            LexError::IntegerOverflow { line, .. } => *line,
         }
     }
 
-    pub fn col(&self) -> usize { 0 }
+    pub fn col(&self) -> usize {
+        match self {
+            LexError::UnexpectedChar { col, .. } => *col,
+            LexError::UnterminatedString { col, .. } => *col,
+            LexError::MixedIndentation { .. } => 0,
+            LexError::InvalidDedent { .. } => 0,
+            LexError::IntegerOverflow { col, .. } => *col,
+        }
+    }
+
+    pub fn len(&self) -> usize { 1 }
 
     pub fn msg(&self) -> String {
         match self {
@@ -249,6 +268,7 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub col: usize,
+    pub len: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,7 +409,7 @@ impl<'a> Lexer<'a> {
             let trimmed = raw.trim_start();
             if trimmed.is_empty() {
                 if paren_depth == 0 {
-                    tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
+                    tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
                 }
                 i += 1;
                 continue;
@@ -405,12 +425,12 @@ impl<'a> Lexer<'a> {
                         let top = *self.indent_stack.last().unwrap();
                         if top <= comment_indent { break; }
                         self.indent_stack.pop();
-                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
                     }
                 }
                 let text = trimmed[1..].trim().to_string();
-                tokens.push(Token { kind: TokenKind::Comment(text), line: self.line, col: 1 });
-                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
+                tokens.push(Token { kind: TokenKind::Comment(text), line: self.line, col: 1, len: 1 });
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
                 i += 1;
                 continue;
             }
@@ -432,7 +452,7 @@ impl<'a> Lexer<'a> {
                 let cur_indent = *self.indent_stack.last().unwrap();
                 if line_indent > cur_indent {
                     self.indent_stack.push(line_indent);
-                    tokens.push(Token { kind: TokenKind::Indent, line: self.line, col: 1 });
+                    tokens.push(Token { kind: TokenKind::Indent, line: self.line, col: 1, len: 1 });
                 } else if line_indent < cur_indent {
                     loop {
                         let top = *self.indent_stack.last().unwrap();
@@ -441,7 +461,7 @@ impl<'a> Lexer<'a> {
                             return Err(LexError::InvalidDedent { line: self.line });
                         }
                         self.indent_stack.pop();
-                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
                     }
                 }
             }
@@ -472,17 +492,133 @@ impl<'a> Lexer<'a> {
             tokens.extend(line_tokens);
             // Emit newline when at top level or when ending a colon-block line inside parens.
             if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
-                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1 });
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
             }
             i += 1;
         }
         // Close all open indents
         while self.indent_stack.len() > 1 {
             self.indent_stack.pop();
-            tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1 });
+            tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
         }
-        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: 1 });
+        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: 1, len: 1 });
         Ok(tokens)
+    }
+
+    /// Like `tokenize`, but collects all recoverable per-line errors instead of stopping.
+    /// Structural errors (InvalidDedent, MixedIndentation) still abort immediately.
+    fn tokenize_all(mut self) -> Result<Vec<Token>, Vec<LexError>> {
+        let mut tokens: Vec<Token> = Vec::new();
+        let mut errors: Vec<LexError> = Vec::new();
+        let lines: Vec<&str> = self.source.lines().collect();
+        let mut i = 0;
+        let mut paren_depth: i32 = 0;
+        let mut inner_colon_blocks: i32 = 0;
+        let mut inner_block_base_indents: Vec<usize> = Vec::new();
+        while i < lines.len() {
+            self.line = i + 1;
+            let raw = lines[i];
+            let trimmed = raw.trim_start();
+            if trimmed.is_empty() {
+                if paren_depth == 0 {
+                    tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
+                }
+                i += 1;
+                continue;
+            }
+            let apply_indent = paren_depth == 0 || inner_colon_blocks > 0;
+            if trimmed.starts_with('#') && apply_indent {
+                let comment_indent = match measure_indent(raw, self.line) {
+                    Ok(n) => n,
+                    Err(e) => { errors.push(e); i += 1; continue; }
+                };
+                let cur_indent = *self.indent_stack.last().unwrap();
+                if comment_indent < cur_indent {
+                    loop {
+                        let top = *self.indent_stack.last().unwrap();
+                        if top <= comment_indent { break; }
+                        self.indent_stack.pop();
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
+                    }
+                }
+                let text = trimmed[1..].trim().to_string();
+                tokens.push(Token { kind: TokenKind::Comment(text), line: self.line, col: 1, len: 1 });
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
+                i += 1;
+                continue;
+            }
+            let line_indent = if apply_indent {
+                match measure_indent(raw, self.line) {
+                    Ok(n) => n,
+                    // MixedIndentation is structural — abort
+                    Err(e @ LexError::MixedIndentation { .. }) => return Err(vec![e]),
+                    Err(e) => { errors.push(e); i += 1; continue; }
+                }
+            } else { 0 };
+            if apply_indent {
+                while inner_colon_blocks > 0 {
+                    let base = *inner_block_base_indents.last().unwrap();
+                    if line_indent <= base {
+                        inner_colon_blocks -= 1;
+                        inner_block_base_indents.pop();
+                    } else {
+                        break;
+                    }
+                }
+                let cur_indent = *self.indent_stack.last().unwrap();
+                if line_indent > cur_indent {
+                    self.indent_stack.push(line_indent);
+                    tokens.push(Token { kind: TokenKind::Indent, line: self.line, col: 1, len: 1 });
+                } else if line_indent < cur_indent {
+                    loop {
+                        let top = *self.indent_stack.last().unwrap();
+                        if top == line_indent { break; }
+                        if top < line_indent {
+                            // InvalidDedent is structural — abort
+                            return Err(vec![LexError::InvalidDedent { line: self.line }]);
+                        }
+                        self.indent_stack.pop();
+                        tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
+                    }
+                }
+            }
+            let content = raw.trim_start();
+            let content = &content[..comment_start(content)];
+            let line_tokens = match lex_line(content.trim_end(), self.line) {
+                Ok(t) => t,
+                Err(e) => { errors.push(e); i += 1; continue; }
+            };
+            let mut last_meaningful_is_colon = false;
+            for t in &line_tokens {
+                match &t.kind {
+                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                        paren_depth += 1;
+                        last_meaningful_is_colon = false;
+                    }
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                        paren_depth -= 1;
+                        last_meaningful_is_colon = false;
+                    }
+                    TokenKind::Colon => { last_meaningful_is_colon = true; }
+                    _ => { last_meaningful_is_colon = false; }
+                }
+            }
+            if last_meaningful_is_colon && paren_depth > 0 {
+                inner_colon_blocks += 1;
+                inner_block_base_indents.push(line_indent);
+            }
+            tokens.extend(line_tokens);
+            if paren_depth == 0 || last_meaningful_is_colon || inner_colon_blocks > 0 {
+                tokens.push(Token { kind: TokenKind::Newline, line: self.line, col: 1, len: 1 });
+            }
+            i += 1;
+        }
+        while self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+            tokens.push(Token { kind: TokenKind::Dedent, line: self.line, col: 1, len: 1 });
+        }
+        tokens.push(Token { kind: TokenKind::Eof, line: self.line, col: 1, len: 1 });
+        if errors.is_empty() { Ok(tokens) } else { Err(errors) }
     }
 }
 
@@ -684,23 +820,54 @@ fn lex_token(chars: &mut CharIter<'_>, line: usize) -> Result<Token, LexError> {
                 TokenKind::Dot
             }
         }
-        '"' => lex_string(chars, line)?,
-        c if c.is_ascii_digit() => lex_number(c, chars, line)?,
+        '"' => lex_string(chars, line, col)?,
+        c if c.is_ascii_digit() => lex_number(c, chars, line, col)?,
         c if c.is_alphabetic() || c == '_' => {
             let s = lex_ident(c, chars);
             keyword_or_ident(s)
         }
-        other => return Err(LexError::UnexpectedChar { line, ch: other }),
+        other => return Err(LexError::UnexpectedChar { line, col, ch: other }),
     };
-    Ok(Token { kind, line, col })
+    // Compute token length: prefer the byte distance to the next char; fall back
+    // to the lexical length of the token kind (covers end-of-line tokens).
+    let len = if let Some(&(end_off, _)) = chars.peek() {
+        end_off.saturating_sub(col - 1).max(1)
+    } else {
+        token_kind_len(&kind)
+    };
+    Ok(Token { kind, line, col, len })
 }
 
-fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexError> {
+fn token_kind_len(kind: &TokenKind) -> usize {
+    match kind {
+        TokenKind::Ident(s) => s.len(),
+        // Keywords — the most common case for end-of-line tokens
+        TokenKind::Do | TokenKind::If | TokenKind::In | TokenKind::Or | TokenKind::Is => 2,
+        TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Def | TokenKind::Req
+        | TokenKind::For | TokenKind::New | TokenKind::Not | TokenKind::And | TokenKind::Nil
+        | TokenKind::Use | TokenKind::Get | TokenKind::Set | TokenKind::Mod | TokenKind::Pub
+        | TokenKind::Try | TokenKind::Ext => 3,
+        TokenKind::Lazy | TokenKind::Else | TokenKind::Loop | TokenKind::Wait | TokenKind::With
+        | TokenKind::Pass | TokenKind::Join | TokenKind::Void | TokenKind::Init | TokenKind::Enum
+        | TokenKind::Type | TokenKind::Task => 4,
+        TokenKind::While | TokenKind::Match | TokenKind::Break | TokenKind::Throw
+        | TokenKind::Catch | TokenKind::Defer | TokenKind::Yield | TokenKind::Guard
+        | TokenKind::Trait | TokenKind::As => 5,
+        TokenKind::Stream | TokenKind::Return | TokenKind::Static | TokenKind::Struct
+        | TokenKind::Throws | TokenKind::Native => 6,
+        TokenKind::Continue | TokenKind::Transient => 8,
+        // For everything else (literals, operators, punctuation) the next-char method
+        // above is reliable; we only reach here for end-of-line edge cases.
+        _ => 1,
+    }
+}
+
+fn lex_string(chars: &mut CharIter<'_>, line: usize, col: usize) -> Result<TokenKind, LexError> {
     let mut parts: Vec<RawInterpPart> = Vec::new();
     let mut current_lit = String::new();
     loop {
         match chars.next() {
-            None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line }),
+            None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line, col }),
             Some((_, '"')) => break,
             // `{{` → literal `{`
             Some((_, '{')) => {
@@ -717,7 +884,7 @@ fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexErr
                     let mut in_hole_str = false;
                     loop {
                         match chars.next() {
-                            None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line }),
+                            None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line, col }),
                             Some((_, '\\')) if in_hole_str => {
                                 inner.push('\\');
                                 if let Some((_, c2)) = chars.next() {
@@ -799,7 +966,7 @@ fn lex_string(chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexErr
     }
 }
 
-fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize) -> Result<TokenKind, LexError> {
+fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) -> Result<TokenKind, LexError> {
     // Hex / binary / octal prefix: 0x, 0b, 0o
     if first == '0' {
         let prefix = chars.peek().map(|(_, c)| *c);
@@ -808,21 +975,21 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize) -> Result<Toke
                 chars.next();
                 let digits = lex_digits(chars, |c| c.is_ascii_hexdigit());
                 let val = u64::from_str_radix(&digits, 16)
-                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
+                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             Some('b') | Some('B') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0' | '1'));
                 let val = u64::from_str_radix(&digits, 2)
-                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
+                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             Some('o') | Some('O') => {
                 chars.next();
                 let digits = lex_digits(chars, |c| matches!(c, '0'..='7'));
                 let val = u64::from_str_radix(&digits, 8)
-                    .map_err(|_| LexError::IntegerOverflow { line })? as i64;
+                    .map_err(|_| LexError::IntegerOverflow { line, col })? as i64;
                 return Ok(TokenKind::Int(val));
             }
             _ => {}
@@ -854,10 +1021,10 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize) -> Result<Toke
                     s.push(chars.next().unwrap().1);
                 }
             }
-            return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line });
+            return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line, col });
         }
     }
-    s.parse().map(TokenKind::Int).map_err(|_| LexError::IntegerOverflow { line })
+    s.parse().map(TokenKind::Int).map_err(|_| LexError::IntegerOverflow { line, col })
 }
 
 /// Collect digits (skipping `_` separators) while `pred` matches.

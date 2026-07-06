@@ -6,6 +6,8 @@ use std::rc::Rc;
 impl Interpreter {
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
         let line = expr.line;
+        let col = expr.col;
+        let len = expr.len;
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Float(f) => Ok(Value::Float(*f)),
@@ -72,11 +74,11 @@ impl Interpreter {
                     Some(s) => format!("undefined variable '{}' — did you mean '{}'?", name, s),
                     None    => format!("undefined variable '{}'", name),
                 };
-                Err(err(msg, line))
+                Err(err_span(msg, line, col, len))
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
-                self.eval_binop(op, lhs, rhs, env, line)
+                self.eval_binop(op, lhs, rhs, env, line, col)
             }
 
             ExprKind::UnaryOp(op, expr) => {
@@ -173,7 +175,7 @@ impl Interpreter {
             ExprKind::Index(obj_expr, idx_expr) => {
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
-                self.get_index(obj, idx, line)
+                self.get_index(obj, idx, line, idx_expr.col, idx_expr.len)
             }
 
             ExprKind::Call(callee_expr, args) => {
@@ -412,8 +414,8 @@ impl Interpreter {
                                 if let Some(sv) = env.borrow().get("self") {
                                     if let Value::Object(ref inner_rc) = sv {
                                         if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
-                                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line };
-                                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line };
+                                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
+                                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
                                             let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
                                         }
                                     }
@@ -570,14 +572,14 @@ impl Interpreter {
 
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line })) };
+                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let v = self.eval_expr(value, Rc::clone(&env))?;
                 Ok(Value::Array(vec![v; n]))
             }
 
             ExprKind::ArrayComp { expr, var, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line })) };
+                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let mut vals = Vec::with_capacity(n);
                 for i in 0..n {
                     let inner = Env::child(Rc::clone(&env));
@@ -951,7 +953,9 @@ impl Interpreter {
     /// Like `eval_block_as_expr` but transparent to control-flow signals.
     /// Used for `do:` blocks: `return`/`break`/`continue` propagate to the
     /// enclosing function/loop rather than being captured by the block itself.
-    pub(crate) fn eval_binop(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, env: EnvRef, line: usize) -> Eval {
+    pub(crate) fn eval_binop(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, env: EnvRef, line: usize, col: usize) -> Eval {
+        let (lcol, llen) = (lhs.col, lhs.len);
+        let (rcol, rlen) = (rhs.col, rhs.len);
         // Short-circuit for And/Or
         if *op == BinOp::And {
             let l = self.eval_expr(lhs, Rc::clone(&env))?;
@@ -978,11 +982,11 @@ impl Interpreter {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Int(b)) => {
-                    if b < 0 { Err(err("cannot add negative Int to Uint", line)) }
+                    if b < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a.wrapping_add(b as u64))) }
                 }
                 (Value::Int(a), Value::Uint(b)) => {
-                    if a < 0 { Err(err("cannot add negative Int to Uint", line)) }
+                    if a < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
                     else { Ok(Value::Uint((a as u64).wrapping_add(b))) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
@@ -1002,18 +1006,18 @@ impl Interpreter {
                     if matches!(&a, Value::RustType { .. } | Value::Object { .. }) {
                         return Ok(a);
                     }
-                    Err(err(format!("cannot add {} and {}", a.type_name(), b.type_name()), line))
+                    Err(err_span(format!("cannot add {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
                 }
             },
             BinOp::Sub => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(b))),
                 (Value::Uint(a), Value::Uint(b)) => {
-                    if b > a { Err(err("uint subtraction underflow", line)) }
+                    if b > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a - b)) }
                 }
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Ok(Value::Uint(a.wrapping_add((-b) as u64))) }
-                    else if (b as u64) > a { Err(err("uint subtraction underflow", line)) }
+                    else if (b as u64) > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a - b as u64)) }
                 }
                 (Value::Int(a), Value::Uint(b)) => Ok(Value::Int(a - b as i64)),
@@ -1024,7 +1028,7 @@ impl Interpreter {
                     if let Some(result) = self.try_operator_method(&a, "sub", b.clone(), line)? {
                         Ok(result)
                     } else {
-                        Err(err(format!("cannot subtract {} and {}", a.type_name(), b.type_name()), line))
+                        Err(err_span(format!("cannot subtract {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
                     }
                 }
             },
@@ -1032,11 +1036,11 @@ impl Interpreter {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Int(b)) => {
-                    if b < 0 { Err(err("cannot multiply Uint by negative Int", line)) }
+                    if b < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a.wrapping_mul(b as u64))) }
                 }
                 (Value::Int(a), Value::Uint(b)) => {
-                    if a < 0 { Err(err("cannot multiply Uint by negative Int", line)) }
+                    if a < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint((a as u64).wrapping_mul(b))) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
@@ -1046,24 +1050,24 @@ impl Interpreter {
                     if let Some(result) = self.try_operator_method(&a, "mul", b.clone(), line)? {
                         Ok(result)
                     } else {
-                        Err(err(format!("cannot multiply {} and {}", a.type_name(), b.type_name()), line))
+                        Err(err_span(format!("cannot multiply {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
                     }
                 }
             },
             BinOp::Div => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
-                    if b == 0 { Err(err("division by zero", line)) } else { Ok(Value::Int(a / b)) }
+                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Int(a / b)) }
                 }
                 (Value::Uint(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err("division by zero", line)) } else { Ok(Value::Uint(a / b)) }
+                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a / b)) }
                 }
                 (Value::Uint(a), Value::Int(b)) => {
-                    if b == 0 { Err(err("division by zero", line)) }
-                    else if b < 0 { Err(err("cannot divide Uint by negative Int", line)) }
+                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
+                    else if b < 0 { Err(err_span("cannot divide Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a / b as u64)) }
                 }
                 (Value::Int(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err("division by zero", line)) }
+                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
                     else { Ok(Value::Int(a / b as i64)) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
@@ -1073,24 +1077,24 @@ impl Interpreter {
                     if let Some(result) = self.try_operator_method(&a, "div", b.clone(), line)? {
                         Ok(result)
                     } else {
-                        Err(err(format!("cannot divide {} and {}", a.type_name(), b.type_name()), line))
+                        Err(err_span(format!("cannot divide {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
                     }
                 }
             },
             BinOp::Rem => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
-                    if b == 0 { Err(err("remainder by zero", line)) } else { Ok(Value::Int(a % b)) }
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int(a % b)) }
                 }
                 (Value::Uint(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err("remainder by zero", line)) } else { Ok(Value::Uint(a % b)) }
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % b)) }
                 }
                 (Value::Uint(a), Value::Int(b)) => {
-                    if b == 0 { Err(err("remainder by zero", line)) }
-                    else if b < 0 { Err(err("cannot take remainder of Uint by negative Int", line)) }
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
+                    else if b < 0 { Err(err_span("cannot take remainder of Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a % b as u64)) }
                 }
                 (Value::Int(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err("remainder by zero", line)) }
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
                     else { Ok(Value::Int(a % b as i64)) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
@@ -1100,7 +1104,7 @@ impl Interpreter {
                     if let Some(result) = self.try_operator_method(&a, "rem", b.clone(), line)? {
                         Ok(result)
                     } else {
-                        Err(err(format!("cannot remainder {} and {}", a.type_name(), b.type_name()), line))
+                        Err(err_span(format!("cannot remainder {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
                     }
                 }
             },
@@ -1136,28 +1140,28 @@ impl Interpreter {
                 if let Some(result) = self.try_operator_method(&l, "lt", r.clone(), line)? {
                     Ok(result)
                 } else {
-                    self.compare_values(l, r, |o| o == std::cmp::Ordering::Less, line)
+                    self.compare_values(l, r, |o| o == std::cmp::Ordering::Less, line, col)
                 }
             }
             BinOp::Gt => {
                 if let Some(result) = self.try_operator_method(&l, "gt", r.clone(), line)? {
                     Ok(result)
                 } else {
-                    self.compare_values(l, r, |o| o == std::cmp::Ordering::Greater, line)
+                    self.compare_values(l, r, |o| o == std::cmp::Ordering::Greater, line, col)
                 }
             }
             BinOp::LtEq => {
                 if let Some(result) = self.try_operator_method(&l, "le", r.clone(), line)? {
                     Ok(result)
                 } else {
-                    self.compare_values(l, r, |o| o != std::cmp::Ordering::Greater, line)
+                    self.compare_values(l, r, |o| o != std::cmp::Ordering::Greater, line, col)
                 }
             }
             BinOp::GtEq => {
                 if let Some(result) = self.try_operator_method(&l, "ge", r.clone(), line)? {
                     Ok(result)
                 } else {
-                    self.compare_values(l, r, |o| o != std::cmp::Ordering::Less, line)
+                    self.compare_values(l, r, |o| o != std::cmp::Ordering::Less, line, col)
                 }
             }
             BinOp::And | BinOp::Or => unreachable!(),
@@ -1166,35 +1170,35 @@ impl Interpreter {
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a & b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a & b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a & b as i64)),
-                (a, b) => Err(err(format!("cannot bitwise-and {} and {}", a.type_name(), b.type_name()), line)),
+                (a, b) => Err(err_span(format!("cannot bitwise-and {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
             BinOp::BitOr => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a | b)),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a | b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a | b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a | b as i64)),
-                (a, b) => Err(err(format!("cannot bitwise-or {} and {}", a.type_name(), b.type_name()), line)),
+                (a, b) => Err(err_span(format!("cannot bitwise-or {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
             BinOp::BitXor => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a ^ b)),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a ^ b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a ^ b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a ^ b as i64)),
-                (a, b) => Err(err(format!("cannot bitwise-xor {} and {}", a.type_name(), b.type_name()), line)),
+                (a, b) => Err(err_span(format!("cannot bitwise-xor {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
             BinOp::Shl => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shl(b as u32))),
                 (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shl(b as u32))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shl(b as u32))),
-                (_, Value::Int(b)) if b < 0 => Err(err("shift amount cannot be negative", line)),
-                (a, b) => Err(err(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line)),
+                (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
+                (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
             BinOp::Shr => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shr(b as u32))),
                 (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shr(b as u32))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shr(b as u32))),
-                (_, Value::Int(b)) if b < 0 => Err(err("shift amount cannot be negative", line)),
-                (a, b) => Err(err(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line)),
+                (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
+                (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
             BinOp::Is => {
                 // Case 1: `x is nil` — nil check
@@ -1244,7 +1248,7 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize) -> Eval {
+    pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
         let ord = match (&l, &r) {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Uint(a), Value::Uint(b)) => a.cmp(b),
@@ -1255,7 +1259,7 @@ impl Interpreter {
             (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
             (Value::Str(a), Value::Str(b)) => a.cmp(b),
-            _ => return Err(err(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line)),
+            _ => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
         };
         Ok(Value::Bool(pred(ord)))
     }

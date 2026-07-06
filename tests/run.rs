@@ -146,6 +146,16 @@ interp_test!(lazy);
 interp_test!(array_comprehension);
 interp_test!(callable_struct);
 interp_test!(fixed_array);
+interp_test!(auto_ref_infer);
+interp_test!(collections2);
+interp_test!(join_handle);
+interp_test!(select);
+interp_test!(triple_string);
+interp_test!(pipe);
+interp_test!(inline_match);
+interp_test!(supertraits);
+interp_test!(type_cast);
+interp_test!(ref_identity);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

@@ -181,20 +181,14 @@ impl Transpiler {
                 matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
             }).unwrap_or(false);
             if prim_via_type || prim_via_value {
-                eprintln!(
-                    "error line {}: primitive values are always copied, use `var` instead",
-                    s.line
-                );
-                std::process::exit(1);
+                self.push_error(s.line, s.col, "primitive values are always copied, use `var` instead");
             }
             if let Some(ty) = &s.ty {
                 if matches!(Self::unwrap_qual(ty), OwnerQual::Shared) {
-                    eprintln!(
-                        "error line {}: `mut` is not allowed with the `'shared` qualifier — \
-                         use `'actor` for interior mutability instead",
-                        s.line
+                    self.push_error(s.line, s.col,
+                        "`mut` is not allowed with the `'shared` qualifier — \
+                         use `'actor` for interior mutability instead"
                     );
-                    std::process::exit(1);
                 }
             }
         }
@@ -2711,7 +2705,7 @@ impl Transpiler {
                             }
                             other => other.clone(),
                         }).collect();
-                        MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line }
+                        MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line, col: 0 }
                     }).collect();
 
                     // Emit the transformed match against __boring_error_typed
@@ -2933,7 +2927,7 @@ impl Transpiler {
                         Pattern::Bind(n) if n == "_" => p.clone(),
                         other => Pattern::Some(Box::new(other.clone())),
                     }).collect();
-                    MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line }
+                    MatchArm { patterns: new_pats, guard: arm.guard.clone(), body: arm.body.clone(), line: arm.line, col: 0 }
                 }).collect())
             } else {
                 None

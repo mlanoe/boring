@@ -21,6 +21,7 @@ pub struct Attr {
     pub name: String,
     pub args: Vec<String>,  // raw string args, may be "key=value" pairs
     pub line: usize,
+    pub col: usize,
 }
 
 // ─── Top-level ───────────────────────────────────────────────────────────────
@@ -52,6 +53,7 @@ pub struct ModDecl {
     pub name: String,
     pub items: Vec<Item>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +63,7 @@ pub struct AliasDecl {
     pub ty: Type,           // the expanded type
     pub newtype: bool,      // true for `type Name as InnerType`, false for `use Name as Type`
     pub line: usize,
+    pub col: usize,
 }
 
 /// `ext TypeName [as Trait1, Trait2]:` — adds methods/conversions to an existing struct.
@@ -76,6 +79,7 @@ pub struct ExtDecl {
     pub conversions: Vec<AsDecl>,
     pub assoc_type_defs: Vec<AssocTypeDef>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +91,7 @@ pub struct UseDecl {
     /// Non-empty ⇒ import only the named items.
     pub items: Vec<String>,
     pub line: usize,
+    pub col: usize,
 }
 
 // ─── Declarations ────────────────────────────────────────────────────────────
@@ -113,6 +118,7 @@ pub struct FnDecl {
     pub where_clause: Vec<(String, String)>,
     pub attrs: Vec<Attr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +131,7 @@ pub struct Param {
     pub variadic: bool,        // `int... args` — collects remaining args as Array
     pub default: Option<Expr>, // `string name = "world"` — used when arg is absent
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +144,7 @@ pub struct SetDecl {
     pub task: bool,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +165,7 @@ pub struct StructDecl {
     pub assoc_type_defs: Vec<AssocTypeDef>,
     pub attrs: Vec<Attr>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// Kind of a type-level method (no `self` receiver).
@@ -180,6 +189,7 @@ pub struct TypeMethod {
     pub throws: bool,
     pub task: bool,
     pub line: usize,
+    pub col: usize,
 }
 
 /// A type-level variable or constant: `[pub] type var/let T name = expr`
@@ -193,6 +203,7 @@ pub struct TypeVar {
     pub is_pub: bool,
     pub mutable: bool, // true = `type var`, false = `type let`
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +214,7 @@ pub struct AsDecl {
     pub task: bool,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +226,7 @@ pub struct FieldDecl {
     pub ty: Type,
     pub default: Option<Expr>,
     pub line: usize,
+    pub col: usize,
 }
 
 // ─── GPU / Kernel AST ────────────────────────────────────────────────────────
@@ -256,6 +269,7 @@ pub struct KernelFieldDecl {
     pub qual: GpuQual,
     pub ty: Type,
     pub line: usize,
+    pub col: usize,
 }
 
 /// A `kernel` struct declaration.
@@ -272,6 +286,7 @@ pub struct KernelDecl {
     pub inits: Vec<InitDecl>,
     pub methods: Vec<FnDecl>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// Launch configuration passed to the `kernel(...)` expression.
@@ -288,6 +303,7 @@ pub struct KernelConfig {
     /// Scheduling priority: `high`, `normal`, or `low` (as string).
     pub priority: Option<String>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// A constructor declaration.
@@ -302,6 +318,7 @@ pub struct InitDecl {
     pub params: Vec<InitParam>,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// A parameter in an `init` declaration.
@@ -316,6 +333,7 @@ pub struct InitParam {
     pub ty: Option<Type>,
     pub default: Option<Expr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +350,7 @@ pub struct EnumDecl {
     pub conversions: Vec<AsDecl>,
     pub attrs: Vec<Attr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +359,7 @@ pub struct EnumVariant {
     pub fields: Vec<VariantField>,
     pub attrs: Vec<Attr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +378,7 @@ pub struct AssocTypeDecl {
     /// Empty for ordinary associated types.
     pub type_params: Vec<String>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// An associated type definition inside a struct: `type Output = int`.
@@ -366,6 +387,7 @@ pub struct AssocTypeDef {
     pub name: String,
     pub ty: Type,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +402,7 @@ pub struct TraitDecl {
     pub type_params: Vec<String>,
     pub assoc_types: Vec<AssocTypeDecl>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -394,6 +417,7 @@ pub struct FnSignature {
     pub return_mutable: bool,
     pub type_params: Vec<String>,
     pub line: usize,
+    pub col: usize,
 }
 
 // ─── Binding kind ────────────────────────────────────────────────────────────
@@ -468,6 +492,7 @@ pub struct LetDestructureStmt {
     pub bindings: Vec<DestructureBinding>,
     pub value: Expr,
     pub line: usize,
+    pub col: usize,
 }
 
 /// One slot in a destructure: a name with an optional type.
@@ -504,6 +529,7 @@ pub struct IfLetStmt {
     pub elif_branches: Vec<IfLetBranch>,
     pub else_body: Option<Vec<Stmt>>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// One `elif` branch of an `if let` chain: its own clause list plus body.
@@ -525,12 +551,14 @@ pub struct LetStmt {
     /// `true` for `lazy` bindings — deferred, write-once via `?=`.
     pub is_lazy: bool,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReturnStmt {
     pub value: Option<Expr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -538,6 +566,7 @@ pub struct IfStmt {
     pub branches: Vec<(Expr, Vec<Stmt>)>,
     pub else_body: Option<Vec<Stmt>>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -545,6 +574,7 @@ pub struct MatchStmt {
     pub subject: Expr,
     pub arms: Vec<MatchArm>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -554,6 +584,7 @@ pub struct MatchArm {
     pub guard: Option<Expr>,
     pub body: MatchBody,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -567,6 +598,7 @@ pub struct WhileStmt {
     pub condition: Expr,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 /// `while let name = expr:` — loops while `expr` returns `Some(value)`.
@@ -578,6 +610,7 @@ pub struct WhileLetStmt {
     pub value: Expr,               // the expression to unwrap
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -585,12 +618,14 @@ pub struct DoWhileStmt {
     pub body: Vec<Stmt>,
     pub condition: Expr,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct LoopStmt {
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -598,6 +633,7 @@ pub struct TryStmt {
     pub body: Vec<Stmt>,
     pub catch_clauses: Vec<CatchClause>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -608,12 +644,14 @@ pub struct CatchClause {
     pub variant: Option<String>,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ThrowStmt {
     pub value: Option<Expr>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +660,7 @@ pub struct ForStmt {
     pub iterable: Expr,
     pub body: Vec<Stmt>,
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -629,6 +668,7 @@ pub struct GuardStmt {
     pub cond: GuardCond,
     pub else_body: Vec<Stmt>,  // must contain return/throw/break/continue
     pub line: usize,
+    pub col: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +718,8 @@ pub enum StringSegment {
 pub struct Expr {
     pub kind: ExprKind,
     pub line: usize,
+    pub col: usize,
+    pub len: usize,
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,22 @@
+struct Point:
+    init(pub int x, pub int y)
+
+# same reference → true
+let Point'shared a = Point(x = 1, y = 2)
+let b = a
+print a === b
+
+# distinct shared object with same value → false
+let Point'shared c = Point(x = 1, y = 2)
+print a === c
+
+# actor qualifier
+struct Counter:
+    var int n = 0
+
+let Counter'actor ca = Counter()
+let cb = ca
+print ca === cb
+
+let Counter'actor cc = Counter()
+print ca === cc

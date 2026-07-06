@@ -65,7 +65,7 @@ impl Transpiler {
         let rel: std::path::PathBuf = u.path.iter().collect::<std::path::PathBuf>().with_extension("br");
         let candidate = self.source_dir.join(&rel);
         if candidate.exists() {
-            self.inline_boring_use(&candidate, u.line);
+            self.inline_boring_use(&candidate, u.line, u.col);
             return;
         }
 
@@ -140,11 +140,11 @@ impl Transpiler {
         }
     }
 
-    fn inline_boring_use(&mut self, path: &std::path::Path, use_line: usize) {
+    fn inline_boring_use(&mut self, path: &std::path::Path, use_line: usize, use_col: usize) {
         let canonical = match path.canonicalize() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("error: cannot resolve '{}': {}", path.display(), e);
+                self.push_error(use_line, use_col, format!("cannot resolve '{}': {}", path.display(), e));
                 return;
             }
         };
@@ -157,21 +157,21 @@ impl Transpiler {
         let source = match std::fs::read_to_string(&canonical) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("error: cannot read '{}': {}", canonical.display(), e);
+                self.push_error(use_line, use_col, format!("cannot read '{}': {}", canonical.display(), e));
                 return;
             }
         };
         let tokens = match crate::lexer::lex(&source) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("error: lex error in '{}' (imported at line {}): {}", canonical.display(), use_line, e);
+                self.push_error(use_line, use_col, format!("lex error in '{}': {}", canonical.display(), e));
                 return;
             }
         };
         let program = match crate::parser::parse(tokens) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("error: parse error in '{}' (imported at line {}): {}", canonical.display(), use_line, e);
+                self.push_error(use_line, use_col, format!("parse error in '{}': {}", canonical.display(), e));
                 return;
             }
         };
@@ -525,12 +525,16 @@ impl Transpiler {
         {
             let prev = std::mem::take(&mut self.fn_current_params);
             let prev_param_lines = std::mem::take(&mut self.fn_current_param_lines);
+            let prev_param_cols = std::mem::take(&mut self.fn_current_param_cols);
             let prev_mut = std::mem::take(&mut self.fn_current_params_mut);
             self.fn_current_params = f.params.iter()
                 .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
                 .collect();
             self.fn_current_param_lines = f.params.iter()
                 .map(|p| (p.name.clone(), p.line))
+                .collect();
+            self.fn_current_param_cols = f.params.iter()
+                .map(|p| (p.name.clone(), p.col))
                 .collect();
             self.fn_current_params_mut = f.params.iter()
                 .filter(|p| p.mutable)
@@ -549,6 +553,7 @@ impl Transpiler {
                 .collect();
             self.fn_current_params = prev;
             self.fn_current_param_lines = prev_param_lines;
+            self.fn_current_param_cols = prev_param_cols;
             self.fn_current_params_mut = prev_mut;
         }
         let params_s: Vec<String> = f.params.iter().map(|p| self.emit_param(p)).collect();
@@ -573,13 +578,12 @@ impl Transpiler {
                 if f.task && f.qualifier.is_some() && !self.inside_trait_impl && !is_enum_self {
                     let sname = self_ty.unwrap_or("");
                     if !sname.is_empty() && !self.arc_qualified_types.contains(sname) {
-                        eprintln!(
-                            "error line {}: `task fn` method '{}::{}' requires '{}' to be used with a \
+                        self.push_error(f.line, f.col, format!(
+                            "`task fn` method '{}::{}' requires '{}' to be used with a \
                              'task, 'actor, or 'guard qualifier at least once in the program \
                              (no arc-qualified binding found)",
-                            f.line, sname, f.name, sname
-                        );
-                        std::process::exit(1);
+                            sname, f.name, sname
+                        ));
                     }
                 }
                 let self_s = if f.mutating && (!f.task || self.inside_trait_impl) && !is_enum_self {
@@ -847,6 +851,10 @@ impl Transpiler {
         self.fn_current_param_lines = f.params.iter()
             .map(|p| (p.name.clone(), p.line))
             .collect();
+        let prev_fn_current_param_cols = std::mem::take(&mut self.fn_current_param_cols);
+        self.fn_current_param_cols = f.params.iter()
+            .map(|p| (p.name.clone(), p.col))
+            .collect();
         let prev_fn_current_params_mut = std::mem::take(&mut self.fn_current_params_mut);
         self.fn_current_params_mut = f.params.iter()
             .filter(|p| p.mutable)
@@ -939,6 +947,7 @@ impl Transpiler {
         self.fn_return_ty      = prev_fn_return_ty;
         self.fn_current_params      = prev_fn_current_params;
         self.fn_current_param_lines = prev_fn_current_param_lines;
+        self.fn_current_param_cols  = prev_fn_current_param_cols;
         self.fn_current_params_mut  = prev_fn_current_params_mut;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
@@ -1015,11 +1024,7 @@ impl Transpiler {
         if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single)
             && (base_item_ty.contains("Rc<") || base_item_ty.contains("RefCell<"))
         {
-            eprintln!(
-                "warning line {}: stream `{}` item type `{}` is !Send in single-thread mode; \
-                 stream<N> requires Send on the item type",
-                f.line, f.name, base_item_ty
-            );
+            self.push_warning(f.line, f.col, format!("stream `{}` item type `{}` is !Send in single-thread mode; stream<N> requires Send on the item type", f.name, base_item_ty));
         }
 
         let (macro_name, item_ty) = if f.throws {

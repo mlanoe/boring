@@ -1,0 +1,27 @@
+# float → int (truncates toward zero)
+let f = 3.7
+print f as int
+
+# int → float
+print 42 as float
+
+# int → string
+print 3 as string
+
+# string → int (returns optional)
+let n = "42" as int
+print n
+
+let bad = "abc" as int
+print bad
+
+# string → int with else
+let safe = ("42" as int) else -1
+print safe
+
+let safe2 = ("abc" as int) else -1
+print safe2
+
+# negative float → int
+let neg = -2.9
+print neg as int

@@ -1,0 +1,25 @@
+int double(int n): n * 2
+int inc(int n): n + 1
+[int] keep_positive([int] arr): arr.filter(n: n > 0)
+
+# single-line pipe chain
+let x = 5 |> double() |> inc() |> inc()
+print x
+
+# multi-line pipe
+let y = 5
+    |> double()
+    |> inc()
+print y
+
+# string methods via pipe
+let shout = "  hello  "
+    |> trim()
+    |> upper()
+print shout
+
+# mixed function + method dispatch
+let nums = [-1, 2, -3, 4]
+    |> keep_positive()
+    |> map(n: n * 2)
+print nums

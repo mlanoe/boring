@@ -602,7 +602,7 @@ impl Transpiler {
                     ClosureBody::Block(stmts) => {
                         let block_expr = Expr {
                             kind: ExprKind::Block(stmts.clone()),
-                            line: 0,
+                            line: 0, col: 0, len: 0,
                         };
                         self.constrain_task_captures(&block_expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                         for st in stmts {

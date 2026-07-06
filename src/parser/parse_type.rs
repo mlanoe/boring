@@ -28,6 +28,7 @@ impl Parser {
 
     pub(crate) fn parse_type(&mut self) -> Result<Type, ParseError> {
         let line = self.line();
+        let _col = self.col();
 
         // Prefix modifiers for function types: `req`, `def`, `task`, or combinations.
         // `req int (int)` → Fn (pure), `def int (int)` / `int (int)` → FnMut (default),
@@ -184,7 +185,7 @@ impl Parser {
                         TokenKind::Int(n) if n >= 0 => { self.advance(); n as usize }
                         _ => return Err(ParseError::Generic {
                             line: self.line(), col: self.col(),
-                            msg: "expected integer literal for fixed-size array length".into(),
+                            msg: "expected integer literal for fixed-size array length".into(), len: self.tok_len(),
                         }),
                     };
                     self.expect(&TokenKind::RBracket)?;
@@ -219,7 +220,7 @@ impl Parser {
             }
             _ => Err(ParseError::Generic {
                 line, col: self.col(),
-                msg: format!("expected type, got {:?}", self.peek()),
+                msg: format!("expected type, got {:?}", self.peek()), len: self.tok_len(),
             }),
         }
     }
@@ -309,18 +310,18 @@ impl Parser {
                                 "const"   => { self.advance(); OwnerQual::GpuConst }
                                 _ => return Err(ParseError::Generic {
                                     msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
-                                    line: self.line(), col: self.col(),
+                                    line: self.line(), col: self.col(), len: self.tok_len(),
                                 }),
                             },
                             _ => return Err(ParseError::Generic {
                                 msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
-                                line: self.line(), col: self.col(),
+                                line: self.line(), col: self.col(), len: self.tok_len(),
                             }),
                         }
                     } else {
                         return Err(ParseError::Generic {
                             msg: "'gpu must be followed by 'unified, 'global, or 'const".into(),
-                            line: self.line(), col: self.col(),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }
                 }
@@ -330,7 +331,7 @@ impl Parser {
                     if self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
-                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line(), col: self.col() }); }
+                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
                     } else {
                         OwnerQual::Actor
                     }
@@ -350,7 +351,7 @@ impl Parser {
                 // `T'guard'task` → GuardTask
                 if self.eat(&TokenKind::Tick) {
                     if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::GuardTask }
-                    else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line(), col: self.col() }); }
+                    else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
                 } else {
                     OwnerQual::Guard
                 }
@@ -435,12 +436,12 @@ impl Parser {
 /// Convert an expression (from a closure param list) to a Param node.
 /// Handles `Var("name")` → unnamed param, `Type name` patterns are already
 /// handled upstream; here we just treat simple var expressions as param names.
-pub(crate) fn expr_to_param(expr: &Expr, line: usize) -> Param {
+pub(crate) fn expr_to_param(expr: &Expr, line: usize, col: usize) -> Param {
     let name = match &expr.kind {
         ExprKind::Var(n) => n.clone(),
         _ => "_".to_string(),
     };
-    Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line }
+    Param { name, ty: None, mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col }
 }
 
 pub(crate) fn check_no_return(stmts: &[Stmt], context: &str) -> Result<(), ParseError> {
@@ -448,7 +449,7 @@ pub(crate) fn check_no_return(stmts: &[Stmt], context: &str) -> Result<(), Parse
         if let Stmt::Return(ret) = stmt {
             return Err(ParseError::Generic {
                 line: ret.line, col: 0,
-                msg: format!("last expression (no 'return' allowed in {})", context),
+                msg: format!("last expression (no 'return' allowed in {})", context), len: 1,
             });
         }
     }

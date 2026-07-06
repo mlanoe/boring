@@ -53,6 +53,7 @@ impl Parser {
             TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static | TokenKind::Lazy => {
                 if self.is_let_destructure() {
                     let line = self.line();
+                    let col = self.col();
                     let _is_static = self.eat(&TokenKind::Static);
                     let binding = match self.peek() {
                         TokenKind::Mut => BindingKind::Mut,
@@ -61,7 +62,7 @@ impl Parser {
                         _ => BindingKind::Let,
                     };
                     self.advance(); // consume let/mut/var/lazy
-                    Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, line)?))
+                    Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, line, col)?))
                 } else {
                     Ok(Stmt::Let(self.parse_let_stmt()?))
                 }
@@ -69,6 +70,7 @@ impl Parser {
             TokenKind::Return => Ok(Stmt::Return(self.parse_return_stmt()?)),
             TokenKind::Yield => {
                 let line = self.line();
+                let _col = self.col();
                 self.advance(); // consume `yield`
                 let expr = self.parse_expr()?;
                 self.expect_newline_soft();
@@ -76,6 +78,7 @@ impl Parser {
             }
             TokenKind::Break => {
                 let line = self.line();
+                let _col = self.col();
                 self.advance();
                 // `break expr` — optional value; newline/dedent/eof = no value
                 let value = if self.is_newline()
@@ -91,6 +94,7 @@ impl Parser {
             }
             TokenKind::Continue => {
                 let line = self.line();
+                let _col = self.col();
                 self.advance();
                 self.expect_newline()?;
                 Ok(Stmt::Continue(line))
@@ -115,6 +119,7 @@ impl Parser {
             }
             TokenKind::Do => {
                 let line = self.line();
+                let col = self.col();
                 self.advance(); // consume 'do'
                 self.expect(&TokenKind::Colon)?;
                 if !self.is_newline() && !self.check(&TokenKind::Eof) {
@@ -124,10 +129,10 @@ impl Parser {
                         self.advance(); // consume 'while'
                         let condition = self.parse_expr()?;
                         self.expect_newline_soft();
-                        Ok(Stmt::DoWhile(DoWhileStmt { body, condition, line }))
+                        Ok(Stmt::DoWhile(DoWhileStmt { body, condition, line, col }))
                     } else {
                         self.expect_newline_soft();
-                        Ok(Stmt::Expr(Expr { kind: ExprKind::Do(body), line }))
+                        Ok(Stmt::Expr(Expr { kind: ExprKind::Do(body), line, col, len: self.tok_len()}))
                     }
                 } else {
                     self.expect_newline()?;
@@ -138,16 +143,17 @@ impl Parser {
                         self.advance(); // consume 'while'
                         let condition = self.parse_expr()?;
                         self.expect_newline()?;
-                        Ok(Stmt::DoWhile(DoWhileStmt { body, condition, line }))
+                        Ok(Stmt::DoWhile(DoWhileStmt { body, condition, line, col }))
                     } else {
                         // do: ...  →  scoped block expression (no while)
-                        Ok(Stmt::Expr(Expr { kind: ExprKind::Do(body), line }))
+                        Ok(Stmt::Expr(Expr { kind: ExprKind::Do(body), line, col, len: self.tok_len()}))
                     }
                 }
             }
             TokenKind::Loop => Ok(Stmt::Loop(self.parse_loop_stmt()?)),
             TokenKind::Wait => {
                 let line = self.line();
+                let _col = self.col();
                 self.advance(); // consume `wait`
                 let dur = self.parse_expr()?;
                 self.expect_newline_soft();
@@ -183,7 +189,7 @@ impl Parser {
                 } else {
                     Err(ParseError::Generic {
                         line: self.line(), col: self.col(),
-                        msg: "use inside a function body must be a type alias: `use Name as Type`".into(),
+                        msg: "use inside a function body must be a type alias: `use Name as Type`".into(), len: self.tok_len(),
                     })
                 }
             }
@@ -225,6 +231,7 @@ impl Parser {
             }
             _ => {
                 let line = self.line();
+                let col = self.col();
                 // Parse lhs (no assignment — parse_expr doesn't produce Assign nodes)
                 let lhs = self.parse_expr()?;
 
@@ -232,7 +239,7 @@ impl Parser {
                 if self.eat(&TokenKind::Eq) {
                     let rhs = self.parse_else_expr()?;
                     self.expect_newline()?;
-                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line }));
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
                 }
                 // Compound assignment: desugar `lhs op= rhs` → `lhs = lhs op rhs`
                 let compound_op = match self.peek() {
@@ -249,16 +256,16 @@ impl Parser {
                 if let Some(op) = compound_op {
                     self.advance();
                     let rhs = self.parse_else_expr()?;
-                    let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line };
+                    let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.tok_len()};
                     self.expect_newline()?;
-                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line }));
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line, col, len: self.tok_len()}));
                 }
                 // Write-once / nil-coalescing assignment: `lhs ?= rhs`
                 // Emits ExprKind::QuestionAssign; the transpiler distinguishes lazy vs optional.
                 if self.eat(&TokenKind::QuestionEq) {
                     let rhs = self.parse_else_expr()?;
                     self.expect_newline()?;
-                    return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line }));
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
                 }
 
                 // Command-style call: `print "hello"` or `print "{}", expr, expr2`
@@ -272,7 +279,7 @@ impl Parser {
                             args.push(Arg { label: None, value: arg , spread: false});
                             if !self.eat(&TokenKind::Comma) { break; }
                         }
-                        Expr { kind: ExprKind::Call(Box::new(lhs), args), line }
+                        Expr { kind: ExprKind::Call(Box::new(lhs), args), line, col, len: self.tok_len()}
                     } else {
                         lhs
                     }
@@ -291,6 +298,7 @@ impl Parser {
 
     pub(crate) fn parse_let_stmt_pub(&mut self, is_pub: bool) -> Result<LetStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         // optional `static` before `let` / `var`
         let is_static = self.eat(&TokenKind::Static);
         let binding = match self.peek() {
@@ -342,7 +350,7 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line });
+                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col });
                     }
                     _ => {}
                 }
@@ -352,23 +360,23 @@ impl Parser {
         // `lazy T name` — deferred write-once binding, no initializer allowed.
         if matches!(binding, BindingKind::Lazy) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: true, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: true, line, col });
         }
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: false, line });
+            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: false, line, col });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line })
+        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col })
     }
 
     /// Parse the binding list of a destructuring `let`.
     /// Handles both the parenthesised form `(a, b)` and the bare form `a, b`.
     /// Called after the `let`/`var` keyword has already been consumed.
-    pub(crate) fn parse_let_destructure(&mut self, binding: BindingKind, line: usize) -> Result<LetDestructureStmt, ParseError> {
+    pub(crate) fn parse_let_destructure(&mut self, binding: BindingKind, line: usize, col: usize) -> Result<LetDestructureStmt, ParseError> {
         let parens = self.eat(&TokenKind::LParen);
         if parens { self.skip_newlines_and_indent(); }
         let mut bindings = Vec::new();
@@ -394,11 +402,12 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetDestructureStmt { binding, bindings, value, line })
+        Ok(LetDestructureStmt { binding, bindings, value, line, col })
     }
 
     pub(crate) fn parse_return_stmt(&mut self) -> Result<ReturnStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Return)?;
         let value = if self.is_newline() || self.check(&TokenKind::Eof) {
             None
@@ -406,11 +415,12 @@ impl Parser {
             Some(self.parse_expr()?)
         };
         self.expect_newline()?;
-        Ok(ReturnStmt { value, line })
+        Ok(ReturnStmt { value, line, col })
     }
 
     pub(crate) fn parse_throw_stmt(&mut self) -> Result<ThrowStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Throw)?;
         let value = if self.is_newline() || self.check(&TokenKind::Eof) {
             None
@@ -418,11 +428,12 @@ impl Parser {
             Some(self.parse_expr()?)
         };
         self.expect_newline()?;
-        Ok(ThrowStmt { value, line })
+        Ok(ThrowStmt { value, line, col })
     }
 
     pub(crate) fn parse_if_stmt(&mut self) -> Result<IfStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::If)?;
         let saved = self.allow_noparen_closure;
         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -485,7 +496,7 @@ impl Parser {
             } else if self.is_newline() || self.check(&TokenKind::Eof) {
                 self.expect_newline_soft();
             }
-            return Ok(IfStmt { branches, else_body, line });
+            return Ok(IfStmt { branches, else_body, line, col });
         }
 
         self.expect_newline()?;
@@ -518,7 +529,7 @@ impl Parser {
             }
         }
 
-        Ok(IfStmt { branches, else_body, line })
+        Ok(IfStmt { branches, else_body, line, col })
     }
 
     /// Parse one condition clause: `let name = expr` or a boolean expression.
@@ -536,10 +547,11 @@ impl Parser {
                 Ok(CondClause::LetPat(pat, expr))
             } else {
                 let name_line = self.line();
+                let name_col = self.col();
                 let name = self.expect_ident()?;
                 // Swift-style shorthand: `if let v:` ≡ `if let v = v:`
                 if !self.check(&TokenKind::Eq) {
-                    let expr = Expr { kind: ExprKind::Var(name.clone()), line: name_line };
+                    let expr = Expr { kind: ExprKind::Var(name.clone()), line: name_line, col: name_col, len: name.len() };
                     return Ok(CondClause::Let(name, expr));
                 }
                 self.expect(&TokenKind::Eq)?;
@@ -567,7 +579,7 @@ impl Parser {
         if !self.check(stop) {
             return Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                msg: format!("expected {:?} after condition clauses, got {:?}", stop, self.peek()),
+                msg: format!("expected {:?} after condition clauses, got {:?}", stop, self.peek()), len: self.tok_len(),
             });
         }
         Ok(clauses)
@@ -589,6 +601,7 @@ impl Parser {
 
     pub(crate) fn parse_if_let_stmt(&mut self) -> Result<IfLetStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::If)?;
         // Parse one or more comma-separated clauses until `:`
         let clauses = self.parse_cond_clauses(&TokenKind::Colon)?;
@@ -631,7 +644,7 @@ impl Parser {
             } else if self.is_newline() || self.check(&TokenKind::Eof) {
                 self.expect_newline_soft();
             }
-            return Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line });
+            return Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line, col });
         }
 
         self.expect_newline()?;
@@ -652,11 +665,12 @@ impl Parser {
                 break;
             }
         }
-        Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line })
+        Ok(IfLetStmt { clauses, then_body, elif_branches, else_body, line, col })
     }
 
     pub(crate) fn parse_match_stmt(&mut self) -> Result<MatchStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Match)?;
         let saved = self.allow_noparen_closure;
         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -666,7 +680,7 @@ impl Parser {
         if self.check(&TokenKind::With) {
             self.advance();
             let arms = self.parse_inline_match_arms()?;
-            return Ok(MatchStmt { subject, arms, line });
+            return Ok(MatchStmt { subject, arms, line, col });
         }
         self.expect(&TokenKind::Colon)?;
         self.expect_newline()?;
@@ -682,7 +696,7 @@ impl Parser {
             arms.push(self.parse_match_arm()?);
         }
         self.eat(&TokenKind::Dedent);
-        Ok(MatchStmt { subject, arms, line })
+        Ok(MatchStmt { subject, arms, line, col })
     }
 
     /// Parse inline match arms: `Pat: val, Pat: val, ...`
@@ -693,11 +707,12 @@ impl Parser {
         let mut arms = Vec::new();
         loop {
             let line = self.line();
+            let col = self.col();
             let pat = self.parse_pattern()?;
             self.expect(&TokenKind::Colon)?;
             let body_expr = self.parse_or()?;
             let body = MatchBody::Block(vec![Stmt::Expr(body_expr)]);
-            arms.push(MatchArm { patterns: vec![pat], guard: None, body, line });
+            arms.push(MatchArm { patterns: vec![pat], guard: None, body, line, col });
             if !self.eat(&TokenKind::Comma) { break; }
             self.skip_newlines();
         }
@@ -706,6 +721,7 @@ impl Parser {
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
         let line = self.line();
+        let col = self.col();
         // Each alternative is a (possibly bare-tuple) pattern; alternatives separated by `|`.
         let mut patterns = vec![self.parse_pattern_or_tuple()?];
         while self.eat(&TokenKind::Pipe) {
@@ -741,7 +757,7 @@ impl Parser {
             MatchBody::Block(stmts)
         };
 
-        Ok(MatchArm { patterns, guard, body, line })
+        Ok(MatchArm { patterns, guard, body, line, col })
     }
 
     /// Parse a pattern that may be a bare tuple: `a, b, c` (no parens required).
@@ -870,7 +886,7 @@ impl Parser {
             }
             _ => Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                msg: format!("expected pattern, got {:?}", self.peek()),
+                msg: format!("expected pattern, got {:?}", self.peek()), len: self.tok_len(),
             }),
         }
     }
@@ -878,6 +894,7 @@ impl Parser {
     /// `while let name = expr:` — while-let loop, binds the result of `expr` each iteration.
     pub(crate) fn parse_while_let_stmt(&mut self) -> Result<WhileLetStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::While)?;
         self.expect(&TokenKind::Let)?;
         // `while let Some(x) = expr:` — detect pattern form
@@ -892,7 +909,7 @@ impl Parser {
         // Swift-style shorthand: `while let v:` ≡ `while let v = v:`
         let saved = self.allow_noparen_closure;
         let value = if !is_pattern && !self.check(&TokenKind::Eq) {
-            Expr { kind: ExprKind::Var(name.clone()), line }
+            Expr { kind: ExprKind::Var(name.clone()), line, col, len: self.tok_len()}
         } else {
             self.expect(&TokenKind::Eq)?;
             self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -909,11 +926,12 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(WhileLetStmt { name, pattern, value, body, line })
+        Ok(WhileLetStmt { name, pattern, value, body, line, col })
     }
 
     pub(crate) fn parse_while_stmt(&mut self) -> Result<WhileStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::While)?;
         let saved = self.allow_noparen_closure;
         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -928,11 +946,12 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(WhileStmt { condition, body, line })
+        Ok(WhileStmt { condition, body, line, col })
     }
 
     pub(crate) fn parse_loop_stmt(&mut self) -> Result<LoopStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Loop)?;
         self.expect(&TokenKind::Colon)?;
         let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
@@ -943,7 +962,7 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(LoopStmt { body, line })
+        Ok(LoopStmt { body, line, col })
     }
 
     /// Returns true if the current position starts a `for var [, var] in` binding form.
@@ -963,6 +982,7 @@ impl Parser {
 
     pub(crate) fn parse_for_stmt(&mut self) -> Result<ForStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::For)?;
 
         let saved = self.allow_noparen_closure;
@@ -993,11 +1013,12 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(ForStmt { vars, iterable, body, line })
+        Ok(ForStmt { vars, iterable, body, line, col })
     }
 
     pub(crate) fn parse_guard_stmt(&mut self) -> Result<GuardStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Guard)?;
 
         // `guard let …` or `guard let …, …` → Clauses
@@ -1015,7 +1036,7 @@ impl Parser {
 
         self.expect(&TokenKind::Else)?;
         let else_body = self.parse_else_body_stmts()?;
-        Ok(GuardStmt { cond, else_body, line })
+        Ok(GuardStmt { cond, else_body, line, col })
     }
 
     /// After `else`: optionally consume `:`, then parse a block (if next is Newline)
@@ -1036,11 +1057,12 @@ impl Parser {
     /// or a single expression inline.
     pub(crate) fn parse_else_body_expr(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.eat(&TokenKind::Colon);
         if self.is_newline() {
             self.expect_newline()?;
             let stmts = self.parse_block()?;
-            Ok(Expr { kind: ExprKind::Block(stmts), line })
+            Ok(Expr { kind: ExprKind::Block(stmts), line, col, len: self.tok_len()})
         } else {
             self.parse_or()
         }
@@ -1048,6 +1070,7 @@ impl Parser {
 
     pub(crate) fn parse_try_stmt(&mut self) -> Result<TryStmt, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Try)?;
         self.expect(&TokenKind::Colon)?;
         self.expect_newline()?;
@@ -1079,13 +1102,13 @@ impl Parser {
                 self.expect(&TokenKind::Colon)?;
                 self.expect_newline()?;
                 let catch_body = self.parse_block()?;
-                catch_clauses.push(CatchClause { types, variant, body: catch_body, line: catch_line });
+                catch_clauses.push(CatchClause { types, variant, body: catch_body, line: catch_line , col: 0 });
             } else {
                 break;
             }
         }
 
-        Ok(TryStmt { body, catch_clauses, line })
+        Ok(TryStmt { body, catch_clauses, line, col })
     }
 
 

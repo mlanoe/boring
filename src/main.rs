@@ -17,37 +17,90 @@ pub mod checker;
 pub mod transpiler;
 pub mod validator;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process;
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────────
 
+struct Ansi { on: bool }
+impl Ansi {
+    fn new() -> Self { Self { on: std::io::stderr().is_terminal() } }
+    fn red(&self, s: &str)    -> String { if self.on { format!("\x1b[31;1m{s}\x1b[0m") } else { s.to_string() } }
+    fn blue(&self, s: &str)   -> String { if self.on { format!("\x1b[34;1m{s}\x1b[0m") } else { s.to_string() } }
+    fn dim(&self, s: &str)    -> String { if self.on { format!("\x1b[2m{s}\x1b[0m")    } else { s.to_string() } }
+    fn bold(&self, s: &str)   -> String { if self.on { format!("\x1b[1m{s}\x1b[0m")    } else { s.to_string() } }
+    fn yellow(&self, s: &str) -> String { if self.on { format!("\x1b[33;1m{s}\x1b[0m") } else { s.to_string() } }
+}
+
 /// Print a Rust-style diagnostic with source context.
 ///
 /// ```text
 /// error: <message>
-///  --> path/to/file.br:5
+///  --> path/to/file.br:5:3
 ///   |
 /// 5 | let z = x + y
-///   |
+///   |   ^
 /// ```
-fn report_error(path: &Path, source: &str, line: usize, col: usize, message: &str) {
-    eprintln!("error: {}", message);
+fn report_error(path: &Path, source: &str, line: usize, col: usize, len: usize, message: &str) {
+    let c = Ansi::new();
+    eprintln!("{} {}", c.red("error:"), c.bold(message));
     if line == 0 {
-        eprintln!(" --> {}", path.display());
+        eprintln!(" {} {}", c.blue("-->"), path.display());
         return;
     }
     let col_s = if col > 0 { format!(":{}", col) } else { String::new() };
-    eprintln!(" --> {}:{}{}", path.display(), line, col_s);
+    eprintln!(" {} {}:{}{}", c.blue("-->"), path.display(), line, col_s);
     let width = line.to_string().len();
     let pad   = " ".repeat(width);
-    eprintln!("{} |", pad);
+    eprintln!("{} {}", pad, c.dim("|"));
     let src_line = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
-    eprintln!("{} | {}", line, src_line);
+    eprintln!("{} {} {}", c.dim(&line.to_string()), c.dim("|"), src_line);
     if col > 0 {
-        eprintln!("{} | {}^", pad, " ".repeat(col.saturating_sub(1)));
+        let underline = "^".repeat(len.max(1));
+        eprintln!("{} {} {}", pad, c.dim("|"), c.red(&format!("{}{}", " ".repeat(col.saturating_sub(1)), underline)));
     } else {
-        eprintln!("{} |", pad);
+        eprintln!("{} {}", pad, c.dim("|"));
+    }
+}
+
+fn report_warning(path: &Path, source: &str, line: usize, col: usize, len: usize, message: &str) {
+    let c = Ansi::new();
+    eprintln!("{} {}", c.yellow("warning:"), c.bold(message));
+    if line == 0 {
+        eprintln!(" {} {}", c.blue("-->"), path.display());
+        return;
+    }
+    let col_s = if col > 0 { format!(":{}", col) } else { String::new() };
+    eprintln!(" {} {}:{}{}", c.blue("-->"), path.display(), line, col_s);
+    let width = line.to_string().len();
+    let pad   = " ".repeat(width);
+    eprintln!("{} {}", pad, c.dim("|"));
+    let src_line = source.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    eprintln!("{} {} {}", c.dim(&line.to_string()), c.dim("|"), src_line);
+    if col > 0 {
+        let underline = "^".repeat(len.max(1));
+        eprintln!("{} {} {}", pad, c.dim("|"), c.yellow(&format!("{}{}", " ".repeat(col.saturating_sub(1)), underline)));
+    } else {
+        eprintln!("{} {}", pad, c.dim("|"));
+    }
+}
+
+fn report_lex_errors(path: &Path, source: &str, errors: &[lexer::LexError]) {
+    for e in errors {
+        report_error(path, source, e.line(), e.col(), e.len(), &e.msg());
+    }
+}
+
+fn report_transpile_errors(path: &Path, source: &str, errors: &[transpiler::TranspileError]) {
+    for e in errors {
+        report_error(path, source, e.line, e.col, 1, &e.message);
+    }
+}
+
+fn report_transpile_warnings(path: &Path, source: &str, warnings: &[transpiler::TranspileError]) {
+    for w in warnings {
+        report_warning(path, source, w.line, w.col, 1, &w.message);
     }
 }
 
@@ -547,10 +600,10 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
         }
     };
 
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
             process::exit(1);
         }
     };
@@ -558,7 +611,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
@@ -589,7 +642,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     }
 
     if let Err(e) = interp.exec_program(&program) {
-        report_error(&path, &source, e.line, 0, &e.message);
+        report_error(&path, &source, e.line, e.col, 1, &e.message);
         process::exit(1);
     }
 }
@@ -610,15 +663,17 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
             process::exit(1);
         }
     };
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => { report_error(&path, &source, e.line(), e.col(), &e.msg()); process::exit(1); }
+        Err(errors) => { report_lex_errors(&path, &source, &errors); process::exit(1); }
     };
     let program = match parser::parse(tokens) {
         Ok(p) => p,
-        Err(e) => { report_error(&path, &source, e.line(), e.col(), &e.msg()); process::exit(1); }
+        Err(e) => { report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg()); process::exit(1); }
     };
     let out = transpiler::transpile_with_config(&program, config);
+    report_transpile_warnings(&path, &source, &out.warnings);
+    if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
     print!("{}", out.code);
 }
 
@@ -654,10 +709,10 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
         }
     };
 
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
             process::exit(1);
         }
     };
@@ -665,7 +720,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
@@ -673,6 +728,8 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
     let config_with_dir = transpiler::TranspileConfig { source_dir, ..config.clone() };
     let transpile_out = transpiler::transpile_with_config(&program, config_with_dir);
+    report_transpile_warnings(&path, &source, &transpile_out.warnings);
+    if !transpile_out.errors.is_empty() { report_transpile_errors(&path, &source, &transpile_out.errors); process::exit(1); }
     let rust_code = transpile_out.code;
     let has_streams = transpile_out.has_streams;
     let uses_log = transpile_out.uses_log;
@@ -845,10 +902,10 @@ fn emit_cuda(path: &str, version: &str) {
         }
     };
 
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
             process::exit(1);
         }
     };
@@ -856,7 +913,7 @@ fn emit_cuda(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
@@ -926,10 +983,10 @@ fn emit_metal(path: &str, version: &str) {
         }
     };
 
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
             process::exit(1);
         }
     };
@@ -937,7 +994,7 @@ fn emit_metal(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
@@ -1004,10 +1061,10 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         }
     };
 
-    let tokens = match lexer::lex(&source) {
+    let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
             process::exit(1);
         }
     };
@@ -1015,7 +1072,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), &e.msg());
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };

@@ -1,0 +1,24 @@
+# Basic inline match
+let status = 404
+let msg = match status with 200: "ok", 404: "not found", _: "error"
+print msg
+
+# Inline match with enum
+enum Color:
+    Red
+    Green
+    Blue
+
+let c = Color.Green
+let name = match c with Color.Red: "red", Color.Green: "green", Color.Blue: "blue"
+print name
+
+# Inline match inside map
+let scores = [0, 50, 100]
+let labels = scores.map((s): match s with 0: "fail", 100: "perfect", _: "pass")
+print labels
+
+# Inline match as expression
+let n = 42
+let parity = match n % 2 with 0: "even", _: "odd"
+print parity

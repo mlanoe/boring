@@ -1,0 +1,43 @@
+trait Named:
+    req string name()
+
+# Describable requires Named — implementing types must satisfy both
+trait Describable as Named:
+    req string describe():
+        "{self.name()} (no description)"
+
+struct Animal as Describable:
+    string species
+    req string name(): self.species
+
+struct Cat as Describable:
+    string species
+    req string name(): self.species
+    req string describe(): "{self.species} says meow"
+
+let a = Animal(species = "Dog")
+print a.name()
+print a.describe()
+
+let cat = Cat(species = "Cat")
+print cat.name()
+print cat.describe()
+
+# Multiple supertraits
+trait Printable:
+    req string to_str()
+
+trait Loggable as Named, Printable:
+    req string log():
+        "[{self.name()}] {self.to_str()}"
+
+struct Server as Loggable:
+    string host
+    int port
+    req string name(): self.host
+    req string to_str(): "{self.host}:{self.port}"
+
+let s = Server(host = "localhost", port = 8080)
+print s.name()
+print s.to_str()
+print s.log()

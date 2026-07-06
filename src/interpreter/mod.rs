@@ -30,6 +30,8 @@ pub mod gpu_profile;
 pub struct RuntimeError {
     pub message: String,
     pub line: usize,
+    pub col: usize,
+    pub len: usize,
 }
 
 impl fmt::Display for RuntimeError {
@@ -39,7 +41,15 @@ impl fmt::Display for RuntimeError {
 }
 
 fn err(msg: impl Into<String>, line: usize) -> Signal {
-    Signal::Error(RuntimeError { message: msg.into(), line })
+    Signal::Error(RuntimeError { message: msg.into(), line, col: 0, len: 0 })
+}
+
+fn err_at(msg: impl Into<String>, line: usize, col: usize) -> Signal {
+    Signal::Error(RuntimeError { message: msg.into(), line, col, len: 1 })
+}
+
+fn err_span(msg: impl Into<String>, line: usize, col: usize, len: usize) -> Signal {
+    Signal::Error(RuntimeError { message: msg.into(), line, col, len })
 }
 
 /// Check whether two overload FnDecls conflict and exit with an error if they do.
@@ -1057,7 +1067,7 @@ fn register_stdlib(env: &EnvRef) {
                         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
-                    _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line })),
+                    _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0 })),
                 }
             } else {
                 // min(a, b)
@@ -1068,7 +1078,7 @@ fn register_stdlib(env: &EnvRef) {
                     (Value::Float(x), Value::Float(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Int(x), Value::Float(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
                     (Value::Float(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line })),
+                    _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }
         },
@@ -1083,7 +1093,7 @@ fn register_stdlib(env: &EnvRef) {
                         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
-                    _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line })),
+                    _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0 })),
                 }
             } else {
                 let a = args.get(0).cloned().unwrap_or(Value::Nil);
@@ -1093,7 +1103,7 @@ fn register_stdlib(env: &EnvRef) {
                     (Value::Float(x), Value::Float(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Int(x), Value::Float(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
                     (Value::Float(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line })),
+                    _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }
         },
@@ -1103,7 +1113,7 @@ fn register_stdlib(env: &EnvRef) {
         func: |args, line| match args.get(0) {
             Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
             Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
-            _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line })),
+            _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("floor", Value::NativeFn {
@@ -1111,7 +1121,7 @@ fn register_stdlib(env: &EnvRef) {
         func: |args, line| match args.get(0) {
             Some(Value::Float(f)) => Ok(Value::Int(f.floor() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
-            _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line })),
+            _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("ceil", Value::NativeFn {
@@ -1119,7 +1129,7 @@ fn register_stdlib(env: &EnvRef) {
         func: |args, line| match args.get(0) {
             Some(Value::Float(f)) => Ok(Value::Int(f.ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
-            _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line })),
+            _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("round", Value::NativeFn {
@@ -1127,7 +1137,7 @@ fn register_stdlib(env: &EnvRef) {
         func: |args, line| match args.get(0) {
             Some(Value::Float(f)) => Ok(Value::Int(f.round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
-            _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line })),
+            _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("sqrt", Value::NativeFn {
@@ -1135,7 +1145,7 @@ fn register_stdlib(env: &EnvRef) {
         func: |args, line| match args.get(0) {
             Some(Value::Float(f)) => Ok(Value::Float(f.sqrt())),
             Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sqrt())),
-            _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line })),
+            _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("readLine", Value::NativeFn {
@@ -1571,7 +1581,7 @@ impl Interpreter {
                     Signal::Error(e) => return Err(e),
                     Signal::Exception(v) => return Err(RuntimeError {
                         message: format!("unhandled exception: {}", v),
-                        line: 0,
+                        line: 0, col: 0, len: 0,
                     }),
                     _ => {}
                 }
@@ -1600,7 +1610,7 @@ impl Interpreter {
                         // at the program level — just give a clear message.
                         return Err(RuntimeError {
                             message: format!("unhandled exception in main: {}", v),
-                            line: 0,
+                            line: 0, col: 0, len: 0,
                         });
                     }
                     _ => {}
@@ -1959,7 +1969,7 @@ impl Interpreter {
                     if prim_via_type || prim_via_value {
                         return Err(Signal::Error(RuntimeError {
                             message: "primitive values are always copied, use `var` instead".into(),
-                            line: stmt.line,
+                            line: stmt.line, col: 0, len: 0,
                         }));
                     }
                 }
@@ -2213,7 +2223,7 @@ impl Interpreter {
                         func: |args, line| {
                             args.first().cloned().ok_or_else(|| Signal::Error(RuntimeError {
                                 line,
-                                message: "newtype constructor requires one argument".into(),
+                                message: "newtype constructor requires one argument".into(), col: 0, len: 0,
                             }))
                         },
                     });

@@ -70,7 +70,11 @@ impl Transpiler {
                 if matches!(op, BinOp::RefEq) {
                     let ls = self.emit_expr(l);
                     let rs = self.emit_expr(r);
-                    return format!("Arc::ptr_eq(&{}, &{})", ls, rs);
+                    let ptr_eq_fn = match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi  => "Arc::ptr_eq",
+                        crate::transpiler::ThreadingMode::Single => "Rc::ptr_eq",
+                    };
+                    return format!("{}(&{}, &{})", ptr_eq_fn, ls, rs);
                 }
                 // `x is SomeType` / `x is not SomeType` — type/nil check
                 if matches!(op, BinOp::Is | BinOp::IsNot) {
@@ -453,11 +457,8 @@ impl Transpiler {
                             if let Some(sn) = struct_name {
                                 if self.struct_fields.contains_key(sn.as_str()) {
                                     let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
-                                    eprintln!(
-                                        "error (line {}): `{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding\n  \
-                                         fix: declare the parameter as `mut {} {}`",
-                                        line, v, field, sn, v
-                                    );
+                                    let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                                    self.push_error(line, col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, field, sn, v));
                                 }
                             }
                         }
@@ -1844,11 +1845,7 @@ impl Transpiler {
                 if !blocking && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     for v in &arc_captures {
                         if self.rc_vars.contains(*v) {
-                            eprintln!(
-                                "warning line {}: `spawn_local` captures `{}` which is Rc<T> (a !Send type); \
-                                 Rc values cannot be sent across task boundaries",
-                                expr.line, v
-                            );
+                            self.push_warning(expr.line, expr.col, format!("`spawn_local` captures `{}` which is Rc<T> (a !Send type); Rc values cannot be sent across task boundaries", v));
                         }
                     }
                 }

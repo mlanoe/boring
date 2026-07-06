@@ -82,8 +82,16 @@ impl Default for TranspileConfig {
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
+pub struct TranspileError {
+    pub message: String,
+    pub line: usize,
+    pub col: usize,
+}
+
 pub struct TranspileOutput {
     pub code: String,
+    pub errors: Vec<TranspileError>,
+    pub warnings: Vec<TranspileError>,
     pub has_streams: bool,
     /// True when the program uses `error`, `warn`, `info`, `debug`, or `trace`.
     /// The caller should add `log = "0.4"` to the project's Cargo.toml.
@@ -165,7 +173,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     } else {
         code
     };
-    TranspileOutput { code, has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules }
+    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -173,6 +181,8 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
 struct Transpiler {
     pub(crate) config: TranspileConfig,
     pub(crate) out: String,
+    pub(crate) errors: std::cell::RefCell<Vec<TranspileError>>,
+    pub(crate) warnings: std::cell::RefCell<Vec<TranspileError>>,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
     pub(crate) in_throws: bool,
@@ -366,6 +376,7 @@ struct Transpiler {
     pub(crate) fn_current_params: std::collections::HashMap<String, Type>,
     /// Source line of each parameter in the current function (name → line).
     pub(crate) fn_current_param_lines: std::collections::HashMap<String, usize>,
+    pub(crate) fn_current_param_cols: std::collections::HashMap<String, usize>,
     /// Names of parameters declared as `mut` in the current function.
     /// Used by qualifier inference to determine auto-ref mutability and to detect
     /// def calls on immutable parameters.
@@ -600,6 +611,8 @@ impl Transpiler {
         Transpiler {
             config,
             out: String::new(),
+            errors: std::cell::RefCell::new(Vec::new()),
+            warnings: std::cell::RefCell::new(Vec::new()),
             indent: 0,
             in_throws: false,
             in_lhs_assign: std::cell::Cell::new(false),
@@ -676,6 +689,7 @@ impl Transpiler {
             fn_return_ty: None,
             fn_current_params: std::collections::HashMap::new(),
             fn_current_param_lines: std::collections::HashMap::new(),
+            fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
@@ -942,6 +956,14 @@ impl Transpiler {
     }
 
     // ── Output helpers ────────────────────────────────────────────────────────
+
+    fn push_error(&self, line: usize, col: usize, msg: impl Into<String>) {
+        self.errors.borrow_mut().push(TranspileError { message: msg.into(), line, col });
+    }
+
+    fn push_warning(&self, line: usize, col: usize, msg: impl Into<String>) {
+        self.warnings.borrow_mut().push(TranspileError { message: msg.into(), line, col });
+    }
 
     fn ind(&self) -> String {
         "    ".repeat(self.indent)
@@ -1491,7 +1513,7 @@ impl Transpiler {
                                     .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz)))
                                     .max_by_key(|(_, sz)| *sz)
                                     .map(|(n, _)| n).unwrap_or("?");
-                                eprintln!("warning line {}: `{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.line, e.name, total_size, largest, e.name);
+                                self.push_warning(e.line, e.col, format!("`{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.name, total_size, largest, e.name));
                             }
                             // Disproportionate variant warning: one variant dominates the median.
                             if known_sizes.len() > 1 {
@@ -1509,10 +1531,7 @@ impl Transpiler {
                                             .collect();
                                         format!("{}({})", dom_name, fts.join(", "))
                                     };
-                                    eprintln!(
-                                        "warning line {}: variant `{}` ({} bytes) dominates `{}` ({} bytes median);\n         consider boxing the payload: {}",
-                                        e.line, dom_name, dom_size, e.name, median, field_ty_s
-                                    );
+                                    self.push_warning(e.line, e.col, format!("variant `{}` ({} bytes) dominates `{}` ({} bytes median); consider boxing the payload: {}", dom_name, dom_size, e.name, median, field_ty_s));
                                 }
                             }
                         }
@@ -1534,7 +1553,7 @@ impl Transpiler {
                         let auto_bytes = self.config.stack_auto_bytes;
                         if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
                             if size > auto_bytes {
-                                eprintln!("warning line {}: `{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.line, s.name, size, s.name);
+                                self.push_warning(s.line, s.col, format!("`{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.name, size, s.name));
                             }
                         }
                     }
@@ -1730,28 +1749,28 @@ impl Transpiler {
                     // Detect overloaded inline methods — same logic as ext blocks.
                     for m in &s.methods {
                         let method_key = format!("{}::{}", s.name, m.name);
-                        let method_variants = self.struct_method_overload_decls
-                            .entry(method_key.clone())
-                            .or_default();
-                        let this_mangled = mangle_overload_name(&m.name, &m.params);
-                        let already_registered = method_variants.iter()
-                            .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
-                        if !already_registered {
-                            for existing in method_variants.iter() {
-                                if let Some(n) = overloads_conflict(existing, m) {
-                                    eprintln!(
-                                        "error line {}: ambiguous overload for method '{}::{}' — \
+                        let (new_errors, overloaded) = {
+                            let method_variants = self.struct_method_overload_decls
+                                .entry(method_key.clone())
+                                .or_default();
+                            let this_mangled = mangle_overload_name(&m.name, &m.params);
+                            let already_registered = method_variants.iter()
+                                .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                            let new_errors: Vec<_> = if !already_registered {
+                                let errs = method_variants.iter()
+                                    .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
+                                        "ambiguous overload for method '{}::{}' — \
                                          both match a call with {} argument(s)",
-                                        m.line, s.name, m.name, n
-                                    );
-                                    std::process::exit(1);
-                                }
-                            }
-                            method_variants.push(m.clone());
-                        }
-                        if method_variants.len() > 1 {
-                            self.overloaded_method_keys.insert(method_key);
-                        }
+                                        s.name, m.name, n
+                                    ))))
+                                    .collect();
+                                method_variants.push(m.clone());
+                                errs
+                            } else { Vec::new() };
+                            (new_errors, method_variants.len() > 1)
+                        };
+                        for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
+                        if overloaded { self.overloaded_method_keys.insert(method_key); }
                     }
                     // Track T'actor / T'actor'task struct fields → Arc<Mutex<T>> or Arc<tokio::sync::Mutex<T>>.
                     for f in &s.fields {
@@ -1883,25 +1902,25 @@ impl Transpiler {
                         }
                         // Track overloaded struct methods (same name, different params).
                         let method_key = format!("{}::{}", tname, m.name);
-                        let method_variants = self.struct_method_overload_decls.entry(method_key.clone()).or_default();
-                        let this_mangled = mangle_overload_name(&m.name, &m.params);
-                        let already_registered = method_variants.iter()
-                            .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
-                        if !already_registered {
-                            for existing in method_variants.iter() {
-                                if let Some(n) = overloads_conflict(existing, m) {
-                                    eprintln!(
-                                        "error line {}: ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
-                                        m.line, tname, m.name, n
-                                    );
-                                    std::process::exit(1);
-                                }
-                            }
-                            method_variants.push(m.clone());
-                        }
-                        if method_variants.len() > 1 {
-                            self.overloaded_method_keys.insert(method_key);
-                        }
+                        let (new_errors, overloaded) = {
+                            let method_variants = self.struct_method_overload_decls.entry(method_key.clone()).or_default();
+                            let this_mangled = mangle_overload_name(&m.name, &m.params);
+                            let already_registered = method_variants.iter()
+                                .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                            let new_errors: Vec<_> = if !already_registered {
+                                let errs = method_variants.iter()
+                                    .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
+                                        "ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
+                                        tname, m.name, n
+                                    ))))
+                                    .collect();
+                                method_variants.push(m.clone());
+                                errs
+                            } else { Vec::new() };
+                            (new_errors, method_variants.len() > 1)
+                        };
+                        for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
+                        if overloaded { self.overloaded_method_keys.insert(method_key); }
                     }
                     // Register setters from ext blocks.
                     for setter in &e.setters {
@@ -2014,44 +2033,43 @@ impl Transpiler {
         // Track overloads: if this name was already registered with a DIFFERENT mangled
         // signature, it's a genuine overload. Same mangled name = redefinition (ignore).
         let this_mangled = mangle_overload_name(&f.name, &f.params);
-        let variants = self.fn_overload_decls.entry(f.name.clone()).or_default();
-        let already_has_this_sig = variants.iter().any(|v| {
-            mangle_overload_name(&v.name, &v.params) == this_mangled
-        });
-        if !already_has_this_sig {
-            // Before accepting the new variant, check for ambiguous conflicts with existing ones.
-            // A conflict exists when a call arity N can match both this overload AND an existing
-            // one — most commonly when a longer overload has default parameters that make it
-            // callable with fewer arguments than its full signature.
-            for existing in variants.iter() {
-                if let Some(conflict_arity) = overloads_conflict(existing, f) {
-                    let a_sig = existing.params.iter()
-                        .map(|p| {
-                            let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
-                                .unwrap_or_else(|| "_".into());
-                            if p.default.is_some() { format!("{}=?", ty) } else { ty }
-                        })
-                        .collect::<Vec<_>>().join(", ");
-                    let b_sig = f.params.iter()
-                        .map(|p| {
-                            let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
-                                .unwrap_or_else(|| "_".into());
-                            if p.default.is_some() { format!("{}=?", ty) } else { ty }
-                        })
-                        .collect::<Vec<_>>().join(", ");
-                    eprintln!(
-                        "error line {}: ambiguous overload for '{}' — \
-                         '{}({})' and '{}({})' both match a call with {} argument(s)",
-                        f.line, f.name, f.name, b_sig, existing.name, a_sig, conflict_arity
-                    );
-                    std::process::exit(1);
-                }
-            }
-            variants.push(f.clone());
-        }
-        if variants.len() > 1 {
-            self.overloaded_fn_names.insert(f.name.clone());
-        }
+        let (new_errors, overloaded) = {
+            let variants = self.fn_overload_decls.entry(f.name.clone()).or_default();
+            let already_has_this_sig = variants.iter().any(|v| {
+                mangle_overload_name(&v.name, &v.params) == this_mangled
+            });
+            let new_errors: Vec<_> = if !already_has_this_sig {
+                // Before accepting the new variant, check for ambiguous conflicts with existing ones.
+                let b_sig = f.params.iter()
+                    .map(|p| {
+                        let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                            .unwrap_or_else(|| "_".into());
+                        if p.default.is_some() { format!("{}=?", ty) } else { ty }
+                    })
+                    .collect::<Vec<_>>().join(", ");
+                let errs = variants.iter()
+                    .filter_map(|existing| overloads_conflict(existing, f).map(|conflict_arity| {
+                        let a_sig = existing.params.iter()
+                            .map(|p| {
+                                let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                                    .unwrap_or_else(|| "_".into());
+                                if p.default.is_some() { format!("{}=?", ty) } else { ty }
+                            })
+                            .collect::<Vec<_>>().join(", ");
+                        (f.line, f.col, format!(
+                            "ambiguous overload for '{}' — \
+                             '{}({})' and '{}({})' both match a call with {} argument(s)",
+                            f.name, f.name, b_sig, existing.name, a_sig, conflict_arity
+                        ))
+                    }))
+                    .collect();
+                variants.push(f.clone());
+                errs
+            } else { Vec::new() };
+            (new_errors, variants.len() > 1)
+        };
+        for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
+        if overloaded { self.overloaded_fn_names.insert(f.name.clone()); }
 
         let param_types: Vec<Type> = f.params.iter().filter_map(|p| p.ty.clone()).collect();
         let defaults: Vec<Option<String>> = f.params.iter().map(|p| {

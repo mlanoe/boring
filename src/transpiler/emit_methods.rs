@@ -884,7 +884,7 @@ impl Transpiler {
                     // throws-aware .await.unwrap()? / .await.unwrap() logic.
                     let field_expr = crate::ast::Expr {
                         kind: crate::ast::ExprKind::Field(Box::new(obj.clone()), method.to_string()),
-                        line: obj.line,
+                        line: obj.line, col: obj.col, len: 0,
                     };
                     return self.emit_expr(&field_expr);
                 }
@@ -1137,11 +1137,8 @@ impl Transpiler {
                         let is_req = self.struct_req_methods.contains(&req_key);
                         if !is_req {
                             let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
-                            eprintln!(
-                                "error (line {}): `{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding\n  \
-                                 fix: declare the parameter as `mut {} {}`",
-                                line, v, method, sn, v
-                            );
+                            let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                            self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, method, sn, v));
                         }
                     }
                 }
@@ -1464,11 +1461,7 @@ impl Transpiler {
                         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
                     );
                     if arg_is_weak && param_is_non_weak {
-                        eprintln!(
-                            "error line {}: cannot pass `{}` (weak reference) to a non-weak parameter — \
-                             weak references may be invalid. Call .upgrade() first and handle the Option.",
-                            a.value.line, vname
-                        );
+                        self.push_error(a.value.line, a.value.col, format!("cannot pass `{}` (weak reference) to a non-weak parameter — weak references may be invalid. Call .upgrade() first and handle the Option.", vname));
                     }
                 }
                 // For Borrow/BorrowMut params, pass the inner type to emit_let_value so it does
@@ -1595,12 +1588,7 @@ impl Transpiler {
                     // Q4: 'shared → mut Counter& is a compile error — 'shared has no interior mutability.
                     if mutable && matches!(arg_qual, Some(Type::Qualified(_, OwnerQual::Shared))) {
                         if let ExprKind::Var(vname) = &a.value.kind {
-                            eprintln!(
-                                "error line {}: cannot pass `{}` ('shared) to `mut Counter&` — \
-                                 'shared does not support mutable references. \
-                                 Use 'actor (Arc<Mutex<T>>) or 'guard (Arc<RwLock<T>>) instead.",
-                                a.value.line, vname
-                            );
+                            self.push_error(a.value.line, a.value.col, format!("cannot pass `{}` ('shared) to `mut Counter&` — 'shared does not support mutable references. Use 'actor (Arc<Mutex<T>>) or 'guard (Arc<RwLock<T>>) instead.", vname));
                         }
                     }
                     match arg_qual {
@@ -1613,12 +1601,7 @@ impl Transpiler {
                         Some(Type::Qualified(_, OwnerQual::Actor)) => {
                             // Q5: MutexGuard held across .await — reject the combination.
                             if self.task_fns.contains(fn_name) {
-                                eprintln!(
-                                    "error line {}: cannot pass 'actor argument to `mut Counter&` in async \
-                                     function `{}` — holding a MutexGuard across .await makes the future \
-                                     !Send. Acquire the lock inside the callee body instead.",
-                                    a.value.line, fn_name
-                                );
+                                self.push_error(a.value.line, a.value.col, format!("cannot pass 'actor argument to `mut Counter&` in async function `{}` — holding a MutexGuard across .await makes the future !Send. Acquire the lock inside the callee body instead.", fn_name));
                             }
                             // Use the raw variable name (not the auto-ref'd form) for lock acquisition,
                             // so the guard lifetime is correct: `let __g = ac.borrow()` not `&ac.borrow()`.
@@ -1635,12 +1618,7 @@ impl Transpiler {
                         Some(Type::Qualified(_, OwnerQual::Guard)) => {
                             // Q5: RwLockGuard held across .await — same issue.
                             if self.task_fns.contains(fn_name) {
-                                eprintln!(
-                                    "error line {}: cannot pass 'guard argument to `mut Counter&` in async \
-                                     function `{}` — holding an RwLockGuard across .await makes the future \
-                                     !Send. Acquire the lock inside the callee body instead.",
-                                    a.value.line, fn_name
-                                );
+                                self.push_error(a.value.line, a.value.col, format!("cannot pass 'guard argument to `mut Counter&` in async function `{}` — holding an RwLockGuard across .await makes the future !Send. Acquire the lock inside the callee body instead.", fn_name));
                             }
                             let raw = if let ExprKind::Var(vname) = &a.value.kind {
                                 vname.clone()
@@ -2034,6 +2012,8 @@ impl Transpiler {
         Transpiler {
             config: self.config.clone(),
             out: String::new(),
+            errors: std::cell::RefCell::new(Vec::new()),
+            warnings: std::cell::RefCell::new(Vec::new()),
             indent: self.indent,
             in_throws: self.in_throws,
             in_async: self.in_async,
@@ -2187,6 +2167,7 @@ impl Transpiler {
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),
             fn_current_params: std::collections::HashMap::new(),
             fn_current_param_lines: std::collections::HashMap::new(),
+            fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,

@@ -32,7 +32,7 @@ enum Either<L, R> { Left(L), Right(R) }
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("line {line}:{col}: {msg}")]
-    Generic { line: usize, col: usize, msg: String },
+    Generic { line: usize, col: usize, len: usize, msg: String },
     #[error("lex error: {0}")]
     Lex(#[from] LexError),
 }
@@ -49,6 +49,13 @@ impl ParseError {
         match self {
             ParseError::Generic { col, .. } => *col,
             ParseError::Lex(_) => 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            ParseError::Generic { len, .. } => *len,
+            ParseError::Lex(_) => 1,
         }
     }
 
@@ -105,6 +112,10 @@ impl Parser {
         self.tokens[self.pos].col
     }
 
+    fn tok_len(&self) -> usize {
+        self.tokens[self.pos].len
+    }
+
     fn advance(&mut self) -> &Token {
         let t = &self.tokens[self.pos];
         if self.pos + 1 < self.tokens.len() {
@@ -151,7 +162,7 @@ impl Parser {
         } else {
             Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                                msg: format!("expected {:?}, got {:?}", kind, self.peek()),
+                                msg: format!("expected {:?}, got {:?}", kind, self.peek()), len: self.tok_len(),
             })
         }
     }
@@ -181,7 +192,7 @@ impl Parser {
         } else {
             Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                                msg: format!("expected newline, got {:?}", self.peek()),
+                                msg: format!("expected newline, got {:?}", self.peek()), len: self.tok_len(),
             })
         }
     }
@@ -324,6 +335,7 @@ impl Parser {
             TokenKind::Static | TokenKind::Let | TokenKind::Mut | TokenKind::Var => {
                 if self.is_let_destructure() {
                     let line = self.line();
+                    let col = self.col();
                     let _is_static = self.eat(&TokenKind::Static);
                     let binding = match self.peek() {
                         TokenKind::Mut => BindingKind::Mut,
@@ -331,7 +343,7 @@ impl Parser {
                         _ => BindingKind::Let,
                     };
                     self.advance(); // consume let/mut/var
-                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(binding, line)?)))
+                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(binding, line, col)?)))
                 } else {
                     Ok(Item::Let(self.parse_let_stmt_pub(is_pub)?))
                 }
@@ -433,6 +445,7 @@ impl Parser {
 
     fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Use)?;
 
         // Parse all dot-separated segments.
@@ -441,7 +454,7 @@ impl Parser {
             if self.eat(&TokenKind::Star) {
                 // use a.b.c.*  — glob import
                 self.expect_newline()?;
-                return Ok(UseDecl { path, glob: true, items: vec![], line });
+                return Ok(UseDecl { path, glob: true, items: vec![], line, col });
             }
             path.push(self.expect_ident()?);
         }
@@ -449,7 +462,7 @@ impl Parser {
         // Single-segment path (`use a`) — whole-module edge case.
         if path.len() == 1 {
             self.expect_newline()?;
-            return Ok(UseDecl { path, glob: false, items: vec![], line });
+            return Ok(UseDecl { path, glob: false, items: vec![], line, col });
         }
 
         // The last segment is always the first item.
@@ -461,7 +474,7 @@ impl Parser {
             items.push(self.expect_ident()?);
         }
         self.expect_newline()?;
-        Ok(UseDecl { path, glob: false, items, line })
+        Ok(UseDecl { path, glob: false, items, line, col })
     }
 
     /// Returns true if `s` looks like a type name: uppercase-starting OR a known lowercase alias.
@@ -726,6 +739,7 @@ impl Parser {
         if is_type_start {
             let saved = self.pos;
             let line = self.line();
+            let _col = self.col();
             // First attempt: full parse_type (handles `T?`, `[T]`, fn types, etc.).
             if let Ok(ty) = self.parse_type() {
                 if let Ok(ty) = self.parse_type_qualifier(ty) {
@@ -1172,6 +1186,7 @@ impl Parser {
 
     fn parse_kernel_decl(&mut self, is_pub: bool) -> Result<KernelDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Kernel)?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
@@ -1207,7 +1222,7 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(KernelDecl { name, is_pub, fields, inits, methods, line })
+        Ok(KernelDecl { name, is_pub, fields, inits, methods, line, col })
     }
 
     /// Parse a kernel field: `let [float]'unified input` or `mut [float]'shared tile`
@@ -1223,7 +1238,7 @@ impl Parser {
             TokenKind::Var => { self.advance(); FieldBinding::Var }
             _ => return Err(ParseError::Generic {
                 msg: "kernel field must start with let, mut, or var".into(),
-                line, col,
+                line, col, len: 1,
             }),
         };
 
@@ -1238,7 +1253,7 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _)) => {
                 return Err(ParseError::Generic {
                     msg: "fixed-size arrays cannot use 'unified or 'global — the size is implicit from the init parameter; use '[T]'unified or '[T]'global instead".into(),
-                    line, col,
+                    line, col, len: 1,
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
@@ -1250,7 +1265,7 @@ impl Parser {
                 if matches!(*inner, Type::Array(_)) {
                     return Err(ParseError::Generic {
                         msg: "'local does not support dynamic arrays — use a fixed-size '[T, N]'local or choose 'unified/'global".into(),
-                        line, col,
+                        line, col, len: 1,
                     });
                 }
                 (GpuQual::Local, *inner)
@@ -1258,7 +1273,7 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuConst) if matches!(*inner, Type::Array(_)) => {
                 return Err(ParseError::Generic {
                     msg: "'const does not support dynamic arrays — use a fixed-size '[T, N]'const for lookup tables".into(),
-                    line, col,
+                    line, col, len: 1,
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
@@ -1286,18 +1301,18 @@ impl Parser {
             }
             _ => return Err(ParseError::Generic {
                 msg: "kernel array field must have an explicit GPU memory qualifier ('unified, 'global, 'shared, or 'local)".into(),
-                line, col,
+                line, col, len: 1,
             }),
         };
 
         let name = self.expect_ident()?;
         self.expect_newline_soft();
-        Ok(KernelFieldDecl { name, binding, qual, ty: base_ty, line })
+        Ok(KernelFieldDecl { name, binding, qual, ty: base_ty, line, col })
     }
 
     /// Parse a `kernel(params) expr` launch expression.
     /// Called from expression parsing when `kernel` is followed by `(`.
-    pub(crate) fn parse_kernel_launch(&mut self, line: usize) -> Result<Expr, ParseError> {
+    pub(crate) fn parse_kernel_launch(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
         self.expect(&TokenKind::Kernel)?;
         self.expect(&TokenKind::LParen)?;
 
@@ -1325,7 +1340,7 @@ impl Parser {
                         TokenKind::Ident(s) => { self.advance(); priority = Some(s); }
                         _ => return Err(ParseError::Generic {
                             msg: "priority must be high, normal, or low".into(),
-                            line: self.line(), col: self.col(),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
                         }),
                     }
                 }
@@ -1336,7 +1351,7 @@ impl Parser {
         }
         self.expect(&TokenKind::RParen)?;
 
-        let config = Box::new(KernelConfig { block, grid, smem, after, priority, line });
+        let config = Box::new(KernelConfig { block, grid, smem, after, priority, line, col });
 
         // Parse the kernel argument — only a primary/postfix expression, NOT a full pipe chain.
         // `kernel(block=N) k |> .wait` should parse as `(kernel(block=N) k) |> .wait`,
@@ -1345,8 +1360,7 @@ impl Parser {
 
         Ok(Expr {
             kind: ExprKind::KernelLaunch { config, kernel: Box::new(kernel_expr) },
-            line,
-        })
+            line, col, len: self.tok_len(), })
     }
 
     fn parse_struct_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
@@ -1355,6 +1369,7 @@ impl Parser {
 
     fn parse_struct_decl_with_attrs(&mut self, is_pub: bool, attrs: Vec<Attr>) -> Result<StructDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_ident()?;
         let (type_params, where_clause) = self.parse_type_params();
@@ -1371,19 +1386,19 @@ impl Parser {
         if self.check(&TokenKind::Pass) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(StructDecl { name, is_pub, is_native: false, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line });
+            return Ok(StructDecl { name, is_pub, is_native: false, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
         }
         if self.check(&TokenKind::Native) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(StructDecl { name, is_pub, is_native: true, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line });
+            return Ok(StructDecl { name, is_pub, is_native: true, protocols, fields: vec![], inits: vec![], methods: vec![], conversions: vec![], type_params, where_clause, setters: vec![], type_methods: vec![], type_vars: vec![], assoc_type_defs: vec![], attrs, line, col });
         }
         self.expect_newline()?;
         self.expect(&TokenKind::Indent)?;
-        self.parse_struct_body(name, is_pub, protocols, type_params, where_clause, attrs, line)
+        self.parse_struct_body(name, is_pub, protocols, type_params, where_clause, attrs, line, col)
     }
 
-    fn parse_struct_body(&mut self, name: String, is_pub: bool, protocols: Vec<String>, type_params: Vec<String>, where_clause: Vec<(String, String)>, attrs: Vec<Attr>, line: usize) -> Result<StructDecl, ParseError> {
+    fn parse_struct_body(&mut self, name: String, is_pub: bool, protocols: Vec<String>, type_params: Vec<String>, where_clause: Vec<(String, String)>, attrs: Vec<Attr>, line: usize, col: usize) -> Result<StructDecl, ParseError> {
 
         let mut fields = Vec::new();
         let mut inits = Vec::new();
@@ -1438,7 +1453,7 @@ impl Parser {
                         self.advance(); // consume `=`
                         let ty = self.parse_type()?;
                         self.expect_newline_soft();
-                        assoc_type_defs.push(AssocTypeDef { name: assoc_name, ty, line: def_line });
+                        assoc_type_defs.push(AssocTypeDef { name: assoc_name, ty, line: def_line , col: 0 });
                     } else {
                         match self.parse_type_member(is_pub_type)? {
                             TypeMemberKind::Method(m) => type_methods.push(m),
@@ -1491,11 +1506,12 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(StructDecl { name, is_pub, is_native: false, protocols, fields, inits, methods, conversions, type_params, where_clause, setters, type_methods, type_vars, assoc_type_defs, attrs, line })
+        Ok(StructDecl { name, is_pub, is_native: false, protocols, fields, inits, methods, conversions, type_params, where_clause, setters, type_methods, type_vars, assoc_type_defs, attrs, line, col })
     }
 
     fn parse_ext_decl(&mut self) -> Result<ExtDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Ext)?;
         let type_name = self.expect_ident()?;
 
@@ -1583,11 +1599,11 @@ impl Parser {
                         self.advance(); // consume `=`
                         let ty = self.parse_type()?;
                         self.expect_newline_soft();
-                        assoc_type_defs.push(AssocTypeDef { name: assoc_name, ty, line: def_line });
+                        assoc_type_defs.push(AssocTypeDef { name: assoc_name, ty, line: def_line , col: 0 });
                     } else {
                         return Err(ParseError::Generic {
                             msg: "unexpected 'type' in ext body (only 'type Name = T' is allowed)".into(),
-                            line: self.line(), col: self.col(),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }
                 }
@@ -1607,7 +1623,7 @@ impl Parser {
                             _ if self.is_task_fn_shorthand() => methods.push(self.parse_fn_decl(true, true)?),
                             _ => return Err(ParseError::Generic {
                                 msg: "expected 'def', 'req', or return type after 'pub task' in ext body".into(),
-                                line: self.line(), col: self.col(),
+                                line: self.line(), col: self.col(), len: self.tok_len(),
                             }),
                         }
                     } else if matches!(next, Some(TokenKind::Set)) {
@@ -1618,7 +1634,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::Generic {
                             msg: "expected 'def', 'req', 'task', 'set', or 'as' after 'pub' in ext body".into(),
-                            line: self.line(), col: self.col(),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }
                 }
@@ -1628,14 +1644,14 @@ impl Parser {
                 _ => {
                     return Err(ParseError::Generic {
                         msg: format!("unexpected token in ext body: {:?}", self.peek()),
-                        line: self.line(), col: self.col(),
+                        line: self.line(), col: self.col(), len: self.tok_len(),
                     });
                 }
             }
         }
         self.eat(&TokenKind::Dedent);
 
-        Ok(ExtDecl { type_name, type_args, type_params, where_clause, traits, methods, setters, conversions, assoc_type_defs, line })
+        Ok(ExtDecl { type_name, type_args, type_params, where_clause, traits, methods, setters, conversions, assoc_type_defs, line, col })
     }
 
     fn parse_enum_decl(&mut self, is_pub: bool) -> Result<EnumDecl, ParseError> {
@@ -1644,6 +1660,7 @@ impl Parser {
 
     fn parse_enum_decl_with_attrs(&mut self, is_pub: bool, attrs: Vec<Attr>) -> Result<EnumDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Enum)?;
         let name = self.expect_ident()?;
         let (type_params, _) = self.parse_type_params();
@@ -1659,12 +1676,12 @@ impl Parser {
         if self.check(&TokenKind::Pass) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line });
+            return Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line, col });
         }
         if self.check(&TokenKind::Native) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(EnumDecl { name, is_pub, is_native: true, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line });
+            return Ok(EnumDecl { name, is_pub, is_native: true, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line, col });
         }
         self.expect_newline()?;
         self.expect(&TokenKind::Indent)?;
@@ -1722,7 +1739,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::Generic {
                             msg: "expected 'def', 'req', 'set', or 'as' after 'pub' in enum body".into(),
-                            line: self.line(), col: self.col(),
+                            line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }
                 }
@@ -1735,11 +1752,12 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants, methods, setters, conversions, attrs, line })
+        Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants, methods, setters, conversions, attrs, line, col })
     }
 
     fn parse_mod_decl(&mut self, _is_pub: bool) -> Result<ModDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Mod)?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::Colon)?;
@@ -1752,11 +1770,12 @@ impl Parser {
             items.push(self.parse_item(false)?);
         }
         self.eat(&TokenKind::Dedent);
-        Ok(ModDecl { name, items, line })
+        Ok(ModDecl { name, items, line, col })
     }
 
     fn parse_enum_variant(&mut self) -> Result<EnumVariant, ParseError> {
         let line = self.line();
+        let col = self.col();
         // Optional per-variant attributes: `@error("message")`, `@doc("...")`, etc.
         let attrs = if self.check(&TokenKind::At) { self.parse_attrs() } else { vec![] };
         let name = self.expect_ident_or_keyword()?;
@@ -1775,11 +1794,12 @@ impl Parser {
             self.expect(&TokenKind::RParen)?;
         }
         self.expect_newline()?;
-        Ok(EnumVariant { name, fields, attrs, line })
+        Ok(EnumVariant { name, fields, attrs, line, col })
     }
 
     fn parse_trait_decl(&mut self) -> Result<TraitDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Trait)?;
         let name = self.expect_ident()?;
         let (type_params, _) = self.parse_type_params();
@@ -1829,7 +1849,7 @@ impl Parser {
                         None
                     };
                     self.expect_newline_soft();
-                    assoc_types.push(AssocTypeDecl { name: assoc_name, constraint, type_params: assoc_type_params, line: decl_line });
+                    assoc_types.push(AssocTypeDecl { name: assoc_name, constraint, type_params: assoc_type_params, line: decl_line , col: 0 });
                 } else {
                     self.advance(); // consume `type`
                     let mutating = if self.check(&TokenKind::Def) {
@@ -1850,7 +1870,7 @@ impl Parser {
                     self.expect_newline_soft();
                     type_signatures.push(FnSignature {
                         name: sig_name, params, return_ty, throws, task, stream: false, mutating,
-                        return_mutable: false, type_params: type_params_sig, line,
+                        return_mutable: false, type_params: type_params_sig, line, col: 0,
                     });
                 }
             } else {
@@ -1865,7 +1885,7 @@ impl Parser {
         let defaults = defaults.into_iter()
             .map(|d| resolve_assoc_in_fn(d, &assoc_names))
             .collect();
-        Ok(TraitDecl { name, parents, signatures, defaults, type_signatures, type_params, assoc_types, line })
+        Ok(TraitDecl { name, parents, signatures, defaults, type_signatures, type_params, assoc_types, line, col })
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
@@ -1886,7 +1906,7 @@ impl Parser {
             }
             other => Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                msg: format!("expected identifier, got {:?}", other),
+                msg: format!("expected identifier, got {:?}", other), len: self.tok_len(),
             }),
         }
     }
@@ -1904,7 +1924,7 @@ impl Parser {
         } else {
             Err(ParseError::Generic {
                 line: self.line(), col: self.col(),
-                msg: format!("expected identifier, got {:?}", self.peek()),
+                msg: format!("expected identifier, got {:?}", self.peek()), len: self.tok_len(),
             })
         }
     }

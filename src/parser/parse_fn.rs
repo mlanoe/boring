@@ -16,6 +16,7 @@ use crate::lexer::{TokenKind, RawInterpPart};
 impl Parser {
     pub(crate) fn parse_fn_decl(&mut self, is_pub: bool, mutating: bool) -> Result<FnDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         // `task`/`stream` may come BEFORE the keyword: `task def f():`, `stream def f():`
         // Shorthand: `task RetType f():` or `stream RetType f():` — `def` is implicit.
         let prefix_task   = self.eat(&TokenKind::Task);
@@ -82,7 +83,7 @@ impl Parser {
                         "parameter '{}' in 'def {}' has no type annotation — add a type (e.g. 'int {}')",
                         p.name, name, p.name
                     ),
-                    line: p.line, col: 0,
+                    line: p.line, col: 0, len: 1,
                 });
             }
         }
@@ -128,7 +129,7 @@ impl Parser {
             self.expect_newline_soft();
             let s = match stmt {
                 Stmt::Expr(ref e) if !matches!(e.kind, ExprKind::Assign(..)) => {
-                    vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line })]
+                    vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line , col: 0 })]
                 }
                 other => vec![other],
             };
@@ -168,6 +169,7 @@ impl Parser {
             where_clause,
             attrs: vec![],
             line,
+            col,
         })
     }
 
@@ -250,6 +252,7 @@ impl Parser {
 
     pub(crate) fn parse_param(&mut self) -> Result<Param, ParseError> {
         let line = self.line();
+        let col = self.col();
         let rebindable = self.eat(&TokenKind::Var);
         let mutable = rebindable || self.eat(&TokenKind::Mut);
         let mut variadic = false;
@@ -336,11 +339,12 @@ impl Parser {
             None
         };
 
-        Ok(Param { name, ty, mutable, rebindable, owned, variadic, default, line })
+        Ok(Param { name, ty, mutable, rebindable, owned, variadic, default, line, col })
     }
 
     pub(crate) fn parse_set_decl(&mut self, is_pub: bool) -> Result<SetDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Set)?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::LParen)?;
@@ -361,7 +365,7 @@ impl Parser {
             self.expect_newline_soft();
             stmts
         };
-        Ok(SetDecl { name, param_name, param_ty, is_pub, throws, task, body, line })
+        Ok(SetDecl { name, param_name, param_ty, is_pub, throws, task, body, line, col })
     }
 
     /// Parse a method/variable body block or inline statement.
@@ -393,7 +397,7 @@ impl Parser {
                 self.expect(&TokenKind::Eq)?;
                 let default = self.parse_expr()?;
                 self.expect_newline_soft();
-                Ok(TypeMemberKind::Var(TypeVar { name, ty, default, is_pub, mutable, line }))
+                Ok(TypeMemberKind::Var(TypeVar { name, ty, default, is_pub, mutable, line, col }))
             }
             // ── type set name(T v): body ──────────────────────────────────────
             TokenKind::Set => {
@@ -412,11 +416,11 @@ impl Parser {
                 let body = self.parse_method_body()?;
                 let param = crate::ast::Param {
                     name: param_name, ty: Some(param_ty),
-                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line,
+                    mutable: false, rebindable: false, owned: false, variadic: false, default: None, line, col: 0,
                 };
                 Ok(TypeMemberKind::Method(TypeMethod {
                     kind: TypeMethodKind::Set, name, params: vec![param],
-                    return_ty: None, body, is_pub, throws, task, line,
+                    return_ty: None, body, is_pub, throws, task, line, col,
                 }))
             }
             // ── type def / type req: [RetTy] name(params): body ──────────────
@@ -437,18 +441,19 @@ impl Parser {
                 self.expect(&TokenKind::Colon)?;
                 let body = self.parse_method_body()?;
                 Ok(TypeMemberKind::Method(TypeMethod {
-                    kind, name, params, return_ty, body, is_pub, throws, task, line,
+                    kind, name, params, return_ty, body, is_pub, throws, task, line, col,
                 }))
             }
             other => Err(ParseError::Generic {
                 msg: format!("expected 'def', 'req', 'set', 'var', or 'let' after 'type', got {:?}", other),
-                line, col,
+                line, col, len: 1,
             }),
         }
     }
 
     pub(crate) fn parse_as_decl(&mut self) -> Result<AsDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         let is_pub = self.eat(&TokenKind::Pub);
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
@@ -465,11 +470,12 @@ impl Parser {
             self.expect_newline_soft();
             vec![Stmt::Expr(expr)]
         };
-        Ok(AsDecl { is_pub, ty, throws, task, body, line })
+        Ok(AsDecl { is_pub, ty, throws, task, body, line, col })
     }
 
     pub(crate) fn parse_field_decl(&mut self) -> Result<FieldDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         let explicit_pub = self.eat(&TokenKind::Pub);
         // `transient` implies `var` (mutable)
         let transient = self.eat(&TokenKind::Transient);
@@ -494,12 +500,13 @@ impl Parser {
             None
         };
         self.expect_newline()?;
-        Ok(FieldDecl { name, is_pub, mutable, transient, ty, default, line })
+        Ok(FieldDecl { name, is_pub, mutable, transient, ty, default, line, col })
     }
 
     pub(crate) fn parse_init_decl(&mut self) -> Result<InitDecl, ParseError> {
         use crate::ast::{InitDecl, InitParam};
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Init)?;
         self.expect(&TokenKind::LParen)?;
         self.skip_newlines_and_indent(); // allow `(\n    param,` multi-line form
@@ -536,7 +543,7 @@ impl Parser {
                 None
             };
 
-            params.push(InitParam { is_pub, mutable, name, ty, default, line: pline });
+            params.push(InitParam { is_pub, mutable, name, ty, default, line: pline , col: 0 });
 
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -549,7 +556,7 @@ impl Parser {
         // No body — all params declare fields
         if self.is_newline() || self.check(&TokenKind::Eof) {
             self.skip_newlines();
-            return Ok(InitDecl { params, body: vec![], line });
+            return Ok(InitDecl { params, body: vec![], line, col });
         }
 
         // With body — all params are local
@@ -562,12 +569,13 @@ impl Parser {
             self.expect_newline_soft();
             stmts
         };
-        Ok(InitDecl { params, body, line })
+        Ok(InitDecl { params, body, line, col })
     }
 
     /// `use Name as Type` — pure type alias (transparent, same Rust type)
     pub(crate) fn parse_alias_decl(&mut self) -> Result<AliasDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Use)?;
         let name = self.expect_ident()?;
         // Optional generic type params: `use Callable<T> as …`
@@ -581,18 +589,19 @@ impl Parser {
         let ty = self.parse_type()?;
         let ty = self.parse_type_qualifier(ty)?;
         self.expect_newline()?;
-        Ok(AliasDecl { name, type_params, ty, newtype: false, line })
+        Ok(AliasDecl { name, type_params, ty, newtype: false, line, col })
     }
 
     /// `type Name as InnerType` — newtype wrapper (distinct Rust struct around InnerType)
     pub(crate) fn parse_newtype_decl(&mut self) -> Result<AliasDecl, ParseError> {
         let line = self.line();
+        let col = self.col();
         self.expect(&TokenKind::Type)?;
         let name = self.expect_ident()?;
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
         self.expect_newline()?;
-        Ok(AliasDecl { name, type_params: vec![], ty, newtype: true, line })
+        Ok(AliasDecl { name, type_params: vec![], ty, newtype: true, line, col })
     }
 
     // ─── Attribute parsing ───────────────────────────────────────────────────
@@ -601,6 +610,7 @@ impl Parser {
         let mut attrs = Vec::new();
         while self.check(&TokenKind::At) {
             let line = self.line();
+            let col = self.col();
             self.advance(); // consume @
             let name = match self.expect_ident() {
                 Ok(n) => n,
@@ -626,7 +636,7 @@ impl Parser {
             }
             // Skip optional newline between attributes
             while self.is_newline() { self.advance(); }
-            attrs.push(Attr { name, args, line });
+            attrs.push(Attr { name, args, line, col });
         }
         attrs
     }
@@ -669,6 +679,7 @@ impl Parser {
     /// Returns `Left(FnSignature)` for abstract, `Right(FnDecl)` for default (has a body).
     pub(crate) fn parse_fn_signature_or_default(&mut self) -> Result<Either<FnSignature, FnDecl>, ParseError> {
         let line = self.line();
+        let col = self.col();
         // `task` may come BEFORE `def`/`req`: `task req f():` (preferred) or after params (legacy)
         let prefix_task = self.eat(&TokenKind::Task);
         // Shorthand: `task RetType name(` — `def` is implicit, same as in parse_fn_decl.
@@ -704,7 +715,7 @@ impl Parser {
                 self.expect_newline_soft();
                 match stmt {
                     Stmt::Expr(ref e) if !matches!(e.kind, ExprKind::Assign(..)) =>
-                        vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line })],
+                        vec![Stmt::Return(ReturnStmt { value: Some(e.clone()), line: expr_line , col: 0 })],
                     other => vec![other],
                 }
             };
@@ -712,11 +723,11 @@ impl Parser {
                 name, qualifier: None, params, return_ty, body,
                 is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
                 return_mutable, is_native: false, throws_ty,
-                type_params, where_clause: vec![], attrs: vec![], line,
+                type_params, where_clause: vec![], attrs: vec![], line, col,
             }))
         } else {
             self.expect_newline()?;
-            Ok(Either::Left(FnSignature { name, params, return_ty, throws, task, stream: false, mutating, return_mutable, type_params, line }))
+            Ok(Either::Left(FnSignature { name, params, return_ty, throws, task, stream: false, mutating, return_mutable, type_params, line, col }))
         }
     }
 }

@@ -1138,7 +1138,7 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn get_index(&mut self, obj: Value, idx: Value, line: usize) -> Eval {
+    pub(crate) fn get_index(&mut self, obj: Value, idx: Value, line: usize, col: usize, len: usize) -> Eval {
         match obj {
             Value::Array(arr) => {
                 let pos: usize = match idx {
@@ -1147,13 +1147,13 @@ impl Interpreter {
                         let i = self.expect_int(other, line)?;
                         let i = if i < 0 { arr.len() as i64 + i } else { i };
                         if i < 0 || i as usize >= arr.len() {
-                            return Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line));
+                            return Err(err_span(format!("array index {} out of bounds (len {})", i, arr.len()), line, col, len));
                         }
                         i as usize
                     }
                 };
                 arr.get(pos).cloned()
-                    .ok_or_else(|| err(format!("array index {} out of bounds (len {})", pos, arr.len()), line))
+                    .ok_or_else(|| err_span(format!("array index {} out of bounds (len {})", pos, arr.len()), line, col, len))
             }
             Value::Dict(pairs) => {
                 // Accept either a DictIndex or a raw key value.
@@ -1171,9 +1171,9 @@ impl Interpreter {
                 match idx {
                     Value::Index(IndexValue::Set(pos)) => {
                         set.get(pos).cloned()
-                            .ok_or_else(|| err(format!("set index {} out of bounds (len {})", pos, set.len()), line))
+                            .ok_or_else(|| err_span(format!("set index {} out of bounds (len {})", pos, set.len()), line, col, len))
                     }
-                    _ => Err(err("set subscript requires a set index — use firstIndex() / nextIndex()", line)),
+                    _ => Err(err_span("set subscript requires a set index — use firstIndex() / nextIndex()", line, col, len)),
                 }
             }
             Value::Str(s) => {
@@ -1181,12 +1181,12 @@ impl Interpreter {
                 let chars: Vec<char> = s.chars().collect();
                 let i = if i < 0 { chars.len() as i64 + i } else { i };
                 if i < 0 || i as usize >= chars.len() {
-                    Err(err(format!("string index {} out of bounds", i), line))
+                    Err(err_span(format!("string index {} out of bounds", i), line, col, len))
                 } else {
                     Ok(Value::Str(chars[i as usize].to_string()))
                 }
             }
-            other => Err(err(format!("cannot index into {}", other.type_name()), line)),
+            other => Err(err_span(format!("cannot index into {}", other.type_name()), line, col, len)),
         }
     }
 
@@ -1206,8 +1206,8 @@ impl Interpreter {
                             .unwrap_or(false);
                         if has_self_field {
                             // Delegate to field assignment (handles mutability + setters).
-                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line };
-                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line };
+                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
+                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
                             return self.assign(&field_expr, val, Rc::clone(&env), line);
                         }
                         // Genuinely new local — define as mutable (bare assignment acts as declaration)
