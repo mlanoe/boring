@@ -270,8 +270,8 @@ def void env_define(mut Env'actor env, string name, Value val, bool mutable):
 
 # ─── register_stdlib ──────────────────────────────────────────────────────────
 
-def void register_stdlib(Interpreter interp):
-    let env = interp.global_env
+def void register_stdlib(mut Interpreter interp):
+    mut env = interp.global_env
 
     let print_fn = Value.NativeFn("print", Value.Nil)
     env_define(env, "print", print_fn, false)
@@ -534,7 +534,7 @@ def void exec_item(mut Interpreter interp, Item item):
 
 # ─── run_program ──────────────────────────────────────────────────────────────
 
-def void run_program(Interpreter interp, Program prog):
+def void run_program(mut Interpreter interp, Program prog):
     for item in prog.items:
         exec_item(interp, item)
 

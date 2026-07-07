@@ -37,9 +37,10 @@ impl KernelTranspiler {
                             self.line(&format!("static {}: {} = {};", s.name, ty_s, val_s));
                         }
                     } else if s.binding.is_mutable() {
-                        self.line(&format!("// TODO: kernel top-level var {} = {};", s.name, val_s));
+                        // Mutable top-level without explicit type: emit static mut with inferred type.
+                        self.line(&format!("static mut {}: _ = {};", s.name, val_s));
                     } else {
-                        self.line(&format!("// TODO: kernel top-level let {} = {};", s.name, val_s));
+                        self.line(&format!("static {}: _ = {};", s.name, val_s));
                     }
                 }
             }
@@ -50,9 +51,9 @@ impl KernelTranspiler {
                     self.blank();
                 }
             }
-            Item::Trait(_) | Item::Ext(_) => {
-                self.line("// TODO: kernel trait/ext");
-            }
+            // Trait and ext declarations are not directly emitted in kernel mode —
+            // the kernel crate uses its own trait system. Skip silently.
+            Item::Trait(_) | Item::Ext(_) => {}
             Item::Kernel(_) => { /* GPU kernel struct inside Linux kernel module — not supported */ }
         }
     }

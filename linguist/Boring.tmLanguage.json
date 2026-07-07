@@ -179,7 +179,7 @@
 
     "declaration-keywords": {
       "name": "keyword.other.declaration.boring",
-      "match": "\\b(let|mut|var|lazy|new|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|channel|sync|with|kernel)\\b"
+      "match": "\\b(let|mut|var|lazy|new|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|sync|with|kernel)\\b"
     },
 
     "operator-keywords": {
@@ -195,9 +195,9 @@
     "ownership-qualifier": {
       "patterns": [
         {
-          "comment": "qualified: 'heap, 'stack, 'shared, 'actor, 'guard, 'weak, 'copy; borrow: &option",
+          "comment": "qualified: 'heap, 'stack, 'shared, 'actor, 'guard, 'weak, 'copy; GPU: 'sync, 'unified, 'global, 'local, 'const; borrow: &option",
           "name": "storage.modifier.ownership.boring",
-          "match": "'(?:heap|stack|shared|actor|guard|weak|copy)\\b|&(?:heap|stack|shared|actor|guard|option|weak)\\b"
+          "match": "'(?:heap|stack|shared|actor|guard|weak|copy|sync|unified|global|local)\\b|&(?:heap|stack|shared|actor|guard|option|weak)\\b"
         },
         {
           "comment": "bare tick before identifier or opening paren — ownership inferred from RHS",

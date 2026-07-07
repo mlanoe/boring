@@ -294,9 +294,9 @@ impl Parser {
                 "heap"   => { self.advance(); OwnerQual::Owned }
                 "new"    => { self.advance(); OwnerQual::New }
                 // GPU memory qualifiers (kernel-context and host-context).
-                // 'shared already caught above as OwnerQual::Shared (Arc/Rc).
                 "unified" => { self.advance(); OwnerQual::GpuUnified }
                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
+                "sync"    => { self.advance(); OwnerQual::GpuSync }
                 "local"   => { self.advance(); OwnerQual::GpuLocal }
                 "const"   => { self.advance(); OwnerQual::GpuConst }
                 "gpu"    => {
@@ -343,6 +343,8 @@ impl Parser {
                 "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
                 _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
             },
+            // `T'sync` — `sync` is a keyword, not an ident: block SRAM with auto-barrier
+            TokenKind::Sync => { self.advance(); OwnerQual::GpuSync }
             // `T'new` — `new` is a keyword, not an ident: pseudo-qualifier "infer excluding 'stack"
             TokenKind::New => { self.advance(); OwnerQual::New }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>

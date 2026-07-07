@@ -16,7 +16,7 @@ def [Stmt] parse_inline_stmts(mut Parser p) throws:
     while true:
         if parser_check(p, "Semicolon"):
             parser_advance(p)
-        if parser_is_newline(p) or parser_check(p, "Eof") or parser_check(p, "Dedent") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace") or parser_check(p, "While") or parser_check(p, "Else") or parser_check(p, "Elif"):
+        if parser_is_newline(p) or parser_check(p, "Eof") or parser_check(p, "Dedent") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace") or parser_check(p, "While") or parser_check(p, "Else") or parser_check(p, "Elif") or parser_check(p, "Comma"):
             break
         if not parser_check(p, "Semicolon") and (parser_is_newline(p) or parser_check(p, "Eof")):
             break
@@ -59,6 +59,7 @@ def string? comparison_op_from_peek(mut Parser p):
         "LtEq":"LtEq"
         "GtEq": "GtEq"
         "EqEq": "EqEq"
+        "EqEqEq": "RefEq"
         "BangEq": "BangEq"
         _: nil
 
@@ -768,7 +769,7 @@ def [StringSegment] resolve_interp(mut Parser p, [RawInterpPart] parts, int line
                     segments.append(segment_lit("{}"))
                 else:
                     let hole_tokens = lex(code)
-                    let sub_parser = make_parser(hole_tokens)
+                    mut sub_parser = make_parser(hole_tokens)
                     parser_skip_newlines(sub_parser)
                     let expr = parse_expr(sub_parser)
                     segments.append(segment_expr(expr))
@@ -781,7 +782,7 @@ def [StringSegment] resolve_interp(mut Parser p, [RawInterpPart] parts, int line
                     segments.append(segment_lit(spec_text))
                 else:
                     let hole_tokens = lex(code)
-                    let sub_parser = make_parser(hole_tokens)
+                    mut sub_parser = make_parser(hole_tokens)
                     parser_skip_newlines(sub_parser)
                     let expr = parse_expr(sub_parser)
                     segments.append(segment_formatted_expr(expr, fmt))

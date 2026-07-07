@@ -1,1 +1,5 @@
-cannot use '=' on lazy binding 'x'
+error: cannot assign to `x` with `=`: `lazy` bindings are written with `?=`
+ --> <file>:2:1
+  |
+2 | x = 42
+  | ^

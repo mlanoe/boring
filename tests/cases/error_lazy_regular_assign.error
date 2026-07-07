@@ -1,0 +1,5 @@
+error: cannot assign to `result` with `=`: `lazy` bindings are written with `?=`
+ --> <file>:2:1
+  |
+2 | result = 42
+  | ^

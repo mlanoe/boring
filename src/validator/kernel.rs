@@ -874,8 +874,8 @@ impl KernelValidator {
             };
             if let Some(name) = target {
                 if let Some(field) = k.fields.iter().find(|f| f.name == name) {
-                    if matches!(field.qual, GpuQual::Shared | GpuQual::Local) {
-                        let kind = if matches!(field.qual, GpuQual::Shared) { "'shared" } else { "'local" };
+                    if matches!(field.qual, GpuQual::Sync | GpuQual::Local) {
+                        let kind = if matches!(field.qual, GpuQual::Sync) { "'shared" } else { "'local" };
                         this.error(
                             line,
                             format!(

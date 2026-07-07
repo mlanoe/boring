@@ -11,7 +11,7 @@
 
 // Statement emission for the kernel transpiler.
 
-use crate::ast::{Stmt, IfStmt, ForStmt, WhileStmt};
+use crate::ast::{Stmt, IfStmt, IfLetStmt, ForStmt, WhileStmt, CondClause};
 use super::helpers::KernelTranspiler;
 
 impl KernelTranspiler {
@@ -256,29 +256,42 @@ impl KernelTranspiler {
                 }
             }
 
-            // Unsupported in kernel
-            Stmt::Wait(_, _) => {
-                self.line("// TODO: kernel wait (no async)");
+            // `wait dur` — no async in kernel; spin with msleep (millisecond granularity).
+            Stmt::Wait(dur, _) => {
+                let ms = self.emit_expr(dur);
+                self.line(&format!("kernel::delay::coarse_sleep(core::time::Duration::from_millis({} as u64));", ms));
             }
             Stmt::Try(s) => {
-                // Simple try: emit body, ignore catches (kernel uses Result)
+                // Emit body; kernel error handling uses Result — catches are ignored.
                 for stmt in &s.body { self.emit_stmt(stmt); }
             }
             Stmt::Guard(s) => {
-                // guard cond else: body
-                let cond_s = match &s.cond {
-                    crate::ast::GuardCond::Expr(e) => self.emit_expr(e),
-                    crate::ast::GuardCond::Clauses(_) => "/* TODO: kernel guard let */".into(),
-                };
-                self.line(&format!("if !({}) {{", cond_s));
-                self.indent += 1;
-                for stmt in &s.else_body { self.emit_stmt(stmt); }
-                self.indent -= 1;
-                self.line("}");
+                match &s.cond {
+                    crate::ast::GuardCond::Expr(e) => {
+                        let cond_s = self.emit_expr(e);
+                        self.line(&format!("if !({}) {{", cond_s));
+                        self.indent += 1;
+                        for stmt in &s.else_body { self.emit_stmt(stmt); }
+                        self.indent -= 1;
+                        self.line("}");
+                    }
+                    crate::ast::GuardCond::Clauses(clauses) => {
+                        // Emit each `let` clause as a Rust `let … else`; bool clauses as `if`.
+                        self.emit_guard_clauses(clauses, &s.else_body);
+                    }
+                }
             }
-            Stmt::IfLet(_) => self.line("// TODO: kernel if let"),
+            Stmt::IfLet(s) => self.emit_if_let(s, is_last),
             Stmt::Match(s) => self.emit_match_stmt(s),
-            Stmt::Defer(_) => self.line("// TODO: kernel defer"),
+            // `defer: body` — emit a drop guard via a local closure called on scope exit.
+            Stmt::Defer(body) => {
+                self.line("let __defer = kernel::init::__cleanup!(|| {");
+                self.indent += 1;
+                for stmt in body { self.emit_stmt(stmt); }
+                self.indent -= 1;
+                self.line("});");
+                self.line("let _ = &__defer;");
+            }
             Stmt::Yield(e, _) => {
                 let s = self.emit_expr(e);
                 if self.in_iter_stream {
@@ -396,7 +409,7 @@ impl KernelTranspiler {
         self.line("}");
     }
 
-    fn emit_pattern(&self, pat: &crate::ast::Pattern) -> String {
+    pub(super) fn emit_pattern(&self, pat: &crate::ast::Pattern) -> String {
         use crate::ast::Pattern;
         match pat {
             Pattern::Wildcard      => "_".into(),
@@ -425,6 +438,117 @@ impl KernelTranspiler {
                     LitPattern::Nil     => "None".into(),
                 }
             }
+        }
+    }
+
+    // ── guard let clauses ─────────────────────────────────────────────────────
+
+    pub(super) fn emit_guard_clauses(&mut self, clauses: &[CondClause], else_body: &[Stmt]) {
+        // Each clause is emitted as a `let … else` (for bindings) or `if !` (for booleans).
+        // All clauses share the same else body; in Rust we chain them top-to-bottom.
+        for clause in clauses {
+            match clause {
+                CondClause::Let(name, expr) => {
+                    let val_s = self.emit_expr(expr);
+                    self.line(&format!("let Some({}) = ({}) else {{", name, val_s));
+                    self.indent += 1;
+                    for stmt in else_body { self.emit_stmt(stmt); }
+                    self.indent -= 1;
+                    self.line("};");
+                }
+                CondClause::LetPat(pat, expr) => {
+                    let val_s = self.emit_expr(expr);
+                    let pat_s = self.emit_pattern(pat);
+                    self.line(&format!("let {} = ({}) else {{", pat_s, val_s));
+                    self.indent += 1;
+                    for stmt in else_body { self.emit_stmt(stmt); }
+                    self.indent -= 1;
+                    self.line("};");
+                }
+                CondClause::Expr(e) => {
+                    let cond_s = self.emit_expr(e);
+                    self.line(&format!("if !({}) {{", cond_s));
+                    self.indent += 1;
+                    for stmt in else_body { self.emit_stmt(stmt); }
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        }
+    }
+
+    // ── if let ───────────────────────────────────────────────────────────────
+
+    fn emit_if_let(&mut self, s: &IfLetStmt, is_last: bool) {
+        // Emit as nested `if let Some(x) = … { … }` chains.
+        // We generate a single outer `if` block from the clauses, then else branches.
+        self.emit_if_let_clauses(&s.clauses, &s.then_body, is_last);
+        for branch in &s.elif_branches {
+            self.line("else {");
+            self.indent += 1;
+            self.emit_if_let_clauses(&branch.clauses, &branch.body, is_last);
+            self.indent -= 1;
+            self.line("}");
+        }
+        if let Some(else_body) = &s.else_body {
+            self.line("else {");
+            self.indent += 1;
+            let len = else_body.len();
+            for (i, stmt) in else_body.iter().enumerate() {
+                if is_last && i + 1 == len { self.emit_stmt_last(stmt); }
+                else { self.emit_stmt(stmt); }
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+    }
+
+    fn emit_if_let_clauses(&mut self, clauses: &[CondClause], body: &[Stmt], is_last: bool) {
+        if clauses.is_empty() {
+            self.line("{");
+            self.indent += 1;
+            let len = body.len();
+            for (i, stmt) in body.iter().enumerate() {
+                if is_last && i + 1 == len { self.emit_stmt_last(stmt); }
+                else { self.emit_stmt(stmt); }
+            }
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+        // Open all `if let` / `if` guards, then emit the body, then close.
+        let mut opened = 0;
+        for clause in clauses {
+            match clause {
+                CondClause::Let(name, expr) => {
+                    let val_s = self.emit_expr(expr);
+                    self.line(&format!("if let Some({}) = {} {{", name, val_s));
+                    self.indent += 1;
+                    opened += 1;
+                }
+                CondClause::LetPat(pat, expr) => {
+                    let val_s = self.emit_expr(expr);
+                    let pat_s = self.emit_pattern(pat);
+                    self.line(&format!("if let {} = {} {{", pat_s, val_s));
+                    self.indent += 1;
+                    opened += 1;
+                }
+                CondClause::Expr(e) => {
+                    let cond_s = self.emit_expr(e);
+                    self.line(&format!("if {} {{", cond_s));
+                    self.indent += 1;
+                    opened += 1;
+                }
+            }
+        }
+        let len = body.len();
+        for (i, stmt) in body.iter().enumerate() {
+            if is_last && i + 1 == len { self.emit_stmt_last(stmt); }
+            else { self.emit_stmt(stmt); }
+        }
+        for _ in 0..opened {
+            self.indent -= 1;
+            self.line("}");
         }
     }
 }

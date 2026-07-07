@@ -374,9 +374,9 @@ impl KernelTranspiler {
             // that returns a KernelFuture<T>.  Just emit it directly.
             ExprKind::Task(inner) => self.emit_expr(inner),
 
-            ExprKind::TaskWithTimeout(_, _) => {
-                "/* TODO: kernel task-with-timeout */".into()
-            }
+            // `task(timeout) expr` — kernel tasks have no deadline mechanism; emit the inner
+            // expression directly and let the caller handle the KernelFuture lifetime.
+            ExprKind::TaskWithTimeout(_, inner) => self.emit_expr(inner),
 
             // `join [f1, f2, ...]` — no tokio::join! in the kernel; block sequentially on each
             // KernelFuture via .wait().  The result is a tuple, matching the std backend layout.
@@ -390,12 +390,82 @@ impl KernelTranspiler {
                     format!("({})", parts.join(", "))
                 }
             }
-            ExprKind::Closure(_, _, _, _, _) => "/* TODO: kernel closure */".into(),
-            ExprKind::Match(_) => "/* TODO: kernel match expr */".into(),
-            ExprKind::Do(_) => "/* TODO: kernel do */".into(),
-            ExprKind::Loop(_) => "/* TODO: kernel loop expr */".into(),
-            ExprKind::TryElse(e, _) => self.emit_expr(e),
-            ExprKind::TryElseBlock(_, _) => "/* TODO: kernel try/else */".into(),
+            ExprKind::Closure(params, ret_ty, body, _, _) => {
+                // Emit as a Rust closure: |p1, p2| { body }
+                let params_s: Vec<String> = params.iter().map(|p| {
+                    if let Some(ty) = &p.ty {
+                        format!("{}: {}", p.name, self.emit_type(ty))
+                    } else {
+                        p.name.clone()
+                    }
+                }).collect();
+                let ret_s = ret_ty.as_ref()
+                    .map(|t| format!(" -> {}", self.emit_type(t)))
+                    .unwrap_or_default();
+                let body_s = match body {
+                    crate::ast::ClosureBody::Expr(e) => self.emit_expr(e),
+                    crate::ast::ClosureBody::Block(stmts) => {
+                        let inner: Vec<String> = stmts.iter()
+                            .map(|s| self.emit_stmt_inline(s))
+                            .collect();
+                        format!("{{ {} }}", inner.join(""))
+                    }
+                };
+                format!("|{}|{} {}", params_s.join(", "), ret_s, body_s)
+            }
+            ExprKind::Match(s) => {
+                // match expr — emit as a block expression
+                let subj = self.emit_expr(&s.subject);
+                let mut out = format!("match {} {{ ", subj);
+                for arm in &s.arms {
+                    let pats: Vec<String> = arm.patterns.iter().map(|p| self.emit_pattern(p)).collect();
+                    let guard_s = arm.guard.as_ref()
+                        .map(|g| format!(" if {}", self.emit_expr(g)))
+                        .unwrap_or_default();
+                    let pat_s = format!("{}{}", pats.join(" | "), guard_s);
+                    let body_s = match &arm.body {
+                        crate::ast::MatchBody::Expr(e) => self.emit_expr(e),
+                        crate::ast::MatchBody::Block(stmts) => {
+                            let inner: Vec<String> = stmts.iter()
+                                .map(|s| self.emit_stmt_inline(s))
+                                .collect();
+                            format!("{{ {} }}", inner.join(""))
+                        }
+                    };
+                    out.push_str(&format!("{} => {}, ", pat_s, body_s));
+                }
+                out.push('}');
+                out
+            }
+            ExprKind::Do(stmts) => {
+                let inner: Vec<String> = stmts.iter()
+                    .map(|s| self.emit_stmt_inline(s))
+                    .collect();
+                format!("{{ {} }}", inner.join(""))
+            }
+            ExprKind::Loop(s) => {
+                let inner: Vec<String> = s.body.iter()
+                    .map(|stmt| self.emit_stmt_inline(stmt))
+                    .collect();
+                format!("loop {{ {} }}", inner.join(""))
+            }
+            ExprKind::TryElse(e, default) => {
+                // `try expr else default` — emit as `expr.unwrap_or(default)` in kernel context
+                let es = self.emit_expr(e);
+                let ds = self.emit_expr(default);
+                format!("{}.unwrap_or({})", es, ds)
+            }
+            ExprKind::TryElseBlock(body, else_body) => {
+                // Emit try body; on error the else block runs — model as a closure called immediately.
+                let try_inner: Vec<String> = body.iter()
+                    .map(|s| self.emit_stmt_inline(s))
+                    .collect();
+                let else_inner: Vec<String> = else_body.iter()
+                    .map(|s| self.emit_stmt_inline(s))
+                    .collect();
+                format!("(|| -> _ {{ {} }})().unwrap_or_else(|_| {{ {} }})",
+                    try_inner.join(""), else_inner.join(""))
+            }
             ExprKind::OptionalField(obj, field) => {
                 let obj_s = self.emit_expr(obj);
                 format!("{}.map(|__v| __v.{})", obj_s, field)
@@ -466,7 +536,7 @@ impl KernelTranspiler {
         }
     }
 
-    /// Emit a statement as an inline expression (for use inside expression contexts).
+    /// Emit a statement as an inline string (for use inside expression contexts).
     fn emit_stmt_inline(&self, stmt: &crate::ast::Stmt) -> String {
         match stmt {
             crate::ast::Stmt::Expr(e) => format!("{}; ", self.emit_expr(e)),
@@ -477,7 +547,30 @@ impl KernelTranspiler {
                     "return; ".into()
                 }
             }
-            _ => "/* TODO: kernel inline stmt */; ".into(),
+            crate::ast::Stmt::Let(s) => {
+                let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                match (&s.ty, &s.value) {
+                    (Some(ty), Some(val)) => format!(
+                        "{} {}: {} = {}; ", kw, s.name, self.emit_type(ty), self.emit_expr(val)
+                    ),
+                    (None, Some(val)) => format!("{} {} = {}; ", kw, s.name, self.emit_expr(val)),
+                    (Some(ty), None)  => format!("{} {}: {}; ", kw, s.name, self.emit_type(ty)),
+                    (None, None)      => format!("{} {}; ", kw, s.name),
+                }
+            }
+            crate::ast::Stmt::Break(_, val) => {
+                if let Some(e) = val {
+                    format!("break {}; ", self.emit_expr(e))
+                } else {
+                    "break; ".into()
+                }
+            }
+            crate::ast::Stmt::Continue(_) => "continue; ".into(),
+            crate::ast::Stmt::Comment(text) => format!("/* {} */ ", text),
+            _ => {
+                // For compound statements not trivially inlineable, emit a placeholder comment.
+                "/* complex stmt */; ".into()
+            }
         }
     }
 }

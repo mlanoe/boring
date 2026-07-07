@@ -177,7 +177,7 @@ impl HostEmitter {
         self.line("__stream: Arc<CudaStream>,");
         for field in &decl.fields {
             match field.qual {
-                GpuQual::Shared | GpuQual::Local => {
+                GpuQual::Sync | GpuQual::Local => {
                     // Block SRAM / registers — no host-side storage.
                 }
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
@@ -290,7 +290,7 @@ impl HostEmitter {
                             field.name, elem
                         ));
                     }
-                    GpuQual::Shared | GpuQual::Local => {
+                    GpuQual::Sync | GpuQual::Local => {
                         match &field.ty {
                             Type::Array(_) | Type::ArrayN(_, _) => {}
                             _ => {
@@ -309,7 +309,7 @@ impl HostEmitter {
         self.line("__stream: __ctx.default_stream(),");
         for field in fields {
             match field.qual {
-                GpuQual::Shared => {} // no host field
+                GpuQual::Sync => {} // no host field
                 GpuQual::Local => {
                     match &field.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => {}
@@ -341,7 +341,7 @@ impl HostEmitter {
                         field.name, elem
                     ));
                 }
-                GpuQual::Shared => {}
+                GpuQual::Sync => {}
                 GpuQual::Local => {
                     match &field.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => {}
@@ -359,7 +359,7 @@ impl HostEmitter {
         self.line("__stream: __ctx.default_stream(),");
         for field in fields {
             match field.qual {
-                GpuQual::Shared => {}
+                GpuQual::Sync => {}
                 GpuQual::Local => match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
                     _ => self.line(&format!("{},", field.name)),
@@ -494,7 +494,7 @@ impl HostEmitter {
         // Statically-sized 'shared ArrayN fields embed their size in the kernel declaration
         // and do not contribute to smem_bytes.
         let dyn_shared_terms: Vec<String> = fields.iter()
-            .filter(|f| matches!(f.qual, GpuQual::Shared))
+            .filter(|f| matches!(f.qual, GpuQual::Sync))
             .filter_map(|f| {
                 if let Type::Array(inner) = &f.ty {
                     let sz = elem_size_bytes(inner);
@@ -567,7 +567,7 @@ impl HostEmitter {
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
                 }
-                GpuQual::Shared => {}
+                GpuQual::Sync => {}
             }
         }
         self.line("unsafe { launcher.launch(cfg) }?;");

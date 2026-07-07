@@ -195,6 +195,22 @@ impl Transpiler {
         // Track every declared local variable so that field/method access can distinguish
         // instance variables (use `.`) from type/module paths (use `::`).
         self.known_local_vars.insert(s.name.clone());
+        // Track binding kind for parameter-passing checks (let ≤ mut ≤ var hierarchy).
+        match s.binding {
+            BindingKind::Let => {
+                self.immutable_local_vars.insert(s.name.clone());
+                self.mut_local_vars.remove(&s.name);
+            }
+            BindingKind::Mut => {
+                self.immutable_local_vars.remove(&s.name);
+                self.mut_local_vars.insert(s.name.clone());
+            }
+            _ => {
+                // var / lazy — rebindable, not in either set
+                self.immutable_local_vars.remove(&s.name);
+                self.mut_local_vars.remove(&s.name);
+            }
+        }
         // `lazy T name` — deferred write-once binding backed by OnceCell<T>.
         // `lazy` vars must NOT have an initializer; the value is provided later via `?=`.
         if s.binding == BindingKind::Lazy {

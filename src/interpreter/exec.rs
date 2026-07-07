@@ -899,7 +899,7 @@ impl Interpreter {
                     OwnerQual::GpuUnified   => "'gpu'unified".to_string(),
                     OwnerQual::GpuGlobal    => "'gpu'global".to_string(),
                     OwnerQual::GpuActorGlobal => "'actor'global".to_string(),
-                    OwnerQual::GpuShared    => "'shared".to_string(),
+                    OwnerQual::GpuSync      => "'sync".to_string(),
                     OwnerQual::GpuLocal     => "'local".to_string(),
                     OwnerQual::GpuConst     => "'gpu'const".to_string(),
                     OwnerQual::Union(members) => {

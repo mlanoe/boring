@@ -458,9 +458,9 @@ fn test_gpu_shared_qualifier() {
     let src = r#"
 kernel SharedWeight:
     mut [float]'unified  out
-    let [float]'shared   weights
+    let [float]'sync     weights
 
-    init([float]'unified data, [float]'shared w):
+    init([float]'unified data, [float]'sync w):
         out     = data
         weights = w
 

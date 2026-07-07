@@ -245,7 +245,9 @@ pub struct FieldDecl {
 pub enum GpuQual {
     Unified,
     Global,
-    Shared,
+    /// `'sync` — block SRAM (threadgroup memory). Barriers are inserted automatically
+    /// unless the kernel `def` contains at least one explicit `sync` statement (manual mode).
+    Sync,
     Local,
     Const,
     /// `'actor'global` — device DRAM accessed via atomics on device.
@@ -934,10 +936,10 @@ pub enum OwnerQual {
     BorrowMut,
     /// GPU memory qualifiers.
     /// Host-side: `T'gpu'unified`, `T'gpu'global`, `T'gpu'const`.
-    /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'shared`, `T'local`, `T'const`.
+    /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'sync`, `T'local`, `T'const`.
     GpuUnified,
     GpuGlobal,
-    GpuShared,
+    GpuSync,
     GpuLocal,
     GpuConst,
     /// `T'actor'global` — device DRAM with atomic access (kernel-side).
@@ -1057,7 +1059,7 @@ impl Type {
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
             Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
-            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuShared | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal) => false,
+            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuSync | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal) => false,
         }
     }
 }

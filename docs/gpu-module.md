@@ -44,7 +44,7 @@ kernel Name:
         <body>
 ```
 
-`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, `'shared`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see [Qualifier inference](#qualifier-inference) below).
+`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, `'sync`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see [Qualifier inference](#qualifier-inference) below).
 
 ---
 
@@ -56,7 +56,7 @@ kernel Name:
 |---|---|---|
 | `'unified` | unified DRAM (host + device) | direct |
 | `'global` | device-only DRAM | via `gpu.copy()` |
-| `'shared` | block SRAM (`__shared__`) | no |
+| `'sync` | block SRAM (`__shared__`) | no |
 | `'local` | registers / thread-local | no — default |
 | `'const` | constant cache | no |
 
@@ -86,13 +86,13 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 
 **Valid qualifier × field-type matrix:**
 
-| | `'unified` | `'global` | `'shared` | `'local` | `'const` |
+| | `'unified` | `'global` | `'sync` | `'local` | `'const` |
 |---|---|---|---|---|---|
 | `[T]` dynamic | explicit | explicit | explicit | error | error |
 | `[T, N]` fixed | error | error | explicit | inferred (`mut`/`var`) | inferred (`let`) |
 | scalar | — | — | — | inferred (`mut`/`var`) | inferred (`let`) |
 
-> `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and `'shared` are always explicit.
+> `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and `'sync` are always explicit.
 
 ---
 
@@ -137,7 +137,7 @@ mut k = kernel(block = 256) k |> .wait
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
 | `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted (1D) |
-| `smem` | `{string = int}` | no | named dynamic `'shared` partitions and their byte sizes |
+| `smem` | `{string = int}` | no | named dynamic `'sync` partitions and their byte sizes |
 | `after` | handle or `[handle]` | no | kernel starts after all listed handles complete |
 | `priority` | `high` / `normal` / `low` | no | stream scheduling priority — default `normal` |
 
@@ -155,7 +155,7 @@ Inside `def ()` and device helpers, `gpu` is available:
 | `gpu.block.x/y/z` | block index within grid |
 | `gpu.block_dim.x/y/z` | threads per block |
 | `gpu.grid_dim.x/y/z` | blocks per grid |
-| `sync` | block-level barrier |
+| `sync` | explicit block-level barrier (manual mode — see `'sync`) |
 
 ---
 
@@ -200,25 +200,47 @@ gpu.copy(k.result, host_buf)    # D2H
 gpu.copy(host_buf, k.input)     # H2D
 ```
 
-### `'shared` — block SRAM
+### `'sync` — block SRAM
 
-`'shared` fields are allocated in per-block shared memory. Use `sync` between producer and consumer threads in the same block.
+`'sync` fields are allocated in per-block shared memory. The transpiler inserts thread-group barriers automatically — no explicit `sync` statement needed.
 
 ```boring
 kernel Reduce:
     mut [float]'unified input
     mut float'unified   result
-    mut [float]'shared  tile
+    mut [float]'sync    tile
 
     def ():
         let tid = gpu.thread.x
         tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
-        sync
+        # barrier inserted automatically before the loop
         if tid == 0:
             var float sum = 0.0
             for v in tile:
                 sum += v
             result = sum
+```
+
+#### Auto-barrier rules
+
+The transpiler operates in **auto mode** when a kernel `def` has no explicit `sync` statement:
+
+1. A barrier is inserted before the first loop in the body (write-phase → loop-phase boundary).
+2. A barrier is inserted at the top of each loop iteration that accesses a `'sync` field (covers cross-thread read patterns such as stride reduction).
+
+#### Manual mode
+
+If the developer writes at least one explicit `sync` in the `def` body, the transpiler disables auto-insertion for the entire `def` and emits barriers only where `sync` appears. Use this when the automatic placement is incorrect or suboptimal.
+
+```boring
+    def ():
+        tile[tid] = data[i]
+        sync                    # developer controls all barriers
+        while stride > 0:
+            if tid < stride:
+                tile[tid] = tile[tid] + tile[tid + stride]
+            sync
+            stride = stride / 2
 ```
 
 ### Ownership and launch
@@ -243,19 +265,56 @@ for batch in batches:
     results.push(k.buf[0])
 ```
 
-### `'shared` field rules
+### `'sync` field rules
 
-`'shared` fields cannot escape the kernel body. The compiler rejects:
+`'sync` fields cannot escape the kernel body. The compiler rejects:
 
-- returning a `'shared` value from a kernel
-- storing a `'shared` value in a field accessible from the host
-- passing a `'shared` reference outside the kernel invocation scope
+- returning a `'sync` value from a kernel
+- storing a `'sync` value in a field accessible from the host
+- passing a `'sync` reference outside the kernel invocation scope
 
-### Dynamic `'shared` — size from launch
+### Struct `'sync` — compound state
+
+When multiple scalars must be observed as a consistent unit across threads, group them in a struct and apply `'sync` to the field. The barrier covers all fields of the struct atomically — no per-field synchronisation is needed.
+
+Use this instead of `'actor'global` (which protects a single scalar at a time): atomics cannot guarantee that two independently updated values are seen together by a third thread.
+
+```boring
+struct Stats:
+    float sum
+    int   count
+
+kernel BlockStats:
+    let [float]'global    data
+    mut [Stats]'sync      acc      # compound state — barrier covers both fields
+    mut [float]'unified   result
+
+    def ():
+        let tid = gpu.thread.x
+        acc[tid] = Stats(sum = data[tid], count = 1)
+        # barrier inserted automatically before the loop
+
+        var stride = gpu.block_dim.x / 2
+        while stride > 0:
+            if tid < stride:
+                acc[tid] = Stats(
+                    sum   = acc[tid].sum   + acc[tid + stride].sum,
+                    count = acc[tid].count + acc[tid + stride].count,
+                )
+            stride = stride / 2
+        # barrier inserted automatically at the top of each iteration
+
+        if tid == 0:
+            result[gpu.block.x] = acc[0].sum / acc[0].count as float
+```
+
+`'actor'global` is appropriate for independent counters (one atomic per slot). `struct'sync` is appropriate when two or more values must be read together coherently.
+
+### Dynamic `'sync` — size from launch
 
 ```boring
 kernel Reduce:
-    mut [float]'shared tile    # size from smem at launch
+    mut [float]'sync tile    # size from smem at launch
 
     def (): ...
 
@@ -350,7 +409,7 @@ maxSharedMem = 49152
 computeCapability = [8, 6]
 ```
 
-> Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
+> Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if barriers are missing. In auto mode the transpiler inserts them; in manual mode (`sync` present in the `def`) the developer is responsible.
 
 ---
 

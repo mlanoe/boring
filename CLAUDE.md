@@ -86,7 +86,7 @@ let int'stack n = 10
 | `mut` | no | yes |
 | `var` | yes | depends on qualifier |
 
-Qualifier constraints: `mut 'shared` → compile error in `boring build` (not enforced by `boring run`). `var 'guard` compiles cleanly with no warning today.
+Qualifier constraints: `mut 'shared` → compile error in both `boring run` and `boring build` (caught by the semantic checker). `var 'guard` compiles cleanly with no warning today.
 
 Parameter passing hierarchy (`var` ≥ `mut` ≥ `let`, caller can pass down, never up) is the intended design but is **not currently enforced** — passing a `let` binding into a `var` parameter compiles and runs without error.
 

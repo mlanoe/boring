@@ -1,0 +1,2 @@
+lazy int result
+result = 42

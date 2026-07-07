@@ -16,11 +16,14 @@ struct DeviceEmitter {
     indent: usize,
     current_fields: Vec<KernelFieldDecl>,
     current_kernel: String,
+    /// Auto-barrier mode: true when the kernel `def` has no explicit `sync` statements.
+    /// When false (manual mode), the developer owns all barriers.
+    auto_sync: bool,
 }
 
 impl DeviceEmitter {
     fn new() -> Self {
-        Self { out: String::new(), indent: 0, current_fields: vec![], current_kernel: String::new() }
+        Self { out: String::new(), indent: 0, current_fields: vec![], current_kernel: String::new(), auto_sync: false }
     }
 
     fn line(&mut self, s: &str) {
@@ -146,7 +149,7 @@ impl DeviceEmitter {
 
         // 4. Dynamic 'shared array fields → threadgroup T* [[threadgroup(N)]]
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Shared) {
+            if matches!(f.qual, GpuQual::Sync) {
                 if matches!(f.ty, Type::Array(_)) {
                     let elem = elem_msl_type(&f.ty);
                     params.push(format!("threadgroup {}* {} [[threadgroup({})]]", elem, f.name, tg_idx));
@@ -173,7 +176,7 @@ impl DeviceEmitter {
 
         // Declare static 'shared arrays inside the kernel body.
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Shared) {
+            if matches!(f.qual, GpuQual::Sync) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     let elem = elem_msl_type(inner);
                     self.line(&format!("threadgroup {} {}[{}];", elem, f.name, n));
@@ -215,7 +218,20 @@ impl DeviceEmitter {
             }
         }
 
-        for stmt in &entry.body { self.emit_stmt(stmt); }
+        let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Sync));
+        self.auto_sync = has_sync_fields && !body_has_explicit_sync(&entry.body);
+        if self.auto_sync {
+            // Emit initial write-phase barrier after the first block of statements that
+            // write to 'sync fields, before any loop that reads them cross-thread.
+            let split = first_loop_index(&entry.body);
+            for stmt in &entry.body[..split] { self.emit_stmt(stmt); }
+            if split < entry.body.len() {
+                self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            }
+            for stmt in &entry.body[split..] { self.emit_stmt(stmt); }
+        } else {
+            for stmt in &entry.body { self.emit_stmt(stmt); }
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -285,6 +301,11 @@ impl DeviceEmitter {
                 let cond = self.expr(&w.condition);
                 self.line(&format!("while ({}) {{", cond));
                 self.indent += 1;
+                // In auto-sync mode, insert a barrier at the top of each loop iteration
+                // so that 'sync writes from the previous iteration are visible to all threads.
+                if self.auto_sync && body_accesses_sync_field(&w.body, &self.current_fields) {
+                    self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                }
                 for s in &w.body { self.emit_stmt(s); }
                 self.indent -= 1;
                 self.line("}");
@@ -305,6 +326,9 @@ impl DeviceEmitter {
                     }
                 }
                 self.indent += 1;
+                if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
+                    self.line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                }
                 for s in &f.body { self.emit_stmt(s); }
                 self.indent -= 1;
                 self.line("}");
@@ -439,7 +463,7 @@ impl DeviceEmitter {
 fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Shared | GpuQual::Local => None,
+            GpuQual::Sync | GpuQual::Local => None,
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
                 let elem = elem_msl_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
@@ -467,7 +491,7 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
 fn buffer_field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Shared | GpuQual::Local => None,
+            GpuQual::Sync | GpuQual::Local => None,
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
                 Some(f.name.clone())
             }
@@ -564,4 +588,65 @@ fn map_builtin_fn(name: &str) -> String {
         "sqrt"  => "sqrt".into(),
         other   => other.into(),
     }
+}
+
+// ── Auto-sync helpers ─────────────────────────────────────────────────────────
+
+/// Returns true if the body contains at least one explicit `sync` statement at any depth.
+fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Comment(c) if c == "sync" => true,
+        Stmt::While(w)   => body_has_explicit_sync(&w.body),
+        Stmt::For(f)     => body_has_explicit_sync(&f.body),
+        Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
+                         || i.else_body.as_ref().map_or(false, |b| body_has_explicit_sync(b)),
+        _ => false,
+    })
+}
+
+/// Returns true if the body references any field declared with `'sync`.
+fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
+    let sync_names: Vec<&str> = fields.iter()
+        .filter(|f| matches!(f.qual, GpuQual::Sync))
+        .map(|f| f.name.as_str())
+        .collect();
+    if sync_names.is_empty() { return false; }
+    stmts_reference_any(stmts, &sync_names)
+}
+
+fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
+    stmts.iter().any(|s| stmt_references_any(s, names))
+}
+
+fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
+    match stmt {
+        Stmt::Expr(e) => expr_references_any(e, names),
+        Stmt::Return(r) => r.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
+        Stmt::Let(s) => s.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
+        Stmt::While(w) => stmts_reference_any(&w.body, names),
+        Stmt::For(f)   => stmts_reference_any(&f.body, names),
+        Stmt::If(i)    => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
+                       || i.else_body.as_ref().map_or(false, |b| stmts_reference_any(b, names)),
+        _ => false,
+    }
+}
+
+fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
+    match &expr.kind {
+        ExprKind::Var(n)           => names.contains(&n.as_str()),
+        ExprKind::Index(a, i)      => expr_references_any(a, names) || expr_references_any(i, names),
+        ExprKind::Field(e, _)      => expr_references_any(e, names),
+        ExprKind::BinOp(_, l, r)   => expr_references_any(l, names) || expr_references_any(r, names),
+        ExprKind::UnaryOp(_, e)    => expr_references_any(e, names),
+        ExprKind::Assign(l, r)     => expr_references_any(l, names) || expr_references_any(r, names),
+        ExprKind::Call(f, args)    => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
+        _ => false,
+    }
+}
+
+/// Returns the index of the first While or For loop in the statement list.
+/// Used to split the pre-loop write phase from the loop phase.
+fn first_loop_index(stmts: &[Stmt]) -> usize {
+    stmts.iter().position(|s| matches!(s, Stmt::While(_) | Stmt::For(_)))
+        .unwrap_or(stmts.len())
 }

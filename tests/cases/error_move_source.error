@@ -1,1 +1,5 @@
-use of moved value 'a'
+error: use of moved value 'a': the value was moved and is no longer accessible — use .clone() to make a copy
+ --> <file>:7
+  |
+7 |     return a.val
+  |

@@ -3933,7 +3933,7 @@ cd main_rust &amp;&amp; cargo +nightly run</code></pre></div>
 <h3 id="language-internals">Language internals</h3>
 <p><strong><a href="interpreter-port-plan.html">Interpreter self-hosting plan</a></strong> How and why the Boring interpreter was rewritten in Boring itself (<code>boring/interpreter/</code>), the porting strategy, and the current implementation status.</p>
 <h3 id="design-drafts-and-exploration">Design drafts and exploration</h3>
-<p><strong><a href="library-distribution.html">Library Distribution Model</a></strong> Design exploration for how Boring packages and libraries are distributed, versioned, and consumed — not yet decided.</p>
+<p><strong><a href="library-distribution.html">Library Distribution Model</a></strong> Boring transpiles to Rust — dependency management and distribution are handled by Cargo on the generated project. A Boring-native package manager is out of scope: source files remain private, only the generated Rust is shipped.</p>
 </main>
 <script>
 // Build TOC from headings

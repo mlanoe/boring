@@ -35,7 +35,7 @@ def string val_type_name(Value v):
         Value.EnumVariant(type_name, _, _): type_name
         _: "unknown"
 
-def Value call_method(Interpreter interp, Value recv, string method_name, [Value] args):
+def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     if method_name == "clone" and args.length == 0:
         return recv
     let recv_type = recv.type_name()

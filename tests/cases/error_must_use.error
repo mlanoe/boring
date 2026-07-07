@@ -1,1 +1,5 @@
-return value discarded
+error: return value discarded — bind it with `let`, discard with `_ = f()`
+ --> <file>:4
+  |
+4 | answer()
+  |

@@ -13,7 +13,7 @@ BORING_KW = {
     "let","mut","var","def","req","set","type","struct","enum","trait","ext","mod","use","pub","new",
     "return","if","elif","else","match","while","for","in","loop","do",
     "break","continue","guard","try","catch","throw","throws","defer","task",
-    "stream","yield","channel",
+    "stream","yield","channel","sync","kernel",
     "nil","true","false","as","and","or","not","is","self","void","pass","init",
 }
 BORING_TYPES = {"int","uint","float","bool","string","str","Self"}

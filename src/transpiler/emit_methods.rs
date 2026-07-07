@@ -1382,6 +1382,7 @@ impl Transpiler {
     pub(crate) fn emit_args_coerced(&self, fn_name: &str, args: &[Arg]) -> String {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
         let rebindable_flags = self.fn_rebindable.get(fn_name).cloned().unwrap_or_default();
+        let mutable_flags = self.fn_mutable.get(fn_name).cloned().unwrap_or_default();
         let defaults = self.fn_defaults.get(fn_name).cloned().unwrap_or_default();
         let variadic_idx = self.fn_variadic.get(fn_name).copied();
         let param_names = self.fn_param_names.get(fn_name).cloned().unwrap_or_default();
@@ -1426,6 +1427,7 @@ impl Transpiler {
             if let Some(a) = args.get(i) {
                 let param_ty = sig.get(i);
                 let param_rebindable = rebindable_flags.get(i).copied().unwrap_or(false);
+                let param_mutable = mutable_flags.get(i).copied().unwrap_or(false);
                 // When passing a `throws` function where a non-throws fn param is expected,
                 // wrap it in a closure that unwraps the Result.
                 let coerced = if let ExprKind::Var(fn_name) = &a.value.kind {
@@ -1462,6 +1464,14 @@ impl Transpiler {
                     );
                     if arg_is_weak && param_is_non_weak {
                         self.push_error(a.value.line, a.value.col, format!("cannot pass `{}` (weak reference) to a non-weak parameter — weak references may be invalid. Call .upgrade() first and handle the Option.", vname));
+                    }
+                    // Hierarchy check: let < mut < var — caller cannot pass up the hierarchy.
+                    // let → mut param: immutable argument passed to a mutable (non-rebindable) parameter.
+                    if param_mutable && !param_rebindable && self.immutable_local_vars.contains(vname.as_str()) {
+                        self.push_error(a.value.line, a.value.col, format!(
+                            "cannot pass `{}` to a `mut` parameter — `{}` is immutable (`let` binding). Use `var` or `mut` instead.",
+                            vname, vname
+                        ));
                     }
                 }
                 // For Borrow/BorrowMut params, pass the inner type to emit_let_value so it does
@@ -1673,6 +1683,19 @@ impl Transpiler {
                 } else if param_rebindable && !matches!(param_ty,
                     Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
                 ) {
+                    if let ExprKind::Var(vname) = &a.value.kind {
+                        if self.immutable_local_vars.contains(vname.as_str()) {
+                            self.push_error(a.value.line, a.value.col, format!(
+                                "cannot pass `{}` to a `var` out-parameter — `{}` is immutable (`let` binding). Use `var` instead.",
+                                vname, vname
+                            ));
+                        } else if self.mut_local_vars.contains(vname.as_str()) {
+                            self.push_error(a.value.line, a.value.col, format!(
+                                "cannot pass `{}` to a `var` out-parameter — `{}` is `mut` (non-rebindable). Use `var` instead.",
+                                vname, vname
+                            ));
+                        }
+                    }
                     format!("&mut {}", emitted)
                 } else {
                     emitted
@@ -2031,6 +2054,7 @@ impl Transpiler {
             index_vars: self.index_vars.clone(),
             fn_sigs: self.fn_sigs.clone(),
             fn_rebindable: self.fn_rebindable.clone(),
+            fn_mutable: self.fn_mutable.clone(),
             enum_variants: self.enum_variants.clone(),
             enum_variant_fields: self.enum_variant_fields.clone(),
             enum_variant_field_types: self.enum_variant_field_types.clone(),
@@ -2169,6 +2193,8 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            immutable_local_vars: self.immutable_local_vars.clone(),
+            mut_local_vars: self.mut_local_vars.clone(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,
             in_struct_method: self.in_struct_method,

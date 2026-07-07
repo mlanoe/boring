@@ -18,7 +18,7 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 |---|---|---|
 | `'unified` | `cudaMallocManaged` | `device` + `MTLStorageMode.shared` (zero-copy on Apple Silicon) |
 | `'global` | `__global__` | `device` |
-| `'shared` | `__shared__` | `threadgroup` |
+| `'sync` | `__shared__` | `threadgroup` |
 | `'local` | registers | thread-private (default) |
 | `'const` scalar | `__constant__ T name;` | `constant T* name [[buffer(N)]]` — dereferenced (`*name`) in body |
 | `'const` fixed array (`[T, N]`) | `__constant__ T name[N];` | `constant T* name [[buffer(N)]]` — accessed as `name[i]` in body |
@@ -33,7 +33,8 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 | `gpu.block.x/y/z` | `blockIdx.x/y/z` | `threadgroup_position_in_grid.x/y/z` |
 | `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` |
 | `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` |
-| `sync` | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
+| `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
+| `'sync` auto-barrier | inserted before first loop + at top of each loop iteration accessing `'sync` fields | idem |
 | atomics (`'actor'global`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` etc. |
 
 ### MSL kernel signature

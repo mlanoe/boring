@@ -149,7 +149,7 @@ li { margin-bottom: 0.3rem; }
 <table><thead><tr><th>Boring</th><th>CUDA C</th></tr></thead><tbody><tr><td><code>gpu.thread.x</code></td><td><code>threadIdx.x</code></td></tr><tr><td><code>gpu.block.x</code></td><td><code>blockIdx.x</code></td></tr><tr><td><code>gpu.block_dim.x</code></td><td><code>blockDim.x</code></td></tr><tr><td><code>gpu.grid_dim.x</code></td><td><code>gridDim.x</code></td></tr><tr><td><code>sync</code></td><td><code>__syncthreads()</code></td></tr><tr><td><code>&#x27;unified</code> field</td><td><code>cudaMallocManaged</code></td></tr><tr><td><code>&#x27;global</code> field</td><td><code>cudaMalloc</code></td></tr><tr><td><code>&#x27;shared</code> field</td><td><code>__shared__</code></td></tr><tr><td><code>&#x27;const</code> scalar field</td><td><code>__constant__ T name;</code> (file scope)</td></tr><tr><td><code>&#x27;const</code> fixed array field (<code>[T, N]</code>)</td><td><code>__constant__ T name[N];</code> (file scope)</td></tr><tr><td>atomic <code>[i] +=</code> on <code>&#x27;actor&#x27;global</code></td><td><code>atomicAdd</code></td></tr><tr><td><code>print</code> in kernel</td><td><code>printf</code></td></tr></tbody></table>
 <h3 id="t-nconst-codegen-detail"><code>[T, N]&#x27;const</code> codegen detail</h3>
 <p>A <code>let [T, N]</code> field (inferred <code>&#x27;const</code>) is emitted as a file-scope <code>__constant__</code> array — not as a kernel parameter. Device code accesses it directly by name:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Lookup:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Lookup:
     <span class="kw">let</span> [<span class="kt">float</span>, <span class="nb">4</span>] lut = [<span class="nb">0.0</span>, <span class="nb">0.25</span>, <span class="nb">0.5</span>, <span class="nb">1.0</span>]
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span> output
 
@@ -180,7 +180,7 @@ __global__ void lookup(float* output) {
 <hr>
 <h2 id="shared--block-sram"><code>&#x27;shared</code> — block SRAM</h2>
 <h3 id="static--size-known-at-compile-time">Static — size known at compile time</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Reduce:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Reduce:
     <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>      input
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>      output
     <span class="kw">mut</span> [<span class="kt">float</span>, <span class="nb">256</span>]<span class="lf">&#x27;shared</span>  tile
@@ -192,13 +192,13 @@ __global__ void lookup(float* output) {
     <span class="kw">def</span> ():
         <span class="kw">let</span> tid = gpu.thread.x
         tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
-        sync
+        <span class="kw">sync</span>
         ...
 
 <span class="kw">mut</span> k = <span class="fn">Reduce</span>(n)
-<span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait</code></pre></div>
+<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait</code></pre></div>
 <h3 id="dynamic--size-passed-at-launch">Dynamic — size passed at launch</h3>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Reduce:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Reduce:
     <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  input
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  output
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;shared</span>   tile
@@ -210,20 +210,20 @@ __global__ void lookup(float* output) {
     <span class="kw">def</span> ():
         <span class="kw">let</span> tid = gpu.thread.x
         tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
-        sync
+        <span class="kw">sync</span>
         ...
 
 <span class="kw">mut</span> k = <span class="fn">Reduce</span>(n)
-<span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
+<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
 <p>Multiple named partitions — the transpiler generates offset arithmetic automatically:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>, flags = <span class="nb">64</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>, flags = <span class="nb">64</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
 <hr>
 <h2 id="atomics--actor-on-kernel-fields">Atomics — <code>&#x27;actor</code> on kernel fields</h2>
 <p>Only <code>&#x27;actor&#x27;global</code> is implemented. <code>&#x27;actor&#x27;unified</code> and <code>&#x27;actor&#x27;shared</code> are not yet supported (parse error on those suffixes).</p>
 <table><thead><tr><th>Qualifier</th><th>Location</th><th>Atomic scope</th></tr></thead><tbody><tr><td><code>mut [int]&#x27;actor&#x27;global bins</code></td><td>device DRAM</td><td>all threads, all blocks</td></tr></tbody></table>
 <p><strong>Operations transpiled automatically on <code>&#x27;actor&#x27;global</code> fields:</strong></p>
 <table><thead><tr><th>Boring</th><th>CUDA</th></tr></thead><tbody><tr><td><code>x += v</code></td><td><code>atomicAdd(&amp;x, v)</code></td></tr><tr><td><code>x -= v</code></td><td><code>atomicSub(&amp;x, v)</code></td></tr><tr><td><code>x |= v</code></td><td><code>atomicOr(&amp;x, v)</code></td></tr><tr><td><code>x &amp;= v</code></td><td><code>atomicAnd(&amp;x, v)</code></td></tr><tr><td><code>x ^= v</code></td><td><code>atomicXor(&amp;x, v)</code></td></tr></tbody></table>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>kernel Histogram:
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Histogram:
     <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;global</span>     input
     <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">&#x27;actor</span><span class="lf">&#x27;global</span> bins
 
@@ -242,17 +242,17 @@ __global__ void lookup(float* output) {
 <p>CUDA errors fall into two categories mapped to the two observation points of a <code>KernelHandle</code>.</p>
 <h3 id="synchronous-errors--raised-at-kernel">Synchronous errors — raised at <code>kernel(...)</code></h3>
 <p>Detected immediately before execution. The handle is never created.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h = <span class="fn">kernel</span>(block = <span class="nb">99999</span>) k    <span class="co"># raise GpuLaunchError</span></code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h = <span class="kw">kernel</span>(block = <span class="nb">99999</span>) k    <span class="co"># raise GpuLaunchError</span></code></pre></div>
 <h3 id="asynchronous-errors--raised-at-wait">Asynchronous errors — raised at <code>.wait</code></h3>
 <p>Detected only at synchronisation.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h = <span class="fn">kernel</span>(block = <span class="nb">256</span>) k
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k
 h.wait                              <span class="co"># raise GpuIllegalAccess if kernel faulted</span></code></pre></div>
 <h3 id="error-types">Error types</h3>
 <table><thead><tr><th>Error</th><th>Phase</th><th>Cause</th></tr></thead><tbody><tr><td><code>GpuLaunchError</code></td><td><code>kernel(...)</code></td><td>invalid config — block size, grid size</td></tr><tr><td><code>GpuOutOfMemory</code></td><td><code>kernel(...)</code></td><td>allocation failed</td></tr><tr><td><code>GpuIllegalAccess</code></td><td><code>.wait</code></td><td>out-of-bounds, invalid pointer</td></tr><tr><td><code>GpuStackOverflow</code></td><td><code>.wait</code></td><td>kernel recursion too deep</td></tr><tr><td><code>GpuTimeout</code></td><td><code>.wait</code></td><td>OS watchdog killed the kernel</td></tr><tr><td><code>GpuDeviceLost</code></td><td><code>.wait</code></td><td>device reset or crash</td></tr></tbody></table>
 <h3 id="after--and-error-propagation"><code>after =</code> and error propagation</h3>
 <p>If a dependency handle failed, the dependent kernel is not launched — the error propagates:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h1 = <span class="fn">kernel</span>(block = <span class="nb">256</span>) ka
-<span class="kw">let</span> h2 = <span class="fn">kernel</span>(block = <span class="nb">256</span>, after = h1) kb    <span class="co"># not launched if h1 failed</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> h1 = <span class="kw">kernel</span>(block = <span class="nb">256</span>) ka
+<span class="kw">let</span> h2 = <span class="kw">kernel</span>(block = <span class="nb">256</span>, after = h1) kb    <span class="co"># not launched if h1 failed</span>
 h2.wait                                         <span class="co"># raises h1&#x27;s error</span></code></pre></div>
 <hr>
 <h2 id="multi-device">Multi-device</h2>
@@ -262,8 +262,8 @@ h2.wait                                         <span class="co"># raises h1&#x2
 <span class="kw">mut</span> ka = <span class="kw">new</span>(g0) <span class="fn">Scale</span>(n)
 <span class="kw">mut</span> kb = <span class="kw">new</span>(g1) <span class="fn">Scale</span>(n)
 
-<span class="kw">mut</span> ka = <span class="fn">kernel</span>(block = <span class="nb">256</span>) ka |&gt; .wait
-<span class="kw">mut</span> kb = <span class="fn">kernel</span>(block = <span class="nb">256</span>) kb |&gt; .wait</code></pre></div>
+<span class="kw">mut</span> ka = <span class="kw">kernel</span>(block = <span class="nb">256</span>) ka |&gt; .wait
+<span class="kw">mut</span> kb = <span class="kw">kernel</span>(block = <span class="nb">256</span>) kb |&gt; .wait</code></pre></div>
 <p><code>after =</code> for cross-device ordering uses the same syntax as single-device. Same-device ordering is implemented via CUDA events.</p>
 <hr>
 <h2 id="known-limitations">Known limitations</h2>

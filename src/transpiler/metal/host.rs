@@ -175,7 +175,7 @@ impl HostEmitter {
         self.line("__pipeline: ComputePipelineState,");
         for field in &decl.fields {
             match field.qual {
-                GpuQual::Shared | GpuQual::Local => {}
+                GpuQual::Sync | GpuQual::Local => {}
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
                     match &field.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => {
@@ -345,7 +345,7 @@ impl HostEmitter {
                     }
                 }
             }
-            GpuQual::Shared => {}
+            GpuQual::Sync => {}
             GpuQual::Local => {
                 match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
@@ -366,7 +366,7 @@ impl HostEmitter {
         self.line("__pipeline,");
         for field in fields {
             match field.qual {
-                GpuQual::Shared => {}
+                GpuQual::Sync => {}
                 GpuQual::Local => match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
                     _ => self.line(&format!("{},", field.name)),
@@ -490,7 +490,7 @@ impl HostEmitter {
 
         // Dynamic shared memory size (per-block).
         let dyn_shared_terms: Vec<String> = fields.iter()
-            .filter(|f| matches!(f.qual, GpuQual::Shared))
+            .filter(|f| matches!(f.qual, GpuQual::Sync))
             .filter_map(|f| {
                 if let Type::Array(inner) = &f.ty {
                     let sz = elem_size_bytes(inner);
@@ -546,7 +546,7 @@ impl HostEmitter {
             }
         }
         for f in fields {
-            if matches!(f.qual, GpuQual::Shared) && matches!(f.ty, Type::Array(_)) {
+            if matches!(f.qual, GpuQual::Sync) && matches!(f.ty, Type::Array(_)) {
                 if let Type::Array(inner) = &f.ty {
                     let sz = elem_size_bytes(inner);
                     self.line(&format!(

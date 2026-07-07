@@ -1,1 +1,5 @@
-array comprehension range must start at 0 — use `..n` or `0..n`
+error: array comprehension range must start at 0 — use `..n` or `0..n`
+ --> <file>:2:17
+  |
+2 | let [int] bad = [0 for 1..n]
+  |                 ^

@@ -1435,7 +1435,7 @@ def Program parse_program(mut Parser p) throws:
 
 def Program parse(string source) throws:
     let toks = lex(source)
-    let p'actor = Parser(tokens: toks, pos: 0, allow_noparen_closure: true, allow_trailing_closure: true)
+    mut p'actor = Parser(tokens: toks, pos: 0, allow_noparen_closure: true, allow_trailing_closure: true)
     parse_program(p)
 # ── AST builder helpers ────────────────────────────────────────────────────────
 
@@ -2023,9 +2023,12 @@ def Pattern parse_match_single_pattern(mut Parser p) throws:
 
 def [MatchArm] parse_inline_match_arms(mut Parser p) throws:
     var arms = []
-    while not parser_check(p, "Newline") and not parser_check(p, "Eof"):
+    while true:
         let arm = parse_match_arm(p)
         arms.append(arm)
+        if not parser_eat(p, "Comma"):
+            break
+        parser_skip_newlines(p)
     arms
 
 def MatchArm parse_match_arm(mut Parser p) throws:

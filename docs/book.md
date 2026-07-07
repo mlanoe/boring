@@ -6984,4 +6984,4 @@ How and why the Boring interpreter was rewritten in Boring itself (`boring/inter
 ### Design drafts and exploration
 
 **[Library Distribution Model](library-distribution.html)**
-Design exploration for how Boring packages and libraries are distributed, versioned, and consumed — not yet decided.
+Boring transpiles to Rust — dependency management and distribution are handled by Cargo on the generated project. A Boring-native package manager is out of scope: source files remain private, only the generated Rust is shipped.

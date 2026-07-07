@@ -104,6 +104,16 @@ fn report_transpile_warnings(path: &Path, source: &str, warnings: &[transpiler::
     }
 }
 
+fn report_check_result(path: &Path, source: &str, result: checker::CheckResult) -> bool {
+    for w in &result.warnings {
+        report_warning(path, source, w.line, w.col, 1, &w.message);
+    }
+    for e in &result.errors {
+        report_error(path, source, e.line, e.col, 1, &e.message);
+    }
+    !result.errors.is_empty()
+}
+
 // ─── boring.toml ─────────────────────────────────────────────────────────────
 
 /// Minimal `boring.toml` representation.
@@ -616,6 +626,10 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
         }
     };
 
+    if report_check_result(&path, &source, checker::check(&program)) {
+        process::exit(1);
+    }
+
     let mut interp = interpreter::Interpreter::new();
 
     if let Some(name) = gpu_profile {
@@ -671,6 +685,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         Ok(p) => p,
         Err(e) => { report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg()); process::exit(1); }
     };
+    if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     let out = transpiler::transpile_with_config(&program, config);
     report_transpile_warnings(&path, &source, &out.warnings);
     if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
@@ -724,6 +739,10 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
             process::exit(1);
         }
     };
+
+    if report_check_result(&path, &source, checker::check(&program)) {
+        process::exit(1);
+    }
 
     let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
     let config_with_dir = transpiler::TranspileConfig { source_dir, ..config.clone() };

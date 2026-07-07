@@ -66,6 +66,45 @@ fn run_error_case(name: &str) {
     );
 }
 
+/// Exact diagnostic test: normalises the file path in `-->` lines to `<file>`
+/// then compares the full stderr against the `.error` snapshot.
+fn run_error_case_exact(name: &str) {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let case_dir = Path::new("tests/cases");
+    let br_file = case_dir.join(format!("{}.br", name));
+    let error_file = case_dir.join(format!("{}.error", name));
+
+    let output = Command::new(bin)
+        .arg(&br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        !output.status.success(),
+        "test '{}' expected to fail but exited successfully",
+        name
+    );
+
+    let path_str = br_file.to_string_lossy();
+    let raw = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    let actual = raw.replace(path_str.as_ref(), "<file>").trim_end().to_string();
+
+    let expected = std::fs::read_to_string(&error_file)
+        .unwrap_or_else(|_| panic!("missing error file: {}", error_file.display()))
+        .replace("\r\n", "\n")
+        .trim_end()
+        .to_string();
+
+    assert_eq!(
+        actual,
+        expected,
+        "test '{}': diagnostic mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
+        name,
+        expected,
+        actual
+    );
+}
+
 macro_rules! interp_test {
     ($name:ident) => {
         #[test]
@@ -80,6 +119,15 @@ macro_rules! error_test {
         #[test]
         fn $name() {
             run_error_case(stringify!($name));
+        }
+    };
+}
+
+macro_rules! error_test_exact {
+    ($name:ident) => {
+        #[test]
+        fn $name() {
+            run_error_case_exact(stringify!($name));
         }
     };
 }
@@ -159,11 +207,15 @@ interp_test!(ref_identity);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
-error_test!(error_undefined_var);
-error_test!(error_uncaught_throw);
-error_test!(error_move_source);
-error_test!(error_immutable_param);
-error_test!(error_conformance_missing);
-error_test!(error_must_use);
-error_test!(error_lazy_assign);
-error_test!(error_array_comp_nonzero);
+error_test_exact!(error_undefined_var);
+error_test_exact!(error_uncaught_throw);
+error_test_exact!(error_move_source);
+error_test_exact!(error_immutable_param);
+error_test_exact!(error_immutable_let);
+error_test_exact!(error_immutable_loop_var);
+error_test_exact!(error_mut_shared);
+error_test_exact!(error_lazy_assign);
+error_test_exact!(error_lazy_regular_assign);
+error_test_exact!(error_conformance_missing);
+error_test_exact!(error_must_use);
+error_test_exact!(error_array_comp_nonzero);

@@ -2,21 +2,21 @@
 
 # Environment helpers
 
-def Value env_get(Interpreter interp, string name):
-    let env = interp.current_env
+def Value env_get(mut Interpreter interp, string name):
+    mut env = interp.current_env
     let result = env.get(name)
     if let val = result:
         val
     else:
         throw "undefined variable '{name}'"
 
-def void env_set(Interpreter interp, string name, Value val):
-    let env = interp.current_env
+def void env_set(mut Interpreter interp, string name, Value val):
+    mut env = interp.current_env
     let ok = env.set(name, val)
     if not ok:
         throw "cannot assign to undefined variable '{name}'"
 
-def void env_define(Interpreter interp, string name, Value val, bool is_mutable):
+def void env_define(mut Interpreter interp, string name, Value val, bool is_mutable):
     if is_mutable:
         interp.current_env.define_mut(name, val)
     else:
@@ -35,7 +35,7 @@ def void pop_scope(mut Interpreter interp):
 
 # Main expression evaluator
 
-def Value eval_expr(Interpreter interp, Expr expr):
+def Value eval_expr(mut Interpreter interp, Expr expr):
     match expr.kind:
         # Literals
         ExprKind.Int(n):
@@ -559,7 +559,7 @@ def Value eval_expr(Interpreter interp, Expr expr):
             throw "unhandled expression kind"
 
 # DotIdent: .Variant — search all known enums for a matching variant
-def Value eval_dot_ident(Interpreter interp, string variant_name):
+def Value eval_dot_ident(mut Interpreter interp, string variant_name):
     for ename, decl in interp.enum_decls:
         for variant in decl.variants:
             if variant.name == variant_name:
@@ -567,7 +567,7 @@ def Value eval_dot_ident(Interpreter interp, string variant_name):
     throw "unknown dot-prefix variant '.{variant_name}'"
 
 # Evaluate a list of call arguments
-def [Value] eval_args(Interpreter interp, [Arg] args):
+def [Value] eval_args(mut Interpreter interp, [Arg] args):
     var vals = []
     for arg in args:
         let v = eval_expr(interp, arg.value)
@@ -587,7 +587,7 @@ def [Value] eval_args(Interpreter interp, [Arg] args):
     vals
 
 # Binary operation dispatch
-def Value eval_binop(Interpreter interp, BinOp op, Expr lhs, Expr rhs):
+def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
     # Short-circuit logical ops
     match op:
         BinOp.And:
@@ -908,7 +908,21 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 _:
                     Value.Bool(l.type_name() != r.type_name())
         BinOp.RefEq:
-            Value.Bool(l == r)
+            match l:
+                Value.Object(l_inner):
+                    match r:
+                        Value.Object(r_inner):
+                            let lid = l_inner.get_field("__ref_id")
+                            let rid = r_inner.get_field("__ref_id")
+                            if let lv = lid:
+                                if let rv = rid:
+                                    Value.Bool(lv == rv)
+                                else:
+                                    Value.Bool(false)
+                            else:
+                                Value.Bool(false)
+                        _: Value.Bool(false)
+                _: Value.Bool(l == r)
         BinOp.And:
             throw "And handled by short-circuit path"
         BinOp.Or:
@@ -971,7 +985,7 @@ def Value get_tuple_field([Value] elems, string field_name):
     if field_name == "7": return elems[7] else Value.Nil
     throw "no field '{field_name}' on tuple"
 
-def Value get_field(Interpreter interp, Value obj, string field_name):
+def Value get_field(mut Interpreter interp, Value obj, string field_name):
     match obj:
         Value.Object(inner):
             let val_opt = inner.get_field(field_name)
@@ -1049,7 +1063,7 @@ def Value get_field(Interpreter interp, Value obj, string field_name):
             throw "cannot access field '{field_name}' on {obj.type_name()}"
 
 # Index access on a value
-def Value get_index(Interpreter interp, Value obj, Value idx):
+def Value get_index(mut Interpreter interp, Value obj, Value idx):
     match obj:
         Value.Array(items):
             match idx:
@@ -1086,7 +1100,7 @@ def Value get_index(Interpreter interp, Value obj, Value idx):
             throw "cannot index into {obj.type_name()}"
 
 # Call a value (function, closure, constructor)
-def Value call_value(Interpreter interp, Value callee, [Value] args):
+def Value call_value(mut Interpreter interp, Value callee, [Value] args):
     match callee:
         Value.Fn(decl, captured_env):
             call_fn(interp, decl, captured_env, args)
@@ -1102,7 +1116,7 @@ def Value call_value(Interpreter interp, Value callee, [Value] args):
             throw "'{callee.type_name()}' is not callable"
 
 # Call a method on a receiver value
-def Value call_method(Interpreter interp, Value recv, string method, [Value] args):
+def Value call_method(mut Interpreter interp, Value recv, string method, [Value] args):
     let recv_type2 = recv.type_name()
     match recv:
         Value.Object(obj):
@@ -1130,7 +1144,7 @@ def Value call_method(Interpreter interp, Value recv, string method, [Value] arg
         _:
             throw "no method '{method}' on {recv_type2}"
 
-def Value call_tuple_method(Interpreter interp, [Value] elems, string method, [Value] args):
+def Value call_tuple_method(mut Interpreter interp, [Value] elems, string method, [Value] args):
     match method:
         "map":
             if args.length != 1:
@@ -1150,7 +1164,7 @@ def bool string_gt(string a, string b):
     a > b
 
 # Call built-in array methods
-def Value call_array_method(Interpreter interp, var [Value] items, string method, [Value] args):
+def Value call_array_method(mut Interpreter interp, var [Value] items, string method, [Value] args):
     match method:
         "length":
             Value.Int(items.length)
@@ -1323,7 +1337,7 @@ def Value call_string_method(string s, string method, [Value] args):
             throw "no method '{method}' on String"
 
 # Call built-in dict methods
-def Value call_dict_method(Interpreter interp, var [(Value, Value)] entries, string method, [Value] args):
+def Value call_dict_method(mut Interpreter interp, var [(Value, Value)] entries, string method, [Value] args):
     match method:
         "get":
             if args.length < 1:
@@ -1374,7 +1388,7 @@ def Value call_dict_method(Interpreter interp, var [(Value, Value)] entries, str
             throw "no method '{method}' on Dict"
 
 # Call built-in set methods
-def Value call_set_method(Interpreter interp, var [Value] items, string method, [Value] args):
+def Value call_set_method(mut Interpreter interp, var [Value] items, string method, [Value] args):
     match method:
         "contains":
             if args.length != 1:
@@ -1437,7 +1451,7 @@ def Value call_float_method(float f, string method, [Value] args):
             throw "no method '{method}' on Float"
 
 # Try calling __as__<typename> method for explicit type conversions
-def Value? try_call_conversion_method(Interpreter interp, Value val, string type_name):
+def Value? try_call_conversion_method(mut Interpreter interp, Value val, string type_name):
     let method_name = "__as__" + type_name
     match val:
         Value.Object(inner):
@@ -1459,7 +1473,7 @@ def Value? try_call_conversion_method(Interpreter interp, Value val, string type
         _: nil
 
 # Type cast
-def Value cast_value(Interpreter interp, Value val, Type ty):
+def Value cast_value(mut Interpreter interp, Value val, Type ty):
     let type_name = match ty:
         Type.Named(name): name
         Type.Int: "int"
@@ -1836,7 +1850,7 @@ req string display_value(Interpreter interp, Value val):
             "<value>"
 
 # Call a method on a struct object
-def Value call_enum_method(Interpreter interp, string type_name, string variant, [Value] fields, string method, [Value] args):
+def Value call_enum_method(mut Interpreter interp, string type_name, string variant, [Value] fields, string method, [Value] args):
     let method_decl_opt = interp.find_method(type_name, method)
     if let method_decl = method_decl_opt:
         let self_val = Value.EnumVariant(type_name, variant, fields)
@@ -1856,7 +1870,7 @@ def Value call_enum_method(Interpreter interp, string type_name, string variant,
 def ObjectInner make_object(string type_name, [(string, Value)] fields):
     ObjectInner(type_name: type_name, fields: fields)
 
-def void eval_channel_rx_for(Interpreter interp, ObjectInner rx_inner, string var_name, [Stmt] body):
+def void eval_channel_rx_for(mut Interpreter interp, ObjectInner rx_inner, string var_name, [Stmt] body):
     let ch_id_opt = rx_inner.get_field("__ch_id__")
     if let ch_id_val = ch_id_opt:
         let ch_key = match ch_id_val:
@@ -1883,7 +1897,7 @@ def Value task_obj_get_value(Value v):
             if let fv = vopt: fv else: Value.Nil
         _: v
 
-def Value call_object_method(Interpreter interp, ObjectInner obj, string method, [Value] args):
+def Value call_object_method(mut Interpreter interp, ObjectInner obj, string method, [Value] args):
     let type_name = obj.type_name
     let method_decl_opt = interp.find_method(type_name, method)
     if let method_decl = method_decl_opt:
@@ -1943,7 +1957,7 @@ def Value call_closure(mut Interpreter interp, [string] params, [Stmt] body, Env
         _: Value.Nil
 
 # Evaluate a block of statements, returning the last expression value
-def Value eval_block(Interpreter interp, [Stmt] stmts):
+def Value eval_block(mut Interpreter interp, [Stmt] stmts):
     var last = Value.Nil
     var i = 0
     while i < stmts.length:
@@ -1956,7 +1970,7 @@ def Value eval_block(Interpreter interp, [Stmt] stmts):
     last
 
 # Execute a statement (side-effects only)
-def void exec_stmt(Interpreter interp, Stmt stmt):
+def void exec_stmt(mut Interpreter interp, Stmt stmt):
     match stmt:
         Stmt.Expr(e):
             eval_expr(interp, e)
@@ -2021,7 +2035,7 @@ def void exec_stmt(Interpreter interp, Stmt stmt):
             throw "unhandled statement kind"
 
 # Evaluate the last statement as an expression (for implicit return)
-def Value eval_stmt_as_expr(Interpreter interp, Stmt stmt):
+def Value eval_stmt_as_expr(mut Interpreter interp, Stmt stmt):
     match stmt:
         Stmt.Expr(e):
             eval_expr(interp, e)
@@ -2041,12 +2055,12 @@ def Value eval_stmt_as_expr(Interpreter interp, Stmt stmt):
             Value.Nil
 
 # Match evaluation
-def Value eval_match_body(Interpreter interp, MatchBody body):
+def Value eval_match_body(mut Interpreter interp, MatchBody body):
     match body:
         MatchBody.Expr(e): eval_expr(interp, e)
         MatchBody.Block(stmts): eval_block(interp, stmts)
 
-def Value eval_match(Interpreter interp, Value subject, [MatchArm] arms):
+def Value eval_match(mut Interpreter interp, Value subject, [MatchArm] arms):
     for arm in arms:
         # Try all or-patterns
         var [Binding]? matched = nil
@@ -2197,7 +2211,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
             nil
 
 # Assignment to a target expression
-def void assign_target(Interpreter interp, Expr target, Value val):
+def void assign_target(mut Interpreter interp, Expr target, Value val):
     match target.kind:
         ExprKind.Var(name):
             if name == "_":
@@ -2266,7 +2280,7 @@ def void assign_target(Interpreter interp, Expr target, Value val):
             throw "invalid assignment target"
 
 # Instantiate a struct from constructor args
-def Value instantiate_struct(Interpreter interp, StructDecl decl, [Value] args):
+def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] args):
     # Separate labeled and positional args
     var {string=Value} labeled = {}
     var positional = []

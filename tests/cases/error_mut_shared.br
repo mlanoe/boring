@@ -1,0 +1,4 @@
+struct Counter:
+    var int value = 0
+
+mut Counter'shared c = Counter()

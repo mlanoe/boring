@@ -157,10 +157,15 @@ param_list      ::= param ("," param)* ","?   # trailing comma allowed
 
 # Type comes before the parameter name.
 # A function-typed parameter has param types after the name: `int f(int, int)`.
-param           ::= "var"? type "..." IDENT                # variadic: int... args → collects into Vec<T>
-                  | "var"? type IDENT "(" type_list? ")"   # function-typed parameter
-                  | "var"? type IDENT ("=" expr)?           # typed parameter, optional default
-                  | "var"? IDENT                            # untyped, inferred
+# Binding prefix controls the parameter passing contract:
+#   (none) / `let` — immutable borrow (&T); caller may pass let, mut, or var
+#   `mut`          — mutable borrow (&mut T); caller must have at least mut or var
+#   `var`          — out-parameter (&mut T, rebindable at call site); caller must have var
+# Hierarchy enforced by the transpiler: let ≤ mut ≤ var — passing down is always an error.
+param           ::= ("var" | "mut")? type "..." IDENT              # variadic: int... args → Vec<T>
+                  | ("var" | "mut")? type IDENT "(" type_list? ")" # function-typed parameter
+                  | ("var" | "mut")? type IDENT ("=" expr)?        # typed parameter, optional default
+                  | ("var" | "mut")? IDENT                         # untyped, inferred
 
 # Type and generic parameters declared in `<...>`.
 # Used in struct and enum declarations; functions infer their lifetime params automatically.
@@ -328,14 +333,20 @@ ext_member      ::= "pub"? fn_decl
 #   gpu.block.x  / .y / .z      — block index within grid
 #   gpu.block_dim.x / .y / .z   — block dimensions
 #   gpu.grid_dim.x  / .y / .z   — grid dimensions
-#   sync                         — barrier: wait for all threads in the block
+#   sync                         — explicit barrier (manual mode): wait for all threads in the block.
+#                                  If `sync` appears in a `def`, auto-insertion is disabled for that
+#                                  `def` and the developer owns all barrier placement.
 #
 # GPU memory qualifiers (kernel-context only — replace standard ownership qualifiers):
 #
 #   'unified  — unified DRAM (host + device); host can read/write directly.
 #               On Apple Silicon (Metal), zero-copy. On CUDA x86: cudaMallocManaged.
 #   'global   — device-only DRAM; host accesses via gpu.copy(). CUDA: __global__.
-#   'shared   — block SRAM shared by all threads in a block. CUDA: __shared__. MSL: threadgroup.
+#   'sync     — block SRAM shared by all threads in a block. CUDA: __shared__. MSL: threadgroup.
+#               Barriers are inserted automatically (auto mode) unless the `def` body contains
+#               at least one explicit `sync` statement (manual mode).
+#               A user-defined struct can also be qualified with 'sync to group compound state
+#               that must be observed coherently across threads.
 #   'local    — thread-private (registers). CUDA: local variables. MSL: default.
 #   'const    — constant cache; read-only. CUDA: __constant__. MSL: constant buffer.
 #
@@ -345,7 +356,7 @@ ext_member      ::= "pub"? fn_decl
 #   var T field       →  'local   (idem)
 #   let [T, N] field  →  'const   (fixed array `let` → constant cache)
 #   mut [T, N] field  →  'local   (fixed array `mut`/`var` → thread-private)
-#   Dynamic [T] always requires an explicit qualifier ('unified, 'global, or 'shared).
+#   Dynamic [T] always requires an explicit qualifier ('unified, 'global, or 'sync).
 #
 # Host-side binding qualifiers for kernel results (outside kernel struct):
 #   T'unified  — returned slice lives in unified memory; accessible on both host and device
@@ -1016,7 +1027,9 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 # struct, enum, trait, ext, use, as, and, or, not, guard,
 # break, continue, self, init, new, with,
 # try, catch, throw, throws, defer,
-# task, set, wait, join, channel, sync,
+# task, set, wait, join, sync,
+# Note: `channel` is NOT a reserved keyword — it is a stdlib function (channel<T>(cap)).
+#       Use `channel<T, N>()` or `channel<T>(cap)` as ordinary function calls.
 # kernel,
 # Note: `select` was removed in 0.3.0 — use Future.done() polling instead.
 # true, false, nil, is,

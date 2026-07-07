@@ -283,6 +283,9 @@ struct Transpiler {
     /// Per-function rebindable flags: fn_name → [is_rebindable per param index].
     /// A rebindable (var) param receives `&mut Wrapper<T>` at the call site.
     pub(crate) fn_rebindable: std::collections::HashMap<String, Vec<bool>>,
+    /// Per-function mutable flags: fn_name → [is_mutable per param index].
+    /// A mutable (mut) param is non-rebindable but mutable — caller must pass a mut/var binding.
+    pub(crate) fn_mutable: std::collections::HashMap<String, Vec<bool>>,
     /// Variadic param index per function: fn_name → index of the `...` param.
     pub(crate) fn_variadic: std::collections::HashMap<String, usize>,
     /// Inside a `try:` body closure — calls to throws functions get `?`.
@@ -381,6 +384,12 @@ struct Transpiler {
     /// Used by qualifier inference to determine auto-ref mutability and to detect
     /// def calls on immutable parameters.
     pub(crate) fn_current_params_mut: std::collections::HashSet<String>,
+    /// Local variables and parameters that are immutable (`let` binding, or plain param without
+    /// `mut`/`var`). Used to reject passing an immutable variable to a `mut` or `var` parameter.
+    pub(crate) immutable_local_vars: std::collections::HashSet<String>,
+    /// Local variables and parameters that are mutable but non-rebindable (`mut` binding, or
+    /// `mut` param). Used to reject passing a `mut` binding to a `var` out-parameter.
+    pub(crate) mut_local_vars: std::collections::HashSet<String>,
     /// Names declared as `type Name as InnerType` newtype wrappers.
     /// Used in emit_constructor to emit `Name(val)` (tuple struct) rather than `Name { field: val }`.
     pub(crate) newtype_types: std::collections::HashSet<String>,
@@ -654,6 +663,7 @@ impl Transpiler {
             weak_vars: std::collections::HashSet::new(),
             auto_ref_params: std::collections::HashSet::new(),
             fn_rebindable: std::collections::HashMap::new(),
+            fn_mutable: std::collections::HashMap::new(),
             fn_variadic: std::collections::HashMap::new(),
             in_try_body: false,
             in_type_setter: false,
@@ -691,6 +701,8 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            immutable_local_vars: std::collections::HashSet::new(),
+            mut_local_vars: std::collections::HashSet::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
             var_newtype_type: std::collections::HashMap::new(),
@@ -2083,6 +2095,8 @@ impl Transpiler {
         self.fn_defaults.insert(this_mangled, defaults);
         let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_rebindable.entry(f.name.clone()).or_insert(rebindable_flags);
+        let mutable_flags: Vec<bool> = f.params.iter().map(|p| p.mutable).collect();
+        self.fn_mutable.entry(f.name.clone()).or_insert(mutable_flags);
         if let Some(ret_ty) = &f.return_ty {
             // For overloaded functions, a non-void definition should not be overwritten by
             // a void one (e.g. exec_stmt: Signal? beats exec_stmt: void for already_opt detection).

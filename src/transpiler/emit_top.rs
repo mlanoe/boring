@@ -293,6 +293,8 @@ impl Transpiler {
             self.fn_sigs.entry(f.name.clone()).or_insert(param_types);
             let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
             self.fn_rebindable.entry(f.name.clone()).or_insert(rebindable_flags);
+            let mutable_flags: Vec<bool> = f.params.iter().map(|p| p.mutable).collect();
+            self.fn_mutable.entry(f.name.clone()).or_insert(mutable_flags);
             let param_names: Vec<String> = f.params.iter()
                 .map(|p| p.name.clone())
                 .collect();
@@ -860,6 +862,18 @@ impl Transpiler {
             .filter(|p| p.mutable)
             .map(|p| p.name.clone())
             .collect();
+        let prev_immutable_local_vars = std::mem::take(&mut self.immutable_local_vars);
+        // Plain params (neither `mut` nor `var`) are immutable.
+        self.immutable_local_vars = f.params.iter()
+            .filter(|p| !p.mutable && !p.rebindable)
+            .map(|p| p.name.clone())
+            .collect();
+        let prev_mut_local_vars = std::mem::take(&mut self.mut_local_vars);
+        // `mut` params are mutable but non-rebindable.
+        self.mut_local_vars = f.params.iter()
+            .filter(|p| p.mutable && !p.rebindable)
+            .map(|p| p.name.clone())
+            .collect();
         let prev_auto_ref_params = std::mem::take(&mut self.auto_ref_params);
         self.auto_ref_params = f.params.iter()
             .filter(|p| matches!(&p.ty,
@@ -949,6 +963,8 @@ impl Transpiler {
         self.fn_current_param_lines = prev_fn_current_param_lines;
         self.fn_current_param_cols  = prev_fn_current_param_cols;
         self.fn_current_params_mut  = prev_fn_current_params_mut;
+        self.immutable_local_vars   = prev_immutable_local_vars;
+        self.mut_local_vars         = prev_mut_local_vars;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
         self.task_vars             = prev_task_vars;
@@ -2103,7 +2119,7 @@ impl Transpiler {
                 // GPU memory qualifiers: emitted as pointer types (placeholders).
                 OwnerQual::GpuUnified => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuGlobal | OwnerQual::GpuActorGlobal => format!("*mut {}", self.emit_type(inner)),
-                OwnerQual::GpuShared  => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuSync    => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuLocal   => self.emit_type(inner), // local = stack in Rust
                 OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),
             }

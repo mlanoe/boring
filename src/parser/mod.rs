@@ -1258,8 +1258,13 @@ impl Parser {
             }
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
             Type::Qualified(inner, OwnerQual::GpuGlobal)  => (GpuQual::Global,  *inner),
-            Type::Qualified(inner, OwnerQual::GpuShared)  => (GpuQual::Shared,  *inner),
-            Type::Qualified(inner, OwnerQual::Shared)     => (GpuQual::Shared,  *inner), // 'shared = block SRAM in kernel
+            Type::Qualified(inner, OwnerQual::GpuSync)    => (GpuQual::Sync,    *inner),
+            Type::Qualified(inner, OwnerQual::Shared) => {
+                return Err(ParseError::Generic {
+                    msg: "'shared is not valid inside a kernel — use 'sync for block SRAM (auto-barrier) or 'global/'unified for device memory".into(),
+                    line, col, len: 1,
+                });
+            }
             Type::Qualified(inner, OwnerQual::GpuLocal) => {
                 // '[T]'local is not representable on GPU — unsized thread-local arrays don't exist.
                 if matches!(*inner, Type::Array(_)) {

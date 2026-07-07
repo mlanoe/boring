@@ -109,12 +109,12 @@ kernel C:
 
 #[test]
 fn device_shared_static_becomes_shared_decl_not_param() {
-    // 'shared with a fixed-size literal init — device emitter declares __shared__
+    // 'sync with a fixed-size literal init — device emitter declares __shared__
     // inside the kernel body rather than as a pointer parameter.
     let (cu, _) = cuda_codegen("shared_static", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'shared scratch
+    let [float]'sync scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[tid]
@@ -130,15 +130,15 @@ fn device_shared_dynamic_becomes_extern_shared() {
     let (cu, _) = cuda_codegen("shared_dynamic", r#"
 kernel D:
     mut [float]'unified out
-    let [float]'shared  scratch
+    let [float]'sync  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(cu.contains("extern __shared__"),
-        "expected extern __shared__ for dynamic 'shared Array;\ngot:\n{cu}");
+        "expected extern __shared__ for dynamic 'sync Array;\ngot:\n{cu}");
     assert!(!cu.contains("scratch* scratch"),
-        "dynamic 'shared must not appear as a kernel parameter;\ngot:\n{cu}");
+        "dynamic 'sync must not appear as a kernel parameter;\ngot:\n{cu}");
 }
 
 #[test]
@@ -207,13 +207,13 @@ fn host_shared_field_absent_from_rust_struct() {
     let (_, rs) = cuda_codegen("host_shared_absent", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'shared  scratch
+    let [float]'sync  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(!rs.contains("scratch: CudaSlice"),
-        "'shared field must not appear as CudaSlice in Rust struct;\ngot:\n{rs}");
+        "'sync field must not appear as CudaSlice in Rust struct;\ngot:\n{rs}");
 }
 
 // ─── host — __boring_launch ───────────────────────────────────────────────────
@@ -254,13 +254,13 @@ fn host_dynamic_shared_smem_uses_block_x_times_elem_size() {
     let (_, rs) = cuda_codegen("smem_dynamic", r#"
 kernel D:
     mut [float]'unified out
-    let [float]'shared  scratch
+    let [float]'sync  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(rs.contains("block_dim.0 as usize * 8"),
-        "expected block_dim.0 * sizeof(f64)=8 for dynamic 'shared;\ngot:\n{rs}");
+        "expected block_dim.0 * sizeof(f64)=8 for dynamic 'sync;\ngot:\n{rs}");
 }
 
 #[test]
