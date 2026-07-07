@@ -5,6 +5,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.1] — 2026-07-07 *(interpreter: 78/78 · transpiler: 245/245 tests passing)*
+
+### Changed
+
+- **`'shared` → `'sync` GPU qualifier** — the block-SRAM qualifier is renamed from `'shared` to `'sync` inside `kernel` structs. The old name collided with the host `'shared` qualifier (Rc/Arc); `'sync` makes the synchronisation contract explicit.
+
+- **Auto-barrier insertion for `'sync` fields** — the transpiler now inserts `__syncthreads()` / `threadgroup_barrier(...)` automatically. No explicit `sync` statement needed in the common case:
+  - A barrier is emitted before the first loop in the `def ()` body (write-phase → loop-phase boundary).
+  - A barrier is emitted at the top of each loop iteration that accesses a `'sync` field (covers stride-reduction and similar patterns).
+  - **Manual mode** — if at least one explicit `sync` statement appears in the `def`, auto-insertion is disabled for the entire `def`; the developer owns all barrier placement.
+
+- **`struct 'sync`** — a user-defined struct can be qualified with `'sync` to group compound state that must be observed coherently across threads. The barrier covers all fields of the struct. Use this instead of per-field `'actor'global` atomics when two or more values must be read together.
+
+- **`sync` and `kernel` added to syntax highlighter** — `docs/build.py` now colours both as keywords in generated HTML documentation.
+
+- **Docs updated** — `gpu-module.md`, `metal-backend.md`, and all generated HTML files reflect the new qualifier name, auto-barrier rules, and the struct `'sync` pattern.
+
+---
+
 ## [0.9.0] — 2026-07-07 *(interpreter: 78/78 · transpiler: 216/216 tests passing)*
 
 ### Fixed
