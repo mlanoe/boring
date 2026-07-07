@@ -44,6 +44,15 @@ pub fn lex_all(source: &str) -> Result<Vec<Token>, Vec<LexError>> {
 /// Regular `"..."` strings found while scanning are copied verbatim (so a `"""`
 /// that happens to appear inside a regular string literal is never misidentified).
 fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
+    // Normalize Windows line endings before any processing so that triple-string
+    // dedent logic (strip_prefix/suffix '\n') works correctly on CRLF files.
+    let normalized;
+    let source = if source.contains('\r') {
+        normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+        &normalized
+    } else {
+        source
+    };
     let chars: Vec<char> = source.chars().collect();
     let n = chars.len();
     let mut result = String::with_capacity(source.len());
