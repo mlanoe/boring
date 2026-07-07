@@ -5,6 +5,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.0] — 2026-07-07 *(interpreter: 78/78 · transpiler: 216/216 tests passing)*
+
+### Fixed
+
+- **Windows CRLF in triple-string preprocessor** — source files with `\r\n` line endings caused `strip_prefix('\n')` / `strip_suffix('\n')` to fail inside `preprocess_triple_strings`, leaving a stray `\r` in the dedented string content. CRLF is now normalised to LF before preprocessing; zero overhead on macOS/Linux.
+
+### Improved — Diagnostics
+
+- **Multi-character caret spans** — runtime errors, warnings, and lexer diagnostics now emit a `^^^` caret that spans the full token width (`len` field on `Expr` / `RuntimeError`). Previously all carets were a single `^`.
+- **Multiple lexer errors** — the lexer now accumulates all per-line errors (unexpected character, unterminated string, integer overflow) before returning, instead of stopping at the first one. Structural errors (mixed indentation, invalid dedent) still abort immediately.
+- **Precise column on runtime errors** — undefined-variable, type-mismatch, division-by-zero, underflow, and index-out-of-bounds errors now report the exact column and token length of the offending operand.
+- **Transpiler column in parameter errors** — `cannot assign to field` and `cannot call def method` errors now point to the parameter's source column instead of column 0.
+- **Warning span** — `report_warning` accepts a `len` argument; multi-character tokens in warnings are now underlined with the correct number of carets.
+
+### Changed
+
+- **`spec/grammar.bnf`** — added missing reserved keywords: `lazy`, `new`, `with`, `sync`.
+- **`linguist/Boring.tmLanguage.json`** — added `lazy`, `new`, `with`, `sync` to the `declaration-keywords` pattern.
+- **`docs/book.md` §28 Diagnostics** — fully rewritten to document the new caret-span format, multi-error output, and warning layout.
+
+---
+
 ## [0.8.0] — 2026-07-04 *(interpreter: 65/65 tests passing)*
 
 ### Added (post-release)

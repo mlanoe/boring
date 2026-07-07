@@ -1012,11 +1012,11 @@ SEMICOLON       ::= ";"                # treated as NEWLINE by the lexer — sep
 COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 
 # Keywords (reserved):
-# def, req, transient, let, mut, var, pub, return, if, elif, else, match, while, do, loop, for, in,
+# def, req, transient, let, mut, var, lazy, pub, return, if, elif, else, match, while, do, loop, for, in,
 # struct, enum, trait, ext, use, as, and, or, not, guard,
-# break, continue, self, init,
+# break, continue, self, init, new, with,
 # try, catch, throw, throws, defer,
-# task, set, wait, join, channel,
+# task, set, wait, join, channel, sync,
 # kernel,
 # Note: `select` was removed in 0.3.0 — use Future.done() polling instead.
 # true, false, nil, is,

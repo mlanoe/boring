@@ -179,7 +179,7 @@
 
     "declaration-keywords": {
       "name": "keyword.other.declaration.boring",
-      "match": "\\b(let|mut|var|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|channel|kernel)\\b"
+      "match": "\\b(let|mut|var|lazy|new|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|channel|sync|with|kernel)\\b"
     },
 
     "operator-keywords": {
