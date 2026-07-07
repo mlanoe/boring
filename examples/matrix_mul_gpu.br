@@ -1,0 +1,37 @@
+# GPU matrix multiplication — Boring with CUDA/Metal backend
+# width=32 for simulation; increase to 1024 for boring build --target cuda
+
+let width = 32
+
+kernel MatrixMul:
+    let [float]'global  a
+    let [float]'global  b
+    mut [float]'unified c
+    let Dimension dim
+
+    init([float]'global input_a, [float]'global input_b, Dimension d):
+        a   = input_a
+        b   = input_b
+        c   = [0.0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        if row < width and col < width:
+            var float sum = 0.0
+            for k in 0..width:
+                sum += a[row * width + k] * b[k * width + col]
+            c[row * width + col] = sum
+
+let size = width * width
+var [float] host_a = [float(i % 100) / 100.0 for i in 0..size]
+var [float] host_b = [float(i % 50)  / 50.0  for i in 0..size]
+
+var k = MatrixMul(host_a, host_b, Dimension(width, width))
+kernel:
+    k(block = (16, 16))
+
+for i in 0..10:
+    for j in 0..10:
+        print "C[{i}][{j}] = {k.c[i * width + j]:.4f}"

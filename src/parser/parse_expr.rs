@@ -571,11 +571,6 @@ impl Parser {
                 let ctor = self.parse_postfix_top_level()?;
                 Ok(Expr { kind: ExprKind::New { arena, ctor: Box::new(ctor) }, line, col, len: self.tok_len()})
             }
-            // `kernel(params) expr` — GPU kernel launch expression.
-            // Disambiguated from `kernel Name:` declaration by checking for `(` next.
-            TokenKind::Kernel if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::LParen)) => {
-                self.parse_kernel_launch(line, col)
-            }
             _ => self.parse_postfix_top_level(),
         }
     }
@@ -1417,17 +1412,51 @@ impl Parser {
             TokenKind::LBracket => {
                 self.advance();
                 self.skip_newlines_and_indent();
+                // `[..n]` — allocate array of length n without initialization
+                if self.check(&TokenKind::DotDot) {
+                    return self.parse_array_alloc(line, col);
+                }
                 // Comprehension forms: `[v for ..n]` or `[f(i) for i in ..n]`
                 if !self.check(&TokenKind::RBracket) && !self.check(&TokenKind::Eof) {
                     // Parse first expression (value or computed expr)
                     let first = self.parse_expr()?;
                     if self.eat(&TokenKind::For) {
-                        // `[v for i in ..n]` — computed form
+                        // `[v for i in ..n]` or `[f(x) for x in collection]` — computed form
                         let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
                             let var = self.expect_ident()?;
                             self.expect(&TokenKind::In)?;
-                            let count = self.parse_comprehension_count(line, col)?;
-                            ExprKind::ArrayComp { expr: Box::new(first), var, count: Box::new(count) }
+                            if self.check(&TokenKind::DotDot) {
+                                // `[f(i) for i in ..n]` — range form
+                                let count = self.parse_comprehension_count(line, col)?;
+                                ExprKind::ArrayComp { expr: Box::new(first), var, count: Box::new(count) }
+                            } else {
+                                // Parse the source — could be `0..n` (range) or a collection expr
+                                let source = self.parse_or()?;
+                                match source.kind {
+                                    ExprKind::Range { ref start, ref end, inclusive: false }
+                                        if matches!(start.kind, ExprKind::Int(0)) =>
+                                    {
+                                        // `[f(i) for i in 0..n]` — treat as range form
+                                        ExprKind::ArrayComp { expr: Box::new(first), var, count: end.clone() }
+                                    }
+                                    ExprKind::Range { inclusive: true, .. } => {
+                                        return Err(ParseError::Generic {
+                                            msg: "array comprehension does not accept inclusive range (`..=`)".to_string(),
+                                            line, col, len: self.tok_len(),
+                                        });
+                                    }
+                                    ExprKind::Range { .. } => {
+                                        return Err(ParseError::Generic {
+                                            msg: "array comprehension range must start at 0 — use `..n` or `0..n`".to_string(),
+                                            line, col, len: self.tok_len(),
+                                        });
+                                    }
+                                    _ => {
+                                        // `[f(x) for x in collection]` — iter form
+                                        ExprKind::ArrayCompIter { expr: Box::new(first), var, iter: Box::new(source) }
+                                    }
+                                }
+                            }
                         } else {
                             // `[v for ..n]` — fill form
                             let count = self.parse_comprehension_count(line, col)?;
@@ -1732,6 +1761,15 @@ impl Parser {
 
     /// Parse the count expression in an array comprehension (`[v for ..n]` or `[f(i) for i in ..n]`).
     /// Accepts `..n` (sugar for `0..n`) and `0..n`. Rejects any non-zero start.
+    #[inline(never)]
+    fn parse_array_alloc(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
+        self.advance(); // consume `..`
+        let count = self.parse_expr()?;
+        self.skip_newlines_and_indent();
+        self.expect(&TokenKind::RBracket)?;
+        Ok(Expr { kind: ExprKind::ArrayAlloc { count: Box::new(count) }, line, col, len: self.tok_len() })
+    }
+
     fn parse_comprehension_count(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
         if self.eat(&TokenKind::DotDot) {
             // `..n` — implicit start 0

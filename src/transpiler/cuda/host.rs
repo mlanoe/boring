@@ -162,6 +162,25 @@ impl HostEmitter {
         self.line("fn done(&self) -> bool { true }");
         self.indent -= 1;
         self.line("}");
+        self.blank();
+        // Boring built-in Dimension type used by 2-D kernels.
+        self.line("#[repr(C)]");
+        self.line("#[derive(Copy, Clone, Debug)]");
+        self.line("struct Dimension { width: u32, height: u32 }");
+        self.line("#[allow(non_snake_case)]");
+        self.line("fn Dimension(width: u32, height: u32) -> Dimension { Dimension { width, height } }");
+        self.blank();
+        // Stream priority helper: wraps cuStreamCreateWithPriority.
+        // priority 0 = normal, -1 = high, 1 = low (CUDA convention: lower int = higher priority).
+        self.line("fn boring_new_stream_with_priority(ctx: &Arc<CudaContext>, priority: i32) -> Result<Arc<CudaStream>, Box<dyn std::error::Error>> {");
+        self.indent += 1;
+        self.line("if priority == 0 { return Ok(ctx.new_stream()?); }");
+        self.line("use cudarc::driver::sys::*;");
+        self.line("let mut raw: CUstream = std::ptr::null_mut();");
+        self.line("unsafe { cuStreamCreateWithPriority(&mut raw, CU_STREAM_NON_BLOCKING, priority).result()?; }");
+        self.line("Ok(unsafe { Arc::new(CudaStream::from_raw(ctx, raw)) })");
+        self.indent -= 1;
+        self.line("}");
         let _ = kernel_names; // used by caller for PTX loading
     }
 
@@ -180,7 +199,7 @@ impl HostEmitter {
                 GpuQual::Sync | GpuQual::Local => {
                     // Block SRAM / registers — no host-side storage.
                 }
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
                     let ty = self.host_field_type(field);
                     self.line(&format!("{}: {},", field.name, ty));
                 }
@@ -283,7 +302,7 @@ impl HostEmitter {
                         let elem = elem_rust_type(&field.ty);
                         self.line(&format!("let {}: Vec<{}> = Vec::new();", field.name, elem));
                     }
-                    GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
+                    GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
                         let elem = elem_rust_type(&field.ty);
                         self.line(&format!(
                             "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
@@ -334,7 +353,7 @@ impl HostEmitter {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!("let {}: Vec<{}> = Vec::new();", field.name, elem));
                 }
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!(
                         "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
@@ -403,10 +422,10 @@ impl HostEmitter {
                                     }
                                     return;
                                 }
-                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const => {
+                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
                                     // Check if RHS is an `ArrayFill` / `[..n]` pattern.
                                     match &rhs.kind {
-                                        ExprKind::ArrayFill { value: _, count } => {
+                                        ExprKind::ArrayFill { value: _, count } | ExprKind::ArrayAlloc { count } => {
                                             let n = self.expr(count);
                                             let elem = elem_rust_type(&field.ty);
                                             self.line(&format!(
@@ -461,7 +480,7 @@ impl HostEmitter {
         // 'actor'global), `grid_dim` becomes optional and is derived from its length.
         let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
                         _ => None,
@@ -473,7 +492,7 @@ impl HostEmitter {
 
         if let Some(field) = &auto_grid_field {
             self.line(
-                "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>]) \
+                "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>], priority: i32) \
                  -> Result<KernelHandle<Self>, Box<dyn std::error::Error>> {"
             );
             self.indent += 1;
@@ -485,7 +504,7 @@ impl HostEmitter {
             self.line("});");
         } else {
             self.line(
-                "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: (u32,u32,u32), after: &[&Arc<CudaStream>]) \
+                "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: (u32,u32,u32), after: &[&Arc<CudaStream>], priority: i32) \
                  -> Result<KernelHandle<Self>, Box<dyn std::error::Error>> {"
             );
             self.indent += 1;
@@ -523,7 +542,7 @@ impl HostEmitter {
             "let func = BORING_MODULE.get().unwrap().load_function(\"{}_kernel\")?;",
             name
         ));
-        self.line("let stream = self.__ctx.new_stream()?;");
+        self.line("let stream = boring_new_stream_with_priority(&self.__ctx, priority)?;");
         self.line("for dep in after { dep.synchronize()?; }");
 
         // Upload 'const fixed-size arrays to __constant__ memory before launch.
@@ -552,7 +571,7 @@ impl HostEmitter {
         self.line("let mut launcher = stream.launch_builder(&func);");
         for f in fields {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                     self.line(&format!("launcher.arg(&mut self.{});", f.name));
                 }
                 GpuQual::Const => {
@@ -746,8 +765,83 @@ impl HostEmitter {
             Stmt::Break(_label, _val) => self.line("break;"),
             Stmt::Continue(_label)    => self.line("continue;"),
             Stmt::Comment(_)          => {}
+            Stmt::KernelBlock(kb) => self.emit_kernel_block(&kb.body),
             _ => { self.line("/* unsupported stmt */"); }
         }
+    }
+
+    fn emit_kernel_block(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(e) => {
+                    // `k(block = N)` inside kernel: — desugar to k.__boring_launch(...)
+                    if let Some(launch) = self.try_emit_kernel_launch_call(e) {
+                        self.line(&format!("{launch};"));
+                    } else {
+                        let s = self.expr(e);
+                        self.line(&format!("{s};"));
+                    }
+                }
+                Stmt::Loop(l) => {
+                    self.line("loop {");
+                    self.indent += 1;
+                    for s in &l.body { self.emit_stmt(s); }
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                other => self.emit_stmt(other),
+            }
+        }
+    }
+
+    /// If `expr` is `k(block = N[, after = [...]])` where `k` is a tracked kernel
+    /// variable, return the `__boring_launch(...)` call string. Otherwise `None`.
+    fn try_emit_kernel_launch_call(&mut self, expr: &Expr) -> Option<String> {
+        let ExprKind::Call(callee, args) = &expr.kind else { return None; };
+        let ExprKind::Var(var_name) = &callee.kind else { return None; };
+        let has_block = args.iter().any(|a| a.label.as_deref() == Some("block"));
+        if !has_block { return None; }
+        let is_kernel = self.var_kernel_type.contains_key(var_name.as_str())
+            || self.kernel_names.contains(var_name.as_str());
+        if !is_kernel { return None; }
+        let kernel_type = self.var_kernel_type.get(var_name.as_str()).cloned()
+            .or_else(|| Some(var_name.clone()));
+        let auto_grid = kernel_type
+            .as_ref()
+            .and_then(|t| self.kernel_decls.get(t))
+            .map(|decl| decl.fields.iter().any(|f|
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
+            .unwrap_or(false);
+        let block = args.iter().find(|a| a.label.as_deref() == Some("block"))
+            .map(|a| self.dim3_expr(&a.value))
+            .unwrap_or_else(|| "(1, 1, 1)".into());
+        let after_arg = match args.iter().find(|a| a.label.as_deref() == Some("after")) {
+            None => "&[]".into(),
+            Some(a) => match &a.value.kind {
+                ExprKind::Array(elems) => {
+                    let refs: Vec<String> = elems.iter()
+                        .map(|e| format!("&{}.stream", self.expr(e)))
+                        .collect();
+                    format!("&[{}]", refs.join(", "))
+                }
+                _ => { let s = self.expr(&a.value); format!("&[&{s}.stream]") }
+            },
+        };
+        let grid: String = if auto_grid { "None".into() } else { "(1, 1, 1)".into() };
+        let priority_arg: String = match args.iter().find(|a| a.label.as_deref() == Some("priority")) {
+            None => "0i32".into(),
+            Some(a) => match &a.value.kind {
+                ExprKind::Str(s) => match s.as_str() {
+                    "high"   => "-1i32".into(),
+                    "low"    =>  "1i32".into(),
+                    _        =>  "0i32".into(),
+                },
+                _ => "0i32".into(),
+            },
+        };
+        // Re-assign so the moved-into-launch value is returned to the variable.
+        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.wait()"))
     }
 
     fn emit_stmt_last(&mut self, stmt: &Stmt) {
@@ -819,6 +913,10 @@ impl HostEmitter {
                     }
                 }
                 let o = self.expr(obj);
+                // `.length` as a field (Boring style) → Rust `.len() as i64`
+                if field == "length" || field == "count" {
+                    return format!("{}.len() as i64", o);
+                }
                 format!("{}.{}", o, field)
             }
             ExprKind::Call(callee, args) => {
@@ -827,6 +925,15 @@ impl HostEmitter {
                     if name == "GPU" {
                         let idx = args.first().map(|a| self.expr(&a.value)).unwrap_or_else(|| "0".into());
                         return format!("boring_gpu_ctx_n({} as usize)?", idx);
+                    }
+                }
+                // `ord(c)` — char → i64 (Boring built-in)
+                if let ExprKind::Var(name) = &callee.kind {
+                    if name == "ord" {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            return format!("({} as i64)", inner);
+                        }
                     }
                 }
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
@@ -875,12 +982,29 @@ impl HostEmitter {
                     if self.gpu_vars.contains(name.as_str()) {
                         return self.emit_gpu_property(name, method);
                     }
+                    // `fs.writeBytes(path, bytes)` — write Vec<i64> as binary file
+                    if name == "fs" && method == "writeBytes" {
+                        let path  = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let bytes = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        return format!("std::fs::write({}, {}.iter().map(|&b| b as u8).collect::<Vec<u8>>())?", path, bytes);
+                    }
+                    if name == "fs" && (method == "write" || method == "writeText") {
+                        let path = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let text = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        return format!("std::fs::write({}, {}.as_bytes())?", path, text);
+                    }
                 }
                 let o = self.expr(obj);
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
                 match method.as_str() {
                     "wait" => format!("{}.wait()?", o),
                     "done" => format!("{}.done()", o),
+                    // `.chars()` — collect to Vec<char> so indexing and .len() work
+                    "chars" if args.is_empty() => format!("{}.chars().collect::<Vec<char>>()", o),
+                    // `.length` / `.count` — map to .len() as i64
+                    "length" | "count" if args.is_empty() => format!("{}.len() as i64", o),
+                    // `.add(x)` / `.insert(x)` — Vec push
+                    "add" | "insert" if args.len() == 1 => format!("{}.push({})", o, args_s[0]),
                     _ => format!("{}.{}({})", o, method, args_s.join(", ")),
                 }
             }
@@ -898,7 +1022,7 @@ impl HostEmitter {
                 let auto_grid = self.resolve_kernel_type(kernel)
                     .and_then(|t| self.kernel_decls.get(&t))
                     .map(|decl| decl.fields.iter().any(|f|
-                        matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
+                        matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
                         && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
                     .unwrap_or(false);
                 let k = self.expr(kernel);
@@ -963,6 +1087,23 @@ impl HostEmitter {
                 let n = self.expr(count);
                 format!("vec![{}; {} as usize]", v, n)
             }
+            ExprKind::ArrayAlloc { count } => {
+                let n = self.expr(count);
+                format!("vec![Default::default(); {} as usize]", n)
+            }
+            ExprKind::ArrayComp { expr, var, count } => {
+                let n = self.expr(count);
+                let body = self.expr(expr);
+                format!(
+                    "(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as i64; {} }}).collect::<Vec<_>>()",
+                    n, var, body
+                )
+            }
+            ExprKind::ArrayCompIter { expr, var, iter } => {
+                let it = self.expr(iter);
+                let body = self.expr(expr);
+                format!("{}.iter().map(|{}| {{ {} }}).collect::<Vec<_>>()", it, var, body)
+            }
             ExprKind::Tuple(elems) => {
                 let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
                 format!("({})", s.join(", "))
@@ -1014,7 +1155,8 @@ impl HostEmitter {
                             args.push(self.expr(e));
                         }
                         StringSegment::FormattedExpr(e, fmt) => {
-                            fmt_str.push_str(&format!("{{:{}}}", fmt));
+                            let rust_fmt = fmt.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                            fmt_str.push_str(&format!("{{:{}}}", rust_fmt));
                             args.push(self.expr(e));
                         }
                     }
@@ -1102,7 +1244,7 @@ impl HostEmitter {
         let decl = self.kernel_decls.get(kernel_type)?;
         let kf = decl.fields.iter().find(|f| f.name == field)?;
         match kf.qual {
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                 match &kf.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {
                         Some(format!("{}.read_{}()?", obj, field))

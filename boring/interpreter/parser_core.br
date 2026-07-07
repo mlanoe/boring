@@ -1720,6 +1720,9 @@ def Expr make_array_fill(Expr value, Expr count, int line):
 def Expr make_array_comp(Expr expr, string varname, Expr count, int line):
     Expr(kind: ExprKind.ArrayComp(expr, varname, count), line: line)
 
+def Expr make_array_comp_iter(Expr expr, string varname, Expr iter, int line):
+    Expr(kind: ExprKind.ArrayCompIter(expr, varname, iter), line: line)
+
 
 def Expr make_dict([(Expr, Expr)] pairs, int line):
     Expr(kind: ExprKind.Dict(pairs), line: line)

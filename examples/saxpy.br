@@ -36,7 +36,8 @@ kernel Saxpy:
         y[i] = alpha * x[i] + y[i]
 
 mut k = Saxpy(alpha, x, y)
-mut k = kernel(block = N) k |> .wait
+kernel:
+    k(block = N)
 
 print "Results (expected: y[i] = 2*i + 1):"
 for i, v in k.y:

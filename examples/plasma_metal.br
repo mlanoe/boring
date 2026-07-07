@@ -1,0 +1,45 @@
+# GPU Plasma animation — Metal display demo
+# Renders a sine-wave plasma effect directly to a Metal window.
+# Pixels are written in BGRA byte order (Metal BGRA8Unorm format).
+#
+# Run: boring build examples/plasma_metal.br --target metal
+#      cd examples/plasma_metal && cargo run --release
+
+let width  = 800
+let height = 600
+let screen = Screen(Dimension(width, height), title = "Plasma — boring")
+
+kernel Plasma:
+    mut [uint]'surface pixels
+    var Dimension dim
+    var float t
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+        t      = 0.0
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < dim.width and row < dim.height:
+            let x = float(col) / float(dim.width)
+            let y = float(row) / float(dim.height)
+            # Three overlapping sine waves → plasma field
+            let v = sin(x * 10.0 + t) + sin(y * 10.0 + t) + sin((x + y) * 7.0 + t * 1.3)
+            # Phase-shifted channels for RGB colour cycling
+            let r = uint((sin(v + t)         * 0.5 + 0.5) * 255.0)
+            let g = uint((sin(v + t + 2.094) * 0.5 + 0.5) * 255.0)
+            let b = uint((sin(v + t + 4.189) * 0.5 + 0.5) * 255.0)
+            # BGRA byte order: A=0xFF, R, G, B packed as 0xAARRGGBB little-endian
+            pixels[row * dim.width + col] = 0xFF000000 | (r << 16) | (g << 8) | b
+
+var k = Plasma(Dimension(width, height))
+
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break

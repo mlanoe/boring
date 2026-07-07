@@ -168,6 +168,14 @@ impl Transpiler {
                     }
                 }
             }
+            Stmt::KernelBlock(s) => {
+                self.line("// kernel: block");
+                let body = s.body.clone();
+                let last = body.len().saturating_sub(1);
+                for (i, stmt) in body.iter().enumerate() {
+                    self.emit_stmt(stmt, i == last);
+                }
+            }
         }
     }
 

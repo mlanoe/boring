@@ -1,4 +1,5 @@
 /target
+examples/*/target/
 # Generated Rust projects from --emit-rust
 tests/cases/*_rust/
 examples/*_rust/

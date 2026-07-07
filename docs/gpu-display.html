@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — GPU display</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="gpu-display">GPU display</h1>
+<blockquote><strong>Status: Metal — implemented.</strong> CUDA and simulation (<code>boring run</code>) are pending.</blockquote>
+<p>Live GPU rendering to a native OS window: a <code>&#x27;surface</code> pixel buffer, a <code>Screen</code> object, and a <code>kernel: loop:</code> render loop. A single Boring source file is intended to compile unchanged on both Metal and CUDA — the backend differences are transparent.</p>
+<hr>
+<h2 id="quick-start">Quick start</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> screen = <span class="fn">Screen</span>(<span class="fn">Dimension</span>(<span class="nb">800</span>, <span class="nb">600</span>), title = <span class="s">"Plasma"</span>)
+
+<span class="kw">kernel</span> Plasma:
+    <span class="kw">mut</span> [<span class="kt">uint</span>]<span class="lf">&#x27;surface</span> pixels
+    <span class="kw">var</span> Dimension dim
+    <span class="kw">var</span> <span class="kt">float</span> t
+
+    <span class="kw">init</span>(Dimension d):
+        pixels = [<span class="nb">0</span> <span class="kw">for</span> ..d.width * d.height]
+        dim    = d
+        t      = <span class="nb">0.0</span>
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        <span class="kw">let</span> row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        <span class="kw">if</span> col &lt; dim.width <span class="kw">and</span> row &lt; dim.height:
+            <span class="kw">let</span> x = <span class="kt">float</span>(col) / <span class="kt">float</span>(dim.width)
+            <span class="kw">let</span> y = <span class="kt">float</span>(row) / <span class="kt">float</span>(dim.height)
+            <span class="kw">let</span> v = <span class="fn">sin</span>(x * <span class="nb">10.0</span> + t) + <span class="fn">sin</span>(y * <span class="nb">10.0</span> + t)
+            <span class="kw">let</span> r = <span class="kt">uint</span>((<span class="fn">sin</span>(v + t)         * <span class="nb">0.5</span> + <span class="nb">0.5</span>) * <span class="nb">255.0</span>)
+            <span class="kw">let</span> g = <span class="kt">uint</span>((<span class="fn">sin</span>(v + t + <span class="nb">2.094</span>) * <span class="nb">0.5</span> + <span class="nb">0.5</span>) * <span class="nb">255.0</span>)
+            <span class="kw">let</span> b = <span class="kt">uint</span>((<span class="fn">sin</span>(v + t + <span class="nb">4.189</span>) * <span class="nb">0.5</span> + <span class="nb">0.5</span>) * <span class="nb">255.0</span>)
+            pixels[row * dim.width + col] = <span class="nb">0</span>xFF000000 | (r &lt;&lt; <span class="nb">16</span>) | (g &lt;&lt; <span class="nb">8</span>) | b
+
+<span class="kw">var</span> k = <span class="fn">Plasma</span>(<span class="fn">Dimension</span>(<span class="nb">800</span>, <span class="nb">600</span>))
+
+<span class="kw">kernel</span>:
+    <span class="kw">loop</span>:
+        k.t = <span class="kt">float</span>(screen.time)
+        <span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))
+        screen.<span class="fn">present</span>(k.pixels)
+        <span class="kw">if</span> screen.<span class="fn">key</span>(<span class="s">"\x1B"</span>):
+            <span class="kw">break</span></code></pre></div>
+<hr>
+<h2 id="surface-qualifier"><code>&#x27;surface</code> qualifier</h2>
+<p><code>&#x27;surface</code> is a GPU memory qualifier for <code>[uint]</code> pixel buffers. It describes a buffer whose content will be presented to a window via <code>screen.present()</code>.</p>
+<table><thead><tr><th>Backend</th><th>Maps to</th><th>Element size</th><th>Presentation path</th></tr></thead><tbody><tr><td>Metal</td><td><code>MTLStorageModeShared</code> buffer</td><td><code>uint</code> (32-bit)</td><td>GPU blit to <code>CAMetalDrawable</code> (BGRA8Unorm)</td></tr><tr><td>CUDA</td><td><code>cudaMallocManaged</code></td><td><code>uint32_t</code></td><td>host upload via SDL2/OpenGL <em>(pending)</em></td></tr><tr><td>Simulation</td><td><code>Vec&lt;u32&gt;</code></td><td><code>u32</code></td><td>PPM write or <code>minifb</code> <em>(pending)</em></td></tr></tbody></table>
+<h3 id="why-not-unified-directly">Why not <code>&#x27;unified</code> directly</h3>
+<p>On Metal, <code>screen.present()</code> performs a GPU-side blit — no CPU access to the pixel buffer is needed. <code>&#x27;surface</code> signals this intent and ensures the correct 32-bit element type for BGRA8Unorm. Using <code>&#x27;unified</code> with <code>screen.present()</code> is also valid but carries minor coherency overhead and is less explicit.</p>
+<h3 id="constraints">Constraints</h3>
+<ul><li>Only <code>[uint]</code> is valid for <code>&#x27;surface</code> — other element types are a compile error.</li><li>A kernel may have at most one <code>&#x27;surface</code> field.</li><li><code>&#x27;surface</code> cannot be combined with other GPU qualifiers.</li></ul>
+<h3 id="pixel-format">Pixel format</h3>
+<p><code>screen.present()</code> on Metal uses <code>BGRA8Unorm</code>. Pixels are packed as 32-bit</p>
+<p><code>uint</code> values: <code>0xAARRGGBB</code> in the source — <code>(alpha &lt;&lt; 24) | (r &lt;&lt; 16) | (g &lt;&lt; 8) | b</code>. The alpha channel should be <code>0xFF</code> for opaque pixels.</p>
+<hr>
+<h2 id="dimension-type"><code>Dimension</code> type</h2>
+<p>Built-in struct for named width/height pairs.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> dim = <span class="fn">Dimension</span>(<span class="nb">1024</span>, <span class="nb">768</span>)
+dim.width   <span class="co"># 1024</span>
+dim.height  <span class="co"># 768</span></code></pre></div>
+<p>On the GPU side, <code>Dimension</code> fields are passed as uniform constants and have <code>uint</code> (32-bit) width and height.</p>
+<hr>
+<h2 id="screen-type"><code>Screen</code> type</h2>
+<p><code>Screen</code> creates a native OS window backed by a Metal layer (macOS).</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> screen = <span class="fn">Screen</span>(<span class="fn">Dimension</span>(<span class="nb">800</span>, <span class="nb">600</span>))
+<span class="kw">let</span> screen = <span class="fn">Screen</span>(<span class="fn">Dimension</span>(<span class="nb">800</span>, <span class="nb">600</span>), title = <span class="s">"My app"</span>)</code></pre></div>
+<h3 id="properties">Properties</h3>
+<table><thead><tr><th>Property</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>screen.dimension</code></td><td><code>Dimension</code></td><td>window size at creation</td></tr><tr><td><code>screen.width</code></td><td><code>int</code></td><td>shorthand for <code>screen.dimension.width</code></td></tr><tr><td><code>screen.height</code></td><td><code>int</code></td><td>shorthand for <code>screen.dimension.height</code></td></tr><tr><td><code>screen.resized</code></td><td><code>bool</code></td><td>true on the frame the window was resized</td></tr><tr><td><code>screen.closed</code></td><td><code>bool</code></td><td>true if the user closed the window</td></tr><tr><td><code>screen.frame</code></td><td><code>int</code></td><td>frame counter, starts at 0</td></tr><tr><td><code>screen.time</code></td><td><code>float</code></td><td>seconds elapsed since loop start</td></tr></tbody></table>
+<h3 id="methods">Methods</h3>
+<table><thead><tr><th>Method</th><th>Description</th></tr></thead><tbody><tr><td><code>screen.present(pixels)</code></td><td>blit the pixel buffer to the window; called once per frame</td></tr><tr><td><code>screen.key(k)</code></td><td><code>bool</code> — true while key <code>k</code> is held (string literal)</td></tr></tbody></table>
+<h3 id="key-strings">Key strings</h3>
+<p><code>screen.key()</code> accepts a string literal for the key name:</p>
+<table><thead><tr><th>Key</th><th>String</th></tr></thead><tbody><tr><td>Escape</td><td><code>&quot;\x1B&quot;</code></td></tr><tr><td>Space</td><td><code>&quot; &quot;</code></td></tr><tr><td>Enter</td><td><code>&quot;\r&quot;</code></td></tr><tr><td>Letters / digits</td><td><code>&quot;a&quot;</code>, <code>&quot;1&quot;</code>, …</td></tr></tbody></table>
+<hr>
+<h2 id="kernel-loop--render-loop"><code>kernel: loop:</code> — render loop</h2>
+<p><code>loop:</code> inside a <code>kernel:</code> block drives the render loop. On Metal it maps to a winit <code>run_return</code> event loop; <code>screen.present()</code> issues a GPU blit and presents the drawable. <code>break</code> exits the loop cleanly.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>:
+    <span class="kw">loop</span>:
+        k.t = <span class="kt">float</span>(screen.time)
+        <span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))
+        screen.<span class="fn">present</span>(k.pixels)
+        <span class="kw">if</span> screen.<span class="fn">key</span>(<span class="s">"\x1B"</span>):
+            <span class="kw">break</span></code></pre></div>
+<h3 id="dispatch-grid">Dispatch grid</h3>
+<p>When a kernel has a <code>Dimension</code> field alongside a <code>&#x27;surface</code> field, the transpiler infers a 2D dispatch grid automatically from that field:</p>
+<div class="code-block"><pre><code>grid = (ceil(dim.width / block_x), ceil(dim.height / block_y), 1)</code></pre></div>
+<p>An explicit <code>grid =</code> parameter overrides the inferred value.</p>
+<h3 id="kernel-scalar-fields-and-screentime">Kernel scalar fields and <code>screen.time</code></h3>
+<p><code>var float t</code> in a kernel is a <code>f32</code> scalar passed as a uniform constant on each dispatch. Assign it before the kernel call:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>k.t = <span class="kt">float</span>(screen.time)   <span class="co"># screen.time is float (seconds), assigned to k.t (f32)</span>
+<span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))</code></pre></div>
+<hr>
+<h2 id="backend-notes-metal">Backend notes (Metal)</h2>
+<ul><li>Window: winit 0.28 + <code>CAMetalLayer</code> attached to the <code>NSView</code>.</li><li>Pixel format: <code>BGRA8Unorm</code> — pixels packed as <code>0xAARRGGBB</code>.</li><li>Blit: <code>MTLBlitCommandEncoder.copyFromBuffer(toTexture:)</code> each frame.</li><li>Drawable size: fixed at the kernel&#x27;s surface dimensions — not updated on window resize.</li><li>Dependencies: <code>winit = &quot;0.28&quot;</code>, <code>objc = &quot;0.2&quot;</code>, <code>core-graphics = &quot;0.23&quot;</code>.</li><li>Requires macOS 11+ with a Metal-capable GPU.</li></ul>
+<hr>
+<h2 id="pending">Pending</h2>
+<ul><li><strong>CUDA</strong>: SDL2 + OpenGL PBO upload path, <code>screen.present()</code> via <code>glTexSubImage2D</code>.</li><li><strong><code>boring run</code></strong>: <code>screen.present()</code> writes a PPM on loop exit; <code>--preview</code> opens a <code>minifb</code> window.</li><li><strong>Resize handling</strong>: <code>screen.resized</code> detected but the kernel surface is not reallocated automatically — user code must reinitialise <code>k</code>.</li><li><strong><code>screen.key_pressed()</code></strong>, <strong><code>screen.mouse</code></strong>: not yet implemented.</li><li><strong><code>screen.pixels_rgba()</code></strong>: portable RGBA read from <code>&#x27;surface</code> buffer.</li></ul>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

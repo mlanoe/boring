@@ -12,7 +12,7 @@ For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table
 
 ```boring
 kernel Scale:
-    mut [float]'unified buf     # unified host+device DRAM
+    mut [float]'unified buf
 
     init([float]'unified data):
         buf = data
@@ -22,7 +22,9 @@ kernel Scale:
         buf[i] *= 2.0
 
 mut k = Scale(data)
-mut k = kernel(block = 256) k |> .wait
+kernel:
+    k(block = 256)
+
 print k.buf[0]
 ```
 
@@ -56,9 +58,13 @@ kernel Name:
 |---|---|---|
 | `'unified` | unified DRAM (host + device) | direct |
 | `'global` | device-only DRAM | via `gpu.copy()` |
+| `'surface` | unified DRAM, 32-bit pixels | direct (CUDA); blit-only (Metal) — use `screen.present()` |
 | `'sync` | block SRAM (`__shared__`) | no |
 | `'local` | registers / thread-local | no — default |
 | `'const` | constant cache | no |
+
+`'surface` is restricted to `[uint]` fields and is intended for pixel buffers
+presented to a `Screen`. See [`gpu-display.md`](gpu-display.html).
 
 ### Qualifier inference
 
@@ -106,42 +112,74 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 
 ---
 
-## Launch expression
+## `kernel:` block
+
+GPU kernels are dispatched inside a `kernel:` block. The block is **synchronous**
+— execution resumes after the closing line, and all kernel fields are accessible
+directly.
 
 ```boring
-kernel(block = N) k
-kernel(block = N, grid = M) k
-kernel(block = (16, 16)) k
-kernel(block = 256, after = h1) k
-kernel(block = 256, smem = {tile = 4096}) k
-kernel(block = 256, priority = high) k
+mut k = Scale(data)
+kernel:
+    k(block = 256)
+
+print k.buf[0]    # safe: kernel: block has completed
 ```
 
-Returns a `KernelHandle`:
+### Dispatch call
 
 ```boring
-struct KernelHandle<T>:
-    req bool done()
-    req T    wait()
+k(block = N)               # 1D block of N threads
+k(block = (16, 16))        # 2D block of 16×16 threads
+k(block = (8, 8, 4))       # 3D block
+k(block = N, grid = M)     # explicit grid of M blocks
 ```
-
-Common pattern with the pipe operator:
-
-```boring
-mut k = kernel(block = 256) k |> .wait
-```
-
-### Dispatch parameters
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
-| `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted (1D) |
-| `smem` | `{string = int}` | no | named dynamic `'sync` partitions and their byte sizes |
-| `after` | handle or `[handle]` | no | kernel starts after all listed handles complete |
-| `priority` | `high` / `normal` / `low` | no | stream scheduling priority — default `normal` |
+| `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted |
+| `after` | kernel var or `[k1, k2, ...]` | no | GPU-side ordering: this dispatch starts after the listed ones complete |
+| `priority` | `"high"` / `"normal"` / `"low"` | no | stream scheduling priority — CUDA only; ignored on Metal and `boring run` |
 
-Device is bound at instantiation (`new(g) Scale(n)`), not at dispatch.
+`after =` on CUDA maps to stream synchronization (GPU-side, no CPU round-trip). On Metal the current implementation dispatches synchronously (`wait_until_completed` inside each call), so `after =` is a no-op — ordering is already guaranteed by sequential execution. Metal does support concurrent kernel execution via multiple command queues and `MTLEvent` fences, but async dispatch is not yet implemented in the Boring Metal backend.
+
+`priority =` on CUDA creates the kernel's stream with `cuStreamCreateWithPriority` — `"high"` maps to priority `-1`, `"normal"` (default) to `0`, `"low"` to `1`. On Metal and `boring run` the parameter is accepted but silently ignored.
+
+When `grid` is omitted it is inferred:
+- **1D**: `ceil(n / block)` where `n` is the length of the first array field.
+- **2D** (kernel has a `Dimension` field alongside a `'surface` field): `(ceil(w/bx), ceil(h/by), 1)`.
+
+### Multi-pass with `after =`
+
+`after =` declares that a dispatch must start after the listed kernels have completed. On CUDA this creates GPU-side stream ordering (no CPU round-trip). On Metal it is a no-op — each dispatch already waits synchronously.
+
+```boring
+kernel:
+    loop:
+        k_sim(block = 256)
+        k_shade(block = (16, 16), after = k_sim)
+        screen.present(k_shade.pixels)
+```
+
+`after =` accepts a single kernel variable or a list:
+
+```boring
+k_render(block = (16, 16), after = [k_a, k_b])
+```
+
+### Render loop
+
+`loop:` inside `kernel:` drives a render loop. See [`gpu-display.md`](gpu-display.html).
+
+```boring
+kernel:
+    loop:
+        k(block = (16, 16))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+```
 
 ---
 
@@ -189,7 +227,7 @@ for g in GPU.all():
 
 ### `'unified` — zero-copy host/device
 
-`'unified` fields share physical memory between host and device. No explicit H2D/D2H copy is needed. Guard with `wait()` before reading on the host after a launch.
+`'unified` fields share physical memory between host and device. No explicit H2D/D2H copy is needed. The `kernel:` block guarantees completion before the next host line.
 
 ### `'global` — device-only
 
@@ -204,11 +242,18 @@ gpu.copy(host_buf, k.input)     # H2D
 
 `'sync` fields are allocated in per-block shared memory. The transpiler inserts thread-group barriers automatically — no explicit `sync` statement needed.
 
+#### Fixed size — `[T, N]'sync`
+
+The size is baked into the kernel declaration. No `init()` assignment needed — the field exists for all threads in the block.
+
 ```boring
 kernel Reduce:
-    mut [float]'unified input
-    mut float'unified   result
-    mut [float]'sync    tile
+    mut [float]'unified      input
+    mut float'unified        result
+    mut [float, 256]'sync    tile   # 256 floats, fixed at compile time
+
+    init([float]'unified data):
+        input = data
 
     def ():
         let tid = gpu.thread.x
@@ -221,16 +266,40 @@ kernel Reduce:
             result = sum
 ```
 
+#### Dynamic size — `[T]'sync`
+
+When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..n]`. The transpiler passes `block_dim.x * sizeof(T)` as `shared_mem_bytes` automatically.
+
+```boring
+kernel Reduce:
+    mut [float]'unified  input
+    mut float'unified    result
+    mut [float]'sync     tile   # one float per thread in the block
+
+    init([float]'unified data, int block_size):
+        input = data
+        tile  = [..block_size]   # allocate without initialization
+
+    def ():
+        let tid = gpu.thread.x
+        tile[tid] = input[gpu.block.x * gpu.block_dim.x + tid]
+        if tid == 0:
+            var float sum = 0.0
+            for v in tile:
+                sum += v
+            result = sum
+```
+
 #### Auto-barrier rules
 
 The transpiler operates in **auto mode** when a kernel `def` has no explicit `sync` statement:
 
 1. A barrier is inserted before the first loop in the body (write-phase → loop-phase boundary).
-2. A barrier is inserted at the top of each loop iteration that accesses a `'sync` field (covers cross-thread read patterns such as stride reduction).
+2. A barrier is inserted at the top of each loop iteration that accesses a `'sync` field.
 
 #### Manual mode
 
-If the developer writes at least one explicit `sync` in the `def` body, the transpiler disables auto-insertion for the entire `def` and emits barriers only where `sync` appears. Use this when the automatic placement is incorrect or suboptimal.
+If the developer writes at least one explicit `sync` in the `def` body, the transpiler disables auto-insertion for the entire `def` and emits barriers only where `sync` appears.
 
 ```boring
     def ():
@@ -243,28 +312,6 @@ If the developer writes at least one explicit `sync` in the `def` body, the tran
             stride = stride / 2
 ```
 
-### Ownership and launch
-
-`kernel(...)` moves the kernel object into the handle. `.wait` returns it. This prevents host access to the kernel's fields while the device is running.
-
-```boring
-mut k = Scale(1024)
-k.buf[0] = 1.0
-let h = kernel(block = 256) k    # k moved into h
-mut k = h.wait                   # k returned after completion
-print k.buf[0]
-```
-
-The kernel is reusable — `.wait` returns the same object:
-
-```boring
-var k = Scale(1024)
-for batch in batches:
-    for i in ..n: k.buf[i] = batch[i]
-    k = kernel(block = 256) k |> .wait
-    results.push(k.buf[0])
-```
-
 ### `'sync` field rules
 
 `'sync` fields cannot escape the kernel body. The compiler rejects:
@@ -275,10 +322,6 @@ for batch in batches:
 
 ### Struct `'sync` — compound state
 
-When multiple scalars must be observed as a consistent unit across threads, group them in a struct and apply `'sync` to the field. The barrier covers all fields of the struct atomically — no per-field synchronisation is needed.
-
-Use this instead of `'actor'global` (which protects a single scalar at a time): atomics cannot guarantee that two independently updated values are seen together by a third thread.
-
 ```boring
 struct Stats:
     float sum
@@ -286,14 +329,12 @@ struct Stats:
 
 kernel BlockStats:
     let [float]'global    data
-    mut [Stats]'sync      acc      # compound state — barrier covers both fields
+    mut [Stats]'sync      acc
     mut [float]'unified   result
 
     def ():
         let tid = gpu.thread.x
         acc[tid] = Stats(sum = data[tid], count = 1)
-        # barrier inserted automatically before the loop
-
         var stride = gpu.block_dim.x / 2
         while stride > 0:
             if tid < stride:
@@ -302,33 +343,9 @@ kernel BlockStats:
                     count = acc[tid].count + acc[tid + stride].count,
                 )
             stride = stride / 2
-        # barrier inserted automatically at the top of each iteration
-
         if tid == 0:
             result[gpu.block.x] = acc[0].sum / acc[0].count as float
 ```
-
-`'actor'global` is appropriate for independent counters (one atomic per slot). `struct'sync` is appropriate when two or more values must be read together coherently.
-
-### Dynamic `'sync` — size from launch
-
-```boring
-kernel Reduce:
-    mut [float]'sync tile    # size from smem at launch
-
-    def (): ...
-
-mut k = Reduce(n)
-mut k = kernel(block = 256, smem = {tile = 256 * 4}) k |> .wait
-```
-
-Multiple named partitions:
-
-```boring
-mut k = kernel(block = 256, smem = {tile = 256 * 4, flags = 64 * 4}) k |> .wait
-```
-
-The transpiler generates the byte-offset arithmetic automatically.
 
 ---
 
@@ -345,34 +362,6 @@ kernel Histogram:
 ```
 
 Supported atomic operations: `+= -= &= |= ^=`.
-
----
-
-## Multi-device
-
-Device placement is controlled at construction time with `new(gpu)`:
-
-```boring
-let g0 = GPU(0)
-let g1 = GPU(1)
-
-let k0 = new(g0) Scale(input)
-let k1 = new(g1) Scale(input)
-
-kernel(block = 256) k0
-kernel(block = 256) k1
-```
-
-`GPU.count()` returns the number of available devices.
-
-### `after =` ordering
-
-```boring
-let h0 = kernel(block = 256) k0
-let h1 = kernel(block = 256, after = h0) k1
-```
-
-`after =` accepts a single handle or a list: `after = [h0, h1]`.
 
 ---
 

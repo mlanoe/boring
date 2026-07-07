@@ -659,6 +659,35 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
         report_error(&path, &source, e.line, e.col, 1, &e.message);
         process::exit(1);
     }
+
+    // After execution: write PPM for every Screen that received at least one frame.
+    // In simulation mode without --preview, this is the only visual output.
+    let screens: Vec<(String, interpreter::Value)> = {
+        let g = interp.global.borrow();
+        g.all_bindings().into_iter()
+            .filter(|(_, v)| matches!(v, interpreter::Value::Screen { frame, .. } if *frame.borrow() > 0))
+            .collect()
+    };
+    for (name, val) in screens {
+        if let interpreter::Value::Screen { pixels, width, height, .. } = val {
+            let w = *width.borrow() as usize;
+            let h = *height.borrow() as usize;
+            let px = pixels.borrow();
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let ppm_path = path.with_file_name(format!("{}_{}.ppm", stem, name));
+            if let Ok(mut f) = std::fs::File::create(&ppm_path) {
+                use std::io::Write;
+                let _ = writeln!(f, "P6\n{} {}\n255", w, h);
+                for pixel in px.iter().take(w * h) {
+                    let r = ((*pixel >> 16) & 0xFF) as u8;
+                    let g = ((*pixel >>  8) & 0xFF) as u8;
+                    let b = ( *pixel        & 0xFF) as u8;
+                    let _ = f.write_all(&[r, g, b]);
+                }
+                eprintln!("wrote {}", ppm_path.display());
+            }
+        }
+    }
 }
 
 // ─── Core: transpile ──────────────────────────────────────────────────────────

@@ -315,6 +315,17 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 result.append(eval_expr(interp, comp_expr))
             Value.Array(result)
 
+        ExprKind.ArrayCompIter(comp_expr, var_name, iter_expr):
+            let col_val = eval_expr(interp, iter_expr)
+            let elems = match col_val:
+                Value.Array(v): v
+                _: throw "array comprehension source must be an array, got {col_val.type_name()}"
+            var result = []
+            for item in elems:
+                env_define(interp, var_name, item, false)
+                result.append(eval_expr(interp, comp_expr))
+            Value.Array(result)
+
         # Tuple literal
         ExprKind.Tuple(elems):
             var vals = []

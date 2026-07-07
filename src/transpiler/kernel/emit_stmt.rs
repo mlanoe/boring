@@ -302,6 +302,11 @@ impl KernelTranspiler {
                     self.line(&format!("yield {};", s));
                 }
             }
+            Stmt::KernelBlock(s) => {
+                self.line("// kernel: block");
+                let body = s.body.clone();
+                for stmt in &body { self.emit_stmt(stmt); }
+            }
         }
     }
 

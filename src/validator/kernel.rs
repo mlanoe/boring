@@ -254,8 +254,12 @@ impl KernelValidator {
             ExprKind::ArrayFill { value, count } => {
                 self.check_expr(value); self.check_expr(count);
             }
+            ExprKind::ArrayAlloc { count } => { self.check_expr(count); }
             ExprKind::ArrayComp { expr, count, .. } => {
                 self.check_expr(expr); self.check_expr(count);
+            }
+            ExprKind::ArrayCompIter { expr, iter, .. } => {
+                self.check_expr(expr); self.check_expr(iter);
             }
             ExprKind::Dict(pairs) => {
                 for (k, v) in pairs {
@@ -365,7 +369,6 @@ impl KernelValidator {
             ExprKind::KernelLaunch { config, kernel } => {
                 if let Some(e) = &config.block { self.check_expr(e); }
                 if let Some(e) = &config.grid  { self.check_expr(e); }
-                if let Some(e) = &config.smem  { self.check_expr(e); }
                 if let Some(e) = &config.after { self.check_expr(e); }
                 self.check_expr(kernel);
             }
@@ -590,6 +593,7 @@ impl KernelValidator {
             Stmt::Alias(a) => self.check_alias(a),
             Stmt::Yield(e, _) => self.check_expr(e),
             Stmt::Comment(_) => {}
+            Stmt::KernelBlock(s) => { for stmt in &s.body { self.check_stmt(stmt); } }
         }
     }
 

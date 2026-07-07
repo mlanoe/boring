@@ -1,0 +1,28 @@
+# GPU vector addition — Boring with CUDA/Metal backend
+
+let n = 1000
+
+kernel VectorAdd:
+    let [int]'global  a
+    let [int]'global  b
+    mut [int]'unified result
+
+    init([int]'global input_a, [int]'global input_b):
+        a = input_a
+        b = input_b
+        result = [0 for ..n]
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        if i < n:
+            result[i] = a[i] + b[i]
+
+var [int] host_a = [i for i in 0..n]
+var [int] host_b = [i * 2 for i in 0..n]
+
+var k = VectorAdd(host_a, host_b)
+kernel:
+    k(block = 256)
+
+for i in 0..n:
+    print "c[{i}] = {k.result[i]}"

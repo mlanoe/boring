@@ -223,6 +223,34 @@ impl Parser {
                 }
                 Ok(Stmt::Expr(task_expr))
             }
+            // `kernel:` / `kernel: expr` / `kernel expr` — unnamed GPU execution block.
+            // Distinct from `kernel Foo:` struct declaration (which has a name after `kernel`).
+            // Accepted forms:
+            //   kernel:          ← multiline block
+            //       k(block=N)
+            //   kernel: k(block=N)   ← single-line with colon
+            //   kernel k(block=N)    ← single-line without colon
+            // `kernel Foo:` is a struct declaration — skip it here.
+            // `kernel k(`, `kernel:`, `kernel <newline>` → kernel block.
+            TokenKind::Kernel if !matches!(
+                (self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                 self.tokens.get(self.pos + 2).map(|t| &t.kind)),
+                (Some(TokenKind::Ident(_)), Some(TokenKind::Colon))
+            ) => {
+                let line = self.line();
+                let col = self.col();
+                self.advance(); // consume `kernel`
+                self.eat(&TokenKind::Colon); // optional `:`
+                let body = if self.is_newline() || self.check(&TokenKind::Eof) {
+                    self.expect_newline()?;
+                    self.parse_block()?
+                } else {
+                    // Single-line: wrap the single statement into a one-element body.
+                    let stmt = self.parse_stmt()?;
+                    vec![stmt]
+                };
+                Ok(Stmt::KernelBlock(crate::ast::KernelBlockStmt { body, line, col }))
+            }
             // `sync` — GPU thread synchronization barrier (no-op in simulation mode).
             TokenKind::Sync => {
                 self.advance();

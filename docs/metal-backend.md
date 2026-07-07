@@ -18,6 +18,7 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 |---|---|---|
 | `'unified` | `cudaMallocManaged` | `device` + `MTLStorageMode.shared` (zero-copy on Apple Silicon) |
 | `'global` | `__global__` | `device` |
+| `'surface` | `cudaMallocManaged` (u32) | `device uint*` — `MTLStorageModeShared`, 32-bit per pixel (BGRA8Unorm) |
 | `'sync` | `__shared__` | `threadgroup` |
 | `'local` | registers | thread-private (default) |
 | `'const` scalar | `__constant__ T name;` | `constant T* name [[buffer(N)]]` — dereferenced (`*name`) in body |
@@ -91,6 +92,21 @@ The generated project has no `build.rs`. Compilation happens once at app startup
 | Warp intrinsics | full support | SIMD-group operations (different API) |
 | `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
 | Windows / Linux | yes | macOS only |
+
+---
+
+## GPU display
+
+`boring build --target metal` supports live GPU rendering via `Screen`,
+`'surface`, and `kernel: loop:`. See [`gpu-display.md`](gpu-display.html) for
+the full reference. Metal-specific notes:
+
+- **Window**: winit 0.28 + `CAMetalLayer` attached to the `NSView` via objc.
+- **Pixel format**: `BGRA8Unorm` — pack pixels as `0xFF000000 | (r << 16) | (g << 8) | b`.
+- **Blit**: `MTLBlitCommandEncoder` from the surface buffer to the `CAMetalDrawable` texture each frame.
+- **Drawable size**: fixed at the kernel's surface `Dimension` — not updated on window resize.
+- **2D dispatch**: when a kernel has a `'surface` field and a `Dimension` field, the grid is inferred as `(ceil(w/bx), ceil(h/by), 1)` automatically.
+- **Extra dependencies** added to `Cargo.toml` when `Screen` is present: `winit = "0.28"`, `objc = "0.2"`, `core-graphics = "0.23"`.
 
 ---
 

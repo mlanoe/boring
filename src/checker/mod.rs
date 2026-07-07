@@ -240,6 +240,7 @@ impl Checker {
             Stmt::Enum(e)      => self.check_enum(e),
             Stmt::Mod(m)       => { for i in &m.items { self.check_item(i); } }
             Stmt::Continue(_) | Stmt::Alias(_) | Stmt::Comment(_) => {}
+            Stmt::KernelBlock(s) => { for stmt in &s.body { self.check_stmt(stmt); } }
         }
     }
 
@@ -371,8 +372,16 @@ impl Checker {
             ExprKind::ArrayFill { value, count } => {
                 self.check_expr(value); self.check_expr(count);
             }
+            ExprKind::ArrayAlloc { count } => { self.check_expr(count); }
             ExprKind::ArrayComp { expr, var, count } => {
                 self.check_expr(count);
+                self.push_scope();
+                self.define(var, BindingKind::Let, 0, 0);
+                self.check_expr(expr);
+                self.pop_scope();
+            }
+            ExprKind::ArrayCompIter { expr, var, iter } => {
+                self.check_expr(iter);
                 self.push_scope();
                 self.define(var, BindingKind::Let, 0, 0);
                 self.check_expr(expr);

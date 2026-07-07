@@ -15,7 +15,7 @@
 //         kernels/main.metal   (device_msl)
 //         Cargo.toml
 
-use crate::ast::{Program, Item};
+use crate::ast::{Program, Item, ExprKind};
 
 mod device;
 mod host;
@@ -40,18 +40,36 @@ pub fn transpile_metal(program: &Program, stem: &str, version: &str) -> MetalOut
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
     }).collect();
 
+    let has_screen = program.items.iter().any(|item| {
+        if let Item::Let(s) = item {
+            if let Some(val) = &s.value {
+                if let ExprKind::Call(callee, _) = &val.kind {
+                    if let ExprKind::Var(name) = &callee.kind {
+                        return name == "Screen";
+                    }
+                }
+            }
+        }
+        false
+    });
+
     let device_msl = device::emit_device_msl(program);
     let host_rs    = host::emit_host_rs(program, &kernel_names);
-    let cargo_toml = emit_cargo_toml(stem, version);
+    let cargo_toml = emit_cargo_toml(stem, version, has_screen);
 
     MetalOutput { host_rs, device_msl, kernel_names, cargo_toml }
 }
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
     // No build.rs needed: MSL is compiled at runtime via newLibraryWithSource.
     // The Metal compiler is built into macOS — no external toolchain required.
+    let extra_deps = if has_screen {
+        "winit = \"0.28\"\nobjc = \"0.2\"\ncore-graphics = \"0.23\"\n"
+    } else {
+        ""
+    };
     format!(
         r#"[package]
 name = "{stem}"
@@ -64,8 +82,9 @@ path = "src/main.rs"
 
 [dependencies]
 metal = "0.29"
-"#,
+{extra_deps}"#,
         stem = stem,
         version = version,
+        extra_deps = extra_deps,
     )
 }

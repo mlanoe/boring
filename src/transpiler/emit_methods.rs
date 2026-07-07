@@ -1806,7 +1806,8 @@ impl Transpiler {
                     args.push(expr_s);
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    fmt.push_str(&format!("{{:{}}}", spec));
+                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    fmt.push_str(&format!("{{:{}}}", rust_spec));
                     args.push(self.emit_expr(e));
                 }
             }
@@ -1840,7 +1841,8 @@ impl Transpiler {
                     args.push(self.emit_expr(e));
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    fmt.push_str(&format!("{{:{}}}", spec));
+                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    fmt.push_str(&format!("{{:{}}}", rust_spec));
                     args.push(self.emit_expr(e));
                 }
             }
@@ -1895,7 +1897,8 @@ impl Transpiler {
                     combined.push(expr_s);
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    fmt.push_str(&format!("{{:{}}}", spec));
+                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    fmt.push_str(&format!("{{:{}}}", rust_spec));
                     combined.push(self.emit_expr(e));
                 }
             }

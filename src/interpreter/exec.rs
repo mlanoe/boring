@@ -300,7 +300,10 @@ impl Interpreter {
                 let is_bare_call = matches!(&e.kind,
                     ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::GenericCall(..)
                 );
-                if is_bare_call && !matches!(val, Value::Void | Value::Nil) {
+                // In a `kernel:` context, a bare `k(block=N)` call returns a KernelHandle.
+                // The `exec_kernel_block` handler writes it back — suppress the must-use error.
+                let is_kernel_handle = matches!(val, Value::KernelHandle { .. });
+                if is_bare_call && !matches!(val, Value::Void | Value::Nil) && !(self.kernel_context && is_kernel_handle) {
                     return Err(err(
                         "return value discarded — bind it with `let`, discard with `_ = f()`",
                         e.line,
@@ -358,6 +361,9 @@ impl Interpreter {
                 Ok(())
             }
             Stmt::Comment(_) => Ok(()),
+            Stmt::KernelBlock(s) => {
+                self.exec_kernel_block(&s.body, env)
+            }
         }
     }
 
@@ -898,6 +904,7 @@ impl Interpreter {
                     OwnerQual::New          => "'new".to_string(),
                     OwnerQual::GpuUnified   => "'gpu'unified".to_string(),
                     OwnerQual::GpuGlobal    => "'gpu'global".to_string(),
+                    OwnerQual::GpuSurface   => "surface".to_string(),
                     OwnerQual::GpuActorGlobal => "'actor'global".to_string(),
                     OwnerQual::GpuSync      => "'sync".to_string(),
                     OwnerQual::GpuLocal     => "'local".to_string(),

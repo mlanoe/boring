@@ -230,8 +230,8 @@ kernel Scale:
         buf[tid] = buf[tid] * 2.0
 "#);
     // grid_dim is Option here because Scale's first field is a 'unified array (auto grid sizing).
-    assert!(rs.contains("fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>])"),
-        "expected __boring_launch signature with after param;\ngot:\n{rs}");
+    assert!(rs.contains("fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>], priority: i32)"),
+        "expected __boring_launch signature with after and priority params;\ngot:\n{rs}");
 }
 
 #[test]
@@ -293,6 +293,8 @@ kernel C:
 }
 
 // ─── host — kernel call site ─────────────────────────────────────────────────
+// TODO: these tests use kernel: block syntax; the CUDA transpiler needs to handle
+// Stmt::KernelBlock before they can pass (transpiler currently emits nothing for it).
 
 #[test]
 fn host_kernel_launch_calls_boring_launch_without_smem() {
@@ -307,11 +309,12 @@ kernel Scale:
 
 let data = [1.0, 2.0]
 mut k = Scale(data)
-mut k = kernel(block = 2) k |> .wait
+kernel:
+    k(block = 2)
 "#);
     // Auto grid sizing: Scale's first field is a 'unified array, so grid is None when omitted.
-    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[])?"),
-        "expected __boring_launch((block_dim), None, &[]) with auto grid;\ngot:\n{rs}");
+    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[], 0i32)?"),
+        "expected __boring_launch((block_dim), None, &[], 0i32) with auto grid;\ngot:\n{rs}");
 }
 
 // ─── infrastructure ───────────────────────────────────────────────────────────
@@ -358,7 +361,8 @@ kernel Grid2D:
 
 let data = [1.0, 2.0]
 mut k = Grid2D(data)
-mut k = kernel(block = (16, 16)) k |> .wait
+kernel:
+    k(block = (16, 16))
 "#);
     assert!(rs.contains("(16 as u32, 16 as u32, 1)"),
         "expected (16, 16, 1) dim3 for 2D block tuple;\ngot:\n{rs}");
@@ -377,7 +381,8 @@ kernel Grid3D:
 
 let data = [1.0, 2.0]
 mut k = Grid3D(data)
-mut k = kernel(block = (8, 8, 4)) k |> .wait
+kernel:
+    k(block = (8, 8, 4))
 "#);
     assert!(rs.contains("(8 as u32, 8 as u32, 4 as u32)"),
         "expected (8, 8, 4) dim3 for 3D block tuple;\ngot:\n{rs}");
@@ -398,14 +403,15 @@ kernel Scale:
 
 let data = [1.0, 2.0]
 mut k = Scale(data)
-mut k = kernel(block = 2) k |> .wait
+kernel:
+    k(block = 2)
 "#);
     assert!(rs.contains("((n + block_dim.0 - 1) / block_dim.0, 1, 1)"),
         "expected auto grid calculation;\ngot:\n{rs}");
     assert!(rs.contains("grid_dim: Option<(u32,u32,u32)>"),
         "expected optional grid_dim param;\ngot:\n{rs}");
     // Without `grid =`, the call site passes None.
-    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[])"),
+    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[], 0i32)"),
         "expected None grid arg at call site;\ngot:\n{rs}");
 }
 
@@ -515,11 +521,11 @@ let k = new(g0) Scale(data)
         "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
 }
 
-// ─── Item 4 — after = CUDA stream dependencies ───────────────────────────────
+// ─── Item 4 — sequential kernel launches in kernel: block ───────────────────
 
 #[test]
-fn item4_after_passes_stream_reference_to_launch() {
-    let (_, rs) = cuda_codegen("after_dep", r#"
+fn item4_sequential_launches_in_kernel_block() {
+    let (_, rs) = cuda_codegen("sequential_launches", r#"
 kernel Scale:
     mut [float]'unified buf
     init([float]'unified data):
@@ -530,16 +536,19 @@ kernel Scale:
 
 let data = [1.0, 2.0]
 mut k1 = Scale(data)
-mut h1 = kernel(block = 2) k1
 mut k2 = Scale(data)
-mut h2 = kernel(block = 2, after = [h1]) k2
+kernel:
+    k1(block = 2)
+    k2(block = 2)
 "#);
-    // The second launch must forward h1.stream as a dependency.
-    assert!(rs.contains("&h1.stream"),
-        "expected &h1.stream in the after arg;\ngot:\n{rs}");
-    // The call should pass a non-empty slice for the after arg.
-    assert!(rs.contains("[&h1.stream]"),
-        "expected [&h1.stream] slice;\ngot:\n{rs}");
+    // Both launches should appear; sequential ordering is guaranteed by the block.
+    assert!(rs.contains("k1.__boring_launch("),
+        "expected k1.__boring_launch in kernel: block;\ngot:\n{rs}");
+    assert!(rs.contains("k2.__boring_launch("),
+        "expected k2.__boring_launch in kernel: block;\ngot:\n{rs}");
+    let pos_k1 = rs.find("k1.__boring_launch(").unwrap();
+    let pos_k2 = rs.find("k2.__boring_launch(").unwrap();
+    assert!(pos_k1 < pos_k2, "k1 launch should appear before k2 launch;\ngot:\n{rs}");
 }
 
 #[test]
@@ -555,11 +564,12 @@ kernel Scale:
 
 let data = [1.0, 2.0]
 mut k = Scale(data)
-mut h = kernel(block = 2) k
+kernel:
+    k(block = 2)
 "#);
-    // Without `after =`, the call site passes &[].
-    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[])"),
-        "expected &[] as after arg when no after specified;\ngot:\n{rs}");
+    // Without `after =`, the call site passes &[] and priority defaults to 0.
+    assert!(rs.contains("__boring_launch((2 as u32, 1, 1), None, &[], 0i32)"),
+        "expected &[] as after arg and 0i32 priority when not specified;\ngot:\n{rs}");
 }
 
 // ─── Item 5 — dtod inference (analysis comment) ──────────────────────────────

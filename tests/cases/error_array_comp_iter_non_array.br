@@ -1,0 +1,3 @@
+let x = 42
+let [int] bad = [v * 2 for v in x]
+print bad

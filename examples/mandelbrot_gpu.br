@@ -1,0 +1,79 @@
+# GPU Mandelbrot set — Boring with CUDA/Metal backend
+# Output: mandelbrot.ppm (PPM P6, convert with `convert mandelbrot.ppm mandelbrot.png`)
+# width/height reduced for simulation; increase to 1024x768 for boring build --target cuda
+
+let width         = 64
+let height        = 48
+let x_min         = -2.0
+let x_max         =  1.0
+let y_min         = -1.5
+let y_max         =  1.5
+let max_iter      = 100
+
+kernel Mandelbrot:
+    mut [float]'unified image
+    let Dimension dim
+
+    init(Dimension d):
+        image = [0.0 for ..d.width * d.height]
+        dim   = d
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < width and row < height:
+            let x0 = x_min + float(col) * (x_max - x_min) / float(width)
+            let y0 = y_min + float(row) * (y_max - y_min) / float(height)
+            var float cx = 0.0
+            var float cy = 0.0
+            var int   it = 0
+            while cx * cx + cy * cy < 4.0 and it < max_iter:
+                let xtemp = cx * cx - cy * cy + x0
+                cy = 2.0 * cx * cy + y0
+                cx = xtemp
+                it += 1
+            let value = if it == max_iter: 1.0 else: float(it) / float(max_iter)
+            image[row * width + col] = value
+
+var k = Mandelbrot(Dimension(width, height))
+kernel:
+    k(block = (16, 16))
+
+# Color palette: deep blue → cyan → white for points outside the set
+# Points inside the set (value == 1.0) remain black
+def [int] colorize(float t):
+    if t >= 1.0:
+        return [0, 0, 0]
+    let v = t * 4.0
+    if v < 1.0:
+        let b = int(v * 255.0)
+        return [0, 0, b]
+    elif v < 2.0:
+        let g = int((v - 1.0) * 255.0)
+        return [0, g, 255]
+    elif v < 3.0:
+        let r = int((v - 2.0) * 255.0)
+        return [r, 255, 255]
+    else:
+        let w = int((v - 3.0) * 255.0)
+        return [255, 255, 255 - w + 255]
+
+# PPM P6 encoding (ASCII header + binary RGB pixels)
+let header      = "P6\n{width} {height}\n255\n"
+let header_chars = header.chars()
+var [int] header_bytes = [ord(header_chars[i]) for i in ..header_chars.length]
+var [int] pixels = [0 for ..width * height * 3]
+let total_pixels = width * height
+for i in 0..total_pixels:
+    let rgb = colorize(k.image[i])
+    pixels[i * 3]     = rgb[0]
+    pixels[i * 3 + 1] = rgb[1]
+    pixels[i * 3 + 2] = rgb[2]
+
+var [int] ppm_data = []
+for b in header_bytes:
+    ppm_data.add(b)
+for b in pixels:
+    ppm_data.add(b)
+fs.writeBytes("mandelbrot.ppm", ppm_data)
+print "Image saved as 'mandelbrot.ppm'"

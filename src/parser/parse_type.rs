@@ -325,6 +325,7 @@ impl Parser {
                         });
                     }
                 }
+                "surface" => { self.advance(); OwnerQual::GpuSurface }
                 "actor"  => {
                     self.advance();
                     // `T'actor'task` → ActorTask  /  `T'actor'global` → GpuActorGlobal

@@ -253,6 +253,9 @@ pub enum GpuQual {
     /// `'actor'global` — device DRAM accessed via atomics on device.
     /// Behaves like `Global` for memory placement; compound assigns become atomic ops.
     ActorGlobal,
+    /// `'surface` — pixel buffer with backend-appropriate placement.
+    /// Metal: `MTLStorageModePrivate` (GPU-only); CUDA: `cudaMallocManaged`; simulation: `Vec<u32>`.
+    Surface,
 }
 
 /// Binding kind for a kernel field: `let`, `mut`, or `var`.
@@ -298,8 +301,6 @@ pub struct KernelConfig {
     pub block: Option<Expr>,
     /// Blocks per grid: int or tuple (inferred if None).
     pub grid: Option<Expr>,
-    /// Named dynamic shared-memory partitions: `{name = bytes}`.
-    pub smem: Option<Expr>,
     /// Ordering dependency: handle or tuple of handles.
     pub after: Option<Expr>,
     /// Scheduling priority: `high`, `normal`, or `low` (as string).
@@ -484,6 +485,34 @@ pub enum Stmt {
     Yield(Expr, usize),
     /// Full-line comment `# text` — preserved for the transpiler, ignored by interpreter.
     Comment(String),
+    /// `kernel:` execution block — unnamed GPU execution context.
+    /// Body is a sequence of statements (may contain an inner `loop:` for GPU-driven rendering).
+    /// Distinct from `kernel Foo:` (named struct declaration) by the absence of a name.
+    KernelBlock(KernelBlockStmt),
+}
+
+/// An unnamed `kernel:` execution block.
+///
+/// ```boring
+/// kernel:
+///     k(block = (16, 16))
+///     screen.present(k.pixels)
+/// ```
+///
+/// Or with a render loop (GPU-driven):
+/// ```boring
+/// kernel:
+///     loop:
+///         k(block = (16, 16))
+///         screen.present(k.pixels)
+/// ```
+///
+/// `let f = kernel: ...` stores the future in `f` (detached execution).
+#[derive(Debug, Clone)]
+pub struct KernelBlockStmt {
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
 }
 
 /// `let (a, b, c) = expr`  — destructures a tuple into named bindings.
@@ -784,8 +813,12 @@ pub enum ExprKind {
     Array(Vec<Expr>),
     /// `[v for ..n]` — fill array of length `count` with `value`
     ArrayFill { value: Box<Expr>, count: Box<Expr> },
+    /// `[..n]` — allocate array of length `count` without initialisation
+    ArrayAlloc { count: Box<Expr> },
     /// `[f(i) for i in ..n]` — computed array of length `count` with `var` bound to index
     ArrayComp { expr: Box<Expr>, var: String, count: Box<Expr> },
+    /// `[f(x) for x in collection]` — map over an existing collection
+    ArrayCompIter { expr: Box<Expr>, var: String, iter: Box<Expr> },
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
@@ -944,6 +977,8 @@ pub enum OwnerQual {
     GpuConst,
     /// `T'actor'global` — device DRAM with atomic access (kernel-side).
     GpuActorGlobal,
+    /// `T'surface` — pixel buffer with backend-differentiated placement.
+    GpuSurface,
     /// Qualifier union: `T'stack|heap|actor` — restricts which qualifiers callers may provide.
     /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
     /// validates that every call site provides one of the listed qualifiers.
@@ -1059,7 +1094,7 @@ impl Type {
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
             Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
-            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuSync | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal) => false,
+            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuSync | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal | OwnerQual::GpuSurface) => false,
         }
     }
 }

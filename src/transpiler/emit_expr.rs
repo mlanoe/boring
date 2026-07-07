@@ -1197,10 +1197,19 @@ impl Transpiler {
                 let n = self.emit_expr(count);
                 format!("vec![{}; {} as usize]", v, n)
             }
+            ExprKind::ArrayAlloc { count } => {
+                let n = self.emit_expr(count);
+                format!("vec![Default::default(); {} as usize]", n)
+            }
             ExprKind::ArrayComp { expr, var, count } => {
                 let n = self.emit_expr(count);
                 let body = self.emit_expr(expr);
                 format!("(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as i64; {} }}).collect::<Vec<_>>()", n, var, body)
+            }
+            ExprKind::ArrayCompIter { expr, var, iter } => {
+                let it = self.emit_expr(iter);
+                let body = self.emit_expr(expr);
+                format!("{}.iter().map(|{}| {{ {} }}).collect::<Vec<_>>()", it, var, body)
             }
             ExprKind::Tuple(elems) => {
                 // Use emit_expr_owned so string literals become Rc/Arc<str> in tuple slots.

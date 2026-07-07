@@ -166,8 +166,8 @@ __global__ void lookup(float* output) {
 <p>The constant array is uploaded once via <code>cudaMemcpyToSymbol</code> before launch.</p>
 <hr>
 <h2 id="dispatch-parameters">Dispatch parameters</h2>
-<p>All dispatch parameters are passed to <code>kernel(...)</code>.</p>
-<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block — 1D, 2D, or 3D</td></tr><tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from kernel shape if omitted</td></tr><tr><td><code>smem</code></td><td><code>{string = int}</code></td><td>no</td><td>named dynamic <code>&#x27;shared</code> partitions and their byte sizes</td></tr><tr><td><code>after</code></td><td>handle or <code>[handle]</code></td><td>no</td><td>ordering — kernel starts after all listed handles complete</td></tr><tr><td><code>priority</code></td><td><code>high</code> / <code>normal</code> / <code>low</code></td><td>no</td><td>stream scheduling priority — default <code>normal</code></td></tr></tbody></table>
+<p>All dispatch parameters are passed inside a <code>kernel:</code> block as labeled args to the kernel variable.</p>
+<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block — 1D, 2D, or 3D</td></tr><tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from kernel shape if omitted</td></tr><tr><td><code>after</code></td><td>kernel var or <code>[k1, k2]</code></td><td>no</td><td>GPU-side ordering — kernel starts after listed ones complete</td></tr><tr><td><code>priority</code></td><td><code>&quot;high&quot;</code> / <code>&quot;normal&quot;</code> / <code>&quot;low&quot;</code></td><td>no</td><td>stream scheduling priority — CUDA only, default <code>&quot;normal&quot;</code></td></tr></tbody></table>
 <p><strong>Grid inference rules (current implementation):</strong></p>
 <ul><li><code>[T]&#x27;global</code> / <code>&#x27;unified</code> 1D array field → <code>grid = ceil(len(buf) / block)</code></li><li>Otherwise, if <code>grid</code> is omitted, the transpiler defaults to <code>grid = (1, 1, 1)</code> — always pass <code>grid</code> explicitly unless relying on 1D array inference.</li></ul>
 <hr>
@@ -178,12 +178,13 @@ __global__ void lookup(float* output) {
     <span class="kw">req</span> T    <span class="fn">wait</span>()</code></pre></div>
 <p><code>.wait</code> is the only way to recover the kernel object.</p>
 <hr>
-<h2 id="shared--block-sram"><code>&#x27;shared</code> — block SRAM</h2>
-<h3 id="static--size-known-at-compile-time">Static — size known at compile time</h3>
+<h2 id="sync--block-sram"><code>&#x27;sync</code> — block SRAM</h2>
+<p><code>&#x27;sync</code> fields are allocated in per-block shared memory (<code>__shared__</code> in CUDA C). The transpiler computes <code>shared_mem_bytes</code> automatically from the block dimension and element size — no <code>smem =</code> dispatch parameter needed.</p>
+<h3 id="fixed-size--t-nsync">Fixed size — <code>[T, N]&#x27;sync</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Reduce:
     <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>      input
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>      output
-    <span class="kw">mut</span> [<span class="kt">float</span>, <span class="nb">256</span>]<span class="lf">&#x27;shared</span>  tile
+    <span class="kw">mut</span> [<span class="kt">float</span>, <span class="nb">256</span>]<span class="lf">&#x27;sync</span>    tile
 
     <span class="kw">init</span>(<span class="kt">int</span> n):
         input  = [..n]
@@ -196,12 +197,14 @@ __global__ void lookup(float* output) {
         ...
 
 <span class="kw">mut</span> k = <span class="fn">Reduce</span>(n)
-<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>) k |&gt; .wait</code></pre></div>
-<h3 id="dynamic--size-passed-at-launch">Dynamic — size passed at launch</h3>
+<span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = <span class="nb">256</span>)</code></pre></div>
+<h3 id="dynamic-size--tsync">Dynamic size — <code>[T]&#x27;sync</code></h3>
+<p>The size is <code>block_dim.x * sizeof(T)</code> — one element per thread in the block. Declare the field without a size; the transpiler passes <code>block_dim.0 * sizeof(T)</code> as <code>shared_mem_bytes</code>.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Reduce:
     <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  input
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  output
-    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;shared</span>   tile
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;sync</span>     tile
 
     <span class="kw">init</span>(<span class="kt">int</span> n):
         input  = [..n]
@@ -214,9 +217,8 @@ __global__ void lookup(float* output) {
         ...
 
 <span class="kw">mut</span> k = <span class="fn">Reduce</span>(n)
-<span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
-<p>Multiple named partitions — the transpiler generates offset arithmetic automatically:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="kw">kernel</span>(block = <span class="nb">256</span>, smem = {tile = <span class="nb">256</span> * <span class="nb">4</span>, flags = <span class="nb">64</span> * <span class="nb">4</span>}) k |&gt; .wait</code></pre></div>
+<span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = <span class="nb">256</span>)</code></pre></div>
 <hr>
 <h2 id="atomics--actor-on-kernel-fields">Atomics — <code>&#x27;actor</code> on kernel fields</h2>
 <p>Only <code>&#x27;actor&#x27;global</code> is implemented. <code>&#x27;actor&#x27;unified</code> and <code>&#x27;actor&#x27;shared</code> are not yet supported (parse error on those suffixes).</p>

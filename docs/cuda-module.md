@@ -112,15 +112,14 @@ The constant array is uploaded once via `cudaMemcpyToSymbol` before launch.
 
 ## Dispatch parameters
 
-All dispatch parameters are passed to `kernel(...)`.
+All dispatch parameters are passed inside a `kernel:` block as labeled args to the kernel variable.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block — 1D, 2D, or 3D |
 | `grid` | `int` or tuple | no | blocks per grid — inferred from kernel shape if omitted |
-| `smem` | `{string = int}` | no | named dynamic `'shared` partitions and their byte sizes |
-| `after` | handle or `[handle]` | no | ordering — kernel starts after all listed handles complete |
-| `priority` | `high` / `normal` / `low` | no | stream scheduling priority — default `normal` |
+| `after` | kernel var or `[k1, k2]` | no | GPU-side ordering — kernel starts after listed ones complete |
+| `priority` | `"high"` / `"normal"` / `"low"` | no | stream scheduling priority — CUDA only, default `"normal"` |
 
 **Grid inference rules (current implementation):**
 
@@ -143,15 +142,17 @@ struct KernelHandle<T>:
 
 ---
 
-## `'shared` — block SRAM
+## `'sync` — block SRAM
 
-### Static — size known at compile time
+`'sync` fields are allocated in per-block shared memory (`__shared__` in CUDA C). The transpiler computes `shared_mem_bytes` automatically from the block dimension and element size — no `smem =` dispatch parameter needed.
+
+### Fixed size — `[T, N]'sync`
 
 ```boring
 kernel Reduce:
     let [float]'unified      input
     mut [float]'unified      output
-    mut [float, 256]'shared  tile
+    mut [float, 256]'sync    tile
 
     init(int n):
         input  = [..n]
@@ -164,16 +165,19 @@ kernel Reduce:
         ...
 
 mut k = Reduce(n)
-mut k = kernel(block = 256) k |> .wait
+kernel:
+    k(block = 256)
 ```
 
-### Dynamic — size passed at launch
+### Dynamic size — `[T]'sync`
+
+The size is `block_dim.x * sizeof(T)` — one element per thread in the block. Declare the field without a size; the transpiler passes `block_dim.0 * sizeof(T)` as `shared_mem_bytes`.
 
 ```boring
 kernel Reduce:
     let [float]'unified  input
     mut [float]'unified  output
-    mut [float]'shared   tile
+    mut [float]'sync     tile
 
     init(int n):
         input  = [..n]
@@ -186,13 +190,8 @@ kernel Reduce:
         ...
 
 mut k = Reduce(n)
-mut k = kernel(block = 256, smem = {tile = 256 * 4}) k |> .wait
-```
-
-Multiple named partitions — the transpiler generates offset arithmetic automatically:
-
-```boring
-mut k = kernel(block = 256, smem = {tile = 256 * 4, flags = 64 * 4}) k |> .wait
+kernel:
+    k(block = 256)
 ```
 
 ---

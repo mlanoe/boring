@@ -308,10 +308,13 @@ impl Parser {
                 }
             }
             TokenKind::Kernel => {
-                // `kernel Name:` — GPU kernel struct declaration.
-                // `kernel(...)` is a launch expression — handled in parse_stmt/parse_expr.
-                let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
-                if matches!(next, Some(TokenKind::Ident(_))) {
+                // `kernel Name:` → GPU kernel struct declaration.
+                // `kernel Name(` / `kernel:` / `kernel expr` → kernel block — handled in parse_stmt.
+                let next  = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+                if matches!(next, Some(TokenKind::Ident(_)))
+                    && matches!(next2, Some(TokenKind::Colon))
+                {
                     Ok(Item::Kernel(self.parse_kernel_decl(is_pub)?))
                 } else {
                     Ok(Item::Stmt(self.parse_stmt()?))
@@ -1283,6 +1286,19 @@ impl Parser {
             }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
             Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
+            Type::Qualified(inner, OwnerQual::GpuSurface) => {
+                // `'surface` is only valid on `[uint]` — pixel buffer.
+                if !matches!(*inner, Type::Named(ref n) if n == "uint") {
+                    if !matches!(*inner, Type::Array(_)) {
+                        return Err(ParseError::Generic {
+                            msg: "'surface requires a '[uint]' element type — pixel buffers hold 32-bit RGBA values".into(),
+                            line, col, len: 1,
+                        });
+                    }
+                    // Allow [uint] (Type::Array(Box<Type::Named("uint")>)) too
+                }
+                (GpuQual::Surface, *inner)
+            }
             // Unqualified scalar → infer from binding:
             //   let scalar  → 'const  (read-only constant cache)
             //   mut/var scalar → 'local (mutable thread-private register)
@@ -1317,57 +1333,6 @@ impl Parser {
 
     /// Parse a `kernel(params) expr` launch expression.
     /// Called from expression parsing when `kernel` is followed by `(`.
-    pub(crate) fn parse_kernel_launch(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
-        self.expect(&TokenKind::Kernel)?;
-        self.expect(&TokenKind::LParen)?;
-
-        let mut block: Option<Expr> = None;
-        let mut grid: Option<Expr> = None;
-        let mut smem: Option<Expr> = None;
-        let mut after: Option<Expr> = None;
-        let mut priority: Option<String> = None;
-
-        // Parse named parameters: `block = N, grid = M, smem = {...}, after = h`
-        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-            self.skip_newlines_and_indent();
-            let param_name = match self.peek().clone() {
-                TokenKind::Ident(s) => { self.advance(); s }
-                _ => break,
-            };
-            self.expect(&TokenKind::Eq)?;
-            match param_name.as_str() {
-                "block"    => { block = Some(self.parse_expr()?); }
-                "grid"     => { grid  = Some(self.parse_expr()?); }
-                "smem"     => { smem  = Some(self.parse_expr()?); }
-                "after"    => { after = Some(self.parse_expr()?); }
-                "priority" => {
-                    match self.peek().clone() {
-                        TokenKind::Ident(s) => { self.advance(); priority = Some(s); }
-                        _ => return Err(ParseError::Generic {
-                            msg: "priority must be high, normal, or low".into(),
-                            line: self.line(), col: self.col(), len: self.tok_len(),
-                        }),
-                    }
-                }
-                _ => { let _ = self.parse_expr()?; } // skip unknown params
-            }
-            if !self.eat(&TokenKind::Comma) { break; }
-            self.skip_newlines_and_indent();
-        }
-        self.expect(&TokenKind::RParen)?;
-
-        let config = Box::new(KernelConfig { block, grid, smem, after, priority, line, col });
-
-        // Parse the kernel argument — only a primary/postfix expression, NOT a full pipe chain.
-        // `kernel(block=N) k |> .wait` should parse as `(kernel(block=N) k) |> .wait`,
-        // not as `kernel(block=N) (k |> .wait)`.
-        let kernel_expr = self.parse_postfix_top_level()?;
-
-        Ok(Expr {
-            kind: ExprKind::KernelLaunch { config, kernel: Box::new(kernel_expr) },
-            line, col, len: self.tok_len(), })
-    }
-
     fn parse_struct_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
         self.parse_struct_decl_with_attrs(is_pub, vec![])
     }

@@ -430,6 +430,7 @@ enum ExprKind:
     Array([Expr] elems)
     ArrayFill(Expr value, Expr count)
     ArrayComp(Expr expr, string varname, Expr count)
+    ArrayCompIter(Expr expr, string varname, Expr iter)
     Tuple([Expr] elems)
     Dict([(Expr, Expr)] pairs)
     Set([Expr] elems)

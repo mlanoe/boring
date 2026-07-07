@@ -2122,6 +2122,7 @@ impl Transpiler {
                 OwnerQual::GpuSync    => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuLocal   => self.emit_type(inner), // local = stack in Rust
                 OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),
+                OwnerQual::GpuSurface => format!("*mut {}", self.emit_type(inner)),
             }
         }
     }

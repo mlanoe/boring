@@ -444,7 +444,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
             GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                 let base = elem_c_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
                 Some(format!("{}{}* {}", constness, base, f.name))
@@ -483,7 +483,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
             GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                 Some(f.name.clone())
             }
             GpuQual::Const => {

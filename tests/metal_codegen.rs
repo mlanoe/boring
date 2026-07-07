@@ -377,7 +377,7 @@ kernel Scale:
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * 2.0
 "#);
-    assert!(rs.contains("fn __boring_launch(self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>"),
+    assert!(rs.contains("fn __boring_launch(&mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>"),
         "expected __boring_launch with Option grid_dim;\ngot:\n{rs}");
 }
 

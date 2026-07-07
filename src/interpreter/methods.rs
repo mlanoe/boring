@@ -4,6 +4,40 @@ use std::rc::Rc;
 
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
+        // Screen built-in method dispatch.
+        if let Value::Screen { width, height, frame, resized, keys, pixels, title } = &obj {
+            match method {
+                // screen.present(pixels_array) — write pixel buffer; advance frame counter.
+                // In simulation mode: store the pixels for PPM output.
+                "present" => {
+                    let buf = match args.into_iter().next() {
+                        Some(Value::Array(v)) => v.iter().map(|x| match x {
+                            Value::Uint(n) => *n as u32,
+                            Value::Int(n)  => *n as u32,
+                            _ => 0u32,
+                        }).collect::<Vec<u32>>(),
+                        _ => vec![],
+                    };
+                    *pixels.borrow_mut() = buf;
+                    *frame.borrow_mut() += 1;
+                    *resized.borrow_mut() = false;
+                    return Ok(Value::Void);
+                }
+                // screen.key("q") — check whether key was pressed this frame.
+                "key" => {
+                    let key = match args.into_iter().next() {
+                        Some(Value::Str(s)) => s.to_string(),
+                        _ => return Ok(Value::Bool(false)),
+                    };
+                    let pressed = keys.borrow().contains(&key);
+                    return Ok(Value::Bool(pressed));
+                }
+                _ => return Err(err(format!("Screen has no method '{}'", method), line)),
+            }
+        }
+        // Screen property access as method call (screen.dimension(), screen.resized(), etc.).
+        // These are also handled in field-access — keep both paths consistent.
+
         // KernelHandle<T> method dispatch — .wait() and .done()
         if let Value::KernelHandle { result } = &obj {
             return match method {
@@ -990,6 +1024,28 @@ impl Interpreter {
 
     pub(crate) fn get_field(&mut self, obj: Value, field: &str, line: usize) -> Eval {
         match obj {
+            // Screen property access.
+            Value::Screen { ref width, ref height, ref frame, ref resized, .. } => {
+                match field {
+                    "dimension" => {
+                        let w = *width.borrow();
+                        let h = *height.borrow();
+                        let inner = crate::interpreter::ObjectInner {
+                            type_name: "Dimension".into(),
+                            fields: vec![
+                                ("width".into(),  Value::Uint(w)),
+                                ("height".into(), Value::Uint(h)),
+                            ],
+                        };
+                        Ok(Value::Object(Rc::new(RefCell::new(inner))))
+                    }
+                    "resized" => Ok(Value::Bool(*resized.borrow())),
+                    "frame"   => Ok(Value::Uint(*frame.borrow())),
+                    "width"   => Ok(Value::Uint(*width.borrow())),
+                    "height"  => Ok(Value::Uint(*height.borrow())),
+                    other => Err(err(format!("Screen has no field '{}'", other), line)),
+                }
+            }
             // KernelHandle.done() / .wait — simulation: kernel already ran, always done.
             Value::KernelHandle { result } if field == "done" => {
                 let _ = result; // mark as used
@@ -1798,7 +1854,8 @@ impl Interpreter {
 
     pub(crate) fn expect_int(&self, val: Value, line: usize) -> Result<i64, Signal> {
         match val {
-            Value::Int(n) => Ok(n),
+            Value::Int(n)  => Ok(n),
+            Value::Uint(n) => Ok(n as i64),
             other => Err(err(format!("expected Int, got {}", other.type_name()), line)),
         }
     }

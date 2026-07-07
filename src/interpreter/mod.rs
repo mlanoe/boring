@@ -316,6 +316,21 @@ pub enum Value {
     },
     /// GPU device handle, produced by `GPU(n)` (simulation mode).
     GpuDevice(usize),
+    /// `Screen` built-in (simulation mode).
+    /// Tracks the current virtual canvas size and key/resize state.
+    Screen {
+        width:   Rc<RefCell<u64>>,
+        height:  Rc<RefCell<u64>>,
+        title:   String,
+        /// Frame counter — incremented each time `present()` is called.
+        frame:   Rc<RefCell<u64>>,
+        /// True for exactly one frame when the window was resized.
+        resized: Rc<RefCell<bool>>,
+        /// Keys "pressed" this frame (set by tests / simulation harness).
+        keys:    Rc<RefCell<Vec<String>>>,
+        /// Pixel buffer written by the last `present()` call (PPM output).
+        pixels:  Rc<RefCell<Vec<u32>>>,
+    },
 }
 
 impl PartialEq for Value {
@@ -388,6 +403,7 @@ impl fmt::Debug for Value {
             Value::KernelHandle { result } => write!(f, "KernelHandle({:?})", result),
             Value::KernelStruct { decl, .. } => write!(f, "KernelStruct({})", decl.name),
             Value::GpuDevice(n) => write!(f, "GpuDevice({})", n),
+            Value::Screen { title, .. } => write!(f, "Screen({:?})", title),
         }
     }
 }
@@ -425,6 +441,7 @@ impl Value {
             Value::KernelHandle { .. } => "KernelHandle".into(),
             Value::KernelStruct { decl, .. } => decl.name.clone(),
             Value::GpuDevice(_) => "GpuDevice".into(),
+            Value::Screen { .. } => "Screen".into(),
         }
     }
 }
@@ -515,6 +532,9 @@ impl fmt::Display for Value {
             Value::KernelHandle { result } => write!(f, "<KernelHandle: {}>", result),
             Value::KernelStruct { decl, .. } => write!(f, "<kernel {}>", decl.name),
             Value::GpuDevice(n) => write!(f, "<GPU {}>", n),
+            Value::Screen { title, width, height, .. } => {
+                write!(f, "Screen({}x{}, {:?})", width.borrow(), height.borrow(), title)
+            }
         }
     }
 }
@@ -598,6 +618,10 @@ impl Env {
             actor_bindings: HashSet::new(),
             lazy_vars: HashSet::new(),
         }))
+    }
+
+    pub fn all_bindings(&self) -> Vec<(String, Value)> {
+        self.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
@@ -1029,7 +1053,9 @@ fn register_stdlib(env: &EnvRef) {
             }
             match &args[0] {
                 Value::Float(f) => Ok(Value::Float(*f)),
-                Value::Int(n) => Ok(Value::Float(*n as f64)),
+                Value::Int(n)   => Ok(Value::Float(*n as f64)),
+                Value::Uint(n)  => Ok(Value::Float(*n as f64)),
+                Value::Bool(b)  => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
                 Value::Str(s) => s.trim().parse::<f64>()
                     .map(Value::Float)
                     .map_err(|_| err(format!("cannot convert '{}' to Float", s), line)),
@@ -1489,6 +1515,9 @@ pub struct Interpreter {
     pub search_paths: Vec<PathBuf>,
     pub loaded: HashSet<PathBuf>,
     pub task_context: bool,  // true at top-level and inside task fns
+    /// True while inside a `kernel:` execution block.
+    /// Enables implicit `.wait()` on KernelHandle bare expressions.
+    pub(crate) kernel_context: bool,
     /// Defer stack: one entry per active function call frame.
     /// Each entry is a list of deferred statement blocks (inner Vec = one `defer:` body).
     /// Blocks are pushed in order and executed in reverse (LIFO) on function exit.
@@ -1558,6 +1587,7 @@ impl Interpreter {
             search_paths: Vec::new(),
             loaded: HashSet::new(),
             task_context: true,  // top-level is implicitly task context
+            kernel_context: false,
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
             current_method_mutating: true,  // default to mutating for top-level code

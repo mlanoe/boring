@@ -3,6 +3,46 @@ use std::collections::{HashMap, VecDeque};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Parse `Screen(Dimension(w,h), title="...")` or `Screen(w, h, title="...")` arguments.
+fn parse_screen_args(args: &[Value]) -> (u64, u64, String) {
+    let mut width: u64 = 800;
+    let mut height: u64 = 600;
+    let mut title = "Boring".to_string();
+
+    let mut positional_idx = 0;
+    for arg in args {
+        match arg {
+            Value::Labeled { label, value } if label == "title" => {
+                if let Value::Str(s) = value.as_ref() {
+                    title = s.to_string();
+                }
+            }
+            Value::Object(obj) if obj.borrow().type_name == "Dimension" => {
+                let obj = obj.borrow();
+                for (k, v) in &obj.fields {
+                    match (k.as_str(), v) {
+                        ("width",  Value::Uint(n)) => width  = *n,
+                        ("height", Value::Uint(n)) => height = *n,
+                        _ => {}
+                    }
+                }
+            }
+            Value::Uint(n) => {
+                if positional_idx == 0 { width  = *n; }
+                else                   { height = *n; }
+                positional_idx += 1;
+            }
+            Value::Int(n) => {
+                if positional_idx == 0 { width  = *n as u64; }
+                else                   { height = *n as u64; }
+                positional_idx += 1;
+            }
+            _ => {}
+        }
+    }
+    (width, height, title)
+}
+
 impl Interpreter {
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
         let line = expr.line;
@@ -219,6 +259,39 @@ impl Interpreter {
                         }
                         return Ok(Value::Str("null".into()));
                     }
+                    // Dimension(w, h) — built-in size descriptor.
+                    // Stored as an Object with fields `width` and `height`.
+                    if name.as_str() == "Dimension" {
+                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        let (w, h) = match arg_vals.as_slice() {
+                            [Value::Uint(w), Value::Uint(h)] => (*w, *h),
+                            [Value::Int(w), Value::Int(h)] => (*w as u64, *h as u64),
+                            [Value::Uint(w)] => (*w, *w),
+                            _ => (0, 0),
+                        };
+                        let obj = crate::interpreter::ObjectInner {
+                            type_name: "Dimension".into(),
+                            fields: vec![
+                                ("width".into(),  Value::Uint(w)),
+                                ("height".into(), Value::Uint(h)),
+                            ],
+                        };
+                        return Ok(Value::Object(Rc::new(RefCell::new(obj))));
+                    }
+                    // Screen(Dimension | w, h, title = ...) — built-in window (simulation mode).
+                    if name.as_str() == "Screen" {
+                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        let (w, h, title) = parse_screen_args(&arg_vals);
+                        return Ok(Value::Screen {
+                            width:   Rc::new(RefCell::new(w)),
+                            height:  Rc::new(RefCell::new(h)),
+                            title,
+                            frame:   Rc::new(RefCell::new(0)),
+                            resized: Rc::new(RefCell::new(false)),
+                            keys:    Rc::new(RefCell::new(vec![])),
+                            pixels:  Rc::new(RefCell::new(vec![])),
+                        });
+                    }
                     // GPU(n) — built-in GPU device handle (simulation mode).
                     if name.as_str() == "GPU" {
                         let idx = match args.first() {
@@ -261,6 +334,33 @@ impl Interpreter {
                     }
                 }
                 let callee = self.eval_expr(callee_expr, Rc::clone(&env))?;
+                // `k(block = N)` short-hand — if the callee is a kernel Object and the
+                // arguments contain a `block =` labeled arg, treat this as a kernel launch
+                // and return a KernelHandle. The handle immediately returns `k` on `.wait`.
+                if matches!(&callee, Value::Object(_)) {
+                    let type_name = callee.type_name();
+                    let is_kernel = self.global.borrow().get(&type_name)
+                        .map(|v| matches!(v, Value::KernelStruct { .. }))
+                        .unwrap_or(false);
+                    let has_block = args.iter().any(|a| a.label.as_deref() == Some("block"));
+                    if is_kernel && has_block {
+                        // Build a synthetic KernelConfig from the labeled args.
+                        let block_arg = args.iter().find(|a| a.label.as_deref() == Some("block"))
+                            .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
+                        let block_val = match block_arg {
+                            Some(Ok(v)) => v,
+                            _ => Value::Int(1),
+                        };
+                        let after_arg = args.iter().find(|a| a.label.as_deref() == Some("after"))
+                            .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
+                        let _after_val = after_arg.and_then(|r| r.ok());
+                        let config = crate::ast::KernelConfig {
+                            block: Some(Expr { kind: crate::ast::ExprKind::Nil, line, col: 0, len: 0 }),
+                            grid: None, after: None, priority: None, line, col: 0,
+                        };
+                        return self.eval_kernel_launch_with_val(config, callee, block_val, line, &env);
+                    }
+                }
                 // Check for double-use of owned args before evaluating
                 if let Value::Fn { ref decl, .. } = callee {
                     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -572,18 +672,39 @@ impl Interpreter {
 
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let v = self.eval_expr(value, Rc::clone(&env))?;
                 Ok(Value::Array(vec![v; n]))
             }
 
+            ExprKind::ArrayAlloc { count } => {
+                let cv = self.eval_expr(count, Rc::clone(&env))?;
+                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                Ok(Value::Array(vec![Value::Int(0); n]))
+            }
+
             ExprKind::ArrayComp { expr, var, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
-                let n = match cv { Value::Int(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
+                let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let mut vals = Vec::with_capacity(n);
                 for i in 0..n {
                     let inner = Env::child(Rc::clone(&env));
                     inner.borrow_mut().define(var, Value::Int(i as i64));
+                    vals.push(self.eval_expr(expr, Rc::clone(&inner))?);
+                }
+                Ok(Value::Array(vals))
+            }
+
+            ExprKind::ArrayCompIter { expr, var, iter } => {
+                let col = self.eval_expr(iter, Rc::clone(&env))?;
+                let elems = match col {
+                    Value::Array(v) => v,
+                    _ => return Err(Signal::Error(RuntimeError { message: "array comprehension source must be an array".into(), line: expr.line, col: 0, len: 0 })),
+                };
+                let mut vals = Vec::with_capacity(elems.len());
+                for item in elems {
+                    let inner = Env::child(Rc::clone(&env));
+                    inner.borrow_mut().define(var, item);
                     vals.push(self.eval_expr(expr, Rc::clone(&inner))?);
                 }
                 Ok(Value::Array(vals))

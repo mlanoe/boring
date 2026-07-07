@@ -625,10 +625,27 @@ def Expr parse_primary(mut Parser p) throws:
                 if parser_check(p, "Ident") and parser_check2(p, "In"):
                     let var_name = parser_expect_ident(p)
                     parser_expect(p, "In")
-                    let count = parse_comp_count(p)
-                    parser_skip_newlines_and_indent(p)
-                    parser_expect(p, "RBracket")
-                    return make_array_comp(first, var_name, count, line)
+                    if parser_check(p, "DotDot"):
+                        let count = parse_comp_count(p)
+                        parser_skip_newlines_and_indent(p)
+                        parser_expect(p, "RBracket")
+                        return make_array_comp(first, var_name, count, line)
+                    let source = parse_or(p)
+                    match source.kind:
+                        ExprKind.Range(start, end, false):
+                            match start.kind:
+                                ExprKind.Int(0):
+                                    parser_skip_newlines_and_indent(p)
+                                    parser_expect(p, "RBracket")
+                                    return make_array_comp(first, var_name, end, line)
+                                _:
+                                    throw "array comprehension range must start at 0 — use `..n` or `0..n`"
+                        ExprKind.Range(_, _, true):
+                            throw "array comprehension does not accept inclusive range (`..=`)"
+                        _:
+                            parser_skip_newlines_and_indent(p)
+                            parser_expect(p, "RBracket")
+                            return make_array_comp_iter(first, var_name, source, line)
                 else:
                     let count = parse_comp_count(p)
                     parser_skip_newlines_and_indent(p)

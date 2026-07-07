@@ -58,10 +58,10 @@ let _result = Scale(data, 3)
     }
 }
 
-// ─── kernel launch and KernelHandle.wait ────────────────────────────────────
+// ─── kernel: block — basic execution ────────────────────────────────────────
 
 #[test]
-fn test_kernel_launch_returns_handle() {
+fn test_kernel_block_runs_entry_point() {
     let src = r#"
 kernel Identity:
     mut [float]'unified buf
@@ -70,20 +70,22 @@ kernel Identity:
         buf = data
 
     def ():
-        let _tid = gpu.thread.x
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 1.0
 
 let data = [10.0, 20.0]
 mut k = Identity(data)
-let _result = kernel(block = 2) k
+kernel:
+    k(block = 2)
+let _result = k.buf[0]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    let val = get_var(&interp, "_result");
-    assert!(matches!(val, Value::KernelHandle { .. }), "kernel(...) should return KernelHandle");
+    assert_eq!(get_var(&interp, "_result"), Value::Float(10.0));
 }
 
 #[test]
-fn test_kernel_handle_wait_returns_object() {
+fn test_kernel_block_writeback() {
     let src = r#"
 kernel Identity:
     mut [float]'unified buf
@@ -92,21 +94,24 @@ kernel Identity:
         buf = data
 
     def ():
-        let _tid = gpu.thread.x
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] + 1.0
 
 let data = [10.0, 20.0]
 mut k = Identity(data)
-let h = kernel(block = 2) k
-let _result = h.wait
+kernel:
+    k(block = 2)
+let _r0 = k.buf[0]
+let _r1 = k.buf[1]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    let val = get_var(&interp, "_result");
-    assert!(matches!(val, Value::Object(_)), ".wait should return the kernel Object");
+    assert_eq!(get_var(&interp, "_r0"), Value::Float(11.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float(21.0));
 }
 
 #[test]
-fn test_kernel_handle_done_returns_true() {
+fn test_kernel_block_single_element() {
     let src = r#"
 kernel Identity:
     mut [float]'unified buf
@@ -115,15 +120,16 @@ kernel Identity:
         buf = data
 
     def ():
-        let _tid = gpu.thread.x
+        buf[0] = buf[0] * 2.0
 
-mut k = Identity([1.0])
-let h = kernel(block = 1) k
-let _result = h.done()
+mut k = Identity([5.0])
+kernel:
+    k(block = 1)
+let _result = k.buf[0]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "_result"), Value::Float(10.0));
 }
 
 // ─── kernel simulation — element-wise operation ──────────────────────────────
@@ -143,7 +149,8 @@ kernel Scale:
 
 let data = [1.0, 2.0, 3.0, 4.0]
 mut k = Scale(data)
-mut k = kernel(block = 4) k |> .wait
+kernel:
+    k(block = 4)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -176,7 +183,8 @@ kernel Scale3:
 
 let data = [2.0, 4.0, 6.0]
 mut k = Scale3(data)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -208,7 +216,8 @@ kernel RecordTid:
         tids[tid] = tid
 
 mut k = RecordTid(3)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.tids
 "#;
     let (interp, result) = run(src);
@@ -221,7 +230,7 @@ let _result = k.tids
     );
 }
 
-// ─── kernel field access after wait ─────────────────────────────────────────
+// ─── kernel field access after launch ────────────────────────────────────────
 
 #[test]
 fn test_kernel_field_access_after_wait() {
@@ -241,7 +250,8 @@ kernel AddOne:
 
 let data = [0.0, 1.0, 2.0]
 mut k = AddOne(3, data)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _a0 = k.arr[0]
 let _a1 = k.arr[1]
 let _a2 = k.arr[2]
@@ -273,7 +283,8 @@ kernel WithHelper:
 
 let data = [1.0, 2.0]
 mut k = WithHelper(data)
-mut k = kernel(block = 2) k |> .wait
+kernel:
+    k(block = 2)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -304,7 +315,8 @@ kernel WithSync:
 
 let data = [1.0, 2.0, 3.0]
 mut k = WithSync(data)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -317,32 +329,7 @@ let _result = k.buf
     );
 }
 
-// ─── pipe |> .wait syntax ───────────────────────────────────────────────────
-
-#[test]
-fn test_pipe_dot_wait_syntax() {
-    let src = r#"
-kernel PipeTest:
-    mut [float]'unified buf
-
-    init([float]'unified data):
-        buf = data
-
-    def ():
-        let tid = gpu.thread.x
-        buf[tid] = buf[tid] + 100.0
-
-let data = [1.0, 2.0]
-mut k = PipeTest(data)
-mut k = kernel(block = 2) k |> .wait
-let _result = k.buf[0]
-"#;
-    let (interp, result) = run(src);
-    result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Float(101.0));
-}
-
-// ─── end-to-end: element-wise multiply (dot product inputs) ─────────────────
+// ─── end-to-end: element-wise multiply ──────────────────────────────────────
 
 #[test]
 fn test_elementwise_multiply_full_program() {
@@ -364,7 +351,8 @@ kernel Multiply:
 let xs = [1.0, 2.0, 3.0, 4.0]
 let ys = [4.0, 3.0, 2.0, 1.0]
 mut k = Multiply(xs, ys)
-mut k = kernel(block = 4) k |> .wait
+kernel:
+    k(block = 4)
 let _r0 = k.out[0]
 let _r1 = k.out[1]
 let _r2 = k.out[2]
@@ -406,11 +394,13 @@ kernel Shift:
 
 let data = [1.0, 2.0, 3.0]
 mut k1 = Scale(data)
-mut k1 = kernel(block = 3) k1 |> .wait
+kernel:
+    k1(block = 3)
 let scaled = k1.buf
 
 mut k2 = Shift(scaled)
-mut k2 = kernel(block = 3) k2 |> .wait
+kernel:
+    k2(block = 3)
 let _r0 = k2.buf[0]
 let _r1 = k2.buf[1]
 let _r2 = k2.buf[2]
@@ -425,7 +415,6 @@ let _r2 = k2.buf[2]
 
 // ─── memory qualifiers ───────────────────────────────────────────────────────
 
-// 'global — device-global writeable buffer (simulation: behaves like 'unified)
 #[test]
 fn test_gpu_global_qualifier() {
     let src = r#"
@@ -441,7 +430,8 @@ kernel GlobalScale:
 
 let data = [1.0, 2.0, 3.0]
 mut k = GlobalScale(data)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -452,7 +442,6 @@ let _result = k.buf
     );
 }
 
-// 'shared — block-shared SRAM; used as a per-block lookup table
 #[test]
 fn test_gpu_shared_qualifier() {
     let src = r#"
@@ -471,7 +460,8 @@ kernel SharedWeight:
 let data    = [1.0, 2.0, 4.0]
 let weights = [5.0]
 mut k = SharedWeight(data, weights)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.out
 "#;
     let (interp, result) = run(src);
@@ -482,8 +472,6 @@ let _result = k.out
     );
 }
 
-// 'local — per-thread scratch; simulation runs sequentially so the last
-//           thread's scratch value is visible in the field after launch.
 #[test]
 fn test_gpu_local_qualifier() {
     let src = r#"
@@ -501,19 +489,18 @@ kernel LocalScratch:
         out[tid] = scratch
 
 mut k = LocalScratch(3)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.out
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    // Each thread writes its own scratch then stores it — result is thread-local
     assert_eq!(
         get_var(&interp, "_result"),
         Value::Array(vec![Value::Float(0.0), Value::Float(10.0), Value::Float(20.0)])
     );
 }
 
-// 'const — read-only constant memory; all threads read the same value
 #[test]
 fn test_gpu_const_qualifier() {
     let src = r#"
@@ -531,7 +518,8 @@ kernel ConstScale:
 
 let data = [2.0, 4.0, 8.0]
 mut k = ConstScale(data, 0.5)
-mut k = kernel(block = 3) k |> .wait
+kernel:
+    k(block = 3)
 let _result = k.buf
 "#;
     let (interp, result) = run(src);
@@ -540,4 +528,225 @@ let _result = k.buf
         get_var(&interp, "_result"),
         Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(4.0)])
     );
+}
+
+// ─── Screen / Dimension built-ins ────────────────────────────────────────────
+
+#[test]
+fn test_dimension_constructor() {
+    let src = r#"
+let d = Dimension(1024, 768)
+let _w = d.width
+let _h = d.height
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_w"), Value::Uint(1024));
+    assert_eq!(get_var(&interp, "_h"), Value::Uint(768));
+}
+
+#[test]
+fn test_screen_constructor_positional() {
+    let src = r#"
+let s = Screen(800, 600)
+let _w = s.width
+let _h = s.height
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_w"), Value::Uint(800));
+    assert_eq!(get_var(&interp, "_h"), Value::Uint(600));
+}
+
+#[test]
+fn test_screen_constructor_with_dimension() {
+    let src = r#"
+let s = Screen(Dimension(640, 480), title = "test")
+let d = s.dimension
+let _w = d.width
+let _h = d.height
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_w"), Value::Uint(640));
+    assert_eq!(get_var(&interp, "_h"), Value::Uint(480));
+}
+
+#[test]
+fn test_screen_present_increments_frame() {
+    let src = r#"
+let screen = Screen(4, 4)
+let pixels = [0 for ..16]
+screen.present(pixels)
+screen.present(pixels)
+let _f = screen.frame
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_f"), Value::Uint(2));
+}
+
+#[test]
+fn test_screen_key_false_by_default() {
+    let src = r#"
+let screen = Screen(4, 4)
+let _pressed = screen.key("q")
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_pressed"), Value::Bool(false));
+}
+
+#[test]
+fn test_screen_resized_false_initially() {
+    let src = r#"
+let screen = Screen(4, 4)
+let _r = screen.resized
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_r"), Value::Bool(false));
+}
+
+// ─── 'surface qualifier + kernel: block ──────────────────────────────────────
+
+#[test]
+fn test_surface_qualifier_kernel_field() {
+    // The kernel body uses Dimension field access (Object.field) which adds stack frames.
+    // Spawn a thread with a larger stack to avoid overflow in test mode (debug build).
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let src = r#"
+kernel Fill:
+    mut [uint]'surface pixels
+    var Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = 0xFF0000FF
+
+let screen = Screen(Dimension(1, 1))
+var k = Fill(screen.dimension)
+kernel:
+    k(block = (1, 1))
+let _p = k.pixels[0]
+"#;
+            let (interp, result) = run(src);
+            result.expect("runtime error");
+            // 0xFF0000FF = 4278190335 — stored as Int literal in Boring
+            assert_eq!(get_var(&interp, "_p"), Value::Int(4278190335u64 as i64));
+        })
+        .unwrap()
+        .join();
+    result.expect("thread panicked");
+}
+
+#[test]
+fn test_kernel_block_executes_body() {
+    let src = r#"
+kernel Counter:
+    mut [uint]'surface pixels
+    var Dimension dim
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = 42
+
+let screen = Screen(Dimension(1, 1))
+var k = Counter(screen.dimension)
+
+kernel:
+    k(block = (1, 1))
+    screen.present(k.pixels)
+
+let _frame = screen.frame
+let _px    = k.pixels[0]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_frame"), Value::Uint(1));
+    assert_eq!(get_var(&interp, "_px"),    Value::Int(42));
+}
+
+#[test]
+fn test_kernel_block_loop_break() {
+    let src = r#"
+kernel Fill:
+    mut [uint]'surface pixels
+    var Dimension dim
+    var int iters
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+        iters = 0
+
+    def ():
+        pixels[0] = uint(iters)
+
+let screen = Screen(Dimension(1, 1))
+var k = Fill(screen.dimension)
+
+kernel:
+    loop:
+        k.iters += 1
+        k(block = (1, 1))
+        screen.present(k.pixels)
+        if k.iters >= 4:
+            break
+
+let _frames = screen.frame
+let _iters  = k.iters
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_frames"), Value::Uint(4));
+    assert_eq!(get_var(&interp, "_iters"),  Value::Int(4));
+}
+
+#[test]
+fn test_kernel_init_overload_dispatch() {
+    let src = r#"
+kernel Zoom:
+    mut [uint]'surface pixels
+    var Dimension dim
+    var float zoom
+
+    init(Dimension d, float zoom):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+        zoom   = zoom
+
+    init(Zoom prev, Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+        zoom   = prev.zoom
+
+    def ():
+        pixels[0] = 0
+
+var k1 = Zoom(Dimension(2, 2), 3.5)
+var k2 = Zoom(k1, Dimension(4, 4))
+let _z1 = k1.zoom
+let _z2 = k2.zoom
+let _w2 = k2.dim.width
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_z1"), Value::Float(3.5));
+    assert_eq!(get_var(&interp, "_z2"), Value::Float(3.5));
+    assert_eq!(get_var(&interp, "_w2"), Value::Uint(4));
 }

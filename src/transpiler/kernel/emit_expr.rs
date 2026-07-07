@@ -208,8 +208,14 @@ impl KernelTranspiler {
             ExprKind::ArrayFill { value, count } => {
                 format!("kernel::prelude::vec![{}; {} as usize]", self.emit_expr(value), self.emit_expr(count))
             }
+            ExprKind::ArrayAlloc { count } => {
+                format!("kernel::prelude::vec![Default::default(); {} as usize]", self.emit_expr(count))
+            }
             ExprKind::ArrayComp { expr, var, count } => {
                 format!("(0..({} as usize)).map(|{}| {{ {} }}).collect::<kernel::prelude::Vec<_>>()", self.emit_expr(count), var, self.emit_expr(expr))
+            }
+            ExprKind::ArrayCompIter { expr, var, iter } => {
+                format!("{}.iter().map(|{}| {{ {} }}).collect::<kernel::prelude::Vec<_>>()", self.emit_expr(iter), var, self.emit_expr(expr))
             }
 
             ExprKind::Tuple(elems) => {
