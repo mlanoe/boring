@@ -5,6 +5,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.2] — 2026-07-10 *(interpreter: 425/425 · transpiler: 216/216 · cuda: 34/34 · metal: 69/69 tests passing)*
+
+### Added
+
+- **`[..n]` ArrayAlloc syntax** — allocates an array of `n` elements without initialization. Distinct from `[v for ..n]` (fill) and `[v, v, ...]` (literal). Used in `kernel init` for `'sync` dynamic-size fields and for `'unified`/`'global` device buffers. Transpiles to `vec![Default::default(); n]` in Rust and `Vec<T>::with_capacity(n)` in simulation.
+
+- **`priority =` dispatch parameter** — sets the stream scheduling priority for a CUDA kernel launch. Accepted values: `"high"`, `"normal"` (default), `"low"`. Maps to `cuStreamCreateWithPriority` with priorities `-1`, `0`, `1` respectively. Silently ignored on Metal and `boring run`.
+
+### Changed
+
+- **`smem =` dispatch parameter removed** — shared-memory byte counts are now computed automatically by the transpiler from the `'sync` field types and the `block` dimension. No user-visible `smem` argument is needed or accepted.
+
+- **Dynamic `[T]'sync` fields** — declare the field without a size and assign `[..block_size]` in `init()`. The transpiler forwards `block_dim.x * sizeof(T)` as `shared_mem_bytes` automatically.
+
+- **`.cargo/config.toml` — `RUST_MIN_STACK=4194304`** — the stack growth from the `ArrayAlloc` variant required increasing the minimum test-thread stack from 2 MB to 4 MB. This is set via an environment variable in `.cargo/config.toml` and does not affect final binaries.
+
+- **`sync` keyword in module paths** — `use std.sync.atomic.AtomicUsize` now parses correctly. The parser accepts any reserved keyword as a path segment in `use` declarations.
+
+- **`examples/plasma_metal.br`** — `var Dimension dim` corrected to `let Dimension dim` (the field is never reassigned after `init`).
+
+- **Docs updated** — `gpu-module.md` and `cuda-module.md` document `[..n]`, `priority`, dynamic `'sync` fields, and the removed `smem` parameter. HTML files regenerated.
+
+---
+
 ## [0.9.1] — 2026-07-07 *(interpreter: 78/78 · transpiler: 245/245 tests passing)*
 
 ### Changed

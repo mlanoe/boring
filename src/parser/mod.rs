@@ -452,14 +452,16 @@ impl Parser {
         self.expect(&TokenKind::Use)?;
 
         // Parse all dot-separated segments.
-        let mut path = vec![self.expect_ident()?];
+        // Keywords that coincide with module names (e.g. `sync` in `std.sync.atomic`)
+        // are accepted as identifiers here.
+        let mut path = vec![self.expect_ident_or_keyword()?];
         while self.eat(&TokenKind::Dot) {
             if self.eat(&TokenKind::Star) {
                 // use a.b.c.*  — glob import
                 self.expect_newline()?;
                 return Ok(UseDecl { path, glob: true, items: vec![], line, col });
             }
-            path.push(self.expect_ident()?);
+            path.push(self.expect_ident_or_keyword()?);
         }
 
         // Single-segment path (`use a`) — whole-module edge case.
@@ -1957,6 +1959,7 @@ impl Parser {
             TokenKind::Native    => Some("native".into()),
             TokenKind::Mod       => Some("mod".into()),
             TokenKind::New       => Some("new".into()),
+            TokenKind::Sync      => Some("sync".into()),
             TokenKind::Bool(b)   => Some(if *b { "True".into() } else { "False".into() }),
             TokenKind::Nil       => Some("Nil".into()),
             _ => None,

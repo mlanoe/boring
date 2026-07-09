@@ -54,7 +54,9 @@ use_decl        ::= "use" mod_path ".*" NEWLINE                                 
                   | "use" IDENT "as" type NEWLINE                                     # type alias
                   | "use" IDENT "<" IDENT ("," IDENT)* ">" "as" type NEWLINE         # generic type alias
 
-mod_path        ::= IDENT ("." IDENT)*
+mod_path        ::= path_seg ("." path_seg)*
+path_seg        ::= IDENT | keyword_as_ident   # keywords like `sync` are valid path segments
+keyword_as_ident ::= "sync" | "type" | "mod" | "new" | "set" | "init" | …
 # The last dot-segment is always an item name, never a module name.
 #
 # Three import forms:
@@ -323,10 +325,12 @@ ext_member      ::= "pub"? fn_decl
 #   kernel(<launch_args>) expr |> .wait              # launch and block until done
 #
 # Launch args:
-#   block = <int>          — threads per block (1-D); required
-#   grid  = <int>          — blocks per grid (1-D); optional, auto-inferred from data size
-#   block = (<int>, <int>, <int>)  — 3-D block dimensions
-#   grid  = (<int>, <int>, <int>)  — 3-D grid dimensions
+#   block    = <int>                   — threads per block (1-D); required
+#   grid     = <int>                   — blocks per grid (1-D); optional, auto-inferred from data size
+#   block    = (<int>, <int>, <int>)   — 3-D block dimensions
+#   grid     = (<int>, <int>, <int>)   — 3-D grid dimensions
+#   after    = kernel_var | [k1, k2]  — GPU-side ordering (CUDA: stream sync; Metal: no-op)
+#   priority = "high" | "normal" | "low"  — stream scheduling priority (CUDA only; ignored elsewhere)
 #
 # GPU built-ins (device side only, no `use` needed):
 #   gpu.thread.x / .y / .z      — thread index within block
@@ -629,7 +633,8 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | "self"
                   | "(" expr ")"            # grouping — newlines inside ignored
                   | "(" expr "," expr ("," expr)* ")"   # tuple
-                  | "[" (expr ("," expr)*)? "]"          # array
+                  | "[" (expr ("," expr)*)? "]"          # array literal
+                  | "[" ".." expr "]"                    # array alloc: [..n] — allocate n elements without init
                   | "{" "}"                              # empty set  `{}`  → HashSet::new()
                   | "{" "=" "}"                          # empty dict `{=}` → HashMap::new()
                   | "{" dict_or_set "}"                  # dict or set (non-empty)

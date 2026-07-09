@@ -11,7 +11,7 @@ let screen = Screen(Dimension(width, height), title = "Plasma — boring")
 
 kernel Plasma:
     mut [uint]'surface pixels
-    var Dimension dim
+    let Dimension dim
     var float t
 
     init(Dimension d):

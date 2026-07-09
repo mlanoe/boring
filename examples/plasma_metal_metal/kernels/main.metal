@@ -12,14 +12,14 @@ struct Dimension { uint width; uint height; };
 
 kernel void Plasma_kernel(
     device uint* pixels [[buffer(0)]],
-    constant Dimension* __dim_init [[buffer(1)]],
+    constant Dimension* __dim [[buffer(1)]],
     constant float* __t_init [[buffer(2)]],
     uint3 __thread_pos [[thread_position_in_threadgroup]],
     uint3 __block_pos [[threadgroup_position_in_grid]],
     uint3 __block_dim [[threads_per_threadgroup]],
     uint3 __grid_dim [[threadgroups_per_grid]]
 ) {
-    Dimension dim = *__dim_init;
+    const Dimension dim = *__dim;
     float t = *__t_init;
     const auto col = (((int64_t)__block_pos.x * (int64_t)__block_dim.x) + (int64_t)__thread_pos.x);
     const auto row = (((int64_t)__block_pos.y * (int64_t)__block_dim.y) + (int64_t)__thread_pos.y);
