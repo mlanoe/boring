@@ -3,6 +3,8 @@ examples/*/target/
 # Generated Rust projects from --emit-rust
 tests/cases/*_rust/
 examples/*_rust/
+examples/*_metal/
+examples/*_cuda/
 stdlib/*_rust/
 # Scratch Cargo projects generated per .br file (boring build <file.br>)
 boring/interpreter/ast_rust/

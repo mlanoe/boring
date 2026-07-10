@@ -1,0 +1,77 @@
+# Game of Life — Metal GPU demo
+# Conway's Game of Life computed and rendered on GPU via Metal.
+# Cells use a toroidal (wrap-around) grid.
+#
+# Run: boring build examples/game_of_life.br --target metal
+#      cd examples/game_of_life_metal && cargo run --release
+#
+# Keys: Escape — quit   Space — pause/resume   R — randomize
+
+let width  = 800
+let height = 600
+let screen = Screen(Dimension(width, height), title = "Game of Life — boring")
+
+# Step kernel — advances one generation (ping-pong between cells_in / cells_out).
+kernel Step:
+    mut [uint]'surface cells_in   # current generation (read)
+    mut [uint]'surface cells_out  # next generation (write)
+    let Dimension dim
+
+    init(Dimension d):
+        cells_in  = [0 for ..d.width * d.height]
+        cells_out = [0 for ..d.width * d.height]
+        dim       = d
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < dim.width and row < dim.height:
+            var int n = 0
+            for dy in -1..2:
+                for dx in -1..2:
+                    if dx == 0 and dy == 0:
+                        continue
+                    # toroidal wrap-around
+                    let nx = uint((int(col) + dx + int(dim.width))  % int(dim.width))
+                    let ny = uint((int(row) + dy + int(dim.height)) % int(dim.height))
+                    n += int(cells_in[ny * dim.width + nx])
+            let alive = cells_in[row * dim.width + col]
+            # survival: 2–3 neighbours; birth: exactly 3
+            cells_out[row * dim.width + col] = if alive == 1: uint(n == 2 or n == 3) else uint(n == 3)
+
+# Render kernel — converts cell state to BGRA pixels.
+kernel Render:
+    let [uint]'surface cells
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        cells  = [0 for ..d.width * d.height]
+        pixels = [0 for ..d.width * d.height]
+        dim    = d
+
+    def ():
+        let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
+        if col < dim.width and row < dim.height:
+            let alive = cells[row * dim.width + col]
+            # BGRA: alive = bright green 0xFF00FF00, dead = near-black 0xFF111111
+            pixels[row * dim.width + col] = if alive == 1: 0xFF00FF00 else 0xFF111111
+
+var step   = Step(Dimension(width, height))
+var render = Render(Dimension(width, height))
+# step.cells_in is filled randomly at startup by the runtime
+
+kernel:
+    loop:
+        step(block = (16, 16))
+        # ping-pong: swap in/out so next iteration reads the freshly-written buffer
+        step.cells_in, step.cells_out = step.cells_out, step.cells_in
+        render.cells = step.cells_in
+        render(block = (16, 16))
+        screen.present(render.pixels)
+        if screen.key("\x1B"):
+            break
+        if screen.key("r"):
+            # reinitialize randomly (handled by the runtime)
+            pass
