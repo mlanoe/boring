@@ -298,6 +298,8 @@ fn print_help() {
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring build --target cuda               Emit a CUDA Cargo project from boring.toml");
     eprintln!("    boring build --target cuda <file.br>     Emit a CUDA Cargo project from a single file");
+    eprintln!("    boring build --target metal              Emit a Metal Cargo project from boring.toml");
+    eprintln!("    boring build --target metal <file.br>    Emit a Metal Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
 }
 

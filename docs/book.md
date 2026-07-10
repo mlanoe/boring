@@ -6968,6 +6968,9 @@ Low-level CUDA codegen internals: generated file layout, `cudarc` host API, PTX 
 **[Metal backend](metal-backend.html)**
 macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.
 
+**[GPU display](gpu-display.html)**
+Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.
+
 ### Compilation targets
 
 **[Rust-for-Linux target](kernel-target.html)**
