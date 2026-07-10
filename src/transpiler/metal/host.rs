@@ -912,7 +912,7 @@ impl HostEmitter {
         }
 
         // Dynamic shared memory size (per-block).
-        let dyn_shared_terms: Vec<String> = fields.iter()
+        let _dyn_shared_terms: Vec<String> = fields.iter()
             .filter(|f| matches!(f.qual, GpuQual::Sync))
             .filter_map(|f| {
                 if let Type::Array(inner) = &f.ty {
@@ -1572,15 +1572,6 @@ impl HostEmitter {
                 let it = self.expr(iter);
                 let body = self.expr(expr);
                 format!("{}.iter().map(|{}| {{ {} }}).collect::<Vec<_>>()", it, var, body)
-            }
-            ExprKind::ArrayFill { value, count } => {
-                let n = self.expr(count);
-                let v = self.expr(value);
-                format!("vec![{} as _; {} as usize]", v, n)
-            }
-            ExprKind::ArrayAlloc { count } => {
-                let n = self.expr(count);
-                format!("vec![Default::default(); {} as usize]", n)
             }
             _ => "/* expr */".into(),
         }

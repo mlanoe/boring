@@ -478,9 +478,6 @@ impl Interpreter {
     /// to the variable the expression reads from (so `k(block=N)` updates `k` in
     /// place, matching the design-doc semantics of `var k =`).
     pub(crate) fn exec_kernel_block(&mut self, stmts: &[crate::ast::Stmt], env: EnvRef) -> Result<(), Signal> {
-        use crate::ast::Stmt;
-        use crate::ast::ExprKind;
-
         let prev_kernel_ctx = self.kernel_context;
         self.kernel_context = true;
 

@@ -1264,7 +1264,7 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
             Type::Qualified(inner, OwnerQual::GpuGlobal)  => (GpuQual::Global,  *inner),
             Type::Qualified(inner, OwnerQual::GpuSync)    => (GpuQual::Sync,    *inner),
-            Type::Qualified(inner, OwnerQual::Shared) => {
+            Type::Qualified(_inner, OwnerQual::Shared) => {
                 return Err(ParseError::Generic {
                     msg: "'shared is not valid inside a kernel — use 'sync for block SRAM (auto-barrier) or 'global/'unified for device memory".into(),
                     line, col, len: 1,

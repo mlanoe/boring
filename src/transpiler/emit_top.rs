@@ -1744,6 +1744,7 @@ impl Transpiler {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn emit_rwlock_type(&self, inner: &Type) -> String { self.emit_guard_type(inner) }
 
     /// guard write: `.write().unwrap()` (multi), `.borrow_mut()` (single).
@@ -1845,6 +1846,7 @@ impl Transpiler {
     }
 
     /// Read access for a guard (rwlock) struct field.
+    #[allow(dead_code)]
     pub(crate) fn rwlock_field_read(&self, key: &str, expr: &str) -> String {
         if self.struct_rwlock_task_fields.contains(key) {
             self.guard_task_read_access(expr)

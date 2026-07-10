@@ -5,7 +5,7 @@ use std::rc::Rc;
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
         // Screen built-in method dispatch.
-        if let Value::Screen { width, height, frame, resized, keys, pixels, title } = &obj {
+        if let Value::Screen { width: _width, height: _height, frame, resized, keys, pixels, title: _title } = &obj {
             match method {
                 // screen.present(pixels_array) — write pixel buffer; advance frame counter.
                 // In simulation mode: store the pixels for PPM output.

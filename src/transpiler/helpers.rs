@@ -698,6 +698,7 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
 /// `emit_program` to decide whether the auto-generated `main` needs to be `async`.
 /// Returns true if any statement in the body declares a T'actor or T'guard binding, meaning
 /// the function will implicitly generate `.lock().await` / `.read().await` calls and needs to be async.
+#[allow(dead_code)]
 pub(crate) fn body_has_actor_binding(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
@@ -755,6 +756,7 @@ pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections:
     false
 }
 
+#[allow(dead_code)]
 pub(crate) fn expr_has_actor_binding(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Block(stmts) => body_has_actor_binding(stmts),
