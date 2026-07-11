@@ -63,7 +63,7 @@ Boring compiles the same source to two distinct Rust targets:
 | Command | Target | Runtime | Use case |
 |---------|--------|---------|----------|
 | `boring build` | Rust std + tokio | userspace | servers, CLIs, desktop apps |
-| `boring build --mode managed` | Rust std + tokio | userspace | managed memory (`T'` → `Arc<Mutex<T>>`) |
+| `boring build --mode managed` | Rust std + tokio | userspace | managed memory (unqualified `T` → `Arc<Mutex<T>>`) |
 | `boring build --threading single` | Rust std + tokio | userspace | single-thread (`Arc` → `Rc`, `spawn` → `spawn_local`) |
 | `boring build --target kernel` | Rust-for-Linux (`no_std`) | Linux kernel | drivers, subsystems, kernel modules |
 
@@ -126,7 +126,7 @@ Boring provides a concise qualifier syntax inspired by Swift's value/reference t
 |---|---|---|
 | `int` | `i64` | copy integer |
 | `float` | `f64` | copy float |
-| `string` | `Arc<str>` | thread-safe shared string — the default |
+| `string` | `Rc<str>` (single) / `Arc<str>` (multi) | shared string — threading-aware |
 | `T?` | `Option<T>` | optional value |
 | `T'` | `Box<T>` | heap-allocated exclusive |
 | `T'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | shared reference — threading-aware |
