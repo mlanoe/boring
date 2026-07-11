@@ -1867,3 +1867,95 @@ p()
         msg
     );
 }
+
+// ── mut on scalars ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_mut_scalar_inferred_int() {
+    // `mut x = 42` with no type annotation — rebindable int
+    let src = r#"
+mut x = 42
+x = 99
+let _result = x
+"#;
+    assert_eq!(run_src(src), Value::Int(99));
+}
+
+#[test]
+fn test_mut_scalar_explicit_int() {
+    // `mut int x = 0` — rebindable with explicit type
+    let src = r#"
+mut int x = 0
+x = 7
+let _result = x
+"#;
+    assert_eq!(run_src(src), Value::Int(7));
+}
+
+#[test]
+fn test_mut_scalar_float() {
+    let src = r#"
+mut float f = 1.0
+f = 3.14
+let _result = f
+"#;
+    assert_eq!(run_src(src), Value::Float(3.14));
+}
+
+#[test]
+fn test_mut_scalar_bool() {
+    let src = r#"
+mut b = true
+b = false
+let _result = b
+"#;
+    assert_eq!(run_src(src), Value::Bool(false));
+}
+
+#[test]
+fn test_mut_scalar_rebind_multiple_times() {
+    let src = r#"
+mut n = 1
+n = 2
+n = 3
+n = 4
+let _result = n
+"#;
+    assert_eq!(run_src(src), Value::Int(4));
+}
+
+#[test]
+fn test_mut_scalar_in_function() {
+    // mut scalar inside a function body
+    let src = r#"
+int count_up(int start):
+    mut i = start
+    i = i + 1
+    i = i + 1
+    return i
+
+let _result = count_up(10)
+"#;
+    assert_eq!(run_src(src), Value::Int(12));
+}
+
+#[test]
+fn test_mut_scalar_toplevel() {
+    // mut at top level (Item::Let path)
+    let (interp, res) = run(r#"
+mut int counter = 0
+counter = 42
+"#);
+    assert!(res.is_ok(), "expected no error: {:?}", res);
+    assert_eq!(get_var(&interp, "counter"), Value::Int(42));
+}
+
+#[test]
+fn test_mut_uint_scalar() {
+    let src = r#"
+mut uint u = 0
+u = 100
+let _result = u
+"#;
+    assert_eq!(run_src(src), Value::Int(100)); // uint is represented as Int in the interpreter
+}

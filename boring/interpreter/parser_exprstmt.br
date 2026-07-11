@@ -967,11 +967,11 @@ def Stmt parse_stmt(mut Parser p) throws:
         while parser_is_newline(p):
             parser_advance(p)
         return stmt_comment(text)
-    if parser_check(p, "Let") or parser_check(p, "Var") or parser_check(p, "Static") or parser_check(p, "Lazy"):
+    if parser_check(p, "Let") or parser_check(p, "Var") or parser_check(p, "Mut") or parser_check(p, "Static") or parser_check(p, "Lazy"):
         if parser_is_let_destructure(p):
             let line = parser_line(p)
             parser_eat(p, "Static")
-            let mutable = parser_check(p, "Var")
+            let mutable = parser_check(p, "Var") or parser_check(p, "Mut")
             parser_advance(p)
             return stmt_let_destructure(parse_let_destructure(p, mutable, line))
         else:
@@ -1141,7 +1141,7 @@ def LetStmt parse_let_stmt_pub(mut Parser p, bool is_pub) throws:
     let line = parser_line(p)
     let is_static = parser_eat(p, "Static")
     let is_lazy = parser_check(p, "Lazy")
-    let mutable = if parser_check(p, "Var"):
+    let mutable = if parser_check(p, "Var") or parser_check(p, "Mut"):
         parser_advance(p)
         true
     else:

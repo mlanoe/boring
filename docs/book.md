@@ -142,12 +142,14 @@ Fixed binding, mutable instance. The pointer never changes — the compiler can 
 
 `let` and `var` are sufficient to write correct code. `mut` is an optional precision when you know the binding will never be rebound.
 
-`mut` is **only valid on mutable types** — it is forbidden on primitive types (`int`, `float`, `bool`) since they are always copied, not mutated in place:
+For structs, `mut` means non-rebindable mutable instance. For primitives (`int`, `uint`, `float`, `bool`), since there is no concept of "mutating in place" (they are always copied), `mut` means rebindable — equivalent to `var`:
 
 ```boring
-mut a = 0        # ERROR — primitive values are always copied, use var
-mut int a = 0    # ERROR — int is always copied, use var
-mut Counter c = Counter()  # ok — Counter is a mutable type
+mut a = 0        # ok — rebindable scalar (equivalent to var)
+mut int a = 0    # ok — rebindable scalar
+a = 1            # ok — rebind
+mut Counter c = Counter()  # ok — fixed binding, mutable instance
+# c = Counter()  # still an error — mut on struct is non-rebindable
 ```
 
 ### Rebindable mutable bindings — `var`

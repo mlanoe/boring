@@ -18,8 +18,8 @@ var x = 42              # rebindable, mutable (qualifier permitting)
 
 struct Counter:
     var int value = 0
-mut c = Counter(0)      # fixed binding, mutable instance — `mut` is rejected on
-                         # primitives (int/uint/float/bool): use `var` for those
+mut c = Counter(0)      # fixed binding, mutable instance
+mut x = 42              # scalar: rebindable (equivalent to var)
 ```
 
 ## Functions
@@ -63,6 +63,10 @@ struct Counter:
         value += 1
 ```
 
+## Binding × mutability (scalars)
+
+For primitives (`int`, `uint`, `float`, `bool`), `mut` is accepted and means **rebindable** — equivalent to `var`. There is no "mutable instance" concept for value types, so `mut x = 42` and `var x = 42` are identical in behavior.
+
 ## Ownership qualifiers
 
 | Qualifier | Rust impl | Mutable | Notes |
@@ -80,11 +84,11 @@ let int'stack n = 10
 
 ## Binding × mutability
 
-| Syntax | Rebindable | Mutable |
-|---|---|---|
-| `let` | no | no |
-| `mut` | no | yes |
-| `var` | yes | depends on qualifier |
+| Syntax | Rebindable | Mutable | Notes |
+|---|---|---|---|
+| `let` | no | no | |
+| `mut` | no (structs) / yes (scalars) | yes | for primitives, equivalent to `var` |
+| `var` | yes | depends on qualifier | |
 
 Qualifier constraints: `mut 'shared` → compile error in both `boring run` and `boring build` (caught by the semantic checker). `var 'guard` compiles cleanly with no warning today.
 

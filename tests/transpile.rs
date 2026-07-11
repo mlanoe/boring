@@ -222,5 +222,6 @@ transpile_test!(inline_match);
 transpile_test!(supertraits);
 transpile_test!(type_cast);
 transpile_test!(ref_identity);
+transpile_test!(mut_scalar);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

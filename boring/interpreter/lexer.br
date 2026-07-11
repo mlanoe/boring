@@ -483,6 +483,7 @@ struct Lexer:
             "let": return TokenKind.Let
             "lazy": return TokenKind.Lazy
             "var": return TokenKind.Var
+            "mut": return TokenKind.Mut
             "def": return TokenKind.Def
             "return": return TokenKind.Return
             "if": return TokenKind.If

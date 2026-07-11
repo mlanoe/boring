@@ -182,15 +182,6 @@ impl Transpiler {
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
         // Validate `mut` qualifier combinations.
         if s.binding == BindingKind::Mut {
-            let prim_via_type = s.ty.as_ref().map(|ty| {
-                matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Bool)
-            }).unwrap_or(false);
-            let prim_via_value = s.ty.is_none() && s.value.as_ref().map(|v| {
-                matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
-            }).unwrap_or(false);
-            if prim_via_type || prim_via_value {
-                self.push_error(s.line, s.col, "primitive values are always copied, use `var` instead");
-            }
             if let Some(ty) = &s.ty {
                 if matches!(Self::unwrap_qual(ty), OwnerQual::Shared) {
                     self.push_error(s.line, s.col,

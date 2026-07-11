@@ -6,22 +6,6 @@ impl Interpreter {
     pub(crate) fn exec_stmt(&mut self, stmt: &Stmt, env: EnvRef) -> Result<(), Signal> {
         match stmt {
             Stmt::Let(s) => {
-                // Validate `mut` with primitive types — primitives are always copied.
-                if s.binding == BindingKind::Mut {
-                    let prim_via_type = s.ty.as_ref().map(|ty| {
-                        matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Bool)
-                        || matches!(ty, Type::Named(n) if matches!(n.as_str(), "int"|"uint"|"float"|"bool"|"Int"|"Uint"|"Float"|"Bool"))
-                    }).unwrap_or(false);
-                    let prim_via_value = s.ty.is_none() && s.value.as_ref().map(|v| {
-                        matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
-                    }).unwrap_or(false);
-                    if prim_via_type || prim_via_value {
-                        return Err(err(
-                            "primitive values are always copied, use `var` instead".to_string(),
-                            s.line,
-                        ));
-                    }
-                }
                 // `static let/var` → store in global env, initialise only once
                 let target_env: EnvRef = if s.is_static {
                     Rc::clone(&self.global)

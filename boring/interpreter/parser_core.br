@@ -56,6 +56,7 @@ def string token_kind_name(TokenKind k):
         TokenKind.Let: "Let"
         TokenKind.Lazy: "Lazy"
         TokenKind.Var: "Var"
+        TokenKind.Mut: "Mut"
         TokenKind.Def: "Def"
         TokenKind.Return: "Return"
         TokenKind.If: "If"

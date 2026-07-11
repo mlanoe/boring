@@ -205,6 +205,7 @@ interp_test!(inline_match);
 interp_test!(supertraits);
 interp_test!(type_cast);
 interp_test!(ref_identity);
+interp_test!(mut_scalar);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
