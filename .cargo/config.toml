@@ -1,2 +1,2 @@
-[env]
-RUST_MIN_STACK = "4194304"
+﻿[build]
+target = "x86_64-pc-windows-msvc"

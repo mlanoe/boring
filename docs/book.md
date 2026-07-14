@@ -6970,6 +6970,9 @@ Low-level CUDA codegen internals: generated file layout, `cudarc` host API, PTX 
 **[Metal backend](metal-backend.html)**
 macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.
 
+**[wgpu backend](wgpu-backend.html)**
+Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Windows), Vulkan (Windows / Linux), and Metal (macOS) — no NVIDIA GPU or external toolchain required. Covers qualifier → WGSL mapping, pipeline overrides for dynamic workgroup size, and limitations vs CUDA.
+
 **[GPU display](gpu-display.html)**
 Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.
 

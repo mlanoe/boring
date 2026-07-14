@@ -251,6 +251,12 @@ impl Parser {
                 };
                 Ok(Stmt::KernelBlock(crate::ast::KernelBlockStmt { body, line, col }))
             }
+            // `pass` — empty block placeholder (no-op, like Python).
+            TokenKind::Pass => {
+                self.advance();
+                self.expect_newline_soft();
+                Ok(Stmt::Comment("pass".to_string()))
+            }
             // `sync` — GPU thread synchronization barrier (no-op in simulation mode).
             TokenKind::Sync => {
                 self.advance();
@@ -263,10 +269,30 @@ impl Parser {
                 // Parse lhs (no assignment — parse_expr doesn't produce Assign nodes)
                 let lhs = self.parse_expr()?;
 
+                // Multi-target assignment: `a, b = b, a` (simultaneous tuple swap / destructure).
+                // Detected when the first expression is followed by `,` before `=`.
+                if self.check(&TokenKind::Comma) {
+                    let mut lhs_list = vec![lhs];
+                    while self.eat(&TokenKind::Comma) {
+                        if self.check(&TokenKind::Eq) { break; }
+                        lhs_list.push(self.parse_expr()?);
+                    }
+                    self.expect(&TokenKind::Eq)?;
+                    let mut rhs_list = vec![self.parse_else_expr()?];
+                    while self.eat(&TokenKind::Comma) {
+                        if self.is_newline() || self.check(&TokenKind::Eof) { break; }
+                        rhs_list.push(self.parse_else_expr()?);
+                    }
+                    self.expect_newline_soft();
+                    let lhs_tuple = Expr { kind: ExprKind::Tuple(lhs_list), line, col, len: self.tok_len() };
+                    let rhs_tuple = Expr { kind: ExprKind::Tuple(rhs_list), line, col, len: self.tok_len() };
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs_tuple), Box::new(rhs_tuple)), line, col, len: self.tok_len() }));
+                }
+
                 // Simple assignment: `lhs = rhs`
                 if self.eat(&TokenKind::Eq) {
                     let rhs = self.parse_else_expr()?;
-                    self.expect_newline()?;
+                    self.expect_newline_soft(); // soft: inline `if…else` RHS may have already consumed the newline
                     return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
                 }
                 // Compound assignment: desugar `lhs op= rhs` → `lhs = lhs op rhs`
@@ -285,14 +311,14 @@ impl Parser {
                     self.advance();
                     let rhs = self.parse_else_expr()?;
                     let binop = Expr { kind: ExprKind::BinOp(op, Box::new(lhs.clone()), Box::new(rhs)), line, col, len: self.tok_len()};
-                    self.expect_newline()?;
+                    self.expect_newline_soft();
                     return Ok(Stmt::Expr(Expr { kind: ExprKind::Assign(Box::new(lhs), Box::new(binop)), line, col, len: self.tok_len()}));
                 }
                 // Write-once / nil-coalescing assignment: `lhs ?= rhs`
                 // Emits ExprKind::QuestionAssign; the transpiler distinguishes lazy vs optional.
                 if self.eat(&TokenKind::QuestionEq) {
                     let rhs = self.parse_else_expr()?;
-                    self.expect_newline()?;
+                    self.expect_newline_soft();
                     return Ok(Stmt::Expr(Expr { kind: ExprKind::QuestionAssign(Box::new(lhs), Box::new(rhs)), line, col, len: self.tok_len()}));
                 }
 

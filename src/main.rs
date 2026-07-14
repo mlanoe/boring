@@ -1,4 +1,4 @@
-// Copyright (C) 2026 Mickaël LANOË
+﻿// Copyright (C) 2026 MickaÃ«l LANOÃ‹
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // This file is part of Boring.
@@ -21,7 +21,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process;
 
-// ─── Diagnostics ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Diagnostics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 struct Ansi { on: bool }
 impl Ansi {
@@ -114,7 +114,7 @@ fn report_check_result(path: &Path, source: &str, result: checker::CheckResult) 
     !result.errors.is_empty()
 }
 
-// ─── boring.toml ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ boring.toml â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Minimal `boring.toml` representation.
 struct BoringToml {
@@ -124,7 +124,7 @@ struct BoringToml {
 }
 
 impl BoringToml {
-    /// Parse a `boring.toml` file.  No external dependency — the format is tiny.
+    /// Parse a `boring.toml` file.  No external dependency â€” the format is tiny.
     fn parse(src: &str) -> Self {
         let mut name    = String::new();
         let mut version = "0.1.0".to_string();
@@ -175,10 +175,10 @@ fn load_project_toml() -> (BoringToml, PathBuf) {
     (toml, toml_path)
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn main() {
-    // Windows default stack is 1 MB — too small for the interpreter's recursive
+    // Windows default stack is 1 MB â€” too small for the interpreter's recursive
     // descent (expression evaluation, type resolution, pattern matching).
     // Spawn a new thread with an 8 MB stack so the same code runs everywhere.
     const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
@@ -187,7 +187,7 @@ fn main() {
     match handler.join() {
         Ok(()) => {}
         Err(e) => {
-            // The worker thread panicked — print the payload for diagnosis.
+            // The worker thread panicked â€” print the payload for diagnosis.
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
                 format!("internal error: {}", s)
             } else if let Some(s) = e.downcast_ref::<String>() {
@@ -244,7 +244,7 @@ fn run() {
             process::exit(0);
         }
 
-        // ── Project commands ────────────────────────────────────────────────
+        // â”€â”€ Project commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Some("new") => {
             let name = args.get(2).unwrap_or_else(|| {
                 eprintln!("usage: boring new <name>");
@@ -300,12 +300,14 @@ fn print_help() {
     eprintln!("    boring build --target cuda <file.br>     Emit a CUDA Cargo project from a single file");
     eprintln!("    boring build --target metal              Emit a Metal Cargo project from boring.toml");
     eprintln!("    boring build --target metal <file.br>    Emit a Metal Cargo project from a single file");
+    eprintln!("    boring build --target wgpu               Emit a wgpu Cargo project from boring.toml (Windows/Linux/macOS)");
+    eprintln!("    boring build --target wgpu <file.br>     Emit a wgpu Cargo project from a single file");
     eprintln!("    boring <file.br>           Run a single file (shorthand)");
 }
 
-// ─── Project commands ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Project commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// `boring new <name>` — scaffold a project directory.
+/// `boring new <name>` â€” scaffold a project directory.
 fn new_project(name: &str) {
     // Validate name
     if name.starts_with('-') || name.contains('/') || name.contains('\\') {
@@ -347,20 +349,20 @@ fn new_project(name: &str) {
     eprintln!("    cd {name} && boring run");
 }
 
-/// `boring run` — run the project described by `boring.toml` in the current directory.
+/// `boring run` â€” run the project described by `boring.toml` in the current directory.
 fn run_project() {
     let (toml, _) = load_project_toml();
     run_file(&toml.main, None);
 }
 
-/// `boring build` — emit a Cargo project from the `boring.toml` main file.
+/// `boring build` â€” emit a Cargo project from the `boring.toml` main file.
 
 fn build_project_with_config(config: transpiler::TranspileConfig) {
     let (toml, _) = load_project_toml();
     emit_rust_with_version_and_config(&toml.main, &toml.version, config);
 }
 
-/// `boring build --target kernel` — emit a kernel Cargo project from `boring.toml`.
+/// `boring build --target kernel` â€” emit a kernel Cargo project from `boring.toml`.
 fn build_project_kernel() {
     let (toml, _) = load_project_toml();
     emit_kernel_with_version(&toml.main, &toml.version);
@@ -373,6 +375,7 @@ fn parse_build_command(build_args: &[String]) {
     let mut target_kernel = false;
     let mut target_cuda   = false;
     let mut target_metal  = false;
+    let mut target_wgpu   = false;
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
     let mut stack_auto_bytes: usize = 256;
@@ -393,14 +396,15 @@ fn parse_build_command(build_args: &[String]) {
                     Some("kernel") => target_kernel = true,
                     Some("cuda")   => target_cuda   = true,
                     Some("metal")  => target_metal  = true,
+                    Some("wgpu")   => target_wgpu   = true,
                     Some(t) => {
                         eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: kernel, cuda, metal");
+                        eprintln!("hint:  supported targets: kernel, cuda, metal, wgpu");
                         process::exit(1);
                     }
                     None => {
                         eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: kernel, cuda, metal");
+                        eprintln!("hint:  supported targets: kernel, cuda, metal, wgpu");
                         process::exit(1);
                     }
                 }
@@ -411,7 +415,7 @@ fn parse_build_command(build_args: &[String]) {
                     Some("strict")  => mode = TranspileMode::Strict,
                     Some("managed") => mode = TranspileMode::Managed,
                     Some(m) => {
-                        eprintln!("error: unknown mode '{}' — expected strict or managed", m);
+                        eprintln!("error: unknown mode '{}' â€” expected strict or managed", m);
                         process::exit(1);
                     }
                     None => {
@@ -426,7 +430,7 @@ fn parse_build_command(build_args: &[String]) {
                     Some("multi")  => threading = ThreadingMode::Multi,
                     Some("single") => threading = ThreadingMode::Single,
                     Some(t) => {
-                        eprintln!("error: unknown threading model '{}' — expected single or multi", t);
+                        eprintln!("error: unknown threading model '{}' â€” expected single or multi", t);
                         process::exit(1);
                     }
                     None => {
@@ -478,7 +482,7 @@ fn parse_build_command(build_args: &[String]) {
                     Some("thread")  => sanitize = Some("thread"),
                     Some("memory")  => sanitize = Some("memory"),
                     Some(s) => {
-                        eprintln!("error: unknown sanitizer '{}' — expected address, thread, or memory", s);
+                        eprintln!("error: unknown sanitizer '{}' â€” expected address, thread, or memory", s);
                         process::exit(1);
                     }
                     None => {
@@ -512,7 +516,12 @@ fn parse_build_command(build_args: &[String]) {
         process::exit(1);
     }
 
-    // CUDA target — short-circuit before the general config path.
+    if target_wgpu && threading != ThreadingMode::Multi {
+        eprintln!("error: --threading is not available for the wgpu target");
+        process::exit(1);
+    }
+
+    // CUDA target â€” short-circuit before the general config path.
     if target_cuda {
         match file {
             Some(path) => { emit_cuda(path, "0.1.0"); return; }
@@ -531,6 +540,18 @@ fn parse_build_command(build_args: &[String]) {
             None => {
                 let (toml, _) = load_project_toml();
                 emit_metal(&toml.main, &toml.version);
+                return;
+            }
+        }
+    }
+
+    // wgpu target.
+    if target_wgpu {
+        match file {
+            Some(path) => { emit_wgpu(path, "0.1.0"); return; }
+            None => {
+                let (toml, _) = load_project_toml();
+                emit_wgpu(&toml.main, &toml.version);
                 return;
             }
         }
@@ -599,7 +620,7 @@ fn run_cargo_build(project_dir: &PathBuf, rust_options: &[String]) {
     }
 }
 
-// ─── Core: interpret ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Core: interpret â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn run_file(path: &str, gpu_profile: Option<&str>) {
     let path = PathBuf::from(path);
@@ -692,7 +713,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     }
 }
 
-// ─── Core: transpile ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Core: transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn emit_rust_with_config(path: &str, config: transpiler::TranspileConfig) {
     emit_rust_with_version_and_config(path, "0.1.0", config);
@@ -912,7 +933,7 @@ tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror
             process::exit(1);
         }
         if config.sanitize.is_some() {
-            eprintln!("note: sanitizer enabled — run with: cargo +nightly run");
+            eprintln!("note: sanitizer enabled â€” run with: cargo +nightly run");
         }
     }
 
@@ -937,9 +958,9 @@ fn host_target() -> String {
     "x86_64-unknown-linux-gnu".to_string()
 }
 
-// ─── Core: kernel transpile ───────────────────────────────────────────────────
+// â”€â”€â”€ Core: kernel transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ─── Core: CUDA transpile ─────────────────────────────────────────────────────
+// â”€â”€â”€ Core: CUDA transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn emit_cuda(path: &str, version: &str) {
     let path = PathBuf::from(path);
@@ -1081,7 +1102,7 @@ fn emit_metal(path: &str, version: &str) {
         process::exit(1);
     }
 
-    // Cargo.toml (no build.rs — MSL compiled at runtime via newLibraryWithSource)
+    // Cargo.toml (no build.rs â€” MSL compiled at runtime via newLibraryWithSource)
     let cargo_toml = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_toml, &metal_out.cargo_toml) {
         eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
@@ -1096,6 +1117,79 @@ fn emit_metal(path: &str, version: &str) {
     }
 }
 
+fn emit_wgpu(path: &str, version: &str) {
+    let path = PathBuf::from(path);
+
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+
+    let tokens = match lexer::lex_all(&source) {
+        Ok(t) => t,
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
+            process::exit(1);
+        }
+    };
+
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    let stem = path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base_dir.join(format!("{}_wgpu", stem));
+
+    let wgpu_out = transpiler::wgpu::transpile_wgpu(&program, &stem, version);
+
+    // Create directory layout.
+    let src_dir     = project_dir.join("src");
+    let shaders_dir = project_dir.join("shaders");
+    for dir in [&src_dir, &shaders_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create '{}': {}", dir.display(), e);
+            process::exit(1);
+        }
+    }
+
+    // src/main.rs
+    let main_rs = src_dir.join("main.rs");
+    if let Err(e) = std::fs::write(&main_rs, &wgpu_out.host_rs) {
+        eprintln!("error: cannot write '{}': {}", main_rs.display(), e);
+        process::exit(1);
+    }
+
+    // shaders/main.wgsl
+    let wgsl_file = shaders_dir.join("main.wgsl");
+    if let Err(e) = std::fs::write(&wgsl_file, &wgpu_out.device_wgsl) {
+        eprintln!("error: cannot write '{}': {}", wgsl_file.display(), e);
+        process::exit(1);
+    }
+
+    // Cargo.toml
+    let cargo_toml = project_dir.join("Cargo.toml");
+    if let Err(e) = std::fs::write(&cargo_toml, &wgpu_out.cargo_toml) {
+        eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
+        process::exit(1);
+    }
+
+    eprintln!("Generated wgpu project at '{}'", project_dir.display());
+    eprintln!("  Requires a DirectX 12 (Windows), Vulkan (Windows/Linux), or Metal (macOS) capable GPU.");
+    eprintln!("  cd {} && cargo build", project_dir.display());
+    if !wgpu_out.kernel_names.is_empty() {
+        eprintln!("  Kernels: {}", wgpu_out.kernel_names.join(", "));
+    }
+}
 fn emit_kernel(path: &str) {
     emit_kernel_with_version(path, "0.1.0");
 }
@@ -1167,7 +1261,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         process::exit(1);
     }
 
-    // Write Cargo.toml — no tokio; the kernel crate is provided by the build system.
+    // Write Cargo.toml â€” no tokio; the kernel crate is provided by the build system.
     let cargo_toml = format!(
         r#"[package]
 name = "{stem}"
@@ -1191,3 +1285,5 @@ path = "src/lib.rs"
     eprintln!("Generated kernel Cargo project at '{}'", project_dir.display());
     eprintln!("  Build with the Linux kernel build system (make -C /path/to/linux M=$PWD)");
 }
+
+

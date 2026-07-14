@@ -1,6 +1,6 @@
 # GPU display
 
-> **Status: Metal — implemented.** CUDA and simulation (`boring run`) are pending.
+> **Status: Metal — implemented.** wgpu, CUDA, and simulation (`boring run`) are pending.
 
 Live GPU rendering to a native OS window: a `'surface` pixel buffer, a `Screen`
 object, and a `kernel: loop:` render loop. A single Boring source file is
@@ -56,7 +56,8 @@ buffer whose content will be presented to a window via `screen.present()`.
 
 | Backend | Maps to | Element size | Presentation path |
 |---|---|---|---|
-| Metal | `MTLStorageModeShared` buffer | `uint` (32-bit) | GPU blit to `CAMetalDrawable` (BGRA8Unorm) |
+| Metal | `MTLStorageModeShared` buffer | `uint` (32-bit) | GPU blit to `CAMetalDrawable` (`BGRA8Unorm`) |
+| wgpu | `storage` buffer, `MAP_READ \| COPY_SRC` | `uint` (32-bit) | `copy_buffer_to_texture` to swapchain (`BGRA8Unorm`) *(pending)* |
 | CUDA | `cudaMallocManaged` | `uint32_t` | host upload via SDL2/OpenGL *(pending)* |
 | Simulation | `Vec<u32>` | `u32` | PPM write or `minifb` *(pending)* |
 
@@ -75,9 +76,13 @@ is also valid but carries minor coherency overhead and is less explicit.
 
 ### Pixel format
 
-`screen.present()` on Metal uses `BGRA8Unorm`. Pixels are packed as 32-bit
-`uint` values: `0xAARRGGBB` in the source — `(alpha << 24) | (r << 16) | (g << 8) | b`.
+All backends use `BGRA8Unorm`. Pixels are packed as 32-bit `uint` values:
+`0xAARRGGBB` in source — `(alpha << 24) | (r << 16) | (g << 8) | b`.
 The alpha channel should be `0xFF` for opaque pixels.
+
+The wgpu backend requests `BGRA8Unorm` explicitly from the surface (supported on
+DX12, Vulkan, and Metal) so that pixel packing is identical to the Metal backend.
+No source change is needed when switching between `--target metal` and `--target wgpu`.
 
 ---
 
@@ -187,8 +192,20 @@ k(block = (16, 16))
 
 ---
 
+## Backend notes (wgpu) *(pending)*
+
+- Window: winit 0.30 + `wgpu::Surface` tied to the window handle. No platform-specific bindings.
+- Pixel format: `BGRA8Unorm` — same packing as Metal (`0xAARRGGBB`). Requested explicitly so pixel code is portable across `--target metal` and `--target wgpu`.
+- Blit: `encoder.copy_buffer_to_texture(surface_buf → swapchain_texture)` each frame, followed by `queue.present()`.
+- Drawable size: fixed at the kernel's surface dimensions — not updated on window resize.
+- Dependencies: `wgpu = "22"`, `winit = "0.30"`.
+- Requires a DX12 (Windows), Vulkan (Windows / Linux), or Metal (macOS) capable GPU.
+
+---
+
 ## Pending
 
+- **wgpu**: winit 0.30 + `wgpu::Surface`; `copy_buffer_to_texture` blit; `BGRA8Unorm` swapchain format. No external toolchain.
 - **CUDA**: SDL2 + OpenGL PBO upload path, `screen.present()` via `glTexSubImage2D`.
 - **`boring run`**: `screen.present()` writes a PPM on loop exit; `--preview` opens a `minifb` window.
 - **Resize handling**: `screen.resized` detected but the kernel surface is not reallocated automatically — user code must reinitialise `k`.

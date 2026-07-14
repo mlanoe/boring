@@ -151,6 +151,19 @@ impl Interpreter {
             }
 
             ExprKind::Assign(target, value) => {
+                // Simultaneous multi-target: `a, b = b, a` — evaluate all RHS first.
+                if let ExprKind::Tuple(targets) = &target.kind {
+                    let rhs_vals: Vec<Value> = if let ExprKind::Tuple(rhs_list) = &value.kind {
+                        rhs_list.iter().map(|e| self.eval_expr(e, Rc::clone(&env))).collect::<Result<_, _>>()?
+                    } else {
+                        let v = self.eval_expr(value, Rc::clone(&env))?;
+                        match v { Value::Tuple(vs) => vs, single => vec![single] }
+                    };
+                    for (t, v) in targets.iter().zip(rhs_vals) {
+                        self.assign(t, v, Rc::clone(&env), line)?;
+                    }
+                    return Ok(Value::Nil);
+                }
                 // Guard: prevent `=` on a lazy binding — use `?=` instead.
                 if let ExprKind::Var(name) = &target.kind {
                     if env.borrow().is_lazy(name) {

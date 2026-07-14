@@ -126,7 +126,7 @@ li { margin-bottom: 0.3rem; }
 </aside>
 <main class="main" id="content">
 <h1 id="gpu-display">GPU display</h1>
-<blockquote><strong>Status: Metal — implemented.</strong> CUDA and simulation (<code>boring run</code>) are pending.</blockquote>
+<blockquote><strong>Status: Metal — implemented.</strong> wgpu, CUDA, and simulation (<code>boring run</code>) are pending.</blockquote>
 <p>Live GPU rendering to a native OS window: a <code>&#x27;surface</code> pixel buffer, a <code>Screen</code> object, and a <code>kernel: loop:</code> render loop. A single Boring source file is intended to compile unchanged on both Metal and CUDA — the backend differences are transparent.</p>
 <hr>
 <h2 id="quick-start">Quick start</h2>
@@ -166,14 +166,15 @@ li { margin-bottom: 0.3rem; }
 <hr>
 <h2 id="surface-qualifier"><code>&#x27;surface</code> qualifier</h2>
 <p><code>&#x27;surface</code> is a GPU memory qualifier for <code>[uint]</code> pixel buffers. It describes a buffer whose content will be presented to a window via <code>screen.present()</code>.</p>
-<table><thead><tr><th>Backend</th><th>Maps to</th><th>Element size</th><th>Presentation path</th></tr></thead><tbody><tr><td>Metal</td><td><code>MTLStorageModeShared</code> buffer</td><td><code>uint</code> (32-bit)</td><td>GPU blit to <code>CAMetalDrawable</code> (BGRA8Unorm)</td></tr><tr><td>CUDA</td><td><code>cudaMallocManaged</code></td><td><code>uint32_t</code></td><td>host upload via SDL2/OpenGL <em>(pending)</em></td></tr><tr><td>Simulation</td><td><code>Vec&lt;u32&gt;</code></td><td><code>u32</code></td><td>PPM write or <code>minifb</code> <em>(pending)</em></td></tr></tbody></table>
+<table><thead><tr><th>Backend</th><th>Maps to</th><th>Element size</th><th>Presentation path</th></tr></thead><tbody><tr><td>Metal</td><td><code>MTLStorageModeShared</code> buffer</td><td><code>uint</code> (32-bit)</td><td>GPU blit to <code>CAMetalDrawable</code> (<code>BGRA8Unorm</code>)</td></tr><tr><td>wgpu</td><td><code>storage</code> buffer, <code>MAP_READ | COPY_SRC</code></td><td><code>uint</code> (32-bit)</td><td><code>copy_buffer_to_texture</code> to swapchain (<code>BGRA8Unorm</code>) <em>(pending)</em></td></tr><tr><td>CUDA</td><td><code>cudaMallocManaged</code></td><td><code>uint32_t</code></td><td>host upload via SDL2/OpenGL <em>(pending)</em></td></tr><tr><td>Simulation</td><td><code>Vec&lt;u32&gt;</code></td><td><code>u32</code></td><td>PPM write or <code>minifb</code> <em>(pending)</em></td></tr></tbody></table>
 <h3 id="why-not-unified-directly">Why not <code>&#x27;unified</code> directly</h3>
 <p>On Metal, <code>screen.present()</code> performs a GPU-side blit — no CPU access to the pixel buffer is needed. <code>&#x27;surface</code> signals this intent and ensures the correct 32-bit element type for BGRA8Unorm. Using <code>&#x27;unified</code> with <code>screen.present()</code> is also valid but carries minor coherency overhead and is less explicit.</p>
 <h3 id="constraints">Constraints</h3>
 <ul><li>Only <code>[uint]</code> is valid for <code>&#x27;surface</code> — other element types are a compile error.</li><li>A kernel may have at most one <code>&#x27;surface</code> field.</li><li><code>&#x27;surface</code> cannot be combined with other GPU qualifiers.</li></ul>
 <h3 id="pixel-format">Pixel format</h3>
-<p><code>screen.present()</code> on Metal uses <code>BGRA8Unorm</code>. Pixels are packed as 32-bit</p>
-<p><code>uint</code> values: <code>0xAARRGGBB</code> in the source — <code>(alpha &lt;&lt; 24) | (r &lt;&lt; 16) | (g &lt;&lt; 8) | b</code>. The alpha channel should be <code>0xFF</code> for opaque pixels.</p>
+<p>All backends use <code>BGRA8Unorm</code>. Pixels are packed as 32-bit <code>uint</code> values:</p>
+<p><code>0xAARRGGBB</code> in source — <code>(alpha &lt;&lt; 24) | (r &lt;&lt; 16) | (g &lt;&lt; 8) | b</code>. The alpha channel should be <code>0xFF</code> for opaque pixels.</p>
+<p>The wgpu backend requests <code>BGRA8Unorm</code> explicitly from the surface (supported on DX12, Vulkan, and Metal) so that pixel packing is identical to the Metal backend. No source change is needed when switching between <code>--target metal</code> and <code>--target wgpu</code>.</p>
 <hr>
 <h2 id="dimension-type"><code>Dimension</code> type</h2>
 <p>Built-in struct for named width/height pairs.</p>
@@ -215,8 +216,11 @@ dim.height  <span class="co"># 768</span></code></pre></div>
 <h2 id="backend-notes-metal">Backend notes (Metal)</h2>
 <ul><li>Window: winit 0.28 + <code>CAMetalLayer</code> attached to the <code>NSView</code>.</li><li>Pixel format: <code>BGRA8Unorm</code> — pixels packed as <code>0xAARRGGBB</code>.</li><li>Blit: <code>MTLBlitCommandEncoder.copyFromBuffer(toTexture:)</code> each frame.</li><li>Drawable size: fixed at the kernel&#x27;s surface dimensions — not updated on window resize.</li><li>Dependencies: <code>winit = &quot;0.28&quot;</code>, <code>objc = &quot;0.2&quot;</code>, <code>core-graphics = &quot;0.23&quot;</code>.</li><li>Requires macOS 11+ with a Metal-capable GPU.</li></ul>
 <hr>
+<h2 id="backend-notes-wgpu-pending">Backend notes (wgpu) <em>(pending)</em></h2>
+<ul><li>Window: winit 0.30 + <code>wgpu::Surface</code> tied to the window handle. No platform-specific bindings.</li><li>Pixel format: <code>BGRA8Unorm</code> — same packing as Metal (<code>0xAARRGGBB</code>). Requested explicitly so pixel code is portable across <code>--target metal</code> and <code>--target wgpu</code>.</li><li>Blit: <code>encoder.copy_buffer_to_texture(surface_buf → swapchain_texture)</code> each frame, followed by <code>queue.present()</code>.</li><li>Drawable size: fixed at the kernel&#x27;s surface dimensions — not updated on window resize.</li><li>Dependencies: <code>wgpu = &quot;22&quot;</code>, <code>winit = &quot;0.30&quot;</code>.</li><li>Requires a DX12 (Windows), Vulkan (Windows / Linux), or Metal (macOS) capable GPU.</li></ul>
+<hr>
 <h2 id="pending">Pending</h2>
-<ul><li><strong>CUDA</strong>: SDL2 + OpenGL PBO upload path, <code>screen.present()</code> via <code>glTexSubImage2D</code>.</li><li><strong><code>boring run</code></strong>: <code>screen.present()</code> writes a PPM on loop exit; <code>--preview</code> opens a <code>minifb</code> window.</li><li><strong>Resize handling</strong>: <code>screen.resized</code> detected but the kernel surface is not reallocated automatically — user code must reinitialise <code>k</code>.</li><li><strong><code>screen.key_pressed()</code></strong>, <strong><code>screen.mouse</code></strong>: not yet implemented.</li><li><strong><code>screen.pixels_rgba()</code></strong>: portable RGBA read from <code>&#x27;surface</code> buffer.</li></ul>
+<ul><li><strong>wgpu</strong>: winit 0.30 + <code>wgpu::Surface</code>; <code>copy_buffer_to_texture</code> blit; <code>BGRA8Unorm</code> swapchain format. No external toolchain.</li><li><strong>CUDA</strong>: SDL2 + OpenGL PBO upload path, <code>screen.present()</code> via <code>glTexSubImage2D</code>.</li><li><strong><code>boring run</code></strong>: <code>screen.present()</code> writes a PPM on loop exit; <code>--preview</code> opens a <code>minifb</code> window.</li><li><strong>Resize handling</strong>: <code>screen.resized</code> detected but the kernel surface is not reallocated automatically — user code must reinitialise <code>k</code>.</li><li><strong><code>screen.key_pressed()</code></strong>, <strong><code>screen.mouse</code></strong>: not yet implemented.</li><li><strong><code>screen.pixels_rgba()</code></strong>: portable RGBA read from <code>&#x27;surface</code> buffer.</li></ul>
 </main>
 <script>
 // Build TOC from headings

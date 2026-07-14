@@ -6,6 +6,8 @@ For the Metal backend (macOS), see [`metal-backend.md`](metal-backend.html).
 
 For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see [`cuda-module.md`](cuda-module.html).
 
+For the wgpu backend (Windows / Linux / macOS, any DirectX 12 / Vulkan / Metal GPU), see [`wgpu-backend.md`](wgpu-backend.html).
+
 ---
 
 ## Quick start

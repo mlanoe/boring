@@ -27,6 +27,7 @@ pub(crate) use helpers::*;
 pub mod kernel;
 pub mod cuda;
 pub mod metal;
+pub mod wgpu;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 
