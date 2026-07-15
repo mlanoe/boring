@@ -2,11 +2,11 @@
 
 Boring supports GPU computing through `kernel` structs — a dedicated declaration form that groups device memory fields, an `init` allocator, device-side helpers, and an anonymous entry point (`def ()`).
 
-For the Metal backend (macOS), see [`metal-backend.md`](metal-backend.html).
+This document covers the **language syntax and semantics** shared by all backends. For backend-specific codegen details, see:
 
-For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see [`cuda-module.md`](cuda-module.html).
-
-For the wgpu backend (Windows / Linux / macOS, any DirectX 12 / Vulkan / Metal GPU), see [`wgpu-backend.md`](wgpu-backend.html).
+- [`cuda-module.md`](cuda-module.html) — CUDA C mapping, generated project layout, `cudarc` host API, PTX compilation
+- [`metal-backend.md`](metal-backend.html) — MSL address space mapping, Metal runtime compilation
+- [`wgpu-backend.md`](wgpu-backend.html) — WGSL mapping, pipeline overrides, cross-platform GPU support
 
 ---
 
@@ -52,6 +52,56 @@ kernel Name:
 
 ---
 
+## Generic kernel declarations
+
+Kernel structs support generic parameters with the same syntax as regular structs.
+
+### Const generics — compile-time array sizes
+
+```boring
+kernel Blur<int N>:
+    mut [float, N] kernel_weights
+    mut float result
+
+    def ():
+        result = kernel_weights[0]
+
+kernel GameOfLife<int W, int H>:
+    mut [bool, W * H]'unified cells
+
+    def ():
+        let i = gpu.thread.x
+        cells[i] = not cells[i]
+```
+
+- `int`, `uint`, `float`, and `bool` are valid const generic types — the type comes before the name, consistent with all variable declarations.
+- Array sizes may be **const-evaluable expressions** involving multiple params (`W * H`, `N + 1`, etc.).
+- All scalar types are accepted: `<int N>`, `<uint N>`, `<float Alpha>`, `<bool Flag>`.
+
+### Type generics and trait bounds
+
+```boring
+kernel MonKernel<A, B>:
+    ...
+
+kernel ConstrainedKernel<A as Displayable>:
+    ...
+```
+
+Type generics follow the same rules as struct generics. See [Section 13 — Generics](book.html#13-generics) for the full generic syntax.
+
+### Instantiation
+
+```boring
+let gol   = GameOfLife<64, 64>()
+let small = Blur<3>()
+let large = Blur<7>()
+```
+
+Multiple instantiations of the same generic kernel generate **distinct** code objects per backend — for example, `Blur<3>` and `Blur<7>` produce separate WGSL entry points `Blur_3_main` and `Blur_7_main` when building with `--target wgpu`.
+
+---
+
 ## GPU memory qualifiers
 
 **Kernel-context** (inside `kernel` struct fields):
@@ -60,8 +110,8 @@ kernel Name:
 |---|---|---|
 | `'unified` | unified DRAM (host + device) | direct |
 | `'global` | device-only DRAM | via `gpu.copy()` |
-| `'surface` | unified DRAM, 32-bit pixels | direct (CUDA); blit-only (Metal) — use `screen.present()` |
-| `'sync` | block SRAM (`__shared__`) | no |
+| `'surface` | unified DRAM, 32-bit pixels | direct (CUDA); blit-only (Metal / wgpu) — use `screen.present()` |
+| `'sync` | block SRAM (`__shared__` / `threadgroup` / `var<workgroup>`) | no |
 | `'local` | registers / thread-local | no — default |
 | `'const` | constant cache | no |
 
@@ -141,12 +191,8 @@ k(block = N, grid = M)     # explicit grid of M blocks
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
 | `grid` | `int` or tuple | no | blocks per grid — inferred from field length if omitted |
-| `after` | kernel var or `[k1, k2, ...]` | no | GPU-side ordering: this dispatch starts after the listed ones complete |
-| `priority` | `"high"` / `"normal"` / `"low"` | no | stream scheduling priority — CUDA only; ignored on Metal and `boring run` |
-
-`after =` on CUDA maps to stream synchronization (GPU-side, no CPU round-trip). On Metal the current implementation dispatches synchronously (`wait_until_completed` inside each call), so `after =` is a no-op — ordering is already guaranteed by sequential execution. Metal does support concurrent kernel execution via multiple command queues and `MTLEvent` fences, but async dispatch is not yet implemented in the Boring Metal backend.
-
-`priority =` on CUDA creates the kernel's stream with `cuStreamCreateWithPriority` — `"high"` maps to priority `-1`, `"normal"` (default) to `0`, `"low"` to `1`. On Metal and `boring run` the parameter is accepted but silently ignored.
+| `after` | kernel var or `[k1, k2, ...]` | no | ordering: this dispatch starts after the listed ones complete (GPU-side on CUDA, submission-ordered on wgpu, sequential on Metal and `boring run`) |
+| `priority` | `"high"` / `"normal"` / `"low"` | no | scheduling priority — CUDA only; ignored on all other backends |
 
 When `grid` is omitted it is inferred:
 - **1D**: `ceil(n / block)` where `n` is the length of the first array field.
@@ -154,7 +200,7 @@ When `grid` is omitted it is inferred:
 
 ### Multi-pass with `after =`
 
-`after =` declares that a dispatch must start after the listed kernels have completed. On CUDA this creates GPU-side stream ordering (no CPU round-trip). On Metal it is a no-op — each dispatch already waits synchronously.
+`after =` declares that a dispatch must start after the listed kernels have completed. The ordering guarantee is always observed; the implementation varies by backend (see each backend's reference for details).
 
 ```boring
 kernel:
@@ -206,22 +252,21 @@ Inside `def ()` and device helpers, `gpu` is available:
 ```boring
 let g = GPU(0)
 print "Device: {g.name()} — {g.totalMem() / 1_073_741_824} GB"
-print "SM {g.computeCapability()[0]}.{g.computeCapability()[1]}, warp {g.warpSize()}"
 
 for g in GPU.all():
     print "[{g.index()}] {g.name()} — {g.freeMem()} bytes free"
 ```
 
-| Method | Returns |
-|---|---|
-| `name()` | device model name |
-| `totalMem()` | total VRAM in bytes |
-| `freeMem()` | available VRAM in bytes |
-| `computeCapability()` | `[major, minor]` |
-| `warpSize()` | threads per warp |
-| `maxThreads()` | max threads per block |
-| `maxSharedMem()` | max shared memory per block (bytes) |
-| `index()` | device index |
+| Method | Returns | Notes |
+|---|---|---|
+| `name()` | device model name | |
+| `totalMem()` | total VRAM in bytes | may be 0 on unified-memory GPUs on wgpu |
+| `freeMem()` | available VRAM in bytes | always 0 on wgpu — not exposed by the API |
+| `computeCapability()` | `[major, minor]` | CUDA SM version; `[0, 0]` on wgpu and Metal |
+| `warpSize()` | threads per warp | conservative default (32) on wgpu |
+| `maxThreads()` | max threads per block | |
+| `maxSharedMem()` | max shared memory per block (bytes) | |
+| `index()` | device index | |
 
 ---
 
@@ -239,6 +284,8 @@ for g in GPU.all():
 gpu.copy(k.result, host_buf)    # D2H
 gpu.copy(host_buf, k.input)     # H2D
 ```
+
+The copy mechanism is backend-specific (staging buffers on wgpu, `cudarc` transfers on CUDA, blit on Metal) but the Boring source is identical across targets.
 
 ### `'sync` — block SRAM
 
@@ -270,7 +317,9 @@ kernel Reduce:
 
 #### Dynamic size — `[T]'sync`
 
-When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..n]`. The transpiler passes `block_dim.x * sizeof(T)` as `shared_mem_bytes` automatically.
+When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..n]`. The transpiler passes `block_dim.x * sizeof(T)` as the dynamic shared memory size automatically.
+
+> **wgpu limitation**: dynamic `[T]'sync` is not supported in WGSL — use `[T, N]'sync` with a const generic param instead.
 
 ```boring
 kernel Reduce:
@@ -380,6 +429,8 @@ boring run --gpu path/to/my.toml main.br
 
 ### Built-in profiles
 
+These profiles simulate the reported properties of named GPU models. No real GPU is required.
+
 | Name | GPU | VRAM | SM |
 |---|---|---|---|
 | `default` | generic | 8 GB | 8.6 |
@@ -401,11 +452,3 @@ computeCapability = [8, 6]
 ```
 
 > Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if barriers are missing. In auto mode the transpiler inserts them; in manual mode (`sync` present in the `def`) the developer is responsible.
-
----
-
-## CUDA codegen
-
-`boring build --target cuda` generates a Cargo project with Rust host code, CUDA C device code, and a `build.rs` that invokes `nvcc`. Requires the CUDA toolkit and a CUDA-capable GPU.
-
-For the full mapping of Boring constructs to CUDA C, generated file layout, and backend limitations, see [`cuda-module.md`](cuda-module.html).

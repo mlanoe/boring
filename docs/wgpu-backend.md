@@ -218,6 +218,38 @@ WGSL forbids `bool` inside `storage` and `uniform` buffers (`array<bool>` is inv
 
 ---
 
+## Generic kernel monomorphisation
+
+Generic kernels (`kernel Blur<int N>:`) are specialised at `boring build --target wgpu` time — the transpiler scans the program for all `Name<arg, ...>()` instantiations and emits one WGSL struct + entry point per unique argument list.
+
+### Naming scheme
+
+| Boring instantiation | WGSL entry point | WGSL params struct |
+|---|---|---|
+| `Blur<3>()` | `Blur_3_main` | `Blur_3Params` |
+| `Blur<7>()` | `Blur_7_main` | `Blur_7Params` |
+| `GameOfLife<64, 64>()` | `GameOfLife_64_64_main` | `GameOfLife_64_64Params` |
+
+Non-generic kernels keep their original name (`Scale_main`).
+
+### Expression evaluation
+
+Array sizes that are const-evaluable expressions are reduced at monomorphisation time:
+
+```boring
+kernel Tile<int W, int H>:
+    mut [float, W * H]'unified weights   # → array<f32, 64> when W=8, H=8
+```
+
+Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
+
+### Restrictions
+
+- `[T]'sync` (dynamic workgroup memory) is not supported in WGSL — use `[T, N]'sync` with a const generic param instead.
+- A generic kernel with no instantiations in the program emits no WGSL (no code is generated for unused generics).
+
+---
+
 ## Known limitations vs CUDA
 
 | Feature | CUDA | wgpu |

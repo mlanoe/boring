@@ -103,7 +103,7 @@ Boring separates two orthogonal concepts:
 - **Rebindable**: can the variable point to a different instance?
 - **Mutable**: can the pointed instance be modified?
 
-Three keywords control this:
+Four keywords control this:
 
 | Keyword | Rebindable | Mutable |
 |---|---|---|
@@ -6959,19 +6959,17 @@ Explicit placement syntax for arena, heap, and GPU device allocators — `new(ar
 
 ### GPU computing
 
-**[GPU / CUDA — full reference](gpu-module.html)**
-Complete GPU reference: memory qualifiers, launch expressions, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
+**[GPU computing — language reference](gpu-module.html)**
+Complete GPU language reference: `kernel` struct syntax, const generic kernel declarations (`kernel Blur<int N>:`), memory qualifiers and inference rules, dispatch, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
 
-> **Qualifier inference:** Inside `kernel` structs, GPU memory qualifiers are optional for scalars and fixed-size arrays. A `let` scalar or `let [T, N]` fixed array infers `'const` (constant cache); a `mut`/`var` scalar or fixed array infers `'local` (thread-private). Dynamic arrays (`[T]`) still require an explicit qualifier. Invalid combinations (`[T]'local`, `[T]'const`, `[T, N]'unified`, `[T, N]'global`) are parse errors. See [Qualifier inference](gpu-module.html#qualifier-inference) in the full reference.
-
-**[Boring GPU — CUDA implementation details](cuda-module.html)**
-Low-level CUDA codegen internals: generated file layout, `cudarc` host API, PTX compilation via `build.rs`, Boring construct to CUDA C mapping, and known limitations.
+**[CUDA backend](cuda-module.html)**
+CUDA codegen internals: generated file layout, `cudarc` host API, PTX compilation via `build.rs`, Boring construct to CUDA C mapping, and known limitations.
 
 **[Metal backend](metal-backend.html)**
 macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.
 
 **[wgpu backend](wgpu-backend.html)**
-Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Windows), Vulkan (Windows / Linux), and Metal (macOS) — no NVIDIA GPU or external toolchain required. Covers qualifier → WGSL mapping, pipeline overrides for dynamic workgroup size, and limitations vs CUDA.
+Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Windows), Vulkan (Windows / Linux), and Metal (macOS) — no NVIDIA GPU or external toolchain required. Covers qualifier → WGSL mapping, pipeline overrides for dynamic workgroup size, generic kernel monomorphisation, and limitations vs CUDA.
 
 **[GPU display](gpu-display.html)**
 Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.

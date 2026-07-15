@@ -127,9 +127,8 @@ li { margin-bottom: 0.3rem; }
 <main class="main" id="content">
 <h1 id="gpu-computing--language-reference">GPU computing — language reference</h1>
 <p>Boring supports GPU computing through <code>kernel</code> structs — a dedicated declaration form that groups device memory fields, an <code>init</code> allocator, device-side helpers, and an anonymous entry point (<code>def ()</code>).</p>
-<p>For the Metal backend (macOS), see <a href="metal-backend.html">`metal-backend.md`</a>.</p>
-<p>For CUDA codegen details (generated Rust/CUDA C, limitations, substitution table), see <a href="cuda-module.html">`cuda-module.md`</a>.</p>
-<p>For the wgpu backend (Windows / Linux / macOS, any DirectX 12 / Vulkan / Metal GPU), see <a href="wgpu-backend.html">`wgpu-backend.md`</a>.</p>
+<p>This document covers the <strong>language syntax and semantics</strong> shared by all backends. For backend-specific codegen details, see:</p>
+<ul><li><a href="cuda-module.html">`cuda-module.md`</a> — CUDA C mapping, generated project layout, <code>cudarc</code> host API, PTX compilation</li><li><a href="metal-backend.html">`metal-backend.md`</a> — MSL address space mapping, Metal runtime compilation</li><li><a href="wgpu-backend.html">`wgpu-backend.md`</a> — WGSL mapping, pipeline overrides, cross-platform GPU support</li></ul>
 <hr>
 <h2 id="quick-start">Quick start</h2>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Scale:
@@ -162,9 +161,39 @@ print k.buf[<span class="nb">0</span>]</code></pre></div>
         &lt;body&gt;</code></pre></div>
 <p><code>let</code>/<code>mut</code>/<code>var</code> are mandatory on every field. GPU memory qualifiers (<code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;sync</code>, <code>&#x27;local</code>, <code>&#x27;const</code>) replace the usual ownership qualifiers inside a <code>kernel</code> struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see <a href="#qualifier-inference">Qualifier inference</a> below).</p>
 <hr>
+<h2 id="generic-kernel-declarations">Generic kernel declarations</h2>
+<p>Kernel structs support generic parameters with the same syntax as regular structs.</p>
+<h3 id="const-generics--compile-time-array-sizes">Const generics — compile-time array sizes</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Blur&lt;<span class="kt">int</span> N&gt;:
+    <span class="kw">mut</span> [<span class="kt">float</span>, N] kernel_weights
+    <span class="kw">mut</span> <span class="kt">float</span> result
+
+    <span class="kw">def</span> ():
+        result = kernel_weights[<span class="nb">0</span>]
+
+<span class="kw">kernel</span> GameOfLife&lt;<span class="kt">int</span> W, <span class="kt">int</span> H&gt;:
+    <span class="kw">mut</span> [<span class="kt">bool</span>, W * H]<span class="lf">&#x27;unified</span> cells
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> i = gpu.thread.x
+        cells[i] = <span class="kw">not</span> cells[i]</code></pre></div>
+<ul><li><code>int</code>, <code>uint</code>, <code>float</code>, and <code>bool</code> are valid const generic types — the type comes before the name, consistent with all variable declarations.</li><li>Array sizes may be <strong>const-evaluable expressions</strong> involving multiple params (<code>W * H</code>, <code>N + 1</code>, etc.).</li><li>All scalar types are accepted: <code>&lt;int N&gt;</code>, <code>&lt;uint N&gt;</code>, <code>&lt;float Alpha&gt;</code>, <code>&lt;bool Flag&gt;</code>.</li></ul>
+<h3 id="type-generics-and-trait-bounds">Type generics and trait bounds</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> MonKernel&lt;A, B&gt;:
+    ...
+
+<span class="kw">kernel</span> ConstrainedKernel&lt;A <span class="kw">as</span> Displayable&gt;:
+    ...</code></pre></div>
+<p>Type generics follow the same rules as struct generics. See <a href="book.html#13-generics">Section 13 — Generics</a> for the full generic syntax.</p>
+<h3 id="instantiation">Instantiation</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> gol   = GameOfLife&lt;<span class="nb">64</span>, <span class="nb">64</span>&gt;()
+<span class="kw">let</span> small = Blur&lt;<span class="nb">3</span>&gt;()
+<span class="kw">let</span> large = Blur&lt;<span class="nb">7</span>&gt;()</code></pre></div>
+<p>Multiple instantiations of the same generic kernel generate <strong>distinct</strong> code objects per backend — for example, <code>Blur&lt;3&gt;</code> and <code>Blur&lt;7&gt;</code> produce separate WGSL entry points <code>Blur_3_main</code> and <code>Blur_7_main</code> when building with <code>--target wgpu</code>.</p>
+<hr>
 <h2 id="gpu-memory-qualifiers">GPU memory qualifiers</h2>
 <p><strong>Kernel-context</strong> (inside <code>kernel</code> struct fields):</p>
-<table><thead><tr><th>Qualifier</th><th>Memory space</th><th>Host access</th></tr></thead><tbody><tr><td><code>&#x27;unified</code></td><td>unified DRAM (host + device)</td><td>direct</td></tr><tr><td><code>&#x27;global</code></td><td>device-only DRAM</td><td>via <code>gpu.copy()</code></td></tr><tr><td><code>&#x27;surface</code></td><td>unified DRAM, 32-bit pixels</td><td>direct (CUDA); blit-only (Metal) — use <code>screen.present()</code></td></tr><tr><td><code>&#x27;sync</code></td><td>block SRAM (<code>__shared__</code>)</td><td>no</td></tr><tr><td><code>&#x27;local</code></td><td>registers / thread-local</td><td>no — default</td></tr><tr><td><code>&#x27;const</code></td><td>constant cache</td><td>no</td></tr></tbody></table>
+<table><thead><tr><th>Qualifier</th><th>Memory space</th><th>Host access</th></tr></thead><tbody><tr><td><code>&#x27;unified</code></td><td>unified DRAM (host + device)</td><td>direct</td></tr><tr><td><code>&#x27;global</code></td><td>device-only DRAM</td><td>via <code>gpu.copy()</code></td></tr><tr><td><code>&#x27;surface</code></td><td>unified DRAM, 32-bit pixels</td><td>direct (CUDA); blit-only (Metal / wgpu) — use <code>screen.present()</code></td></tr><tr><td><code>&#x27;sync</code></td><td>block SRAM (<code>__shared__</code> / <code>threadgroup</code> / <code>var&lt;workgroup&gt;</code>)</td><td>no</td></tr><tr><td><code>&#x27;local</code></td><td>registers / thread-local</td><td>no — default</td></tr><tr><td><code>&#x27;const</code></td><td>constant cache</td><td>no</td></tr></tbody></table>
 <p><code>&#x27;surface</code> is restricted to <code>[uint]</code> fields and is intended for pixel buffers presented to a <code>Screen</code>. See <a href="gpu-display.html">`gpu-display.md`</a>.</p>
 <h3 id="qualifier-inference">Qualifier inference</h3>
 <p>Inside a <code>kernel</code> struct, the qualifier may be omitted for scalars and fixed-size arrays. The transpiler infers it from the binding keyword:</p>
@@ -191,13 +220,11 @@ print k.buf[<span class="nb">0</span>]    <span class="co"># safe: kernel: block
 <span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))        <span class="co"># 2D block of 16×16 threads</span>
 <span class="fn">k</span>(block = (<span class="nb">8</span>, <span class="nb">8</span>, <span class="nb">4</span>))       <span class="co"># 3D block</span>
 <span class="fn">k</span>(block = N, grid = M)     <span class="co"># explicit grid of M blocks</span></code></pre></div>
-<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block</td></tr><tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from field length if omitted</td></tr><tr><td><code>after</code></td><td>kernel var or <code>[k1, k2, ...]</code></td><td>no</td><td>GPU-side ordering: this dispatch starts after the listed ones complete</td></tr><tr><td><code>priority</code></td><td><code>&quot;high&quot;</code> / <code>&quot;normal&quot;</code> / <code>&quot;low&quot;</code></td><td>no</td><td>stream scheduling priority — CUDA only; ignored on Metal and <code>boring run</code></td></tr></tbody></table>
-<p><code>after =</code> on CUDA maps to stream synchronization (GPU-side, no CPU round-trip). On Metal the current implementation dispatches synchronously (<code>wait_until_completed</code> inside each call), so <code>after =</code> is a no-op — ordering is already guaranteed by sequential execution. Metal does support concurrent kernel execution via multiple command queues and <code>MTLEvent</code> fences, but async dispatch is not yet implemented in the Boring Metal backend.</p>
-<p><code>priority =</code> on CUDA creates the kernel&#x27;s stream with <code>cuStreamCreateWithPriority</code> — <code>&quot;high&quot;</code> maps to priority <code>-1</code>, <code>&quot;normal&quot;</code> (default) to <code>0</code>, <code>&quot;low&quot;</code> to <code>1</code>. On Metal and <code>boring run</code> the parameter is accepted but silently ignored.</p>
+<table><thead><tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody><tr><td><code>block</code></td><td><code>int</code> or <code>(int, int)</code> or <code>(int, int, int)</code></td><td>yes</td><td>threads per block</td></tr><tr><td><code>grid</code></td><td><code>int</code> or tuple</td><td>no</td><td>blocks per grid — inferred from field length if omitted</td></tr><tr><td><code>after</code></td><td>kernel var or <code>[k1, k2, ...]</code></td><td>no</td><td>ordering: this dispatch starts after the listed ones complete (GPU-side on CUDA, submission-ordered on wgpu, sequential on Metal and <code>boring run</code>)</td></tr><tr><td><code>priority</code></td><td><code>&quot;high&quot;</code> / <code>&quot;normal&quot;</code> / <code>&quot;low&quot;</code></td><td>no</td><td>scheduling priority — CUDA only; ignored on all other backends</td></tr></tbody></table>
 <p>When <code>grid</code> is omitted it is inferred:</p>
 <ul><li><strong>1D</strong>: <code>ceil(n / block)</code> where <code>n</code> is the length of the first array field.</li><li><strong>2D</strong> (kernel has a <code>Dimension</code> field alongside a <code>&#x27;surface</code> field): <code>(ceil(w/bx), ceil(h/by), 1)</code>.</li></ul>
 <h3 id="multi-pass-with-after">Multi-pass with <code>after =</code></h3>
-<p><code>after =</code> declares that a dispatch must start after the listed kernels have completed. On CUDA this creates GPU-side stream ordering (no CPU round-trip). On Metal it is a no-op — each dispatch already waits synchronously.</p>
+<p><code>after =</code> declares that a dispatch must start after the listed kernels have completed. The ordering guarantee is always observed; the implementation varies by backend (see each backend&#x27;s reference for details).</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>:
     <span class="kw">loop</span>:
         <span class="fn">k_sim</span>(block = <span class="nb">256</span>)
@@ -222,11 +249,10 @@ print k.buf[<span class="nb">0</span>]    <span class="co"># safe: kernel: block
 <p><code>GPU</code> is a built-in type for device selection and property queries:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> g = <span class="fn">GPU</span>(<span class="nb">0</span>)
 print <span class="s">"Device: <span class="si">{g.name()}</span> — <span class="si">{g.totalMem() / 1_073_741_824}</span> GB"</span>
-print <span class="s">"SM <span class="si">{g.computeCapability()[0]}</span>.<span class="si">{g.computeCapability()[1]}</span>, warp <span class="si">{g.warpSize()}</span>"</span>
 
 <span class="kw">for</span> g <span class="kw">in</span> GPU.<span class="fn">all</span>():
     print <span class="s">"[<span class="si">{g.index()}</span>] <span class="si">{g.name()}</span> — <span class="si">{g.freeMem()}</span> bytes free"</span></code></pre></div>
-<table><thead><tr><th>Method</th><th>Returns</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td></tr><tr><td><code>index()</code></td><td>device index</td></tr></tbody></table>
+<table><thead><tr><th>Method</th><th>Returns</th><th>Notes</th></tr></thead><tbody><tr><td><code>name()</code></td><td>device model name</td><td></td></tr><tr><td><code>totalMem()</code></td><td>total VRAM in bytes</td><td>may be 0 on unified-memory GPUs on wgpu</td></tr><tr><td><code>freeMem()</code></td><td>available VRAM in bytes</td><td>always 0 on wgpu — not exposed by the API</td></tr><tr><td><code>computeCapability()</code></td><td><code>[major, minor]</code></td><td>CUDA SM version; <code>[0, 0]</code> on wgpu and Metal</td></tr><tr><td><code>warpSize()</code></td><td>threads per warp</td><td>conservative default (32) on wgpu</td></tr><tr><td><code>maxThreads()</code></td><td>max threads per block</td><td></td></tr><tr><td><code>maxSharedMem()</code></td><td>max shared memory per block (bytes)</td><td></td></tr><tr><td><code>index()</code></td><td>device index</td><td></td></tr></tbody></table>
 <hr>
 <h2 id="memory-safety-model">Memory safety model</h2>
 <h3 id="unified--zero-copy-hostdevice"><code>&#x27;unified</code> — zero-copy host/device</h3>
@@ -235,6 +261,7 @@ print <span class="s">"SM <span class="si">{g.computeCapability()[0]}</span>.<sp
 <p><code>&#x27;global</code> fields live in device DRAM. Host reads/writes require explicit <code>gpu.copy()</code>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>gpu.<span class="fn">copy</span>(k.result, host_buf)    <span class="co"># D2H</span>
 gpu.<span class="fn">copy</span>(host_buf, k.input)     <span class="co"># H2D</span></code></pre></div>
+<p>The copy mechanism is backend-specific (staging buffers on wgpu, <code>cudarc</code> transfers on CUDA, blit on Metal) but the Boring source is identical across targets.</p>
 <h3 id="sync--block-sram"><code>&#x27;sync</code> — block SRAM</h3>
 <p><code>&#x27;sync</code> fields are allocated in per-block shared memory. The transpiler inserts thread-group barriers automatically — no explicit <code>sync</code> statement needed.</p>
 <h4 id="fixed-size--t-nsync">Fixed size — <code>[T, N]&#x27;sync</code></h4>
@@ -257,7 +284,8 @@ gpu.<span class="fn">copy</span>(host_buf, k.input)     <span class="co"># H2D</
                 sum += v
             result = sum</code></pre></div>
 <h4 id="dynamic-size--tsync">Dynamic size — <code>[T]&#x27;sync</code></h4>
-<p>When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in <code>init()</code> using <code>[..n]</code>. The transpiler passes <code>block_dim.x * sizeof(T)</code> as <code>shared_mem_bytes</code> automatically.</p>
+<p>When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in <code>init()</code> using <code>[..n]</code>. The transpiler passes <code>block_dim.x * sizeof(T)</code> as the dynamic shared memory size automatically.</p>
+<blockquote><strong>wgpu limitation</strong>: dynamic <code>[T]&#x27;sync</code> is not supported in WGSL — use <code>[T, N]&#x27;sync</code> with a const generic param instead.</blockquote>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Reduce:
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  input
     <span class="kw">mut</span> <span class="kt">float</span><span class="lf">&#x27;unified</span>    result
@@ -331,6 +359,7 @@ boring run --gpu a100 main.br
 boring run --gpu h100 main.br
 boring run --gpu path/to/my.toml main.br</code></pre></div>
 <h3 id="built-in-profiles">Built-in profiles</h3>
+<p>These profiles simulate the reported properties of named GPU models. No real GPU is required.</p>
 <table><thead><tr><th>Name</th><th>GPU</th><th>VRAM</th><th>SM</th></tr></thead><tbody><tr><td><code>default</code></td><td>generic</td><td>8 GB</td><td>8.6</td></tr><tr><td><code>v100</code></td><td>Tesla V100 SXM2</td><td>16 GB</td><td>7.0</td></tr><tr><td><code>a100</code></td><td>A100 SXM4</td><td>80 GB</td><td>8.0</td></tr><tr><td><code>rtx3090</code></td><td>RTX 3090</td><td>24 GB</td><td>8.6</td></tr><tr><td><code>rtx4090</code></td><td>RTX 4090</td><td>24 GB</td><td>8.9</td></tr><tr><td><code>h100</code></td><td>H100 SXM5</td><td>80 GB</td><td>9.0</td></tr></tbody></table>
 <h3 id="custom-toml-profile">Custom TOML profile</h3>
 <div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>name = &quot;My GPU&quot;
@@ -340,10 +369,6 @@ maxThreads = 1024
 maxSharedMem = 49152
 computeCapability = [8, 6]</code></pre></div>
 <blockquote>Sequential simulation hides data races between threads. A kernel correct in simulation may be incorrect on real hardware if barriers are missing. In auto mode the transpiler inserts them; in manual mode (<code>sync</code> present in the <code>def</code>) the developer is responsible.</blockquote>
-<hr>
-<h2 id="cuda-codegen">CUDA codegen</h2>
-<p><code>boring build --target cuda</code> generates a Cargo project with Rust host code, CUDA C device code, and a <code>build.rs</code> that invokes <code>nvcc</code>. Requires the CUDA toolkit and a CUDA-capable GPU.</p>
-<p>For the full mapping of Boring constructs to CUDA C, generated file layout, and backend limitations, see <a href="cuda-module.html">`cuda-module.md`</a>.</p>
 </main>
 <script>
 // Build TOC from headings

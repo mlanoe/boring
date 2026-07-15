@@ -224,6 +224,19 @@ device.<span class="fn">create_compute_pipeline</span>(&amp;wgpu::<span class="k
 <h3 id="bool-in-storage-buffers"><code>bool</code> in storage buffers</h3>
 <p>WGSL forbids <code>bool</code> inside <code>storage</code> and <code>uniform</code> buffers (<code>array&lt;bool&gt;</code> is invalid). The transpiler maps <code>bool</code> fields and <code>bool</code> array elements to <code>u32</code> in all GPU memory contexts (<code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;sync</code>, struct fields). <code>true</code> → <code>1u</code>, <code>false</code> → <code>0u</code>. Comparisons and conditionals that receive a <code>u32</code> from a GPU field coerce back to WGSL <code>bool</code> via <code>!= 0u</code> automatically.</p>
 <hr>
+<h2 id="generic-kernel-monomorphisation">Generic kernel monomorphisation</h2>
+<p>Generic kernels (<code>kernel Blur&lt;int N&gt;:</code>) are specialised at <code>boring build --target wgpu</code> time — the transpiler scans the program for all <code>Name&lt;arg, ...&gt;()</code> instantiations and emits one WGSL struct + entry point per unique argument list.</p>
+<h3 id="naming-scheme">Naming scheme</h3>
+<table><thead><tr><th>Boring instantiation</th><th>WGSL entry point</th><th>WGSL params struct</th></tr></thead><tbody><tr><td><code>Blur&lt;3&gt;()</code></td><td><code>Blur_3_main</code></td><td><code>Blur_3Params</code></td></tr><tr><td><code>Blur&lt;7&gt;()</code></td><td><code>Blur_7_main</code></td><td><code>Blur_7Params</code></td></tr><tr><td><code>GameOfLife&lt;64, 64&gt;()</code></td><td><code>GameOfLife_64_64_main</code></td><td><code>GameOfLife_64_64Params</code></td></tr></tbody></table>
+<p>Non-generic kernels keep their original name (<code>Scale_main</code>).</p>
+<h3 id="expression-evaluation">Expression evaluation</h3>
+<p>Array sizes that are const-evaluable expressions are reduced at monomorphisation time:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Tile&lt;<span class="kt">int</span> W, <span class="kt">int</span> H&gt;:
+    <span class="kw">mut</span> [<span class="kt">float</span>, W * H]<span class="lf">&#x27;unified</span> weights   <span class="co"># → array&lt;f32, 64&gt; when W=8, H=8</span></code></pre></div>
+<p>Supported operators: <code>+</code>, <code>-</code>, <code>*</code>, <code>/</code>, <code>%</code>, unary <code>-</code>.</p>
+<h3 id="restrictions">Restrictions</h3>
+<ul><li><code>[T]&#x27;sync</code> (dynamic workgroup memory) is not supported in WGSL — use <code>[T, N]&#x27;sync</code> with a const generic param instead.</li><li>A generic kernel with no instantiations in the program emits no WGSL (no code is generated for unused generics).</li></ul>
+<hr>
 <h2 id="known-limitations-vs-cuda">Known limitations vs CUDA</h2>
 <table><thead><tr><th>Feature</th><th>CUDA</th><th>wgpu</th></tr></thead><tbody><tr><td><code>print</code> in kernel</td><td><code>printf</code></td><td>silent no-op — WGSL has no device-side print</td></tr><tr><td>Double precision</td><td>full support</td><td>optional feature (<code>SHADER_F64</code>); not enabled by default</td></tr><tr><td><code>priority =</code></td><td><code>cuStreamCreateWithPriority</code></td><td>no-op — wgpu has no queue priority API</td></tr><tr><td><code>freeMem()</code></td><td><code>cuMemGetInfo</code></td><td>always 0 — wgpu does not expose free VRAM</td></tr><tr><td><code>computeCapability()</code></td><td>CUDA SM version</td><td>always <code>[0, 0]</code> — not applicable</td></tr><tr><td>Multi-device (<code>GPU(1)</code>, <code>new(g1) K</code>)</td><td>full support</td><td>supported — one wgpu adapter per <code>GPU(i)</code></td></tr><tr><td>Windows / Linux / macOS</td><td>Windows + Linux</td><td>yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu)</td></tr></tbody></table>
 <hr>
