@@ -321,7 +321,10 @@ impl Transpiler {
         }
         // Managed mode: add #[track_caller] so panic messages report the call site rather
         // than the panic site inside the function body.
-        if self.config.mode == crate::transpiler::TranspileMode::Managed && !f.is_native {
+        if self.config.mode == crate::transpiler::TranspileMode::Managed
+            && !f.is_native
+            && !(f.name == "main" && self_ty.is_none())
+        {
             self.line("#[track_caller]");
         }
         // Auto-detect: a function that declares T'actor locals or consumes stream functions
@@ -1959,6 +1962,8 @@ impl Transpiler {
             Type::Optional(inner) => format!("Option<{}>", self.emit_type(inner)),
             Type::Array(inner)    => format!("Vec<{}>", self.emit_type(inner)),
             Type::ArrayN(inner, n) => format!("[{}; {}]", self.emit_type(inner), n),
+            Type::ArrayNExpr(inner, _) => format!("[{}; _]", self.emit_type(inner)), // resolved during monomorphisation
+            Type::ConstInt(n) => n.to_string(),
             Type::Dict(k, v)      => format!("HashMap<{}, {}>", self.emit_type(k), self.emit_type(v)),
             Type::Set(inner)      => format!("HashSet<{}>", self.emit_type(inner)),
             Type::Tuple(elems)    => format!("({})", elems.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ")),

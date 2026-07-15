@@ -5,6 +5,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.3] — 2026-07-15 *(interpreter: 433/433 · functional: 69/69 × 4 modes)*
+
+### Added
+
+- **wgpu GPU backend** — `boring build --target wgpu` transpiles `.br` source to a self-contained Rust/wgpu Cargo project targeting DirectX 12, Vulkan, and Metal. Supports compute kernels, ping-pong buffers, screen display via a blit render pipeline, and the winit `ApplicationHandler` API.
+
+- **Const generic params on kernel structs** — `kernel Foo<int W, int H>:` declares compile-time constants. Array sizes may reference them directly or as arithmetic expressions (`[float, W * H]`). wgpu monomorphises each unique instantiation into a distinct WGSL shader with concrete sizes.
+
+- **Default values on scalar kernel fields** — `let float sigma = 1.0` initialises the field to a literal and omits it from the generated `new()` constructor signature. Array/buffer fields cannot carry a default (parser rejects them). Applies to all three GPU backends: wgpu, CUDA, Metal.
+
+- **`mut` on scalar types** — `mut x = 42` is now valid and equivalent to `var x = 42` for primitives (`int`, `uint`, `float`, `bool`). The mutability/rebinding distinction is meaningless for value types; `mut` naturally means rebindable. Rejected for struct and array bindings.
+
+### Changed
+
+- **`--mode managed` output directory** — managed-mode builds now write to a distinct directory (`main_rust_managed` / `main_rust_managed_single`) instead of overwriting the strict-mode project. All four combinations `strict/managed × multi/single` now have isolated output directories.
+
+- **`#[track_caller]` excluded from `fn main`** — in managed mode the attribute is no longer emitted on the entry point, which Rust forbids.
+
+### Testing
+
+- **Test suite runs in all 4 transpiler modes** — every interpreter unit test (`run` / `run_src`) now also transpiles its source through all four mode combinations (Strict×Multi, Strict×Single, Managed×Multi, Managed×Single) and asserts zero transpiler errors.
+
+- **`interpreter_build` covers all 4 modes** — previously only `strict+multi` and `strict+single` were built; all four variants are now compiled and verified.
+
+- **`interpreter_functional` tests against all 4 binaries** — each of the 69 `.br` case files is run against the four transpiled interpreter binaries and output compared against `.expected`.
+
+- **`interpreter_functional` binary path** — the test now scans `target/` dynamically instead of a hardcoded path, making it work on Windows (target-triple subdirectory, `.exe` extension) and Linux/macOS without changes.
+
+### Spec
+
+- **`spec/grammar.bnf`** — updated to reflect all additions: `kernel_decl` gains `type_params?`; new `const_param` rule; `kernel_field_decl` gains `("=" expr)?`; `[T, const_expr]` fixed-size array form and `const_expr` rule added; `--target wgpu` documented in build flags; `mut` scalar semantics clarified in `let_stmt`.
+
+- **`linguist/samples/gpu.br`** — updated with a const-generic example (`kernel Blur<int W, int H>:`) showing field defaults and `W * H` array sizes.
+
+---
+
 ## [0.9.2] — 2026-07-10 *(interpreter: 425/425 · transpiler: 216/216 · cuda: 34/34 · metal: 69/69 tests passing)*
 
 ### Added

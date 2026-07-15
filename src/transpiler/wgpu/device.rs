@@ -5,9 +5,9 @@
 
 use crate::ast::*;
 
-pub(super) fn emit_device_wgsl(program: &Program) -> String {
+pub(super) fn emit_device_wgsl(program: &Program, effective_kernels: &[crate::ast::KernelDecl]) -> String {
     let mut e = DeviceEmitter::new();
-    e.emit_program(program);
+    e.emit_program(program, effective_kernels);
     e.out
 }
 
@@ -47,7 +47,7 @@ impl DeviceEmitter {
 
     fn blank(&mut self) { self.out.push('\n'); }
 
-    fn emit_program(&mut self, program: &Program) {
+    fn emit_program(&mut self, program: &Program, effective_kernels: &[crate::ast::KernelDecl]) {
         // Pre-pass: collect top-level scalar lets for inlining.
         for item in &program.items {
             if let Item::Let(s) = item {
@@ -83,10 +83,8 @@ impl DeviceEmitter {
         // Pre-pass: extract block sizes from kernel call sites.
         self.block_sizes = collect_block_sizes(program);
 
-        for item in &program.items {
-            if let Item::Kernel(decl) = item {
-                self.emit_kernel_decl(decl);
-            }
+        for decl in effective_kernels {
+            self.emit_kernel_decl(decl);
         }
     }
 
@@ -165,10 +163,6 @@ impl DeviceEmitter {
 
         self.blank();
 
-        // Workgroup size — look up from call sites; default to 1 if not found.
-        let (bx, by, bz) = self.block_sizes.get(&decl.name)
-            .or_else(|| self.block_sizes.get(&decl.name.to_lowercase()))
-            .copied().unwrap_or((1, 1, 1));
         self.blank();
 
         // Device helper functions (named def methods).

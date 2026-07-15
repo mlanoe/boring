@@ -181,18 +181,28 @@ impl Parser {
                 let inner = self.parse_type()?;
                 let inner = self.parse_type_qualifier(inner)?;
                 if self.eat(&TokenKind::Comma) {
-                    let n = match self.peek().clone() {
-                        TokenKind::Int(n) if n >= 0 => { self.advance(); n as usize }
-                        _ => return Err(ParseError::Generic {
-                            line: self.line(), col: self.col(),
-                            msg: "expected integer literal for fixed-size array length".into(), len: self.tok_len(),
-                        }),
-                    };
+                    // Size can be an integer literal OR an expression over const generic params.
+                    if let TokenKind::Int(n) = self.peek().clone() {
+                        // Peek ahead: if the next token after the int is `]`, it's a plain literal.
+                        if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::RBracket)) {
+                            self.advance(); // consume int
+                            self.expect(&TokenKind::RBracket)?;
+                            return Ok(Type::ArrayN(Box::new(inner), n as usize));
+                        }
+                    }
+                    // Otherwise parse as a full expression (handles `W * H`, `N + 1`, etc.).
+                    let size_expr = self.parse_expr()?;
                     self.expect(&TokenKind::RBracket)?;
-                    return Ok(Type::ArrayN(Box::new(inner), n));
+                    return Ok(Type::ArrayNExpr(Box::new(inner), ConstExpr(Box::new(size_expr))));
                 }
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Type::Array(Box::new(inner)))
+            }
+            // Integer literal in type-argument position: e.g. `GameOfLife<64, 64>`.
+            TokenKind::Int(n) => {
+                let n = n;
+                self.advance();
+                Ok(Type::ConstInt(n))
             }
             TokenKind::LParen => {
                 self.advance();

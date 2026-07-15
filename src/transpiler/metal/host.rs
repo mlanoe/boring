@@ -694,7 +694,10 @@ impl HostEmitter {
                     }
                     _ => {
                         let ty = rust_type(&field.ty);
-                        self.line(&format!("let {}: {} = Default::default();", field.name, ty));
+                        let val = field.default.as_ref()
+                            .map(emit_scalar_default)
+                            .unwrap_or_else(|| "Default::default()".into());
+                        self.line(&format!("let {}: {} = {};", field.name, ty, val));
                     }
                 }
             }
@@ -709,7 +712,10 @@ impl HostEmitter {
                     }
                     _ => {
                         let ty = rust_type(&field.ty);
-                        self.line(&format!("let {}: {} = Default::default();", field.name, ty));
+                        let val = field.default.as_ref()
+                            .map(emit_scalar_default)
+                            .unwrap_or_else(|| "Default::default()".into());
+                        self.line(&format!("let {}: {} = {};", field.name, ty, val));
                     }
                 }
             }
@@ -719,7 +725,10 @@ impl HostEmitter {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
                     _ => {
                         let ty = rust_type(&field.ty);
-                        self.line(&format!("let {}: {} = Default::default();", field.name, ty));
+                        let val = field.default.as_ref()
+                            .map(emit_scalar_default)
+                            .unwrap_or_else(|| "Default::default()".into());
+                        self.line(&format!("let {}: {} = {};", field.name, ty, val));
                     }
                 }
             }
@@ -1729,6 +1738,23 @@ fn elem_size_bytes(ty: &Type) -> usize {
         Type::Qualified(inner, _)                 => elem_size_bytes(inner),
         Type::Array(inner) | Type::ArrayN(inner, _) => elem_size_bytes(inner),
         _                                         => 8,
+    }
+}
+
+fn emit_scalar_default(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::Int(n)   => n.to_string(),
+        ExprKind::Float(f) => {
+            let s = format!("{}", f);
+            if s.contains('.') { s } else { format!("{}.0", s) }
+        }
+        ExprKind::Bool(b)  => b.to_string(),
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => match &inner.kind {
+            ExprKind::Int(n)   => format!("-{}", n),
+            ExprKind::Float(f) => format!("-{}", f),
+            _ => "Default::default()".into(),
+        },
+        _ => "Default::default()".into(),
     }
 }
 

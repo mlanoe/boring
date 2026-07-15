@@ -308,13 +308,14 @@ impl Parser {
                 }
             }
             TokenKind::Kernel => {
-                // `kernel Name:` → GPU kernel struct declaration.
+                // `kernel Name:` / `kernel Name<...>:` → GPU kernel struct declaration.
                 // `kernel Name(` / `kernel:` / `kernel expr` → kernel block — handled in parse_stmt.
                 let next  = self.tokens.get(self.pos + 1).map(|t| &t.kind);
                 let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
-                if matches!(next, Some(TokenKind::Ident(_)))
-                    && matches!(next2, Some(TokenKind::Colon))
-                {
+                let is_decl = matches!(next, Some(TokenKind::Ident(_)))
+                    && (matches!(next2, Some(TokenKind::Colon))
+                        || matches!(next2, Some(TokenKind::Lt)));
+                if is_decl {
                     Ok(Item::Kernel(self.parse_kernel_decl(is_pub)?))
                 } else {
                     Ok(Item::Stmt(self.parse_stmt()?))
@@ -1194,6 +1195,7 @@ impl Parser {
         let col = self.col();
         self.expect(&TokenKind::Kernel)?;
         let name = self.expect_ident()?;
+        let (type_params, where_clause) = self.parse_type_params();
         self.expect(&TokenKind::Colon)?;
         self.expect_newline()?;
         self.expect(&TokenKind::Indent)?;
@@ -1227,7 +1229,7 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(KernelDecl { name, is_pub, fields, inits, methods, line, col })
+        Ok(KernelDecl { name, is_pub, fields, inits, methods, type_params, where_clause, line, col })
     }
 
     /// Parse a kernel field: `let [float]'unified input` or `mut [float]'shared tile`
@@ -1255,7 +1257,7 @@ impl Parser {
         // Note: `'shared` maps to OwnerQual::Shared (Arc/Rc) in the global qualifier table;
         // in kernel context it means block SRAM — we accept both spellings.
         let (qual, base_ty) = match parsed_ty {
-            Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _)) => {
+            Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) => {
                 return Err(ParseError::Generic {
                     msg: "fixed-size arrays cannot use 'unified or 'global — the size is implicit from the init parameter; use '[T]'unified or '[T]'global instead".into(),
                     line, col, len: 1,
@@ -1304,18 +1306,18 @@ impl Parser {
             // Unqualified scalar → infer from binding:
             //   let scalar  → 'const  (read-only constant cache)
             //   mut/var scalar → 'local (mutable thread-private register)
-            unqualified if !matches!(unqualified, Type::Array(_) | Type::ArrayN(_, _)) => {
+            unqualified if !matches!(unqualified, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) => {
                 let qual = match binding {
                     FieldBinding::Let => GpuQual::Const,
                     FieldBinding::Mut | FieldBinding::Var => GpuQual::Local,
                 };
                 (qual, unqualified)
             }
-            // Unqualified fixed array [T, N]: infer from binding.
+            // Unqualified fixed array [T, N] or [T, expr]: infer from binding.
             //   let [T, N] → 'const (read-only lookup table in constant cache)
             //   mut/var [T, N] → 'local (thread-private stack array)
             // Dynamic [T] stays an error: 'unified vs 'global is a semantic choice.
-            Type::ArrayN(_, _) => {
+            Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => {
                 let qual = match binding {
                     FieldBinding::Let => GpuQual::Const,
                     FieldBinding::Mut | FieldBinding::Var => GpuQual::Local,
@@ -1329,8 +1331,21 @@ impl Parser {
         };
 
         let name = self.expect_ident()?;
+        let default = if self.eat(&TokenKind::Eq) {
+            let expr = self.parse_expr()?;
+            // Validate: defaults only allowed on scalar fields, not buffers.
+            if matches!(base_ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) {
+                return Err(ParseError::Generic {
+                    msg: "kernel array fields cannot have a default value — buffer size must come from the constructor".into(),
+                    line, col, len: 1,
+                });
+            }
+            Some(expr)
+        } else {
+            None
+        };
         self.expect_newline_soft();
-        Ok(KernelFieldDecl { name, binding, qual, ty: base_ty, line, col })
+        Ok(KernelFieldDecl { name, binding, qual, ty: base_ty, default, line, col })
     }
 
     /// Parse a `kernel(params) expr` launch expression.

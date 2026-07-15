@@ -273,6 +273,7 @@ pub struct KernelFieldDecl {
     pub binding: FieldBinding,
     pub qual: GpuQual,
     pub ty: Type,
+    pub default: Option<Expr>,
     pub line: usize,
     pub col: usize,
 }
@@ -290,6 +291,10 @@ pub struct KernelDecl {
     pub fields: Vec<KernelFieldDecl>,
     pub inits: Vec<InitDecl>,
     pub methods: Vec<FnDecl>,
+    /// Generic parameters — same encoding as `StructDecl.type_params`.
+    /// `"$W:i64"` = const generic `int W`, `"$N:usize"` = const generic `uint N`, `"T"` = type param.
+    pub type_params: Vec<String>,
+    pub where_clause: Vec<(String, String)>,
     pub line: usize,
     pub col: usize,
 }
@@ -989,6 +994,15 @@ pub enum OwnerQual {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/// Wrapper around an `Expr` used as a const-generic array-size expression.
+/// PartialEq always returns `false` — two size expressions are never considered equal
+/// structurally (they are resolved to concrete integers before comparison is needed).
+#[derive(Debug, Clone)]
+pub struct ConstExpr(pub Box<Expr>);
+impl PartialEq for ConstExpr {
+    fn eq(&self, _other: &Self) -> bool { false }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
@@ -1006,6 +1020,12 @@ pub enum Type {
     Array(Box<Type>),
     /// Fixed-size array: `[T, N]` → Rust `[T; N]`
     ArrayN(Box<Type>, usize),
+    /// Fixed-size array whose length is a compile-time expression over const generic params.
+    /// E.g. `[bool, W * H]` where W and H are const params declared on the kernel.
+    /// Monomorphised to `ArrayN` before code generation (concrete values substituted).
+    ArrayNExpr(Box<Type>, ConstExpr),
+    /// Integer literal in type-argument position: `GameOfLife<64, 64>`.
+    ConstInt(i64),
     Tuple(Vec<Type>),
     Dict(Box<Type>, Box<Type>),
     Set(Box<Type>),
@@ -1045,7 +1065,8 @@ impl Type {
             Type::Int | Type::Uint | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
-            Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::ConstInt(_) => true,
             Type::Fn(..) => true,  // functions are copy (shared under the hood)
             // Owned = exclusive move → never copy
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => false,
@@ -1073,7 +1094,8 @@ impl Type {
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),
             // Unqualified collections / named types are not safe (sharing semantics undefined)
-            Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
+            Type::ConstInt(_) => true,
             // Qualifiers
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => true,  // exclusive move → source invalidated
             Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe

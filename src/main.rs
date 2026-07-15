@@ -579,7 +579,7 @@ fn parse_build_command(build_args: &[String]) {
                 .file_stem().map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "output".to_string());
             let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-            let dir = base.join(rust_dir_name(&stem, &config.threading));
+            let dir = base.join(rust_dir_name_full(&stem, &config.threading, &config.mode));
             emit_rust_with_config(path, config);
             dir
         }
@@ -589,7 +589,7 @@ fn parse_build_command(build_args: &[String]) {
                 .file_stem().map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "output".to_string());
             let base = std::path::Path::new(&toml.main).parent().unwrap_or(std::path::Path::new("."));
-            let dir = base.join(rust_dir_name(&stem, &config.threading));
+            let dir = base.join(rust_dir_name_full(&stem, &config.threading, &config.mode));
             build_project_with_config(config);
             dir
         }
@@ -744,11 +744,14 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     print!("{}", out.code);
 }
 
-fn rust_dir_name(stem: &str, threading: &transpiler::ThreadingMode) -> String {
-    if matches!(threading, transpiler::ThreadingMode::Single) {
-        format!("{}_rust_single", stem)
-    } else {
-        format!("{}_rust", stem)
+fn rust_dir_name_full(stem: &str, threading: &transpiler::ThreadingMode, mode: &transpiler::TranspileMode) -> String {
+    let managed = matches!(mode, transpiler::TranspileMode::Managed);
+    let single  = matches!(threading, transpiler::ThreadingMode::Single);
+    match (managed, single) {
+        (false, false) => format!("{}_rust", stem),
+        (false, true)  => format!("{}_rust_single", stem),
+        (true,  false) => format!("{}_rust_managed", stem),
+        (true,  true)  => format!("{}_rust_managed_single", stem),
     }
 }
 
@@ -760,7 +763,7 @@ fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpil
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
     let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let project_dir = base_dir.join(rust_dir_name(&stem, &config.threading));
+    let project_dir = base_dir.join(rust_dir_name_full(&stem, &config.threading, &config.mode));
 
     emit_rust_to_dir(path.to_str().unwrap_or(""), version, config, project_dir);
 }

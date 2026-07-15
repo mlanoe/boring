@@ -12,8 +12,26 @@
 use super::*;
 use crate::lexer::lex;
 use crate::parser::parse;
+use crate::transpiler::{transpile_with_config, TranspileConfig, TranspileMode, ThreadingMode};
+
+fn transpile_check(src: &str) {
+    use TranspileMode::*;
+    use ThreadingMode::*;
+    for (mode, threading) in [(Strict, Multi), (Strict, Single), (Managed, Multi), (Managed, Single)] {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        let cfg = TranspileConfig { mode, threading, ..TranspileConfig::default() };
+        let out = transpile_with_config(&program, cfg);
+        assert!(
+            out.errors.is_empty(),
+            "transpile errors in {mode:?}/{threading:?}: {errs:?}",
+            errs = out.errors.iter().map(|e| &e.message).collect::<Vec<_>>(),
+        );
+    }
+}
 
 pub(super) fn run(src: &str) -> (Interpreter, Result<(), RuntimeError>) {
+    transpile_check(src);
     let tokens = lex(src).expect("lex error");
     let program = parse(tokens).expect("parse error");
     let mut interp = Interpreter::new();
@@ -26,6 +44,7 @@ pub(super) fn get_var(interp: &Interpreter, name: &str) -> Value {
 }
 
 pub(super) fn run_src(src: &str) -> Value {
+    transpile_check(src);
     let tokens = lex(src).expect("lex error");
     let program = parse(tokens).expect("parse error");
     let mut interp = Interpreter::new();
@@ -1491,7 +1510,13 @@ let _result = d.speak() + "|" + d.print()
 #[test]
 fn test_struct_composition_fields() {
     // Dog composes Animal, exposes its fields via composition
-    let src = r#"
+    // Runs in a larger-stack thread: eval_expr is deeply recursive and Value is 344 bytes,
+    // so struct composition chains exhaust the default 1 MB test-thread stack on Windows.
+    // Value contains Rc so it is not Send; extract the string inside the thread.
+    let result: String = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let src = r#"
 struct Animal:
     init(pub string name)
 
@@ -1502,7 +1527,15 @@ struct Dog:
 let d = Dog(base = Animal(name = "Rex"), breed = "Labrador")
 let _result = d.describe()
 "#;
-    assert_eq!(run_src(src), Value::Str("Rex (Labrador)".to_string()));
+            match run_src(src) {
+                Value::Str(s) => s,
+                other => panic!("expected Str, got {:?}", other),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(result, "Rex (Labrador)");
 }
 
 #[test]

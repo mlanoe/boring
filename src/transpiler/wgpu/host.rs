@@ -5,8 +5,8 @@
 
 use crate::ast::*;
 
-pub(super) fn emit_host_rs(program: &Program, kernel_names: &[String]) -> String {
-    let mut e = HostEmitter::new(program, kernel_names);
+pub(super) fn emit_host_rs(program: &Program, kernel_names: &[String], effective_kernels: &[KernelDecl]) -> String {
+    let mut e = HostEmitter::new(program, kernel_names, effective_kernels);
     e.emit();
     e.out
 }
@@ -15,13 +15,14 @@ struct HostEmitter<'a> {
     out: String,
     program: &'a Program,
     kernel_names: &'a [String],
+    effective_kernels: &'a [KernelDecl],
     has_screen: bool,
     /// When true, render-stmt helpers emit `self.` prefix and `event_loop` for exit.
     in_method: bool,
 }
 
 impl<'a> HostEmitter<'a> {
-    fn new(program: &'a Program, kernel_names: &'a [String]) -> Self {
+    fn new(program: &'a Program, kernel_names: &'a [String], effective_kernels: &'a [KernelDecl]) -> Self {
         let has_screen = program.items.iter().any(|item| {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
@@ -34,7 +35,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, has_screen, in_method: false }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -69,10 +70,10 @@ impl<'a> HostEmitter<'a> {
     // â"€â"€ Kernel structs â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     fn emit_kernel_structs(&mut self) {
-        for item in self.program.items.iter() {
-            if let Item::Kernel(decl) = item {
-                self.emit_kernel_struct(decl);
-            }
+        // Use effective_kernels (monomorphised) rather than raw program items.
+        let decls: Vec<KernelDecl> = self.effective_kernels.to_vec();
+        for decl in &decls {
+            self.emit_kernel_struct(decl);
         }
     }
 
@@ -145,7 +146,6 @@ impl<'a> HostEmitter<'a> {
                 GpuQual::Sync => {
                     // workgroup memory, no host side.
                 }
-                _ => {}
             }
         }
         if !params_fields.is_empty() {
@@ -318,15 +318,19 @@ impl<'a> HostEmitter<'a> {
                                 f.name, host_scalar_type(inner), n));
                         }
                         ty => {
-                            self.line(&format!("            {}: {}::default(),",
-                                f.name, host_scalar_type(ty)));
+                            let val = f.default.as_ref()
+                                .map(emit_scalar_default)
+                                .unwrap_or_else(|| format!("{}::default()", host_scalar_type(ty)));
+                            self.line(&format!("            {}: {},", f.name, val));
                         }
                     }
                 }
                 GpuQual::Local => {
                     if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
-                        self.line(&format!("            {}: {}::default(),",
-                            f.name, host_scalar_type(&f.ty)));
+                        let val = f.default.as_ref()
+                            .map(emit_scalar_default)
+                            .unwrap_or_else(|| format!("{}::default()", host_scalar_type(&f.ty)));
+                        self.line(&format!("            {}: {},", f.name, val));
                     }
                 }
                 _ => {}
@@ -829,6 +833,7 @@ impl<'a> HostEmitter<'a> {
         map
     }
 
+    #[allow(dead_code)]
     fn collect_render_block_sizes(&self) -> std::collections::HashMap<String, (String, String, String)> {
         let mut map = std::collections::HashMap::new();
         for item in &self.program.items {
@@ -1192,33 +1197,66 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Find the KernelDecl for a top-level kernel variable (e.g. `var render = Render(...)`).
+    /// Returns the monomorphised decl from `effective_kernels`.
     fn find_kernel_decl_for_var(&self, var_name: &str) -> Option<&KernelDecl> {
         let ktype_name = self.program.items.iter().find_map(|item| {
             if let Item::Let(s) = item {
                 if s.name == var_name {
                     if let Some(val) = &s.value {
-                        if let ExprKind::Call(callee, _) = &val.kind {
-                            if let ExprKind::Var(kn) = &callee.kind {
-                                if self.kernel_names.contains(kn) {
-                                    return Some(kn.clone());
+                        match &val.kind {
+                            ExprKind::Call(callee, _) => {
+                                if let ExprKind::Var(kn) = &callee.kind {
+                                    if self.kernel_names.contains(kn) {
+                                        return Some(kn.clone());
+                                    }
                                 }
                             }
+                            ExprKind::GenericCall(callee, type_args, _) => {
+                                if let ExprKind::Var(kn) = &callee.kind {
+                                    if self.kernel_names.contains(kn) {
+                                        // Build the monomorphised name from the concrete args.
+                                        let args: Vec<i64> = type_args.iter().map(|t| {
+                                            if let Type::ConstInt(n) = t { *n } else { 0 }
+                                        }).collect();
+                                        if args.is_empty() {
+                                            return Some(kn.clone());
+                                        }
+                                        let suffix: Vec<String> = args.iter().map(|n| n.to_string()).collect();
+                                        return Some(format!("{}_{}", kn, suffix.join("_")));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
             None
         })?;
-        self.program.items.iter().find_map(|item| {
-            if let Item::Kernel(decl) = item {
-                if decl.name == ktype_name { return Some(decl); }
-            }
-            None
-        })
+        // Look up in effective_kernels (monomorphised) — the first match for this name.
+        self.effective_kernels.iter().find(|decl| decl.name == ktype_name)
     }
 }
 
 //â"€â"€ Free helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+/// Emit a simple scalar expression as a Rust literal for use as a kernel field default.
+fn emit_scalar_default(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::Int(n)   => n.to_string(),
+        ExprKind::Float(f) => {
+            let s = format!("{}", f);
+            if s.contains('.') { s } else { format!("{}.0", s) }
+        }
+        ExprKind::Bool(b)  => b.to_string(),
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => match &inner.kind {
+            ExprKind::Int(n)   => format!("-{}", n),
+            ExprKind::Float(f) => format!("-{}", f),
+            _ => "Default::default()".into(),
+        },
+        _ => "Default::default()".into(),
+    }
+}
 
 fn is_params_field(f: &KernelFieldDecl) -> bool {
     match f.qual {

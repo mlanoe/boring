@@ -1,6 +1,6 @@
 [package]
 name        = "boring"
-version     = "0.9.2"
+version     = "0.9.3"
 edition     = "2021"
 description = "A language that compiles to Rust — clean syntax, zero-cost abstractions, no boilerplate"
 license     = "GPL-3.0"

@@ -1,5 +1,7 @@
-# Boring language sample — GPU kernel structs (CUDA / Metal)
-# Build with: boring build --target cuda   or   boring build --target metal
+# Boring language sample — GPU kernel structs (CUDA / Metal / wgpu)
+# Build with: boring build --target cuda
+#         or: boring build --target metal
+#         or: boring build --target wgpu
 
 # ── SAXPY: y = alpha * x + y ──────────────────────────────────────────────────
 
@@ -27,6 +29,37 @@ mut k = kernel(block = 256) k |> .wait
 print "y[0] = {k.y[0]}"    # 1.0
 print "y[1] = {k.y[1]}"    # 3.0
 
+# ── Const generic params — fixed-size tile ─────────────────────────────────────
+#
+# kernel Foo<int W, int H>: declares compile-time constants W and H.
+# Array sizes may reference them directly or as expressions.
+# wgpu monomorphises each unique instantiation into a distinct WGSL shader.
+
+kernel Blur<int W, int H>:
+    let [float, W * H]'const weights    # constant cache — size known at compile time
+    let [float]'global        input
+    mut [float]'global        output
+    let float                 sigma = 1.0   # scalar default — omitted from constructor
+
+    init([float] w, [float] inp, [float] out):
+        weights = w
+        input   = inp
+        output  = out
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        var acc = 0.0
+        for k in 0..W * H:
+            acc = acc + weights[k] * input[i + k]
+        output[i] = acc
+
+let w = [0.25, 0.5, 0.25]
+let pixels = (0..1024).map((i): i as float)
+mut result = [0.0] * 1024
+
+mut blur = Blur<3, 1>(w, pixels, result)
+mut blur = kernel(block = 256) blur |> .wait
+
 # ── Shared-memory tile reduction ───────────────────────────────────────────────
 
 kernel TileSum:
@@ -42,14 +75,12 @@ kernel TileSum:
         let i    = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         let tid  = gpu.thread.x
         tile[tid] = data[i]
-        # no sync needed — transpiler inserts barrier before the loop
 
         var stride = gpu.block_dim.x / 2
         while stride > 0:
             if tid < stride:
                 tile[tid] = tile[tid] + tile[tid + stride]
             stride = stride / 2
-        # transpiler inserts barrier at the top of each iteration
 
         if tid == 0:
             result[gpu.block.x] = tile[0]
@@ -62,16 +93,3 @@ mut ts = kernel(block = 256, grid = 4) ts |> .wait
 
 let total = partial.reduce(0.0, (acc, v): acc + v)
 print "sum = {total}"
-
-# ── Ownership qualifiers on host side ─────────────────────────────────────────
-
-# T'unified  — readable on both host and device (zero-copy on Apple Silicon)
-let [float]'unified shared_buf = [0.0] * 512
-
-# Regular task qualifier for async orchestration across GPU launches
-task void pipeline(float alpha):
-    mut s = Saxpy(alpha, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
-    mut s = kernel(block = 3) s |> .wait
-    print "done: y[0]={s.y[0]}"
-
-task pipeline(2.5) |> .wait

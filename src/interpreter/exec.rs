@@ -853,6 +853,8 @@ impl Interpreter {
             Type::Optional(inner) => format!("{}?", Self::display_type(inner)),
             Type::Array(e) => format!("[{}]", Self::display_type(e)),
             Type::ArrayN(e, n) => format!("[{}, {}]", Self::display_type(e), n),
+            Type::ArrayNExpr(e, _) => format!("[{}, <expr>]", Self::display_type(e)),
+            Type::ConstInt(n) => n.to_string(),
             Type::Tuple(ts) => {
                 let inner = ts.iter().map(|t| Self::display_type(t)).collect::<Vec<_>>().join(", ");
                 format!("({})", inner)
@@ -1060,6 +1062,8 @@ impl Interpreter {
             // Associated type reference — accept any value at runtime (dynamically typed)
             Type::SelfAssoc(_) => true,
             Type::AssocOf(_, _) => true,
+            // Const-generic types don't appear at runtime.
+            Type::ArrayNExpr(_, _) | Type::ConstInt(_) => false,
         }
     }
 

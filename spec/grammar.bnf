@@ -182,8 +182,11 @@ param           ::= ("var" | "mut")? type "..." IDENT              # variadic: i
 #   struct Excerpt<&a>:               — struct holding a borrowed reference
 #   struct Cache<&a, T as Display>:   — lifetime + type param
 type_params     ::= "<" type_or_generic_param ("," type_or_generic_param)* ">"
-type_or_generic_param ::= lifetime_param | type_param
+type_or_generic_param ::= lifetime_param | const_param | type_param
 lifetime_param  ::= "&" LOWERCASE_IDENT                    # e.g. &a, &b  (stored as 'a for Rust)
+# Const generic param — type before name, consistent with boring's variable syntax.
+# Valid const types: int, uint, bool (primitives only; float is not valid in Rust const generics).
+const_param     ::= ("int" | "uint" | "bool") IDENT
 type_param      ::= IDENT ("as" (IDENT | "(" IDENT ("," IDENT)* ")"))?
 
 # Functions do NOT need explicit lifetime params: they are auto-inferred from the signature.
@@ -307,11 +310,15 @@ ext_member      ::= "pub"? fn_decl
 # ─── GPU kernel structs ───────────────────────────────────────────────────────
 #
 # `kernel` structs declare GPU-resident data and the entry-point thread body.
-# They transpile to CUDA C (--target cuda) or MSL (--target metal).
+# They transpile to CUDA C (--target cuda), MSL (--target metal), or
+# WGSL/wgpu (--target wgpu).
 #
 # Declaration form:
-#   kernel Name:
-#       <binding> [<type>]['<gpu_qual>] <field>     # field with optional GPU qualifier
+#   kernel Name:                              # no generic params
+#   kernel Name<int W, int H>:               # const generic params (int / uint / bool)
+#   kernel Name<T, U as Trait>:              # type generic params
+#   kernel Name<int N, T as Displayable>:    # mixed const + type params
+#       <binding> [<type>]['<gpu_qual>] <field> ["=" expr]  # field, optional default
 #       ...
 #       init(<params>):                              # host-side allocator
 #           <body>
@@ -319,6 +326,14 @@ ext_member      ::= "pub"? fn_decl
 #           <body>
 #       def ():                                      # entry point — one call per thread
 #           <body>
+#
+# Const generic params allow array sizes to be computed at instantiation time:
+#   kernel Blur<int W, int H>:
+#       let [float, W * H]'const weights
+#   # Instantiated as: Blur<3, 3>()
+#
+# wgpu: const generics are monomorphised — each unique instantiation produces a
+# distinct WGSL shader with concrete sizes. No WGSL const-generic support needed.
 #
 # Launch form (host side):
 #   kernel(<launch_args>) expr                       # returns KernelHandle<T>
@@ -365,7 +380,7 @@ ext_member      ::= "pub"? fn_decl
 # Host-side binding qualifiers for kernel results (outside kernel struct):
 #   T'unified  — returned slice lives in unified memory; accessible on both host and device
 
-kernel_decl     ::= "kernel" IDENT ":" NEWLINE INDENT
+kernel_decl     ::= "kernel" IDENT type_params? ":" NEWLINE INDENT
                       kernel_member+
                     DEDENT
 
@@ -373,7 +388,9 @@ kernel_member   ::= kernel_field_decl
                   | init_decl
                   | fn_decl
 
-kernel_field_decl ::= ("let" | "mut" | "var") type IDENT NEWLINE
+# Scalar fields may carry an inline default value (omitted from the generated constructor).
+# Array/buffer fields ('unified, 'global, 'sync) must NOT have a default — the parser rejects them.
+kernel_field_decl ::= ("let" | "mut" | "var") type IDENT ("=" expr)? NEWLINE
 
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
 mod_decl        ::= "mod" IDENT ":" NEWLINE INDENT
@@ -428,6 +445,12 @@ wait_stmt       ::= "wait" expr NEWLINE
 # Type annotation comes BEFORE the name (consistent with params and fields).
 # `pub` makes the binding visible outside its module.
 # `static` makes it a module-level singleton (no re-evaluation on repeated calls).
+#
+# Binding semantics summary:
+#   let  — immutable binding, immutable instance
+#   mut  — for structs: fixed binding, mutable instance (&mut self access)
+#          for scalars (int, uint, float, bool): equivalent to `var` (rebindable)
+#   var  — rebindable binding; mutability depends on the qualifier
 #
 # Move syntax: appending `'` to the binding name requests ownership transfer.
 #   `let b = a`   — borrow by default: `b` is a reference, `a` remains valid
@@ -758,13 +781,24 @@ type            ::= primitive_type
                   | IDENT                              # named type; if a trait → Box<dyn Trait>
                   | IDENT "<" type_list ">"            # generic: Stack<Int>
                   | type "?"                           # optional: T?  →  Option<T>
-                  | "[" type "]"                       # array: [T]  →  Vec<T>
+                  | "[" type "]"                       # dynamic array: [T]  →  Vec<T>
+                  | "[" type "," const_expr "]"        # fixed-size array: [T, N]  →  [T; N] in Rust
+                                                       #   N may be an INT literal, a const generic param name,
+                                                       #   or an arithmetic expression over those (W * H, N - 1, …)
                   | "(" type ("," type)* ")"           # tuple: (T, U)
                   | "{" type "=" type "}"              # dict: {K = V}  →  HashMap<K,V>
                   | "{" type "}"                       # set: {T}  →  HashSet<T>
                   | type "(" type_list? ")"            # function type: ReturnType (ParamTypes)
                   | type "'" owner_qual                # heap / smart-pointer ownership qualifier
                   | type "&" borrow_qual               # borrow / reference qualifier
+
+# Compile-time size expression — used in fixed-size array types `[T, N]`.
+# Only available where the type system can resolve the value statically (kernel fields, etc.).
+const_expr      ::= INT
+                  | IDENT                              # reference to a const generic param (e.g. N, W)
+                  | const_expr ("+" | "-" | "*" | "/") const_expr
+                  | "-" const_expr                     # unary negation
+                  | "(" const_expr ")"
 
 # Note: `any Trait` (old syntax) is deprecated. Use bare `Trait` for Box<dyn> and `<Trait>` for impl.
 
@@ -1053,6 +1087,8 @@ COMMENT         ::= "#" .* NEWLINE     # ignored by parser
 #   boring build --target cuda             — CUDA project from boring.toml
 #   boring build --target metal <file.br>  — Metal GPU backend (macOS, MSL compiled at runtime)
 #   boring build --target metal            — Metal project from boring.toml
+#   boring build --target wgpu <file.br>   — wgpu GPU backend (Windows/Linux/macOS; DirectX 12 / Vulkan / Metal)
+#   boring build --target wgpu             — wgpu project from boring.toml
 #   boring build --emit-rust <file.br>     — print generated Rust to stdout, no project created
 #
 # Debugging and profiling flags (orthogonal, composable, stable unless noted):

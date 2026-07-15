@@ -3,29 +3,46 @@
 //
 // Functional test suite for the Boring-in-Boring interpreter.
 //
-// Each test:
-//   1. Pipes a `tests/cases/<name>.br` file to the compiled interpreter binary
-//      (boring/interpreter/main_rust/target/debug/main).
-//   2. Compares stdout against `tests/cases/<name>.expected`.
+// Each test runs the `.br` case against all 4 transpiled binaries:
+//   strict+multi, strict+single, managed+multi, managed+single.
 //
 // Prerequisite: run `cargo test --test interpreter_build` at least once to
-// compile the interpreter binary before running these tests.
+// compile all four interpreter binaries before running these tests.
 //
 // Run with:
 //   cargo test --test interpreter_functional
 
 use std::io::Write as IoWrite;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const INTERP_BIN: &str = "boring/interpreter/main_rust/target/debug/main";
+const MODES: &[(&str, &str, &str)] = &[
+    ("strict",  "multi",  "main_rust"),
+    ("strict",  "single", "main_rust_single"),
+    ("managed", "multi",  "main_rust_managed"),
+    ("managed", "single", "main_rust_managed_single"),
+];
 
-fn run_case(name: &str) {
-    let bin = Path::new(INTERP_BIN);
+fn find_bin_in(rust_dir: &str) -> PathBuf {
+    let base = Path::new("boring/interpreter").join(rust_dir).join("target");
+    let name = format!("main{}", std::env::consts::EXE_SUFFIX);
+    // Scan one level deep for a target-triple subdirectory (e.g. x86_64-pc-windows-msvc).
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("debug").join(&name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    base.join("debug").join(&name)
+}
+
+fn run_case_with_bin(name: &str, bin: &Path, label: &str) {
     assert!(
         bin.exists(),
-        "interpreter binary not found at {}  — run `cargo test --test interpreter_build` first",
-        bin.display()
+        "[{}@{}] binary not found at {} — run `cargo test --test interpreter_build` first",
+        name, label, bin.display()
     );
 
     let case_dir = Path::new("tests/cases");
@@ -40,17 +57,17 @@ fn run_case(name: &str) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("[{}] failed to spawn interpreter: {}", name, e));
+        .unwrap_or_else(|e| panic!("[{}@{}] failed to spawn: {}", name, label, e));
 
     child.stdin.take().unwrap().write_all(&source).unwrap();
 
     let out = child.wait_with_output()
-        .unwrap_or_else(|e| panic!("[{}] wait failed: {}", name, e));
+        .unwrap_or_else(|e| panic!("[{}@{}] wait failed: {}", name, label, e));
 
     assert!(
         out.status.success(),
-        "[{}] interpreter exited with error:\n{}",
-        name,
+        "[{}@{}] interpreter exited with error:\n{}",
+        name, label,
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -62,12 +79,21 @@ fn run_case(name: &str) {
     assert_eq!(
         actual.trim_end(),
         expected.trim_end(),
-        "[{}] output mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
-        name,
+        "[{}@{}] output mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
+        name, label,
         expected.trim_end(),
-        actual.trim_end()
+        actual.trim_end(),
     );
 }
+
+fn run_case(name: &str) {
+    for (mode, threading, rust_dir) in MODES {
+        let label = format!("{}+{}", mode, threading);
+        let bin = find_bin_in(rust_dir);
+        run_case_with_bin(name, &bin, &label);
+    }
+}
+
 
 macro_rules! itest {
     ($name:ident) => {

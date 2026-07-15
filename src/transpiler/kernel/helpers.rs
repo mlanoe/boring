@@ -111,6 +111,8 @@ impl KernelTranspiler {
             Type::Optional(inner)  => format!("Option<{}>", self.emit_type(inner)),
             Type::Array(inner)     => format!("kernel::prelude::Vec<{}>", self.emit_type(inner)),
             Type::ArrayN(inner, n) => format!("[{}; {}]", self.emit_type(inner), n),
+            Type::ArrayNExpr(inner, _) => format!("[{}; _]", self.emit_type(inner)),
+            Type::ConstInt(n) => n.to_string(),
             Type::Tuple(elems)     => format!(
                 "({})",
                 elems.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ")

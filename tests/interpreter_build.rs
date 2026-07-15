@@ -18,7 +18,8 @@
 use std::path::Path;
 use std::process::Command;
 
-fn build_interpreter(threading: &str) {
+fn build_interpreter(mode: &str, threading: &str) {
+    let label       = format!("{}+{}", mode, threading);
     let bin         = env!("CARGO_BIN_EXE_boring");
     let project_dir = Path::new("boring/interpreter");
 
@@ -28,22 +29,26 @@ fn build_interpreter(threading: &str) {
     if threading != "multi" {
         cmd.arg("--threading").arg(threading);
     }
+    if mode != "strict" {
+        cmd.arg("--mode").arg(mode);
+    }
     let emit = cmd
         .output()
-        .unwrap_or_else(|e| panic!("[interpreter@{}] failed to invoke boring: {}", threading, e));
+        .unwrap_or_else(|e| panic!("[interpreter@{}] failed to invoke boring: {}", label, e));
 
     assert!(
         emit.status.success(),
         "[interpreter@{}] boring build failed:\n{}",
-        threading,
+        label,
         String::from_utf8_lossy(&emit.stderr)
     );
 
     // ── Step 2: cargo build ───────────────────────────────────────────────────
-    let rust_dir = if threading == "multi" {
-        project_dir.join("main_rust")
-    } else {
-        project_dir.join(format!("main_rust_{}", threading))
+    let rust_dir = match (mode, threading) {
+        ("strict",  "multi")  => project_dir.join("main_rust"),
+        ("strict",  _)        => project_dir.join(format!("main_rust_{}", threading)),
+        (_,         "multi")  => project_dir.join(format!("main_rust_{}", mode)),
+        _                     => project_dir.join(format!("main_rust_{}_{}", mode, threading)),
     };
 
     let build = Command::new("cargo")
@@ -51,22 +56,17 @@ fn build_interpreter(threading: &str) {
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
         .output()
-        .unwrap_or_else(|e| panic!("[interpreter@{}] failed to invoke cargo build: {}", threading, e));
+        .unwrap_or_else(|e| panic!("[interpreter@{}] failed to invoke cargo build: {}", label, e));
 
     assert!(
         build.status.success(),
         "[interpreter@{}] cargo build failed:\n--- stderr ---\n{}",
-        threading,
+        label,
         String::from_utf8_lossy(&build.stderr)
     );
 }
 
-#[test]
-fn interpreter_transpiles_single_thread() {
-    build_interpreter("single");
-}
-
-#[test]
-fn interpreter_transpiles_multi_thread() {
-    build_interpreter("multi");
-}
+#[test] fn interpreter_strict_multi()          { build_interpreter("strict",  "multi");  }
+#[test] fn interpreter_strict_single()         { build_interpreter("strict",  "single"); }
+#[test] fn interpreter_managed_multi()         { build_interpreter("managed", "multi");  }
+#[test] fn interpreter_managed_single()        { build_interpreter("managed", "single"); }
