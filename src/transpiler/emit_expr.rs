@@ -961,6 +961,34 @@ impl Transpiler {
                 if mapped.contains(" as ") { format!("({})", result) } else { result }
             }
             ExprKind::Index(obj, idx) => {
+                // Slice: a[M..N], a[..N], a[M..], a[..]  →  obj[M..N].to_vec()
+                if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
+                    let obj_s = self.emit_expr(obj);
+                    let start_s = start.as_deref().map(|e| {
+                        let raw = self.emit_expr(e);
+                        match &e.kind {
+                            ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                                format!("({}) as usize", raw),
+                            _ => raw,
+                        }
+                    });
+                    let end_s = end.as_deref().map(|e| {
+                        let raw = self.emit_expr(e);
+                        match &e.kind {
+                            ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                                format!("({}) as usize", raw),
+                            _ => raw,
+                        }
+                    });
+                    let dots = if *inclusive { "..=" } else { ".." };
+                    let range_s = match (start_s, end_s) {
+                        (Some(s), Some(e)) => format!("{s}{dots}{e}"),
+                        (Some(s), None)    => format!("{s}.."),
+                        (None,    Some(e)) => format!("{dots}{e}"),
+                        (None,    None)    => "..".to_string(),
+                    };
+                    return format!("{}[{}].to_vec()", obj_s, range_s);
+                }
                 // When the index is an opaque collection index var (Option<usize> from
                 // firstIndex/nextIndex), use the get_at(Option<usize>) trait method.
                 if let ExprKind::Var(v) = &idx.kind {
@@ -1894,6 +1922,9 @@ impl Transpiler {
                 format!("tokio::join!({})", exprs.join(", "))
             }
             ExprKind::MacroCall { name, args } => self.emit_macro(name, args),
+            ExprKind::SliceRange { .. } => {
+                panic!("SliceRange cannot appear outside an index expression")
+            }
         }
     }
 

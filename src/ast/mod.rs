@@ -834,6 +834,9 @@ pub enum ExprKind {
     // Range literals
     Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool },
 
+    // Slice index — only valid as the idx argument to Index: a[M..N], a[..N], a[M..], a[..]
+    SliceRange { start: Option<Box<Expr>>, end: Option<Box<Expr>>, inclusive: bool },
+
     // Cast
     Cast(Box<Expr>, Type),
 

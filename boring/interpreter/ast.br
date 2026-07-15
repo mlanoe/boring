@@ -436,6 +436,9 @@ enum ExprKind:
     Set([Expr] elems)
     DotIdent(string name)
     Range(Expr start, Expr end, bool inclusive)
+    # SliceRange: absent start/end encoded as ExprKind.Hole
+    SliceRange(Expr start, Expr end, bool inclusive)
+    Hole  # sentinel for absent slice bound
     Cast(Expr expr, Type ty)
     Else(Expr expr, Expr default)
     OptionalField(Expr expr, string name)

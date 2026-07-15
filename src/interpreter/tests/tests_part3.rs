@@ -1959,3 +1959,91 @@ let _result = u
 "#;
     assert_eq!(run_src(src), Value::Int(100)); // uint is represented as Int in the interpreter
 }
+
+// ── Array slice syntax ───────────────────────────────────────────────────────
+
+#[test]
+fn test_slice_m_to_n() {
+    let src = r#"
+let a = [10, 20, 30, 40, 50]
+let _result = a[1..3]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30)]));
+}
+
+#[test]
+fn test_slice_from_start() {
+    let src = r#"
+let a = [10, 20, 30, 40, 50]
+let _result = a[..3]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)]));
+}
+
+#[test]
+fn test_slice_to_end() {
+    let src = r#"
+let a = [10, 20, 30, 40, 50]
+let _result = a[2..]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(30), Value::Int(40), Value::Int(50)]));
+}
+
+#[test]
+fn test_slice_full() {
+    let src = r#"
+let a = [1, 2, 3]
+let _result = a[..]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+}
+
+#[test]
+fn test_slice_inclusive() {
+    let src = r#"
+let a = [10, 20, 30, 40, 50]
+let _result = a[1..=3]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30), Value::Int(40)]));
+}
+
+#[test]
+fn test_slice_empty_range() {
+    let src = r#"
+let a = [10, 20, 30]
+let _result = a[2..1]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![]));
+}
+
+#[test]
+fn test_slice_out_of_bounds_clamps() {
+    let src = r#"
+let a = [1, 2, 3]
+let _result = a[1..100]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3)]));
+}
+
+#[test]
+fn test_slice_with_var_bounds() {
+    let src = r#"
+let a = [1, 2, 3, 4, 5]
+let lo = 1
+let hi = 4
+let _result = a[lo..hi]
+"#;
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3), Value::Int(4)]));
+}
+
+#[test]
+fn test_slice_in_for_loop() {
+    let src = r#"
+let a = [10, 20, 30, 40, 50]
+var sum = 0
+for v in a[1..4]:
+    sum += v
+let _result = sum
+"#;
+    assert_eq!(run_src(src), Value::Int(90)); // 20+30+40
+}

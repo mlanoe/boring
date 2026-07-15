@@ -500,6 +500,10 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
             collect_vars_in(start, out);
             collect_vars_in(end, out);
         }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { collect_vars_in(s, out); }
+            if let Some(e) = end   { collect_vars_in(e, out); }
+        }
 
         // Closure: walk param defaults and body.
         // We intentionally do NOT recurse into the params' names — those introduce new

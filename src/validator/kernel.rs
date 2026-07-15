@@ -373,6 +373,11 @@ impl KernelValidator {
                 self.check_expr(kernel);
             }
 
+            ExprKind::SliceRange { start, end, .. } => {
+                if let Some(s) = start { self.check_expr(s); }
+                if let Some(e) = end   { self.check_expr(e); }
+            }
+
             // Leaf kinds — nothing to recurse into
             ExprKind::Int(_)
             | ExprKind::Str(_)

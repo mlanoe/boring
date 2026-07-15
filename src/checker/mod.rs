@@ -393,6 +393,10 @@ impl Checker {
             }
             ExprKind::Set(elems)   => { for e in elems { self.check_expr(e); } }
             ExprKind::Range { start, end, .. } => { self.check_expr(start); self.check_expr(end); }
+            ExprKind::SliceRange { start, end, .. } => {
+                if let Some(s) = start { self.check_expr(s); }
+                if let Some(e) = end   { self.check_expr(e); }
+            }
             ExprKind::StringInterp(segs) => {
                 for seg in segs {
                     if let StringSegment::Expr(e) | StringSegment::FormattedExpr(e, _) = seg {

@@ -282,9 +282,42 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Index access
         ExprKind.Index(obj_expr, idx_expr):
-            let obj = eval_expr(interp, obj_expr)
-            let idx = eval_expr(interp, idx_expr)
-            get_index(interp, obj, idx)
+            match idx_expr.kind:
+                # Slice: a[M..N], a[..N], a[M..], a[..]
+                ExprKind.SliceRange(start_expr, end_expr, inclusive):
+                    let obj = eval_expr(interp, obj_expr)
+                    let items = match obj:
+                        Value.Array(v): v
+                        _: throw "slice requires an array, got {obj.type_name()}"
+                    let len = items.length
+                    var lo = 0
+                    if not (start_expr.kind == ExprKind.Hole):
+                        let sv = eval_expr(interp, start_expr)
+                        let i = match sv:
+                            Value.Int(n): n
+                            _: throw "slice start must be int"
+                        lo = if i < 0: (len + i).max(0) else i.min(len)
+                    var hi = len
+                    if not (end_expr.kind == ExprKind.Hole):
+                        let ev = eval_expr(interp, end_expr)
+                        let i = match ev:
+                            Value.Int(n): n
+                            _: throw "slice end must be int"
+                        let adj = if inclusive: i + 1 else i
+                        hi = if adj < 0: (len + adj).max(0) else adj.min(len)
+                    if lo >= len or lo >= hi:
+                        Value.Array([])
+                    else:
+                        var result = []
+                        var k = lo
+                        while k < hi:
+                            result.append(items[k])
+                            k += 1
+                        Value.Array(result)
+                _:
+                    let obj = eval_expr(interp, obj_expr)
+                    let idx = eval_expr(interp, idx_expr)
+                    get_index(interp, obj, idx)
 
         # Array literal
         ExprKind.Array(elems):

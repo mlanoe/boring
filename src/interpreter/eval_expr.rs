@@ -226,6 +226,42 @@ impl Interpreter {
             }
 
             ExprKind::Index(obj_expr, idx_expr) => {
+                // Slice: a[M..N], a[..N], a[M..], a[..]
+                if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
+                    let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                    let Value::Array(arr) = obj else {
+                        return Err(err("slice index requires an array", line));
+                    };
+                    let len = arr.len() as i64;
+                    let resolve = |v: i64| -> usize {
+                        let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                        i as usize
+                    };
+                    let lo = match start.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice start must be an integer", line));
+                            };
+                            resolve(v)
+                        }
+                        None => 0,
+                    };
+                    let hi = match end.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice end must be an integer", line));
+                            };
+                            if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
+                        }
+                        None => arr.len(),
+                    };
+                    let slice = if lo >= arr.len() || lo >= hi {
+                        vec![]
+                    } else {
+                        arr[lo..hi.min(arr.len())].to_vec()
+                    };
+                    return Ok(Value::Array(slice));
+                }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
                 self.get_index(obj, idx, line, idx_expr.col, idx_expr.len)
@@ -970,6 +1006,10 @@ impl Interpreter {
                     evaled_args.push(self.eval_expr(&a.value, Rc::clone(&env))?);
                 }
                 self.call_value(callee_val, evaled_args, line, false)
+            }
+
+            ExprKind::SliceRange { .. } => {
+                Err(err("SliceRange cannot appear outside an index expression", line))
             }
         }
     }

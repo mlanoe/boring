@@ -19,5 +19,7 @@ boring/interpreter/tokens_rust/
 boring/interpreter/value_rust/
 boring/interpreter/main_rust/
 boring/interpreter/main_rust_single/
+boring/interpreter/main_rust_managed/
+boring/interpreter/main_rust_managed_single/
 Cargo.lock
 .claude/worktrees/

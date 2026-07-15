@@ -421,7 +421,23 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_optional_field(expr, field, line)
         elif parser_check(p, "LBracket"):
             parser_advance(p)
-            let idx = parse_expr(p)
+            # Slice with no start: a[..N], a[..=N], a[..]
+            let idx = if parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
+                let inclusive = parser_check(p, "DotDotEq")
+                parser_advance(p)
+                let end_expr = if parser_check(p, "RBracket"): make_hole(line) else parse_expr(p)
+                make_slice_range(make_hole(line), end_expr, inclusive, line)
+            else:
+                let inner = parse_expr(p)
+                # parse_expr may have consumed M..N as Range — convert to SliceRange
+                # M.. (open-ended) is caught by the DotDot postfix arm below
+                match inner.kind:
+                    ExprKind.Range(start, end, inclusive):
+                        make_slice_range(start, end, inclusive, line)
+                    ExprKind.SliceRange(s, e, inc):
+                        inner
+                    _:
+                        inner
             parser_expect(p, "RBracket")
             expr = make_index(expr, idx, line)
         elif parser_check(p, "LParen"):
@@ -448,8 +464,12 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
         elif parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
             let inclusive = parser_check(p, "DotDotEq")
             parser_advance(p)
-            let end = parse_primary(p)
-            expr = make_range(expr, end, inclusive, line)
+            # a[M..] — open-ended slice (next token is `]`)
+            if parser_check(p, "RBracket"):
+                expr = make_slice_range(expr, make_hole(line), inclusive, line)
+            else:
+                let end = parse_primary(p)
+                expr = make_range(expr, end, inclusive, line)
         elif parser_peek_is_ident(p) and parser_peek_is_trailing_closure_no_paren(p):
             let args = parse_trailing_closure_no_paren(p, [])
             seen_trailing_closure = true

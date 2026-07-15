@@ -679,7 +679,27 @@ impl Parser {
                 }
                 TokenKind::LBracket => {
                     self.advance();
-                    let idx = self.parse_expr()?;
+                    // Slice with no start: `a[..N]`, `a[..=N]`, `a[..]`
+                    let idx = if self.check(&TokenKind::DotDot) || self.check(&TokenKind::DotDotEq) {
+                        let inclusive = self.peek() == &TokenKind::DotDotEq;
+                        self.advance();
+                        let end = if self.check(&TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        };
+                        Expr { kind: ExprKind::SliceRange { start: None, end, inclusive }, line, col, len: self.tok_len() }
+                    } else {
+                        let inner = self.parse_expr()?;
+                        // `parse_expr` consumed `M..N` → Range; convert to SliceRange.
+                        // `M..` with no end is caught in the DotDot postfix arm below.
+                        match inner.kind {
+                            ExprKind::Range { start, end, inclusive } =>
+                                Expr { kind: ExprKind::SliceRange { start: Some(start), end: Some(end), inclusive }, line, col, len: self.tok_len() },
+                            ExprKind::SliceRange { .. } => inner, // M.. already produced by postfix
+                            _ => inner,
+                        }
+                    };
                     self.expect(&TokenKind::RBracket)?;
                     expr = Expr { kind: ExprKind::Index(Box::new(expr), Box::new(idx)), line, col, len: self.tok_len()};
                 }
@@ -717,14 +737,26 @@ impl Parser {
                 TokenKind::DotDot | TokenKind::DotDotEq => {
                     let inclusive = self.peek() == &TokenKind::DotDotEq;
                     self.advance();
-                    let end = self.parse_postfix_inner(false)?;
-                    expr = Expr {
-                        kind: ExprKind::Range {
-                            start: Box::new(expr),
-                            end: Box::new(end),
-                            inclusive,
-                        },
-                        line, col, len: self.tok_len(), };
+                    // `M..` inside `[M..]` — open-ended slice (next token is `]`)
+                    if self.check(&TokenKind::RBracket) {
+                        expr = Expr {
+                            kind: ExprKind::SliceRange {
+                                start: Some(Box::new(expr)),
+                                end: None,
+                                inclusive,
+                            },
+                            line, col, len: self.tok_len(),
+                        };
+                    } else {
+                        let end = self.parse_postfix_inner(false)?;
+                        expr = Expr {
+                            kind: ExprKind::Range {
+                                start: Box::new(expr),
+                                end: Box::new(end),
+                                inclusive,
+                            },
+                            line, col, len: self.tok_len(), };
+                    }
                 }
                 TokenKind::Ident(_) if self.peek_is_trailing_closure_no_paren() => {
                     // `expr x: body` — single-param trailing closure without parens

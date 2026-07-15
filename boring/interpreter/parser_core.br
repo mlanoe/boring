@@ -1737,6 +1737,12 @@ def Expr make_tuple([Expr] elems, int line):
 def Expr make_range(Expr start, Expr end, bool inclusive, int line):
     Expr(kind: ExprKind.Range(start, end, inclusive), line: line)
 
+def Expr make_hole(int line):
+    Expr(kind: ExprKind.Hole, line: line)
+
+def Expr make_slice_range(Expr start, Expr end, bool inclusive, int line):
+    Expr(kind: ExprKind.SliceRange(start, end, inclusive), line: line)
+
 def Expr make_index(Expr expr, Expr index, int line):
     Expr(kind: ExprKind.Index(expr, index), line: line)
 

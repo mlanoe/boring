@@ -1556,6 +1556,31 @@ let z: [i64; 3] = [0i64; 3];
 
 `N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
 
+#### Array slicing
+
+A sub-array can be extracted with slice syntax. The result is a new `[T]` containing a copy of the selected elements.
+
+```boring
+let a = [10, 20, 30, 40, 50]
+
+let b = a[1..3]    # [20, 30]        — exclusive: indices 1 and 2
+let c = a[..3]     # [10, 20, 30]    — from start up to (not including) 3
+let d = a[2..]     # [30, 40, 50]    — from index 2 to end
+let e = a[..]      # [10, 20, 30, 40, 50]  — full copy
+let f = a[1..=3]   # [20, 30, 40]   — inclusive: indices 1, 2 and 3
+```
+
+Out-of-range bounds are clamped silently. An empty range (e.g. `a[3..1]`) produces `[]`.
+
+**Rust equivalent**
+```rust
+let b = a[1..3].to_vec();
+let c = a[..3].to_vec();
+let d = a[2..].to_vec();
+let e = a[..].to_vec();
+let f = a[1..=3].to_vec();
+```
+
 #### Array methods
 
 | Boring                      | Rust                              |

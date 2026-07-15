@@ -990,6 +990,22 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> v: [f64; <span class="nb">4</span>] = [<span class="nb">1.0</span>, <span class="nb">2.0</span>, <span class="nb">3.0</span>, <span class="nb">4.0</span>];
 <span class="kw">let</span> z: [i64; <span class="nb">3</span>] = [<span class="nb">0i64</span>; <span class="nb">3</span>];</code></pre></div>
 <p><code>N</code> must be a non-negative integer literal — it cannot be a runtime variable. Use <code>[T]</code> (<code>Vec&lt;T&gt;</code>) when the size is dynamic.</p>
+<h4 id="array-slicing">Array slicing</h4>
+<p>A sub-array can be extracted with slice syntax. The result is a new <code>[T]</code> containing a copy of the selected elements.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = [<span class="nb">10</span>, <span class="nb">20</span>, <span class="nb">30</span>, <span class="nb">40</span>, <span class="nb">50</span>]
+
+<span class="kw">let</span> b = a[<span class="nb">1..3</span>]    <span class="co"># [20, 30]        — exclusive: indices 1 and 2</span>
+<span class="kw">let</span> c = a[..<span class="nb">3</span>]     <span class="co"># [10, 20, 30]    — from start up to (not including) 3</span>
+<span class="kw">let</span> d = a[<span class="nb">2..</span>]     <span class="co"># [30, 40, 50]    — from index 2 to end</span>
+<span class="kw">let</span> e = a[..]      <span class="co"># [10, 20, 30, 40, 50]  — full copy</span>
+<span class="kw">let</span> f = a[<span class="nb">1..</span>=<span class="nb">3</span>]   <span class="co"># [20, 30, 40]   — inclusive: indices 1, 2 and 3</span></code></pre></div>
+<p>Out-of-range bounds are clamped silently. An empty range (e.g. <code>a[3..1]</code>) produces <code>[]</code>.</p>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> b = a[<span class="nb">1..3</span>].<span class="fn">to_vec</span>();
+<span class="kw">let</span> c = a[..<span class="nb">3</span>].<span class="fn">to_vec</span>();
+<span class="kw">let</span> d = a[<span class="nb">2..</span>].<span class="fn">to_vec</span>();
+<span class="kw">let</span> e = a[..].<span class="fn">to_vec</span>();
+<span class="kw">let</span> f = a[<span class="nb">1..</span>=<span class="nb">3</span>].<span class="fn">to_vec</span>();</code></pre></div>
 <h4 id="array-methods">Array methods</h4>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>arr.length</code></td><td><code>arr.len()</code></td></tr><tr><td><code>arr.first()</code></td><td><code>arr.first().cloned()</code></td></tr><tr><td><code>arr.last()</code></td><td><code>arr.last().cloned()</code></td></tr><tr><td><code>arr.push(v)</code></td><td><code>arr.push(v)</code></td></tr><tr><td><code>arr.pop()</code></td><td><code>arr.pop()</code></td></tr><tr><td><code>arr.append(other)</code></td><td><code>arr.extend(other)</code></td></tr><tr><td><code>arr.insert(i, v)</code></td><td><code>arr.insert(i, v)</code></td></tr><tr><td><code>arr.remove(i)</code></td><td><code>arr.remove(i)</code></td></tr><tr><td><code>arr.contains(v)</code></td><td><code>arr.contains(&amp;v)</code></td></tr><tr><td><code>arr.sort()</code></td><td><code>arr.sort()</code></td></tr><tr><td><code>arr.reverse()</code></td><td><code>arr.reverse()</code></td></tr><tr><td><code>arr.map((x): expr)</code></td><td><code>arr.iter().map(|x| expr).collect()</code></td></tr><tr><td><code>arr.filter((x): cond)</code></td><td><code>arr.iter().filter(|x| cond).cloned().collect()</code></td></tr><tr><td><code>arr.reduce(init, (a,b): expr)</code></td><td><code>arr.iter().fold(init, |a,b| expr)</code></td></tr><tr><td><code>arr.any((x): cond)</code></td><td><code>arr.iter().any(|x| cond)</code></td></tr><tr><td><code>arr.all((x): cond)</code></td><td><code>arr.iter().all(|x| cond)</code></td></tr><tr><td><code>arr.join(sep)</code></td><td><code>arr.join(sep)</code></td></tr><tr><td><code>arr.flat()</code></td><td><code>arr.concat()</code></td></tr><tr><td><code>arr.isEmpty()</code></td><td><code>arr.is_empty()</code></td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> doubled  = numbers.<span class="fn">map</span>((n): n * <span class="nb">2</span>)

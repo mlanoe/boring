@@ -509,6 +509,9 @@ impl KernelTranspiler {
                 // GPU kernel launch inside a Linux kernel module — not supported.
                 "/* unsupported: gpu kernel launch in kernel module */".to_string()
             }
+            ExprKind::SliceRange { .. } => {
+                panic!("SliceRange cannot appear outside an index expression")
+            }
         }
     }
 
