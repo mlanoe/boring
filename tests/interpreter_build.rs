@@ -18,6 +18,21 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Return the host triple (e.g. `x86_64-unknown-linux-gnu`) so that `cargo build
+/// --target <triple>` ignores any `[build] target` override in `.cargo/config.toml`.
+fn host_triple() -> String {
+    let out = Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .expect("rustc not found");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.starts_with("host:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("x86_64-unknown-linux-gnu")
+        .to_string()
+}
+
 fn build_interpreter(mode: &str, threading: &str) {
     let label       = format!("{}+{}", mode, threading);
     let bin         = env!("CARGO_BIN_EXE_boring");
@@ -51,8 +66,9 @@ fn build_interpreter(mode: &str, threading: &str) {
         _                     => project_dir.join(format!("main_rust_{}_{}", mode, threading)),
     };
 
+    let triple = host_triple();
     let build = Command::new("cargo")
-        .args(["build", "--quiet", "--manifest-path"])
+        .args(["build", "--quiet", "--target", &triple, "--manifest-path"])
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
         .output()
