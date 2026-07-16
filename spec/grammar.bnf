@@ -643,6 +643,7 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                   | "." IDENT "(" arg_list? ")"                             # method call
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
                   | "[" expr "]"                                             # index
+                  | "[" slice_range "]"                                     # slice: a[M..N], a[..N], a[M..], a[..]
                   | "as" type                                                # cast
 
 arg_list        ::= arg ("," arg)* ","?    # trailing comma allowed
@@ -678,6 +679,13 @@ join_expr       ::= "join" "[" expr ("," expr)* "]"
 
 range_expr      ::= expr ".." expr      # exclusive range  [start, end)
                   | expr "..=" expr     # inclusive range  [start, end]
+
+slice_range     ::= expr ".." expr      # a[M..N]  — exclusive sub-array
+                  | expr "..=" expr     # a[M..=N] — inclusive sub-array
+                  | ".." expr           # a[..N]   — from index 0
+                  | "..=" expr          # a[..=N]  — from index 0, inclusive
+                  | expr ".."           # a[M..]   — to end of array
+                  | ".."               # a[..]    — full copy
 
 closure_expr    ::= "(" param_list? ")" modifier* ":" fn_body  # standard: (x, y): x + y
                   | IDENT ":" fn_body                          # no-paren single param: x: x * 2

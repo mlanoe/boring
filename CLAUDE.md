@@ -117,6 +117,7 @@ let name = "World"
 print "Hello, {name}!"
 ```
 
+- **No `string(x)` conversion function** — to convert a value to string, use interpolation: `let s = "{x}"` or inline `"prefix {x} suffix"`
 - `{{` → literal `{` ; `}}` → literal `}`
 - `{}` (empty hole) → literal `{}`
 - `{expr:fmt}` → formatted interpolation with a **static** format specifier (e.g. `{n:.2f}`, `{n:x}` for hex); the format part is a raw string, not an expression — `{n:{fmt}}` does **not** interpolate `fmt`, it produces the literal `{:{fmt}}`
@@ -151,6 +152,14 @@ Dict and set literals/types use `=`, **not** `:` — a common mistake:
 let [int] arr = [1, 2, 3]
 let {string=int} scores = {"Alice" = 90, "Bob" = 85}   # NOT {"Alice": 90} — that's not valid syntax
 let {int} unique = {1, 2, 3}                            # set — deduplicates
+```
+
+Empty literals: `[]` = empty array, `{}` = empty **set**, `{=}` = empty **dict**.
+
+```boring
+var [int] arr   = []     # empty array
+var {int} s     = {}     # empty set
+var {string=int} d = {=} # empty dict  ← NOT {} which would be an empty set
 ```
 
 Index assignment (`arr[i] = v`, `dict[k] = v`) mutates in place and requires a `var`/`mut` binding — `let` raises `cannot assign to immutable variable`. Dict assignment inserts the key if absent, updates it otherwise. Sets are **not** index-assignable (`s[i] = v` is a compile/runtime error) — use `s.add(v)` / `s.remove(v)`.

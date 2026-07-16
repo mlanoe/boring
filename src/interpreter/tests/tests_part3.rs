@@ -2047,3 +2047,224 @@ let _result = sum
 "#;
     assert_eq!(run_src(src), Value::Int(90)); // 20+30+40
 }
+
+// ── Nested arrays (array of arrays) ──────────────────────────────────────────
+
+#[test]
+fn test_nested_array_literal() {
+    let src = r#"
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let _result = m
+"#;
+    assert_eq!(
+        run_src(src),
+        Value::Array(vec![
+            Value::Array(vec![Value::Float(1.0), Value::Float(2.0)]),
+            Value::Array(vec![Value::Float(3.0), Value::Float(4.0)]),
+        ])
+    );
+}
+
+#[test]
+fn test_nested_array_double_index() {
+    let src = r#"
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let _result = m[0][1]
+"#;
+    assert_eq!(run_src(src), Value::Float(2.0));
+}
+
+#[test]
+fn test_nested_array_comprehension() {
+    let src = r#"
+let rows = [[float(i * j) for j in 0..4] for i in 0..3]
+let _result = rows
+"#;
+    assert_eq!(
+        run_src(src),
+        Value::Array(vec![
+            Value::Array(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]),
+            Value::Array(vec![Value::Float(0.0), Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)]),
+            Value::Array(vec![Value::Float(0.0), Value::Float(2.0), Value::Float(4.0), Value::Float(6.0)]),
+        ])
+    );
+}
+
+// ── BPE tokenizer viability ────────────────────────────────────────────────
+
+#[test]
+fn test_bpe_core_merge_loop() {
+    let src = r#"
+int findBestMerge([string] tokens, [[string]] merges):
+    var int best_rank = -1
+    var int best_pos  = -1
+    let n  = len(tokens)
+    let n1 = n - 1
+    for i in 0..n1:
+        for rank in 0..len(merges):
+            if merges[rank][0] == tokens[i] and merges[rank][1] == tokens[i+1]:
+                if best_rank == -1 or rank < best_rank:
+                    best_rank = rank
+                    best_pos  = i
+    best_pos
+
+[string] applyMerge([string] tokens, int pos):
+    let merged = tokens[pos] + tokens[pos+1]
+    var [string] result = []
+    let n = len(tokens)
+    var int i = 0
+    while i < n:
+        if i == pos:
+            result.push(merged)
+            i += 2
+        else:
+            result.push(tokens[i])
+            i += 1
+    result
+
+[string] bpeTokenize(string word, [[string]] merges):
+    var tokens = word.chars()
+    while true:
+        let pos = findBestMerge(tokens, merges)
+        if pos == -1:
+            break
+        tokens = applyMerge(tokens, pos)
+    tokens
+
+let vocab   = {"a"=0, "b"=1, "ab"=2, "c"=3, "abc"=4, "d"=5, "cd"=6, "abcd"=7}
+let merges  = [["a","b"], ["ab","c"], ["c","d"], ["abc","d"]]
+
+let toks = bpeTokenize("abcd", merges)
+var [int] ids = []
+for tok in toks:
+    ids.push(vocab[tok])
+let _result = ids
+"#;
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || format!("{:?}", run_src(src)))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(result, format!("{:?}", Value::Array(vec![Value::Int(7)])));
+}
+
+#[test]
+fn test_bpe_sentence_encode() {
+    let src = r#"
+let vocab   = {"h"=0,"e"=1,"l"=2,"o"=3,"he"=4,"hel"=8,"hell"=11,"hello"=13,
+               "w"=14,"r"=15,"d"=16,"wo"=17,"wor"=21,"worl"=22,"world"=23," "=24}
+let merges  = [["h","e"],["he","l"],["hel","l"],["hell","o"],
+               ["w","o"],["wo","r"],["wor","l"],["worl","d"]]
+
+int findBestMerge([string] tokens, [[string]] merges):
+    var int best_rank = -1
+    var int best_pos  = -1
+    let n  = len(tokens)
+    let n1 = n - 1
+    for i in 0..n1:
+        for rank in 0..len(merges):
+            if merges[rank][0] == tokens[i] and merges[rank][1] == tokens[i+1]:
+                if best_rank == -1 or rank < best_rank:
+                    best_rank = rank
+                    best_pos  = i
+    best_pos
+
+[string] applyMerge([string] tokens, int pos):
+    let merged = tokens[pos] + tokens[pos+1]
+    var [string] result = []
+    let n = len(tokens)
+    var int i = 0
+    while i < n:
+        if i == pos:
+            result.push(merged)
+            i += 2
+        else:
+            result.push(tokens[i])
+            i += 1
+    result
+
+[int] bpeEncode(string word, [[string]] merges, {string=int} vocab):
+    var tokens = word.chars()
+    while true:
+        let pos = findBestMerge(tokens, merges)
+        if pos == -1:
+            break
+        tokens = applyMerge(tokens, pos)
+    var [int] ids = []
+    for tok in tokens:
+        if vocab.contains(tok):
+            ids.push(vocab[tok])
+        else:
+            ids.push(-1)
+    ids
+
+var [int] all_ids = []
+all_ids.push(bpeEncode("hello", merges, vocab)[0])
+all_ids.push(vocab[" "])
+all_ids.push(bpeEncode("world", merges, vocab)[0])
+let _result = all_ids
+"#;
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || format!("{:?}", run_src(src)))
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(
+        result,
+        format!("{:?}", Value::Array(vec![Value::Int(13), Value::Int(24), Value::Int(23)]))
+    );
+}
+
+// ── Gap fixes ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_scientific_notation_float() {
+    // 1e-10 should lex as Float, not (Ident "1e") - Int(10)
+    assert_eq!(run_src("let _result = 1e-10"), Value::Float(1e-10));
+    assert_eq!(run_src("let _result = 2.5e3"), Value::Float(2500.0));
+    assert_eq!(run_src("let _result = 1e10"), Value::Float(1e10));
+}
+
+#[test]
+fn test_sort_by_closure() {
+    let src = r#"
+struct Item:
+    string name
+    float score
+
+var items = [Item("c", 3.0), Item("a", 1.0), Item("b", 2.0)]
+items.sortBy (x): x.score
+let _result = [items[0].name, items[1].name, items[2].name]
+"#;
+    assert_eq!(
+        run_src(src),
+        Value::Array(vec![
+            Value::Str("a".into()),
+            Value::Str("b".into()),
+            Value::Str("c".into()),
+        ])
+    );
+}
+
+#[test]
+fn test_sort_by_descending() {
+    let src = r#"
+struct Item:
+    string name
+    float score
+
+var items = [Item("c", 3.0), Item("a", 1.0), Item("b", 2.0)]
+items.sortBy (x): -x.score
+let _result = [items[0].name, items[1].name, items[2].name]
+"#;
+    assert_eq!(
+        run_src(src),
+        Value::Array(vec![
+            Value::Str("c".into()),
+            Value::Str("b".into()),
+            Value::Str("a".into()),
+        ])
+    );
+}

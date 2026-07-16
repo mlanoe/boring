@@ -83,9 +83,32 @@ impl DeviceEmitter {
         // Pre-pass: extract block sizes from kernel call sites.
         self.block_sizes = collect_block_sizes(program);
 
+        // Emit free functions as WGSL helpers callable from any kernel.
+        for item in &program.items {
+            if let Item::Fn(decl) = item {
+                if decl.qualifier.is_none() && !decl.task {
+                    self.emit_free_device_fn(decl);
+                    self.blank();
+                }
+            }
+        }
+
         for decl in effective_kernels {
             self.emit_kernel_decl(decl);
         }
+    }
+
+    fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
+        let ret = decl.return_ty.as_ref().map(|t| wgsl_type(t)).unwrap_or_else(|| "void".into());
+        let params: Vec<String> = decl.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(|t| wgsl_type(t)).unwrap_or_else(|| "i32".into());
+            format!("{}: {}", p.name, ty)
+        }).collect();
+        self.line(&format!("fn {}({}) -> {} {{", decl.name, params.join(", "), ret));
+        self.indent += 1;
+        for stmt in &decl.body { self.emit_stmt(stmt); }
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// Emit WGSL struct declarations for Boring structs referenced in kernel fields.
@@ -712,8 +735,14 @@ fn map_builtin_fn(name: &str) -> String {
         "sin"   => "sin".into(),
         "cos"   => "cos".into(),
         "tan"   => "tan".into(),
+        "tanh"  => "tanh".into(),
+        "exp"   => "exp".into(),
+        "log"   => "log".into(),
+        "log2"  => "log2".into(),
+        "pow"   => "pow".into(),
         "floor" => "floor".into(),
         "ceil"  => "ceil".into(),
+        "round" => "round".into(),
         other   => other.into(),
     }
 }

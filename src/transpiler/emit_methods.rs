@@ -429,7 +429,7 @@ impl Transpiler {
         // (get, len, contains, …) fall through to more specific handlers below.
         const ACTOR_FIELD_MUTATING: &[&str] = &[
             "append", "add", "push", "extend", "insert", "set", "remove", "remove_at",
-            "pop", "clear", "sort", "sort_by", "reverse", "shuffle", "dedup",
+            "pop", "clear", "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup",
             "retain", "truncate", "drain",
         ];
         if ACTOR_FIELD_MUTATING.contains(&method) {
@@ -938,6 +938,31 @@ impl Transpiler {
                 }
             }
             // No closure: fallthrough to map_method which maps "count" → "len" as i64.
+        }
+        // `sortBy(closure)` — in-place sort by key extractor (mutating).
+        // Emits: obj.sort_by_key(|param| key_expr)
+        if method == "sortBy" {
+            if let Some(first_arg) = args.first() {
+                if let ExprKind::Closure(params, _, body, _, _) = &first_arg.value.kind {
+                    if let Some(param) = params.first() {
+                        let pname = &param.name;
+                        let mut sub = self.make_sub();
+                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                        let body_s = match body {
+                            ClosureBody::Expr(e) => sub.emit_expr(e),
+                            ClosureBody::Block(stmts) => {
+                                let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
+                                format!("{{ {} }}", inner.join(" "))
+                            }
+                        };
+                        let obj_s = self.emit_expr(obj);
+                        return format!(
+                            "{}.sort_by(|{}, __boring_b| {{ let __boring_ka = {{ let {} = {}.clone(); {} }}; let __boring_kb = {{ let {} = __boring_b.clone(); {} }}; __boring_ka.partial_cmp(&__boring_kb).unwrap_or(std::cmp::Ordering::Equal) }})",
+                            obj_s, pname, pname, pname, body_s, pname, body_s
+                        );
+                    }
+                }
+            }
         }
         // `sortedBy(closure)` → { let mut __v = obj.clone(); __v.sort_by_key(...); __v.iter().cloned().collect::<Vec<_>>() }
         // The collect at the end makes looks_like_collection() return true so print wraps with BoringFmt.

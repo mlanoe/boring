@@ -428,6 +428,18 @@ impl Interpreter {
                 }
                 let arg_vals = self.eval_args(args, Rc::clone(&env))?;
                 let result = self.call_value(callee.clone(), arg_vals, line, false)?;
+                // Write back mutated `var` params to their caller variables.
+                if let Value::Fn { ref decl, .. } = callee {
+                    for (param, arg) in decl.params.iter().zip(args.iter()) {
+                        if param.mutable {
+                            if let ExprKind::Var(caller_name) = &arg.value.kind {
+                                if let Some(new_val) = self.last_var_params.get(&param.name).cloned() {
+                                    env.borrow_mut().force_set(caller_name, new_val);
+                                }
+                            }
+                        }
+                    }
+                }
                 // Invalidate owned param sources after successful call
                 if let Value::Fn { ref decl, .. } = callee {
                     for (param, arg) in decl.params.iter().zip(args.iter()) {

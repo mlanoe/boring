@@ -218,7 +218,7 @@ impl Interpreter {
                 // The receiver expression is evaluated exactly ONCE here; calling
                 // `eval_expr(e)` a second time would re-evaluate it (bug for
                 // non-idempotent receivers like `getArray().push(x)`).
-                const MUTATING: &[&str] = &["push", "append", "insert", "remove", "sort", "reverse", "add", "removeAt", "pop"];
+                const MUTATING: &[&str] = &["push", "append", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop"];
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {

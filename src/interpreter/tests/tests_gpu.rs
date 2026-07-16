@@ -750,3 +750,698 @@ let _w2 = k2.dim.width
     assert_eq!(get_var(&interp, "_z2"), Value::Float(3.5));
     assert_eq!(get_var(&interp, "_w2"), Value::Uint(4));
 }
+
+// ─── MatMul kernel — Whisper attention building block ────────────────────────
+//
+// Computes out = a * b where:
+//   a is [rows × inner] stored row-major in a flat [float]
+//   b is [inner × cols] stored row-major in a flat [float]
+//   out is [rows × cols] stored row-major in a flat [float]
+//
+// Each GPU thread computes one output element: out[row, col].
+// In simulation mode threads run sequentially; block = rows * cols.
+
+#[test]
+fn test_kernel_matmul_2x2() {
+    // a = [[1, 2], [3, 4]]  b = [[5, 6], [7, 8]]
+    // expected = [[19, 22], [43, 50]]
+    let src_str = r#"
+kernel MatMul:
+    let [float]'global  a
+    let [float]'global  b
+    mut [float]'unified out
+    let int rows
+    let int cols
+    let int inner
+
+    init([float]'global a, [float]'global b, [float]'unified out, int rows, int cols, int inner):
+        a     = a
+        b     = b
+        out   = out
+        rows  = rows
+        cols  = cols
+        inner = inner
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / cols
+        let col = tid % cols
+        if row < rows and col < cols:
+            var float acc = 0.0
+            for k in 0..inner:
+                acc += a[row * inner + k] * b[k * cols + col]
+            out[row * cols + col] = acc
+
+let a   = [1.0, 2.0, 3.0, 4.0]
+let b   = [5.0, 6.0, 7.0, 8.0]
+var out = [0.0, 0.0, 0.0, 0.0]
+mut k = MatMul(a, b, out, 2, 2, 2)
+kernel:
+    k(block = 4)
+let _r00 = k.out[0]
+let _r01 = k.out[1]
+let _r10 = k.out[2]
+let _r11 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            assert_eq!(get_var(&interp, "_r00"), Value::Float(19.0));
+            assert_eq!(get_var(&interp, "_r01"), Value::Float(22.0));
+            assert_eq!(get_var(&interp, "_r10"), Value::Float(43.0));
+            assert_eq!(get_var(&interp, "_r11"), Value::Float(50.0));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn test_kernel_matmul_2x3() {
+    // a = [[1, 2, 3], [4, 5, 6]]  (2×3)
+    // b = [[7, 8], [9, 10], [11, 12]]  (3×2)
+    // expected = [[58, 64], [139, 154]]
+    let src_str = r#"
+kernel MatMul:
+    let [float]'global  a
+    let [float]'global  b
+    mut [float]'unified out
+    let int rows
+    let int cols
+    let int inner
+
+    init([float]'global a, [float]'global b, [float]'unified out, int rows, int cols, int inner):
+        a     = a
+        b     = b
+        out   = out
+        rows  = rows
+        cols  = cols
+        inner = inner
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / cols
+        let col = tid % cols
+        if row < rows and col < cols:
+            var float acc = 0.0
+            for k in 0..inner:
+                acc += a[row * inner + k] * b[k * cols + col]
+            out[row * cols + col] = acc
+
+let a   = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let b   = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+var out = [0.0, 0.0, 0.0, 0.0]
+mut k = MatMul(a, b, out, 2, 2, 3)
+kernel:
+    k(block = 4)
+let _r00 = k.out[0]
+let _r01 = k.out[1]
+let _r10 = k.out[2]
+let _r11 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            assert_eq!(get_var(&interp, "_r00"), Value::Float(58.0));
+            assert_eq!(get_var(&interp, "_r01"), Value::Float(64.0));
+            assert_eq!(get_var(&interp, "_r10"), Value::Float(139.0));
+            assert_eq!(get_var(&interp, "_r11"), Value::Float(154.0));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// ─── Softmax kernel — Whisper attention scores ───────────────────────────────
+//
+// GPU softmax in two phases:
+//   Phase 1 (CPU): compute max_val and sum_exp — reductions over the full vector.
+//   Phase 2 (GPU): each thread computes out[i] = exp(x[i] - max_val) / sum_exp.
+//
+// This matches the pattern used in production (cuDNN, whisper.cpp) for
+// short sequences where the reduction cost on CPU is negligible.
+
+#[test]
+fn test_kernel_softmax_uniform() {
+    // All inputs equal → all outputs equal to 1/n
+    let src_str = r#"
+kernel Softmax:
+    let [float]'global  x
+    mut [float]'unified out
+    let int n
+    let float max_val
+    let float sum_exp
+
+    init([float]'global x, [float]'unified out, int n, float max_val, float sum_exp):
+        x       = x
+        out     = out
+        n       = n
+        max_val = max_val
+        sum_exp = sum_exp
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = exp(x[i] - max_val) / sum_exp
+
+let x       = [2.0, 2.0, 2.0, 2.0]
+var out     = [0.0, 0.0, 0.0, 0.0]
+let max_val = 2.0
+let sum_exp = 4.0
+mut k = Softmax(x, out, 4, max_val, sum_exp)
+kernel:
+    k(block = 4)
+let _r0 = k.out[0]
+let _r1 = k.out[1]
+let _r2 = k.out[2]
+let _r3 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            let check = |v: Value| {
+                if let Value::Float(f) = v { (f - 0.25).abs() < 1e-9 }
+                else { false }
+            };
+            assert!(check(get_var(&interp, "_r0")), "expected 0.25");
+            assert!(check(get_var(&interp, "_r1")), "expected 0.25");
+            assert!(check(get_var(&interp, "_r2")), "expected 0.25");
+            assert!(check(get_var(&interp, "_r3")), "expected 0.25");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn test_kernel_softmax_peaked() {
+    // x = [0.0, 0.0, 10.0, 0.0] — almost all mass on index 2
+    let src_str = r#"
+kernel Softmax:
+    let [float]'global  x
+    mut [float]'unified out
+    let int n
+    let float max_val
+    let float sum_exp
+
+    init([float]'global x, [float]'unified out, int n, float max_val, float sum_exp):
+        x       = x
+        out     = out
+        n       = n
+        max_val = max_val
+        sum_exp = sum_exp
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = exp(x[i] - max_val) / sum_exp
+
+let x       = [0.0, 0.0, 10.0, 0.0]
+var out     = [0.0, 0.0, 0.0, 0.0]
+let max_val = 10.0
+let e10     = exp(-10.0)
+let sum_exp = 3.0 * e10 + 1.0
+mut k = Softmax(x, out, 4, max_val, sum_exp)
+kernel:
+    k(block = 4)
+let _peak  = k.out[2]
+let _other = k.out[0]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            if let Value::Float(peak) = get_var(&interp, "_peak") {
+                assert!(peak > 0.999, "peak should be near 1, got {}", peak);
+            } else { panic!("expected float"); }
+            if let Value::Float(other) = get_var(&interp, "_other") {
+                assert!(other < 0.001, "other should be near 0, got {}", other);
+            } else { panic!("expected float"); }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// ─── Scaled dot-product attention ────────────────────────────────────────────
+//
+// attention(Q, K, V) = softmax(Q × Kᵀ / sqrt(d_k)) × V
+//
+// Three kernels chained with CPU reductions between phases 1 and 2:
+//   1. ScaledQKt  — Q × Kᵀ * scale  (GPU)
+//   2. RowSoftmax — row-wise softmax (CPU reductions + GPU element-wise)
+//   3. MatMul     — weights × V      (GPU)
+//
+// Test: seq_len=2, d_k=2, d_v=2, scale=1.0
+//   Q=[[1,1],[1,1]]  K=[[1,0],[0,1]]  V=[[1,2],[3,4]]
+//   scores = [[1,1],[1,1]]  →  weights = [[0.5,0.5],[0.5,0.5]]
+//   output = [[2,3],[2,3]]
+
+#[test]
+fn test_kernel_scaled_dot_product_attention() {
+    let src_str = r#"
+kernel ScaledQKt:
+    let [float]'global  q
+    let [float]'global  k
+    mut [float]'unified out
+    let int seq_len
+    let int d_k
+    let float scale
+
+    init([float]'global q, [float]'global k, [float]'unified out, int seq_len, int d_k, float scale):
+        q       = q
+        k       = k
+        out     = out
+        seq_len = seq_len
+        d_k     = d_k
+        scale   = scale
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / seq_len
+        let col = tid % seq_len
+        if row < seq_len and col < seq_len:
+            var float acc = 0.0
+            for i in 0..d_k:
+                acc += q[row * d_k + i] * k[col * d_k + i]
+            out[row * seq_len + col] = acc * scale
+
+kernel RowSoftmax:
+    let [float]'global  scores
+    mut [float]'unified weights
+    let [float]'global  max_vals
+    let [float]'global  sum_exps
+    let int seq_len
+
+    init([float]'global scores, [float]'unified weights, [float]'global max_vals, [float]'global sum_exps, int seq_len):
+        scores   = scores
+        weights  = weights
+        max_vals = max_vals
+        sum_exps = sum_exps
+        seq_len  = seq_len
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / seq_len
+        let col = tid % seq_len
+        if row < seq_len and col < seq_len:
+            weights[row * seq_len + col] = exp(scores[row * seq_len + col] - max_vals[row]) / sum_exps[row]
+
+kernel MatMul:
+    let [float]'global  a
+    let [float]'global  b
+    mut [float]'unified out
+    let int rows
+    let int cols
+    let int inner
+
+    init([float]'global a, [float]'global b, [float]'unified out, int rows, int cols, int inner):
+        a     = a
+        b     = b
+        out   = out
+        rows  = rows
+        cols  = cols
+        inner = inner
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / cols
+        let col = tid % cols
+        if row < rows and col < cols:
+            var float acc = 0.0
+            for k in 0..inner:
+                acc += a[row * inner + k] * b[k * cols + col]
+            out[row * cols + col] = acc
+
+let seq_len = 2
+let d_k     = 2
+let d_v     = 2
+let scale   = 1.0
+let q = [1.0, 1.0, 1.0, 1.0]
+let k = [1.0, 0.0, 0.0, 1.0]
+let v = [1.0, 2.0, 3.0, 4.0]
+
+var scores = [0.0, 0.0, 0.0, 0.0]
+mut qkt = ScaledQKt(q, k, scores, seq_len, d_k, scale)
+kernel:
+    qkt(block = 4)
+
+let max_vals = [max([qkt.out[r * seq_len + c] for c in 0..seq_len]) for r in 0..seq_len]
+let sum_exps = [sum([exp(qkt.out[r * seq_len + c] - max_vals[r]) for c in 0..seq_len]) for r in 0..seq_len]
+
+var weights = [0.0, 0.0, 0.0, 0.0]
+mut sm = RowSoftmax(qkt.out, weights, max_vals, sum_exps, seq_len)
+kernel:
+    sm(block = 4)
+
+var attn_out = [0.0, 0.0, 0.0, 0.0]
+mut mm = MatMul(sm.weights, v, attn_out, seq_len, d_v, seq_len)
+kernel:
+    mm(block = 4)
+
+let _o00 = mm.out[0]
+let _o01 = mm.out[1]
+let _o10 = mm.out[2]
+let _o11 = mm.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            assert_eq!(get_var(&interp, "_o00"), Value::Float(2.0));
+            assert_eq!(get_var(&interp, "_o01"), Value::Float(3.0));
+            assert_eq!(get_var(&interp, "_o10"), Value::Float(2.0));
+            assert_eq!(get_var(&interp, "_o11"), Value::Float(3.0));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// ─── Layer norm kernel — Whisper residual stream ──────────────────────────────
+//
+// y[i] = weight[i] * (x[i] - mean) / sqrt(variance + eps) + bias[i]
+//
+// CPU: compute mean and variance (reductions).
+// GPU: normalize and affine-transform element-wise.
+
+#[test]
+fn test_kernel_layer_norm_identity_weights() {
+    // weight=1 bias=0 → out = (x - mean) / sqrt(variance + eps)
+    // x=[1,2,3,4] mean=2.5 variance=1.25
+    let src_str = r#"
+kernel LayerNorm:
+    let [float]'global  x
+    let [float]'global  weight
+    let [float]'global  bias
+    mut [float]'unified out
+    let int n
+    let float mean
+    let float variance
+    let float eps
+
+    init([float]'global x, [float]'global weight, [float]'global bias, [float]'unified out, int n, float mean, float variance, float eps):
+        x        = x
+        weight   = weight
+        bias     = bias
+        out      = out
+        n        = n
+        mean     = mean
+        variance = variance
+        eps      = eps
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            let norm = (x[i] - mean) / sqrt(variance + eps)
+            out[i] = weight[i] * norm + bias[i]
+
+let x      = [1.0, 2.0, 3.0, 4.0]
+let weight = [1.0, 1.0, 1.0, 1.0]
+let bias   = [0.0, 0.0, 0.0, 0.0]
+let n      = 4
+let mean     = sum(x) / float(n)
+let variance = sum([(v - mean) * (v - mean) for v in x]) / float(n)
+let eps      = 0.00001
+var out = [0.0, 0.0, 0.0, 0.0]
+mut k = LayerNorm(x, weight, bias, out, n, mean, variance, eps)
+kernel:
+    k(block = 4)
+let _o0 = k.out[0]
+let _o1 = k.out[1]
+let _o2 = k.out[2]
+let _o3 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            let expected = [-1.3416354199689269_f64, -0.447211806656309,
+                             0.447211806656309,   1.3416354199689269];
+            for (i, &exp) in expected.iter().enumerate() {
+                let name = ["_o0", "_o1", "_o2", "_o3"][i];
+                if let Value::Float(got) = get_var(&interp, name) {
+                    assert!((got - exp).abs() < 1e-9, "{}: expected {}, got {}", name, exp, got);
+                } else { panic!("{}: expected float", name); }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn test_kernel_layer_norm_with_affine() {
+    // weight=[2,2,2,2] bias=[1,1,1,1] → out = 2*norm + 1
+    let src_str = r#"
+kernel LayerNorm:
+    let [float]'global  x
+    let [float]'global  weight
+    let [float]'global  bias
+    mut [float]'unified out
+    let int n
+    let float mean
+    let float variance
+    let float eps
+
+    init([float]'global x, [float]'global weight, [float]'global bias, [float]'unified out, int n, float mean, float variance, float eps):
+        x        = x
+        weight   = weight
+        bias     = bias
+        out      = out
+        n        = n
+        mean     = mean
+        variance = variance
+        eps      = eps
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            let norm = (x[i] - mean) / sqrt(variance + eps)
+            out[i] = weight[i] * norm + bias[i]
+
+let x      = [1.0, 2.0, 3.0, 4.0]
+let weight = [2.0, 2.0, 2.0, 2.0]
+let bias   = [1.0, 1.0, 1.0, 1.0]
+let n      = 4
+let mean     = sum(x) / float(n)
+let variance = sum([(v - mean) * (v - mean) for v in x]) / float(n)
+let eps      = 0.00001
+var out = [0.0, 0.0, 0.0, 0.0]
+mut k = LayerNorm(x, weight, bias, out, n, mean, variance, eps)
+kernel:
+    k(block = 4)
+let _o0 = k.out[0]
+let _o3 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            if let Value::Float(o0) = get_var(&interp, "_o0") {
+                assert!((o0 - (-1.6832708399378538)).abs() < 1e-9, "o0={}", o0);
+            } else { panic!("expected float"); }
+            if let Value::Float(o3) = get_var(&interp, "_o3") {
+                assert!((o3 - 3.6832708399378538).abs() < 1e-9, "o3={}", o3);
+            } else { panic!("expected float"); }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// ─── GELU kernel — Whisper FFN activation ────────────────────────────────────
+//
+// GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+//
+// gelu() is a free Boring function called from inside the kernel entry point.
+// This tests that free functions are accessible from kernel def () bodies.
+
+#[test]
+fn test_kernel_gelu() {
+    let src_str = r#"
+float gelu(float x):
+    let c = 0.7978845608028654
+    0.5 * x * (1.0 + tanh(c * (x + 0.044715 * x * x * x)))
+
+kernel GeluKernel:
+    let [float]'global  x
+    mut [float]'unified out
+    let int n
+
+    init([float]'global x, [float]'unified out, int n):
+        x   = x
+        out = out
+        n   = n
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = gelu(x[i])
+
+let x = [0.0, 1.0, -1.0, 2.0]
+var out = [0.0, 0.0, 0.0, 0.0]
+mut k = GeluKernel(x, out, 4)
+kernel:
+    k(block = 4)
+let _o0 = k.out[0]
+let _o1 = k.out[1]
+let _o2 = k.out[2]
+let _o3 = k.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            // gelu(0) = 0
+            assert_eq!(get_var(&interp, "_o0"), Value::Float(0.0));
+            // gelu(1) ≈ 0.8412
+            if let Value::Float(v) = get_var(&interp, "_o1") {
+                assert!((v - 0.8411919906082768).abs() < 1e-9, "gelu(1)={}", v);
+            } else { panic!("expected float"); }
+            // gelu(-1) ≈ -0.1588  (antisymmetric around 0)
+            if let Value::Float(v) = get_var(&interp, "_o2") {
+                assert!((v - (-0.15880800939172324)).abs() < 1e-9, "gelu(-1)={}", v);
+            } else { panic!("expected float"); }
+            // gelu(2) ≈ 1.9546
+            if let Value::Float(v) = get_var(&interp, "_o3") {
+                assert!((v - 1.954597694087775).abs() < 1e-9, "gelu(2)={}", v);
+            } else { panic!("expected float"); }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// ─── FFN kernel — Whisper feed-forward network ────────────────────────────────
+//
+// FFN(x) = W2 · GELU(W1 · x + b1) + b2
+//
+// Three kernels chained:
+//   1. LinearBias      — W1·x + b1
+//   2. GeluActivation  — element-wise GELU
+//   3. LinearBias      — W2·h + b2
+//
+// Test: W1=W2=identity, b1=b2=0 → FFN(x) = GELU(x) element-wise.
+
+#[test]
+fn test_kernel_ffn() {
+    let src_str = r#"
+float gelu(float x):
+    let c = 0.7978845608028654
+    0.5 * x * (1.0 + tanh(c * (x + 0.044715 * x * x * x)))
+
+kernel LinearBias:
+    let [float]'global  x
+    let [float]'global  w
+    let [float]'global  b
+    mut [float]'unified out
+    let int rows
+    let int cols
+    let int inner
+
+    init([float]'global x, [float]'global w, [float]'global b, [float]'unified out, int rows, int cols, int inner):
+        x     = x
+        w     = w
+        b     = b
+        out   = out
+        rows  = rows
+        cols  = cols
+        inner = inner
+
+    def ():
+        let tid = gpu.thread.x
+        let row = tid / cols
+        let col = tid % cols
+        if row < rows and col < cols:
+            var float acc = 0.0
+            for k in 0..inner:
+                acc += x[row * inner + k] * w[k * cols + col]
+            out[row * cols + col] = acc + b[col]
+
+kernel GeluActivation:
+    let [float]'global  x
+    mut [float]'unified out
+    let int n
+
+    init([float]'global x, [float]'unified out, int n):
+        x   = x
+        out = out
+        n   = n
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = gelu(x[i])
+
+let seq_len = 2
+let d_model = 2
+let d_ff    = 2
+let x  = [1.0, 2.0, 3.0, 4.0]
+let w1 = [1.0, 0.0, 0.0, 1.0]
+let b1 = [0.0, 0.0]
+let w2 = [1.0, 0.0, 0.0, 1.0]
+let b2 = [0.0, 0.0]
+
+var h = [0.0, 0.0, 0.0, 0.0]
+mut lin1 = LinearBias(x, w1, b1, h, seq_len, d_ff, d_model)
+kernel:
+    lin1(block = 4)
+
+var h2 = [0.0, 0.0, 0.0, 0.0]
+mut act = GeluActivation(lin1.out, h2, 4)
+kernel:
+    act(block = 4)
+
+var ffn_out = [0.0, 0.0, 0.0, 0.0]
+mut lin2 = LinearBias(act.out, w2, b2, ffn_out, seq_len, d_model, d_ff)
+kernel:
+    lin2(block = 4)
+
+let _o0 = lin2.out[0]
+let _o1 = lin2.out[1]
+let _o2 = lin2.out[2]
+let _o3 = lin2.out[3]
+"#;
+    let src_str = src_str.to_string();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let (interp, result) = run(&src_str);
+            result.expect("runtime error");
+            let expected = [
+                0.8411919906082768_f64,
+                1.954597694087775,
+                2.996362607918227,
+                3.9999297540518075,
+            ];
+            for (i, &exp) in expected.iter().enumerate() {
+                let name = ["_o0", "_o1", "_o2", "_o3"][i];
+                if let Value::Float(got) = get_var(&interp, name) {
+                    assert!((got - exp).abs() < 1e-9, "{}: expected {}, got {}", name, exp, got);
+                } else { panic!("{}: expected float", name); }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -215,6 +215,16 @@ impl Interpreter {
             self.type_param_stack.pop();
         }
 
+        // Populate last_var_params so the call site can write back mutated var args.
+        self.last_var_params.clear();
+        for param in &decl.params {
+            if param.mutable {
+                if let Some(val) = fn_env.borrow().get(&param.name) {
+                    self.last_var_params.insert(param.name.clone(), val);
+                }
+            }
+        }
+
         match result {
             Ok(v) => {
                 if resolved_ret.as_ref().map(|t| matches!(t, Type::Void)).unwrap_or(false) {

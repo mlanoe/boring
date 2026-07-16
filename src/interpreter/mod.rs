@@ -1293,6 +1293,78 @@ fn register_stdlib(env: &EnvRef) {
             Ok(Value::Float(y.atan2(x)))
         },
     });
+    e.define("exp", Value::NativeFn {
+        name: "exp".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Float(f)) => Ok(Value::Float(f.exp())),
+            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).exp())),
+            _ => Err(err("exp: expected number", line)),
+        },
+    });
+    e.define("tanh", Value::NativeFn {
+        name: "tanh".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Float(f)) => Ok(Value::Float(f.tanh())),
+            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).tanh())),
+            _ => Err(err("tanh: expected number", line)),
+        },
+    });
+    e.define("sum", Value::NativeFn {
+        name: "sum".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Array(arr)) => {
+                let mut int_sum = 0i64;
+                let mut float_sum = 0.0f64;
+                let mut is_float = false;
+                for v in arr {
+                    match v {
+                        Value::Float(f) => { float_sum += f; is_float = true; }
+                        Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
+                        _ => return Err(err("sum: array must contain numbers", line)),
+                    }
+                }
+                if is_float { Ok(Value::Float(float_sum)) } else { Ok(Value::Int(int_sum)) }
+            }
+            _ => Err(err("sum: expected array", line)),
+        },
+    });
+    e.define("bitsToFloat", Value::NativeFn {
+        name: "bitsToFloat".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Int(n)) => Ok(Value::Float(f32::from_bits(*n as u32) as f64)),
+            _ => Err(err("bitsToFloat: expected int", line)),
+        },
+    });
+    e.define("floatToBits", Value::NativeFn {
+        name: "floatToBits".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Float(f)) => Ok(Value::Int((*f as f32).to_bits() as i64)),
+            Some(Value::Int(n))   => Ok(Value::Int((*n as f32).to_bits() as i64)),
+            _ => Err(err("floatToBits: expected number", line)),
+        },
+    });
+    e.define("chr", Value::NativeFn {
+        name: "chr".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Int(n)) => {
+                char::from_u32(*n as u32)
+                    .map(|c| Value::Str(c.to_string().into()))
+                    .ok_or_else(|| err("chr: invalid Unicode code point", line))
+            }
+            _ => Err(err("chr: expected int", line)),
+        },
+    });
+    e.define("ord", Value::NativeFn {
+        name: "ord".into(),
+        func: |args, line| match args.get(0) {
+            Some(Value::Str(s)) => {
+                s.chars().next()
+                    .map(|c| Value::Int(c as i64))
+                    .ok_or_else(|| err("ord: empty string", line))
+            }
+            _ => Err(err("ord: expected string", line)),
+        },
+    });
     e.define("clamp", Value::NativeFn {
         name: "clamp".into(),
         func: |args, line| {
@@ -1545,6 +1617,10 @@ pub struct Interpreter {
     pub(crate) stream_yields: Vec<Value>,
     /// Arguments forwarded to the user's script (for `args()` built-in).
     pub user_args: Vec<String>,
+    /// Final values of `var` params after the most recent function call.
+    /// Keyed by param name. Cleared and repopulated by every call_fn invocation.
+    /// Read by the call site to write back mutated values to caller variables.
+    pub(crate) last_var_params: HashMap<String, Value>,
 }
 
 impl Interpreter {
@@ -1597,6 +1673,7 @@ impl Interpreter {
             in_stream: false,
             stream_yields: Vec::new(),
             user_args: Vec::new(),
+            last_var_params: HashMap::new(),
         }
     }
 

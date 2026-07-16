@@ -75,11 +75,34 @@ impl DeviceEmitter {
         self.line("struct Dimension { uint width; uint height; };");
         self.blank();
 
+        // Emit free functions as device helpers callable from any kernel.
+        for item in &program.items {
+            if let Item::Fn(decl) = item {
+                if decl.qualifier.is_none() && !decl.task {
+                    self.emit_free_device_fn(decl);
+                    self.blank();
+                }
+            }
+        }
+
         for item in &program.items {
             if let Item::Kernel(decl) = item {
                 self.emit_kernel_decl(decl);
             }
         }
+    }
+
+    fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
+        let ret = decl.return_ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "void".into());
+        let params: Vec<String> = decl.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "int64_t".into());
+            format!("{} {}", ty, p.name)
+        }).collect();
+        self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
+        self.indent += 1;
+        for stmt in &decl.body { self.emit_stmt(stmt); }
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn emit_kernel_decl(&mut self, decl: &KernelDecl) {
@@ -627,6 +650,18 @@ fn map_builtin_fn(name: &str) -> String {
         "min"   => "min".into(),
         "max"   => "max".into(),
         "sqrt"  => "sqrt".into(),
+        "exp"   => "exp".into(),
+        "log"   => "log".into(),
+        "log2"  => "log2".into(),
+        "log10" => "log10".into(),
+        "sin"   => "sin".into(),
+        "cos"   => "cos".into(),
+        "tan"   => "tan".into(),
+        "tanh"  => "tanh".into(),
+        "pow"   => "pow".into(),
+        "floor" => "floor".into(),
+        "ceil"  => "ceil".into(),
+        "round" => "round".into(),
         other   => other.into(),
     }
 }

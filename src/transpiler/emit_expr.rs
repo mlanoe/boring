@@ -2907,6 +2907,7 @@ impl Transpiler {
                 format!("({} as f64).atan2({} as f64)", y, x)
             }
             "exp"        => format!("({} as f64).exp()", self.emit_expr(&args[0].value)),
+            "tanh"       => format!("({} as f64).tanh()", self.emit_expr(&args[0].value)),
             "log"        => format!("({} as f64).ln()", self.emit_expr(&args[0].value)),
             "log2"       => format!("({} as f64).log2()", self.emit_expr(&args[0].value)),
             "log10"      => format!("({} as f64).log10()", self.emit_expr(&args[0].value)),
@@ -2933,12 +2934,18 @@ impl Transpiler {
                     format!("({}).max({})", a, b)
                 }
             }
+            "sum"        => {
+                let a = self.emit_expr(&args[0].value);
+                format!("{}.iter().copied().reduce(|acc, v| acc + v).unwrap_or_default()", a)
+            }
             "clamp"      => {
                 let x  = self.emit_expr(&args[0].value);
                 let lo = self.emit_expr(&args[1].value);
                 let hi = self.emit_expr(&args[2].value);
                 format!("({}).clamp({}, {})", x, lo, hi)
             }
+            "bitsToFloat" => format!("(f32::from_bits({} as u32) as f64)", self.emit_expr(&args[0].value)),
+            "floatToBits" => format!("(({} as f32).to_bits() as i64)", self.emit_expr(&args[0].value)),
             "sign"       => format!("({}).signum()", self.emit_expr(&args[0].value)),
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),

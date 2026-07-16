@@ -120,7 +120,7 @@ impl Interpreter {
                 }
                 if let Some(result) = self.call_array_method(obj.clone(), method, args.clone(), line)? {
                     // For mutating array methods, set out_self so the caller can write back.
-                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "reverse", "removeAt"];
+                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -491,6 +491,28 @@ impl Interpreter {
                     }
                 });
                 Ok(Some(Value::Array(new_arr)))
+            }
+            "sortBy" => {
+                // sortBy (elem): key_expr  — sort by a key extractor closure (ascending).
+                // Negate the key for descending: sortBy (e): -e.score
+                let closure = args.into_iter().next().unwrap_or(Value::Nil);
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let key = self.call_value(closure.clone(), vec![item.clone()], line, false)?;
+                    keyed.push((key, item));
+                }
+                keyed.sort_by(|(ka, _), (kb, _)| {
+                    match (ka, kb) {
+                        (Value::Int(a), Value::Int(b))     => a.cmp(b),
+                        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Int(a), Value::Float(b))   => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float(a), Value::Int(b))   => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Str(a), Value::Str(b))     => a.cmp(b),
+                        _                                   => std::cmp::Ordering::Equal,
+                    }
+                });
+                let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                Ok(Some(Value::Array(sorted)))
             }
             "map" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);

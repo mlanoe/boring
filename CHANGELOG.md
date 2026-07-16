@@ -5,6 +5,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.4] — 2026-07-16 *(interpreter: 445/445 · functional: 69/69 × 4 modes)*
+
+### Added
+
+- **Array slice syntax** — `a[M..N]`, `a[..N]`, `a[M..]`, `a[..]`, and `a[M..=N]` (inclusive) extract a sub-array as a new `[T]`. All five forms work in the interpreter and transpile to `arr[M..N].to_vec()` in Rust. Out-of-bounds indices are clamped; negative indices count from the end.
+
+### Spec
+
+- **`spec/grammar.bnf`** — added `slice_range` non-terminal and a new `postfix` alternative `"[" slice_range "]"` covering all six slice forms.
+
+---
+
 ## [0.9.3] — 2026-07-15 *(interpreter: 433/433 · functional: 69/69 × 4 modes)*
 
 ### Added

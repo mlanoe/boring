@@ -1033,6 +1033,17 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) ->
             return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line, col });
         }
     }
+    // Integer followed by exponent: 1e10, 1e-10, 2E+3 → float
+    if chars.peek().map(|(_, c)| *c == 'e' || *c == 'E').unwrap_or(false) {
+        s.push(chars.next().unwrap().1);
+        if chars.peek().map(|(_, c)| *c == '+' || *c == '-').unwrap_or(false) {
+            s.push(chars.next().unwrap().1);
+        }
+        while chars.peek().map(|(_, c)| c.is_ascii_digit()).unwrap_or(false) {
+            s.push(chars.next().unwrap().1);
+        }
+        return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line, col });
+    }
     s.parse().map(TokenKind::Int).map_err(|_| LexError::IntegerOverflow { line, col })
 }
 
