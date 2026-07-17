@@ -33,7 +33,7 @@ impl Interpreter {
             let val = if param.variadic {
                 // Collect all remaining positional values into an Array
                 let remaining: Vec<Value> = positional_pool.drain(..).collect();
-                Value::Array(remaining)
+                Value::Array(remaining.into())
             } else if let Some(v) = labeled_pool.remove(&param.name) {
                 v
             } else if let Some(v) = positional_pool.pop_front() {
@@ -283,7 +283,7 @@ impl Interpreter {
         let collected = std::mem::replace(&mut self.stream_yields, prev_yields);
 
         match result {
-            Ok(()) | Err(Signal::Return(_)) => Ok(Value::Array(collected)),
+            Ok(()) | Err(Signal::Return(_)) => Ok(Value::Array(collected.into())),
             Err(other) => Err(other),
         }
     }
@@ -563,7 +563,7 @@ impl Interpreter {
 
             // ── Collection constructors ───────────────────────────────────────
             // `vec![a, b, c]`  →  boring Array
-            "vec" => Ok(Value::Array(args)),
+            "vec" => Ok(Value::Array(args.into())),
             // `hashmap!{k => v, ...}` or `hashmap!(k, v, ...)` — pairs → Dict
             "hashmap" | "btreemap" => {
                 let mut pairs = Vec::new();

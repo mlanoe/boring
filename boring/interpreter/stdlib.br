@@ -18,6 +18,8 @@ struct Interpreter:
     var int next_channel_id = 0
     var bool in_stream_fn = false
     var [Value] stream_yields = []
+    var bool in_kernel_context = false
+    var [string] cli_args = []
 
     def void set_pending_return(Value v):
         has_pending_return = true
@@ -87,10 +89,10 @@ def string val_to_string(Value v):
             var first = true
             for e in elems:
                 if not first:
-                    parts.append(", ")
-                parts.append(val_to_string(e))
+                    parts.push(", ")
+                parts.push(val_to_string(e))
                 first = false
-            parts.append("]")
+            parts.push("]")
             var string result = ""
             for p in parts:
                 result = "{result}{p}"
@@ -100,10 +102,10 @@ def string val_to_string(Value v):
             var first = true
             for e in elems:
                 if not first:
-                    parts.append(", ")
-                parts.append(val_to_string(e))
+                    parts.push(", ")
+                parts.push(val_to_string(e))
                 first = false
-            parts.append(")")
+            parts.push(")")
             var string result = ""
             for p in parts:
                 result = "{result}{p}"
@@ -113,12 +115,12 @@ def string val_to_string(Value v):
             var first = true
             for pair in pairs:
                 if not first:
-                    parts.append(", ")
-                parts.append(val_to_string(pair.0))
-                parts.append(": ")
-                parts.append(val_to_string(pair.1))
+                    parts.push(", ")
+                parts.push(val_to_string(pair.0))
+                parts.push(": ")
+                parts.push(val_to_string(pair.1))
                 first = false
-            parts.append("}}")
+            parts.push("}}")
             var string result = ""
             for p in parts:
                 result = "{result}{p}"
@@ -128,10 +130,10 @@ def string val_to_string(Value v):
             var first = true
             for e in elems:
                 if not first:
-                    parts.append(", ")
-                parts.append(val_to_string(e))
+                    parts.push(", ")
+                parts.push(val_to_string(e))
                 first = false
-            parts.append("}}")
+            parts.push("}}")
             var string result = ""
             for p in parts:
                 result = "{result}{p}"
@@ -144,10 +146,10 @@ def string val_to_string(Value v):
                 var first = true
                 for f in fields:
                     if not first:
-                        parts.append(", ")
-                    parts.append(val_to_string(f))
+                        parts.push(", ")
+                    parts.push(val_to_string(f))
                     first = false
-                parts.append(")")
+                parts.push(")")
                 var result = ""
                 for p in parts:
                     result = "{result}{p}"
@@ -354,6 +356,9 @@ def void register_stdlib(mut Interpreter interp):
     let exit_fn = Value.NativeFn("exit", Value.Nil)
     env_define(env, "exit", exit_fn, false)
 
+    let args_fn = Value.NativeFn("args", Value.Nil)
+    env_define(env, "args", args_fn, false)
+
     let input_fn = Value.NativeFn("input", Value.Nil)
     env_define(env, "input", input_fn, false)
 
@@ -446,7 +451,9 @@ def Interpreter'actor new_interpreter():
         channel_queues = {},
         next_channel_id = 0,
         in_stream_fn = false,
-        stream_yields = []
+        stream_yields = [],
+        in_kernel_context = false,
+        cli_args = []
     )
     register_stdlib(interp)
     interp
@@ -468,7 +475,7 @@ def void exec_item(mut Interpreter interp, Item item):
             var own_names_str = ","
             for m in decl.methods:
                 own_names_str = own_names_str + m.name + ","
-                all_struct_methods.append(m)
+                all_struct_methods.push(m)
             # Merge trait default implementations for each declared protocol
             for proto_name in decl.protocols:
                 let trait_key = "__trait__" + proto_name
@@ -476,7 +483,7 @@ def void exec_item(mut Interpreter interp, Item item):
                 if let trait_methods = trait_methods_opt:
                     for tm in trait_methods:
                         if not own_names_str.contains("," + tm.name + ","):
-                            all_struct_methods.append(tm)
+                            all_struct_methods.push(tm)
             interp.set_method_decls(sname, all_struct_methods)
             env_define(interp.global_env, sname, Value.StructDef(sname), false)
         Item.Enum(decl):
@@ -521,12 +528,12 @@ def void exec_item(mut Interpreter interp, Item item):
             var ext_names_str = ","
             for m in decl.methods:
                 ext_names_str = ext_names_str + m.name + ","
-                all_methods.append(m)
+                all_methods.push(m)
             # Append existing methods that are not overridden by ext
             if let existing = existing_methods_opt:
                 for m in existing:
                     if not ext_names_str.contains("," + m.name + ","):
-                        all_methods.append(m)
+                        all_methods.push(m)
             interp.set_method_decls(decl.type_name, all_methods)
         Item.Mod(decl):
             for sub_item in decl.items:

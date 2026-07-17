@@ -96,7 +96,7 @@ def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
         let stmt = stmts[i]
         match stmt:
             Stmt.Defer(body):
-                defers.append(body)
+                defers.push(body)
             _:
                 if i == n - 1:
                     match stmt:
@@ -184,7 +184,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
             let yv = eval_expr(interp, expr)
             if interp.in_stream_fn:
                 var sy = interp.stream_yields
-                sy.append(yv)
+                sy.push(yv)
                 interp.stream_yields = sy
                 nil
             else:
@@ -306,6 +306,9 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
             for sub_item in decl.items:
                 exec_item(interp, sub_item)
             nil
+
+        KernelBlock(body, _):
+            exec_kernel_block(interp, body)
 
         _: nil
 
@@ -533,20 +536,20 @@ def [Value] collect_iterable(Value val):
         Value.Dict(pairs):
             var out = []
             for p in pairs:
-                out.append(Tuple([p.0, p.1]))
+                out.push(Tuple([p.0, p.1]))
             out
         Range(start, end, inclusive, _):
             var out = []
             var i = start
             let limit = if inclusive: end + 1 else: end
             while i < limit:
-                out.append(Int(i))
+                out.push(Int(i))
                 i = i + 1
             out
         Str(s):
             var out = []
             for c in s.chars():
-                out.append(Value.Str(c))
+                out.push(Value.Str(c))
             out
         _: throw "value is not iterable"
 
@@ -737,6 +740,59 @@ def Signal? exec_try(mut Interpreter interp, TryStmt s):
     else:
         body_sig
 
+# ─── exec_kernel_block ────────────────────────────────────────────────────────
+#
+# Executes the body of a `kernel:` block.
+# Strategy mirrors the Rust interpreter (eval_gpu.rs):
+#   1. Set in_kernel_context = true so callers can detect kernel scope.
+#   2. For each statement that is an expression returning a KernelHandle,
+#      write the merged result back to the kernel variable in scope.
+#   3. All other statements execute normally.
+# Parallelism: the Boring interpreter uses synchronous `task` semantics,
+# so threads run sequentially here (same as how JoinAll works in eval.br).
+# True thread-level parallelism would require rayon, which is only available
+# in the Rust host; this structure is the correct foundation for it.
+
+def Signal? exec_kernel_block(mut Interpreter interp, [Stmt] stmts):
+    let prev_kernel = interp.in_kernel_context
+    interp.in_kernel_context = true
+    var Signal? result = nil
+    var i = 0
+    while i < stmts.length and result == nil:
+        let stmt = stmts[i]
+        i = i + 1
+        match stmt:
+            Stmt.Expr(expr):
+                let val = eval_expr(interp, expr)
+                if interp.has_pending_throw:
+                    result = ThrowSignal(interp.take_pending_throw())
+                else:
+                    # If the call returned a KernelHandle, write the merged
+                    # result back to the variable that holds the kernel object.
+                    match val:
+                        Value.KernelHandle(merged):
+                            let var_name = kernel_expr_var_name(expr)
+                            if let vname = var_name:
+                                interp.current_env.force_set(vname, merged)
+                        _: nil
+            _:
+                let sig = exec_stmt(interp, stmt)
+                if sig != nil:
+                    result = sig
+    interp.in_kernel_context = prev_kernel
+    result
+
+# Extract the variable name from a bare `k(block=N)` expression so we can
+# write back the merged kernel result, mirroring `exec_kernel_block_inner` in
+# the Rust interpreter.
+def string? kernel_expr_var_name(Expr expr):
+    match expr.kind:
+        ExprKind.Call(callee, _):
+            match callee.kind:
+                ExprKind.Var(name): some(name)
+                _: nil
+        _: nil
+
 # ─── exec_stream_fn ───────────────────────────────────────────────────────────
 
 def [Value] exec_stream_fn(mut Interpreter interp, [Stmt] stmts):
@@ -762,14 +818,14 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
             Labeled(label, v):
                 labeled.set(label, v)
             _:
-                positional.append(val)
+                positional.push(val)
     var pos_idx = 0
     for param in decl.params:
         if param.variadic:
             # Collect all remaining positional args into an array
             var rest = [Value]{}
             while pos_idx < positional.length:
-                rest.append(positional[pos_idx])
+                rest.push(positional[pos_idx])
                 pos_idx = pos_idx + 1
             if param.mutable:
                 fn_env.define_mut(param.name, Array(rest))
@@ -870,7 +926,7 @@ def Value call_value(mut Interpreter interp, Value callee, [Value] args):
             var fields = []
             var i = 1
             while i < args.length:
-                fields.append(args[i])
+                fields.push(args[i])
                 i = i + 1
             Value.EnumVariant(name, variant_name, fields)
 
@@ -926,6 +982,7 @@ def string value_type_name(Value val):
         Labeled(_, _): "labeled"
         StructDef(n): "struct:{n}"
         EnumDef(n): "enum:{n}"
+        KernelHandle(_): "kernel-handle"
         Moved(_): "moved"
 
 def string value_to_string(Value val):

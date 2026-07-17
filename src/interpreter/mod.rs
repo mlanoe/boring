@@ -235,7 +235,7 @@ pub enum Value {
     Uint(u64),
     Float(f64),
     Str(String),
-    Array(Vec<Value>),
+    Array(Rc<Vec<Value>>),
     Tuple(Vec<Value>),
     Dict(Vec<(Value, Value)>),
     Set(Vec<Value>),
@@ -409,6 +409,14 @@ impl fmt::Debug for Value {
 }
 
 impl Value {
+    /// Take ownership of an `Rc`-wrapped array's data, cloning only if another
+    /// `Value::Array` still shares the same backing `Vec` (copy-on-write).
+    /// In the common single-owner case (e.g. a loop-local array being pushed
+    /// to repeatedly) this is O(1) instead of an O(n) deep clone.
+    pub(crate) fn rc_vec_into_owned(rc: Rc<Vec<Value>>) -> Vec<Value> {
+        Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+    }
+
     pub fn type_name(&self) -> String {
         match self {
             Value::Uninitialized => "Uninitialized".into(),
@@ -624,6 +632,21 @@ impl Env {
 
     pub fn all_bindings(&self) -> Vec<(String, Value)> {
         self.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// Move a variable's value out of its slot, leaving `Value::Nil` behind.
+    /// Unlike `get`, this does not clone — used to obtain exclusive ownership
+    /// of a value (e.g. an array) so a mutating method can rewrite it in
+    /// place (copy-on-write) instead of always deep-cloning. The caller must
+    /// restore the slot (via `force_set`) before the value is observable again.
+    pub fn take(&mut self, name: &str) -> Option<Value> {
+        if let Some(slot) = self.vars.get_mut(name) {
+            Some(std::mem::replace(slot, Value::Nil))
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow_mut().take(name)
+        } else {
+            None
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
@@ -1317,7 +1340,7 @@ fn register_stdlib(env: &EnvRef) {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
                 let mut is_float = false;
-                for v in arr {
+                for v in arr.iter() {
                     match v {
                         Value::Float(f) => { float_sum += f; is_float = true; }
                         Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
@@ -1496,7 +1519,30 @@ fn register_stdlib(env: &EnvRef) {
                 // boring run file.br → user args start at index 3
                 all.into_iter().skip(3).map(Value::Str).collect()
             };
-            Ok(Value::Array(argv))
+            Ok(Value::Array(argv.into()))
+        },
+    });
+
+    // raw_args() — every CLI argument passed to this program, with no `--`
+    // filtering. Unlike args() (meant for a script to read its own pass-through
+    // arguments), this is for programs that parse their own command-line syntax
+    // — e.g. the self-hosted Boring interpreter, which needs to see `--gpu`,
+    // the file path, and `--` all at once instead of having `--` swallow them.
+    e.define("raw_args", Value::NativeFn {
+        name: "raw_args".into(),
+        func: |_args, _line| {
+            let all: Vec<String> = std::env::args().collect();
+            // boring run file.br → this program's own args start at index 3.
+            // A lone leading `--` is dropped if present — it only exists to
+            // escape `boring run`'s single-positional-file parser (e.g.
+            // `boring run main.br -- --gpu v100 script.br`); everything after
+            // it passes through untouched, with no further `--` filtering.
+            let mut rest: Vec<String> = all.into_iter().skip(3).collect();
+            if rest.first().map(|s| s == "--").unwrap_or(false) {
+                rest.remove(0);
+            }
+            let argv: Vec<Value> = rest.into_iter().map(Value::Str).collect();
+            Ok(Value::Array(argv.into()))
         },
     });
 
@@ -1678,6 +1724,38 @@ impl Interpreter {
         }
     }
 
+    /// Lightweight interpreter for parallel kernel thread execution.
+    /// Copies the parent's type/trait/alias tables and gpu profile but creates a fresh env.
+    pub(crate) fn new_for_kernel(
+        traits: HashMap<String, TraitDecl>,
+        enums: HashMap<String, EnumDecl>,
+        aliases: HashMap<String, Type>,
+        gpu_profile: gpu_profile::GpuProfile,
+    ) -> Self {
+        let global = Env::new_global();
+        Self {
+            gpu_profile,
+            global,
+            traits,
+            enums,
+            aliases,
+            search_paths: Vec::new(),
+            loaded: HashSet::new(),
+            task_context: false,
+            kernel_context: false,
+            defer_stack: Vec::new(),
+            type_param_stack: Vec::new(),
+            current_method_mutating: true,
+            in_init_body: false,
+            type_var_store: HashMap::new(),
+            in_type_setter: false,
+            in_stream: false,
+            stream_yields: Vec::new(),
+            user_args: Vec::new(),
+            last_var_params: HashMap::new(),
+        }
+    }
+
     pub fn add_search_path(&mut self, path: PathBuf) {
         self.search_paths.push(path);
     }
@@ -1842,9 +1920,11 @@ impl Interpreter {
             self.exec_item(item, Rc::clone(&module_env))?;
         }
         if decl.items.is_empty() {
-            // No filter — export every pub item (existing behaviour).
+            // No filter — export every named item (pub or not).
+            // Within a project, all symbols from sibling files are accessible;
+            // `pub` only controls external-package visibility (like Rust's pub(crate)).
             for item in &program.items {
-                if let Some((name, true)) = Self::item_pub_name(item) {
+                if let Some((name, _)) = Self::item_pub_name(item) {
                     if let Some(val) = module_env.borrow().get(name) {
                         // For enum namespaces, also export each variant as a bare name.
                         if let Value::EnumNamespace { ref variants, .. } = val {

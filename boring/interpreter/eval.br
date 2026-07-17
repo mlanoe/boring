@@ -206,7 +206,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             if let fn_decl = fn_decl_opt:
                 var all_args = [obj]
                 for a in extra_args:
-                    all_args.append(a)
+                    all_args.push(a)
                 call_fn(interp, fn_decl, all_args, nil)
             else:
                 call_method(interp, obj, method, extra_args)
@@ -311,7 +311,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                         var result = []
                         var k = lo
                         while k < hi:
-                            result.append(items[k])
+                            result.push(items[k])
                             k += 1
                         Value.Array(result)
                 _:
@@ -323,7 +323,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         ExprKind.Array(elems):
             var vals = []
             for item in elems:
-                vals.append(eval_expr(interp, item))
+                vals.push(eval_expr(interp, item))
             Value.Array(vals)
 
         ExprKind.ArrayFill(value_expr, count_expr):
@@ -334,7 +334,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             let v = eval_expr(interp, value_expr)
             var result = []
             for _ in 0..n:
-                result.append(v)
+                result.push(v)
             Value.Array(result)
 
         ExprKind.ArrayComp(comp_expr, var_name, count_expr):
@@ -345,7 +345,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             var result = []
             for i in 0..n:
                 env_define(interp, var_name, Value.Int(i), false)
-                result.append(eval_expr(interp, comp_expr))
+                result.push(eval_expr(interp, comp_expr))
             Value.Array(result)
 
         ExprKind.ArrayCompIter(comp_expr, var_name, iter_expr):
@@ -356,14 +356,14 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             var result = []
             for item in elems:
                 env_define(interp, var_name, item, false)
-                result.append(eval_expr(interp, comp_expr))
+                result.push(eval_expr(interp, comp_expr))
             Value.Array(result)
 
         # Tuple literal
         ExprKind.Tuple(elems):
             var vals = []
             for item in elems:
-                vals.append(eval_expr(interp, item))
+                vals.push(eval_expr(interp, item))
             Value.Tuple(vals)
 
         # Do block (inline block expression)
@@ -389,7 +389,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             for pair in pairs:
                 let k = eval_expr(interp, pair.0)
                 let v = eval_expr(interp, pair.1)
-                entries.append((k, v))
+                entries.push((k, v))
             Value.Dict(entries)
 
         # Set literal
@@ -398,7 +398,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             for item in elems:
                 let v = eval_expr(interp, item)
                 if not vals.contains(v):
-                    vals.append(v)
+                    vals.push(v)
             Value.Set(vals)
 
         # String interpolation
@@ -594,9 +594,9 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 # Extract .value from task objects synchronously
                 let tn = task_obj_type_name(join_val)
                 if tn == "__Task__":
-                    results.append(task_obj_get_value(join_val))
+                    results.push(task_obj_get_value(join_val))
                 else:
-                    results.append(join_val)
+                    results.push(join_val)
             Value.Array(results)
 
         _:
@@ -620,14 +620,14 @@ def [Value] eval_args(mut Interpreter interp, [Arg] args):
             match v:
                 Value.Object(spread_inner):
                     for field in spread_inner.fields:
-                        vals.append(Value.Labeled(field.0, field.1))
-                _: vals.append(v)
+                        vals.push(Value.Labeled(field.0, field.1))
+                _: vals.push(v)
         else:
             let label_opt = arg.label
             if let label = label_opt:
-                vals.append(Value.Labeled(label, v))
+                vals.push(Value.Labeled(label, v))
             else:
-                vals.append(v)
+                vals.push(v)
     vals
 
 # Binary operation dispatch
@@ -739,7 +739,7 @@ def Value apply_binop(BinOp op, Value l, Value r):
                         Value.Array(b):
                             var merged = a
                             for item in b:
-                                merged.append(item)
+                                merged.push(item)
                             Value.Array(merged)
                         _:
                             throw "cannot add Array and {r.type_name()}"
@@ -1197,7 +1197,7 @@ def Value call_tuple_method(mut Interpreter interp, [Value] elems, string method
             var result = []
             for elem in elems:
                 let mapped = call_value(interp, fn_val, [elem])
-                result.append(mapped)
+                result.push(mapped)
             Value.Tuple(result)
         "length":
             Value.Int(elems.length)
@@ -1215,7 +1215,7 @@ def Value call_array_method(mut Interpreter interp, var [Value] items, string me
         "append":
             if args.length != 1:
                 throw "append takes 1 argument"
-            items.append(args[0])
+            items.push(args[0])
             Value.Nil
         "pop":
             if items.length == 0:
@@ -1253,7 +1253,7 @@ def Value call_array_method(mut Interpreter interp, var [Value] items, string me
             var rev = []
             var i = items.length - 1
             while i >= 0:
-                rev.append(items[i])
+                rev.push(items[i])
                 i = i - 1
             Value.Array(rev)
         "join":
@@ -1325,7 +1325,7 @@ def Value call_string_method(string s, string method, [Value] args):
                     let parts = s.split(sep)
                     var result = []
                     for p in parts:
-                        result.append(Value.Str(p))
+                        result.push(Value.Str(p))
                     Value.Array(result)
                 _:
                     throw "split argument must be string"
@@ -1405,7 +1405,7 @@ def Value call_dict_method(mut Interpreter interp, var [(Value, Value)] entries,
                     found = true
                 i = i + 1
             if not found:
-                entries.append((key, val))
+                entries.push((key, val))
             Value.Nil
         "contains_key":
             if args.length != 1:
@@ -1419,12 +1419,12 @@ def Value call_dict_method(mut Interpreter interp, var [(Value, Value)] entries,
         "keys":
             var result = []
             for entry in entries:
-                result.append(entry.0)
+                result.push(entry.0)
             Value.Array(result)
         "values":
             var result = []
             for entry in entries:
-                result.append(entry.1)
+                result.push(entry.1)
             Value.Array(result)
         "length":
             Value.Int(entries.length)
@@ -1442,7 +1442,7 @@ def Value call_set_method(mut Interpreter interp, var [Value] items, string meth
             if args.length != 1:
                 throw "insert takes 1 argument"
             if not items.contains(args[0]):
-                items.append(args[0])
+                items.push(args[0])
             Value.Nil
         "remove":
             if args.length != 1:
@@ -1450,7 +1450,7 @@ def Value call_set_method(mut Interpreter interp, var [Value] items, string meth
             var result = []
             for item in items:
                 if item != args[0]:
-                    result.append(item)
+                    result.push(item)
             items = result
             Value.Nil
         "length":
@@ -1873,7 +1873,7 @@ req string display_value(Interpreter interp, Value val):
             var visible_obj_fields = []
             for f in obj.fields:
                 if not f.0.starts_with("__"):
-                    visible_obj_fields.append(f)
+                    visible_obj_fields.push(f)
             if visible_obj_fields.length == 1 and visible_obj_fields[0].0 == "value":
                 display_value(interp, visible_obj_fields[0].1)
             else:
@@ -1912,7 +1912,7 @@ def Value call_enum_method(mut Interpreter interp, string type_name, string vari
         throw "no method '{method}' on enum '{type_name}'"
 
 def ObjectInner make_object(string type_name, [(string, Value)] fields):
-    ObjectInner(type_name: type_name, fields: fields)
+    ObjectInner(type_name= type_name, fields= fields)
 
 def void eval_channel_rx_for(mut Interpreter interp, ObjectInner rx_inner, string var_name, [Stmt] body):
     let ch_id_opt = rx_inner.get_field("__ch_id__")
@@ -1970,7 +1970,7 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, Env? captured_env, [Value
             var rest = [Value]{}
             var j = i
             while j < args.length:
-                rest.append(args[j])
+                rest.push(args[j])
                 j = j + 1
             env_define(interp, param.name, Value.Array(rest), param.mutable)
             break
@@ -2172,7 +2172,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                                 let [Binding]? sub_match = try_match_pattern(interp, sfields[i], sub_patterns[i])
                                 if let sb = sub_match:
                                     for b in sb:
-                                        all_bindings.append(b)
+                                        all_bindings.push(b)
                                 else:
                                     ok = false
                                 i = i + 1
@@ -2188,7 +2188,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                         var visible_fields = []
                         for f in inner.fields:
                             if not f.0.starts_with("__"):
-                                visible_fields.append(f)
+                                visible_fields.push(f)
                         if sub_patterns.length == 0:
                             []
                         else if sub_patterns.length == visible_fields.length:
@@ -2200,7 +2200,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                                 let [Binding]? sub_match = try_match_pattern(interp, fv, sub_patterns[i])
                                 if let sb = sub_match:
                                     for b in sb:
-                                        all_bindings.append(b)
+                                        all_bindings.push(b)
                                 else:
                                     ok = false
                                 i = i + 1
@@ -2222,7 +2222,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                             let [Binding]? sub_match = try_match_pattern(interp, items[i], sub_patterns[i])
                             if let sb = sub_match:
                                 for b in sb:
-                                    all_bindings.append(b)
+                                    all_bindings.push(b)
                             else:
                                 ok = false
                             i = i + 1
@@ -2316,7 +2316,7 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
                             found = true
                         di = di + 1
                     if not found:
-                        new_entries.append((idx, val))
+                        new_entries.push((idx, val))
                     assign_target(interp, obj_expr, Value.Dict(new_entries))
                 _:
                     throw "cannot index-assign into {obj.type_name()}"
@@ -2331,20 +2331,20 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
     for arg in args:
         match arg:
             Value.Labeled(label, v): labeled.set(label, v)
-            _: positional.append(arg)
+            _: positional.push(arg)
     var fields = []
     var pos_idx = 0
     for field in decl.fields:
         if labeled.has(field.name):
-            fields.append((field.name, labeled[field.name]))
+            fields.push((field.name, labeled[field.name]))
         elif pos_idx < positional.length:
-            fields.append((field.name, positional[pos_idx]))
+            fields.push((field.name, positional[pos_idx]))
             pos_idx = pos_idx + 1
         else:
             var fval = Value.Nil
             if let default_expr = field.default:
                 fval = eval_expr(interp, default_expr)
-            fields.append((field.name, fval))
+            fields.push((field.name, fval))
     # Handle init declarations: pub params become fields
     if decl.inits.length > 0:
         let init_decl = decl.inits[0]
@@ -2360,11 +2360,11 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
                 let param_default = param.default
                 if let default_expr = param_default:
                     pval = eval_expr(interp, default_expr)
-            fields.append((param.name, pval))
+            fields.push((param.name, pval))
     let ref_id = interp.next_ref_id
     interp.next_ref_id = ref_id + 1
-    fields.append(("__ref_id", Value.Int(ref_id)))
-    let inner = ObjectInner(type_name: decl.name, fields: fields)
+    fields.push(("__ref_id", Value.Int(ref_id)))
+    let inner = ObjectInner(type_name= decl.name, fields= fields)
     let result = Value.Object(inner)
     # Run init body if present
     if decl.inits.length > 0:

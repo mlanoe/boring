@@ -152,7 +152,7 @@ impl Interpreter {
                 let elems = match val {
                     Value::Tuple(ref v) => v.clone(),
                     // Allow destructuring an Array as if it were a tuple
-                    Value::Array(ref v) => v.clone(),
+                    Value::Array(ref v) => v.as_ref().clone(),
                     other => {
                         return Err(err(
                             format!("cannot destructure '{}' as a tuple", other.type_name()),
@@ -225,6 +225,26 @@ impl Interpreter {
                     let might_mutate = MUTATING.contains(&method.as_str())
                         || MUTATING_COLL_ONLY.contains(&method.as_str());
                     if might_mutate {
+                        // Fast path: `var_name.mutatingArrayMethod(args)` — this is the
+                        // form loop bodies use (`samples.push(x)` as its own statement),
+                        // so it's the hot path the O(n) full-array clone below needs to
+                        // avoid. See `try_fast_mutating_array_call`'s doc comment.
+                        let line = e.line;
+                        if let ExprKind::Var(name) = &obj_expr.kind {
+                            if let Some(result) = self.try_fast_mutating_array_call(name, method, args, &env, line) {
+                                result?;
+                                if matches!(method.as_str(), "push" | "append")
+                                    && env.borrow().is_owned_collection(name)
+                                {
+                                    if let Some(n) = args.first().and_then(|arg| {
+                                        if let ExprKind::Var(n) = &arg.value.kind { Some(n.clone()) } else { None }
+                                    }) {
+                                        env.borrow_mut().invalidate(&n);
+                                    }
+                                }
+                                return Ok(());
+                            }
+                        }
                         // Evaluate the receiver once — never again.
                         let obj_val = self.eval_expr(obj_expr, Rc::clone(&env))?;
                         let is_collection = matches!(&obj_val, Value::Array(_) | Value::Dict(_) | Value::Set(_));
@@ -232,8 +252,6 @@ impl Interpreter {
                             && matches!(&obj_val, Value::Dict(_) | Value::Set(_));
 
                         if (MUTATING.contains(&method.as_str()) && is_collection) || is_coll_mutating {
-                            let line = e.line;
-
                             // Determine if we need to invalidate an owned arg after the call
                             let invalidate_name: Option<String> =
                                 if matches!(method.as_str(), "push" | "append") {
@@ -647,7 +665,7 @@ impl Interpreter {
 
     pub(crate) fn collect_iterable(&mut self, val: Value, line: usize) -> Result<Vec<Value>, Signal> {
         match val {
-            Value::Array(elems) => Ok(elems),
+            Value::Array(elems) => Ok(Value::rc_vec_into_owned(elems)),
             Value::Set(elems) => Ok(elems),
             Value::Tuple(elems) => Ok(elems),
             Value::Dict(pairs) => Ok(pairs.into_iter().map(|(k, v)| Value::Tuple(vec![k, v])).collect()),

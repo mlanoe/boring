@@ -186,17 +186,17 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             var result = arr
                             var i = 0
                             while i < other.length:
-                                result.append(other[i])
+                                result.push(other[i])
                                 i = i + 1
                             Value.Array(result)
                         _:
                             var result = arr
-                            result.append(other_val)
+                            result.push(other_val)
                             Value.Array(result)
                 "push":
                     let val = args[0] else Value.Nil
                     var result = arr
-                    result.append(val)
+                    result.push(val)
                     Value.Array(result)
                 "pop":
                     if arr.length == 0:
@@ -253,7 +253,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < arr.length:
                         let r = call_value(interp, closure, [arr[i]])
-                        result.append(r)
+                        result.push(r)
                         i = i + 1
                     Value.Array(result)
                 "filter":
@@ -265,7 +265,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         match r:
                             Value.Bool(b):
                                 if b:
-                                    result.append(arr[i])
+                                    result.push(arr[i])
                             _: throw "filter: predicate must return bool"
                         i = i + 1
                     Value.Array(result)
@@ -300,7 +300,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < arr.length:
                         let k = call_value(interp, closure, [arr[i]])
-                        keys.append(k)
+                        keys.push(k)
                         i = i + 1
                     # Build sorted copy of arr using insertion sort on keys
                     var sorted_arr = arr
@@ -398,7 +398,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             let len = if arr.length < other.length: arr.length else: other.length
                             var i = 0
                             while i < len:
-                                result.append(Value.Tuple([arr[i], other[i]]))
+                                result.push(Value.Tuple([arr[i], other[i]]))
                                 i = i + 1
                             Value.Array(result)
                         _: throw "zip: expected array argument"
@@ -406,7 +406,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var result = []
                     var i = 0
                     while i < arr.length:
-                        result.append(Value.Tuple([Value.Int(i), arr[i]]))
+                        result.push(Value.Tuple([Value.Int(i), arr[i]]))
                         i = i + 1
                     Value.Array(result)
                 "indexOf":
@@ -426,10 +426,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             Value.Array(inner):
                                 var j = 0
                                 while j < inner.length:
-                                    result.append(inner[j])
+                                    result.push(inner[j])
                                     j = j + 1
                             other:
-                                result.append(other)
+                                result.push(other)
                         i = i + 1
                     Value.Array(result)
                 "flatMap":
@@ -442,10 +442,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             Value.Array(inner):
                                 var j = 0
                                 while j < inner.length:
-                                    result.append(inner[j])
+                                    result.push(inner[j])
                                     j = j + 1
                             other:
-                                result.append(other)
+                                result.push(other)
                         i = i + 1
                     Value.Array(result)
                 "join":
@@ -456,11 +456,11 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             var i = 0
                             while i < arr.length:
                                 match arr[i]:
-                                    Value.Str(sv): parts.append(sv)
-                                    Value.Int(n): parts.append("{n}")
-                                    Value.Float(f): parts.append("{f}")
-                                    Value.Bool(b): parts.append("{b}")
-                                    _: parts.append("nil")
+                                    Value.Str(sv): parts.push(sv)
+                                    Value.Int(n): parts.push("{n}")
+                                    Value.Float(f): parts.push("{f}")
+                                    Value.Bool(b): parts.push("{b}")
+                                    _: parts.push("nil")
                                 i = i + 1
                             Value.Str(parts.joined(sep))
                         _: throw "join_val: expected string separator"
@@ -534,7 +534,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < arr.length:
                         if not result.contains(arr[i]):
-                            result.append(arr[i])
+                            result.push(arr[i])
                         i = i + 1
                     Value.Array(result)
                 "isEmpty":
@@ -573,7 +573,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     if update_idx >= 0:
                         new_pairs[update_idx] = (key, val)
                     else:
-                        new_pairs.append((key, val))
+                        new_pairs.push((key, val))
                     Value.Dict(new_pairs)
                 "put":
                     let key = args[0] else Value.Nil
@@ -589,7 +589,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     if update_idx >= 0:
                         new_pairs[update_idx] = (key, val)
                     else:
-                        new_pairs.append((key, val))
+                        new_pairs.push((key, val))
                     Value.Dict(new_pairs)
                 "contains":
                     let key = args[0] else Value.Nil
@@ -615,21 +615,21 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < pairs.length:
                         if pairs[i].0 != key:
-                            result.append(pairs[i])
+                            result.push(pairs[i])
                         i = i + 1
                     Value.Dict(result)
                 "keys":
                     var result = []
                     var i = 0
                     while i < pairs.length:
-                        result.append(pairs[i].0)
+                        result.push(pairs[i].0)
                         i = i + 1
                     Value.Array(result)
                 "values":
                     var result = []
                     var i = 0
                     while i < pairs.length:
-                        result.append(pairs[i].1)
+                        result.push(pairs[i].1)
                         i = i + 1
                     Value.Array(result)
                 "entries":
@@ -637,7 +637,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < pairs.length:
                         let (ek, ev) = pairs[i]
-                        result.append(Value.Array([ek, ev]))
+                        result.push(Value.Array([ek, ev]))
                         i = i + 1
                     Value.Array(result)
                 "merge":
@@ -657,7 +657,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                 if update_j >= 0:
                                     result[update_j] = oe
                                 else:
-                                    result.append(oe)
+                                    result.push(oe)
                                 i = i + 1
                             Value.Dict(result)
                         _: throw "merge: expected dict argument"
@@ -674,7 +674,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         match r:
                             Value.Bool(b):
                                 if b:
-                                    result.append(pairs[fi])
+                                    result.push(pairs[fi])
                             _: throw "dict.filter: predicate must return bool"
                         fi = fi + 1
                     Value.Dict(result)
@@ -686,7 +686,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         let pk = pairs[mi].0
                         let pv = pairs[mi].1
                         let r = call_value(interp, closure, [pk, pv])
-                        result.append((pairs[mi].0, r))
+                        result.push((pairs[mi].0, r))
                         mi = mi + 1
                     Value.Dict(result)
                 "any":
@@ -733,7 +733,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         Value.Set(elements)
                     else:
                         var result = elements
-                        result.append(val)
+                        result.push(val)
                         Value.Set(result)
                 "remove":
                     let val = args[0] else Value.Nil
@@ -741,7 +741,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < elements.length:
                         if elements[i] != val:
-                            result.append(elements[i])
+                            result.push(elements[i])
                         i = i + 1
                     Value.Set(result)
                 "toArray":
@@ -756,7 +756,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < other.length:
                         if not result.contains(other[i]):
-                            result.append(other[i])
+                            result.push(other[i])
                         i = i + 1
                     Value.Set(result)
                 "intersection":
@@ -769,7 +769,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < elements.length:
                         if other.contains(elements[i]):
-                            result.append(elements[i])
+                            result.push(elements[i])
                         i = i + 1
                     Value.Set(result)
                 "difference":
@@ -782,7 +782,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = 0
                     while i < elements.length:
                         if not other.contains(elements[i]):
-                            result.append(elements[i])
+                            result.push(elements[i])
                         i = i + 1
                     Value.Set(result)
                 "isSubset":
@@ -873,7 +873,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var i = start
                     let lim = if inclusive: end + 1 else: end
                     while i < lim:
-                        result.append(Value.Int(i))
+                        result.push(Value.Int(i))
                         i = i + step
                     Value.Array(result)
                 "contains":
@@ -923,7 +923,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     var result = []
                     for elem in elems:
                         let mapped = call_value(interp, fn_val, [elem])
-                        result.append(mapped)
+                        result.push(mapped)
                     Value.Tuple(result)
                 _:
                     throw "unknown method {method_name} on tuple"
@@ -941,7 +941,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                         let queue_opt = interp.channel_queues.get(ch_key)
                         if let queue = queue_opt:
                             var mut_queue = queue
-                            mut_queue.append(val_to_send)
+                            mut_queue.push(val_to_send)
                             var {string=[Value]} cq = interp.channel_queues
                             cq[ch_key] = mut_queue
                             interp.channel_queues = cq

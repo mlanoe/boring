@@ -95,17 +95,20 @@ impl Interpreter {
                 // pop/remove need special handling: they must set out_self to the
                 // SHORTENED array AND return the extracted element (not the new array).
                 if method == "pop" {
-                    if let Value::Array(mut arr_owned) = obj.clone() {
+                    if let Value::Array(arr_rc) = obj {
+                        let mut arr_owned = Value::rc_vec_into_owned(arr_rc);
                         if arr_owned.is_empty() {
                             return Err(err("pop: array is empty", line));
                         }
                         let last = arr_owned.pop().unwrap();
-                        *out_self = Some(Value::Array(arr_owned));
+                        *out_self = Some(Value::Array(arr_owned.into()));
                         return Ok(last);
                     }
+                    unreachable!()
                 }
                 if method == "remove" {
-                    if let Value::Array(mut arr_owned) = obj.clone() {
+                    if let Value::Array(arr_rc) = obj {
+                        let mut arr_owned = Value::rc_vec_into_owned(arr_rc);
                         let idx_val = args.first().cloned().unwrap_or(Value::Int(0));
                         let idx = self.expect_int(idx_val, line)?;
                         let idx = if idx < 0 { arr_owned.len() as i64 + idx } else { idx };
@@ -114,9 +117,37 @@ impl Interpreter {
                         } else {
                             Value::Nil
                         };
-                        *out_self = Some(Value::Array(arr_owned));
+                        *out_self = Some(Value::Array(arr_owned.into()));
                         return Ok(removed);
                     }
+                    unreachable!()
+                }
+                // Methods recognized by call_array_method — safe to MOVE `obj` into it
+                // rather than clone: since call_array_method always returns Some(_) for
+                // these, we never fall through to the generic "no method" path below that
+                // would otherwise need the original `obj`. Moving (instead of an Rc clone
+                // that keeps this function's `obj` alive concurrently) lets the array's
+                // Rc<Vec<Value>> reach a unique-owner refcount, so the mutation methods
+                // (push, etc.) can rewrite the Vec in place instead of deep-cloning it.
+                const KNOWN_ARRAY_METHODS: &[&str] = &[
+                    "len", "length", "push", "contains", "first", "last", "reverse", "sort", "sortBy",
+                    "map", "filter", "reduce", "join", "any", "all", "find", "indexOf", "flatMap", "flat",
+                    "zip", "enumerate", "slice", "insert", "remove", "append", "count", "min", "max", "sum",
+                    "isEmpty", "reversed", "sorted", "sortedBy", "take", "drop", "joined",
+                    "firstIndex", "nextIndex", "removeAt", "getAt",
+                ];
+                if KNOWN_ARRAY_METHODS.contains(&method) {
+                    let result = match self.call_array_method(obj, method, args, line)? {
+                        Some(result) => result,
+                        None => return Err(err(format!("no method '{}' on Array", method), line)),
+                    };
+                    const MUTATING: &[&str] = &["push", "append", "insert", "sort", "sortBy", "reverse", "removeAt"];
+                    if MUTATING.contains(&method) {
+                        if let Value::Array(_) = &result {
+                            *out_self = Some(result.clone());
+                        }
+                    }
+                    return Ok(result);
                 }
                 if let Some(result) = self.call_array_method(obj.clone(), method, args.clone(), line)? {
                     // For mutating array methods, set out_self so the caller can write back.
@@ -450,7 +481,7 @@ impl Interpreter {
             "split" => {
                 let sep = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 let parts: Vec<Value> = s.split(sep.as_str()).map(|p| Value::Str(p.to_string())).collect();
-                Ok(Some(Value::Array(parts)))
+                Ok(Some(Value::Array(parts.into())))
             }
             "trim" => Ok(Some(Value::Str(s.trim().to_string()))),
             "trimStart" => Ok(Some(Value::Str(s.trim_start().to_string()))),
@@ -464,11 +495,11 @@ impl Interpreter {
             }
             "chars" => {
                 let chars: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string())).collect();
-                Ok(Some(Value::Array(chars)))
+                Ok(Some(Value::Array(chars.into())))
             }
             "lines" => {
                 let lines: Vec<Value> = s.lines().map(|l| Value::Str(l.to_string())).collect();
-                Ok(Some(Value::Array(lines)))
+                Ok(Some(Value::Array(lines.into())))
             }
             "slice" => {
                 let char_count = s.chars().count();
@@ -528,9 +559,9 @@ impl Interpreter {
         match method {
             "len" | "length" => Ok(Some(Value::Int(arr.len() as i64))),
             "push" => {
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.push(args.into_iter().next().unwrap_or(Value::Nil));
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "contains" => {
                 let target = args.into_iter().next().unwrap_or(Value::Nil);
@@ -539,12 +570,12 @@ impl Interpreter {
             "first" => Ok(Some(arr.first().cloned().unwrap_or(Value::Nil))),
             "last" => Ok(Some(arr.last().cloned().unwrap_or(Value::Nil))),
             "reverse" => {
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.reverse();
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "sort" => {
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.sort_by(|a, b| {
                     match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
@@ -553,12 +584,13 @@ impl Interpreter {
                         _ => std::cmp::Ordering::Equal,
                     }
                 });
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "sortBy" => {
                 // sortBy (elem): key_expr  — sort by a key extractor closure (ascending).
                 // Negate the key for descending: sortBy (e): -e.score
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
+                let arr = Value::rc_vec_into_owned(arr);
                 let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
                 for item in arr {
                     let key = self.call_value(closure.clone(), vec![item.clone()], line, false)?;
@@ -575,33 +607,33 @@ impl Interpreter {
                     }
                 });
                 let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
-                Ok(Some(Value::Array(sorted)))
+                Ok(Some(Value::Array(sorted.into())))
             }
             "map" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut result = Vec::new();
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item], line, false)?;
                     result.push(r);
                 }
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "filter" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut result = Vec::new();
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item.clone()], line, false)?;
                     let b = self.expect_bool(r, line)?;
                     if b { result.push(item); }
                 }
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "reduce" => {
                 // reduce(init, closure) — initial value first, closure second
                 let init = args.first().cloned().unwrap_or(Value::Nil);
                 let closure = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut acc = init;
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     acc = self.call_value(closure.clone(), vec![acc, item], line, false)?;
                 }
                 Ok(Some(acc))
@@ -616,7 +648,7 @@ impl Interpreter {
             }
             "any" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item], line, false)?;
                     if self.expect_bool(r, line)? { return Ok(Some(Value::Bool(true))); }
                 }
@@ -624,7 +656,7 @@ impl Interpreter {
             }
             "all" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item], line, false)?;
                     if !self.expect_bool(r, line)? { return Ok(Some(Value::Bool(false))); }
                 }
@@ -632,7 +664,7 @@ impl Interpreter {
             }
             "find" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item.clone()], line, false)?;
                     if self.expect_bool(r, line)? { return Ok(Some(item)); }
                 }
@@ -648,40 +680,40 @@ impl Interpreter {
             "flatMap" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut result = Vec::new();
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     let r = self.call_value(closure.clone(), vec![item], line, false)?;
                     match r {
-                        Value::Array(inner) => result.extend(inner),
+                        Value::Array(inner) => result.extend(Value::rc_vec_into_owned(inner)),
                         other => result.push(other),
                     }
                 }
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "flat" => {
                 let mut result = Vec::new();
-                for item in arr {
+                for item in Value::rc_vec_into_owned(arr) {
                     match item {
-                        Value::Array(inner) => result.extend(inner),
+                        Value::Array(inner) => result.extend(Value::rc_vec_into_owned(inner)),
                         other => result.push(other),
                     }
                 }
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "zip" => {
                 let other = match args.into_iter().next() {
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
-                let result: Vec<Value> = arr.into_iter().zip(other)
+                let result: Vec<Value> = Value::rc_vec_into_owned(arr).into_iter().zip(other)
                     .map(|(a, b)| Value::Tuple(vec![a, b]))
                     .collect();
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "enumerate" => {
-                let result: Vec<Value> = arr.into_iter().enumerate()
+                let result: Vec<Value> = Value::rc_vec_into_owned(arr).into_iter().enumerate()
                     .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v]))
                     .collect();
-                Ok(Some(Value::Array(result)))
+                Ok(Some(Value::Array(result.into())))
             }
             "slice" => {
                 let len = arr.len();
@@ -702,43 +734,43 @@ impl Interpreter {
                     }
                     None => len,
                 };
-                Ok(Some(Value::Array(arr[start..end.max(start)].to_vec())))
+                Ok(Some(Value::Array(arr[start..end.max(start)].to_vec().into())))
             }
             "insert" => {
                 let idx_i = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let val = args.get(1).cloned().unwrap_or(Value::Nil);
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 let idx = if idx_i < 0 {
                     (new_arr.len() as i64 + idx_i).max(0) as usize
                 } else {
                     (idx_i as usize).min(new_arr.len())
                 };
                 new_arr.insert(idx, val);
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "remove" => {
                 let idx = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 let idx = if idx < 0 { new_arr.len() as i64 + idx } else { idx };
                 if idx >= 0 && (idx as usize) < new_arr.len() {
                     new_arr.remove(idx as usize);
                 }
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "append" => {
                 let other = match args.into_iter().next() {
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.extend(other);
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "count" => {
                 match args.into_iter().next() {
                     Some(closure @ (Value::Closure { .. } | Value::Fn { .. } | Value::NativeFn { .. })) => {
                         let mut n = 0i64;
-                        for item in arr {
+                        for item in Value::rc_vec_into_owned(arr) {
                             let r = self.call_value(closure.clone(), vec![item], line, false)?;
                             if self.expect_bool(r, line)? { n += 1; }
                         }
@@ -767,7 +799,7 @@ impl Interpreter {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
                 let mut has_float = false;
-                for item in &arr {
+                for item in arr.iter() {
                     match item {
                         Value::Int(n) => int_sum += n,
                         Value::Float(f) => { float_sum += f; has_float = true; }
@@ -782,23 +814,23 @@ impl Interpreter {
             }
             "isEmpty" => Ok(Some(Value::Bool(arr.is_empty()))),
             "reversed" => {
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.reverse();
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "sorted" => {
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.sort_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
                     (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
-                Ok(Some(Value::Array(new_arr)))
+                Ok(Some(Value::Array(new_arr.into())))
             }
             "sortedBy" => {
                 let closure = args.into_iter().next().unwrap_or(Value::Nil);
-                let mut new_arr = arr;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
                 let mut sort_err: Option<Signal> = None;
                 new_arr.sort_by(|a, b| {
                     if sort_err.is_some() { return std::cmp::Ordering::Equal; }
@@ -832,17 +864,17 @@ impl Interpreter {
                     }
                 });
                 let sorted: Vec<Value> = indices.into_iter().map(|i| new_arr[i].clone()).collect();
-                Ok(Some(Value::Array(sorted)))
+                Ok(Some(Value::Array(sorted.into())))
             }
             "take" => {
                 let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let n = (n.max(0)) as usize;
-                Ok(Some(Value::Array(arr.into_iter().take(n).collect())))
+                Ok(Some(Value::Array(Value::rc_vec_into_owned(arr).into_iter().take(n).collect::<Vec<_>>().into())))
             }
             "drop" => {
                 let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let n = (n.max(0)) as usize;
-                Ok(Some(Value::Array(arr.into_iter().skip(n).collect())))
+                Ok(Some(Value::Array(Value::rc_vec_into_owned(arr).into_iter().skip(n).collect::<Vec<_>>().into())))
             }
             "joined" => {
                 let sep = match args.first() {
@@ -879,9 +911,9 @@ impl Interpreter {
                         if pos >= arr.len() {
                             return Err(err(format!("removeAt: index {} out of bounds (len {})", pos, arr.len()), line));
                         }
-                        let mut new_arr = arr;
+                        let mut new_arr = Value::rc_vec_into_owned(arr);
                         new_arr.remove(pos);
-                        Ok(Some(Value::Array(new_arr)))
+                        Ok(Some(Value::Array(new_arr.into())))
                     }
                     _ => Err(err("removeAt: expected an ArrayIndex value", line)),
                 }
@@ -906,8 +938,8 @@ impl Interpreter {
             _ => unreachable!(),
         };
         match method {
-            "keys" => Ok(Some(Value::Array(pairs.into_iter().map(|(k, _)| k).collect()))),
-            "values" => Ok(Some(Value::Array(pairs.into_iter().map(|(_, v)| v).collect()))),
+            "keys" => Ok(Some(Value::Array(pairs.into_iter().map(|(k, _)| k).collect::<Vec<_>>().into()))),
+            "values" => Ok(Some(Value::Array(pairs.into_iter().map(|(_, v)| v).collect::<Vec<_>>().into()))),
             "len" => Ok(Some(Value::Int(pairs.len() as i64))),
             "contains" | "containsKey" | "has" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
@@ -1012,13 +1044,13 @@ impl Interpreter {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
                 Ok(Some(Value::Bool(set.contains(&val))))
             }
-            "toArray" => Ok(Some(Value::Array(set))),
+            "toArray" => Ok(Some(Value::Array(set.into()))),
             "isEmpty" => Ok(Some(Value::Bool(set.is_empty()))),
             "count" | "len" | "length" => Ok(Some(Value::Int(set.len() as i64))),
             "union" => {
                 let other = match args.into_iter().next() {
                     Some(Value::Set(s)) => s,
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
                 let mut new_set = set;
@@ -1030,7 +1062,7 @@ impl Interpreter {
             "intersection" => {
                 let other = match args.into_iter().next() {
                     Some(Value::Set(s)) => s,
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
                 let new_set: Vec<Value> = set.into_iter().filter(|v| other.contains(v)).collect();
@@ -1039,7 +1071,7 @@ impl Interpreter {
             "difference" => {
                 let other = match args.into_iter().next() {
                     Some(Value::Set(s)) => s,
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
                 let new_set: Vec<Value> = set.into_iter().filter(|v| !other.contains(v)).collect();
@@ -1048,7 +1080,7 @@ impl Interpreter {
             "isSubset" => {
                 let other = match args.into_iter().next() {
                     Some(Value::Set(s)) => s,
-                    Some(Value::Array(a)) => a,
+                    Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
                 Ok(Some(Value::Bool(set.iter().all(|v| other.contains(v)))))
@@ -1331,6 +1363,73 @@ impl Interpreter {
         }
     }
 
+    /// Fast path for `var_name[idx] = val` on a plain local variable holding an
+    /// array. The generic path (in `assign`, below) reads the array via
+    /// `eval_expr` (cloning the `Rc<Vec<Value>>` out of the env slot while the
+    /// slot's own copy stays alive), so copy-on-write in `Value::rc_vec_into_owned`
+    /// always has to deep-clone — the same O(n)-per-write issue `.push()` had (see
+    /// `try_fast_mutating_array_call`'s doc comment). Taking the value out of the
+    /// slot instead drops that to one owner in the common unaliased case, making
+    /// index-assignment O(1) instead of O(n) per write (so a loop writing n
+    /// elements is O(n), not O(n^2)) — the mel-spectrogram/matrix code this
+    /// interpreter runs writes every element of large flat arrays this way.
+    ///
+    /// `idx_expr` is evaluated first (while the slot is still intact) so a
+    /// self-referential index like `arr[arr.length - 1] = v` still sees the real
+    /// array. Returns `None` if `name` doesn't currently hold an array — the
+    /// caller falls through to the generic path unchanged, without having
+    /// evaluated `idx_expr` (no risk of double evaluation).
+    #[inline(never)]
+    fn try_fast_array_index_assign(
+        &mut self,
+        name: &str,
+        idx_expr: &Expr,
+        val: Value,
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Result<(), Signal>> {
+        if !matches!(env.borrow().get(name), Some(Value::Array(_))) {
+            return None;
+        }
+        Some((|| {
+            let idx = self.eval_expr(idx_expr, Rc::clone(env))?;
+            let taken = env.borrow_mut().take(name).unwrap_or(Value::Nil);
+            let arr_rc = match taken {
+                Value::Array(rc) => rc,
+                other => {
+                    // Extremely unlikely (idx evaluation somehow changed the
+                    // variable's type mid-expression) — restore and report clearly.
+                    env.borrow_mut().force_set(name, other);
+                    return Err(err(format!("'{}' is no longer an array", name), line));
+                }
+            };
+            let mut arr = Value::rc_vec_into_owned(arr_rc);
+            let pos_result: Result<usize, Signal> = match idx {
+                Value::Index(IndexValue::Array(p)) => Ok(p),
+                other => {
+                    let i = self.expect_int(other, line)?;
+                    let i = if i < 0 { arr.len() as i64 + i } else { i };
+                    if i < 0 || i as usize >= arr.len() {
+                        Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line))
+                    } else {
+                        Ok(i as usize)
+                    }
+                }
+            };
+            match pos_result {
+                Ok(pos) => {
+                    if pos < arr.len() { arr[pos] = val; }
+                    env.borrow_mut().force_set(name, Value::Array(arr.into()));
+                    Ok(())
+                }
+                Err(e) => {
+                    env.borrow_mut().force_set(name, Value::Array(arr.into()));
+                    Err(e)
+                }
+            }
+        })())
+    }
+
     pub(crate) fn assign(&mut self, target: &Expr, val: Value, env: EnvRef, line: usize) -> Result<(), Signal> {
         match &target.kind {
             ExprKind::Var(name) => {
@@ -1515,6 +1614,15 @@ impl Interpreter {
                 }
             }
             ExprKind::Index(obj_expr, idx_expr) => {
+                // Fast path — see `try_fast_array_index_assign`'s doc comment. Kept in
+                // its own #[inline(never)] function so this stays out of `assign`'s
+                // (recursive) stack frame — see `try_fast_mutating_array_call` for why
+                // that matters in this interpreter's debug-build stack budget.
+                if let ExprKind::Var(name) = &obj_expr.kind {
+                    if let Some(result) = self.try_fast_array_index_assign(name, idx_expr, val.clone(), &env, line) {
+                        return result;
+                    }
+                }
                 // Evaluate the object before the index — matches the real evaluation
                 // order of `obj[idx] = val` in the transpiled Rust (and left-to-right
                 // evaluation in general), so side effects in `obj`/`idx` fire in the
@@ -1522,7 +1630,8 @@ impl Interpreter {
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
                 match obj {
-                    Value::Array(mut arr) => {
+                    Value::Array(arr_rc) => {
+                        let mut arr = Value::rc_vec_into_owned(arr_rc);
                         let pos: usize = match idx {
                             Value::Index(IndexValue::Array(p)) => p,
                             other => {
@@ -1535,7 +1644,7 @@ impl Interpreter {
                             }
                         };
                         if pos < arr.len() { arr[pos] = val; }
-                        self.assign(obj_expr, Value::Array(arr), env, line)?;
+                        self.assign(obj_expr, Value::Array(arr.into()), env, line)?;
                     }
                     Value::Dict(mut pairs) => {
                         let key = match idx {
@@ -2180,7 +2289,7 @@ impl Interpreter {
                         let lines = s.lines()
                             .map(|l| Value::Str(l.to_string()))
                             .collect::<Vec<_>>();
-                        Ok(Value::Array(lines))
+                        Ok(Value::Array(lines.into()))
                     }
                     Err(e) => fs_err!(e),
                 }
@@ -2262,7 +2371,7 @@ impl Interpreter {
                                 Err(e) => fs_err!(e),
                             }
                         }
-                        Ok(Value::Array(entries))
+                        Ok(Value::Array(entries.into()))
                     }
                     Err(e) => fs_err!(e),
                 }
@@ -2274,7 +2383,7 @@ impl Interpreter {
                         let arr = bytes.iter()
                             .map(|&b| Value::Int(b as i64))
                             .collect::<Vec<_>>();
-                        Ok(Value::Array(arr))
+                        Ok(Value::Array(arr.into()))
                     }
                     Err(e) => fs_err!(e),
                 }

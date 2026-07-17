@@ -163,7 +163,7 @@ let _result = k.buf
             Value::Float(4.0),
             Value::Float(6.0),
             Value::Float(8.0),
-        ]),
+        ].into()),
         "each element should be doubled"
     );
 }
@@ -196,7 +196,7 @@ let _result = k.buf
             Value::Float(6.0),
             Value::Float(12.0),
             Value::Float(18.0),
-        ])
+        ].into())
     );
 }
 
@@ -225,7 +225,7 @@ let _result = k.tids
     let val = get_var(&interp, "_result");
     assert_eq!(
         val,
-        Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(2)]),
+        Value::Array(vec![Value::Int(0), Value::Int(1), Value::Int(2)].into()),
         "tids[i] should equal i (thread index)"
     );
 }
@@ -292,7 +292,7 @@ let _result = k.buf
     let val = get_var(&interp, "_result");
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(10.0), Value::Float(20.0)])
+        Value::Array(vec![Value::Float(10.0), Value::Float(20.0)].into())
     );
 }
 
@@ -325,7 +325,7 @@ let _result = k.buf
     // (1+1)*2=4, (2+1)*2=6, (3+1)*2=8
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(4.0), Value::Float(6.0), Value::Float(8.0)])
+        Value::Array(vec![Value::Float(4.0), Value::Float(6.0), Value::Float(8.0)].into())
     );
 }
 
@@ -438,7 +438,7 @@ let _result = k.buf
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(3.0), Value::Float(6.0), Value::Float(9.0)])
+        Value::Array(vec![Value::Float(3.0), Value::Float(6.0), Value::Float(9.0)].into())
     );
 }
 
@@ -468,7 +468,7 @@ let _result = k.out
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(5.0), Value::Float(10.0), Value::Float(20.0)])
+        Value::Array(vec![Value::Float(5.0), Value::Float(10.0), Value::Float(20.0)].into())
     );
 }
 
@@ -497,7 +497,7 @@ let _result = k.out
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(0.0), Value::Float(10.0), Value::Float(20.0)])
+        Value::Array(vec![Value::Float(0.0), Value::Float(10.0), Value::Float(20.0)].into())
     );
 }
 
@@ -526,7 +526,7 @@ let _result = k.buf
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(4.0)])
+        Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(4.0)].into())
     );
 }
 

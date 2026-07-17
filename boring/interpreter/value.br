@@ -37,7 +37,7 @@ struct ObjectInner:
                 self.fields[i] = (name, val)
                 return
             i = i + 1
-        self.fields.append((name, val))
+        self.fields.push((name, val))
 
 struct TypeRef:
     string name
@@ -67,6 +67,7 @@ enum Value:
     Labeled(string label, Value val)
     StructDef(string name)
     EnumDef(string name)
+    KernelHandle(Value result)
 
     req string type_name():
         match self:
@@ -92,6 +93,7 @@ enum Value:
             Value.Labeled(_, _): "labeled"
             Value.StructDef(n): "struct:{n}"
             Value.EnumDef(n): "enum:{n}"
+            Value.KernelHandle(_): "kernel-handle"
 
 bool is_copy_value(Value v):
     match v:
@@ -235,7 +237,7 @@ struct Env:
         var names = self.vars.keys()
         if let p = self.parent:
             for n in p.all_names():
-                names.append(n)
+                names.push(n)
         names
 
 # ─── new_env ──────────────────────────────────────────────────────────────────

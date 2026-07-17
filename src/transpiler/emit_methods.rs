@@ -2333,13 +2333,19 @@ impl Transpiler {
             args.get(i).map(|a| self.emit_expr(&a.value)).unwrap_or_default()
         };
 
+        // Path args go through functions bound on `impl AsRef<Path>` — `Rc<str>`/`Arc<str>`
+        // (boring's `string`) only implements `AsRef<str>`, not `AsRef<Path>`, so a bare
+        // string *variable* (unlike a `&'static str` literal) fails to compile. Deref-reborrow
+        // to `&str` first, which does implement `AsRef<Path>` — harmless on literals too.
+        let pth = |i: usize| -> String { format!("&*({})", a(i)) };
+
         // Which fs module to use (tokio for async, std for sync).
         let fs_mod = if self.in_async { "tokio::fs" } else { "std::fs" };
 
         match method {
             // fs.read("path") → Arc<str>
             "read" => {
-                let path = a(0);
+                let path = pth(0);
                 format!(
                     "{{ let __boring_s = {}::read_to_string({}){aw}; {}::<str>::from(__boring_s.as_str()) }}",
                     fs_mod, path, self.str_ptr(), aw = aw
@@ -2348,7 +2354,7 @@ impl Transpiler {
 
             // fs.readLines("path") → Vec<Arc<str>>
             "readLines" => {
-                let path = a(0);
+                let path = pth(0);
                 format!(
                     "{{ let __boring_s = {}::read_to_string({}){aw}; __boring_s.lines().map(|l| {}::<str>::from(l)).collect::<Vec<{}<str>>>() }}",
                     fs_mod, path, self.str_ptr(), self.str_ptr(), aw = aw
@@ -2357,7 +2363,7 @@ impl Transpiler {
 
             // fs.write("path", content)
             "write" => {
-                let path    = a(0);
+                let path    = pth(0);
                 let content = a(1);
                 // content is Arc<str>; Deref<Target=str> → .as_bytes() works.
                 format!("{}::write({}, ({}).as_bytes()){aw}", fs_mod, path, content, aw = aw)
@@ -2365,7 +2371,7 @@ impl Transpiler {
 
             // fs.append("path", content)  — OpenOptions::append
             "append" => {
-                let path    = a(0);
+                let path    = pth(0);
                 let content = a(1);
                 if self.in_async {
                     format!(
@@ -2382,7 +2388,7 @@ impl Transpiler {
 
             // fs.exists("path") → bool  (never throws — uses is_ok())
             "exists" => {
-                let path = a(0);
+                let path = pth(0);
                 if self.in_async {
                     format!("tokio::fs::metadata({}).await.is_ok()", path)
                 } else {
@@ -2392,25 +2398,25 @@ impl Transpiler {
 
             // fs.isDir("path") → bool
             "isDir" => {
-                let path = a(0);
+                let path = pth(0);
                 format!("std::path::Path::new({}).is_dir()", path)
             }
 
             // fs.isFile("path") → bool
             "isFile" => {
-                let path = a(0);
+                let path = pth(0);
                 format!("std::path::Path::new({}).is_file()", path)
             }
 
             // fs.mkdir("path")  — create_dir_all
             "mkdir" => {
-                let path = a(0);
+                let path = pth(0);
                 format!("{}::create_dir_all({}){aw}", fs_mod, path, aw = aw)
             }
 
             // fs.remove("path")  — remove file or directory tree
             "remove" => {
-                let path = a(0);
+                let path = pth(0);
                 // Smart remove: directory tree if it's a dir, single file otherwise.
                 // Emit a block that tries remove_file, falls back to remove_dir_all.
                 if self.in_async {
@@ -2428,22 +2434,22 @@ impl Transpiler {
 
             // fs.rename("old", "new") / fs.move(...)
             "rename" | "move" => {
-                let from = a(0);
-                let to   = a(1);
+                let from = pth(0);
+                let to   = pth(1);
                 format!("{}::rename({}, {}){aw}", fs_mod, from, to, aw = aw)
             }
 
             // fs.copy("src", "dst")
             "copy" => {
-                let from = a(0);
-                let to   = a(1);
+                let from = pth(0);
+                let to   = pth(1);
                 // std::fs::copy returns u64 (bytes); tokio::fs::copy too — discard it.
                 format!("{{ let _ = {}::copy({}, {}){aw}; }}", fs_mod, from, to, aw = aw)
             }
 
             // fs.list("path") → Vec<Arc<str>> of entry names
             "list" => {
-                let path = a(0);
+                let path = pth(0);
                 let p = self.str_ptr();
                 if self.in_async {
                     format!(
@@ -2460,7 +2466,7 @@ impl Transpiler {
 
             // fs.readBytes("path") → Vec<i64> (bytes as i64 to match boring's [int])
             "readBytes" => {
-                let path = a(0);
+                let path = pth(0);
                 if aw.is_empty() {
                     format!("{{ let __rb = {}::read({})?; __rb.into_iter().map(|b| b as i64).collect::<Vec<i64>>() }}", fs_mod, path)
                 } else {
@@ -2470,7 +2476,7 @@ impl Transpiler {
 
             // fs.writeBytes("path", bytes)
             "writeBytes" => {
-                let path  = a(0);
+                let path  = pth(0);
                 let bytes = a(1);
                 format!("{}::write({}, &{}){aw}", fs_mod, path, bytes, aw = aw)
             }

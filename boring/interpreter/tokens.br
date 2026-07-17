@@ -70,6 +70,7 @@ enum TokenKind:
     Pass
     Native
     Mod
+    Kernel
 
     # Operators
     Plus
@@ -180,6 +181,7 @@ struct Token:
             TokenKind.Pub: "pub"
             TokenKind.Native: "native"
             TokenKind.Pass: "pass"
+            TokenKind.Kernel: "kernel"
             TokenKind.With: "with"
             TokenKind.Wait: "wait"
             TokenKind.Task: "task"

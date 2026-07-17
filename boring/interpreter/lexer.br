@@ -88,11 +88,11 @@ def string dedent_triple(string raw):
     var [string] result = []
     for ln in lines:
         if ln.trim().length == 0:
-            result.append("")
+            result.push("")
         elif ln.length >= min_indent:
-            result.append(ln.slice(min_indent, ln.length))
+            result.push(ln.slice(min_indent, ln.length))
         else:
-            result.append(ln)
+            result.push(ln)
     var out = ""
     for ii in 0..result.length:
         if ii > 0:
@@ -265,7 +265,7 @@ struct Lexer:
         return ch
 
     def void push(TokenKind kind):
-        self.tokens.append(Token(kind: kind, line: self.line))
+        self.tokens.push(Token(kind= kind, line= self.line))
 
     # ── Comment-start scanning (skips inside strings) ──────────────────────
     req int find_comment_start([string] line_chars):
@@ -318,7 +318,7 @@ struct Lexer:
                     current_lit = current_lit + "{{"
                 else:
                     if current_lit.length > 0:
-                        parts.append(RawInterpPart.Lit(current_lit))
+                        parts.push(RawInterpPart.Lit(current_lit))
                         current_lit = ""
                     var inner = ""
                     var depth = 0
@@ -341,9 +341,9 @@ struct Lexer:
                     let expr = expr_raw.trim()
                     let fmt = split[1]
                     if fmt.length > 0:
-                        parts.append(RawInterpPart.HoleFormatted(expr, fmt))
+                        parts.push(RawInterpPart.HoleFormatted(expr, fmt))
                     else:
-                        parts.append(RawInterpPart.Hole(expr))
+                        parts.push(RawInterpPart.Hole(expr))
             elif ch == "}}":
                 if self.match_char("}}"):
                     self.consume()
@@ -383,7 +383,7 @@ struct Lexer:
         if parts.length == 0:
             return TokenKind.Str(current_lit)
         if current_lit.length > 0:
-            parts.append(RawInterpPart.Lit(current_lit))
+            parts.push(RawInterpPart.Lit(current_lit))
         return TokenKind.StringInterp(parts)
 
     # ── Lex a number (first digit already read) ────────────────────────────
@@ -533,6 +533,7 @@ struct Lexer:
             "pass": return TokenKind.Pass
             "native": return TokenKind.Native
             "mod": return TokenKind.Mod
+            "kernel": return TokenKind.Kernel
             "true": return TokenKind.Bool(true)
             "false": return TokenKind.Bool(false)
             "nil": return TokenKind.Nil
@@ -671,7 +672,7 @@ struct Lexer:
                 self.pos += 1
                 continue
             let kind = self.lex_one_token()
-            line_tokens.append(Token(kind: kind, line: self.line))
+            line_tokens.push(Token(kind= kind, line= self.line))
         return line_tokens
 
     # ── Main tokenize pass ────────────────────────────────────────────────
@@ -721,7 +722,7 @@ struct Lexer:
                         break
                 let cur_indent = self.indent_stack[self.indent_stack.length - 1]
                 if line_indent > cur_indent:
-                    self.indent_stack.append(line_indent)
+                    self.indent_stack.push(line_indent)
                     self.push(TokenKind.Indent)
                 elif line_indent < cur_indent:
                     while true:
@@ -746,10 +747,10 @@ struct Lexer:
                 match t.kind:
                     TokenKind.Colon: last_is_colon = true
                     _: last_is_colon = false
-                self.tokens.append(t)
+                self.tokens.push(t)
             if last_is_colon and self.paren_depth > 0:
                 self.inner_colon_blocks += 1
-                self.inner_block_base_indents.append(line_indent)
+                self.inner_block_base_indents.push(line_indent)
             if self.paren_depth == 0 or last_is_colon or self.inner_colon_blocks > 0:
                 self.push(TokenKind.Newline)
             i += 1

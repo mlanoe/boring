@@ -178,13 +178,51 @@ fn load_project_toml() -> (BoringToml, PathBuf) {
     (toml, toml_path)
 }
 
+/// Walk up from `start` (a file or directory) looking for an ancestor directory
+/// containing `boring.toml`, treating it as the project root. Returns `None` if
+/// no such ancestor exists (e.g. a standalone script run outside any project).
+///
+/// Used by `boring run` so a script under `test/` or `examples/` can `use` a
+/// module that lives under the project's `src/` directory without requiring
+/// `BORING_PATH` to be set manually — mirroring the `src/`-rooted layout
+/// `boring build` already assumes for a project's `boring.toml`.
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    // Resolve to an absolute path first: a relative `start` like "foo.br" (no
+    // directory component) must still walk up from the real current directory,
+    // not stop after checking CWD once because the relative path ran out of
+    // components.
+    let absolute = start.canonicalize().ok()?;
+    let mut dir: &Path = if absolute.is_dir() { &absolute } else { absolute.parent()? };
+    loop {
+        if dir.join("boring.toml").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
 // â”€â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn main() {
     // Windows default stack is 1 MB â€” too small for the interpreter's recursive
     // descent (expression evaluation, type resolution, pattern matching).
-    // Spawn a new thread with an 8 MB stack so the same code runs everywhere.
-    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+    // Spawn a new thread with a much larger stack so the same code runs
+    // everywhere. Each level of *interpreted* recursion (e.g. a user-defined
+    // function calling itself) costs far more native stack than it looks like
+    // it should: one Boring-level call spans a whole chain of native frames
+    // (eval_expr -> call_fn -> exec_block -> exec_stmt -> eval_expr -> ...),
+    // and in an unoptimized debug build of `boring` itself, the interpreter's
+    // large match-based eval_expr/exec_stmt functions don't get their stack
+    // slots reused across match arms the way a release build's optimizer
+    // would, multiplying the per-call cost roughly 10x. With the previous
+    // 8 MB, a debug build of the interpreter overflowed on a plain recursive
+    // function (e.g. a factorial) after only ~15-20 levels of recursion —
+    // even a release build only reached ~190 levels. 256 MB is only a
+    // virtual-memory reservation (pages are committed lazily as the stack
+    // actually grows), so it costs nothing for shallow programs; it raises
+    // that ceiling to roughly the thousands in debug builds and much higher
+    // in release builds.
+    const STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MB
     let builder = std::thread::Builder::new().stack_size(STACK_SIZE);
     let handler = builder.spawn(run).expect("failed to spawn main thread");
     match handler.join() {
@@ -220,6 +258,10 @@ fn parse_run_flags(args: &[String]) -> (Option<String>, Option<&str>) {
                     eprintln!("error: --gpu requires a profile name");
                     process::exit(1);
                 }
+            }
+            "--" => {
+                // Everything after `--` is passed to the script via args() — stop parsing here.
+                break;
             }
             s if !s.starts_with('-') => {
                 if file.is_some() {
@@ -671,6 +713,17 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     // Add the file's directory to the search path for `use` resolution
     if let Some(dir) = path.parent() {
         interp.add_search_path(dir.to_path_buf());
+    }
+
+    // If this file belongs to a project (an ancestor directory has a
+    // `boring.toml`), also search that project's `src/` directory — so a
+    // script under `test/` or `examples/` can `use` a module that lives in
+    // `src/` without needing `BORING_PATH` set. See `find_project_root`.
+    if let Some(root) = find_project_root(&path) {
+        let src_dir = root.join("src");
+        if src_dir.is_dir() {
+            interp.add_search_path(src_dir);
+        }
     }
 
     // Add BORING_PATH entries (uses OS path-list separator: `:` on Unix, `;` on Windows)

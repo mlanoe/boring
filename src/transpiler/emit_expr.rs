@@ -2989,6 +2989,11 @@ impl Transpiler {
             "args" => {
                 format!("std::env::args().skip(1).map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
             }
+            // raw_args() — same as args() in compiled binaries (there is no `boring run`
+            // prefix to strip, and no implicit `--` filtering either way).
+            "raw_args" => {
+                format!("std::env::args().skip(1).map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
+            }
             "ord" => {
                 let s = self.emit_expr(&args[0].value);
                 format!("({}).chars().next().expect(\"ord: empty string\") as i64", s)

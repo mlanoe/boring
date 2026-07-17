@@ -10,11 +10,112 @@ use eval
 use stdlib
 
 # == MAIN ==
+#
+# Accepts the same launch parameters as `boring run`, so this self-hosted
+# interpreter can be swapped in for the Rust one without changing how it's
+# invoked:
+#     [--gpu <profile>] [file.br] [-- script-args...]
+# With no file given, falls back to the `main` file declared in boring.toml
+# in the current directory — mirrors `boring run` with no file argument.
+#
+# Uses raw_args() rather than args(): args() is meant for a script to read
+# its own pass-through arguments and truncates everything before a `--`,
+# which would swallow our own --gpu/file flags whenever a script also
+# receives args after `--`. raw_args() returns everything, unfiltered.
+
+struct RunArgs:
+    string? gpu_profile
+    string? file
+    [string] script_args
+
+def RunArgs parse_run_args([string] argv):
+    var string? gpu_profile = nil
+    var string? file = nil
+    var [string] script_args = []
+    var int i = 0
+    while i < argv.length:
+        let a = argv[i]
+        if a == "--gpu":
+            i = i + 1
+            if i < argv.length:
+                gpu_profile = argv[i]
+            else:
+                error "error: --gpu requires a profile name"
+                exit(1)
+        elif a == "--":
+            i = i + 1
+            while i < argv.length:
+                script_args.push(argv[i])
+                i = i + 1
+            return RunArgs(gpu_profile, file, script_args)
+        elif a.startsWith("-"):
+            error "error: unknown run flag '{a}'"
+            exit(1)
+        else:
+            if file != nil:
+                error "error: unexpected extra argument '{a}' (a file was already given)"
+                exit(1)
+            file = a
+        i = i + 1
+    RunArgs(gpu_profile, file, script_args)
+
+def void print_help():
+    print "Boring language interpreter (self-hosted)"
+    print ""
+    print "USAGE:"
+    print "    <interpreter> [--gpu <profile>] [file.br] [-- args...]"
+    print "    <interpreter>                        Run the project in the current directory"
+    print "    <interpreter> --help | -h             Show this help"
+    print ""
+    print "Accepts the same launch parameters as `boring run`, so it can be"
+    print "swapped in for the Rust interpreter without changing invocation syntax."
+
+# Extracts the value from a `key = "value"` or `key = value` boring.toml line.
+def string extract_toml_value(string line):
+    let parts = line.split("=")
+    if parts.length < 2:
+        return ""
+    var string val = parts[1].trim()
+    var int i = 2
+    while i < parts.length:
+        val = val + "=" + parts[i].trim()
+        i = i + 1
+    if val.length >= 2 and val.startsWith("\"") and val.endsWith("\""):
+        return val.slice(1, val.length - 1)
+    val
+
+# Reads the `main` file declared in boring.toml, mirroring the Rust
+# interpreter's `run_project()`. Defaults to "main.br" if unspecified.
+def string resolve_project_main() throws:
+    let content = fs.read("boring.toml")
+    var string main_file = "main.br"
+    for line in content.split("\n"):
+        let trimmed = line.trim()
+        if trimmed.startsWith("main"):
+            let v = extract_toml_value(trimmed)
+            if v.length > 0:
+                main_file = v
+    main_file
 
 def void main() throws:
-    var source = ""
-    while let ln = readLine():
-        source = source + ln + "\n"
+    let raw = raw_args()
+    if raw.length > 0 and (raw[0] == "--help" or raw[0] == "-h"):
+        print_help()
+        exit(0)
+    let parsed = parse_run_args(raw)
+    # GPU profile simulation isn't implemented in the self-hosted interpreter
+    # yet; --gpu is accepted (for CLI compatibility with `boring run --gpu
+    # <profile>`) but currently has no effect.
+    var string source = ""
+    if let f = parsed.file:
+        source = fs.read(f)
+    elif fs.exists("boring.toml"):
+        source = fs.read(resolve_project_main())
+    else:
+        # No file, no project — read the script from stdin (pipe or redirect).
+        while let ln = readLine():
+            source = source + ln + "\n"
     let prog = parse(source)
     var interp = new_interpreter()
+    interp.cli_args = parsed.script_args
     run_program(interp, prog)

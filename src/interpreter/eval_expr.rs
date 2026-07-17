@@ -44,6 +44,57 @@ fn parse_screen_args(args: &[Value]) -> (u64, u64, String) {
 }
 
 impl Interpreter {
+    /// Fast path for `var_name.mutatingArrayMethod(args)` on a plain local variable.
+    ///
+    /// The generic `MethodCall` handling reads the receiver via `eval_expr` (which
+    /// clones the `Rc<Vec<Value>>` out of the env slot while the slot's own copy
+    /// stays alive too), so by the time the mutation runs, at least two owners of
+    /// the same `Vec` are alive and copy-on-write (`Value::rc_vec_into_owned`)
+    /// always has to deep-clone — an O(n) cost on every `.push()` in a loop, i.e.
+    /// O(n^2) overall. Taking the value out of the slot instead (leaving a `Nil`
+    /// placeholder) drops that to one owner in the common unaliased case, making
+    /// `push` etc. O(1) amortized instead of O(n) per call.
+    ///
+    /// Restricted to methods that can never fail after taking ownership — `pop`,
+    /// `removeAt`, and `sortBy` can error out (empty array / bad index / a
+    /// throwing closure) after ownership is already taken, and unlike the generic
+    /// path (which only ever operates on a *clone*, leaving the env's own copy
+    /// untouched) there would be no original left to restore. Those stay on the
+    /// slower, always-safe generic path below.
+    ///
+    /// Returns `None` if the fast path doesn't apply (wrong method, or the
+    /// variable doesn't currently hold an array) — the caller falls through to
+    /// the generic path unchanged. `#[inline(never)]` so this stays its own stack
+    /// frame rather than inflating `eval_expr`'s (a big, deeply-recursive match)
+    /// on every call.
+    #[inline(never)]
+    pub(crate) fn try_fast_mutating_array_call(
+        &mut self,
+        name: &str,
+        method: &str,
+        args: &[Arg],
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Eval> {
+        const FAST_MUTATING_ARRAY_METHODS: &[&str] =
+            &["push", "append", "insert", "remove", "sort", "reverse"];
+        if !FAST_MUTATING_ARRAY_METHODS.contains(&method)
+            || !matches!(env.borrow().get(name), Some(Value::Array(_)))
+        {
+            return None;
+        }
+        Some((|| {
+            let arg_vals = self.eval_args(args, Rc::clone(env))?;
+            let taken = env.borrow_mut().take(name).ok_or_else(|| {
+                err(format!("internal error: variable '{}' disappeared", name), line)
+            })?;
+            let mut modified_self: Option<Value> = None;
+            let result = self.call_method(taken, method, arg_vals, line, &mut modified_self)?;
+            env.borrow_mut().force_set(name, modified_self.unwrap_or(Value::Nil));
+            Ok(result)
+        })())
+    }
+
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
         let line = expr.line;
         let col = expr.col;
@@ -257,7 +308,7 @@ impl Interpreter {
                             } else {
                                 arr[lo..hi.min(arr.len())].to_vec()
                             };
-                            return Ok(Value::Array(slice));
+                            return Ok(Value::Array(slice.into()));
                         }
                         Value::Str(s) => {
                             let chars: Vec<char> = s.chars().collect();
@@ -498,7 +549,7 @@ impl Interpreter {
                     }
                     // GPU.all() — iterate all GPU devices (simulation: a single device).
                     if v == "GPU" && method == "all" {
-                        return Ok(Value::Array(vec![Value::GpuDevice(0)]));
+                        return Ok(Value::Array(vec![Value::GpuDevice(0)].into()));
                     }
                 }
 
@@ -524,6 +575,17 @@ impl Interpreter {
                         }
                     }
                 }
+                // Fast path: `var_name.mutatingArrayMethod(args)` on a plain local
+                // variable. See `try_fast_mutating_array_call`'s doc comment. Kept in
+                // its own #[inline(never)] function so this large `eval_expr` match
+                // doesn't gain extra stack-frame size for every call (this recursive
+                // function runs close to the debug-build stack limit in some existing
+                // call chains — inlining this directly here previously overflowed it).
+                if let ExprKind::Var(name) = &obj_expr.kind {
+                    if let Some(result) = self.try_fast_mutating_array_call(name, method, args, &env, line) {
+                        return result;
+                    }
+                }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 // GPU device property methods — simulation mock values.
                 if let Value::GpuDevice(idx) = &obj {
@@ -534,7 +596,7 @@ impl Interpreter {
                         "name"              => Value::Str(format!("{} (sim {})", p.name, idx)),
                         "totalMem"          => Value::Int(p.total_mem),
                         "freeMem"           => Value::Int(p.total_mem),  // nothing else running
-                        "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)]),
+                        "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)].into()),
                         "warpSize"          => Value::Int(p.warp_size),
                         "maxThreads"        => Value::Int(p.max_threads),
                         "maxSharedMem"      => Value::Int(p.max_shared_mem),
@@ -759,20 +821,20 @@ impl Interpreter {
                 for e in elems {
                     vals.push(self.eval_expr(e, Rc::clone(&env))?);
                 }
-                Ok(Value::Array(vals))
+                Ok(Value::Array(vals.into()))
             }
 
             ExprKind::ArrayFill { value, count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
                 let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
                 let v = self.eval_expr(value, Rc::clone(&env))?;
-                Ok(Value::Array(vec![v; n]))
+                Ok(Value::Array(vec![v; n].into()))
             }
 
             ExprKind::ArrayAlloc { count } => {
                 let cv = self.eval_expr(count, Rc::clone(&env))?;
                 let n = match cv { Value::Int(n) => n as usize, Value::Uint(n) => n as usize, _ => return Err(Signal::Error(RuntimeError { message: "array count must be int".into(), line: expr.line, col: 0, len: 0 })) };
-                Ok(Value::Array(vec![Value::Int(0); n]))
+                Ok(Value::Array(vec![Value::Int(0); n].into()))
             }
 
             ExprKind::ArrayComp { expr, var, count } => {
@@ -784,13 +846,13 @@ impl Interpreter {
                     inner.borrow_mut().define(var, Value::Int(i as i64));
                     vals.push(self.eval_expr(expr, Rc::clone(&inner))?);
                 }
-                Ok(Value::Array(vals))
+                Ok(Value::Array(vals.into()))
             }
 
             ExprKind::ArrayCompIter { expr, var, iter } => {
                 let col = self.eval_expr(iter, Rc::clone(&env))?;
-                let elems = match col {
-                    Value::Array(v) => v,
+                let elems: Vec<Value> = match col {
+                    Value::Array(v) => Rc::try_unwrap(v).unwrap_or_else(|rc| (*rc).clone()),
                     _ => return Err(Signal::Error(RuntimeError { message: "array comprehension source must be an array".into(), line: expr.line, col: 0, len: 0 })),
                 };
                 let mut vals = Vec::with_capacity(elems.len());
@@ -799,7 +861,7 @@ impl Interpreter {
                     inner.borrow_mut().define(var, item);
                     vals.push(self.eval_expr(expr, Rc::clone(&inner))?);
                 }
-                Ok(Value::Array(vals))
+                Ok(Value::Array(vals.into()))
             }
 
             ExprKind::Tuple(elems) => {
@@ -1210,7 +1272,11 @@ impl Interpreter {
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
-                (Value::Array(mut a), Value::Array(b)) => { a.extend(b); Ok(Value::Array(a)) }
+                (Value::Array(a), Value::Array(b)) => {
+                    let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
+                    new_vec.extend(b.iter().cloned());
+                    Ok(Value::Array(new_vec.into()))
+                }
                 (a, b) => {
                     // Try user-defined operator overload first (e.g. `Vec2 + Vec2`)
                     if let Some(result) = self.try_operator_method(&a, "add", b.clone(), line)? {
@@ -1583,7 +1649,7 @@ impl Interpreter {
             // std::collections::BTreeSet →  boring Set
             "BTreeSet" => Ok(Value::Set(vec![])),
             // Vec  →  boring Array (optionally pre-filled)
-            "Vec" | "VecDeque" => Ok(Value::Array(args)),
+            "Vec" | "VecDeque" => Ok(Value::Array(args.into())),
             // String  →  boring Str
             "String" => {
                 match args.into_iter().next() {

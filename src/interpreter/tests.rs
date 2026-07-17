@@ -274,7 +274,7 @@ fn test_trailing_closure_inline() {
 let _result = [1, 2, 3].map (x): x * 2
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
+        assert_eq!(*v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
     } else { panic!("expected Array"); }
 }
 
@@ -295,7 +295,7 @@ let _result = [1, 2, 3].filter (x): x > 1
                         .map (x): x * 10
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(20), Value::Int(30)]);
+        assert_eq!(*v, vec![Value::Int(20), Value::Int(30)]);
     } else { panic!("expected Array"); }
 }
 
@@ -306,7 +306,7 @@ let _result = [1, 2, 3].map (x):
     x * 2
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
+        assert_eq!(*v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
     } else { panic!("expected Array"); }
 }
 
@@ -339,7 +339,7 @@ fn test_trailing_closure_no_paren() {
 let _result = [1, 2, 3].map x: x * 2
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
+        assert_eq!(*v, vec![Value::Int(2), Value::Int(4), Value::Int(6)]);
     } else { panic!("expected Array"); }
 }
 
@@ -349,7 +349,7 @@ fn test_closure_no_paren_as_arg() {
 let _result = [1, 2, 3].filter(x: x > 1)
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(2), Value::Int(3)]);
+        assert_eq!(*v, vec![Value::Int(2), Value::Int(3)]);
     } else { panic!("expected Array"); }
 }
 
@@ -360,7 +360,7 @@ let _result = [1, 2, 3].map x:
     x * 3
 ";
     if let Value::Array(v) = run_src(src) {
-        assert_eq!(v, vec![Value::Int(3), Value::Int(6), Value::Int(9)]);
+        assert_eq!(*v, vec![Value::Int(3), Value::Int(6), Value::Int(9)]);
     } else { panic!("expected Array"); }
 }
 

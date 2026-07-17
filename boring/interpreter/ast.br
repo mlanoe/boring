@@ -251,6 +251,7 @@ enum Stmt:
     Alias(AliasDecl decl)
     Yield(Expr expr, int line)
     Comment(string text)
+    KernelBlock([Stmt] body, int line)
 
 struct LetDestructureStmt:
     bool mutable

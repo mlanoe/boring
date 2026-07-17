@@ -1968,7 +1968,7 @@ fn test_slice_m_to_n() {
 let a = [10, 20, 30, 40, 50]
 let _result = a[1..3]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30)].into()));
 }
 
 #[test]
@@ -1977,7 +1977,7 @@ fn test_slice_from_start() {
 let a = [10, 20, 30, 40, 50]
 let _result = a[..3]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)].into()));
 }
 
 #[test]
@@ -1986,7 +1986,7 @@ fn test_slice_to_end() {
 let a = [10, 20, 30, 40, 50]
 let _result = a[2..]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(30), Value::Int(40), Value::Int(50)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(30), Value::Int(40), Value::Int(50)].into()));
 }
 
 #[test]
@@ -1995,7 +1995,7 @@ fn test_slice_full() {
 let a = [1, 2, 3]
 let _result = a[..]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)].into()));
 }
 
 #[test]
@@ -2004,7 +2004,7 @@ fn test_slice_inclusive() {
 let a = [10, 20, 30, 40, 50]
 let _result = a[1..=3]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30), Value::Int(40)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(20), Value::Int(30), Value::Int(40)].into()));
 }
 
 #[test]
@@ -2013,7 +2013,7 @@ fn test_slice_empty_range() {
 let a = [10, 20, 30]
 let _result = a[2..1]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![]));
+    assert_eq!(run_src(src), Value::Array(vec![].into()));
 }
 
 #[test]
@@ -2022,7 +2022,7 @@ fn test_slice_out_of_bounds_clamps() {
 let a = [1, 2, 3]
 let _result = a[1..100]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3)].into()));
 }
 
 #[test]
@@ -2033,7 +2033,7 @@ let lo = 1
 let hi = 4
 let _result = a[lo..hi]
 "#;
-    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3), Value::Int(4)]));
+    assert_eq!(run_src(src), Value::Array(vec![Value::Int(2), Value::Int(3), Value::Int(4)].into()));
 }
 
 #[test]
@@ -2059,9 +2059,9 @@ let _result = m
     assert_eq!(
         run_src(src),
         Value::Array(vec![
-            Value::Array(vec![Value::Float(1.0), Value::Float(2.0)]),
-            Value::Array(vec![Value::Float(3.0), Value::Float(4.0)]),
-        ])
+            Value::Array(vec![Value::Float(1.0), Value::Float(2.0)].into()),
+            Value::Array(vec![Value::Float(3.0), Value::Float(4.0)].into()),
+        ].into())
     );
 }
 
@@ -2083,10 +2083,10 @@ let _result = rows
     assert_eq!(
         run_src(src),
         Value::Array(vec![
-            Value::Array(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)]),
-            Value::Array(vec![Value::Float(0.0), Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)]),
-            Value::Array(vec![Value::Float(0.0), Value::Float(2.0), Value::Float(4.0), Value::Float(6.0)]),
-        ])
+            Value::Array(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)].into()),
+            Value::Array(vec![Value::Float(0.0), Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)].into()),
+            Value::Array(vec![Value::Float(0.0), Value::Float(2.0), Value::Float(4.0), Value::Float(6.0)].into()),
+        ].into())
     );
 }
 
@@ -2146,7 +2146,7 @@ let _result = ids
         .unwrap()
         .join()
         .unwrap();
-    assert_eq!(result, format!("{:?}", Value::Array(vec![Value::Int(7)])));
+    assert_eq!(result, format!("{:?}", Value::Array(vec![Value::Int(7)].into())));
 }
 
 #[test]
@@ -2213,7 +2213,7 @@ let _result = all_ids
         .unwrap();
     assert_eq!(
         result,
-        format!("{:?}", Value::Array(vec![Value::Int(13), Value::Int(24), Value::Int(23)]))
+        format!("{:?}", Value::Array(vec![Value::Int(13), Value::Int(24), Value::Int(23)].into()))
     );
 }
 
@@ -2244,7 +2244,7 @@ let _result = [items[0].name, items[1].name, items[2].name]
             Value::Str("a".into()),
             Value::Str("b".into()),
             Value::Str("c".into()),
-        ])
+        ].into())
     );
 }
 
@@ -2265,6 +2265,6 @@ let _result = [items[0].name, items[1].name, items[2].name]
             Value::Str("c".into()),
             Value::Str("b".into()),
             Value::Str("a".into()),
-        ])
+        ].into())
     );
 }

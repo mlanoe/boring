@@ -23,7 +23,7 @@ def [Stmt] parse_inline_stmts(mut Parser p) throws:
         # stop if no progress (Newline, Dedent, or end)
         if parser_check(p, "Newline"):
             break
-        stmts.append(parse_inline_stmt(p))
+        stmts.push(parse_inline_stmt(p))
     stmts
 
 def [Stmt] parse_inline_stmts_if_body(mut Parser p) throws:
@@ -32,7 +32,7 @@ def [Stmt] parse_inline_stmts_if_body(mut Parser p) throws:
         parser_advance(p)
         if parser_is_newline(p) or parser_check(p, "Eof") or parser_check(p, "Else") or parser_check(p, "Elif"):
             break
-        stmts.append(parse_inline_if_body(p))
+        stmts.push(parse_inline_if_body(p))
     stmts
 
 def string parser_peek_kind(mut Parser p):
@@ -124,7 +124,7 @@ def Stmt parse_inline_stmt_impl(mut Parser p, bool stop_at_else) throws:
             var args = []
             while true:
                 let arg = parse_or(p)
-                args.append(make_arg(nil, arg, false))
+                args.push(make_arg(nil, arg, false))
                 if not parser_eat(p, "Comma"):
                     break
             make_call(lhs, args, line)
@@ -536,7 +536,7 @@ def Expr parse_primary(mut Parser p) throws:
             while parser_eat(p, "Comma"):
                 if parser_check(p, "Gt"):
                     break
-                type_args.append(parse_type(p))
+                type_args.push(parse_type(p))
             parser_expect(p, "Gt")
             let callee = make_var_expr(name, line)
             let args = if parser_check(p, "LParen"): parse_call_args(p) else: []
@@ -598,7 +598,7 @@ def Expr parse_primary(mut Parser p) throws:
                 parser_skip_newlines_and_indent(p)
                 if parser_check(p, "RParen"):
                     break
-                params.append(parse_param(p))
+                params.push(parse_param(p))
             parser_skip_newlines_and_indent(p)
             parser_expect(p, "RParen")
             let ex = parse_closure_modifiers(p)
@@ -613,7 +613,7 @@ def Expr parse_primary(mut Parser p) throws:
                 parser_skip_newlines_and_indent(p)
                 if parser_check(p, "RParen"):
                     break
-                elems.append(parse_expr(p))
+                elems.push(parse_expr(p))
             parser_skip_newlines_and_indent(p)
             parser_expect(p, "RParen")
             let ex = parse_closure_modifiers(p)
@@ -676,7 +676,7 @@ def Expr parse_primary(mut Parser p) throws:
             if parser_eat(p, "Comma"):
                 parser_skip_newlines_and_indent(p)
                 while not parser_check(p, "RBracket") and not parser_check(p, "Eof"):
-                    elems.append(parse_expr(p))
+                    elems.push(parse_expr(p))
                     if not parser_eat(p, "Comma"):
                         break
                     parser_skip_newlines_and_indent(p)
@@ -710,7 +710,7 @@ def Expr parse_primary(mut Parser p) throws:
         parser_expect(p, "LParen")
         var exprs = []
         while not parser_check(p, "RParen") and not parser_check(p, "Eof"):
-            exprs.append(parse_expr(p))
+            exprs.push(parse_expr(p))
             if not parser_eat(p, "Comma"):
                 break
         parser_expect(p, "RParen")
@@ -736,7 +736,7 @@ def [Arg] parse_call_args(mut Parser p) throws:
     parser_set_allow_trailing_closure(p, true)
     var args = []
     while not parser_check(p, "RParen") and not parser_check(p, "Eof"):
-        args.append(parse_arg(p))
+        args.push(parse_arg(p))
         if not parser_eat(p, "Comma"):
             break
         parser_skip_newlines_and_indent(p)
@@ -780,7 +780,7 @@ def Expr parse_brace_expr(mut Parser p, int line) throws:
             let k = parse_expr(p)
             parser_expect(p, "Eq")
             let v = parse_expr(p)
-            pairs.append((k, v))
+            pairs.push((k, v))
         parser_skip_newlines_and_indent(p)
         parser_expect(p, "RBrace")
         return make_dict(pairs, line)
@@ -790,7 +790,7 @@ def Expr parse_brace_expr(mut Parser p, int line) throws:
             parser_skip_newlines_and_indent(p)
             if parser_check(p, "RBrace"):
                 break
-            elems.append(parse_expr(p))
+            elems.push(parse_expr(p))
         parser_skip_newlines_and_indent(p)
         parser_expect(p, "RBrace")
         return make_set(elems, line)
@@ -800,29 +800,29 @@ def [StringSegment] resolve_interp(mut Parser p, [RawInterpPart] parts, int line
     for part in parts:
         match part:
             Lit(s):
-                segments.append(segment_lit(s))
+                segments.push(segment_lit(s))
             Hole(code):
                 if string_trim(code) == "":
-                    segments.append(segment_lit("{}"))
+                    segments.push(segment_lit("{}"))
                 else:
                     let hole_tokens = lex(code)
                     mut sub_parser = make_parser(hole_tokens)
                     parser_skip_newlines(sub_parser)
                     let expr = parse_expr(sub_parser)
-                    segments.append(segment_expr(expr))
+                    segments.push(segment_expr(expr))
             HoleFormatted(code, fmt):
                 if string_trim(code) == "":
                     var spec_text = "{{"
                     spec_text = spec_text + ":"
                     spec_text = spec_text + fmt
                     spec_text = spec_text + "}}"
-                    segments.append(segment_lit(spec_text))
+                    segments.push(segment_lit(spec_text))
                 else:
                     let hole_tokens = lex(code)
                     mut sub_parser = make_parser(hole_tokens)
                     parser_skip_newlines(sub_parser)
                     let expr = parse_expr(sub_parser)
-                    segments.append(segment_formatted_expr(expr, fmt))
+                    segments.push(segment_formatted_expr(expr, fmt))
     segments
 
 def ClosureBody parse_closure_body(mut Parser p) throws:
@@ -849,7 +849,7 @@ def [Arg] parse_trailing_closure(mut Parser p, [Arg] existing_args) throws:
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
     var args = existing_args
-    args.append(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false))
     args
 
 def [Arg] parse_trailing_body(mut Parser p, [Arg] existing_args) throws:
@@ -863,7 +863,7 @@ def [Arg] parse_trailing_body(mut Parser p, [Arg] existing_args) throws:
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
-    args.append(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false))
     args
 
 def [Arg] parse_trailing_body_no_colon(mut Parser p, [Arg] existing_args) throws:
@@ -873,7 +873,7 @@ def [Arg] parse_trailing_body_no_colon(mut Parser p, [Arg] existing_args) throws
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
-    args.append(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false))
     args
 
 def [Arg] parse_trailing_closure_no_paren(mut Parser p, [Arg] existing_args) throws:
@@ -888,7 +888,7 @@ def [Arg] parse_trailing_closure_no_paren(mut Parser p, [Arg] existing_args) thr
     let (throws_task, body) = infer_throws_task(body)
     let closure_expr = make_closure([param], nil, body, throws_task.can_throw, throws_task.is_task, line)
     var args = existing_args
-    args.append(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false))
     args
 
 def [Param] parse_closure_params(mut Parser p) throws:
@@ -900,11 +900,11 @@ def [Param] parse_closure_params(mut Parser p) throws:
         return params
     while not parser_check(p, "RParen") and not parser_check(p, "Eof"):
         if parser_is_type_start_before_ident(p):
-            params.append(parse_param(p))
+            params.push(parse_param(p))
         else:
             let line = parser_line(p)
             let name = parser_expect_ident(p)
-            params.append(make_param_at(name, nil, false, line))
+            params.push(make_param_at(name, nil, false, line))
         if not parser_eat(p, "Comma"):
             break
         parser_skip_newlines_and_indent(p)
@@ -977,7 +977,7 @@ def [Stmt] parse_stmts_until_dedent(mut Parser p) throws:
         parser_skip_newlines(p)
         if parser_check(p, "Dedent") or parser_check(p, "Eof") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace"):
             break
-        stmts.append(parse_stmt(p))
+        stmts.push(parse_stmt(p))
     stmts
 
 def Stmt parse_stmt(mut Parser p) throws:
@@ -1110,6 +1110,20 @@ def Stmt parse_stmt(mut Parser p) throws:
             return stmt_enum(parse_enum_decl(p, true))
         else:
             return stmt_fn(parse_fn_decl(p, true, true))
+    if parser_check(p, "Kernel"):
+        let kline = parser_line(p)
+        parser_advance(p)
+        # `kernel Name:` → struct declaration (skip here); `kernel:` / `kernel expr` → block
+        let next_is_named_decl = parser_check(p, "Ident") and parser_peek_next_is(p, "Colon")
+        if not next_is_named_decl:
+            parser_eat(p, "Colon")
+            let body = if parser_is_newline(p) or parser_check(p, "Eof"):
+                parser_expect_newline(p)
+                parse_block(p)
+            else:
+                let s = parse_stmt(p)
+                [s]
+            return stmt_kernel_block(body, kline)
     if parser_check(p, "Task"):
         if parser_peek_next_is(p, "Def"):
             return stmt_fn(parse_fn_decl(p, false, true))
@@ -1143,7 +1157,7 @@ def Stmt parse_stmt(mut Parser p) throws:
             var args = []
             while true:
                 let arg = parse_or(p)
-                args.append(make_arg(nil, arg, false))
+                args.push(make_arg(nil, arg, false))
                 if not parser_eat(p, "Comma"):
                     break
             make_call(lhs, args, line)
@@ -1177,7 +1191,7 @@ def LetStmt parse_let_stmt_pub(mut Parser p, bool is_pub) throws:
             (parser_expect_ident(p), nil)
         let (string lz_name, Type? lz_ty) = name_ty
         parser_expect_newline_soft(p)
-        return LetStmt(mutable: false, is_pub: is_pub, is_static: is_static, is_lazy: true, name: lz_name, ty: lz_ty, value: nil, line: line)
+        return LetStmt(mutable= false, is_pub= is_pub, is_static= is_static, is_lazy= true, name= lz_name, ty= lz_ty, value= nil, line= line)
     let name_ty = if parser_is_type_start_before_ident(p):
         let base = parse_type(p)
         let ty = parse_type_qualifier(p, base)
@@ -1231,7 +1245,7 @@ def LetDestructureStmt parse_let_destructure(mut Parser p, bool mutable, int lin
         else:
             (parser_expect_ident(p), nil)
         let (string dt_name, Type? dt_ty) = name_ty
-        bindings.append(make_destructure_binding(dt_name, dt_ty))
+        bindings.push(make_destructure_binding(dt_name, dt_ty))
         if not parser_eat(p, "Comma"):
             break
         parser_skip_newlines_and_indent(p)
@@ -1275,7 +1289,7 @@ def IfStmt parse_if_stmt(mut Parser p) throws:
     parser_expect(p, "Colon")
     if not parser_is_newline(p) and not parser_check(p, "Eof"):
         let then_stmts = parse_inline_stmts_if_body(p)
-        var branches = [IfBranch(cond: cond, body: then_stmts)]
+        var branches = [IfBranch(cond= cond, body= then_stmts)]
         var [Stmt]? else_body = nil
         while true:
             if parser_check(p, "Elif"):
@@ -1288,7 +1302,7 @@ def IfStmt parse_if_stmt(mut Parser p) throws:
                 parser_set_allow_trailing_closure(p, true)
                 parser_expect(p, "Colon")
                 let elif_stmts = parse_inline_stmts_if_body(p)
-                branches.append(IfBranch(cond: elif_cond, body: elif_stmts))
+                branches.push(IfBranch(cond= elif_cond, body= elif_stmts))
             elif parser_check(p, "Else"):
                 parser_advance(p)
                 else_body = parse_else_body_stmts(p)
@@ -1313,7 +1327,7 @@ def IfStmt parse_if_stmt(mut Parser p) throws:
                     else:
                         parser_expect_newline(p)
                         parse_block(p)
-                    branches.append(IfBranch(cond: elif_cond, body: elif_body))
+                    branches.push(IfBranch(cond= elif_cond, body= elif_body))
                 elif parser_check(p, "Else"):
                     parser_advance(p)
                     else_body = parse_else_body_stmts(p)
@@ -1325,7 +1339,7 @@ def IfStmt parse_if_stmt(mut Parser p) throws:
         return make_if_stmt(branches, else_body, line)
     parser_expect_newline(p)
     let body = parse_block(p)
-    var branches = [IfBranch(cond: cond, body: body)]
+    var branches = [IfBranch(cond= cond, body= body)]
     var [Stmt]? else_body = nil
     while true:
         parser_skip_newlines(p)
@@ -1343,7 +1357,7 @@ def IfStmt parse_if_stmt(mut Parser p) throws:
             else:
                 parser_expect_newline(p)
                 parse_block(p)
-            branches.append(IfBranch(cond: elif_cond, body: elif_body))
+            branches.push(IfBranch(cond= elif_cond, body= elif_body))
         elif parser_check(p, "Else"):
             parser_advance(p)
             else_body = parse_else_body_stmts(p)
@@ -1380,7 +1394,7 @@ def ForStmt parse_for_stmt(mut Parser p) throws:
     let vars_iterable = if parser_is_for_with_vars(p):
         var vars = [parser_expect_ident(p)]
         while parser_eat(p, "Comma"):
-            vars.append(parser_expect_ident(p))
+            vars.push(parser_expect_ident(p))
         parser_expect(p, "In")
         let iterable = parse_expr(p)
         (vars, iterable)
@@ -1420,7 +1434,7 @@ def MatchStmt parse_match_stmt(mut Parser p) throws:
         parser_skip_newlines(p)
         if parser_check(p, "Dedent") or parser_check(p, "Eof") or parser_check(p, "RParen") or parser_check(p, "RBracket") or parser_check(p, "RBrace"):
             break
-        arms.append(parse_match_arm(p))
+        arms.push(parse_match_arm(p))
     parser_eat(p, "Dedent")
     make_match_stmt(subject, arms, line)
 
@@ -1442,15 +1456,15 @@ def TryStmt parse_try_stmt(mut Parser p) throws:
                 let first_type = parser_expect_ident(p)
                 if parser_eat(p, "Dot"):
                     variant = parser_expect_ident(p)
-                    types.append(first_type)
+                    types.push(first_type)
                 else:
-                    types.append(first_type)
+                    types.push(first_type)
                     while parser_eat(p, "Comma"):
-                        types.append(parser_expect_ident(p))
+                        types.push(parser_expect_ident(p))
             parser_expect(p, "Colon")
             parser_expect_newline(p)
             let catch_body = parse_block(p)
-            catch_clauses.append(make_catch_clause(types, variant, catch_body, catch_line))
+            catch_clauses.push(make_catch_clause(types, variant, catch_body, catch_line))
         else:
             break
     make_try_stmt(body, catch_clauses, line)
@@ -1460,7 +1474,7 @@ def Stmt parse_print_stmt(mut Parser p) throws:
     parser_expect(p, "Print")
     var args = []
     while not parser_is_newline(p) and not parser_check(p, "Eof"):
-        args.append(parse_or(p))
+        args.push(parse_or(p))
         if not parser_eat(p, "Comma"):
             break
     parser_expect_newline_soft(p)
