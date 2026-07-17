@@ -54,17 +54,16 @@ impl Parser {
                 && !self.check(&TokenKind::Req));
         // `def mut` / `req mut` — mutable return value.
         // Parsed after consuming `def`/`req`, before the return type.
-        let return_mutable;
-        if !shorthand {
+        let return_mutable = if !shorthand {
             if mutating {
                 self.expect(&TokenKind::Def)?;
             } else {
                 self.expect(&TokenKind::Req)?;
             }
-            return_mutable = self.eat(&TokenKind::Mut);
+            self.eat(&TokenKind::Mut)
         } else {
-            return_mutable = false;
-        }
+            false
+        };
 
         // Return type is optional: `def foo()` defaults to void, `def int foo()` is explicit.
         // Only closures (`let f = (x): x * 2`) may omit parameter types.
@@ -183,9 +182,8 @@ impl Parser {
     /// first-occurrence order and avoiding duplicates.
     pub(crate) fn collect_type_params_from_ty(ty: &Type, out: &mut Vec<String>) {
         match ty {
-            Type::TypeParam(name) => {
-                if !out.contains(name) { out.push(name.clone()); }
-            }
+            Type::TypeParam(name)
+                if !out.contains(name) => { out.push(name.clone()); }
             Type::Optional(inner) | Type::Array(inner) | Type::Set(inner) => {
                 Self::collect_type_params_from_ty(inner, out);
             }

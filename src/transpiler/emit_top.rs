@@ -1271,7 +1271,7 @@ impl Transpiler {
                             .map(|fty| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
                             .unwrap_or(false);
                         let field_is_string = field_ty_opt.as_ref()
-                            .map(|fty| Self::is_string_type(fty))
+                            .map(Self::is_string_type)
                             .unwrap_or(false);
                         return if field_is_shared {
                             match self.config.threading {
@@ -1358,7 +1358,7 @@ impl Transpiler {
                 // Don't apply map_field to known user struct fields (same logic as emit_expr).
                 let field_s = if let ExprKind::Var(v) = &obj.kind {
                     let is_user_field = (v == "self")
-                        .then(|| self.self_type.as_deref())
+                        .then_some(self.self_type.as_deref())
                         .flatten()
                         .and_then(|t| self.struct_fields.get(t))
                         .map(|fields| fields.iter().any(|(fname, _)| fname == field))
@@ -1664,7 +1664,6 @@ impl Transpiler {
     /// multi + async fns → `Arc::new(tokio::sync::Mutex::new(v))`, multi + no async → `Arc::new(Mutex::new(v))`,
     /// single → `Rc::new(RefCell::new(v))`.
     // ── 'actor (std::sync::Mutex) ─────────────────────────────────────────────
-
     pub(crate) fn emit_actor_new(&self, inner_expr: &str) -> String {
         match self.config.threading {
             crate::transpiler::ThreadingMode::Multi  => format!("Arc::new(std::sync::Mutex::new({}))", inner_expr),

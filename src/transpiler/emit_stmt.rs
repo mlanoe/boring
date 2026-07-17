@@ -217,11 +217,7 @@ impl Transpiler {
             if let Some(ty) = &s.ty {
                 self.lazy_var_types.insert(s.name.clone(), ty.clone());
                 let inner_ty = self.emit_type(ty);
-                let once_cell = if matches!(self.config.threading, ThreadingMode::Multi) {
-                    format!("std::cell::OnceCell::<{}>::new()", inner_ty)
-                } else {
-                    format!("std::cell::OnceCell::<{}>::new()", inner_ty)
-                };
+                let once_cell = format!("std::cell::OnceCell::<{}>::new()", inner_ty);
                 self.line(&format!("let {} = {};", s.name, once_cell));
             } else {
                 // No type annotation — emit without the turbofish
@@ -429,7 +425,7 @@ impl Transpiler {
                     Type::Qualified(inner, OwnerQual::Weak)
                     if !matches!(inner.as_ref(), Type::Qualified(_, _)));
                 if is_bare_weak && val.starts_with("Arc::downgrade(") {
-                    format!(": std::sync::Weak<_>")
+                    ": std::sync::Weak<_>".to_string()
                 } else {
                     format!(": {}", self.emit_type(ty))
                 }
@@ -652,11 +648,10 @@ impl Transpiler {
         // Also handle type method calls: `let c2 = Counter2.zero()` → c2 is Counter2.
         if let ExprKind::MethodCall(callee_obj, _, _) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee_obj.kind {
-                if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    if self.struct_fields.contains_key(type_name.as_str()) {
+                if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && self.struct_fields.contains_key(type_name.as_str()) {
                         self.var_struct_types.insert(s.name.clone(), type_name.clone());
                     }
-                }
             }
         }
         if let ExprKind::Call(callee, _) = &s_value.kind {
@@ -948,9 +943,7 @@ impl Transpiler {
                     ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
                     _ => false,
                 };
-                if STRING_ONLY_METHODS.contains(&method_name.as_str()) {
-                    self.string_vars.insert(s.name.clone());
-                } else if STRING_CONDITIONAL_METHODS.contains(&method_name.as_str()) && recv_is_str {
+                if STRING_ONLY_METHODS.contains(&method_name.as_str()) || (STRING_CONDITIONAL_METHODS.contains(&method_name.as_str()) && recv_is_str) {
                     self.string_vars.insert(s.name.clone());
                 } else if method_name == "clone" {
                     // clone() on a string var or a string field access → result is also a string
@@ -1111,7 +1104,7 @@ impl Transpiler {
                 let src_var = if let ExprKind::Var(v) = &s_value.kind { v.clone() } else { val.clone() };
                 let rc_val = format!("{}.clone()", src_var);
                 self.line(&format!("{}{} {}{} = {};", vis, kw, s.name, ty, rc_val));
-                self.var_types.insert(s.name.clone(), Type::Named(format!("Rc<ref>")));
+                self.var_types.insert(s.name.clone(), Type::Named("Rc<ref>".to_string()));
                 return;
             }
         }
@@ -1264,7 +1257,7 @@ impl Transpiler {
                 // Determine struct type of left operand
                 let struct_ty = if let ExprKind::Var(v) = &l.kind {
                     self.var_struct_types.get(v.as_str()).cloned()
-                        .or_else(|| {
+                        .or({
                             // Also handle plain (non-tracked) vars whose type we know from constructor
                             None
                         })
@@ -2040,7 +2033,7 @@ impl Transpiler {
             if matches!(&callee.kind, ExprKind::Var(n) if n == "channel"));
         let is_channel = is_channel_generic || is_channel_typed;
         if is_channel {
-            if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+            if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                 if sender.name != "_" { self.channel_senders.insert(sender.name.clone()); }
                 if receiver.name != "_" {
                     self.channel_receivers.insert(receiver.name.clone());
@@ -2050,7 +2043,7 @@ impl Transpiler {
                         ExprKind::GenericCall(_, type_args, _) => type_args.first()
                             .map(|t| matches!(t, Type::Named(n) if n == "string" || n == "String"))
                             .unwrap_or(false),
-                        _ => s.bindings.get(0)
+                        _ => s.bindings.first()
                             .and_then(|b| b.ty.as_ref())
                             .map(|t| matches!(t, Type::Named(n) if n == "string" || n == "String"))
                             .unwrap_or(false),
@@ -2068,7 +2061,7 @@ impl Transpiler {
             || matches!(&s.value.kind, ExprKind::Call(callee, _)
             if matches!(&callee.kind, ExprKind::Var(n) if n == "oneshot"));
         if is_oneshot {
-            if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+            if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                 if sender.name != "_" { self.oneshot_senders.insert(sender.name.clone()); }
                 if receiver.name != "_" { self.oneshot_receivers.insert(receiver.name.clone()); }
                 self.has_streams = true;
@@ -2080,7 +2073,7 @@ impl Transpiler {
             || matches!(&s.value.kind, ExprKind::Call(callee, _)
             if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"));
         if is_broadcast {
-            if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+            if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                 if sender.name != "_" { self.broadcast_senders.insert(sender.name.clone()); }
                 if receiver.name != "_" { self.broadcast_receivers.insert(receiver.name.clone()); }
                 self.has_streams = true;
@@ -2092,7 +2085,7 @@ impl Transpiler {
             || matches!(&s.value.kind, ExprKind::Call(callee, _)
             if matches!(&callee.kind, ExprKind::Var(n) if n == "watch"));
         if is_watch {
-            if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+            if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                 if sender.name != "_" { self.watch_senders.insert(sender.name.clone()); }
                 if receiver.name != "_" { self.watch_receivers.insert(receiver.name.clone()); }
                 self.has_streams = true;
@@ -2100,7 +2093,7 @@ impl Transpiler {
         }
         // For `let T tx, rx = channel(n)`, emit with explicit type from the binding annotation.
         let val = if is_channel_typed {
-            let item_ty = s.bindings.get(0)
+            let item_ty = s.bindings.first()
                 .and_then(|b| b.ty.as_ref())
                 .map(|t| self.emit_type(t))
                 .unwrap_or_else(|| "_".to_string());
@@ -2273,7 +2266,6 @@ impl Transpiler {
                 // (static dispatch), so the concrete value must be returned as-is — no
                 // boxing.  Boxing would produce `Box<ConcreteType>` which does NOT
                 // automatically implement `Trait` unless there is an explicit blanket impl.
-                let val = val;
                 if self.in_throws {
                     self.line(&format!("return Ok({});", val));
                 } else {
@@ -3031,11 +3023,9 @@ impl Transpiler {
         // Strategy 3: look for function call that returns an enum type.
         if let ExprKind::Call(callee, _) = &subject.kind {
             if let ExprKind::Var(fn_name) = &callee.kind {
-                if let Some(ret_ty) = self.fn_return_types.get(fn_name.as_str()) {
-                    if let Type::Named(tname) = ret_ty {
-                        if self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", tname))) {
-                            return Some(tname.clone());
-                        }
+                if let Some(Type::Named(tname)) = self.fn_return_types.get(fn_name.as_str()) {
+                    if self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", tname))) {
+                        return Some(tname.clone());
                     }
                 }
             }
@@ -4021,8 +4011,7 @@ impl Transpiler {
                             // Track the inner type of the optional — after the guard let,
                             // `name` has the unwrapped type (e.g. string? → string).
                             if let ExprKind::Var(src) = &expr.kind {
-                                if let Some(ty) = self.var_types.get(src.as_str()).cloned() {
-                                    if let Type::Optional(inner) = ty {
+                                if let Some(Type::Optional(inner)) = self.var_types.get(src.as_str()).cloned() {
                                         self.var_types.insert(name.clone(), *inner.clone());
                                         if Self::is_string_type(&inner) {
                                             self.string_vars.insert(name.clone());
@@ -4030,7 +4019,6 @@ impl Transpiler {
                                         if matches!(*inner, Type::Optional(_)) {
                                             self.optional_vars.insert(name.clone());
                                         }
-                                    }
                                 }
                             }
                             let val = self.emit_expr(expr);
@@ -4224,6 +4212,7 @@ impl Transpiler {
                     // Unhandled variants are re-thrown via `return Err(...)`.
                     {
                         // Build ordered groups: Vec<(type_name, Vec<(variant, body)>)>
+                        #[allow(clippy::type_complexity)]
                         let mut variant_groups: Vec<(String, Vec<(String, Vec<crate::ast::Stmt>)>)> = Vec::new();
                         for clause in &variant_named {
                             let ty_name = clause.types.first().cloned().unwrap_or_default();

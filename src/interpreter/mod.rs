@@ -541,6 +541,8 @@ impl fmt::Display for Value {
 
 // ─── Signals ─────────────────────────────────────────────────────────────────
 
+// Signal is used for interpreter control flow; boxing Value variants would add heap allocations in the hot loop
+#[allow(clippy::result_large_err)]
 #[derive(Debug, Clone)]
 pub enum Signal {
     Return(Value),
@@ -635,6 +637,7 @@ impl Env {
     }
 
     /// Returns Err if the variable exists but is immutable, Ok(false) if not found, Ok(true) if set.
+    #[allow(clippy::result_unit_err)]
     pub fn set(&mut self, name: &str, value: Value) -> Result<bool, ()> {
         if self.vars.contains_key(name) {
             // Lazy vars can be set once (they are in lazy_vars until first assignment).
@@ -848,12 +851,11 @@ fn register_stdlib(env: &EnvRef) {
         name: "print".into(),
         func: |args, line| {
             // Positional: `print "{}", expr` — first arg is a format string with `{}`
-            if args.len() >= 2 {
-                if matches!(&args[0], Value::Str(_)) {
-                    println!("{}", Interpreter::macro_format(&args, line)?);
+            if args.len() >= 2
+                && matches!(&args[0], Value::Str(_)) {
+                    println!("{}", Interpreter::macro_format(args, line)?);
                     return Ok(Value::Nil);
                 }
-            }
             let parts: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
             println!("{}", parts.join(" "));
             Ok(Value::Nil)
@@ -864,12 +866,11 @@ fn register_stdlib(env: &EnvRef) {
         name: "write".into(),
         func: |args, line| {
             // Positional: `write "{}", expr` — first arg is a format string with `{}`
-            if args.len() >= 2 {
-                if matches!(&args[0], Value::Str(_)) {
-                    print!("{}", Interpreter::macro_format(&args, line)?);
+            if args.len() >= 2
+                && matches!(&args[0], Value::Str(_)) {
+                    print!("{}", Interpreter::macro_format(args, line)?);
                     return Ok(Value::Nil);
                 }
-            }
             let parts: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
             print!("{}", parts.join(" "));
             Ok(Value::Nil)
@@ -1033,7 +1034,7 @@ fn register_stdlib(env: &EnvRef) {
                     else { Ok(Value::Uint(*n as u64)) }
                 }
                 Value::Float(f) => {
-                    if *f < 0.0 { Err(err(format!("cannot convert negative Float to Uint"), line)) }
+                    if *f < 0.0 { Err(err("cannot convert negative Float to Uint".to_string(), line)) }
                     else { Ok(Value::Uint(*f as u64)) }
                 }
                 Value::Str(s) => s.trim().parse::<u64>()
@@ -1072,7 +1073,7 @@ fn register_stdlib(env: &EnvRef) {
             }
             // String first arg → formatting (like format())
             if matches!(&args[0], Value::Str(_)) {
-                return Ok(Value::Str(Interpreter::macro_format(&args, line)?));
+                return Ok(Value::Str(Interpreter::macro_format(args, line)?));
             }
             // Single non-string arg → conversion
             if args.len() != 1 {
@@ -1097,7 +1098,7 @@ fn register_stdlib(env: &EnvRef) {
                 }
             } else {
                 // min(a, b)
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x <= y { a } else { b }),
@@ -1122,7 +1123,7 @@ fn register_stdlib(env: &EnvRef) {
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0 })),
                 }
             } else {
-                let a = args.get(0).cloned().unwrap_or(Value::Nil);
+                let a = args.first().cloned().unwrap_or(Value::Nil);
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x >= y { a } else { b }),
@@ -1136,7 +1137,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("abs", Value::NativeFn {
         name: "abs".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
             Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
             _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0 })),
@@ -1144,7 +1145,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("floor", Value::NativeFn {
         name: "floor".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Int(f.floor() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0 })),
@@ -1152,7 +1153,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("ceil", Value::NativeFn {
         name: "ceil".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Int(f.ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0 })),
@@ -1160,7 +1161,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("round", Value::NativeFn {
         name: "round".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Int(f.round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0 })),
@@ -1168,7 +1169,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("sqrt", Value::NativeFn {
         name: "sqrt".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.sqrt())),
             Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sqrt())),
             _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0 })),
@@ -1192,7 +1193,7 @@ fn register_stdlib(env: &EnvRef) {
     e.define("pow", Value::NativeFn {
         name: "pow".into(),
         func: |args, line| {
-            let base = match args.get(0) {
+            let base = match args.first() {
                 Some(Value::Float(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("pow: expected numeric base", line)),
@@ -1207,7 +1208,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("log", Value::NativeFn {
         name: "log".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.ln())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).ln())),
             _ => Err(err("log: expected number", line)),
@@ -1215,7 +1216,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("log2", Value::NativeFn {
         name: "log2".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.log2())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).log2())),
             _ => Err(err("log2: expected number", line)),
@@ -1223,7 +1224,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("log10", Value::NativeFn {
         name: "log10".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.log10())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).log10())),
             _ => Err(err("log10: expected number", line)),
@@ -1231,7 +1232,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("sin", Value::NativeFn {
         name: "sin".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.sin())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).sin())),
             _ => Err(err("sin: expected number", line)),
@@ -1239,7 +1240,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("cos", Value::NativeFn {
         name: "cos".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.cos())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).cos())),
             _ => Err(err("cos: expected number", line)),
@@ -1247,7 +1248,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("tan", Value::NativeFn {
         name: "tan".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.tan())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).tan())),
             _ => Err(err("tan: expected number", line)),
@@ -1255,7 +1256,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("asin", Value::NativeFn {
         name: "asin".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.asin())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).asin())),
             _ => Err(err("asin: expected number", line)),
@@ -1263,7 +1264,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("acos", Value::NativeFn {
         name: "acos".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.acos())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).acos())),
             _ => Err(err("acos: expected number", line)),
@@ -1271,7 +1272,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("atan", Value::NativeFn {
         name: "atan".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.atan())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).atan())),
             _ => Err(err("atan: expected number", line)),
@@ -1280,7 +1281,7 @@ fn register_stdlib(env: &EnvRef) {
     e.define("atan2", Value::NativeFn {
         name: "atan2".into(),
         func: |args, line| {
-            let y = match args.get(0) {
+            let y = match args.first() {
                 Some(Value::Float(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("atan2: expected numeric y", line)),
@@ -1295,7 +1296,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("exp", Value::NativeFn {
         name: "exp".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.exp())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).exp())),
             _ => Err(err("exp: expected number", line)),
@@ -1303,7 +1304,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("tanh", Value::NativeFn {
         name: "tanh".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Float(f.tanh())),
             Some(Value::Int(n))   => Ok(Value::Float((*n as f64).tanh())),
             _ => Err(err("tanh: expected number", line)),
@@ -1311,7 +1312,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("sum", Value::NativeFn {
         name: "sum".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Array(arr)) => {
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
@@ -1330,14 +1331,14 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("bitsToFloat", Value::NativeFn {
         name: "bitsToFloat".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Int(n)) => Ok(Value::Float(f32::from_bits(*n as u32) as f64)),
             _ => Err(err("bitsToFloat: expected int", line)),
         },
     });
     e.define("floatToBits", Value::NativeFn {
         name: "floatToBits".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Int((*f as f32).to_bits() as i64)),
             Some(Value::Int(n))   => Ok(Value::Int((*n as f32).to_bits() as i64)),
             _ => Err(err("floatToBits: expected number", line)),
@@ -1345,10 +1346,10 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("chr", Value::NativeFn {
         name: "chr".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Int(n)) => {
                 char::from_u32(*n as u32)
-                    .map(|c| Value::Str(c.to_string().into()))
+                    .map(|c| Value::Str(c.to_string()))
                     .ok_or_else(|| err("chr: invalid Unicode code point", line))
             }
             _ => Err(err("chr: expected int", line)),
@@ -1356,7 +1357,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("ord", Value::NativeFn {
         name: "ord".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Str(s)) => {
                 s.chars().next()
                     .map(|c| Value::Int(c as i64))
@@ -1368,11 +1369,11 @@ fn register_stdlib(env: &EnvRef) {
     e.define("clamp", Value::NativeFn {
         name: "clamp".into(),
         func: |args, line| {
-            match (args.get(0), args.get(1), args.get(2)) {
+            match (args.first(), args.get(1), args.get(2)) {
                 (Some(Value::Float(x)), Some(Value::Float(lo)), Some(Value::Float(hi))) =>
                     Ok(Value::Float(x.clamp(*lo, *hi))),
                 (Some(Value::Int(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
-                    Ok(Value::Int(x.clamp(lo, hi).clone())),
+                    Ok(Value::Int(*x.clamp(lo, hi))),
                 (Some(Value::Float(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
                     Ok(Value::Float(x.clamp(*lo as f64, *hi as f64))),
                 (Some(Value::Int(x)), Some(Value::Float(lo)), Some(Value::Float(hi))) =>
@@ -1383,7 +1384,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("sign", Value::NativeFn {
         name: "sign".into(),
-        func: |args, line| match args.get(0) {
+        func: |args, line| match args.first() {
             Some(Value::Int(n))   => Ok(Value::Int(n.signum())),
             Some(Value::Float(f)) => Ok(Value::Float(f.signum())),
             _ => Err(err("sign: expected number", line)),
@@ -1391,7 +1392,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("isNaN", Value::NativeFn {
         name: "isNaN".into(),
-        func: |args, _line| match args.get(0) {
+        func: |args, _line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Bool(f.is_nan())),
             Some(Value::Int(_))   => Ok(Value::Bool(false)),
             _ => Ok(Value::Bool(false)),
@@ -1399,7 +1400,7 @@ fn register_stdlib(env: &EnvRef) {
     });
     e.define("isInfinite", Value::NativeFn {
         name: "isInfinite".into(),
-        func: |args, _line| match args.get(0) {
+        func: |args, _line| match args.first() {
             Some(Value::Float(f)) => Ok(Value::Bool(f.is_infinite())),
             _                     => Ok(Value::Bool(false)),
         },
@@ -1490,10 +1491,10 @@ fn register_stdlib(env: &EnvRef) {
         func: |_args, _line| {
             let all: Vec<String> = std::env::args().collect();
             let argv: Vec<Value> = if let Some(sep) = all.iter().position(|s| s == "--") {
-                all.into_iter().skip(sep + 1).map(|s| Value::Str(s.into())).collect()
+                all.into_iter().skip(sep + 1).map(Value::Str).collect()
             } else {
                 // boring run file.br → user args start at index 3
-                all.into_iter().skip(3).map(|s| Value::Str(s.into())).collect()
+                all.into_iter().skip(3).map(Value::Str).collect()
             };
             Ok(Value::Array(argv))
         },
@@ -1503,7 +1504,7 @@ fn register_stdlib(env: &EnvRef) {
     e.define("ord", Value::NativeFn {
         name: "ord".into(),
         func: |args, line| {
-            let s = match args.into_iter().next() {
+            let s = match args.iter().next() {
                 Some(Value::Str(s)) => s,
                 _ => return Err(err("ord: expected a string argument", line)),
             };
@@ -1518,12 +1519,12 @@ fn register_stdlib(env: &EnvRef) {
     e.define("chr", Value::NativeFn {
         name: "chr".into(),
         func: |args, line| {
-            let n = match args.into_iter().next() {
+            let n = match args.iter().next() {
                 Some(Value::Int(n)) => *n,
                 _ => return Err(err("chr: expected an int argument", line)),
             };
             match char::from_u32(n as u32) {
-                Some(c) => Ok(Value::Str(c.to_string().into())),
+                Some(c) => Ok(Value::Str(c.to_string())),
                 None => Err(err(format!("chr: invalid codepoint {}", n), line)),
             }
         },
@@ -1533,7 +1534,7 @@ fn register_stdlib(env: &EnvRef) {
     e.define("exit", Value::NativeFn {
         name: "exit".into(),
         func: |args, _line| {
-            let code = match args.into_iter().next() {
+            let code = match args.iter().next() {
                 Some(Value::Int(n)) => *n as i32,
                 _ => 0,
             };
@@ -2097,7 +2098,7 @@ impl Interpreter {
                                             Self::display_type(&resolved),
                                         ),
                                         stmt.line,
-                                    ).into());
+                                    ));
                                 }
                                 coerced
                             }
@@ -2281,7 +2282,7 @@ impl Interpreter {
                     .map(|m| m.name.as_str())
                     .collect();
 
-                let claimed_traits: Vec<String> = decl.traits.iter().cloned().collect();
+                let claimed_traits: Vec<String> = decl.traits.to_vec();
 
                 for trait_name in &claimed_traits {
                     let Some(trait_decl) = self.traits.get(trait_name.as_str()) else { continue };

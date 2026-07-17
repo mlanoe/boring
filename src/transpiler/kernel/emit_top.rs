@@ -123,7 +123,7 @@ impl KernelTranspiler {
             sn = struct_name
         ));
         self.indent += 1;
-        self.line(&format!("fn run(this: Arc<Self>) {{"));
+        self.line("fn run(this: Arc<Self>) {");
         self.indent += 1;
 
         // Build the call to the _body function
@@ -194,7 +194,7 @@ impl KernelTranspiler {
         }
         self.line("result: Arc::clone(&result),");
         self.line("done_cond: Arc::clone(&done_cond),");
-        self.line(&format!("work: kernel::workqueue::Work::new(),"));
+        self.line("work: kernel::workqueue::Work::new(),");
         self.indent -= 1;
         self.line("});");
 
@@ -214,7 +214,7 @@ impl KernelTranspiler {
         let body_all_params = if let Some(receiver_ty) = self_ty {
             let self_ref = if f.mutating { "&mut self" } else { "&self" };
             if body_params_s.is_empty() {
-                format!("{}", self_ref)
+                self_ref.to_string()
             } else {
                 format!("{}, _receiver: Arc<{}>, {}", self_ref, receiver_ty, body_params_s.join(", "))
             }
@@ -403,7 +403,7 @@ impl KernelTranspiler {
             self.line(&format!("{},", p.name));
         }
         self.line("tx,");
-        self.line(&format!("work: kernel::workqueue::Work::new(),"));
+        self.line("work: kernel::workqueue::Work::new(),");
         self.indent -= 1;
         self.line("});");
 
@@ -513,10 +513,7 @@ impl KernelTranspiler {
         // For throws functions, add implicit Ok(()) if the body doesn't end with a return/expr
         if f.throws {
             let last = f.body.last();
-            let needs_ok = match last {
-                Some(crate::ast::Stmt::Return(_)) | Some(crate::ast::Stmt::Expr(_)) => false,
-                _ => true,
-            };
+            let needs_ok = !matches!(last, Some(crate::ast::Stmt::Return(_)) | Some(crate::ast::Stmt::Expr(_)));
             if needs_ok { self.line("Ok(())"); }
         }
 

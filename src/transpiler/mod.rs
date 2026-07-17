@@ -1380,7 +1380,7 @@ impl Transpiler {
                 self.line("let _boring_span = __boring_instrument::Span::enter(\"main\");");
             }
             if use_local_set {
-                self.line(&format!("tokio::task::LocalSet::new().run_until(async move {{"));
+                self.line("tokio::task::LocalSet::new().run_until(async move {");
                 self.indent += 1;
             }
             // main() returns Result<(), Box<dyn Error>>, so throws function calls should get `?`.
@@ -2055,7 +2055,7 @@ impl Transpiler {
                 // Before accepting the new variant, check for ambiguous conflicts with existing ones.
                 let b_sig = f.params.iter()
                     .map(|p| {
-                        let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                        let ty = p.ty.as_ref().map(mangle_type_name)
                             .unwrap_or_else(|| "_".into());
                         if p.default.is_some() { format!("{}=?", ty) } else { ty }
                     })
@@ -2064,7 +2064,7 @@ impl Transpiler {
                     .filter_map(|existing| overloads_conflict(existing, f).map(|conflict_arity| {
                         let a_sig = existing.params.iter()
                             .map(|p| {
-                                let ty = p.ty.as_ref().map(|t| mangle_type_name(t))
+                                let ty = p.ty.as_ref().map(mangle_type_name)
                                     .unwrap_or_else(|| "_".into());
                                 if p.default.is_some() { format!("{}=?", ty) } else { ty }
                             })
@@ -2102,10 +2102,7 @@ impl Transpiler {
             // For overloaded functions, a non-void definition should not be overwritten by
             // a void one (e.g. exec_stmt: Signal? beats exec_stmt: void for already_opt detection).
             let existing = self.fn_return_types.get(f.name.as_str());
-            let overwrite = match (existing, ret_ty) {
-                (Some(existing_ty), Type::Void) if !matches!(existing_ty, Type::Void) => false,
-                _ => true,
-            };
+            let overwrite = !matches!((existing, ret_ty), (Some(existing_ty), Type::Void) if !matches!(existing_ty, Type::Void));
             if overwrite {
                 self.fn_return_types.insert(f.name.clone(), ret_ty.clone());
             }
@@ -2166,7 +2163,7 @@ fn program_uses_broadcast(program: &Program) -> bool {
     fn stmt_uses(s: &Stmt) -> bool {
         match s {
             Stmt::LetDestructure(s) => expr_is_broadcast(&s.value),
-            Stmt::Let(s) => s.value.as_ref().map(|v| expr_is_broadcast(v)).unwrap_or(false),
+            Stmt::Let(s) => s.value.as_ref().map(expr_is_broadcast).unwrap_or(false),
             Stmt::Expr(e) => expr_is_broadcast(e),
             Stmt::If(s) => s.branches.iter().any(|(_, b)| stmts_use(b))
                 || s.else_body.as_ref().map(|b| stmts_use(b)).unwrap_or(false),

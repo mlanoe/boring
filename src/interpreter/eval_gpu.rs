@@ -100,7 +100,7 @@ impl Interpreter {
                     .filter_map(|(_, v)| if let Value::Array(a) = v { Some(a.len()) } else { None })
                     .max()
                     .unwrap_or(0);
-                let inferred_x = if max_len > 0 { (max_len + block_x * block_y - 1) / (block_x * block_y) } else { 1 };
+                let inferred_x = if max_len > 0 { max_len.div_ceil(block_x * block_y) } else { 1 };
                 (inferred_x, 1)
             };
 
@@ -288,11 +288,11 @@ impl Interpreter {
                     })
                 } else { None });
             if let (Some(w), Some(h)) = (dim_w, dim_h) {
-                let gx = (w + block_x - 1) / block_x;
-                let gy = (h + block_y - 1) / block_y;
+                let gx = w.div_ceil(block_x);
+                let gy = h.div_ceil(block_y);
                 (gx, gy)
             } else {
-                let gx = (total_threads + bxy - 1) / bxy;
+                let gx = total_threads.div_ceil(bxy);
                 (gx, 1)
             }
         } else {

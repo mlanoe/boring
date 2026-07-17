@@ -99,9 +99,9 @@ impl DeviceEmitter {
     }
 
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
-        let ret = decl.return_ty.as_ref().map(|t| wgsl_type(t)).unwrap_or_else(|| "void".into());
+        let ret = decl.return_ty.as_ref().map(wgsl_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(|t| wgsl_type(t)).unwrap_or_else(|| "i32".into());
+            let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
             format!("{}: {}", p.name, ty)
         }).collect();
         self.line(&format!("fn {}({}) -> {} {{", decl.name, params.join(", "), ret));
@@ -146,15 +146,14 @@ impl DeviceEmitter {
 
         // Validate: reject dynamic 'sync fields ([T]'sync without size).
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync) {
-                if matches!(f.ty, Type::Array(_)) {
+            if matches!(f.qual, GpuQual::Sync)
+                && matches!(f.ty, Type::Array(_)) {
                     self.errors.push(format!(
                         "kernel {}: dynamic '[T]'sync field '{}' is not supported on --target wgpu — \
                          WGSL requires a compile-time workgroup size; use '[T, N]'sync' instead",
                         decl.name, f.name
                     ));
                 }
-            }
         }
 
         self.line(&format!("// ─── kernel {} ───", decl.name));
@@ -162,7 +161,7 @@ impl DeviceEmitter {
 
         // Collect all fields that need bindings: unified, global, actor, surface, const.
         // Scalar local/const fields go into a params uniform struct.
-        let has_params = decl.fields.iter().any(|f| is_params_field(f));
+        let has_params = decl.fields.iter().any(is_params_field);
         let mut binding: u32 = 0;
 
         // 1. Array buffer fields.
@@ -235,11 +234,11 @@ impl DeviceEmitter {
 
     fn emit_device_fn(&mut self, kernel: &str, method: &FnDecl) {
         let ret = method.return_ty.as_ref()
-            .map(|t| wgsl_type(t))
+            .map(wgsl_type)
             .unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         let params: Vec<String> = method.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(|t| wgsl_type(t)).unwrap_or_else(|| "i32".into());
+            let ty = p.ty.as_ref().map(wgsl_type).unwrap_or_else(|| "i32".into());
             format!("{}: {}", p.name, ty)
         }).collect();
         if ret == "void" {
@@ -281,7 +280,7 @@ impl DeviceEmitter {
         }
 
         // Unpack 'const scalars and Dimension fields from params struct.
-        let has_params = decl.fields.iter().any(|f| is_params_field(f));
+        let has_params = decl.fields.iter().any(is_params_field);
         if has_params {
             let pvar = format!("{}_params", decl.name.to_lowercase());
             for f in &decl.fields {
@@ -398,7 +397,7 @@ impl DeviceEmitter {
             }
             Stmt::While(w) => {
                 let cond = self.expr(&w.condition);
-                self.line(&format!("loop {{"));
+                self.line("loop {");
                 self.indent += 1;
                 self.line(&format!("if !({})", cond));
                 self.indent += 1;
@@ -422,7 +421,7 @@ impl DeviceEmitter {
                 if let Some((lo, hi, inclusive)) = neg_range {
                     let op = if inclusive { "<=" } else { "<" };
                     self.line(&format!("var {var}: i32 = {lo};"));
-                    self.line(&format!("loop {{"));
+                    self.line("loop {");
                     self.indent += 1;
                     self.line(&format!("if !({var} {op} {hi}) {{ break; }}"));
                     if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
@@ -438,7 +437,7 @@ impl DeviceEmitter {
                         let hi = self.expr(end);
                         let op = if *inclusive { "<=" } else { "<" };
                         self.line(&format!("var {var}: i32 = {lo};"));
-                        self.line(&format!("loop {{"));
+                        self.line("loop {");
                         self.indent += 1;
                         self.line(&format!("if !({var} {op} {hi}) {{ break; }}"));
                         if self.auto_sync && body_accesses_sync_field(&f.body, &self.current_fields) {
@@ -765,7 +764,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
         Stmt::While(w)   => body_has_explicit_sync(&w.body),
         Stmt::For(f)     => body_has_explicit_sync(&f.body),
         Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
-                         || i.else_body.as_ref().map_or(false, |b| body_has_explicit_sync(b)),
+                         || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
         _ => false,
     })
 }
@@ -786,12 +785,12 @@ fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
 fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
     match stmt {
         Stmt::Expr(e)      => expr_references_any(e, names),
-        Stmt::Return(r)    => r.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
-        Stmt::Let(s)       => s.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
+        Stmt::Return(r)    => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
+        Stmt::Let(s)       => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
         Stmt::While(w)     => stmts_reference_any(&w.body, names),
         Stmt::For(f)       => stmts_reference_any(&f.body, names),
         Stmt::If(i)        => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
-                           || i.else_body.as_ref().map_or(false, |b| stmts_reference_any(b, names)),
+                           || i.else_body.as_ref().is_some_and(|b| stmts_reference_any(b, names)),
         _ => false,
     }
 }
@@ -862,7 +861,7 @@ fn scan_call_block_size(s: &Stmt, map: &mut std::collections::HashMap<String, (u
                         };
                         let (bx, by, bz) = match &ba.value.kind {
                             ExprKind::Tuple(elems) => {
-                                let g = |i: usize| elems.get(i).map(|e| parse_u32(e)).unwrap_or(1);
+                                let g = |i: usize| elems.get(i).map(&parse_u32).unwrap_or(1);
                                 (g(0), g(1), g(2))
                             }
                             _ => (parse_u32(&ba.value), 1, 1),

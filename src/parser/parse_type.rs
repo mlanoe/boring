@@ -200,7 +200,6 @@ impl Parser {
             }
             // Integer literal in type-argument position: e.g. `GameOfLife<64, 64>`.
             TokenKind::Int(n) => {
-                let n = n;
                 self.advance();
                 Ok(Type::ConstInt(n))
             }
@@ -419,19 +418,16 @@ impl Parser {
                 let inner = Type::Qualified(Box::new(ty), qual);
                 return Ok(Type::Qualified(Box::new(inner), OwnerQual::Lifetime(lt)));
             }
-            match qual {
-                OwnerQual::Weak => {
-                    self.advance();
-                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak));
-                }
-                _ => {}
+            if qual == OwnerQual::Weak {
+                self.advance();
+                return Ok(Type::Qualified(Box::new(ty), OwnerQual::BorrowWeak));
             }
         }
         let qualified = Type::Qualified(Box::new(ty), qual.clone());
         // `T'shared'weak`, `T'actor'weak` — weak ref on any ref-counted type.
         // `'weak` is a second-level qualifier: Qualified(Qualified(T, Shared|Actor|Guard), Weak).
-        if matches!(qual, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) {
-            if self.check(&TokenKind::Tick) {
+        if matches!(qual, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)
+            && self.check(&TokenKind::Tick) {
                 let after_tick = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
                 if matches!(after_tick, Some(TokenKind::Ident(ref s)) if s == "weak") {
                     self.advance(); // consume `'`
@@ -439,7 +435,6 @@ impl Parser {
                     return Ok(Type::Qualified(Box::new(qualified), OwnerQual::Weak));
                 }
             }
-        }
         Ok(qualified)
     }
 }

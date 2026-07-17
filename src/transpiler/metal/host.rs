@@ -607,7 +607,7 @@ impl HostEmitter {
     fn emit_kernel_new(&mut self, name: &str, fields: &[KernelFieldDecl], init: &InitDecl) {
         let params: Vec<String> = init.params.iter().map(|p| {
             let ty = p.ty.as_ref()
-                .map(|t| host_param_type(t))
+                .map(host_param_type)
                 .unwrap_or_else(|| "()".into());
             format!("{}: {}", p.name, ty)
         }).collect();
@@ -1027,7 +1027,7 @@ impl HostEmitter {
             }
             None => params.join(", "),
         };
-        let ret = f.return_ty.as_ref().map(|t| rust_type(t)).unwrap_or_else(|| "()".into());
+        let ret = f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into());
         let sig = format!("{}fn {}({}) -> {}", vis, f.name, all_params, ret);
         if f.body.is_empty() {
             self.line(&format!("{} {{}}", sig));
@@ -1419,13 +1419,13 @@ impl HostEmitter {
                     }
                     // `fs.writeBytes(path, bytes)` — write Vec<i64> as binary file
                     if name == "fs" && method == "writeBytes" {
-                        let path  = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let bytes = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
                         return format!("std::fs::write({}, {}.iter().map(|&b| b as u8).collect::<Vec<u8>>())?", path, bytes);
                     }
                     // `fs.write(path, text)` — write string as text file
                     if name == "fs" && (method == "write" || method == "writeText") {
-                        let path = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let path = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let text = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
                         return format!("std::fs::write({}, {}.as_bytes())?", path, text);
                     }
@@ -1559,7 +1559,7 @@ impl HostEmitter {
                             fargs.push(self.expr(e));
                         }
                         StringSegment::FormattedExpr(e, fmt) => {
-                            let rust_fmt = fmt.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                            let rust_fmt = fmt.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                             fmt_str.push_str(&format!("{{:{}}}", rust_fmt));
                             fargs.push(self.expr(e));
                         }
@@ -1714,7 +1714,7 @@ fn rust_type(ty: &Type) -> String {
         Type::TypeParam(p)     => p.clone(),
         Type::Qualified(inner, _) => rust_type(inner),
         Type::Generic(n, args) => {
-            let s: Vec<String> = args.iter().map(|a| rust_type(a)).collect();
+            let s: Vec<String> = args.iter().map(rust_type).collect();
             format!("{}<{}>", n, s.join(", "))
         }
         _ => "()".into(),

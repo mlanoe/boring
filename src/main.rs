@@ -9,6 +9,9 @@
 //
 // See the LICENSE file at the project root for the full text.
 
+// Signal is used for interpreter control flow; boxing Value variants would add heap allocations in the hot loop
+#![allow(clippy::result_large_err)]
+
 pub mod lexer;
 pub mod ast;
 pub mod parser;
@@ -355,8 +358,7 @@ fn run_project() {
     run_file(&toml.main, None);
 }
 
-/// `boring build` â€” emit a Cargo project from the `boring.toml` main file.
-
+/// `boring build` — emit a Cargo project from the `boring.toml` main file.
 fn build_project_with_config(config: transpiler::TranspileConfig) {
     let (toml, _) = load_project_toml();
     emit_rust_with_version_and_config(&toml.main, &toml.version, config);

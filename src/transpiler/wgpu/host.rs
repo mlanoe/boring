@@ -149,7 +149,7 @@ impl<'a> HostEmitter<'a> {
             }
         }
         if !params_fields.is_empty() {
-            self.line(&format!("    params_buf: wgpu::Buffer,"));
+            self.line("    params_buf: wgpu::Buffer,");
         }
         self.line("}");
         self.blank();
@@ -178,7 +178,7 @@ impl<'a> HostEmitter<'a> {
         // Build constructor params from init method if present.
         let init_params: Vec<String> = if let Some(init) = decl.methods.iter().find(|m| m.name == "init") {
             init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| host_type(t)).unwrap_or_else(|| "i64".into());
+                let ty = p.ty.as_ref().map(host_type).unwrap_or_else(|| "i64".into());
                 format!("{}: {}", p.name, ty)
             }).collect()
         } else {
@@ -196,7 +196,7 @@ impl<'a> HostEmitter<'a> {
         // Load shader.
         self.line("        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {");
         self.line("            label: None,");
-        self.line(&format!("            source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),"));
+        self.line("            source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
         self.line("        });");
         self.blank();
 
@@ -238,7 +238,7 @@ impl<'a> HostEmitter<'a> {
 
         // Params buffer.
         if !params_fields.is_empty() {
-            self.line(&format!("        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {{"));
+            self.line("        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {");
             self.line("            label: None,");
             self.line(&format!("            size: std::mem::size_of::<{}Params>() as u64,", name));
             self.line("            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,");
@@ -248,7 +248,7 @@ impl<'a> HostEmitter<'a> {
         self.blank();
 
         // Pipeline (workgroup size is hardcoded in WGSL, no override constants needed).
-        self.line(&format!("        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {{"));
+        self.line("        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {");
         self.line("            label: None,");
         self.line("            layout: None,");
         self.line("            module: &shader,");
@@ -325,14 +325,13 @@ impl<'a> HostEmitter<'a> {
                         }
                     }
                 }
-                GpuQual::Local => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                GpuQual::Local
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) => {
                         let val = f.default.as_ref()
                             .map(emit_scalar_default)
                             .unwrap_or_else(|| format!("{}::default()", host_scalar_type(&f.ty)));
                         self.line(&format!("            {}: {},", f.name, val));
                     }
-                }
                 _ => {}
             }
         }
@@ -646,12 +645,12 @@ impl<'a> HostEmitter<'a> {
         self.line("                        has_dynamic_offset: false, min_binding_size: None }, count: None },");
         self.line("            ],");
         self.line("        });");
-        self.line(&format!("        let blit_dim_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {{"));
+        self.line("        let blit_dim_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {");
         self.line("            label: Some(\"blit_dim\"),");
         self.line(&format!("            contents: bytemuck::cast_slice(&[{width}u32, {height}u32]),"));
         self.line("            usage: wgpu::BufferUsages::UNIFORM,");
         self.line("        });");
-        self.line(&format!("        let blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {{"));
+        self.line("        let blit_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {");
         self.line("            label: None, layout: &blit_bgl, entries: &[");
         self.line(&format!("                wgpu::BindGroupEntry {{ binding: 0, resource: self.{pixels_buf}.as_entire_binding() }},"));
         self.line("                wgpu::BindGroupEntry { binding: 1, resource: blit_dim_buf.as_entire_binding() },");
@@ -758,12 +757,12 @@ impl<'a> HostEmitter<'a> {
                 None
             }).unwrap_or_default();
             for field in &surface_fields {
-                self.line(&format!("    {{"));
-                self.line(&format!("        let mut __rng: u64 = 0x12345678ABCDEF01u64;"));
+                self.line("    {");
+                self.line("        let mut __rng: u64 = 0x12345678ABCDEF01u64;");
                 self.line(&format!("        let __n = ({width} * {height}) as usize;"));
-                self.line(&format!("        let __rand_data: Vec<u32> = (0..__n).map(|_| {{ __rng ^= __rng << 13; __rng ^= __rng >> 7; __rng ^= __rng << 17; if __rng % 10 < 3 {{ 1u32 }} else {{ 0u32 }} }}).collect();"));
+                self.line("        let __rand_data: Vec<u32> = (0..__n).map(|_| { __rng ^= __rng << 13; __rng ^= __rng >> 7; __rng ^= __rng << 17; if __rng % 10 < 3 { 1u32 } else { 0u32 } }).collect();");
                 self.line(&format!("        queue.write_buffer(&{var}.{field}_buf, 0, bytemuck::cast_slice(&__rand_data));"));
-                self.line(&format!("    }}"));
+                self.line("    }");
             }
         }
         self.line("    let mut app = __App {");
@@ -798,7 +797,7 @@ impl<'a> HostEmitter<'a> {
                                         if let ExprKind::Call(dc, da) = &a.value.kind {
                                             if let ExprKind::Var(dn) = &dc.kind {
                                                 if dn == "Dimension" {
-                                                    let w = da.get(0).map(|x| host_expr(&x.value)).unwrap_or_else(|| "800".into());
+                                                    let w = da.first().map(|x| host_expr(&x.value)).unwrap_or_else(|| "800".into());
                                                     let h = da.get(1).map(|x| host_expr(&x.value)).unwrap_or_else(|| "600".into());
                                                     return Some((w, h));
                                                 }
@@ -861,7 +860,7 @@ impl<'a> HostEmitter<'a> {
                         if let Some(ba) = args.iter().find(|a| a.label.as_deref() == Some("block")) {
                             let (bx, by, bz) = match &ba.value.kind {
                                 ExprKind::Tuple(elems) => {
-                                    let g = |i: usize| elems.get(i).map(|e| host_expr(e)).unwrap_or_else(|| "1".into());
+                                    let g = |i: usize| elems.get(i).map(host_expr).unwrap_or_else(|| "1".into());
                                     (g(0), g(1), g(2))
                                 }
                                 _ => (host_expr(&ba.value), "1".into(), "1".into()),
@@ -939,7 +938,7 @@ impl<'a> HostEmitter<'a> {
         let ba = args.iter().find(|a| a.label.as_deref() == Some("block"))?;
         let (bx, by) = match &ba.value.kind {
             ExprKind::Tuple(elems) => {
-                let g = |i: usize| elems.get(i).map(|e| host_expr(e)).unwrap_or_else(|| "1".into());
+                let g = |i: usize| elems.get(i).map(host_expr).unwrap_or_else(|| "1".into());
                 (g(0), g(1))
             }
             _ => (host_expr(&ba.value), "1".into()),
@@ -1036,7 +1035,7 @@ impl<'a> HostEmitter<'a> {
         let (bx, by, bz) = match &block_arg.value.kind {
             ExprKind::Tuple(elems) => {
                 let get = |i: usize| elems.get(i)
-                    .map(|e| host_expr(e))
+                    .map(host_expr)
                     .unwrap_or_else(|| "1".into());
                 (get(0), get(1), get(2))
             }
@@ -1051,7 +1050,7 @@ impl<'a> HostEmitter<'a> {
         let (gx, gy, gz) = if let Some(g) = grid_arg {
             match &g.value.kind {
                 ExprKind::Tuple(elems) => {
-                    let get = |i: usize| elems.get(i).map(|e| host_expr(e)).unwrap_or_else(|| "1".into());
+                    let get = |i: usize| elems.get(i).map(host_expr).unwrap_or_else(|| "1".into());
                     (get(0), get(1), get(2))
                 }
                 _ => {
@@ -1263,8 +1262,7 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
         GpuQual::Const => true,
         GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
         _ => {
-            matches!(&f.ty, Type::Named(n) if n != "Dimension" || true)
-                && matches!(&f.ty, Type::Named(_))
+            matches!(&f.ty, Type::Named(n) if n != "Dimension")
                 && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
         }
     }
@@ -1359,7 +1357,7 @@ fn extract_dimension_args(arg: Option<&Arg>) -> Option<(String, String)> {
     if let ExprKind::Call(dc, da) = &arg.value.kind {
         if let ExprKind::Var(n) = &dc.kind {
             if n == "Dimension" {
-                let w = da.get(0).map(|x| host_expr(&x.value)).unwrap_or_else(|| "800".into());
+                let w = da.first().map(|x| host_expr(&x.value)).unwrap_or_else(|| "800".into());
                 let h = da.get(1).map(|x| host_expr(&x.value)).unwrap_or_else(|| "600".into());
                 return Some((w, h));
             }

@@ -651,16 +651,15 @@ pub(crate) fn body_has_early_return(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::Return(_) | Stmt::Throw(_) | Stmt::Guard(_) => return true,
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, body)| body_has_early_return(body))
-                    || i.else_body.as_deref().map_or(false, body_has_early_return)
-                {
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, body)| body_has_early_return(body))
+                    || i.else_body.as_deref().is_some_and(body_has_early_return))
+                => {
                     return true;
                 }
-            }
-            Stmt::While(w) => { if body_has_early_return(&w.body) { return true; } }
-            Stmt::For(f)   => { if body_has_early_return(&f.body) { return true; } }
-            Stmt::WhileLet(w) => { if body_has_early_return(&w.body) { return true; } }
+            Stmt::While(w) if body_has_early_return(&w.body) => { return true; }
+            Stmt::For(f) if body_has_early_return(&f.body) => { return true; }
+            Stmt::WhileLet(w) if body_has_early_return(&w.body) => { return true; }
             Stmt::Try(t) => {
                 if body_has_early_return(&t.body) { return true; }
                 if t.catch_clauses.iter().any(|c| body_has_early_return(&c.body)) { return true; }
@@ -716,18 +715,17 @@ pub(crate) fn body_has_actor_binding(stmts: &[Stmt]) -> bool {
                     }
                 }
                 // Recurse into nested blocks
-                if l.value.as_ref().map_or(false, |v| expr_has_actor_binding(v)) { return true; }
+                if l.value.as_ref().is_some_and(expr_has_actor_binding) { return true; }
             }
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, body)| body_has_actor_binding(body))
-                    || i.else_body.as_deref().map_or(false, body_has_actor_binding)
-                {
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, body)| body_has_actor_binding(body))
+                    || i.else_body.as_deref().is_some_and(body_has_actor_binding))
+                => {
                     return true;
                 }
-            }
-            Stmt::While(w) => { if body_has_actor_binding(&w.body) { return true; } }
-            Stmt::For(f)   => { if body_has_actor_binding(&f.body) { return true; } }
-            Stmt::Defer(b) => { if body_has_actor_binding(b) { return true; } }
+            Stmt::While(w) if body_has_actor_binding(&w.body) => { return true; }
+            Stmt::For(f) if body_has_actor_binding(&f.body) => { return true; }
+            Stmt::Defer(b) if body_has_actor_binding(b) => { return true; }
             _ => {}
         }
     }
@@ -747,13 +745,12 @@ pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections:
                 }
                 if body_has_stream_for(&f.body, stream_fns) { return true; }
             }
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, body)| body_has_stream_for(body, stream_fns))
-                    || i.else_body.as_deref().map_or(false, |b| body_has_stream_for(b, stream_fns))
-                { return true; }
-            }
-            Stmt::While(w)   => { if body_has_stream_for(&w.body, stream_fns)  { return true; } }
-            Stmt::Defer(b)   => { if body_has_stream_for(b,        stream_fns)  { return true; } }
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, body)| body_has_stream_for(body, stream_fns))
+                    || i.else_body.as_deref().is_some_and(|b| body_has_stream_for(b, stream_fns)))
+                => { return true; }
+            Stmt::While(w) if body_has_stream_for(&w.body, stream_fns)  => { return true; }
+            Stmt::Defer(b) if body_has_stream_for(b,        stream_fns)  => { return true; }
             _ => {}
         }
     }
@@ -773,20 +770,17 @@ pub(crate) fn expr_has_actor_binding(expr: &Expr) -> bool {
 pub(crate) fn body_has_channel_or_task(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
-            Stmt::Let(l) => {
-                if l.value.as_ref().map_or(false, |v| expr_has_channel_or_task(v)) { return true; }
-            }
-            Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
-                if expr_has_channel_or_task(e) { return true; }
-            }
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, b)| body_has_channel_or_task(b))
-                    || i.else_body.as_deref().map_or(false, body_has_channel_or_task)
-                { return true; }
-            }
-            Stmt::While(w) => { if body_has_channel_or_task(&w.body) { return true; } }
-            Stmt::For(f)   => { if body_has_channel_or_task(&f.body) { return true; } }
-            Stmt::Defer(b) => { if body_has_channel_or_task(b) { return true; } }
+            Stmt::Let(l)
+                if l.value.as_ref().is_some_and(expr_has_channel_or_task) => { return true; }
+            Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. })
+                if expr_has_channel_or_task(e) => { return true; }
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, b)| body_has_channel_or_task(b))
+                    || i.else_body.as_deref().is_some_and(body_has_channel_or_task))
+                => { return true; }
+            Stmt::While(w) if body_has_channel_or_task(&w.body) => { return true; }
+            Stmt::For(f) if body_has_channel_or_task(&f.body) => { return true; }
+            Stmt::Defer(b) if body_has_channel_or_task(b) => { return true; }
             _ => {}
         }
     }
@@ -837,19 +831,16 @@ pub(crate) fn is_blocking_spawn(e: &Expr, task_fns: &std::collections::HashSet<S
 pub(crate) fn body_calls_task_fn(stmts: &[Stmt], task_fns: &std::collections::HashSet<String>) -> bool {
     for stmt in stmts {
         match stmt {
-            Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. }) => {
-                if expr_calls_task_fn(e, task_fns) { return true; }
-            }
-            Stmt::Let(l) => {
-                if l.value.as_ref().map_or(false, |v| expr_calls_task_fn(v, task_fns)) { return true; }
-            }
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, b)| body_calls_task_fn(b, task_fns))
-                    || i.else_body.as_deref().map_or(false, |b| body_calls_task_fn(b, task_fns))
-                { return true; }
-            }
-            Stmt::While(w) => { if body_calls_task_fn(&w.body, task_fns) { return true; } }
-            Stmt::For(f)   => { if body_calls_task_fn(&f.body, task_fns) { return true; } }
+            Stmt::Expr(e) | Stmt::Return(ReturnStmt { value: Some(e), .. })
+                if expr_calls_task_fn(e, task_fns) => { return true; }
+            Stmt::Let(l)
+                if l.value.as_ref().is_some_and(|v| expr_calls_task_fn(v, task_fns)) => { return true; }
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, b)| body_calls_task_fn(b, task_fns))
+                    || i.else_body.as_deref().is_some_and(|b| body_calls_task_fn(b, task_fns)))
+                => { return true; }
+            Stmt::While(w) if body_calls_task_fn(&w.body, task_fns) => { return true; }
+            Stmt::For(f) if body_calls_task_fn(&f.body, task_fns) => { return true; }
             Stmt::Try(t)   => {
                 if body_calls_task_fn(&t.body, task_fns) { return true; }
                 if t.catch_clauses.iter().any(|c| body_calls_task_fn(&c.body, task_fns)) { return true; }
@@ -870,14 +861,13 @@ fn body_has_wait(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::Wait(..) => return true,
-            Stmt::If(i) => {
-                if i.branches.iter().any(|(_, b)| body_has_wait(b))
-                    || i.else_body.as_deref().map_or(false, body_has_wait)
-                { return true; }
-            }
-            Stmt::While(w) => { if body_has_wait(&w.body) { return true; } }
-            Stmt::For(f)   => { if body_has_wait(&f.body) { return true; } }
-            Stmt::Defer(b) => { if body_has_wait(b)       { return true; } }
+            Stmt::If(i)
+                if (i.branches.iter().any(|(_, b)| body_has_wait(b))
+                    || i.else_body.as_deref().is_some_and(body_has_wait))
+                => { return true; }
+            Stmt::While(w) if body_has_wait(&w.body) => { return true; }
+            Stmt::For(f) if body_has_wait(&f.body) => { return true; }
+            Stmt::Defer(b) if body_has_wait(b)       => { return true; }
             Stmt::Try(t)   => {
                 if body_has_wait(&t.body) { return true; }
                 if t.catch_clauses.iter().any(|c| body_has_wait(&c.body)) { return true; }
@@ -913,8 +903,8 @@ fn expr_calls_task_fn(expr: &Expr, task_fns: &std::collections::HashSet<String>)
 pub(crate) fn items_have_task(items: &[&Item]) -> bool {
     for item in items {
         match item {
-            Item::Stmt(s) => { if stmt_has_task(s) { return true; } }
-            Item::Let(l)  => { if l.value.as_ref().map_or(false, |v| expr_has_task(v)) { return true; } }
+            Item::Stmt(s) if stmt_has_task(s) => { return true; }
+            Item::Let(l) if l.value.as_ref().is_some_and(expr_has_task) => { return true; }
             _ => {}
         }
     }
@@ -924,12 +914,8 @@ pub(crate) fn items_have_task(items: &[&Item]) -> bool {
 pub(crate) fn items_have_task_call(items: &[&Item], task_fns: &std::collections::HashSet<String>) -> bool {
     for item in items {
         match item {
-            Item::Stmt(s) => {
-                if let Stmt::Expr(e) = s {
-                    if expr_has_task_call(e, task_fns) { return true; }
-                }
-            }
-            Item::Let(l) => { if l.value.as_ref().map_or(false, |v| expr_has_task_call(v, task_fns)) { return true; } }
+            Item::Stmt(Stmt::Expr(e)) if expr_has_task_call(e, task_fns) => { return true; }
+            Item::Let(l) if l.value.as_ref().is_some_and(|v| expr_has_task_call(v, task_fns)) => { return true; }
             _ => {}
         }
     }
@@ -939,11 +925,11 @@ pub(crate) fn items_have_task_call(items: &[&Item], task_fns: &std::collections:
 pub(crate) fn stmt_has_task(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_has_task(e),
-        Stmt::Let(l)  => l.value.as_ref().map_or(false, |v| expr_has_task(v)),
+        Stmt::Let(l)  => l.value.as_ref().is_some_and(expr_has_task),
         Stmt::If(i) => {
             i.branches.iter().any(|(cond, body)| {
                 expr_has_task(cond) || body.iter().any(stmt_has_task)
-            }) || i.else_body.as_deref().map_or(false, |b| b.iter().any(stmt_has_task))
+            }) || i.else_body.as_deref().is_some_and(|b| b.iter().any(stmt_has_task))
         }
         Stmt::While(w) => expr_has_task(&w.condition) || w.body.iter().any(stmt_has_task),
         Stmt::For(f)   => expr_has_task(&f.iterable) || f.body.iter().any(stmt_has_task),
@@ -1133,11 +1119,10 @@ pub(crate) fn stmts_have_struct_match(
             }
             // Stmt::Let: we do not recurse into expression interiors here.
             Stmt::Let(_) => {}
-            Stmt::Fn(f) => {
-                if stmts_have_struct_match(&f.body, type_param_var_names, struct_field_names) {
+            Stmt::Fn(f)
+                if stmts_have_struct_match(&f.body, type_param_var_names, struct_field_names) => {
                     return true;
                 }
-            }
             Stmt::If(i) => {
                 for (_, branch) in &i.branches {
                     if stmts_have_struct_match(branch, type_param_var_names, struct_field_names) {
@@ -1334,13 +1319,13 @@ pub(crate) fn stmts_use_task_cancelled(stmts: &[Stmt]) -> bool {
 fn stmt_uses_task_cancelled(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_uses_task_cancelled(e),
-        Stmt::Let(l) => l.value.as_ref().map_or(false, |v| expr_uses_task_cancelled(v)),
+        Stmt::Let(l) => l.value.as_ref().is_some_and(expr_uses_task_cancelled),
         Stmt::Return(ReturnStmt { value: Some(e), .. })
         | Stmt::Throw(ThrowStmt { value: Some(e), .. }) => expr_uses_task_cancelled(e),
         Stmt::If(i) => {
             i.branches.iter().any(|(cond, body)| {
                 expr_uses_task_cancelled(cond) || stmts_use_task_cancelled(body)
-            }) || i.else_body.as_deref().map_or(false, stmts_use_task_cancelled)
+            }) || i.else_body.as_deref().is_some_and(stmts_use_task_cancelled)
         }
         Stmt::While(w) => {
             expr_uses_task_cancelled(&w.condition) || stmts_use_task_cancelled(&w.body)

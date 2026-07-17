@@ -925,7 +925,7 @@ impl Transpiler {
                 // `count` should not be remapped to `len()` on a user struct).
                 let mapped = if let ExprKind::Var(v) = &obj.kind {
                     let is_user_field = (v == "self")
-                        .then(|| self.self_type.as_deref())
+                        .then_some(self.self_type.as_deref())
                         .flatten()
                         .and_then(|t| self.struct_fields.get(t))
                         .map(|fields| fields.iter().any(|(fname, _)| fname == field))
@@ -963,23 +963,53 @@ impl Transpiler {
             ExprKind::Index(obj, idx) => {
                 // Slice: a[M..N], a[..N], a[M..], a[..]  →  obj[M..N].to_vec()
                 if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
+                    // Detect whether the receiver is a string to emit a char-safe slice.
+                    let is_str = match &obj.kind {
+                        ExprKind::Str(_) => true,
+                        ExprKind::Var(v) =>
+                            self.string_vars.contains(v.as_str())
+                            || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Str))
+                            || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
+                        _ => false,
+                    };
                     let obj_s = self.emit_expr(obj);
-                    let start_s = start.as_deref().map(|e| {
-                        let raw = self.emit_expr(e);
+                    // Cast an index expression to `usize` where needed.
+                    let cast_idx = |raw: String, e: &crate::ast::Expr| -> String {
                         match &e.kind {
                             ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
                                 format!("({}) as usize", raw),
                             _ => raw,
                         }
-                    });
-                    let end_s = end.as_deref().map(|e| {
-                        let raw = self.emit_expr(e);
-                        match &e.kind {
-                            ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
-                                format!("({}) as usize", raw),
-                            _ => raw,
-                        }
-                    });
+                    };
+                    if is_str {
+                        // String slice via char indices → collect back to Arc<str>.
+                        // s[lo..hi]  →  Arc::from(&s.chars().skip(lo).take(hi-lo).collect::<String>())
+                        // s[lo..]    →  Arc::from(&s.chars().skip(lo).collect::<String>())
+                        let lo_s = start.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
+                        let hi_s = end.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
+                        let str_ptr = self.str_ptr();
+                        let collected = match (lo_s, hi_s) {
+                            (Some(lo), Some(hi)) => {
+                                if *inclusive {
+                                    format!("{obj_s}.chars().skip({lo}).take({hi}+1-{lo}).collect::<String>()")
+                                } else {
+                                    format!("{obj_s}.chars().skip({lo}).take({hi}-{lo}).collect::<String>()")
+                                }
+                            }
+                            (Some(lo), None)    => format!("{obj_s}.chars().skip({lo}).collect::<String>()"),
+                            (None, Some(hi))    => {
+                                if *inclusive {
+                                    format!("{obj_s}.chars().take({hi}+1).collect::<String>()")
+                                } else {
+                                    format!("{obj_s}.chars().take({hi}).collect::<String>()")
+                                }
+                            }
+                            (None, None)        => format!("{obj_s}.chars().collect::<String>()"),
+                        };
+                        return format!("{str_ptr}::from({collected}.as_str())");
+                    }
+                    let start_s = start.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
+                    let end_s   = end.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
                     let dots = if *inclusive { "..=" } else { ".." };
                     let range_s = match (start_s, end_s) {
                         (Some(s), Some(e)) => format!("{s}{dots}{e}"),
@@ -2636,7 +2666,7 @@ impl Transpiler {
                             crate::transpiler::ThreadingMode::Multi =>
                                 self.emit_actor_new("Default::default()"),
                             crate::transpiler::ThreadingMode::Single =>
-                                format!("Rc::new(RefCell::new(Default::default()))"),
+                                "Rc::new(RefCell::new(Default::default()))".to_string(),
                         };
                         fields.push(format!("{}: {}", field_name, init));
                     }
@@ -2699,10 +2729,8 @@ impl Transpiler {
                     .map(|a| self.emit_expr(&a.value))
                     .collect();
                 if let Some(defaults) = self.struct_init_defaults.get(name).cloned() {
-                    for i in all_args.len()..defaults.len() {
-                        if let Some(def) = &defaults[i] {
-                            all_args.push(def.clone());
-                        }
+                    for def in defaults.iter().skip(all_args.len()).flatten() {
+                        all_args.push(def.clone());
                     }
                 }
                 let args_s = all_args.join(", ");

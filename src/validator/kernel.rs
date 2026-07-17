@@ -35,6 +35,12 @@ pub struct KernelValidator {
     diags: Vec<KernelDiagnostic>,
 }
 
+impl Default for KernelValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KernelValidator {
     pub fn new() -> Self {
         KernelValidator { diags: Vec::new() }

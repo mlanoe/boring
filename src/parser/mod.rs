@@ -58,6 +58,7 @@ impl ParseError {
             ParseError::Lex(_) => 1,
         }
     }
+    pub fn is_empty(&self) -> bool { false }
 
     pub fn msg(&self) -> String {
         match self {
@@ -878,7 +879,7 @@ impl Parser {
     fn is_type_start_before_ident(&self) -> bool {
         // Returns true if current token starts a type that is followed by an ident (param name).
         match self.peek() {
-            TokenKind::Req | TokenKind::Def | TokenKind::Task => return true,
+            TokenKind::Req | TokenKind::Def | TokenKind::Task => true,
             TokenKind::Ident(s) => {
                 if !Self::is_type_name(s) { return false; }
                 let mut i = self.pos + 1;
@@ -1292,15 +1293,14 @@ impl Parser {
             Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
             Type::Qualified(inner, OwnerQual::GpuSurface) => {
                 // `'surface` is only valid on `[uint]` — pixel buffer.
-                if !matches!(*inner, Type::Named(ref n) if n == "uint") {
-                    if !matches!(*inner, Type::Array(_)) {
+                if !matches!(*inner, Type::Named(ref n) if n == "uint")
+                    && !matches!(*inner, Type::Array(_)) {
                         return Err(ParseError::Generic {
                             msg: "'surface requires a '[uint]' element type — pixel buffers hold 32-bit RGBA values".into(),
                             line, col, len: 1,
                         });
                     }
                     // Allow [uint] (Type::Array(Box<Type::Named("uint")>)) too
-                }
                 (GpuQual::Surface, *inner)
             }
             // Unqualified scalar → infer from binding:
@@ -1385,6 +1385,7 @@ impl Parser {
         self.parse_struct_body(name, is_pub, protocols, type_params, where_clause, attrs, line, col)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_struct_body(&mut self, name: String, is_pub: bool, protocols: Vec<String>, type_params: Vec<String>, where_clause: Vec<(String, String)>, attrs: Vec<Attr>, line: usize, col: usize) -> Result<StructDecl, ParseError> {
 
         let mut fields = Vec::new();
@@ -1993,12 +1994,10 @@ impl Parser {
 pub(crate) fn collect_const_params_from_type(ty: &crate::ast::Type, type_params: &mut Vec<String>) {
     use crate::ast::Type;
     match ty {
-        Type::Named(n) if n.starts_with('$') => {
-            if !type_params.contains(n) { type_params.push(n.clone()); }
-        }
-        Type::TypeParam(n) => {
-            if !type_params.contains(n) { type_params.push(n.clone()); }
-        }
+        Type::Named(n) if n.starts_with('$')
+            && !type_params.contains(n) => { type_params.push(n.clone()); }
+        Type::TypeParam(n)
+            if !type_params.contains(n) => { type_params.push(n.clone()); }
         Type::Generic(_, args) => {
             for arg in args { collect_const_params_from_type(arg, type_params); }
         }

@@ -313,7 +313,7 @@ impl Interpreter {
                 // NOT in global, so it is invisible outside the function.
                 self.exec_item(&Item::Struct(decl.clone()), Rc::clone(&env))?;
                 // Undo the global registration that exec_item performed.
-                if self.global.borrow().vars.get(&decl.name).is_some() {
+                if self.global.borrow().vars.contains_key(&decl.name) {
                     // Only remove it if the global wasn't defining this type before.
                     // We detect "local" by checking whether env IS the global.
                     if !Rc::ptr_eq(&env, &self.global) {
@@ -856,13 +856,13 @@ impl Interpreter {
             Type::ArrayNExpr(e, _) => format!("[{}, <expr>]", Self::display_type(e)),
             Type::ConstInt(n) => n.to_string(),
             Type::Tuple(ts) => {
-                let inner = ts.iter().map(|t| Self::display_type(t)).collect::<Vec<_>>().join(", ");
+                let inner = ts.iter().map(Self::display_type).collect::<Vec<_>>().join(", ");
                 format!("({})", inner)
             }
             Type::Dict(k, v) => format!("[{}: {}]", Self::display_type(k), Self::display_type(v)),
             Type::Set(e) => format!("{{{}}}", Self::display_type(e)),
             Type::Fn(ret, params, throws, task, req) => {
-                let params_str = params.iter().map(|t| Self::display_type(t)).collect::<Vec<_>>().join(", ");
+                let params_str = params.iter().map(Self::display_type).collect::<Vec<_>>().join(", ");
                 let ret_str = ret.as_ref().map(|r| format!("{} ", Self::display_type(r))).unwrap_or_default();
                 let throws_str = if *throws { " throws" } else { "" };
                 let task_str = if *task { " task" } else { "" };
@@ -914,7 +914,7 @@ impl Interpreter {
                 if args.is_empty() {
                     name.clone()
                 } else {
-                    let args_str = args.iter().map(|t| Self::display_type(t)).collect::<Vec<_>>().join(", ");
+                    let args_str = args.iter().map(Self::display_type).collect::<Vec<_>>().join(", ");
                     format!("{}<{}>", name, args_str)
                 }
             }
@@ -1348,23 +1348,23 @@ impl Interpreter {
                 // Zero-pad: preserve leading sign char
                 if body.starts_with('+') || body.starts_with('-') {
                     let (sign, rest) = body.split_at(1);
-                    let pad: String = std::iter::repeat('0').take(w - char_len).collect();
+                    let pad: String = std::iter::repeat_n('0', w - char_len).collect();
                     format!("{sign}{pad}{rest}")
                 } else {
-                    let pad: String = std::iter::repeat('0').take(w - char_len).collect();
+                    let pad: String = std::iter::repeat_n('0', w - char_len).collect();
                     format!("{pad}{body}")
                 }
             } else {
                 let eff_align = align.unwrap_or('>');
                 let pad_count = w - char_len;
-                let pad: String = std::iter::repeat(fill).take(pad_count).collect();
+                let pad: String = std::iter::repeat_n(fill, pad_count).collect();
                 match eff_align {
                     '<' => format!("{body}{pad}"),
                     '^' => {
                         let left = pad_count / 2;
                         let right = pad_count - left;
-                        let lp: String = std::iter::repeat(fill).take(left).collect();
-                        let rp: String = std::iter::repeat(fill).take(right).collect();
+                        let lp: String = std::iter::repeat_n(fill, left).collect();
+                        let rp: String = std::iter::repeat_n(fill, right).collect();
                         format!("{lp}{body}{rp}")
                     }
                     _ => format!("{pad}{body}"),

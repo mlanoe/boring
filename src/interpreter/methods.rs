@@ -151,8 +151,72 @@ impl Interpreter {
                     return Ok(result);
                 }
             }
-            Value::Channel { buf, is_sender, .. } => {
-                if method == "send" {
+            Value::Float(f) => {
+                let result = match method {
+                    "sqrt"  => Some(Value::Float(f.sqrt())),
+                    "cbrt"  => Some(Value::Float(f.cbrt())),
+                    "abs"   => Some(Value::Float(f.abs())),
+                    "floor" => Some(Value::Float(f.floor())),
+                    "ceil"  => Some(Value::Float(f.ceil())),
+                    "round" => Some(Value::Float(f.round())),
+                    "exp"   => Some(Value::Float(f.exp())),
+                    "exp2"  => Some(Value::Float(f.exp2())),
+                    "ln"    => Some(Value::Float(f.ln())),
+                    "log2"  => Some(Value::Float(f.log2())),
+                    "log10" => Some(Value::Float(f.log10())),
+                    "sin"   => Some(Value::Float(f.sin())),
+                    "cos"   => Some(Value::Float(f.cos())),
+                    "tan"   => Some(Value::Float(f.tan())),
+                    "asin"  => Some(Value::Float(f.asin())),
+                    "acos"  => Some(Value::Float(f.acos())),
+                    "atan"  => Some(Value::Float(f.atan())),
+                    "sinh"  => Some(Value::Float(f.sinh())),
+                    "cosh"  => Some(Value::Float(f.cosh())),
+                    "tanh"  => Some(Value::Float(f.tanh())),
+                    "sign" | "signum" => Some(Value::Float(f.signum())),
+                    "isNaN" | "is_nan" => Some(Value::Bool(f.is_nan())),
+                    "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
+                    "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
+                    "toInt" | "int" => Some(Value::Int(*f as i64)),
+                    "pow" | "powf" => {
+                        let exp = args.first().cloned().unwrap_or(Value::Float(1.0));
+                        let e = match exp {
+                            Value::Float(e) => e,
+                            Value::Int(n)   => n as f64,
+                            _ => return Err(err("pow: argument must be a number", line)),
+                        };
+                        Some(Value::Float(f.powf(e)))
+                    }
+                    "log" => {
+                        let base = args.first().cloned().unwrap_or(Value::Float(std::f64::consts::E));
+                        let b = match base {
+                            Value::Float(b) => b,
+                            Value::Int(n)   => n as f64,
+                            _ => return Err(err("log: base must be a number", line)),
+                        };
+                        Some(Value::Float(f.log(b)))
+                    }
+                    "atan2" => {
+                        let other = args.first().cloned().unwrap_or(Value::Float(0.0));
+                        let o = match other {
+                            Value::Float(o) => o,
+                            Value::Int(n)   => n as f64,
+                            _ => return Err(err("atan2: argument must be a number", line)),
+                        };
+                        Some(Value::Float(f.atan2(o)))
+                    }
+                    "clamp" => {
+                        if args.len() < 2 { return Err(err("clamp: requires two arguments (min, max)", line)); }
+                        let lo = match &args[0] { Value::Float(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: min must be a number", line)) };
+                        let hi = match &args[1] { Value::Float(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: max must be a number", line)) };
+                        Some(Value::Float(f.clamp(lo, hi)))
+                    }
+                    _ => None,
+                };
+                if let Some(v) = result { return Ok(v); }
+            }
+            Value::Channel { buf, is_sender, .. }
+                if method == "send" => {
                     if !is_sender {
                         return Err(err("send called on a channel receiver", line));
                     }
@@ -160,7 +224,6 @@ impl Interpreter {
                     buf.borrow_mut().push_back(val);
                     return Ok(Value::Void);
                 }
-            }
             _ => {}
         }
 
@@ -373,19 +436,19 @@ impl Interpreter {
         match method {
             "len" => Ok(Some(Value::Int(s.chars().count() as i64))),
             "contains" => {
-                let sub = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.contains(sub.as_str()))))
             }
             "startsWith" => {
-                let sub = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.starts_with(sub.as_str()))))
             }
             "endsWith" => {
-                let sub = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.ends_with(sub.as_str()))))
             }
             "split" => {
-                let sep = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let sep = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 let parts: Vec<Value> = s.split(sep.as_str()).map(|p| Value::Str(p.to_string())).collect();
                 Ok(Some(Value::Array(parts)))
             }
@@ -395,7 +458,7 @@ impl Interpreter {
             "upper" | "toUpper" | "toUpperCase" | "uppercased" => Ok(Some(Value::Str(s.to_uppercase()))),
             "lower" | "toLower" | "toLowerCase" | "lowercased" => Ok(Some(Value::Str(s.to_lowercase()))),
             "replace" => {
-                let from = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let from = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 let to = self.expect_str(args.get(1).cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Str(s.replace(from.as_str(), to.as_str()))))
             }
@@ -409,7 +472,7 @@ impl Interpreter {
             }
             "slice" => {
                 let char_count = s.chars().count();
-                let start_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let start_i = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let start = if start_i < 0 {
                     (char_count as i64 + start_i).max(0) as usize
                 } else {
@@ -430,7 +493,7 @@ impl Interpreter {
                 Ok(Some(Value::Str(result)))
             }
             "repeat" => {
-                let n = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)? as usize;
+                let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)? as usize;
                 Ok(Some(Value::Str(s.repeat(n))))
             }
             "parseInt" => {
@@ -446,7 +509,7 @@ impl Interpreter {
                 }
             }
             "indexOf" => {
-                let sub = self.expect_str(args.get(0).cloned().unwrap_or(Value::Nil), line)?;
+                let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 match s.find(sub.as_str()) {
                     Some(i) => Ok(Some(Value::Int(i as i64))),
                     None => Ok(Some(Value::Nil)),
@@ -535,7 +598,7 @@ impl Interpreter {
             }
             "reduce" => {
                 // reduce(init, closure) — initial value first, closure second
-                let init = args.get(0).cloned().unwrap_or(Value::Nil);
+                let init = args.first().cloned().unwrap_or(Value::Nil);
                 let closure = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut acc = init;
                 for item in arr {
@@ -544,7 +607,7 @@ impl Interpreter {
                 Ok(Some(acc))
             }
             "join" => {
-                let sep = match args.get(0) {
+                let sep = match args.first() {
                     Some(Value::Str(s)) => s.clone(),
                     _ => String::new(),
                 };
@@ -609,7 +672,7 @@ impl Interpreter {
                     Some(Value::Array(a)) => a,
                     _ => vec![],
                 };
-                let result: Vec<Value> = arr.into_iter().zip(other.into_iter())
+                let result: Vec<Value> = arr.into_iter().zip(other)
                     .map(|(a, b)| Value::Tuple(vec![a, b]))
                     .collect();
                 Ok(Some(Value::Array(result)))
@@ -622,7 +685,7 @@ impl Interpreter {
             }
             "slice" => {
                 let len = arr.len();
-                let start_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let start_i = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let start = if start_i < 0 {
                     (len as i64 + start_i).max(0) as usize
                 } else {
@@ -642,7 +705,7 @@ impl Interpreter {
                 Ok(Some(Value::Array(arr[start..end.max(start)].to_vec())))
             }
             "insert" => {
-                let idx_i = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let idx_i = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let val = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut new_arr = arr;
                 let idx = if idx_i < 0 {
@@ -654,7 +717,7 @@ impl Interpreter {
                 Ok(Some(Value::Array(new_arr)))
             }
             "remove" => {
-                let idx = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let idx = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let mut new_arr = arr;
                 let idx = if idx < 0 { new_arr.len() as i64 + idx } else { idx };
                 if idx >= 0 && (idx as usize) < new_arr.len() {
@@ -772,17 +835,17 @@ impl Interpreter {
                 Ok(Some(Value::Array(sorted)))
             }
             "take" => {
-                let n = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let n = (n.max(0)) as usize;
                 Ok(Some(Value::Array(arr.into_iter().take(n).collect())))
             }
             "drop" => {
-                let n = self.expect_int(args.get(0).cloned().unwrap_or(Value::Int(0)), line)?;
+                let n = self.expect_int(args.first().cloned().unwrap_or(Value::Int(0)), line)?;
                 let n = (n.max(0)) as usize;
                 Ok(Some(Value::Array(arr.into_iter().skip(n).collect())))
             }
             "joined" => {
-                let sep = match args.get(0) {
+                let sep = match args.first() {
                     Some(Value::Str(s)) => s.clone(),
                     _ => String::new(),
                 };
@@ -847,17 +910,17 @@ impl Interpreter {
             "values" => Ok(Some(Value::Array(pairs.into_iter().map(|(_, v)| v).collect()))),
             "len" => Ok(Some(Value::Int(pairs.len() as i64))),
             "contains" | "containsKey" | "has" => {
-                let key = args.get(0).cloned().unwrap_or(Value::Nil);
+                let key = args.first().cloned().unwrap_or(Value::Nil);
                 Ok(Some(Value::Bool(pairs.iter().any(|(k, _)| k == &key))))
             }
             "get" => {
-                let key = args.get(0).cloned().unwrap_or(Value::Nil);
+                let key = args.first().cloned().unwrap_or(Value::Nil);
                 let default = args.get(1).cloned().unwrap_or(Value::Nil);
                 let found = pairs.into_iter().find(|(k, _)| k == &key).map(|(_, v)| v);
                 Ok(Some(found.unwrap_or(default)))
             }
             "remove" => {
-                let key = args.get(0).cloned().unwrap_or(Value::Nil);
+                let key = args.first().cloned().unwrap_or(Value::Nil);
                 let new_pairs: Vec<(Value, Value)> = pairs.into_iter().filter(|(k, _)| k != &key).collect();
                 Ok(Some(Value::Dict(new_pairs)))
             }
@@ -882,7 +945,7 @@ impl Interpreter {
             "isEmpty" => Ok(Some(Value::Bool(pairs.is_empty()))),
             "count"   => Ok(Some(Value::Int(pairs.len() as i64))),
             "set" | "put" => {
-                let key = args.get(0).cloned().unwrap_or(Value::Nil);
+                let key = args.first().cloned().unwrap_or(Value::Nil);
                 let val = args.get(1).cloned().unwrap_or(Value::Nil);
                 let mut new_pairs = pairs;
                 let mut found = false;
@@ -1423,7 +1486,7 @@ impl Interpreter {
                         for (k, v) in &mut inner_mut.fields {
                             if k == field { *v = val.clone(); break; }
                         }
-                        return Ok(());
+                        Ok(())
                     }
                     Value::EnumVariant { ref type_name, .. } => {
                         let ns = self.global.borrow().get(type_name);
@@ -1446,9 +1509,9 @@ impl Interpreter {
                                 return Ok(());
                             }
                         }
-                        return Err(err(format!("enum variant has no settable field '{}'", field), line));
+                        Err(err(format!("enum variant has no settable field '{}'", field), line))
                     }
-                    _ => return Err(err("cannot assign field on non-object", line)),
+                    _ => Err(err("cannot assign field on non-object", line)),
                 }
             }
             ExprKind::Index(obj_expr, idx_expr) => {
@@ -1506,10 +1569,7 @@ impl Interpreter {
     pub(crate) fn display_value(&mut self, val: Value, line: usize) -> Result<String, Signal> {
         if matches!(&val, Value::Object(_) | Value::EnumVariant { .. }) {
             let str_ty = Type::Str;
-            match self.cast_value(val.clone(), &str_ty, line) {
-                Ok(Value::Str(s)) => return Ok(s),
-                _ => {}
-            }
+            if let Ok(Value::Str(s)) = self.cast_value(val.clone(), &str_ty, line) { return Ok(s) }
         }
         Ok(format!("{}", val))
     }
@@ -1594,6 +1654,7 @@ impl Interpreter {
         Ok(Value::Nil)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     pub(crate) fn cast_value(&mut self, val: Value, ty: &Type, line: usize) -> Eval {
         // Resolve aliases (int→Int, string→Str, etc.) before dispatching
         let resolved = self.resolve_type(ty);
@@ -1606,7 +1667,7 @@ impl Interpreter {
             let struct_val = self.global.borrow().get(&type_name);
             if let Some(Value::Struct { decl, captured }) = struct_val {
                 if let Some(as_decl) = decl.conversions.iter().find(|a| {
-                    type_matches(&strip_qualifiers(&self.resolve_type(&a.ty)), strip_qualifiers(ty))
+                    type_matches(strip_qualifiers(&self.resolve_type(&a.ty)), strip_qualifiers(ty))
                 }) {
                     let body = as_decl.body.clone();
                     let fn_env = Env::child(captured);
@@ -1621,7 +1682,7 @@ impl Interpreter {
             let ns = self.global.borrow().get(type_name);
             if let Some(Value::EnumNamespace { conversions, captured, .. }) = ns {
                 if let Some(as_decl) = conversions.iter().find(|a| {
-                    type_matches(&strip_qualifiers(&self.resolve_type(&a.ty)), strip_qualifiers(ty))
+                    type_matches(strip_qualifiers(&self.resolve_type(&a.ty)), strip_qualifiers(ty))
                 }) {
                     let body = as_decl.body.clone();
                     let fn_env = Env::child(captured);
@@ -1633,7 +1694,7 @@ impl Interpreter {
 
         match ty {
             // Strip ownership qualifiers — `int` = Qualified(Int, Copy), etc.
-            Type::Qualified(inner, _) => return self.cast_value(val, inner, line),
+            Type::Qualified(inner, _) => self.cast_value(val, inner, line),
             Type::Int => match val {
                 Value::Int(n) => Ok(Value::Int(n)),
                 Value::Uint(n) => Ok(Value::Int(n as i64)),
@@ -1903,17 +1964,17 @@ impl Interpreter {
             Value::Nil      => Type::Nil,
             Value::Void     => Type::Void,
             Value::Array(elems) => {
-                let elem_ty = elems.first().map(|e| Self::type_of_value(e)).unwrap_or(Type::Nil);
+                let elem_ty = elems.first().map(Self::type_of_value).unwrap_or(Type::Nil);
                 Type::Array(Box::new(elem_ty))
             }
-            Value::Tuple(elems) => Type::Tuple(elems.iter().map(|e| Self::type_of_value(e)).collect()),
+            Value::Tuple(elems) => Type::Tuple(elems.iter().map(Self::type_of_value).collect()),
             Value::Dict(pairs) => {
                 let k = pairs.first().map(|(k, _)| Self::type_of_value(k)).unwrap_or(Type::Nil);
                 let v = pairs.first().map(|(_, v)| Self::type_of_value(v)).unwrap_or(Type::Nil);
                 Type::Dict(Box::new(k), Box::new(v))
             }
             Value::Set(elems) => {
-                let elem_ty = elems.first().map(|e| Self::type_of_value(e)).unwrap_or(Type::Nil);
+                let elem_ty = elems.first().map(Self::type_of_value).unwrap_or(Type::Nil);
                 Type::Set(Box::new(elem_ty))
             }
             Value::Object(inner) => Type::Named(inner.borrow().type_name.clone()),
@@ -2045,8 +2106,7 @@ impl Interpreter {
             let struct_val = self.global.borrow().get(type_name);
             let has_trait = match struct_val {
                 Some(Value::Struct { decl, .. }) => {
-                    if decl.protocols.iter().any(|p| p == trait_name) { true }
-                    else if decl.methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name.as_str())) { true }
+                    if decl.protocols.iter().any(|p| p == trait_name) || decl.methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name.as_str())) { true }
                     else {
                         // Structural: check all trait method signatures exist in struct methods
                         if let Some(trait_decl) = self.traits.get(trait_name.as_str()) {
@@ -2059,8 +2119,7 @@ impl Interpreter {
                     }
                 }
                 Some(Value::EnumNamespace { methods, protocols, .. }) => {
-                    if protocols.iter().any(|p| p == trait_name) { true }
-                    else if methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name.as_str())) { true }
+                    if protocols.iter().any(|p| p == trait_name) || methods.iter().any(|m| m.qualifier.as_deref() == Some(trait_name.as_str())) { true }
                     else {
                         if let Some(trait_decl) = self.traits.get(trait_name.as_str()) {
                             let method_names: std::collections::HashSet<&str> =

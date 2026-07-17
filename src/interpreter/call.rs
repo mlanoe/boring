@@ -512,12 +512,10 @@ impl Interpreter {
     pub(crate) fn has_method(&self, type_name: &str, method: &str) -> bool {
         if let Some(val) = self.global.borrow().get(type_name) {
             match &val {
-                Value::Struct { decl, .. } => {
-                    if decl.methods.iter().any(|m| m.name == method) { return true; }
-                }
-                Value::EnumNamespace { methods, .. } => {
-                    if methods.iter().any(|m| m.name == method) { return true; }
-                }
+                Value::Struct { decl, .. }
+                    if decl.methods.iter().any(|m| m.name == method) => { return true; }
+                Value::EnumNamespace { methods, .. }
+                    if methods.iter().any(|m| m.name == method) => { return true; }
                 _ => {}
             }
         }
@@ -579,7 +577,7 @@ impl Interpreter {
 
             // ── Assertion macros ─────────────────────────────────────────────
             "assert" => {
-                match args.get(0) {
+                match args.first() {
                     Some(Value::Bool(true)) => Ok(Value::Void),
                     Some(Value::Bool(false)) => {
                         let msg = args.get(1)
@@ -591,7 +589,7 @@ impl Interpreter {
                 }
             }
             "assert_eq" => {
-                let ok = match (args.get(0), args.get(1)) {
+                let ok = match (args.first(), args.get(1)) {
                     (Some(a), Some(b)) => a == b,
                     _ => false,
                 };
@@ -600,13 +598,13 @@ impl Interpreter {
                     let msg = args.get(2)
                         .map(|v| format!("{}", v))
                         .unwrap_or_else(|| format!("assertion `left == right` failed\n  left: {}\n right: {}",
-                            args.get(0).unwrap_or(&Value::Nil),
+                            args.first().unwrap_or(&Value::Nil),
                             args.get(1).unwrap_or(&Value::Nil)));
                     Err(err(msg, line))
                 }
             }
             "assert_ne" => {
-                let neq = match (args.get(0), args.get(1)) {
+                let neq = match (args.first(), args.get(1)) {
                     (Some(a), Some(b)) => a != b,
                     _ => true,
                 };
@@ -615,7 +613,7 @@ impl Interpreter {
                     let msg = args.get(2)
                         .map(|v| format!("{}", v))
                         .unwrap_or_else(|| format!("assertion `left != right` failed\n  value: {}",
-                            args.get(0).unwrap_or(&Value::Nil)));
+                            args.first().unwrap_or(&Value::Nil)));
                     Err(err(msg, line))
                 }
             }

@@ -255,12 +255,10 @@ impl Parser {
             //   try: … catch: …         — statement with typed catch
             return Err(ParseError::Generic {
                 line, col,
-                msg: format!(
-                    "'try expr' requires an else clause or '?' — use:\n  \
+                msg: "'try expr' requires an else clause or '?' — use:\n  \
                      try f() else default     (expression with fallback)\n  \
                      try? f()                 (nil on error)\n  \
-                     try: … catch: …          (statement with catch)"
-                ), len: self.tok_len(),
+                     try: … catch: …          (statement with catch)".to_string(), len: self.tok_len(),
             });
         }
         let expr = self.parse_pipe()?;
@@ -814,7 +812,8 @@ impl Parser {
     /// Returns true if the current token can start a primary expression (used for command-style calls).
     /// Excludes newline, EOF, dedent, and tokens that would be ambiguous in statement position.
     pub(crate) fn peek_starts_expr(&self) -> bool {
-        match self.tokens.get(self.pos).map(|t| &t.kind) {
+        matches!(
+            self.tokens.get(self.pos).map(|t| &t.kind),
             Some(TokenKind::Str(_))
             | Some(TokenKind::StringInterp(_))
             | Some(TokenKind::Int(_))
@@ -823,9 +822,8 @@ impl Parser {
             | Some(TokenKind::Nil)
             | Some(TokenKind::LParen)
             | Some(TokenKind::LBracket)
-            | Some(TokenKind::Ident(_)) => true,
-            _ => false,
-        }
+            | Some(TokenKind::Ident(_))
+        )
     }
 
     /// Returns true if the current position looks like a no-paren single-param trailing closure: `Ident ':'`.
@@ -943,8 +941,8 @@ impl Parser {
         match s {
             Stmt::Throw(_) => (true, false),
             Stmt::Expr(e) => Self::scan_expr_throws_task(e),
-            Stmt::Let(l) => l.value.as_ref().map(|e| Self::scan_expr_throws_task(e)).unwrap_or((false, false)),
-            Stmt::Return(r) => r.value.as_ref().map(|e| Self::scan_expr_throws_task(e)).unwrap_or((false, false)),
+            Stmt::Let(l) => l.value.as_ref().map(Self::scan_expr_throws_task).unwrap_or((false, false)),
+            Stmt::Return(r) => r.value.as_ref().map(Self::scan_expr_throws_task).unwrap_or((false, false)),
             Stmt::If(i) => {
                 let mut t = false; let mut k = false;
                 for (cond, body) in &i.branches {
@@ -1193,8 +1191,8 @@ impl Parser {
         }
         // Labeled arg: `ident= expr` or `ident: expr`
         // Detected by `Ident` followed immediately by `Eq` or `Colon`.
-        if matches!(self.peek(), TokenKind::Ident(_)) {
-            if self.check2(&TokenKind::Eq) {
+        if matches!(self.peek(), TokenKind::Ident(_))
+            && self.check2(&TokenKind::Eq) {
                 // Make sure it is not `ident ==` (equality check)
                 let after_eq_pos = self.pos + 2;
                 let is_double_eq = after_eq_pos < self.tokens.len()
@@ -1210,7 +1208,6 @@ impl Parser {
             // indistinguishable from a no-paren closure `x: body`. Use `ident= expr`
             // for labeled arguments instead. The `ident:` form is parsed as a
             // no-paren closure in parse_primary when allow_noparen_closure is true.
-        }
         let value = self.parse_expr()?;
         Ok(Arg { label: None, value, spread: false })
     }

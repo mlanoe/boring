@@ -234,7 +234,7 @@ impl Transpiler {
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
-                    || TOKIO_ASYNC_INSTANCE.iter().any(|&m| m == method);
+                    || TOKIO_ASYNC_INSTANCE.contains(&method);
                 return if self.in_async && needs_await {
                     format!("{}.await", call)
                 } else {
@@ -298,7 +298,7 @@ impl Transpiler {
                             .and_then(|ty| if let crate::ast::Type::Qualified(inner, _) = ty {
                                 if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
                             } else { None });
-                        let is_req = struct_name.map_or(false, |sn| {
+                        let is_req = struct_name.is_some_and(|sn| {
                             self.struct_req_methods.contains(&format!("{}::{}", sn, method))
                         });
                         if is_req { "borrow" } else { "borrow_mut" }
@@ -315,7 +315,7 @@ impl Transpiler {
                 // Add .await for user task methods AND known tokio async instance methods (recv, etc.)
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
-                    || TOKIO_ASYNC_INSTANCE.iter().any(|&m| m == method);
+                    || TOKIO_ASYNC_INSTANCE.contains(&method);
                 let throws = (self.in_throws || self.in_try_body)
                     && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
                 let call = if throws { format!("{}?", call) } else { call };
@@ -739,7 +739,7 @@ impl Transpiler {
                         str_ty, obj_s, from_s, to_s
                     );
                 }
-                "repeat" if args.len() >= 1 => {
+                "repeat" if !args.is_empty() => {
                     let n_s = self.emit_expr(&args[0].value);
                     let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
                     let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
@@ -793,7 +793,7 @@ impl Transpiler {
                     let key_s = self.emit_dict_key_borrow(&args[0].value);
                     return format!("{}.contains_key({})", obj_s, key_s);
                 }
-                "remove" if args.len() >= 1 => {
+                "remove" if !args.is_empty() => {
                     let key_s = self.emit_dict_key_borrow(&args[0].value);
                     return format!("{}.remove({})", obj_s, key_s);
                 }
@@ -854,15 +854,15 @@ impl Transpiler {
                         .unwrap_or_else(|| "Default::default()".to_string());
                     return format!("{}.difference(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s);
                 }
-                "add" | "insert" if args.len() >= 1 => {
+                "add" | "insert" if !args.is_empty() => {
                     let val_s = self.emit_expr_owned(&args[0].value);
                     return format!("{}.insert({})", obj_s, val_s);
                 }
-                "remove" if args.len() >= 1 => {
+                "remove" if !args.is_empty() => {
                     let val_s = self.emit_expr_owned(&args[0].value);
                     return format!("{}.remove(&{})", obj_s, val_s);
                 }
-                "contains" if args.len() >= 1 => {
+                "contains" if !args.is_empty() => {
                     let val_s = self.emit_expr_owned(&args[0].value);
                     return format!("{}.contains(&{})", obj_s, val_s);
                 }
@@ -1101,6 +1101,57 @@ impl Transpiler {
                 call
             };
         }
+        // Float math methods: map boring method names to their Rust f64 equivalents.
+        // Only intercept when the receiver is known to be a float (primitive), not a struct.
+        let receiver_is_float = match &obj.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::Int(_)   => true,
+            ExprKind::Var(v) => matches!(
+                self.var_types.get(v.as_str()),
+                Some(crate::ast::Type::Float) | Some(crate::ast::Type::Int) | Some(crate::ast::Type::Uint)
+            ),
+            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float | crate::ast::Type::Int | crate::ast::Type::Uint),
+            _ => false,
+        };
+        if receiver_is_float {
+            const FLOAT_UNARY_METHODS: &[(&str, &str)] = &[
+                ("sqrt",  "sqrt"),  ("cbrt",   "cbrt"),  ("abs",   "abs"),
+                ("floor", "floor"), ("ceil",   "ceil"),  ("round", "round"),
+                ("exp",   "exp"),   ("exp2",   "exp2"),  ("ln",    "ln"),
+                ("log2",  "log2"),  ("log10",  "log10"),
+                ("sin",   "sin"),   ("cos",    "cos"),   ("tan",   "tan"),
+                ("asin",  "asin"),  ("acos",   "acos"),  ("atan",  "atan"),
+                ("sinh",  "sinh"),  ("cosh",   "cosh"),  ("tanh",  "tanh"),
+                ("signum","signum"),("recip",  "recip"),
+                ("toRadians","to_radians"), ("toDegrees","to_degrees"),
+            ];
+            if let Some(&(_, rust_name)) = FLOAT_UNARY_METHODS.iter().find(|&&(n, _)| n == method) {
+                let obj_s = self.emit_expr(obj);
+                return format!("({} as f64).{}()", obj_s, rust_name);
+            }
+            if method == "pow" || method == "powf" {
+                let obj_s = self.emit_expr(obj);
+                let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
+                return format!("({} as f64).powf({} as f64)", obj_s, exp);
+            }
+            if method == "log" {
+                let obj_s = self.emit_expr(obj);
+                let base = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "std::f64::consts::E".to_string());
+                return format!("({} as f64).log({} as f64)", obj_s, base);
+            }
+            if method == "atan2" {
+                let obj_s = self.emit_expr(obj);
+                let other = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0.0f64".to_string());
+                return format!("({} as f64).atan2({} as f64)", obj_s, other);
+            }
+            if method == "clamp" && args.len() >= 2 {
+                let obj_s = self.emit_expr(obj);
+                let lo = self.emit_expr(&args[0].value);
+                let hi = self.emit_expr(&args[1].value);
+                return format!("({} as f64).clamp({} as f64, {} as f64)", obj_s, lo, hi);
+            }
+        }
+
         let obj_s = self.emit_expr(obj);
         // Use `::` for module/type path receivers (not instance variable method calls).
         // Lowercase non-local vars: `mpsc.channel(32)` → `mpsc::channel(32)`
@@ -1349,7 +1400,7 @@ impl Transpiler {
         const TOKIO_ASYNC_METHODS: &[&str] = &[
             "read_line", "write_all", "acquire", "recv",
         ];
-        let is_tokio_async = TOKIO_ASYNC_METHODS.iter().any(|&m| m == method);
+        let is_tokio_async = TOKIO_ASYNC_METHODS.contains(&method);
         let propagates_throw = (self.in_throws || self.in_try_body)
             && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
@@ -1647,7 +1698,7 @@ impl Transpiler {
                             };
                             let lock_method = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                                 if mutable { "borrow_mut" } else { "borrow" }
-                            } else if mutable { "lock" } else { "lock" };
+                            } else { "lock" };
                             format!("{{ let __g = {}.{}(); {}*__g }}", raw, lock_method, ref_prefix)
                         }
                         Some(Type::Qualified(_, OwnerQual::Guard)) => {
@@ -1831,7 +1882,7 @@ impl Transpiler {
                     args.push(expr_s);
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
                     args.push(self.emit_expr(e));
                 }
@@ -1866,7 +1917,7 @@ impl Transpiler {
                     args.push(self.emit_expr(e));
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
                     args.push(self.emit_expr(e));
                 }
@@ -1922,7 +1973,7 @@ impl Transpiler {
                     combined.push(expr_s);
                 }
                 StringSegment::FormattedExpr(e, spec) => {
-                    let rust_spec = spec.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                    let rust_spec = spec.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                     fmt.push_str(&format!("{{:{}}}", rust_spec));
                     combined.push(self.emit_expr(e));
                 }
@@ -2407,10 +2458,14 @@ impl Transpiler {
                 }
             }
 
-            // fs.readBytes("path") → Vec<u8>
+            // fs.readBytes("path") → Vec<i64> (bytes as i64 to match boring's [int])
             "readBytes" => {
                 let path = a(0);
-                format!("{}::read({}){aw}", fs_mod, path, aw = aw)
+                if aw.is_empty() {
+                    format!("{{ let __rb = {}::read({})?; __rb.into_iter().map(|b| b as i64).collect::<Vec<i64>>() }}", fs_mod, path)
+                } else {
+                    format!("{{ let __rb = {}::read({}).await?; __rb.into_iter().map(|b| b as i64).collect::<Vec<i64>>() }}", fs_mod, path)
+                }
             }
 
             // fs.writeBytes("path", bytes)

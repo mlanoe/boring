@@ -288,7 +288,7 @@ impl Transpiler {
                 );
                 for atd in &s.assoc_type_defs {
                     let belongs = trait_assoc_names.as_ref()
-                        .map_or(false, |names| names.contains(&atd.name));
+                        .is_some_and(|names| names.contains(&atd.name));
                     if belongs {
                         let ty_s = self.emit_type(&atd.ty);
                         self.line(&format!("type {} = {};", atd.name, ty_s));
@@ -302,7 +302,7 @@ impl Transpiler {
                 let prev_in_trait = self.inside_trait_impl;
                 self.inside_trait_impl = true;
                 for f in &s.methods {
-                    if known.as_ref().map_or(true, |names| names.contains(&f.name)) {
+                    if known.as_ref().is_none_or(|names| names.contains(&f.name)) {
                         self.emit_fn(f, Some(&s.name));
                         self.blank();
                     }
@@ -853,6 +853,7 @@ impl Transpiler {
         // e.g. `enum EPair { Both(int first, int second) }` → `fn first(&self) -> i64`
         // Group by field name to avoid duplicate method definitions when multiple variants
         // share the same field name (e.g. `Add(int left, int right)` and `Mul(int left, int right)`).
+        #[allow(clippy::type_complexity)]
         let mut named_field_getters: Vec<(String, Vec<(usize, &VariantField, &str)>)> = Vec::new();
         for v in &e.variants {
             for (idx, field) in v.fields.iter().enumerate() {

@@ -915,12 +915,10 @@ impl Parser {
                 }
             }
             TokenKind::Int(n) => {
-                let n = n;
                 self.advance();
                 Ok(Pattern::Lit(LitPattern::Int(n)))
             }
             TokenKind::Float(f) => {
-                let f = f;
                 self.advance();
                 Ok(Pattern::Lit(LitPattern::Float(f)))
             }
@@ -930,7 +928,6 @@ impl Parser {
                 Ok(Pattern::Lit(LitPattern::Str(s)))
             }
             TokenKind::Bool(b) => {
-                let b = b;
                 self.advance();
                 Ok(Pattern::Lit(LitPattern::Bool(b)))
             }

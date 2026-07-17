@@ -622,7 +622,7 @@ impl HostEmitter {
             }
             None => params.join(", "),
         };
-        let ret = f.return_ty.as_ref().map(|t| rust_type(t)).unwrap_or_else(|| "()".into());
+        let ret = f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into());
         let sig = format!("{}fn {}({}) -> {}", vis, f.name, all_params, ret);
         if f.body.is_empty() {
             self.line(&format!("{} {{}}", sig));
@@ -863,7 +863,7 @@ impl HostEmitter {
     /// Scalar `N` → `(N as u32, 1, 1)`.  Tuple `(X, Y)` → `(X as u32, Y as u32, 1)`.  Etc.
     fn dim3_expr(&mut self, e: &Expr) -> String {
         if let ExprKind::Tuple(elems) = &e.kind {
-            let x = elems.get(0).map(|e| format!("{} as u32", self.expr(e))).unwrap_or_else(|| "1".into());
+            let x = elems.first().map(|e| format!("{} as u32", self.expr(e))).unwrap_or_else(|| "1".into());
             let y = elems.get(1).map(|e| format!("{} as u32", self.expr(e))).unwrap_or_else(|| "1".into());
             let z = elems.get(2).map(|e| format!("{} as u32", self.expr(e))).unwrap_or_else(|| "1".into());
             format!("({x}, {y}, {z})")
@@ -990,12 +990,12 @@ impl HostEmitter {
                     }
                     // `fs.writeBytes(path, bytes)` — write Vec<i64> as binary file
                     if name == "fs" && method == "writeBytes" {
-                        let path  = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let path  = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let bytes = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
                         return format!("std::fs::write({}, {}.iter().map(|&b| b as u8).collect::<Vec<u8>>())?", path, bytes);
                     }
                     if name == "fs" && (method == "write" || method == "writeText") {
-                        let path = args.get(0).map(|a| self.expr(&a.value)).unwrap_or_default();
+                        let path = args.first().map(|a| self.expr(&a.value)).unwrap_or_default();
                         let text = args.get(1).map(|a| self.expr(&a.value)).unwrap_or_default();
                         return format!("std::fs::write({}, {}.as_bytes())?", path, text);
                     }
@@ -1161,7 +1161,7 @@ impl HostEmitter {
                             args.push(self.expr(e));
                         }
                         StringSegment::FormattedExpr(e, fmt) => {
-                            let rust_fmt = fmt.trim_end_matches(|c| matches!(c, 'f' | 'd' | 's' | 'g' | 'G'));
+                            let rust_fmt = fmt.trim_end_matches(['f', 'd', 's', 'g', 'G']);
                             fmt_str.push_str(&format!("{{:{}}}", rust_fmt));
                             args.push(self.expr(e));
                         }
@@ -1308,7 +1308,7 @@ fn rust_type(ty: &Type) -> String {
         Type::Array(inner)   => format!("Vec<{}>", rust_type(inner)),
         Type::ArrayN(inner, n) => format!("[{}; {}]", rust_type(inner), n),
         Type::Tuple(ts) => {
-            let s: Vec<String> = ts.iter().map(|t| rust_type(t)).collect();
+            let s: Vec<String> = ts.iter().map(rust_type).collect();
             format!("({})", s.join(", "))
         }
         Type::Dict(k, v) => format!(
@@ -1328,7 +1328,7 @@ fn rust_type(ty: &Type) -> String {
         Type::TypeParam(p)     => p.clone(),
         Type::Qualified(inner, _) => rust_type(inner),
         Type::Generic(n, args) => {
-            let s: Vec<String> = args.iter().map(|a| rust_type(a)).collect();
+            let s: Vec<String> = args.iter().map(rust_type).collect();
             format!("{}<{}>", n, s.join(", "))
         }
         _ => "()".into(),

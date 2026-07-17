@@ -188,14 +188,12 @@ impl Transpiler {
 
         // Tail-expression inference: bare variable as last expression inherits return qualifier.
         if let Some(ref rq) = return_qual {
-            if let Some(last) = stmts.iter().rev().find(|s| !matches!(s, Stmt::Defer(_))) {
-                if let Stmt::Expr(e) = last {
-                    if let ExprKind::Var(name) = &e.kind {
-                        if anonymous_vars.contains(name.as_str()) {
-                            constrain_candidates(&mut candidates, name, &[rq.clone()], &alias_of);
-                            if auto_ref_param_vars.contains(name.as_str()) {
-                                has_qualifier_constraint.insert(name.clone());
-                            }
+            if let Some(Stmt::Expr(e)) = stmts.iter().rev().find(|s| !matches!(s, Stmt::Defer(_))) {
+                if let ExprKind::Var(name) = &e.kind {
+                    if anonymous_vars.contains(name.as_str()) {
+                        constrain_candidates(&mut candidates, name, std::slice::from_ref(rq), &alias_of);
+                        if auto_ref_param_vars.contains(name.as_str()) {
+                            has_qualifier_constraint.insert(name.clone());
                         }
                     }
                 }
@@ -249,6 +247,7 @@ impl Transpiler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_stmt_for_qualifiers(
         &mut self,
         stmt: &Stmt,
@@ -273,7 +272,7 @@ impl Transpiler {
                 if let Some(e) = &r.value {
                     if let (Some(rq), ExprKind::Var(name)) = (return_qual, &e.kind) {
                         if anonymous_vars.contains(name.as_str()) {
-                            constrain_candidates(candidates, name, &[rq.clone()], alias_of);
+                            constrain_candidates(candidates, name, std::slice::from_ref(rq), alias_of);
                             if auto_ref_param_vars.contains(name.as_str()) {
                                 has_qualifier_constraint.insert(name.clone());
                             }
@@ -381,6 +380,7 @@ impl Transpiler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_expr_for_qualifiers(
         &mut self,
         expr: &Expr,
@@ -434,11 +434,10 @@ impl Transpiler {
                                 constrain_candidates(candidates, var_name, &compatible, alias_of);
                                 // A concrete qualifier demand (not Borrow/BorrowMut) is a
                                 // qualifier-demand signal: auto-ref inference does not apply.
-                                if auto_ref_param_vars.contains(var_name.as_str()) {
-                                    if !matches!(demanded, OwnerQual::Borrow | OwnerQual::BorrowMut) {
+                                if auto_ref_param_vars.contains(var_name.as_str())
+                                    && !matches!(demanded, OwnerQual::Borrow | OwnerQual::BorrowMut) {
                                         has_qualifier_constraint.insert(var_name.clone());
                                     }
-                                }
                             }
                         }
                     }
@@ -647,6 +646,7 @@ impl Transpiler {
 
     /// Walk a CondClause for qualifier constraints.
     /// Moving-out patterns (`let Some(x) = param.field`) suppress auto-ref on the root param.
+    #[allow(clippy::too_many_arguments)]
     fn walk_cond_clause_for_qualifiers(
         &mut self,
         clause: &crate::ast::CondClause,
@@ -682,6 +682,7 @@ impl Transpiler {
     /// kept as candidates here — the final pick between them happens in `infer_qualifiers`'s
     /// resolution loop via `disambiguate_task_variant`, based on whether a `task`-declared
     /// method was called on the captured variable (recorded here into `task_method_call_vars`).
+    #[allow(clippy::too_many_arguments)]
     fn constrain_task_captures(
         &mut self,
         body: &Expr,
@@ -1312,7 +1313,7 @@ fn resolve_fallback(
     stack_auto_bytes: usize,
 ) -> Option<OwnerQual> {
     let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
-    let fits = type_size.map_or(true, |s| s <= stack_auto_bytes);
+    let fits = type_size.is_none_or(|s| s <= stack_auto_bytes);
 
     // Ordered chain: 'heap > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
     // The 'task variant is checked first at each slot so that it wins when it's the one

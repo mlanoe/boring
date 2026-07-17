@@ -260,6 +260,7 @@ impl LexError {
     }
 
     pub fn len(&self) -> usize { 1 }
+    pub fn is_empty(&self) -> bool { false }
 
     pub fn msg(&self) -> String {
         match self {

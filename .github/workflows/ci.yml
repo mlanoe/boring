@@ -61,5 +61,5 @@ jobs:
         with:
           components: clippy
 
-      - name: Clippy (warnings only)
-        run: cargo clippy 2>&1 || true
+      - name: Clippy
+        run: cargo clippy -- -D warnings

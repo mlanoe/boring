@@ -93,9 +93,9 @@ impl DeviceEmitter {
     }
 
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
-        let ret = decl.return_ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "void".into());
+        let ret = decl.return_ty.as_ref().map(msl_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "int64_t".into());
+            let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
             format!("{} {}", ty, p.name)
         }).collect();
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
@@ -127,11 +127,11 @@ impl DeviceEmitter {
     }
 
     fn emit_device_fn(&mut self, kernel: &str, method: &FnDecl, fields: &[KernelFieldDecl]) {
-        let ret = method.return_ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "void".into());
+        let ret = method.return_ty.as_ref().map(msl_type).unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         let mut params = buffer_field_params(fields);
         for p in &method.params {
-            let ty = p.ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "int64_t".into());
+            let ty = p.ty.as_ref().map(msl_type).unwrap_or_else(|| "int64_t".into());
             params.push(format!("{} {}", ty, p.name));
         }
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
@@ -200,24 +200,22 @@ impl DeviceEmitter {
 
         // 3. Scalar 'local fields → constant T* [[buffer(N)]] (passed from host as scalar)
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Local) {
-                if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            if matches!(f.qual, GpuQual::Local)
+                && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
                     let ty = msl_type(&f.ty);
                     params.push(format!("constant {}* __{}_init [[buffer({})]]", ty, f.name, buf_idx));
                     buf_idx += 1;
                 }
-            }
         }
 
         // 4. Dynamic 'shared array fields → threadgroup T* [[threadgroup(N)]]
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync) {
-                if matches!(f.ty, Type::Array(_)) {
+            if matches!(f.qual, GpuQual::Sync)
+                && matches!(f.ty, Type::Array(_)) {
                     let elem = elem_msl_type(&f.ty);
                     params.push(format!("threadgroup {}* {} [[threadgroup({})]]", elem, f.name, tg_idx));
                     tg_idx += 1;
                 }
-            }
         }
 
         // 5. Built-in position parameters.
@@ -304,7 +302,7 @@ impl DeviceEmitter {
         match stmt {
             Stmt::Let(s) => {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
-                let ty = s.ty.as_ref().map(|t| msl_type(t)).unwrap_or_else(|| "auto".into());
+                let ty = s.ty.as_ref().map(msl_type).unwrap_or_else(|| "auto".into());
                 let kw = if mutable { "" } else { "const " };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
@@ -675,7 +673,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
         Stmt::While(w)   => body_has_explicit_sync(&w.body),
         Stmt::For(f)     => body_has_explicit_sync(&f.body),
         Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
-                         || i.else_body.as_ref().map_or(false, |b| body_has_explicit_sync(b)),
+                         || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
         _ => false,
     })
 }
@@ -697,12 +695,12 @@ fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
 fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_references_any(e, names),
-        Stmt::Return(r) => r.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
-        Stmt::Let(s) => s.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
+        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
+        Stmt::Let(s) => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
         Stmt::While(w) => stmts_reference_any(&w.body, names),
         Stmt::For(f)   => stmts_reference_any(&f.body, names),
         Stmt::If(i)    => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
-                       || i.else_body.as_ref().map_or(false, |b| stmts_reference_any(b, names)),
+                       || i.else_body.as_ref().is_some_and(|b| stmts_reference_any(b, names)),
         _ => false,
     }
 }

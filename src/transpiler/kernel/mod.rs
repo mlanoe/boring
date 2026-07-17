@@ -63,7 +63,7 @@ fn stmts_have_dyn_channel(stmts: &[Stmt]) -> bool {
 fn stmt_has_channel(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::LetDestructure(s) => expr_is_static_channel(&s.value),
-        Stmt::Let(s) => s.value.as_ref().map(|v| expr_is_static_channel(v)).unwrap_or(false),
+        Stmt::Let(s) => s.value.as_ref().map(expr_is_static_channel).unwrap_or(false),
         Stmt::Expr(e) => expr_is_static_channel(e),
         Stmt::If(s) => {
             s.branches.iter().any(|(_, b)| stmts_have_channel(b))
@@ -79,7 +79,7 @@ fn stmt_has_channel(stmt: &Stmt) -> bool {
 fn stmt_has_dyn_channel(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::LetDestructure(s) => expr_is_dyn_channel(&s.value),
-        Stmt::Let(s) => s.value.as_ref().map(|v| expr_is_dyn_channel(v)).unwrap_or(false),
+        Stmt::Let(s) => s.value.as_ref().map(expr_is_dyn_channel).unwrap_or(false),
         Stmt::Expr(e) => expr_is_dyn_channel(e),
         Stmt::If(s) => {
             s.branches.iter().any(|(_, b)| stmts_have_dyn_channel(b))
@@ -166,7 +166,7 @@ fn stmts_have_dyn_broadcast(stmts: &[Stmt]) -> bool {
 fn stmt_has_expr(stmt: &Stmt, pred: fn(&Expr) -> bool) -> bool {
     match stmt {
         Stmt::LetDestructure(s) => pred(&s.value),
-        Stmt::Let(s) => s.value.as_ref().map(|v| pred(v)).unwrap_or(false),
+        Stmt::Let(s) => s.value.as_ref().map(&pred).unwrap_or(false),
         Stmt::Expr(e) => pred(e),
         Stmt::If(s) => {
             s.branches.iter().any(|(_, b)| b.iter().any(|st| stmt_has_expr(st, pred)))

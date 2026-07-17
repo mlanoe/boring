@@ -160,7 +160,7 @@ impl KernelTranspiler {
                     ExprKind::Call(callee, _)
                     if matches!(&callee.kind, ExprKind::Var(n) if n == "oneshot"));
                 if is_oneshot {
-                    if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+                    if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                         if sender.name != "_" { self.oneshot_senders.insert(sender.name.clone()); }
                         if receiver.name != "_" { self.oneshot_receivers.insert(receiver.name.clone()); }
                     }
@@ -173,7 +173,7 @@ impl KernelTranspiler {
                     ExprKind::Call(callee, _)
                     if matches!(&callee.kind, ExprKind::Var(n) if n == "broadcast"));
                 if is_broadcast {
-                    if let Some(sender) = s.bindings.get(0) {
+                    if let Some(sender) = s.bindings.first() {
                         if sender.name != "_" { self.broadcast_senders.insert(sender.name.clone()); }
                     }
                     if let Some(receiver) = s.bindings.get(1) {
@@ -188,7 +188,7 @@ impl KernelTranspiler {
                     ExprKind::Call(callee, _)
                     if matches!(&callee.kind, ExprKind::Var(n) if n == "watch"));
                 if is_watch {
-                    if let (Some(sender), Some(receiver)) = (s.bindings.get(0), s.bindings.get(1)) {
+                    if let (Some(sender), Some(receiver)) = (s.bindings.first(), s.bindings.get(1)) {
                         if sender.name != "_" { self.watch_senders.insert(sender.name.clone()); }
                         if receiver.name != "_" { self.watch_receivers.insert(receiver.name.clone()); }
                     }

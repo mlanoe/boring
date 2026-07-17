@@ -65,9 +65,9 @@ impl DeviceEmitter {
     }
 
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
-        let ret = decl.return_ty.as_ref().map(|t| c_type(t)).unwrap_or_else(|| "void".into());
+        let ret = decl.return_ty.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
-            let ty = p.ty.as_ref().map(|t| c_type(t)).unwrap_or_else(|| "int64_t".into());
+            let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
             format!("{} {}", ty, p.name)
         }).collect();
         self.line(&format!("__device__ {} {}({}) {{", ret, decl.name, params.join(", ")));
@@ -110,11 +110,11 @@ impl DeviceEmitter {
     }
 
     fn emit_device_fn(&mut self, kernel: &str, method: &FnDecl, fields: &[KernelFieldDecl]) {
-        let ret = method.return_ty.as_ref().map(|t| c_type(t)).unwrap_or_else(|| "void".into());
+        let ret = method.return_ty.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         let mut params = field_params(fields);
         for p in &method.params {
-            let ty = p.ty.as_ref().map(|t| c_type(t)).unwrap_or_else(|| "int64_t".into());
+            let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
             params.push(format!("{} {}", ty, p.name));
         }
         self.line(&format!("__device__ {} {}({}) {{", ret, fn_name, params.join(", ")));
@@ -182,7 +182,7 @@ impl DeviceEmitter {
         match stmt {
             Stmt::Let(s) => {
                 let mutable = matches!(s.binding, BindingKind::Mut | BindingKind::Var | BindingKind::Lazy);
-                let ty = s.ty.as_ref().map(|t| c_type(t)).unwrap_or_else(|| "auto".into());
+                let ty = s.ty.as_ref().map(c_type).unwrap_or_else(|| "auto".into());
                 let kw = if mutable { "" } else { "const " };
                 if let Some(val) = &s.value {
                     let rhs = self.expr(val);
@@ -643,7 +643,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
         Stmt::While(w)   => body_has_explicit_sync(&w.body),
         Stmt::For(f)     => body_has_explicit_sync(&f.body),
         Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
-                         || i.else_body.as_ref().map_or(false, |b| body_has_explicit_sync(b)),
+                         || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
         _ => false,
     })
 }
@@ -664,12 +664,12 @@ fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
 fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
     match stmt {
         Stmt::Expr(e) => expr_references_any(e, names),
-        Stmt::Return(r) => r.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
-        Stmt::Let(s) => s.value.as_ref().map_or(false, |v| expr_references_any(v, names)),
+        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
+        Stmt::Let(s) => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
         Stmt::While(w) => stmts_reference_any(&w.body, names),
         Stmt::For(f)   => stmts_reference_any(&f.body, names),
         Stmt::If(i)    => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
-                       || i.else_body.as_ref().map_or(false, |b| stmts_reference_any(b, names)),
+                       || i.else_body.as_ref().is_some_and(|b| stmts_reference_any(b, names)),
         _ => false,
     }
 }

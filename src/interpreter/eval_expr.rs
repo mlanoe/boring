@@ -102,11 +102,9 @@ impl Interpreter {
                     }
                 }
                 // Implicit self: `fieldname` inside a method resolves to `self.fieldname`
-                if let Some(self_val) = env.borrow().get("self") {
-                    if let Value::Object(inner_rc) = &self_val {
-                        if let Some((_, field_val)) = inner_rc.borrow().fields.iter().find(|(k, _)| k == name) {
-                            return Ok(field_val.clone());
-                        }
+                if let Some(Value::Object(inner_rc)) = env.borrow().get("self").as_ref() {
+                    if let Some((_, field_val)) = inner_rc.borrow().fields.iter().find(|(k, _)| k == name) {
+                        return Ok(field_val.clone());
                     }
                 }
                 let candidates = env.borrow().all_names();
@@ -229,38 +227,75 @@ impl Interpreter {
                 // Slice: a[M..N], a[..N], a[M..], a[..]
                 if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
                     let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                    let Value::Array(arr) = obj else {
-                        return Err(err("slice index requires an array", line));
-                    };
-                    let len = arr.len() as i64;
-                    let resolve = |v: i64| -> usize {
-                        let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
-                        i as usize
-                    };
-                    let lo = match start.as_deref() {
-                        Some(e) => {
-                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                return Err(err("slice start must be an integer", line));
+                    match obj {
+                        Value::Array(arr) => {
+                            let len = arr.len() as i64;
+                            let resolve = |v: i64| -> usize {
+                                let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                                i as usize
                             };
-                            resolve(v)
-                        }
-                        None => 0,
-                    };
-                    let hi = match end.as_deref() {
-                        Some(e) => {
-                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                return Err(err("slice end must be an integer", line));
+                            let lo = match start.as_deref() {
+                                Some(e) => {
+                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                        return Err(err("slice start must be an integer", line));
+                                    };
+                                    resolve(v)
+                                }
+                                None => 0,
                             };
-                            if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
+                            let hi = match end.as_deref() {
+                                Some(e) => {
+                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                        return Err(err("slice end must be an integer", line));
+                                    };
+                                    if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
+                                }
+                                None => arr.len(),
+                            };
+                            let slice = if lo >= arr.len() || lo >= hi {
+                                vec![]
+                            } else {
+                                arr[lo..hi.min(arr.len())].to_vec()
+                            };
+                            return Ok(Value::Array(slice));
                         }
-                        None => arr.len(),
-                    };
-                    let slice = if lo >= arr.len() || lo >= hi {
-                        vec![]
-                    } else {
-                        arr[lo..hi.min(arr.len())].to_vec()
-                    };
-                    return Ok(Value::Array(slice));
+                        Value::Str(s) => {
+                            let chars: Vec<char> = s.chars().collect();
+                            let len = chars.len() as i64;
+                            let resolve = |v: i64| -> usize {
+                                let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                                i as usize
+                            };
+                            let lo = match start.as_deref() {
+                                Some(e) => {
+                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                        return Err(err("slice start must be an integer", line));
+                                    };
+                                    resolve(v)
+                                }
+                                None => 0,
+                            };
+                            let hi = match end.as_deref() {
+                                Some(e) => {
+                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                        return Err(err("slice end must be an integer", line));
+                                    };
+                                    if *inclusive { (resolve(v) + 1).min(chars.len()) } else { resolve(v) }
+                                }
+                                None => chars.len(),
+                            };
+                            let sliced: String = if lo >= chars.len() || lo >= hi {
+                                String::new()
+                            } else {
+                                chars[lo..hi.min(chars.len())].iter().collect()
+                            };
+                            return Ok(Value::Str(sliced));
+                        }
+                        other => return Err(err(
+                            format!("slice index requires an array or string, got {}", other.type_name()),
+                            line,
+                        )),
+                    }
                 }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
                 let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
@@ -304,7 +339,7 @@ impl Interpreter {
                     if name.as_str() == "json" {
                         if let Some(arg) = args.first() {
                             let v = self.eval_expr(&arg.value, Rc::clone(&env))?;
-                            return Ok(Value::Str(format!("{:?}", v).into()));
+                            return Ok(Value::Str(format!("{:?}", v)));
                         }
                         return Ok(Value::Str("null".into()));
                     }
@@ -572,13 +607,11 @@ impl Interpreter {
                             let written = env.borrow_mut().force_set(name, new_obj.clone());
                             // If not found in scope, try to write to self field (implicit self pattern).
                             if !written {
-                                if let Some(sv) = env.borrow().get("self") {
-                                    if let Value::Object(ref inner_rc) = sv {
-                                        if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
-                                            let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
-                                            let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
-                                            let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
-                                        }
+                                if let Some(Value::Object(ref inner_rc)) = env.borrow().get("self").as_ref() {
+                                    if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
+                                        let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
+                                        let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
+                                        let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
                                     }
                                 }
                             }
@@ -593,8 +626,7 @@ impl Interpreter {
                     let names: Option<Vec<String>> = {
                         let g = self.global.borrow();
                         if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
-                            if let Some(fn_decl) = decl.methods.iter().find(|m| m.name == *method) {
-                                Some(fn_decl.params.iter().zip(args.iter()).filter_map(|(param, arg)| {
+                            decl.methods.iter().find(|m| m.name == *method).map(|fn_decl| fn_decl.params.iter().zip(args.iter()).filter_map(|(param, arg)| {
                                     if param.owned {
                                         if let ExprKind::Var(name) = &arg.value.kind {
                                             return Some(name.clone());
@@ -602,7 +634,6 @@ impl Interpreter {
                                     }
                                     None
                                 }).collect())
-                            } else { None }
                         } else { None }
                     }; // global borrow dropped here
                     if let Some(names) = names {
@@ -1245,7 +1276,7 @@ impl Interpreter {
                     if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Int(a / b)) }
                 }
                 (Value::Uint(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a / b)) }
+                    Ok(Value::Uint(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
                 }
                 (Value::Uint(a), Value::Int(b)) => {
                     if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
@@ -1477,7 +1508,7 @@ impl Interpreter {
     pub(crate) fn call_value(&mut self, callee: Value, args: Vec<Value>, line: usize, in_throws_context: bool) -> Eval {
         match callee {
             Value::NativeFn { func, .. } => {
-                func(&args, line).map_err(|sig| sig)
+                func(&args, line)
             }
             Value::Fn { decl, captured } => {
                 self.call_fn(&decl, captured, args, line, in_throws_context)
@@ -1565,7 +1596,7 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn item_pub_name<'a>(item: &'a Item) -> Option<(&'a str, bool)> {
+    pub(crate) fn item_pub_name(item: &Item) -> Option<(&str, bool)> {
         match item {
             Item::Fn(d)     => Some((&d.name, d.is_pub)),
             Item::Struct(d) => Some((&d.name, d.is_pub)),
