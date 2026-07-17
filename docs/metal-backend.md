@@ -126,6 +126,14 @@ boring build --target metal main.br
 cd main_metal && cargo build
 ```
 
+**Multi-file projects**: `use <file>.br` in the entry file is resolved and
+inlined before transpilation — first relative to the importing file's own
+directory, then against each path in the `BORING_PATH` environment variable
+(same search order as `boring run`). Circular and duplicate imports are
+merged once. A `use` that doesn't resolve to a `.br` file on disk (e.g.
+`use std.collections`) is left as an ordinary import for the general
+transpiler to handle.
+
 ---
 
 ## Implementation notes

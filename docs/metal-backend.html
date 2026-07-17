@@ -173,6 +173,7 @@ li { margin-bottom: 0.3rem; }
 <p>Requires macOS 11+ with a Metal-capable GPU.</p>
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target metal main.br
 cd main_metal &amp;&amp; cargo build</code></pre></div>
+<p><strong>Multi-file projects</strong>: <code>use &lt;file&gt;.br</code> in the entry file is resolved and inlined before transpilation — first relative to the importing file&#x27;s own directory, then against each path in the <code>BORING_PATH</code> environment variable (same search order as <code>boring run</code>). Circular and duplicate imports are merged once. A <code>use</code> that doesn&#x27;t resolve to a <code>.br</code> file on disk (e.g. <code>use std.collections</code>) is left as an ordinary import for the general transpiler to handle.</p>
 <hr>
 <h2 id="implementation-notes">Implementation notes</h2>
 <ul><li><strong>Host crate</strong>: <code>metal</code> v0.29 — simpler API, still maintained.</li><li><strong>Buffer index ordering</strong>: unified/global/actor arrays → const fields → local scalars → dynamic shared (<code>threadgroup</code>). Device and host use the same fixed order.</li><li><strong>Dispatch</strong>: synchronous — <code>wait_until_completed()</code> is called inside <code>__boring_launch</code>. <code>after =</code> is accepted syntactically but has no effect.</li><li><strong>Atomics</strong>: <code>atomicSub</code> has no MSL equivalent — emitted as <code>atomic_fetch_add_explicit</code> with a negated value, <code>memory_order_relaxed</code>.</li></ul>

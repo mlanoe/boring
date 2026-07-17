@@ -30,6 +30,19 @@ kernel:
 print k.buf[0]
 ```
 
+This pattern — construct, dispatch, read back — is not limited to top-level
+code: it works the same way inside an ordinary function body, mixed freely
+with regular Boring control flow, string interpolation, and other function
+calls.
+
+```boring
+def [float] scaleAll([float] data):
+    mut k = Scale(data)
+    kernel:
+        k(block = 256)
+    k.buf
+```
+
 ---
 
 ## `kernel` struct

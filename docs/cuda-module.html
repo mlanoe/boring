@@ -133,6 +133,7 @@ li { margin-bottom: 0.3rem; }
 <p><code>boring build --target cuda</code> emits a Cargo project:</p>
 <ul><li><code>src/main.rs</code> — Rust host code using the <code>cudarc</code> crate</li><li><code>kernels/main.cu</code> — CUDA C device code</li><li><code>build.rs</code> — invokes <code>nvcc</code> to compile <code>.cu</code> → PTX</li><li><code>Cargo.toml</code></li></ul>
 <p>Requires the CUDA toolkit (<code>nvcc</code>) and a CUDA-capable GPU.</p>
+<p><strong>Multi-file projects</strong>: <code>use &lt;file&gt;.br</code> in the entry file is resolved and inlined before transpilation — first relative to the importing file&#x27;s own directory, then against each path in the <code>BORING_PATH</code> environment variable (same search order as <code>boring run</code>). Circular and duplicate imports are merged once. A <code>use</code> that doesn&#x27;t resolve to a <code>.br</code> file on disk (e.g. <code>use std.collections</code>) is left as an ordinary import for the general transpiler to handle.</p>
 <hr>
 <h2 id="qualifier-model">Qualifier model</h2>
 <p>GPU qualifiers appear in two contexts with different syntax:</p>

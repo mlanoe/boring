@@ -146,6 +146,12 @@ li { margin-bottom: 0.3rem; }
     <span class="fn">k</span>(block = <span class="nb">256</span>)
 
 print k.buf[<span class="nb">0</span>]</code></pre></div>
+<p>This pattern — construct, dispatch, read back — is not limited to top-level code: it works the same way inside an ordinary function body, mixed freely with regular Boring control flow, string interpolation, and other function calls.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> [<span class="kt">float</span>] <span class="fn">scaleAll</span>([<span class="kt">float</span>] data):
+    <span class="kw">mut</span> k = <span class="fn">Scale</span>(data)
+    <span class="kw">kernel</span>:
+        <span class="fn">k</span>(block = <span class="nb">256</span>)
+    k.buf</code></pre></div>
 <hr>
 <h2 id="kernel-struct"><code>kernel</code> struct</h2>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Name:
