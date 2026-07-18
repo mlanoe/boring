@@ -143,6 +143,19 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                 if interp.has_pending_throw:
                     return ThrowSignal(interp.take_pending_throw())
                 # Note: move semantics not enforced in interpreter — all values treated as copyable
+                # Coerce int literals/values to the declared uint/uint8 type — the parser
+                # already recognizes these annotations, but nothing applied them at runtime.
+                if let declared_ty = s.ty:
+                    match declared_ty:
+                        Type.Uint:
+                            match val:
+                                Value.Uint(_): nil
+                                _: val = cast_value(interp, val, Type.Uint)
+                        Type.Uint8:
+                            match val:
+                                Value.Uint8(_): nil
+                                _: val = cast_value(interp, val, Type.Uint8)
+                        _: nil
             if s.is_lazy:
                 interp.current_env.define_lazy(s.name)
             elif s.mutable:
@@ -966,6 +979,8 @@ def string value_type_name(Value val):
         Uninitialized: "uninitialized"
         Bool(_): "bool"
         Int(_): "int"
+        Uint(_): "uint"
+        Uint8(_): "uint8"
         Float(_): "float"
         Str(_): "string"
         Array(_): "array"

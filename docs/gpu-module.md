@@ -127,9 +127,13 @@ Multiple instantiations of the same generic kernel generate **distinct** code ob
 | `'sync` | block SRAM (`__shared__` / `threadgroup` / `var<workgroup>`) | no |
 | `'local` | registers / thread-local | no — default |
 | `'const` | constant cache | no |
+| `'actor'global` (or bare `'actor`) | device-only DRAM, atomic access | via `gpu.copy()` — see [Atomics](#atomics) |
 
 `'surface` is restricted to `[uint]` fields and is intended for pixel buffers
 presented to a `Screen`. See [`gpu-display.md`](gpu-display.html).
+
+`'actor` alone is an alias for `'actor'global` — atomics are only implemented for
+device-global memory, so there's no other qualifier it could mean.
 
 ### Qualifier inference
 
@@ -423,6 +427,15 @@ kernel Histogram:
 
     def ():
         counts[bucket] += 1     # compiled to atomicAdd
+```
+
+`'actor` alone is an alias for `'actor'global` — atomics are only meaningful (and only
+implemented) for device-global memory here, so there's no other qualifier `'actor` could
+mean:
+
+```boring
+kernel Histogram:
+    mut [int]'actor counts = [0, 0, 0, 0]   # same as 'actor'global
 ```
 
 Supported atomic operations: `+= -= &= |= ^=`.

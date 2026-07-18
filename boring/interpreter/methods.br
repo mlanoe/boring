@@ -5,11 +5,29 @@ def bool value_lt(Value a, Value b):
         Value.Int(x):
             match b:
                 Value.Int(y): x < y
+                Value.Uint(y): x < (y as int)
+                Value.Uint8(y): x < (y as int)
+                Value.Float(y): (x as float) < y
+                _: false
+        Value.Uint(x):
+            match b:
+                Value.Uint(y): x < y
+                Value.Uint8(y): x < (y as uint)
+                Value.Int(y): (x as int) < y
+                Value.Float(y): (x as float) < y
+                _: false
+        Value.Uint8(x):
+            match b:
+                Value.Uint8(y): x < y
+                Value.Uint(y): (x as uint) < y
+                Value.Int(y): (x as int) < y
                 Value.Float(y): (x as float) < y
                 _: false
         Value.Float(x):
             match b:
                 Value.Int(y): x < (y as float)
+                Value.Uint(y): x < (y as float)
+                Value.Uint8(y): x < (y as float)
                 Value.Float(y): x < y
                 _: false
         Value.Str(x):
@@ -21,6 +39,8 @@ def bool value_lt(Value a, Value b):
 def string val_type_name(Value v):
     match v:
         Value.Int(_): "int"
+        Value.Uint(_): "uint"
+        Value.Uint8(_): "uint8"
         Value.Float(_): "float"
         Value.Str(_): "string"
         Value.Bool(_): "bool"
@@ -831,6 +851,48 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Int(n)
                 "round":
                     Value.Int(n)
+                "toStr":
+                    Value.Str("{n}")
+                "toBin":
+                    Value.Str("{n:b}")
+                "toHex":
+                    Value.Str("{n:x}")
+                _:
+                    throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint(n):
+            match method_name:
+                "abs":
+                    Value.Uint(n)
+                "sqrt":
+                    Value.Float((n as float).sqrt())
+                "floor":
+                    Value.Uint(n)
+                "ceil":
+                    Value.Uint(n)
+                "round":
+                    Value.Uint(n)
+                "toStr":
+                    Value.Str("{n}")
+                "toBin":
+                    Value.Str("{n:b}")
+                "toHex":
+                    Value.Str("{n:x}")
+                _:
+                    throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint8(n):
+            match method_name:
+                "abs":
+                    Value.Uint8(n)
+                "sqrt":
+                    Value.Float((n as float).sqrt())
+                "floor":
+                    Value.Uint8(n)
+                "ceil":
+                    Value.Uint8(n)
+                "round":
+                    Value.Uint8(n)
                 "toStr":
                     Value.Str("{n}")
                 "toBin":

@@ -488,7 +488,7 @@ impl Parser {
     fn is_type_name(s: &str) -> bool {
         s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
             || matches!(s,
-                "int" | "uint" | "float" | "bool" | "string" | "str"
+                "int" | "uint" | "uint8" | "float" | "bool" | "string" | "str"
                 | "void" | "never"
                 | "i8" | "i16" | "i32" | "i64"
                 | "u8" | "u16" | "u32" | "u64" | "usize"
@@ -1290,7 +1290,13 @@ impl Parser {
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
-            Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
+            // `'actor` alone is an alias for `'actor'global` inside a kernel: atomics are
+            // only meaningful (and only implemented) for device-global memory here, so
+            // there's no ambiguity to preserve by requiring the explicit two-qualifier
+            // spelling. Falling through this match without a dedicated arm used to
+            // silently misclassify the field as an unqualified scalar (binding-inferred
+            // 'const/'local) instead of raising a clear error or doing the right thing.
+            Type::Qualified(inner, OwnerQual::GpuActorGlobal | OwnerQual::Actor) => (GpuQual::ActorGlobal, *inner),
             Type::Qualified(inner, OwnerQual::GpuSurface) => {
                 // `'surface` is only valid on `[uint]` — pixel buffer.
                 if !matches!(*inner, Type::Named(ref n) if n == "uint")

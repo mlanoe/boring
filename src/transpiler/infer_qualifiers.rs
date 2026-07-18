@@ -57,6 +57,18 @@ impl Transpiler {
                         auto_ref_param_vars.insert(name.clone());
                     }
                 }
+                // Bare [T] / {K=V} / {T} parameter — array/dict/set. Same auto-ref treatment
+                // as bare struct params: free functions only (never struct methods — mirrors
+                // the deliberately-unresolved struct-method case above). Unlike structs, these
+                // have no entry in type_sizes/all_struct_types (they're built-in collection
+                // types, not user-defined), so eligibility doesn't gate on that — only on
+                // being a free-function param at all.
+                Type::Array(_) | Type::Dict(_, _) | Type::Set(_) => {
+                    anonymous_vars.insert(name.clone());
+                    if !self.in_struct_method {
+                        auto_ref_param_vars.insert(name.clone());
+                    }
+                }
                 // T? parameter — bare optional struct: eligible for qualifier inference.
                 // Optional params are never auto-ref (Option<&T> is not useful).
                 Type::Optional(inner) => {

@@ -192,6 +192,7 @@ transpile_test!(format);
 transpile_test!(loops);
 transpile_test!(traits);
 transpile_test!(numeric);
+transpile_test!(uint_int_cross_eq);
 transpile_test!(modules);
 transpile_test!(ownership);
 transpile_test!(tasks);

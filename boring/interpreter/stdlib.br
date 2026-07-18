@@ -82,6 +82,8 @@ def string val_to_string(Value v):
         Value.Uninitialized: "<uninitialized>"
         Value.Bool(b): if b: "true" else "false"
         Value.Int(n): int_to_string(n)
+        Value.Uint(n): "{n}"
+        Value.Uint8(n): "{n}"
         Value.Float(f): "{f}"
         Value.Str(s): s
         Value.Array(elems):
@@ -203,12 +205,30 @@ def bool values_equal(Value a, Value b):
         Value.Int(x):
             match b:
                 Value.Int(y): x == y
+                Value.Uint(y): x == (y as int)
+                Value.Uint8(y): x == (y as int)
+                Value.Float(y): float(x) == y
+                _: false
+        Value.Uint(x):
+            match b:
+                Value.Uint(y): x == y
+                Value.Int(y): (x as int) == y
+                Value.Uint8(y): x == (y as uint)
+                Value.Float(y): float(x) == y
+                _: false
+        Value.Uint8(x):
+            match b:
+                Value.Uint8(y): x == y
+                Value.Int(y): (x as int) == y
+                Value.Uint(y): (x as uint) == y
                 Value.Float(y): float(x) == y
                 _: false
         Value.Float(x):
             match b:
                 Value.Float(y): x == y
                 Value.Int(y): x == float(y)
+                Value.Uint(y): x == float(y)
+                Value.Uint8(y): x == float(y)
                 _: false
         Value.Str(x):
             match b:
@@ -260,7 +280,10 @@ def bool values_equal(Value a, Value b):
             match b:
                 Value.Range(s2, e2, inc2, _): s1 == s2 and e1 == e2 and inc1 == inc2
                 _: false
-        _: false
+        # Set/Dict/Object/closures/etc. — no cross-type numeric coercion applies,
+        # so defer to native structural equality (this is also what set-literal
+        # normalization relies on for order-independent set equality).
+        _: a == b
 
 # ─── env_define ───────────────────────────────────────────────────────────────
 
@@ -289,6 +312,12 @@ def void register_stdlib(mut Interpreter interp):
 
     let int_fn = Value.NativeFn("int", Value.Nil)
     env_define(env, "int", int_fn, false)
+
+    let uint_fn = Value.NativeFn("uint", Value.Nil)
+    env_define(env, "uint", uint_fn, false)
+
+    let uint8_fn = Value.NativeFn("uint8", Value.Nil)
+    env_define(env, "uint8", uint8_fn, false)
 
     let float_fn = Value.NativeFn("float", Value.Nil)
     env_define(env, "float", float_fn, false)

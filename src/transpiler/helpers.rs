@@ -133,6 +133,7 @@ pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
         "String"            => "String".into(),
         "int"    | "Int"    => "i64".into(),
         "uint"   | "Uint"   => "u64".into(),
+        "uint8"  | "Uint8"  => "u8".into(),
         "float"  | "Float"  => "f64".into(),
         "bool"   | "Bool"   => "bool".into(),
         "void"   | "Void"   => "()".into(),

@@ -93,6 +93,7 @@ fn fmt_type(ty: &Type) -> String {
     match ty {
         Type::Int    => "int".into(),
         Type::Uint   => "uint".into(),
+        Type::Uint8  => "uint8".into(),
         Type::Float  => "float".into(),
         Type::Bool   => "bool".into(),
         Type::Str    => "string".into(),
@@ -108,11 +109,12 @@ fn fmt_type(ty: &Type) -> String {
 fn types_match_for_overload(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
-        (Int, Int) | (Uint, Uint) | (Float, Float) | (Bool, Bool) | (Str, Str) => true,
+        (Int, Int) | (Uint, Uint) | (Uint8, Uint8) | (Float, Float) | (Bool, Bool) | (Str, Str) => true,
         (Named(x), Named(y)) => x == y,
         (Named(n), t) | (t, Named(n)) => match n.as_str() {
             "int"    => matches!(t, Int),
             "uint"   => matches!(t, Uint),
+            "uint8"  => matches!(t, Uint8),
             "float"  => matches!(t, Float),
             "bool"   => matches!(t, Bool),
             "string" => matches!(t, Str),
@@ -233,6 +235,7 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Uint(u64),
+    Uint8(u8),
     Float(f64),
     Str(String),
     Array(Rc<Vec<Value>>),
@@ -341,6 +344,7 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Uint(a), Value::Uint(b)) => a == b,
+            (Value::Uint8(a), Value::Uint8(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
@@ -380,6 +384,7 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({:?})", b),
             Value::Int(n) => write!(f, "Int({:?})", n),
             Value::Uint(n) => write!(f, "Uint({:?})", n),
+            Value::Uint8(n) => write!(f, "Uint8({:?})", n),
             Value::Float(n) => write!(f, "Float({:?})", n),
             Value::Str(s) => write!(f, "Str({:?})", s),
             Value::Array(v) => write!(f, "Array({:?})", v),
@@ -426,6 +431,7 @@ impl Value {
             Value::Bool(_) => "Bool".into(),
             Value::Int(_) => "Int".into(),
             Value::Uint(_) => "Uint".into(),
+            Value::Uint8(_) => "Uint8".into(),
             Value::Float(_) => "Float".into(),
             Value::Str(_) => "String".into(),
             Value::Array(_) => "Array".into(),
@@ -464,6 +470,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
             Value::Uint(n) => write!(f, "{}", n),
+            Value::Uint8(n) => write!(f, "{}", n),
             Value::Float(n) => write!(f, "{}", n),
             Value::Str(s) => write!(f, "{}", s),
             Value::Array(elems) => {
@@ -1034,6 +1041,7 @@ fn register_stdlib(env: &EnvRef) {
             match &args[0] {
                 Value::Int(n) => Ok(Value::Int(*n)),
                 Value::Uint(n) => Ok(Value::Int(*n as i64)),
+                Value::Uint8(n) => Ok(Value::Int(*n as i64)),
                 Value::Float(f) => Ok(Value::Int(*f as i64)),
                 Value::Str(s) => s.trim().parse::<i64>()
                     .map(Value::Int)
@@ -1052,6 +1060,7 @@ fn register_stdlib(env: &EnvRef) {
             }
             match &args[0] {
                 Value::Uint(n) => Ok(Value::Uint(*n)),
+                Value::Uint8(n) => Ok(Value::Uint(*n as u64)),
                 Value::Int(n) => {
                     if *n < 0 { Err(err(format!("cannot convert negative Int {} to Uint", n), line)) }
                     else { Ok(Value::Uint(*n as u64)) }
@@ -1069,6 +1078,35 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+    e.define("uint8", Value::NativeFn {
+        name: "uint8".into(),
+        func: |args, line| {
+            if args.len() != 1 {
+                return Err(err("uint8() takes 1 argument", line));
+            }
+            match &args[0] {
+                Value::Uint8(n) => Ok(Value::Uint8(*n)),
+                Value::Int(n) => {
+                    if *n < 0 || *n > 255 { Err(err(format!("cannot convert Int {} to Uint8 (out of 0..=255 range)", n), line)) }
+                    else { Ok(Value::Uint8(*n as u8)) }
+                }
+                Value::Uint(n) => {
+                    if *n > 255 { Err(err(format!("cannot convert Uint {} to Uint8 (out of 0..=255 range)", n), line)) }
+                    else { Ok(Value::Uint8(*n as u8)) }
+                }
+                Value::Float(f) => {
+                    if *f < 0.0 || *f > 255.0 { Err(err("cannot convert Float to Uint8 (out of 0..=255 range)".to_string(), line)) }
+                    else { Ok(Value::Uint8(*f as u8)) }
+                }
+                Value::Str(s) => s.trim().parse::<u8>()
+                    .map(Value::Uint8)
+                    .map_err(|_| err(format!("cannot convert '{}' to Uint8", s), line)),
+                Value::Bool(b) => Ok(Value::Uint8(if *b { 1 } else { 0 })),
+                other => Err(err(format!("cannot convert {} to Uint8", other.type_name()), line)),
+            }
+        },
+    });
+
     e.define("float", Value::NativeFn {
         name: "float".into(),
         func: |args, line| {
@@ -1079,6 +1117,7 @@ fn register_stdlib(env: &EnvRef) {
                 Value::Float(f) => Ok(Value::Float(*f)),
                 Value::Int(n)   => Ok(Value::Float(*n as f64)),
                 Value::Uint(n)  => Ok(Value::Float(*n as f64)),
+                Value::Uint8(n) => Ok(Value::Float(*n as f64)),
                 Value::Bool(b)  => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
                 Value::Str(s) => s.trim().parse::<f64>()
                     .map(Value::Float)
@@ -1676,6 +1715,7 @@ impl Interpreter {
         // Built-in lowercase aliases
         aliases.insert("int".into(),    Type::Int);
         aliases.insert("uint".into(),   Type::Uint);
+        aliases.insert("uint8".into(),  Type::Uint8);
         aliases.insert("float".into(),  Type::Float);
         aliases.insert("bool".into(),   Type::Bool);
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
@@ -1698,6 +1738,7 @@ impl Interpreter {
         aliases.insert("String".into(), Type::Str);
         aliases.insert("Int".into(),    Type::Int);
         aliases.insert("Uint".into(),   Type::Uint);
+        aliases.insert("Uint8".into(),  Type::Uint8);
         aliases.insert("Float".into(),  Type::Float);
         aliases.insert("Bool".into(),   Type::Bool);
         let global = Env::new_global();

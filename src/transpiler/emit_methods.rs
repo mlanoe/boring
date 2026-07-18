@@ -3,6 +3,28 @@ use super::Transpiler;
 use super::helpers::*;
 
 impl Transpiler {
+    /// Resolve the user struct type name of an expression, walking `self`/local-var roots
+    /// and field chains (`self.encoder`, `a.b.c`). Returns None for anything else (locals of
+    /// non-struct type, method-call results, etc.) — callers should treat that as "not a
+    /// known user struct".
+    pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+            ExprKind::Field(inner, field) => {
+                let inner_ty = self.resolve_expr_struct_type(inner)?;
+                self.struct_fields.get(inner_ty.as_str())?
+                    .iter()
+                    .find(|(fname, _)| fname == field)
+                    .and_then(|(_, fty)| match fty {
+                        Type::Named(n) => Some(n.clone()),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
         // Built-in `fs` module namespace — intercept before any other dispatch.
         if let ExprKind::Var(v) = &obj.kind {
@@ -136,7 +158,12 @@ impl Transpiler {
 
         // Detect `TypeName.method(args)` — type method or enum variant call.
         if let ExprKind::Var(type_name) = &obj.kind {
-            let is_type = type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+            // A known local variable that happens to start with an uppercase letter
+            // (e.g. `var Qh = []`) is still a local, not a type/module path -- must fall
+            // through to ordinary instance-method dispatch further down, not the
+            // `TypeName::method(...)` treatment below.
+            let is_type = !self.known_local_vars.contains(type_name.as_str())
+                && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
             if is_type {
                 let is_variant = method.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
                 if is_variant {
@@ -250,7 +277,6 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, rwlock_field));
                     if let Some(k) = key {
                         if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
-                            let is_task_field = self.struct_rwlock_task_fields.contains(&k);
                             let (rust_method, extra_wrap) = map_method(method, args.len());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
@@ -258,9 +284,9 @@ impl Transpiler {
                             let is_req = self.struct_req_methods.contains(&req_key);
                             let field_expr = format!("self.{}", rwlock_field);
                             let guard = if is_req {
-                                if is_task_field { self.guard_task_read_access(&field_expr) } else { self.guard_read_access(&field_expr) }
+                                self.rwlock_field_read(&k, &field_expr)
                             } else {
-                                if is_task_field { self.guard_task_write_guard(&field_expr) } else { self.guard_write_guard(&field_expr) }
+                                self.rwlock_field_write(&k, &field_expr)
                             };
                             let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
@@ -1068,10 +1094,16 @@ impl Transpiler {
                 obj_s
             );
         }
-        // `sum()` → iter().cloned().sum::<i64>()
+        // `sum()` → iter().cloned().sum::<T>() where T is the receiver's known element
+        // type. A hardcoded `::<i64>()` broke summing a `[float]` (Sum<f64> isn't
+        // implemented for i64); omitting the turbofish entirely instead broke callers
+        // with no surrounding type context to infer from (e.g. `print arr.sum()`).
+        // Default to i64 (the historical behavior) unless the receiver is positively
+        // known to be a float array.
         if method == "sum" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!("{}.iter().cloned().sum::<i64>()", obj_s);
+            let elem_ty = if self.expr_is_float_array(obj) { "f64" } else { "i64" };
+            return format!("{}.iter().cloned().sum::<{}>()", obj_s, elem_ty);
         }
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
         // Note: the map_method fallback maps indexOf → iter().position which returns Option<usize>;
@@ -1152,16 +1184,33 @@ impl Transpiler {
             }
         }
 
-        let obj_s = self.emit_expr(obj);
+        // A method-call receiver that's an array/dict index (`arr[i].method(...)`) must
+        // be a genuine place expression, not a fresh clone of the element — cloning here
+        // silently drops any mutation a `def` (mutating) method makes, since it would
+        // then be mutating the throwaway clone instead of the actual array element (e.g.
+        // `blocks[i].step(...)` updating a per-element KV cache). `in_lhs_assign` already
+        // signals exactly this ("don't clone, give me the real place") for the assignment-
+        // target case in emit_expr's Index arm — reuse it here for the same effect.
+        let obj_s = if matches!(&obj.kind, ExprKind::Index(_, _)) {
+            self.in_lhs_assign.set(true);
+            let s = self.emit_expr(obj);
+            self.in_lhs_assign.set(false);
+            s
+        } else {
+            self.emit_expr(obj)
+        };
         // Use `::` for module/type path receivers (not instance variable method calls).
         // Lowercase non-local vars: `mpsc.channel(32)` → `mpsc::channel(32)`
         // Cascaded paths: `tokio::time.sleep()` → `tokio::time::sleep()`,
         // but NOT call results: `Path::new(x).exists()` uses `.` (result is a value).
         let is_path_receiver = match &obj.kind {
             ExprKind::Var(v) => {
-                if v == "self" { false }
+                // `self`, and any known local variable that happens to start with an
+                // uppercase letter (e.g. `var Qh = []`), are still locals, not type/module
+                // paths, and must dispatch as `.method()` -- checked before the uppercase
+                // heuristic below.
+                if v == "self" || self.known_local_vars.contains(v.as_str()) { false }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
-                else if self.known_local_vars.contains(v.as_str()) { false }
                 else {
                     // Struct fields accessed without `self.` in method bodies are NOT path receivers.
                     let is_struct_field = self.self_type.as_ref()
@@ -1222,6 +1271,9 @@ impl Transpiler {
         }
 
         // If the receiver is a known user struct, preserve method names (don't remap to Rust builtins).
+        // Field chains (e.g. `self.encoder`, a struct field holding another struct instance)
+        // are resolved the same way so args to `self.encoder.forward(mel)` get the owned/clone
+        // treatment struct methods expect, not the bare emit_expr fallback.
         let is_user_struct_receiver = match &obj.kind {
             ExprKind::Var(v) => {
                 if v == "self" {
@@ -1235,6 +1287,9 @@ impl Transpiler {
                         .unwrap_or(false)
                 }
             }
+            ExprKind::Field(..) => self.resolve_expr_struct_type(obj)
+                .map(|t| self.struct_fields.contains_key(t.as_str()))
+                .unwrap_or(false),
             _ => false,
         };
         // Map boring method names → Rust equivalents
@@ -1401,8 +1456,25 @@ impl Transpiler {
             "read_line", "write_all", "acquire", "recv",
         ];
         let is_tokio_async = TOKIO_ASYNC_METHODS.contains(&method);
+        // When the receiver's struct type is known, check the qualified
+        // "StructName::method" key ONLY -- otherwise a same-named-but-non-throwing
+        // method on a different struct (e.g. EncoderBlock.forward vs
+        // AudioEncoder.forward, both "forward") would incorrectly pick up a stray
+        // `?` from the bare-name entry. Fall back to the bare-name check only when
+        // the receiver's struct type can't be resolved here.
+        let receiver_struct = match &obj.kind {
+            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+            ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                .or_else(|| self.var_struct_type.get(v.as_str()))
+                .cloned(),
+            _ => None,
+        };
+        let struct_throws = match &receiver_struct {
+            Some(sn) => self.struct_method_throws.contains(&format!("{}::{}", sn, method)),
+            None => self.struct_method_throws.contains(method),
+        };
         let propagates_throw = (self.in_throws || self.in_try_body)
-            && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
+            && (self.fn_throws.contains(method) || struct_throws);
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
             if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) }
         } else if propagates_throw {
@@ -1863,6 +1935,7 @@ impl Transpiler {
                             '"' => fmt.push_str("\\\""),
                             '\\' => fmt.push_str("\\\\"),
                             '\n' => fmt.push_str("\\n"),
+                            '\r' => fmt.push_str("\\r"),
                             '\t' => fmt.push_str("\\t"),
                             c   => fmt.push(c),
                         }
@@ -1906,6 +1979,7 @@ impl Transpiler {
                             '"'  => fmt.push_str("\\\""),
                             '\\' => fmt.push_str("\\\\"),
                             '\n' => fmt.push_str("\\n"),
+                            '\r' => fmt.push_str("\\r"),
                             '\t' => fmt.push_str("\\t"),
                             c    => fmt.push(c),
                         }
@@ -1957,6 +2031,7 @@ impl Transpiler {
                             '"'  => fmt.push_str("\\\""),
                             '\\' => fmt.push_str("\\\\"),
                             '\n' => fmt.push_str("\\n"),
+                            '\r' => fmt.push_str("\\r"),
                             '\t' => fmt.push_str("\\t"),
                             c    => fmt.push(c),
                         }
@@ -1994,7 +2069,7 @@ impl Transpiler {
     ///      `d.map(…)`, `d.filter(…)`, `d.set(…)`, `d.put(…)`, `d.remove(…)`
     ///   4. A function call whose declared return type is `Dict(…)` in
     ///      `fn_return_types`
-    fn expr_is_dict(&self, expr: &Expr) -> bool {
+    pub(crate) fn expr_is_dict(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::Var(v) => {
                 if self.dict_vars.contains(v.as_str()) { return true; }
@@ -2281,6 +2356,12 @@ impl Transpiler {
             lazy_vars: self.lazy_vars.clone(),
             lazy_var_types: self.lazy_var_types.clone(),
             callable_structs: self.callable_structs.clone(),
+            kernel_decls: self.kernel_decls.clone(),
+            kernel_vars: self.kernel_vars.clone(),
+            is_gpu_target: self.is_gpu_target,
+            user_top_level_names: self.user_top_level_names.clone(),
+            gpu_main_emitted: std::cell::Cell::new(false),
+            gpu_top_level_const_names: self.gpu_top_level_const_names.clone(),
         }
     }
 
@@ -2464,17 +2545,16 @@ impl Transpiler {
                 }
             }
 
-            // fs.readBytes("path") → Vec<i64> (bytes as i64 to match boring's [int])
+            // fs.readBytes("path") → Vec<u8>, matching boring's [uint8] directly —
+            // no per-element widening needed since uint8 is a real 1-byte type.
+            // `aw` already includes `.await` when async (see its definition above),
+            // so no separate self.in_async branch is needed here.
             "readBytes" => {
                 let path = pth(0);
-                if aw.is_empty() {
-                    format!("{{ let __rb = {}::read({})?; __rb.into_iter().map(|b| b as i64).collect::<Vec<i64>>() }}", fs_mod, path)
-                } else {
-                    format!("{{ let __rb = {}::read({}).await?; __rb.into_iter().map(|b| b as i64).collect::<Vec<i64>>() }}", fs_mod, path)
-                }
+                format!("{}::read({}){aw}", fs_mod, path, aw = aw)
             }
 
-            // fs.writeBytes("path", bytes)
+            // fs.writeBytes("path", bytes) — bytes is already Vec<u8> ([uint8]).
             "writeBytes" => {
                 let path  = pth(0);
                 let bytes = a(1);
@@ -2504,6 +2584,15 @@ impl Transpiler {
                 if self.global_vars_used_in_fns.contains(n) {
                     let static_name = n.to_uppercase();
                     return format!("{}.lock().unwrap_or_else(|e| e.into_inner()).clone()", static_name);
+                }
+                // GPU-target top-level scalar const, uppercased at emission (see
+                // `emit_item`'s `Item::Let` case) to avoid colliding with a same-named fn
+                // parameter elsewhere in the file. A genuine local of the same name in
+                // THIS scope (e.g. a fn parameter actually called `width`) must still
+                // shadow it, matching ordinary Rust scoping -- only rewrite when there
+                // isn't one.
+                if self.gpu_top_level_const_names.contains(n) && !self.known_local_vars.contains(n) {
+                    return n.to_uppercase();
                 }
                 // Bare PascalCase enum variant not in known_local_vars — qualify it.
                 // e.g. `Nil` (Value::Nil) or `Uninitialized` (Value::Uninitialized)

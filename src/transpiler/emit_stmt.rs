@@ -169,6 +169,12 @@ impl Transpiler {
                 }
             }
             Stmt::KernelBlock(s) => {
+                // GPU targets only (see emit_kernel.rs): `k(block=.., grid=..)` dispatches
+                // a tracked kernel variable instead of the naive body passthrough below.
+                if let Some(code) = self.try_emit_kernel_dispatch(s) {
+                    self.line(&code);
+                    return;
+                }
                 self.line("// kernel: block");
                 let body = s.body.clone();
                 let last = body.len().saturating_sub(1);
@@ -180,6 +186,13 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
+        // GPU targets only (see emit_kernel.rs): a `let`/`mut`/`var` initialized from a
+        // `kernel Name(...)` constructor needs GPU-specific codegen, not the plain
+        // tuple-constructor call the rest of this function would otherwise emit.
+        if self.try_emit_kernel_let(s) {
+            self.known_local_vars.insert(s.name.clone());
+            return;
+        }
         // Validate `mut` qualifier combinations.
         if s.binding == BindingKind::Mut {
             if let Some(ty) = &s.ty {
@@ -1350,6 +1363,21 @@ impl Transpiler {
         }
     }
 
+    /// True when `expr` is positively known to be a `[float]` array -- used to pick the
+    /// right turbofish type for `.sum()` (see emit_methods.rs). Conservatively `false`
+    /// (not "definitely an int array") for anything not confidently identifiable, since
+    /// the caller's default (`i64`) is the historically-safe choice for those cases.
+    pub(crate) fn expr_is_float_array(&self, expr: &Expr) -> bool {
+        fn is_float_ty(t: &Type) -> bool {
+            matches!(t, Type::Float) || matches!(t, Type::Named(n) if n == "float" || n == "f64" || n == "f32")
+        }
+        match &expr.kind {
+            ExprKind::Var(v) => matches!(self.var_types.get(v.as_str()), Some(Type::Array(inner)) if is_float_ty(inner)),
+            ExprKind::Array(elems) => elems.first().is_some_and(|e| matches!(&e.kind, ExprKind::Float(_))),
+            _ => false,
+        }
+    }
+
     /// Collect all leaf parts of a string concatenation chain `a + b + c` into a flat Vec.
     /// Each part is emitted as a raw expression string (no Arc::new wrapping).
     pub(crate) fn collect_string_parts(&self, expr: &Expr, parts: &mut Vec<String>) {
@@ -1410,6 +1438,21 @@ impl Transpiler {
             }
             _ => None,
         }
+    }
+
+    /// True when `v` is a function parameter whose bare `[T]`/`{K=V}`/`{T}` type was
+    /// auto-ref inferred to `&Vec<T>`/`&HashMap<K,V>`/`&HashSet<T>` (see the free-function
+    /// array/dict/set eligibility in `infer_qualifiers.rs`). Reading such a param into an
+    /// owned context (a fresh local, a struct field, …) needs an explicit `.clone()` —
+    /// Rust would otherwise infer the destination's type as the reference itself.
+    fn is_borrowed_collection_param(&self, v: &str) -> bool {
+        matches!(
+            self.fn_current_params.get(v),
+            Some(Type::Array(_) | Type::Dict(..) | Type::Set(_))
+        ) && matches!(
+            self.inferred_qualifiers.get(v),
+            Some(OwnerQual::Borrow) | Some(OwnerQual::BorrowMut)
+        )
     }
 
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
@@ -1617,6 +1660,9 @@ impl Transpiler {
                             .map(|e| self.emit_let_value(Some(elem_ty), e))
                             .collect();
                         format!("vec![{}]", es.join(", "))
+                    }
+                    ExprKind::Var(v) if self.is_borrowed_collection_param(v) => {
+                        format!("{}.clone()", self.emit_expr(value))
                     }
                     _ => self.emit_expr(value),
                 }
@@ -1972,6 +2018,14 @@ impl Transpiler {
                         if is_user_enum && !s.ends_with(".clone()") {
                             return format!("{}.clone()", s);
                         }
+                    }
+                    // Auto-ref array/dict/set param (bare [T]/{K=V}/{T} inferred to &Vec<T>/
+                    // &HashMap<K,V>/&HashSet<T>): assigning it to a fresh local needs a deep
+                    // clone, same reasoning as the struct case above — otherwise Rust infers
+                    // the local's type as the reference itself, and any later mutation
+                    // (`.push()`, index-assign, etc.) fails to borrow it as mutable.
+                    if self.is_borrowed_collection_param(v) && !s.ends_with(".clone()") {
+                        return format!("{}.clone()", s);
                     }
                 }
                 // If the value is a field access on a local struct variable, and the field type
@@ -3694,6 +3748,51 @@ impl Transpiler {
                 for v in &s.vars {
                     self.chars_vars.insert(v.clone());
                 }
+            }
+        }
+        // Track the array element type when iterating over a known `[T]` iterable
+        // (`self.blocks`, a local `[T]` var, etc.) so the loop var inside the body resolves
+        // correctly: struct elements get owned-arg cloning / qualified throws lookup instead
+        // of bare-name heuristics, and primitive elements (e.g. `[int]`) are known non-string
+        // so dict-key emission doesn't wrongly treat them as `Arc<str>`.
+        if s.vars.len() == 1 {
+            let elem_ty: Option<Type> = match &s.iterable.kind {
+                ExprKind::Field(inner, field) => self.resolve_expr_struct_type(inner).and_then(|owner_ty| {
+                    self.struct_fields.get(owner_ty.as_str())
+                        .and_then(|fields| fields.iter().find(|(fname, _)| fname == field))
+                        .and_then(|(_, fty)| match fty {
+                            Type::Array(elem) => Some(elem.as_ref().clone()),
+                            _ => None,
+                        })
+                }),
+                ExprKind::Var(v) => self.var_types.get(v.as_str())
+                    .or_else(|| self.fn_current_params.get(v.as_str()))
+                    .and_then(|ty| match ty {
+                        Type::Array(elem) => Some(elem.as_ref().clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            match &elem_ty {
+                Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str()) => {
+                    self.var_struct_types.insert(s.vars[0].clone(), n.clone());
+                }
+                // Primitive element types: `int`/`uint`/`float`/`bool` parse as `Type::Named`
+                // (lowercase source syntax), not the bare `Type::Int` etc. builtin variants —
+                // match both forms.
+                Some(ty @ (Type::Int | Type::Uint | Type::Float | Type::Bool)) => {
+                    self.var_types.insert(s.vars[0].clone(), ty.clone());
+                }
+                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "bool") => {
+                    let canonical = match n.as_str() {
+                        "int" => Type::Int,
+                        "uint" => Type::Uint,
+                        "float" => Type::Float,
+                        _ => Type::Bool,
+                    };
+                    self.var_types.insert(s.vars[0].clone(), canonical);
+                }
+                _ => {}
             }
         }
         // Track loop variables from Vec<Arc<str>> iterables so string methods dispatch correctly.

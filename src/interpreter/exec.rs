@@ -826,8 +826,10 @@ impl Interpreter {
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
         let target = match ty {
             Type::Uint => Some(Type::Uint),
+            Type::Uint8 => Some(Type::Uint8),
             Type::Qualified(inner, _) => match inner.as_ref() {
                 Type::Uint => Some(Type::Uint),
+                Type::Uint8 => Some(Type::Uint8),
                 _ => None,
             },
             _ => None,
@@ -836,6 +838,10 @@ impl Interpreter {
             Some(Type::Uint) => match val {
                 Value::Int(n) if n >= 0 => Value::Uint(n as u64),
                 other => other, // negative Int: leave unchanged → type-check will reject it
+            },
+            Some(Type::Uint8) => match val {
+                Value::Int(n) if (0..=255).contains(&n) => Value::Uint8(n as u8),
+                other => other, // out-of-range Int: leave unchanged → type-check will reject it
             },
             _ => val,
         }
@@ -861,6 +867,7 @@ impl Interpreter {
         match ty {
             Type::Int    => "int".into(),
             Type::Uint   => "uint".into(),
+            Type::Uint8  => "uint8".into(),
             Type::Float  => "float".into(),
             Type::Str    => "string".into(),
             Type::Bool   => "bool".into(),
@@ -968,6 +975,8 @@ impl Interpreter {
             // Negative Int values are rejected here so that `var uint x = -1` errors rather
             // than silently wrapping to 18446744073709551615.
             Type::Uint   => matches!(val, Value::Uint(_)) || matches!(val, Value::Int(n) if *n >= 0),
+            // Uint8 accepts Int only when it fits in 0..=255 (coerce_to_type handles the cast).
+            Type::Uint8  => matches!(val, Value::Uint8(_)) || matches!(val, Value::Int(n) if (0..=255).contains(n)),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -1091,6 +1100,7 @@ impl Interpreter {
         match ty {
             Type::Int    => matches!(val, Value::Int(_)),
             Type::Uint   => matches!(val, Value::Uint(_)),
+            Type::Uint8  => matches!(val, Value::Uint8(_)),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -1099,6 +1109,7 @@ impl Interpreter {
             Type::Named(name) => match name.as_str() {
                 "int"    => matches!(val, Value::Int(_)),
                 "uint"   => matches!(val, Value::Uint(_)),
+                "uint8"  => matches!(val, Value::Uint8(_)),
                 "float"  => matches!(val, Value::Float(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),

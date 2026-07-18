@@ -439,6 +439,7 @@ impl Interpreter {
         match ty {
             Type::Int    => matches!(val, Value::Int(_)),
             Type::Uint   => matches!(val, Value::Uint(_)),
+            Type::Uint8  => matches!(val, Value::Uint8(_)),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -446,6 +447,7 @@ impl Interpreter {
             Type::Named(name) => match name.as_str() {
                 "int"    => matches!(val, Value::Int(_)),
                 "uint"   => matches!(val, Value::Uint(_)),
+                "uint8"  => matches!(val, Value::Uint8(_)),
                 "float"  => matches!(val, Value::Float(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),
@@ -1807,6 +1809,7 @@ impl Interpreter {
             Type::Int => match val {
                 Value::Int(n) => Ok(Value::Int(n)),
                 Value::Uint(n) => Ok(Value::Int(n as i64)),
+                Value::Uint8(n) => Ok(Value::Int(n as i64)),
                 Value::Float(f) => Ok(Value::Int(f as i64)),
                 Value::Str(s) => Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil)),
                 Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
@@ -1814,15 +1817,25 @@ impl Interpreter {
             },
             Type::Uint => match val {
                 Value::Uint(n) => Ok(Value::Uint(n)),
+                Value::Uint8(n) => Ok(Value::Uint(n as u64)),
                 Value::Int(n) if n >= 0 => Ok(Value::Uint(n as u64)),
                 Value::Float(f) if f >= 0.0 => Ok(Value::Uint(f as u64)),
                 Value::Str(s) => Ok(s.trim().parse::<u64>().map(Value::Uint).unwrap_or(Value::Nil)),
+                _ => Ok(Value::Nil),
+            },
+            Type::Uint8 => match val {
+                Value::Uint8(n) => Ok(Value::Uint8(n)),
+                Value::Int(n) if (0..=255).contains(&n) => Ok(Value::Uint8(n as u8)),
+                Value::Uint(n) if n <= 255 => Ok(Value::Uint8(n as u8)),
+                Value::Float(f) if (0.0..=255.0).contains(&f) => Ok(Value::Uint8(f as u8)),
+                Value::Str(s) => Ok(s.trim().parse::<u8>().map(Value::Uint8).unwrap_or(Value::Nil)),
                 _ => Ok(Value::Nil),
             },
             Type::Float => match val {
                 Value::Float(f) => Ok(Value::Float(f)),
                 Value::Int(n) => Ok(Value::Float(n as f64)),
                 Value::Uint(n) => Ok(Value::Float(n as f64)),
+                Value::Uint8(n) => Ok(Value::Float(n as f64)),
                 Value::Str(s) => Ok(s.trim().parse::<f64>().map(Value::Float).unwrap_or(Value::Nil)),
                 _ => Ok(Value::Nil),
             },
@@ -1985,7 +1998,7 @@ impl Interpreter {
             Type::Nil | Type::Void | Type::Never => Ok(()),
 
             // Bare primitive types: stack-allocated by default, always valid.
-            Type::Int | Type::Uint | Type::Float | Type::Bool => Ok(()),
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool => Ok(()),
             // Bare String without qualifier: requires explicit qualification.
             Type::Str => Err(err("use 'string' instead of bare 'String' (which has no ownership qualifier)", line)),
 
@@ -2049,6 +2062,7 @@ impl Interpreter {
         match val {
             Value::Int(n)  => Ok(n),
             Value::Uint(n) => Ok(n as i64),
+            Value::Uint8(n) => Ok(n as i64),
             other => Err(err(format!("expected Int, got {}", other.type_name()), line)),
         }
     }
@@ -2067,6 +2081,7 @@ impl Interpreter {
         match val {
             Value::Int(_)   => Type::Int,
             Value::Uint(_)  => Type::Uint,
+            Value::Uint8(_) => Type::Uint8,
             Value::Float(_) => Type::Float,
             Value::Str(_)   => Type::Str,
             Value::Bool(_)  => Type::Bool,
@@ -2200,7 +2215,7 @@ impl Interpreter {
             let base = strip_qualifiers(concrete_ty);
             // Primitives are assumed to satisfy any constraint
             match base {
-                Type::Int | Type::Uint | Type::Float | Type::Str | Type::Bool => continue,
+                Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool => continue,
                 _ => {}
             }
             let type_name = match base {
@@ -2381,7 +2396,7 @@ impl Interpreter {
                 match std::fs::read(&path) {
                     Ok(bytes) => {
                         let arr = bytes.iter()
-                            .map(|&b| Value::Int(b as i64))
+                            .map(|&b| Value::Uint8(b))
                             .collect::<Vec<_>>();
                         Ok(Value::Array(arr.into()))
                     }
@@ -2391,11 +2406,17 @@ impl Interpreter {
             "writeBytes" => {
                 let path = str_arg!(0);
                 let bytes = match args.get(1) {
-                    Some(Value::Array(arr)) => arr.iter().map(|v| match v {
-                        Value::Int(n) => *n as u8,
-                        _ => 0u8,
-                    }).collect::<Vec<u8>>(),
-                    _ => return Err(err("fs.writeBytes: expected [int] as second argument", line)),
+                    Some(Value::Array(arr)) => {
+                        let mut out = Vec::with_capacity(arr.len());
+                        for v in arr.iter() {
+                            match v {
+                                Value::Uint8(n) => out.push(*n),
+                                other => return Err(err(format!("fs.writeBytes: expected [uint8] elements, found {}", other.type_name()), line)),
+                            }
+                        }
+                        out
+                    }
+                    _ => return Err(err("fs.writeBytes: expected [uint8] as second argument", line)),
                 };
                 match std::fs::write(&path, &bytes) {
                     Ok(())  => Ok(Value::Void),

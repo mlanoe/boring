@@ -142,10 +142,12 @@ impl Transpiler {
                     let fmt = parts.iter().map(|_| "{}").collect::<Vec<_>>().join("");
                     return format!("{}::<str>::from(format!(\"{}\", {}))", self.str_ptr(), fmt, parts.join(", "));
                 }
-                // Numeric type coercion: when adding/subtracting/multiplying typed numeric vars
-                // of different widths (i8 + i16, etc.), cast both to the wider type.
+                // Numeric type coercion: when adding/subtracting/multiplying/comparing typed
+                // numeric vars of different widths (i8 + i16, uint == int, etc.), cast both
+                // to the wider type — Rust's `==`/`<`/etc. require identical operand types.
                 // Also handle mixed float-literal/int-literal arithmetic: `7.5 % 2` → `7.5_f64 % 2_f64`.
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) {
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                    | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
                     let l_is_float_lit = matches!(l.kind, ExprKind::Float(_));
                     let r_is_float_lit = matches!(r.kind, ExprKind::Float(_));
                     let l_is_int_lit   = matches!(l.kind, ExprKind::Int(_));
@@ -487,8 +489,15 @@ impl Transpiler {
                             _ => None,
                         };
                         if let Some(op_str) = compound_op {
+                            // Emit both sides in lhs-assign mode: `target` because it's the
+                            // actual compound-assign target (e.g. `mel[i] /= 4.0` must not
+                            // become `mel[i].clone() /= 4.0` -- clone() isn't an lvalue), and
+                            // `lhs_copy` (the parser's desugared duplicate of the same target)
+                            // to match, so the equality check below still lines up.
+                            self.in_lhs_assign.set(true);
                             let target_s = self.emit_expr(target);
                             let lhs_s    = self.emit_expr(lhs_copy);
+                            self.in_lhs_assign.set(false);
                             if target_s == lhs_s {
                                 let rhs_s = self.emit_expr_owned(rhs);
                                 return format!("{} {} {}", target_s, op_str, rhs_s);
@@ -606,6 +615,12 @@ impl Transpiler {
                 format!("{{ if {lhs_s}.is_none() {{ {lhs_s} = Some({rhs_s}); }} }}", lhs_s = lhs_s, rhs_s = rhs_s)
             }
             ExprKind::Field(obj, field) => {
+                // GPU targets only (see emit_kernel.rs): reading a `'unified`/`'global`
+                // array field on a tracked kernel variable reads back the GPU buffer
+                // instead of a plain (host-uninitialized) field access.
+                if let Some(code) = self.try_emit_kernel_field_read(obj, field) {
+                    return code;
+                }
                 // Special case: `(task expr).value` / `(task expr).wait` where the task body
                 // captures non-Arc local variables.  We cannot safely `tokio::spawn(async move {})`
                 // because that would move the variable — leaving the outer scope without it.
@@ -1019,6 +1034,32 @@ impl Transpiler {
                     };
                     return format!("{}[{}].to_vec()", obj_s, range_s);
                 }
+                // Single-index string access: s[i] → the i-th character, as a one-char
+                // string (boring has no separate `char` type -- comparisons like
+                // `s[i] == "x"` and `s[i] != Q` expect a string back). Rust can't index
+                // `str`/`Arc<str>` by usize at all (UTF-8 isn't O(1) per-byte), so this
+                // goes through `.chars().nth(i)` instead.
+                let is_str = match &obj.kind {
+                    ExprKind::Str(_) => true,
+                    ExprKind::Var(v) =>
+                        self.string_vars.contains(v.as_str())
+                        || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Str))
+                        || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
+                    _ => false,
+                };
+                if is_str {
+                    let obj_s = self.emit_expr(obj);
+                    let raw = self.emit_expr(idx);
+                    let idx_s = match &idx.kind {
+                        ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
+                            format!("({}) as usize", raw),
+                        _ => raw,
+                    };
+                    let str_ptr = self.str_ptr();
+                    return format!(
+                        "{str_ptr}::<str>::from({obj_s}.chars().nth({idx_s}).expect(\"string index out of bounds\").to_string().as_str())"
+                    );
+                }
                 // When the index is an opaque collection index var (Option<usize> from
                 // firstIndex/nextIndex), use the get_at(Option<usize>) trait method.
                 if let ExprKind::Var(v) = &idx.kind {
@@ -1074,8 +1115,15 @@ impl Transpiler {
                         _ => raw,
                     }
                 };
-                // Add .clone() so generic T values can be moved out of collections
-                format!("{}[{}].clone()", self.emit_expr(obj), idx_s)
+                // Add .clone() so generic T values can be moved out of collections --
+                // except when this index expression is itself an assignment target
+                // (e.g. `mel[i] /= 4.0`, `arr[i] = v`): `.clone()` produces a temporary,
+                // not an lvalue, so `arr[i].clone() /= 4.0` fails to compile (E0067).
+                if self.in_lhs_assign.get() {
+                    format!("{}[{}]", self.emit_expr(obj), idx_s)
+                } else {
+                    format!("{}[{}].clone()", self.emit_expr(obj), idx_s)
+                }
             }
             ExprKind::Call(callee, args) => self.emit_call(callee, args),
             ExprKind::MethodCall(obj, method, args) => self.emit_method_call(obj, method, args),
@@ -1167,12 +1215,15 @@ impl Transpiler {
                     return match ty {
                         Type::Int => format!("{}.trim().parse::<i64>().unwrap_or({})", src, dv),
                         Type::Uint => format!("{}.trim().parse::<u64>().unwrap_or({})", src, dv),
+                        Type::Uint8 => format!("{}.trim().parse::<u8>().unwrap_or({})", src, dv),
                         Type::Float => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Bool => format!("({} == \"true\")", src),
                         Type::Named(n) if n == "int" =>
                             format!("{}.trim().parse::<i64>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "uint" =>
                             format!("{}.trim().parse::<u64>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "uint8" =>
+                            format!("{}.trim().parse::<u8>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "float" =>
                             format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
@@ -1181,22 +1232,21 @@ impl Transpiler {
                 }
                 // `dict[key] else default` — rebuild .get() directly to avoid double-unwrap
                 // (ExprKind::Index for dict vars emits .unwrap() for bare access).
+                // Uses expr_is_dict (not a plain-Var-only check) so `self.field[key] else d`
+                // is recognized too, not just a bare dict variable.
                 if let ExprKind::Index(dict_obj, key) = &e.kind {
-                    if let ExprKind::Var(dict_name) = &dict_obj.kind {
-                        if self.dict_vars.contains(dict_name.as_str()) {
-                            let key_ref = self.emit_dict_key_borrow(key);
-                            let dv = self.emit_expr_owned(default);
-                            return format!("{}.get({}).cloned().unwrap_or_else(|| {})",
-                                dict_name, key_ref, dv);
-                        }
+                    if self.expr_is_dict(dict_obj) {
+                        let dict_s = self.emit_expr(dict_obj);
+                        let key_ref = self.emit_dict_key_borrow(key);
+                        let dv = self.emit_expr_owned(default);
+                        return format!("{}.get({}).cloned().unwrap_or_else(|| {})",
+                            dict_s, key_ref, dv);
                     }
                 }
                 // `vec[i] else default` — Vec::get returns Option<&T>, use .cloned().unwrap_or_else.
                 // Direct indexing would yield T (not Option<T>), so .unwrap_or_else would fail.
                 if let ExprKind::Index(arr_obj, idx_expr) = &e.kind {
-                    let is_dict = matches!(&arr_obj.kind, ExprKind::Var(v)
-                        if self.dict_vars.contains(v.as_str()));
-                    if !is_dict {
+                    if !self.expr_is_dict(arr_obj) {
                         let arr_s = self.emit_expr(arr_obj);
                         let idx_s = self.emit_expr(idx_expr);
                         let dv = self.emit_expr_owned(default);
@@ -1396,9 +1446,11 @@ impl Transpiler {
                     let parse_ty = match inner.as_ref() {
                         Type::Int                           => Some("i64"),
                         Type::Uint                          => Some("u64"),
+                        Type::Uint8                          => Some("u8"),
                         Type::Float                         => Some("f64"),
                         Type::Named(n) if n == "int"        => Some("i64"),
                         Type::Named(n) if n == "uint"       => Some("u64"),
+                        Type::Named(n) if n == "uint8"       => Some("u8"),
                         Type::Named(n) if n == "float"      => Some("f64"),
                         _                                   => None,
                     };
@@ -1419,8 +1471,15 @@ impl Transpiler {
                     if !self.string_vars.contains(v.as_str()));
                 let is_float_ty = matches!(ty, Type::Float)
                     || matches!(ty, Type::Named(n) if n == "float");
-                let is_int_ty = matches!(ty, Type::Int | Type::Uint)
-                    || matches!(ty, Type::Named(n) if n == "int" || n == "uint");
+                let is_int_ty = matches!(ty, Type::Int)
+                    || matches!(ty, Type::Named(n) if n == "int");
+                // Kept separate from is_int_ty: uint/uint8 must cast via `as u64`/`as u8`,
+                // not `as i64` (folding them into is_int_ty would silently reinterpret the
+                // sign bit instead of producing the unsigned value).
+                let is_uint_ty = matches!(ty, Type::Uint)
+                    || matches!(ty, Type::Named(n) if n == "uint");
+                let is_uint8_ty = matches!(ty, Type::Uint8)
+                    || matches!(ty, Type::Named(n) if n == "uint8");
                 let is_bool_ty = matches!(ty, Type::Bool)
                     || matches!(ty, Type::Named(n) if n == "bool");
 
@@ -1434,11 +1493,17 @@ impl Transpiler {
                 if src_is_expr && is_int_ty {
                     return format!("({} as i64)", src);
                 }
+                if src_is_expr && is_uint_ty {
+                    return format!("({} as u64)", src);
+                }
+                if src_is_expr && is_uint8_ty {
+                    return format!("({} as u8)", src);
+                }
                 // Known-numeric variable (tracked in var_types as Int/Float/Uint) → cast with `as T`
                 let src_var_is_numeric = matches!(&e.kind, ExprKind::Var(v) if {
                     let vt = self.var_types.get(v.as_str());
-                    matches!(vt, Some(Type::Int | Type::Uint | Type::Float))
-                    || matches!(vt, Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "i64" | "u64" | "f64" | "usize" | "i32" | "u32" | "f32"))
+                    matches!(vt, Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float))
+                    || matches!(vt, Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "uint8" | "float" | "i64" | "u64" | "u8" | "f64" | "usize" | "i32" | "u32" | "f32"))
                 });
                 if src_var_is_numeric && is_float_ty {
                     return format!("({} as f64)", src);
@@ -1446,14 +1511,32 @@ impl Transpiler {
                 if src_var_is_numeric && is_int_ty {
                     return format!("({} as i64)", src);
                 }
+                if src_var_is_numeric && is_uint_ty {
+                    return format!("({} as u64)", src);
+                }
+                if src_var_is_numeric && is_uint8_ty {
+                    return format!("({} as u8)", src);
+                }
 
                 // bool → int: direct cast (true=1, false=0), always succeeds
                 if src_is_bool_lit && is_int_ty {
                     return format!("({} as i64)", src);
                 }
+                if src_is_bool_lit && is_uint_ty {
+                    return format!("({} as u64)", src);
+                }
+                if src_is_bool_lit && is_uint8_ty {
+                    return format!("({} as u8)", src);
+                }
                 // int/float literal → float: use `as f64`, not .parse()
                 if src_is_numeric_lit && is_float_ty {
                     return format!("({} as f64)", src);
+                }
+                if src_is_numeric_lit && is_uint_ty {
+                    return format!("({} as u64)", src);
+                }
+                if src_is_numeric_lit && is_uint8_ty {
+                    return format!("({} as u8)", src);
                 }
                 // numeric literal → bool: always nil (int-to-bool not meaningful in Boring)
                 if src_is_numeric_lit && is_bool_ty {
@@ -1465,6 +1548,12 @@ impl Transpiler {
                 }
                 if src_is_numeric_var && is_int_ty {
                     return format!("({} as i64)", src);
+                }
+                if src_is_numeric_var && is_uint_ty {
+                    return format!("({} as u64)", src);
+                }
+                if src_is_numeric_var && is_uint8_ty {
+                    return format!("({} as u8)", src);
                 }
                 // Non-string (numeric var) → bool: None (invalid cast)
                 if src_is_numeric_var && is_bool_ty {
@@ -1505,6 +1594,16 @@ impl Transpiler {
                         format!("{}.trim().parse::<u64>()?", src)
                     } else {
                         format!("{}.trim().parse::<u64>().ok()", src)
+                    },
+                    Type::Uint8 => if self.in_try_body {
+                        format!("{}.trim().parse::<u8>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<u8>().ok()", src)
+                    },
+                    Type::Named(n) if n == "uint8" => if self.in_try_body {
+                        format!("{}.trim().parse::<u8>()?", src)
+                    } else {
+                        format!("{}.trim().parse::<u8>().ok()", src)
                     },
                     Type::Named(n) if n == "float" => if self.in_try_body {
                         format!("{}.trim().parse::<f64>()?", src)
@@ -2903,8 +3002,20 @@ impl Transpiler {
                 let a = self.emit_expr(&args[0].value);
                 format!("{}.len()", a)
             }
+            // `int(x)`/`uint(x)`/`float(x)` on a string arg must parse, not `as`-cast --
+            // Arc<str>/&str can't be cast to a numeric type at all in Rust ("non-primitive
+            // cast"). Only numeric args (the common case) get the plain `as` cast.
+            "int" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<i64>().unwrap_or(0)", self.emit_expr(&args[0].value)),
+            "uint" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<u64>().unwrap_or(0)", self.emit_expr(&args[0].value)),
+            "uint8" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<u8>().unwrap_or(0)", self.emit_expr(&args[0].value)),
+            "float" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<f64>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
             "int"   => format!("({} as i64)", self.emit_expr(&args[0].value)),
             "uint"  => format!("({} as u64)", self.emit_expr(&args[0].value)),
+            "uint8" => format!("({} as u8)", self.emit_expr(&args[0].value)),
             "float" => format!("({} as f64)", self.emit_expr(&args[0].value)),
             "str"   => {
                 // Single non-string arg → conversion.

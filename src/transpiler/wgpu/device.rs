@@ -4,6 +4,7 @@
 // WGSL device code emitter for the wgpu backend.
 
 use crate::ast::*;
+use crate::transpiler::helpers::collect_vars_in_stmt;
 
 pub(super) fn emit_device_wgsl(program: &Program, effective_kernels: &[crate::ast::KernelDecl]) -> String {
     let mut e = DeviceEmitter::new();
@@ -18,6 +19,12 @@ struct DeviceEmitter {
     current_kernel: String,
     auto_sync: bool,
     top_level_scalars: std::collections::HashMap<String, String>,
+    /// Buffer/uniform field name → kernel-prefixed WGSL variable name for the kernel
+    /// currently being emitted. All kernels share one WGSL module, so their storage/uniform
+    /// bindings live in one flat global namespace — two kernels both declaring a field
+    /// named `a` would otherwise emit two conflicting `var<storage,...> a: ...` at module
+    /// scope. Declarations get the prefixed name; body references are rewritten to match.
+    current_buffer_renames: std::collections::HashMap<String, String>,
     /// Block sizes per kernel, extracted from call sites: kernel_name → (bx, by, bz).
     block_sizes: std::collections::HashMap<String, (u32, u32, u32)>,
     /// Errors accumulated during emission (e.g. unsupported qualifiers).
@@ -33,6 +40,7 @@ impl DeviceEmitter {
             current_kernel: String::new(),
             auto_sync: false,
             top_level_scalars: std::collections::HashMap::new(),
+            current_buffer_renames: std::collections::HashMap::new(),
             block_sizes: std::collections::HashMap::new(),
             errors: vec![],
         }
@@ -83,10 +91,35 @@ impl DeviceEmitter {
         // Pre-pass: extract block sizes from kernel call sites.
         self.block_sizes = collect_block_sizes(program);
 
-        // Emit free functions as WGSL helpers callable from any kernel.
+        // Emit free functions as WGSL helpers, but only those actually reachable from a
+        // kernel's device code (`def ()` entry point or device helper methods). A `use`d
+        // file merged into the same program for its GPU kernels may pull in ordinary
+        // host-only helpers (e.g. a CPU array-building `zeros()`/`vec_add()`) that a kernel
+        // never calls and that don't even have a valid WGSL translation (dynamic `.push()`
+        // growth, `HashMap`, `String`, ...) -- emitting those unconditionally produced
+        // invalid WGSL (`/* unsupported: ... */` placeholders) that failed shader
+        // compilation at runtime even though nothing in the actual kernel graph needed them.
+        let free_fns: std::collections::HashMap<&str, &FnDecl> = program.items.iter()
+            .filter_map(|item| match item {
+                Item::Fn(decl) if decl.qualifier.is_none() && !decl.task => Some((decl.name.as_str(), decl)),
+                _ => None,
+            })
+            .collect();
+        let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut frontier: Vec<String> = Vec::new();
+        for decl in effective_kernels {
+            for method in &decl.methods {
+                collect_called_fn_names(&method.body, &mut frontier);
+            }
+        }
+        while let Some(name) = frontier.pop() {
+            if !free_fns.contains_key(name.as_str()) { continue; }
+            if !reachable.insert(name.clone()) { continue; } // already visited
+            collect_called_fn_names(&free_fns[name.as_str()].body, &mut frontier);
+        }
         for item in &program.items {
             if let Item::Fn(decl) = item {
-                if decl.qualifier.is_none() && !decl.task {
+                if decl.qualifier.is_none() && !decl.task && reachable.contains(decl.name.as_str()) {
                     self.emit_free_device_fn(decl);
                     self.blank();
                 }
@@ -143,6 +176,10 @@ impl DeviceEmitter {
     fn emit_kernel_decl(&mut self, decl: &KernelDecl) {
         self.current_fields = decl.fields.clone();
         self.current_kernel = decl.name.clone();
+        self.current_buffer_renames = decl.fields.iter()
+            .filter(|f| is_buffer_field(f))
+            .map(|f| (f.name.clone(), format!("{}_{}", decl.name.to_lowercase(), f.name)))
+            .collect();
 
         // Validate: reject dynamic 'sync fields ([T]'sync without size).
         for f in &decl.fields {
@@ -168,8 +205,9 @@ impl DeviceEmitter {
         for f in &decl.fields {
             if is_buffer_field(f) {
                 let (access, ty) = wgsl_buffer_type(f);
+                let var_name = &self.current_buffer_renames[&f.name];
                 self.line(&format!("@group(0) @binding({}) var<storage, {}> {}: {};",
-                    binding, access, f.name, ty));
+                    binding, access, var_name, ty));
                 binding += 1;
             }
         }
@@ -420,6 +458,12 @@ impl DeviceEmitter {
                 } else { None };
                 if let Some((lo, hi, inclusive)) = neg_range {
                     let op = if inclusive { "<=" } else { "<" };
+                    // Wrapped in its own block: WGSL has no shadowing, so sibling for-loops
+                    // reusing the same loop-variable name (e.g. two `for j in ..n` in the
+                    // same enclosing scope) would otherwise emit two `var j` in one block,
+                    // which naga rejects as a redefinition.
+                    self.line("{");
+                    self.indent += 1;
                     self.line(&format!("var {var}: i32 = {lo};"));
                     self.line("loop {");
                     self.indent += 1;
@@ -431,11 +475,16 @@ impl DeviceEmitter {
                     self.line(&format!("{var} = {var} + 1;"));
                     self.indent -= 1;
                     self.line("}");
+                    self.indent -= 1;
+                    self.line("}");
                 } else { match &f.iterable.kind {
                     ExprKind::Range { start, end, inclusive } => {
                         let lo = self.expr(start);
                         let hi = self.expr(end);
                         let op = if *inclusive { "<=" } else { "<" };
+                        // See comment above: own block to scope the loop variable.
+                        self.line("{");
+                        self.indent += 1;
                         self.line(&format!("var {var}: i32 = {lo};"));
                         self.line("loop {");
                         self.indent += 1;
@@ -445,6 +494,8 @@ impl DeviceEmitter {
                         }
                         for s in &f.body { self.emit_stmt(s); }
                         self.line(&format!("{var} = {var} + 1;"));
+                        self.indent -= 1;
+                        self.line("}");
                         self.indent -= 1;
                         self.line("}");
                     }
@@ -482,6 +533,9 @@ impl DeviceEmitter {
 
         let i = self.expr(idx);
         let v = self.expr(value);
+        // Same cross-kernel namespacing as the general Var case (see its comment) —
+        // this bypasses self.expr() entirely so it needs its own rename lookup.
+        let arr_name = self.current_buffer_renames.get(&arr_name).cloned().unwrap_or(arr_name);
         // WGSL atomics require a pointer to the element.
         let ptr = format!("&{}[{} as u32]", arr_name, i);
 
@@ -524,7 +578,17 @@ impl DeviceEmitter {
             ExprKind::Nil      => "0".into(),
             ExprKind::Void     => "".into(),
             ExprKind::Var(name) => {
-                self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                // Buffer-qualified fields (`'unified`/`'global`/`'actor'global`) become WGSL
+                // module-level globals shared across every kernel in the same shader file —
+                // a bare field name like `a` collides the moment two kernels both happen to
+                // name a buffer field `a` (e.g. two matmul-shaped kernels). Prefix with the
+                // owning kernel's name to keep each kernel's globals in its own namespace,
+                // matching the params-uniform variable's existing `{kernel}_params` naming.
+                if let Some(prefixed) = self.current_buffer_renames.get(name) {
+                    prefixed.clone()
+                } else {
+                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                }
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
@@ -560,8 +624,16 @@ impl DeviceEmitter {
                     let fn_name = format!("{}_{}", self.current_kernel, method);
                     format!("{}({})", fn_name, args_s.join(", "))
                 } else {
+                    // Numeric builtin method call (`.sqrt()`, `.exp()`, `.tanh()`, `.pow(y)`,
+                    // etc.) on a scalar expression — WGSL has no methods, only free
+                    // functions, so `v.exp()` becomes `exp(v)`. Kernels are numeric-only
+                    // (WGSL has no strings/dynamic collections), so any non-`self` method
+                    // call reaching device code is expected to be one of these.
                     let obj_s = self.expr(obj);
-                    format!("/* unsupported: {}.{}({}) */", obj_s, method, args_s.join(", "))
+                    let fn_s = map_builtin_fn(method);
+                    let mut call_args = vec![obj_s];
+                    call_args.extend(args_s);
+                    format!("{}({})", fn_s, call_args.join(", "))
                 }
             }
             ExprKind::Cast(inner, ty) => {
@@ -587,6 +659,19 @@ impl DeviceEmitter {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
+
+/// Collect every identifier referenced anywhere in `body` (variable reads and call
+/// callees alike — `collect_vars_in_stmt` doesn't distinguish them) into `out`. Used to
+/// find which free functions a kernel's device code actually calls, so WGSL emission for
+/// merged-in host-only helpers (unreachable from any kernel) can be skipped. Harmless
+/// over-approximation: plain variable names that happen to collide with a free function's
+/// name would also be swept in, but that only makes the reachable set too large, never
+/// too small.
+fn collect_called_fn_names(body: &[Stmt], out: &mut Vec<String>) {
+    for stmt in body {
+        collect_vars_in_stmt(stmt, out);
+    }
+}
 
 /// Returns true if the field goes into a storage buffer binding.
 fn is_buffer_field(f: &KernelFieldDecl) -> bool {

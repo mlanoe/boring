@@ -30,11 +30,40 @@ impl Transpiler {
             Item::Mod(m)    => self.emit_mod(m),
             Item::Alias(a)  => self.emit_alias(a),
             Item::Let(s)    => {
-                if s.is_static {
-                    // Top-level `static let` → emit as `const` at module scope.
-                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "_".to_string());
+                // Top-level `static let` → emit as `const` at module scope. GPU targets
+                // treat every top-level `let` this way too -- see `emit_program_items`'s
+                // classification of `Item::Let` (gated on `is_gpu_target`, not on
+                // `kernel_decls` being non-empty).
+                if s.is_static || self.is_gpu_target {
+                    // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
+                    // where the compiler can infer it. Without an explicit boring type
+                    // annotation, infer one from a scalar literal initializer (the only
+                    // shape `top_level_let_is_const_safe`, in `emit_program_items`, allows
+                    // through without a declared type).
+                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
+                        match s.value.as_ref().map(|v| &v.kind) {
+                            Some(ExprKind::Int(_))   => "i64".to_string(),
+                            Some(ExprKind::Float(_)) => "f64".to_string(),
+                            Some(ExprKind::Bool(_))  => "bool".to_string(),
+                            _ => "_".to_string(),
+                        }
+                    });
                     let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
-                    self.line(&format!("const {}: {} = {};", s.name, ty_str, val_str));
+                    // GPU targets: uppercase the Rust identifier. A fn parameter whose name
+                    // matches an in-scope `const` is parsed by Rust as a refutable pattern
+                    // matching that constant's *value*, not a fresh binding -- a hard type
+                    // error the moment the types differ (E0308, "interpreted as a constant,
+                    // not a new binding"). Kernel constructors commonly use `width`/`height`
+                    // as parameter names (see `wgpu::host::emit_kernel_new`), which collides
+                    // with exactly the top-level names the docs' own examples use
+                    // (`let width = 800`, see examples/game_of_life.br). `map_builtin_var`
+                    // does the matching read-side rewrite via `gpu_top_level_const_names`.
+                    let const_name = if self.is_gpu_target {
+                        s.name.to_uppercase()
+                    } else {
+                        s.name.clone()
+                    };
+                    self.line(&format!("const {}: {} = {};", const_name, ty_str, val_str));
                 } else {
                     self.emit_let(s, false);
                 }
@@ -108,6 +137,7 @@ impl Transpiler {
     /// emitted, so forward references to throws functions work correctly across file boundaries.
     pub(crate) fn deep_pre_scan(&mut self, program: &crate::ast::Program, visited: &mut std::collections::HashSet<std::path::PathBuf>) {
         self.pre_scan(program);
+        self.pre_infer_fn_qualifiers(program);
         for item in &program.items {
             if let crate::ast::Item::Use(u) = item {
                 let rel: std::path::PathBuf = u.path.iter().collect::<std::path::PathBuf>().with_extension("br");
@@ -136,6 +166,75 @@ impl Transpiler {
                 }
                 self.deep_pre_scan(&sub_program, visited);
                 self.source_dir = prev_dir;
+            }
+        }
+    }
+
+    /// Pre-pass: compute every free function's parameter-qualifier inference up front (in
+    /// declaration order, independent of emission order) and propagate the results into
+    /// `fn_sigs` — mirrors the cross-function propagation `emit_fn` performs after its own
+    /// `emit_body` (see the comment there), just run for every function in the file before any
+    /// of them are actually emitted. Without this, a caller emitted *earlier* in the file than
+    /// a callee (or, thanks to `deep_pre_scan`'s recursion, in another file) would see the
+    /// callee's stale unqualified signature and never learn it takes e.g. `&Vec<T>` — this
+    /// bit both bare-struct params (rare in practice) and bare array/dict/set params (the
+    /// common case in a call-heavy file like a hand-written recursive-descent parser).
+    pub(crate) fn pre_infer_fn_qualifiers(&mut self, program: &crate::ast::Program) {
+        for item in &program.items {
+            let crate::ast::Item::Fn(f) = item else { continue };
+            if f.qualifier.is_some() || f.is_native { continue; }
+
+            // Run the inference on a throwaway clone (make_sub), never on `self` directly.
+            // infer_qualifiers is normally only ever run as part of a function's real emission,
+            // where it's the sole thing observing/mutating this per-function scratch state; here
+            // we're running it speculatively, once per function, before anything else in the
+            // file has been emitted — doing that against `self` risks leaking half-computed
+            // state into unrelated emission (a prior attempt at this corrupted enum-variant
+            // handling in a completely unrelated file). The clone already carries everything
+            // infer_qualifiers reads (fn_sigs, type_sizes, struct_fields, etc.) from pre_scan.
+            let mut sub = self.make_sub();
+            sub.fn_current_params = f.params.iter()
+                .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+                .collect();
+            sub.fn_current_param_lines = f.params.iter().map(|p| (p.name.clone(), p.line)).collect();
+            sub.fn_current_param_cols = f.params.iter().map(|p| (p.name.clone(), p.col)).collect();
+            sub.fn_current_params_mut = f.params.iter()
+                .filter(|p| p.mutable)
+                .map(|p| p.name.clone())
+                .collect();
+            sub.fn_return_ty = f.return_ty.clone();
+            sub.in_struct_method = false;
+
+            sub.infer_qualifiers(&f.body);
+            let pre_inferred: std::collections::HashMap<String, crate::ast::OwnerQual> = f.params.iter()
+                .filter_map(|p| sub.inferred_qualifiers.get(&p.name).map(|q| (p.name.clone(), q.clone())))
+                .collect();
+
+            // Update both the plain-name entry and the mangled-name entry (pre_register_fn
+            // always registers both — see its comment — regardless of whether this name turns
+            // out overloaded). Overload dispatch (emit_call) looks calls up by the mangled key,
+            // so it must carry the propagated qualifier too. Do NOT gate this on
+            // `self.overloaded_fn_names.contains(&f.name)`: that flag is filled in cumulatively
+            // as pre_scan walks files one at a time (deep_pre_scan runs pre_scan then this pass
+            // per file before moving to the next), so a same-named overload declared in a
+            // not-yet-visited file wouldn't be known about yet, and this update would silently
+            // skip the mangled entry the real overloaded call site actually looks up.
+            let keys = [f.name.clone(), mangle_overload_name(&f.name, &f.params)];
+            for key in keys {
+                let Some(sig) = self.fn_sigs.get_mut(&key) else { continue };
+                for (i, param) in f.params.iter().enumerate() {
+                    let Some(inferred_qual) = pre_inferred.get(&param.name).cloned() else { continue };
+                    // Do not propagate 'stack: it's the default fallback, not a real signal
+                    // (see the identical exclusion in emit_fn's post-emit_body propagation).
+                    if matches!(inferred_qual, crate::ast::OwnerQual::Stack) { continue; }
+                    let Some(param_ty) = sig.get_mut(i) else { continue };
+                    let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
+                        && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
+                        && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)));
+                    if !already_qualified {
+                        *param_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(param_ty, inferred_qual);
+                    }
+                }
             }
         }
     }
@@ -654,12 +753,14 @@ impl Transpiler {
                 .filter_map(|p| {
                     let ty_s = match p.ty.as_ref()? {
                         Type::Int  | Type::Uint => Some("i64".to_string()),
+                        Type::Uint8 => Some("u8".to_string()),
                         Type::Float => Some("f64".to_string()),
                         Type::Bool  => Some("bool".to_string()),
                         Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                         Type::Named(n) => match n.as_str() {
                             "int" | "i64" | "i32" | "i16" | "i8" | "isize" => Some("i64".to_string()),
-                            "uint" | "u64" | "u32" | "u16" | "u8" | "usize" => Some("u64".to_string()),
+                            "uint" | "u64" | "u32" | "u16" | "usize" => Some("u64".to_string()),
+                            "uint8" | "u8" => Some("u8".to_string()),
                             "float" | "f64" | "f32" => Some("f64".to_string()),
                             "bool"   => Some("bool".to_string()),
                             "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
@@ -1100,6 +1201,17 @@ impl Transpiler {
             ExprKind::Str(s) => format!("\"{}\"", escape_str(s)),
             ExprKind::Var(v) if self.chars_vars.contains(v.as_str()) =>
                 format!("&{}.to_string()", v),
+            // Known-primitive keys (e.g. a `{int=string}` dict keyed by a loop var of type
+            // int/uint/float/bool) are Copy types, not Arc<str> — a plain reference, no Deref.
+            // Lowercase source syntax (`int`, `uint`, ...) parses as `Type::Named`, not the
+            // bare builtin variants — match both forms.
+            ExprKind::Var(v) if matches!(
+                self.var_types.get(v.as_str()),
+                Some(Type::Int | Type::Uint | Type::Float | Type::Bool)
+            ) || matches!(
+                self.var_types.get(v.as_str()),
+                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "bool")
+            ) => format!("&{}", v),
             ExprKind::Var(v) => format!("&*{}", v), // Arc<str> → &str via Deref
             _ => {
                 let k = self.emit_expr(key);
@@ -1208,6 +1320,13 @@ impl Transpiler {
             }
             // self.field in owned context → .clone() so Arc<T> fields don't move out of &self
             ExprKind::Field(obj, field) => {
+                // GPU kernel field read (e.g. a kernel wrapper's `.unified`/`.global` array
+                // field used as a throws function's tail expression, wrapped in `Ok(...)`
+                // via emit_expr_owned rather than emit_expr) — same conversion as emit_expr's
+                // Field arm, so the f32 GPU buffer element type doesn't leak into host code.
+                if let Some(code) = self.try_emit_kernel_field_read(obj, field) {
+                    return code;
+                }
                 // Type-level access: delegate to emit_expr which handles Counter::X
                 if let ExprKind::Var(type_name) = &obj.kind {
                     if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -1746,9 +1865,6 @@ impl Transpiler {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn emit_rwlock_type(&self, inner: &Type) -> String { self.emit_guard_type(inner) }
-
     /// guard write: `.write().unwrap()` (multi), `.borrow_mut()` (single).
     pub(crate) fn guard_write_guard(&self, expr: &str) -> String {
         match self.config.threading {
@@ -1848,7 +1964,6 @@ impl Transpiler {
     }
 
     /// Read access for a guard (rwlock) struct field.
-    #[allow(dead_code)]
     pub(crate) fn rwlock_field_read(&self, key: &str, expr: &str) -> String {
         if self.struct_rwlock_task_fields.contains(key) {
             self.guard_task_read_access(expr)
@@ -1918,6 +2033,7 @@ impl Transpiler {
         match ty {
             Type::Int   => "i64".into(),
             Type::Uint  => "u64".into(),
+            Type::Uint8 => "u8".into(),
             Type::Float => "f64".into(),
             Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },
             Type::Bool  => "bool".into(),

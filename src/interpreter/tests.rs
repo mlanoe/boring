@@ -464,7 +464,14 @@ let _result = c as float
 
 #[test]
 fn test_as_decl_block() {
-    let src = r#"
+    // Runs in a larger-stack thread: eval_expr is deeply recursive, so this
+    // `as string:` conversion block exhausts the default 1 MB test-thread
+    // stack on Windows (see test_conformance_multi_header).
+    // Value contains Rc so it is not Send; extract the string inside the thread.
+    let result: String = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let src = r#"
 struct Point:
     float x
     float y
@@ -476,7 +483,15 @@ struct Point:
 let p = Point(1.0, 2.0)
 let _result = p as string
 "#;
-    assert_eq!(run_src(src), Value::Str("Point(1, 2)".to_string()));
+            match run_src(src) {
+                Value::Str(s) => s,
+                other => panic!("expected Str, got {:?}", other),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(result, "Point(1, 2)");
 }
 
 #[test]
@@ -1435,6 +1450,52 @@ let x = pass_uint(7)
     assert_eq!(get_var(&interp, "x"), Value::Uint(7));
 }
 
+/// uint/int cross-type equality — a Uint and an Int literal of equal magnitude
+/// must compare equal, matching the transpiled Rust behavior.
+#[test]
+fn test_uint_int_cross_type_equality() {
+    let src = r#"
+let uint x = 5
+let bool a = x == 5
+let bool b = 5 == x
+let bool c = x != 5
+let int y = 5
+let bool d = x == y
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "a"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "b"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "c"), Value::Bool(false));
+    assert_eq!(get_var(&interp, "d"), Value::Bool(true));
+}
+
+/// Cross-type equality also covers Uint8/Float pairings, and must not
+/// spuriously match when the magnitudes actually differ.
+#[test]
+fn test_numeric_cross_type_equality_float_uint8_mismatch() {
+    let src = r#"
+let uint8 u8 = 5
+let float f = 5.0
+let int i = 5
+let bool a = u8 == 5
+let bool b = f == 5
+let bool c = u8 == f
+let bool d = i == f
+let uint x = 6
+let bool e = x == 5
+let bool f2 = u8 == 6
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "a"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "b"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "c"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "d"), Value::Bool(true));
+    assert_eq!(get_var(&interp, "e"), Value::Bool(false));
+    assert_eq!(get_var(&interp, "f2"), Value::Bool(false));
+}
+
 #[test]
 fn test_getter_basic() {
     let src = r#"
@@ -1490,7 +1551,14 @@ let _a = c.area
 #[test]
 fn test_conformance_multi_header() {
     // struct Dog as Animal, Printable: — multiple protocols in header
-    let src = r#"
+    // Runs in a larger-stack thread: eval_expr is deeply recursive, so struct
+    // conformance checks with multiple protocol headers exhaust the default
+    // 1 MB test-thread stack on Windows (see test_struct_composition_fields).
+    // Value contains Rc so it is not Send; extract the string inside the thread.
+    let result: String = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| {
+            let src = r#"
 trait Animal:
     req string speak()
 
@@ -1505,7 +1573,15 @@ struct Dog as Animal, Printable:
 let d = Dog("Rex")
 let _result = d.speak() + "|" + d.print()
 "#;
-    assert_eq!(run_src(src), Value::Str("woof|Dog(Rex)".to_string()));
+            match run_src(src) {
+                Value::Str(s) => s,
+                other => panic!("expected Str, got {:?}", other),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(result, "woof|Dog(Rex)");
 }
 
 #[test]

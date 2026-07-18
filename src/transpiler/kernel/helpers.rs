@@ -86,6 +86,7 @@ impl KernelTranspiler {
         match ty {
             Type::Int   => "i64".into(),
             Type::Uint  => "u64".into(),
+            Type::Uint8 => "u8".into(),
             // float is forbidden in kernel code; emit a comment as a fallback
             Type::Float => "/* float forbidden */ f64".into(),
             Type::Str   => "kernel::str::CString".into(),
@@ -96,6 +97,7 @@ impl KernelTranspiler {
             Type::Named(n) => match n.as_str() {
                 "int"    => "i64".into(),
                 "uint"   => "u64".into(),
+                "uint8"  => "u8".into(),
                 "float"  => "/* float forbidden */ f64".into(),
                 "bool"   => "bool".into(),
                 "string" | "str" => "kernel::str::CString".into(),

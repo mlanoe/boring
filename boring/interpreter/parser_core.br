@@ -534,6 +534,7 @@ def Type parse_type_base(mut Parser p) throws:
             match s:
                 "int":   Type.Int
                 "uint":  Type.Uint
+                "uint8": Type.Uint8
                 "float": Type.Float
                 "string": Type.Str
                 "bool":  Type.Bool
@@ -686,7 +687,7 @@ def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
     let peek1k = token_kind_name(parser_peek_token_at(p, 1).kind)
     let peek0txt = parser_peek_token_at(p, 0).text()
     # Callable req only fires for known primitive return types or Void
-    let peek0_is_prim_type = peek0txt == "int" or peek0txt == "float" or peek0txt == "string" or peek0txt == "bool" or peek0txt == "void" or peek0txt == "uint"
+    let peek0_is_prim_type = peek0txt == "int" or peek0txt == "float" or peek0txt == "string" or peek0txt == "bool" or peek0txt == "void" or peek0txt == "uint" or peek0txt == "uint8"
     let is_callable_req = peek0k == "Ident" and peek1k == "LParen" and peek0_is_prim_type
     if is_callable_def:
         var name = "__call__"
@@ -2376,14 +2377,34 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
         let v = args[0] else Value.Nil
         match v:
             Value.Int(n): return Value.Int(n)
+            Value.Uint(n): return Value.Int(n as int)
+            Value.Uint8(n): return Value.Int(n as int)
             Value.Float(f): return Value.Int(int(f))
             Value.Bool(b): return if b: Value.Int(1) else Value.Int(0)
+            _: return Value.Nil
+    if name == "uint":
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Uint(n): return Value.Uint(n)
+            Value.Uint8(n): return Value.Uint(n as uint)
+            Value.Int(n): return Value.Uint(n as uint)
+            Value.Float(f): return Value.Uint(f as uint)
+            _: return Value.Nil
+    if name == "uint8":
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Uint8(n): return Value.Uint8(n)
+            Value.Uint(n): return Value.Uint8(n as uint8)
+            Value.Int(n): return Value.Uint8(n as uint8)
+            Value.Float(f): return Value.Uint8(f as uint8)
             _: return Value.Nil
     if name == "float":
         let v = args[0] else Value.Nil
         match v:
             Value.Float(f): return Value.Float(f)
             Value.Int(n): return Value.Float(float(n))
+            Value.Uint(n): return Value.Float(n as float)
+            Value.Uint8(n): return Value.Float(n as float)
             _: return Value.Nil
     if name == "string":
         let v = args[0] else Value.Nil

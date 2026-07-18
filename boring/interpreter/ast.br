@@ -514,6 +514,7 @@ enum OwnerQual:
 enum Type:
     Int
     Uint
+    Uint8
     Float
     Str
     Bool

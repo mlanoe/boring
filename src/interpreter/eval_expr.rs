@@ -1260,6 +1260,7 @@ impl Interpreter {
             BinOp::Add => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_add(b))),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_add(b))),
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a.wrapping_add(b as u64))) }
@@ -1268,6 +1269,8 @@ impl Interpreter {
                     if a < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
                     else { Ok(Value::Uint((a as u64).wrapping_add(b))) }
                 }
+                (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_add(b))),
+                (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_add(b as u64))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
@@ -1298,12 +1301,26 @@ impl Interpreter {
                     if b > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a - b)) }
                 }
+                (Value::Uint8(a), Value::Uint8(b)) => {
+                    if b > a { Err(err_span("uint8 subtraction underflow", line, rcol, rlen)) }
+                    else { Ok(Value::Uint8(a - b)) }
+                }
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Ok(Value::Uint(a.wrapping_add((-b) as u64))) }
                     else if (b as u64) > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a - b as u64)) }
                 }
                 (Value::Int(a), Value::Uint(b)) => Ok(Value::Int(a - b as i64)),
+                (Value::Uint8(a), Value::Uint(b)) => {
+                    let au = a as u64;
+                    if b > au { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                    else { Ok(Value::Uint(au - b)) }
+                }
+                (Value::Uint(a), Value::Uint8(b)) => {
+                    let bu = b as u64;
+                    if bu > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                    else { Ok(Value::Uint(a - bu)) }
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
@@ -1318,6 +1335,7 @@ impl Interpreter {
             BinOp::Mul => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_mul(b))),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_mul(b))),
                 (Value::Uint(a), Value::Int(b)) => {
                     if b < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint(a.wrapping_mul(b as u64))) }
@@ -1326,6 +1344,8 @@ impl Interpreter {
                     if a < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
                     else { Ok(Value::Uint((a as u64).wrapping_mul(b))) }
                 }
+                (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_mul(b))),
+                (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_mul(b as u64))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
@@ -1344,6 +1364,9 @@ impl Interpreter {
                 (Value::Uint(a), Value::Uint(b)) => {
                     Ok(Value::Uint(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
                 }
+                (Value::Uint8(a), Value::Uint8(b)) => {
+                    Ok(Value::Uint8(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+                }
                 (Value::Uint(a), Value::Int(b)) => {
                     if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
                     else if b < 0 { Err(err_span("cannot divide Uint by negative Int", line, rcol, rlen)) }
@@ -1352,6 +1375,12 @@ impl Interpreter {
                 (Value::Int(a), Value::Uint(b)) => {
                     if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
                     else { Ok(Value::Int(a / b as i64)) }
+                }
+                (Value::Uint8(a), Value::Uint(b)) => {
+                    Ok(Value::Uint((a as u64).checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+                }
+                (Value::Uint(a), Value::Uint8(b)) => {
+                    Ok(Value::Uint(a.checked_div(b as u64).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
@@ -1371,6 +1400,9 @@ impl Interpreter {
                 (Value::Uint(a), Value::Uint(b)) => {
                     if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % b)) }
                 }
+                (Value::Uint8(a), Value::Uint8(b)) => {
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint8(a % b)) }
+                }
                 (Value::Uint(a), Value::Int(b)) => {
                     if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
                     else if b < 0 { Err(err_span("cannot take remainder of Uint by negative Int", line, rcol, rlen)) }
@@ -1379,6 +1411,12 @@ impl Interpreter {
                 (Value::Int(a), Value::Uint(b)) => {
                     if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
                     else { Ok(Value::Int(a % b as i64)) }
+                }
+                (Value::Uint8(a), Value::Uint(b)) => {
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint((a as u64) % b)) }
+                }
+                (Value::Uint(a), Value::Uint8(b)) => {
+                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % (b as u64))) }
                 }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
                 (Value::Int(a),   Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
@@ -1395,14 +1433,14 @@ impl Interpreter {
                 if let Some(result) = self.try_operator_method(&l, "eq", r.clone(), line)? {
                     Ok(result)
                 } else {
-                    Ok(Value::Bool(l == r))
+                    Ok(Value::Bool(Self::values_equal(&l, &r)))
                 }
             }
             BinOp::RefEq => {
                 // Reference equality — bypasses user-defined eq, always compares identity
                 let result = match (&l, &r) {
                     (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
-                    _ => l == r,   // primitives have value semantics, identity == equality
+                    _ => Self::values_equal(&l, &r),   // primitives have value semantics, identity == equality
                 };
                 Ok(Value::Bool(result))
             }
@@ -1416,7 +1454,7 @@ impl Interpreter {
                         other => Ok(Value::Bool(other != Value::Bool(true))),
                     }
                 } else {
-                    Ok(Value::Bool(l != r))
+                    Ok(Value::Bool(!Self::values_equal(&l, &r)))
                 }
             }
             BinOp::Lt => {
@@ -1451,6 +1489,7 @@ impl Interpreter {
             BinOp::BitAnd => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a & b)),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a & b)),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a & b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a & b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a & b as i64)),
                 (a, b) => Err(err_span(format!("cannot bitwise-and {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
@@ -1458,6 +1497,7 @@ impl Interpreter {
             BinOp::BitOr => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a | b)),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a | b)),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a | b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a | b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a | b as i64)),
                 (a, b) => Err(err_span(format!("cannot bitwise-or {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
@@ -1465,6 +1505,7 @@ impl Interpreter {
             BinOp::BitXor => match (l, r) {
                 (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a ^ b)),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a ^ b)),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a ^ b)),
                 (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a ^ b as u64)),
                 (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a ^ b as i64)),
                 (a, b) => Err(err_span(format!("cannot bitwise-xor {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
@@ -1473,6 +1514,8 @@ impl Interpreter {
                 (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shl(b as u32))),
                 (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shl(b as u32))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shl(b as u32))),
+                (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
                 (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
                 (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
@@ -1480,6 +1523,8 @@ impl Interpreter {
                 (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shr(b as u32))),
                 (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shr(b as u32))),
                 (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shr(b as u32))),
+                (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
+                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
                 (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
                 (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
             },
@@ -1531,10 +1576,32 @@ impl Interpreter {
         }
     }
 
+    // Cross-numeric-type equality (Int/Uint/Uint8/Float), matching the promotions
+    // `compare_values` applies for `<`/`>`/etc. — otherwise derived PartialEq treats
+    // e.g. Value::Int(5) and Value::Uint(5) as unequal since they're different variants.
+    pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
+        match (l, r) {
+            (Value::Uint(a), Value::Int(b)) => (*a as i128) == (*b as i128),
+            (Value::Int(a), Value::Uint(b)) => (*a as i128) == (*b as i128),
+            (Value::Uint8(a), Value::Int(b)) => (*a as i128) == (*b as i128),
+            (Value::Int(a), Value::Uint8(b)) => (*a as i128) == (*b as i128),
+            (Value::Uint8(a), Value::Uint(b)) => (*a as u64) == *b,
+            (Value::Uint(a), Value::Uint8(b)) => *a == (*b as u64),
+            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            (Value::Uint(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Uint(b)) => *a == (*b as f64),
+            (Value::Uint8(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Uint8(b)) => *a == (*b as f64),
+            _ => l == r,
+        }
+    }
+
     pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
         let ord = match (&l, &r) {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Uint(a), Value::Uint(b)) => a.cmp(b),
+            (Value::Uint8(a), Value::Uint8(b)) => a.cmp(b),
             // Cross Int/Uint comparison: promote both to i128 to handle all cases safely
             (Value::Uint(a), Value::Int(b)) => (*a as i128).cmp(&(*b as i128)),
             (Value::Int(a), Value::Uint(b)) => (*a as i128).cmp(&(*b as i128)),

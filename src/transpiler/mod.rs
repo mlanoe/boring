@@ -21,6 +21,7 @@ mod emit_struct;
 mod emit_stmt;
 mod emit_expr;
 mod emit_methods;
+mod emit_kernel;
 mod infer_qualifiers;
 pub(crate) mod helpers;
 pub(crate) use helpers::*;
@@ -66,6 +67,33 @@ pub struct TranspileConfig {
     pub sanitize: Option<&'static str>,
     /// Directory of the root source file — used to resolve `use` imports at transpile time.
     pub source_dir: std::path::PathBuf,
+    /// `kernel Name: ...` declarations known to the program, passed in by GPU targets
+    /// (wgpu/cuda/metal) so the general transpiler can special-case kernel construction,
+    /// `kernel:` dispatch blocks, and kernel 'unified-field reads wherever they appear —
+    /// including inside ordinary function bodies, not just top-level statements. Empty
+    /// (the default) for every other target, which leaves current behavior untouched.
+    pub gpu_kernels: Vec<crate::ast::KernelDecl>,
+    /// True when this transpile_with_config call is producing the "general" (non-kernel)
+    /// Rust code that a GPU target (wgpu/cuda/metal) splices into its own generated
+    /// main.rs (see transpiler::wgpu::transpile_wgpu). Distinct from `gpu_kernels` being
+    /// non-empty: a GPU-target program can have zero kernels *reachable from this
+    /// particular file* (e.g. whisper-boring's main.br never imports its own
+    /// audio_gpu.br) while still needing every top-level `let` treated as a real
+    /// `const` and the auto-generated stub `fn main()` suppressed, because the GPU
+    /// target provides its own entry point either way. Empty `gpu_kernels` must NOT
+    /// imply "not a GPU target" — this flag is the direct signal for that instead.
+    pub is_gpu_target: bool,
+    /// True when the GPU target's own host backend already owns top-level kernel/Screen
+    /// construction, dispatch, and read-back entirely by itself (wgpu's `emit_screen_main`,
+    /// for a `Screen`-using program: kernel instances become `__App` struct fields and the
+    /// render loop is inlined into the winit event handler -- see `wgpu::host`). Leftover
+    /// top-level statements/non-const `let`s are silently dropped by this pass in that case
+    /// instead of being pushed into a synthesized `boring_main` (see `emit_program_items`):
+    /// nothing calls `boring_main` for a Screen program, and worse, `emit_kernel.rs`'s
+    /// construction logic doesn't understand the `Dimension(w, h)`-shaped/no-`init`
+    /// construction convention a render-loop kernel commonly uses, so trying anyway
+    /// would panic rather than silently duplicate already-correct behavior.
+    pub gpu_top_level_handled_by_host: bool,
 }
 
 impl Default for TranspileConfig {
@@ -77,6 +105,9 @@ impl Default for TranspileConfig {
             instrument: false,
             sanitize: None::<&'static str>,
             source_dir: std::path::PathBuf::new(),
+            gpu_kernels: Vec::new(),
+            is_gpu_target: false,
+            gpu_top_level_handled_by_host: false,
         }
     }
 }
@@ -122,6 +153,12 @@ pub struct TranspileOutput {
     /// Each entry is `(module_name, rust_code)` — written as `src/<module_name>.rs`
     /// and included into `src/main.rs` via `include!` macros.
     pub modules: Vec<(String, String)>,
+    /// True when this call emitted a `fn boring_main()` wrapper for GPU-target
+    /// top-level statements/non-const `let`s (see `emit_program_items`). GPU targets
+    /// (wgpu/cuda/metal) need this to know whether to call `boring_main()` from their
+    /// own generated entry point -- a synthesized wrapper exists only in `code`, not as
+    /// an `Item::Fn` in the source `Program`, so it can't be detected by AST inspection.
+    pub gpu_main_emitted: bool,
 }
 
 pub fn transpile(program: &Program) -> String {
@@ -174,7 +211,7 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     } else {
         code
     };
-    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules }
+    TranspileOutput { code, errors: t.errors.into_inner(), warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get() }
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────
@@ -614,10 +651,46 @@ struct Transpiler {
     /// Struct type names that declare an anonymous `def ()` or `req ()` call operator.
     /// When `var(args)` is called and `var` resolves to one of these types, emit `var.__call__(args)`.
     pub(crate) callable_structs: std::collections::HashSet<String>,
+    /// `kernel Name: ...` declarations, by name, passed in via `TranspileConfig::gpu_kernels`.
+    /// Empty (the default) for every non-GPU-kernel-aware target — all of the special-case
+    /// kernel codegen below is gated on this being non-empty, so behavior for those targets
+    /// is completely unchanged.
+    pub(crate) kernel_decls: std::collections::HashMap<String, crate::ast::KernelDecl>,
+    /// Local variable name -> kernel type name, for `let`/`mut`/`var` bindings whose
+    /// initializer is a call to one of `kernel_decls` (e.g. `mut k = StftPower(...)`).
+    /// Populated by `emit_let`; consumed by kernel-construction, `kernel:` dispatch, and
+    /// kernel 'unified-field-read codegen (GPU targets only -- see `kernel_decls`).
+    pub(crate) kernel_vars: std::collections::HashMap<String, String>,
+    /// Names of every top-level `let` (across the whole reachable `use` graph, collected
+    /// by `pre_scan`/`deep_pre_scan` before the prelude is emitted). Used to skip the
+    /// prelude's `use std::f64::consts::{PI, E, TAU}` for any of those three names a
+    /// program defines itself — otherwise a user's own top-level `let float PI = ...`
+    /// collides with the auto-imported one (E0255).
+    pub(crate) user_top_level_names: std::collections::HashSet<String>,
+    /// Mirrors `TranspileConfig::is_gpu_target` for quick access. See that field's doc
+    /// comment — this is NOT the same as `!kernel_decls.is_empty()`.
+    pub(crate) is_gpu_target: bool,
+    /// Set when `emit_program_items` synthesizes a `fn boring_main()` wrapper for
+    /// GPU-target top-level statements/non-const `let`s (see `emit_program_items`).
+    /// Reported back via `TranspileOutput::gpu_main_emitted` so
+    /// `transpiler::wgpu::transpile_wgpu` knows whether to call `boring_main()` from
+    /// its own generated entry point, without re-deriving it from AST inspection
+    /// (which can't see a function that exists only in the emitted text).
+    pub(crate) gpu_main_emitted: std::cell::Cell<bool>,
+    /// Original (lowercase, boring-source) names of GPU-target top-level scalar `let`s
+    /// promoted to a Rust `const` -- the actual emitted Rust identifier is uppercased
+    /// (see `emit_item`'s `Item::Let` case) to avoid colliding with a same-named local
+    /// variable or function parameter elsewhere in the file. Consumed by
+    /// `map_builtin_var` to rewrite reads of these names to the uppercased const.
+    pub(crate) gpu_top_level_const_names: std::collections::HashSet<String>,
 }
 
 impl Transpiler {
     fn new(config: TranspileConfig) -> Self {
+        let kernel_decls = config.gpu_kernels.iter()
+            .map(|k| (k.name.clone(), k.clone()))
+            .collect();
+        let is_gpu_target = config.is_gpu_target;
         Transpiler {
             config,
             out: String::new(),
@@ -785,6 +858,12 @@ impl Transpiler {
             lazy_vars: std::collections::HashSet::new(),
             lazy_var_types: std::collections::HashMap::new(),
             callable_structs: std::collections::HashSet::new(),
+            kernel_decls,
+            kernel_vars: std::collections::HashMap::new(),
+            user_top_level_names: std::collections::HashSet::new(),
+            is_gpu_target,
+            gpu_main_emitted: std::cell::Cell::new(false),
+            gpu_top_level_const_names: std::collections::HashSet::new(),
         }
     }
 
@@ -850,11 +929,13 @@ impl Transpiler {
     fn estimate_size_inner(ty: &Type, program: &Program, visiting: &mut std::collections::HashSet<String>) -> Option<usize> {
         match ty {
             Type::Int | Type::Uint | Type::Float => Some(8),
+            Type::Uint8 => Some(1),
             Type::Bool => Some(1),
             Type::Str => Some(16), // Arc<str> = 2 pointers
             Type::Nil | Type::Void => Some(0),
             // Primitive type names that may appear as Named() from init-param parsing
             Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float") => Some(8),
+            Type::Named(n) if n.as_str() == "uint8" => Some(1),
             Type::Named(n) if n.as_str() == "bool" => Some(1),
             Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
             Type::Qualified(inner, OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
@@ -1034,7 +1115,14 @@ impl Transpiler {
         if matches!(self.config.threading, ThreadingMode::Multi) && !has_async_fns {
             self.line("use std::sync::{Mutex, RwLock};");
         }
-        self.line("use std::f64::consts::{PI, E, TAU};");
+        // Skip any of PI/E/TAU the program defines itself as a top-level `let` --
+        // otherwise the two collide (E0255: name defined multiple times).
+        let f64_consts: Vec<&str> = ["PI", "E", "TAU"].into_iter()
+            .filter(|n| !self.user_top_level_names.contains(*n))
+            .collect();
+        if !f64_consts.is_empty() {
+            self.line(&format!("use std::f64::consts::{{{}}};", f64_consts.join(", ")));
+        }
         self.line("use std::time::Duration;");
         if matches!(self.config.threading, ThreadingMode::Single) && self.uses_local_channel.get() {
             self.line("use local_channel;");
@@ -1302,10 +1390,35 @@ impl Transpiler {
         let mut stmts: Vec<&Item> = Vec::new();
         // emitted_fn_sigs is shared across all inlined files (self.emitted_fn_sigs) to deduplicate
         // functions that appear in multiple files (kept for historical compatibility).
+        // GPU targets whose host backend already owns top-level orchestration by
+        // itself (wgpu's `emit_screen_main`, for a `Screen`-using program -- see
+        // `TranspileConfig::gpu_top_level_handled_by_host`'s doc) -- nothing here would
+        // ever run it anyway, and some of it (Dimension-shaped/no-`init` kernel
+        // construction) isn't a pattern `emit_kernel.rs` understands. Skip every
+        // top-level statement/let entirely instead of emitting or falling through.
+        let host_owns_top_level = self.is_gpu_target && self.config.gpu_top_level_handled_by_host;
         for item in &program.items {
             match item {
+                Item::Stmt(_) if host_owns_top_level => {}
                 Item::Stmt(_) => stmts.push(item),
                 Item::Let(s) if s.is_static => {
+                    // Top-level `static let` → emit as `const` at module scope.
+                    self.emit_item(item);
+                    self.blank();
+                }
+                Item::Let(_) if host_owns_top_level => {}
+                // GPU targets: there is no auto-generated `fn main()` body for a plain
+                // top-level `let` to live in as a local, so a scalar constant needs to
+                // become a real global `const` other top-level functions can reference
+                // (gated on `is_gpu_target`, NOT on `kernel_decls` being non-empty -- a
+                // GPU-target file can have zero kernels reachable from it and still
+                // needs this treatment). Anything that ISN'T a plain scalar constant
+                // (a kernel constructor call, an array/dict/set/string value) has no
+                // const constructor in Rust -- fall through to `stmts` below instead,
+                // so it runs as an ordinary statement inside the synthesized/renamed
+                // `boring_main` (see the `is_gpu_target` branch further down), the same
+                // way it would for a non-GPU target's auto-generated `fn main()`.
+                Item::Let(s) if self.is_gpu_target && self.top_level_let_is_const_safe(s) => {
                     self.emit_item(item);
                     self.blank();
                 }
@@ -1334,10 +1447,38 @@ impl Transpiler {
 
         // If a user-defined `main` function already exists (e.g. `def void main() task:`),
         // do NOT emit a second `fn main` from top-level statements to avoid duplicate symbol.
+        // GPU targets rename the user's `main` to `boring_main` (see
+        // `wgpu::rename_top_level_main`) *before* this function ever sees the program, so by
+        // the time we get here the name to look for is `boring_main`, not `main` -- checking
+        // only "main" would miss it and wrongly re-synthesize a second `fn boring_main` from
+        // any bare top-level statements, causing a duplicate-symbol compile error.
         let has_explicit_main = program.items.iter().any(|item| {
-            matches!(item, Item::Fn(f) if f.name == "main" && f.qualifier.is_none())
+            matches!(item, Item::Fn(f) if f.qualifier.is_none()
+                && (f.name == "main" || (self.is_gpu_target && f.name == "boring_main")))
         });
 
+        // GPU targets (wgpu/cuda/metal) call transpile_with_config to get Rust code for
+        // everything the kernel-specific backend doesn't handle itself (see
+        // transpiler::wgpu::transpile_wgpu), and provide their own `fn main()` /
+        // `async fn async_main()` separately. An explicit user `def main():` was already
+        // renamed to `boring_main` before this call (see
+        // `transpiler::wgpu::rename_top_level_main`) and is emitted normally via the
+        // ordinary `Item::Fn` path above -- nothing more to do here for that case.
+        // But bare top-level statements/non-const `let`s (e.g. `mut k = Scale(data)` /
+        // `kernel: k(block=..)` / `print k.buf[0]`, the documented top-level kernel
+        // usage pattern) have nowhere else to run: there's no auto-generated `fn main()`
+        // for a GPU target, and silently dropping them would discard real program
+        // behavior. Synthesize the same `boring_main` wrapper for them instead, so the
+        // GPU target's own generated entry point can call it exactly like an explicit
+        // user main -- `gpu_main_emitted` tells the caller (which can't see this
+        // function in the source AST, only in this emitted text) that it now exists.
+        if self.is_gpu_target {
+            if !stmts.is_empty() && !has_explicit_main {
+                self.emit_gpu_boring_main(&stmts);
+                self.gpu_main_emitted.set(true);
+            }
+            return;
+        }
         if !emit_main { return; }
         // Top-level statements → fn main()
         // All stmts are side-effectful; in_throws stays false so no Ok() wrapping happens.
@@ -1413,6 +1554,83 @@ impl Transpiler {
         }
     }
 
+    /// Synthesize `fn boring_main() -> Result<(), ...> { ...stmts...; Ok(()) }` for GPU
+    /// targets with no explicit user `main`, from the same leftover top-level
+    /// statements/non-const `let`s the non-GPU path above would otherwise wrap in an
+    /// auto-generated `fn main()`. Deliberately synchronous (no `#[tokio::main]`/async
+    /// promotion, unlike the non-GPU path): the GPU host backend's own generated entry
+    /// point (`async_main`, see `transpiler::wgpu::host`) calls `boring_main()` without
+    /// `.await`, and drives its own async setup (device/adapter requests) with
+    /// `pollster`, not a tokio runtime -- `tokio::spawn`/tokio channels/timers would
+    /// panic at runtime ("no reactor running") even if this function were made `async`
+    /// and awaited. Fail at transpile time instead of generating code that compiles
+    /// but panics the first time it actually runs.
+    fn emit_gpu_boring_main(&mut self, stmts: &[&Item]) {
+        let top_stmts: Vec<Stmt> = stmts.iter().filter_map(|i| {
+            if let Item::Stmt(s) = i { Some((*s).clone()) } else { None }
+        }).collect();
+        let needs_async = items_have_task(stmts)
+            || body_has_stream_for(&top_stmts, &self.stream_fns)
+            || items_have_task_call(stmts, &self.task_fns);
+        if needs_async {
+            panic!(
+                "top-level `task`/stream/channel usage isn't supported for GPU targets (wgpu/cuda/metal) yet -- \
+                 the generated entry point runs under a minimal `pollster` executor, not a tokio runtime, so \
+                 `tokio::spawn`/tokio channels/timers would panic at runtime (\"no reactor running\") even if this \
+                 code were made async. Move this into a synchronous `def main():` instead, or avoid task/stream/\
+                 channel usage in top-level GPU code for now."
+            );
+        }
+        let result_ty = if self.user_defines_result { "std::result::Result" } else { "Result" };
+        let box_ty = if self.user_defines_box { "std::boxed::Box" } else { "Box" };
+        let main_ret = format!("{}<(), {}<dyn std::error::Error + Send + Sync>>", result_ty, box_ty);
+        let ok_ret = if self.user_defines_result { "std::result::Result::Ok(())" } else { "Ok(())" };
+        self.line(&format!("fn boring_main() -> {} {{", main_ret));
+        self.indent += 1;
+        self.in_throws = true;
+        for item in stmts {
+            match item {
+                Item::Let(s) => {
+                    if s.binding.is_mutable() && self.global_vars_used_in_fns.contains(&s.name) {
+                        // Already emitted as LazyLock<Mutex<T>> static — skip.
+                    } else {
+                        self.emit_let(s, false);
+                    }
+                }
+                Item::Stmt(s) => self.emit_stmt(s, false),
+                _ => {}
+            }
+        }
+        self.line(ok_ret);
+        self.in_throws = false;
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Whether a top-level `let`'s value can compile as a Rust `const` -- true only for
+    /// scalar types (int/uint/float/bool), false for anything backed by a heap
+    /// allocation (`[T]`, `string`, `{K=V}`, `{T}`) or a kernel constructor call, none of
+    /// which have a const constructor in stable Rust. Used to gate GPU targets'
+    /// top-level-`let`-to-`const` promotion (see `emit_program_items`).
+    fn top_level_let_is_const_safe(&self, s: &LetStmt) -> bool {
+        fn is_scalar(t: &Type) -> bool {
+            match t {
+                Type::Int | Type::Uint | Type::Float | Type::Bool => true,
+                Type::Named(n) => matches!(n.as_str(), "int" | "uint" | "float" | "bool"),
+                Type::Optional(inner) | Type::Qualified(inner, _) => is_scalar(inner),
+                _ => false,
+            }
+        }
+        if let Some(ty) = &s.ty {
+            return is_scalar(ty);
+        }
+        // No declared type -- only trust a bare scalar literal initializer.
+        matches!(
+            s.value.as_ref().map(|v| &v.kind),
+            Some(ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
+        )
+    }
+
     fn pre_scan(&mut self, program: &Program) {
         // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
         self.typed_error_enums.insert("Error".to_string());
@@ -1428,6 +1646,17 @@ impl Transpiler {
             match item {
                 Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
                 Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
+                Item::Let(s)    => {
+                    self.user_top_level_names.insert(s.name.clone());
+                    // Populated here (before any emission) rather than inline where the
+                    // `const` is actually emitted, so a function appearing earlier in
+                    // source order than the `let` it references still sees the name in
+                    // this set -- Rust doesn't care about const declaration order, but
+                    // this scan does, being a single pass over `program.items`.
+                    if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
+                        self.gpu_top_level_const_names.insert(s.name.clone());
+                    }
+                }
                 _ => {}
             }
         }
@@ -1752,7 +1981,15 @@ impl Transpiler {
                     // Track instance methods that are `task` for .await at call sites.
                     for m in &s.methods {
                         if m.task { self.instance_task_methods.insert(m.name.clone()); }
-                        if m.throws { self.struct_method_throws.insert(m.name.clone()); }
+                        if m.throws {
+                            // Qualified key (checked first at call sites when the receiver's
+                            // struct type is known) avoids a same-named-but-non-throwing
+                            // method on a different struct picking up a stray `?` -- e.g.
+                            // `EncoderBlock.forward` (no throws) vs `AudioEncoder.forward`
+                            // (throws) both being named "forward".
+                            self.struct_method_throws.insert(format!("{}::{}", s.name, m.name));
+                            self.struct_method_throws.insert(m.name.clone());
+                        }
                         // Track return types for already_opt detection in emit_stmt.
                         if let Some(ret_ty) = &m.return_ty {
                             let key = format!("{}::{}", s.name, m.name);
@@ -1911,6 +2148,11 @@ impl Transpiler {
                                 format!("{}::{}", tname, m.name), ret_ty.clone());
                         }
                         if m.throws {
+                            // Qualified key (checked first at call sites when the receiver's
+                            // struct type is known) avoids a same-named-but-non-throwing
+                            // method on a different struct picking up a stray `?` -- see the
+                            // bare-name insert's doc comment.
+                            self.struct_method_throws.insert(format!("{}::{}", tname, m.name));
                             self.struct_method_throws.insert(m.name.clone());
                         }
                         // Track overloaded struct methods (same name, different params).
@@ -2090,8 +2332,15 @@ impl Transpiler {
         }).collect();
         // Register under both the plain name (for non-overloaded path) and the mangled name
         // (for overloaded dispatch, so emit_args_coerced can find the correct param types).
-        self.fn_sigs.insert(f.name.clone(), param_types.clone());
-        self.fn_sigs.insert(this_mangled.clone(), param_types);
+        // `or_insert` (not a blind overwrite): pre_register_fn re-runs every time a `use`d
+        // file is re-parsed and re-emitted via `inline_boring_use` (emit_program calls
+        // pre_scan unconditionally on entry), which would otherwise stomp the qualifier
+        // inference `pre_infer_fn_qualifiers` already propagated into this exact entry —
+        // silently reverting e.g. `&Vec<T>` params back to the raw unqualified `Vec<T>`
+        // for every caller emitted after that point. The raw param_types are identical
+        // across re-registrations of the same declaration, so this is a no-op otherwise.
+        self.fn_sigs.entry(f.name.clone()).or_insert_with(|| param_types.clone());
+        self.fn_sigs.entry(this_mangled.clone()).or_insert(param_types);
         self.fn_defaults.insert(f.name.clone(), defaults.clone());
         self.fn_defaults.insert(this_mangled, defaults);
         let rebindable_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();

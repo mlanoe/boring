@@ -1010,6 +1010,11 @@ impl PartialEq for ConstExpr {
 pub enum Type {
     Int,
     Uint,
+    /// Unsigned 8-bit integer (Rust `u8`) — distinct from `Uint` (64-bit).
+    /// Unambiguous single-width type, unlike the pre-existing `u8` alias
+    /// (which resolves to bare `Uint`/`u64` under `boring run` but real
+    /// Rust `u8` under `boring build` — a run/build semantic split).
+    Uint8,
     Float,
     Str,
     Bool,
@@ -1065,7 +1070,7 @@ fn owner_qual_is_copy(q: &OwnerQual) -> bool {
 impl Type {
     pub fn is_copy(&self) -> bool {
         match self {
-            Type::Int | Type::Uint | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
             Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
@@ -1092,7 +1097,7 @@ impl Type {
     pub fn is_task_safe(&self) -> bool {
         match self {
             // Primitive copy types are always safe
-            Type::Int | Type::Uint | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Fn(..) => true,
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),

@@ -601,7 +601,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new() };
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false };
 
     if emit_rust {
         match file {
@@ -1020,13 +1020,52 @@ fn host_target() -> String {
 
 // â”€â”€â”€ Core: CUDA transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-fn emit_cuda(path: &str, version: &str) {
+// Parse `path` and recursively inline every `use <file>.br` import reachable
+// from it, returning one flattened `Program` with all items concatenated
+// (entry file first) and `Item::Use` entries dropped once resolved.
+// GPU targets (wgpu/cuda/metal) parse a single file with no `use` resolution
+// otherwise, unlike the std/Rust target which resolves `use` imports into
+// separate modules via the transpiler's own source_dir-based mechanism.
+// A `use` is resolved relative to the importing file's own directory first
+// (like the std target), then against each `BORING_PATH` entry (matching
+// `boring run`'s search-path behavior — see `run_file`'s `add_search_path`
+// calls), so e.g. `test/foo.br` can `use sibling` when `sibling.br` lives in
+// `src/` and `BORING_PATH` points there. Circular/duplicate imports are
+// visited once. On any read/lex/parse error, reports it in the usual style
+// and exits.
+fn parse_and_merge_program(path: &str) -> ast::Program {
     let path = PathBuf::from(path);
+    let mut visited = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    if let Ok(env_path) = std::env::var("BORING_PATH") {
+        search_paths.extend(std::env::split_paths(&env_path));
+    }
+    merge_into(&path, &mut visited, &mut items, &search_paths);
+    ast::Program { items }
+}
 
-    let source = match std::fs::read_to_string(&path) {
+fn merge_into(
+    path: &Path,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    items: &mut Vec<ast::Item>,
+    search_paths: &[PathBuf],
+) {
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: cannot resolve '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+    if !visited.insert(canonical.clone()) {
+        return; // already merged (circular or duplicate `use`)
+    }
+
+    let source = match std::fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            eprintln!("error: cannot read '{}': {}", canonical.display(), e);
             process::exit(1);
         }
     };
@@ -1034,7 +1073,7 @@ fn emit_cuda(path: &str, version: &str) {
     let tokens = match lexer::lex_all(&source) {
         Ok(t) => t,
         Err(errors) => {
-            report_lex_errors(&path, &source, &errors);
+            report_lex_errors(&canonical, &source, &errors);
             process::exit(1);
         }
     };
@@ -1042,10 +1081,35 @@ fn emit_cuda(path: &str, version: &str) {
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
+            report_error(&canonical, &source, e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
+
+    let dir = canonical.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    for item in program.items {
+        if let ast::Item::Use(u) = &item {
+            let rel: PathBuf = u.path.iter().collect::<PathBuf>().with_extension("br");
+            let candidate = std::iter::once(&dir)
+                .chain(search_paths.iter())
+                .map(|base| base.join(&rel))
+                .find(|c| c.exists());
+            if let Some(candidate) = candidate {
+                merge_into(&candidate, visited, items, search_paths);
+                continue; // inlined -- the `use` item itself is now redundant
+            }
+            // Not a boring source file (e.g. `use std.collections`) -- keep the
+            // item as-is so callers that also run the general transpiler over
+            // this merged program (which knows how to emit real Rust `use`
+            // statements for external crates) still see it.
+        }
+        items.push(item);
+    }
+}
+
+fn emit_cuda(path: &str, version: &str) {
+    let program = parse_and_merge_program(path);
+    let path = PathBuf::from(path);
 
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1102,31 +1166,8 @@ fn emit_cuda(path: &str, version: &str) {
 }
 
 fn emit_metal(path: &str, version: &str) {
+    let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
-
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read '{}': {}", path.display(), e);
-            process::exit(1);
-        }
-    };
-
-    let tokens = match lexer::lex_all(&source) {
-        Ok(t) => t,
-        Err(errors) => {
-            report_lex_errors(&path, &source, &errors);
-            process::exit(1);
-        }
-    };
-
-    let program = match parser::parse(tokens) {
-        Ok(p) => p,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
-            process::exit(1);
-        }
-    };
 
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1176,31 +1217,8 @@ fn emit_metal(path: &str, version: &str) {
 }
 
 fn emit_wgpu(path: &str, version: &str) {
+    let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
-
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read '{}': {}", path.display(), e);
-            process::exit(1);
-        }
-    };
-
-    let tokens = match lexer::lex_all(&source) {
-        Ok(t) => t,
-        Err(errors) => {
-            report_lex_errors(&path, &source, &errors);
-            process::exit(1);
-        }
-    };
-
-    let program = match parser::parse(tokens) {
-        Ok(p) => p,
-        Err(e) => {
-            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
-            process::exit(1);
-        }
-    };
 
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())

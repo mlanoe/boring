@@ -61,10 +61,60 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     });
 
     let device_wgsl = device::emit_device_wgsl(program, &effective_kernels);
-    let host_rs     = host::emit_host_rs(program, &kernel_names, &effective_kernels);
+
+    // Non-kernel code (regular fn/struct/enum/dict logic, including the user's own
+    // `def main()`, if any) is transpiled by the SAME general pipeline the std/Rust
+    // target uses, with `gpu_kernels` set so it special-cases kernel construction,
+    // `kernel:` dispatch, and kernel 'unified-field reads wherever they appear --
+    // including inside ordinary function bodies (see `transpiler::emit_kernel`).
+    // The general pipeline's own `fn main()`/`#[tokio::main]` handling only
+    // triggers on a function literally named "main", so rename the boring
+    // program's entry point before feeding it through -- this project's own
+    // `fn main()`/`async fn async_main()` (below) is the real entry point,
+    // and calls the renamed function once the GPU device/queue are ready.
+    let renamed_program = rename_top_level_main(program, "boring_main");
+    let general_config = crate::transpiler::TranspileConfig {
+        gpu_kernels: effective_kernels.clone(),
+        is_gpu_target: true,
+        // A `Screen`-using program's top-level kernel/Screen construction, dispatch, and
+        // the render loop itself are entirely owned by `host::emit_screen_main` (kernel
+        // instances become `__App` struct fields; see that function) -- the general pass
+        // must leave that untouched rather than trying to reconstruct it a second time.
+        gpu_top_level_handled_by_host: has_screen,
+        ..crate::transpiler::TranspileConfig::default()
+    };
+    let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
+    // `boring_main` exists either because the user's own `def main():` was renamed to it
+    // above (visible as an `Item::Fn` in `renamed_program`), or because the general pass
+    // synthesized one from bare top-level statements/non-const `let`s (invisible here --
+    // it exists only in `general_out.code` -- so `general_out.gpu_main_emitted` is the
+    // only way to know; see `emit_program_items`).
+    let has_boring_main = general_out.gpu_main_emitted || renamed_program.items.iter().any(|item| {
+        matches!(item, Item::Fn(f) if f.name == "boring_main" && f.qualifier.is_none())
+    });
+
+    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main);
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
     WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml }
+}
+
+/// Clone `program`, renaming any top-level, non-method function literally named
+/// `main` to `new_name`. Used so the general transpiler doesn't try to emit its
+/// own `fn main()`/`#[tokio::main]` wrapper for a boring program's entry point
+/// when it's being embedded into a GPU target's own generated `main.rs`.
+fn rename_top_level_main(program: &Program, new_name: &str) -> Program {
+    let items = program.items.iter().map(|item| {
+        if let Item::Fn(f) = item {
+            if f.name == "main" && f.qualifier.is_none() {
+                let mut renamed = f.clone();
+                renamed.name = new_name.to_string();
+                return Item::Fn(renamed);
+            }
+        }
+        item.clone()
+    }).collect();
+    Program { items }
 }
 
 // ─── Monomorphisation ─────────────────────────────────────────────────────────

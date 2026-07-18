@@ -51,6 +51,8 @@ enum Value:
     Moved(string name)
     Bool(bool v)
     Int(int n)
+    Uint(uint n)
+    Uint8(uint8 n)
     Float(float f)
     Str(string s)
     Array([Value] elems)
@@ -77,6 +79,8 @@ enum Value:
             Value.Moved(_): "moved"
             Value.Bool(_): "bool"
             Value.Int(_): "int"
+            Value.Uint(_): "uint"
+            Value.Uint8(_): "uint8"
             Value.Float(_): "float"
             Value.Str(_): "string"
             Value.Array(_): "array"
@@ -99,6 +103,8 @@ bool is_copy_value(Value v):
     match v:
         Value.Bool(_): true
         Value.Int(_): true
+        Value.Uint(_): true
+        Value.Uint8(_): true
         Value.Float(_): true
         Value.Nil: true
         Value.Void: true

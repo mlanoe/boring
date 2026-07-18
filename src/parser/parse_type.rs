@@ -120,6 +120,7 @@ impl Parser {
                 let base = match s.as_str() {
                     "Int"    => Type::Int,
                     "Uint"   => Type::Uint,
+                    "Uint8"  => Type::Uint8,
                     "Float"  => Type::Float,
                     "String" => Type::Str,
                     "Bool"   => Type::Bool,
