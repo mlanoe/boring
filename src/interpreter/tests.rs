@@ -916,6 +916,7 @@ work()
 }
 
 #[test]
+#[allow(clippy::approx_constant)] // "3.14" here is a test literal, not a stand-in for PI
 fn test_cast_nil_on_failure() {
     let src = r#"
 let a = "42" as int

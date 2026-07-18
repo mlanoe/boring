@@ -1161,6 +1161,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 here is a test literal, not a stand-in for PI
     fn test_float() {
         assert_eq!(kinds("3.14"), vec![TokenKind::Float(3.14), TokenKind::Newline, TokenKind::Eof]);
     }

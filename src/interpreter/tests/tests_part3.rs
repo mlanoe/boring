@@ -1893,6 +1893,7 @@ let _result = x
 }
 
 #[test]
+#[allow(clippy::approx_constant)] // 3.14 is a test literal, not a stand-in for PI
 fn test_mut_scalar_float() {
     let src = r#"
 mut float f = 1.0

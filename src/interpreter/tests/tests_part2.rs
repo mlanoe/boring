@@ -373,6 +373,7 @@ c.increment()
 }
 
 #[test]
+#[allow(clippy::approx_constant)] // 3.14159 is boring source text under test, not a PI stand-in
 fn test_req_as_property() {
     // zero-param `req` callable without `()` (property-style access)
     let src = r#"
@@ -459,6 +460,7 @@ let _result = c.radius
 }
 
 #[test]
+#[allow(clippy::approx_constant)] // 3.14159 is boring source text under test, not a PI stand-in
 fn test_init_form3_computed_field() {
     // Form 3: init body computes a field
     let src = r#"

@@ -220,11 +220,7 @@ impl HostEmitter {
         self.line("}");
         self.blank();
         // Boring built-in Dimension type used by 2-D kernels.
-        self.line("#[repr(C)]");
-        self.line("#[derive(Copy, Clone, Debug)]");
-        self.line("struct Dimension { width: u32, height: u32 }");
-        self.line("#[allow(non_snake_case)]");
-        self.line("fn Dimension(width: u32, height: u32) -> Dimension { Dimension { width, height } }");
+        self.line(crate::transpiler::helpers::DIMENSION_STRUCT_RUST);
         if self.screen_var.is_some() {
             self.emit_screen_prelude();
         }

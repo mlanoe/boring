@@ -79,11 +79,6 @@ impl KernelTranspiler {
         self.out.push('\n');
     }
 
-    #[allow(dead_code)]
-    pub(super) fn push(&mut self, s: &str) {
-        self.out.push_str(s);
-    }
-
     // ── Type emission ─────────────────────────────────────────────────────
 
     /// Translate a Boring type to its Rust-for-Linux equivalent.

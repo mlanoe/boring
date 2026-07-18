@@ -53,10 +53,6 @@ pub fn check(program: &Program) -> CheckResult {
 #[derive(Clone)]
 struct Binding {
     kind: BindingKind,
-    #[allow(dead_code)]
-    line: usize,
-    #[allow(dead_code)]
-    col:  usize,
 }
 
 struct Checker {
@@ -77,9 +73,9 @@ impl Checker {
 
     fn pop_scope(&mut self) { self.scopes.pop(); }
 
-    fn define(&mut self, name: &str, kind: BindingKind, line: usize, col: usize) {
+    fn define(&mut self, name: &str, kind: BindingKind) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { kind, line, col });
+            scope.insert(name.to_string(), Binding { kind });
         }
     }
 
@@ -96,6 +92,9 @@ impl Checker {
         self.errors.push(CheckError { message: msg.into(), line, col });
     }
 
+    // No current check calls this yet -- `CheckResult::warnings` is already wired up
+    // end-to-end (consumed and printed by `main::report_check_result`), so this is a
+    // ready extension point for the next non-fatal check, not dead infrastructure.
     #[allow(dead_code)]
     fn warning(&mut self, msg: impl Into<String>, line: usize, col: usize) {
         self.warnings.push(CheckWarning { message: msg.into(), line, col });
@@ -150,7 +149,7 @@ impl Checker {
         for m in &s.methods { self.check_fn(m); }
         for m in &s.type_methods {
             self.push_scope();
-            for p in &m.params { self.define(&p.name, param_binding(p), p.line, p.col); }
+            for p in &m.params { self.define(&p.name, param_binding(p)); }
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
@@ -172,7 +171,7 @@ impl Checker {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, &p.ty, p.line, p.col);
             }
-            self.define(&p.name, param_binding(p), p.line, p.col);
+            self.define(&p.name, param_binding(p));
         }
         for stmt in &f.body { self.check_stmt(stmt); }
         self.pop_scope();
@@ -187,7 +186,7 @@ impl Checker {
                 self.check_expr(&s.value);
                 for b in &s.bindings {
                     if b.name != "_" {
-                        self.define(&b.name, s.binding.clone(), s.line, s.col);
+                        self.define(&b.name, s.binding.clone());
                     }
                 }
             }
@@ -203,7 +202,7 @@ impl Checker {
             Stmt::WhileLet(s)  => {
                 self.check_expr(&s.value);
                 self.push_scope();
-                self.define(&s.name, BindingKind::Let, s.line, s.col);
+                self.define(&s.name, BindingKind::Let);
                 self.check_block_in_current_scope(&s.body);
                 self.pop_scope();
             }
@@ -215,7 +214,7 @@ impl Checker {
             Stmt::For(s)       => {
                 self.check_expr(&s.iterable);
                 self.push_scope();
-                for v in &s.vars { self.define(v, BindingKind::Let, s.line, s.col); }
+                for v in &s.vars { self.define(v, BindingKind::Let); }
                 self.check_block_in_current_scope(&s.body);
                 self.pop_scope();
             }
@@ -247,7 +246,7 @@ impl Checker {
     fn check_let_stmt(&mut self, s: &LetStmt) {
         self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
-        self.define(&s.name, s.binding.clone(), s.line, s.col);
+        self.define(&s.name, s.binding.clone());
     }
 
     fn check_if(&mut self, s: &IfStmt) {
@@ -278,7 +277,7 @@ impl Checker {
                 CondClause::Expr(e)       => self.check_expr(e),
                 CondClause::Let(name, e)  => {
                     self.check_expr(e);
-                    self.define(name, BindingKind::Let, 0, 0);
+                    self.define(name, BindingKind::Let);
                 }
                 CondClause::LetPat(_, e)  => self.check_expr(e),
             }
@@ -291,8 +290,8 @@ impl Checker {
             if let Some(g) = &arm.guard { self.check_expr(g); }
             self.push_scope();
             for pat in &arm.patterns {
-                bind_in_pattern(pat, arm.line, arm.col, &mut |name, line, col| {
-                    self.define(name, BindingKind::Let, line, col);
+                bind_in_pattern(pat, arm.line, arm.col, &mut |name, _line, _col| {
+                    self.define(name, BindingKind::Let);
                 });
             }
             match &arm.body {
@@ -376,14 +375,14 @@ impl Checker {
             ExprKind::ArrayComp { expr, var, count } => {
                 self.check_expr(count);
                 self.push_scope();
-                self.define(var, BindingKind::Let, 0, 0);
+                self.define(var, BindingKind::Let);
                 self.check_expr(expr);
                 self.pop_scope();
             }
             ExprKind::ArrayCompIter { expr, var, iter } => {
                 self.check_expr(iter);
                 self.push_scope();
-                self.define(var, BindingKind::Let, 0, 0);
+                self.define(var, BindingKind::Let);
                 self.check_expr(expr);
                 self.pop_scope();
             }
@@ -418,7 +417,7 @@ impl Checker {
             }
             ExprKind::Closure(params, _, body, _, _) => {
                 self.push_scope();
-                for p in params { self.define(&p.name, param_binding(p), p.line, p.col); }
+                for p in params { self.define(&p.name, param_binding(p)); }
                 match body {
                     ClosureBody::Expr(e)      => self.check_expr(e),
                     ClosureBody::Block(stmts) => self.check_block_in_current_scope(stmts),

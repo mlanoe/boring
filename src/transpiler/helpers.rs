@@ -1,5 +1,14 @@
 use super::*;
 
+/// Rust source for boring's built-in `Dimension` type, used by 2-D kernels.
+/// Emitted verbatim by both the cuda and metal host backends.
+pub(crate) const DIMENSION_STRUCT_RUST: &str =
+    "#[repr(C)]\n\
+     #[derive(Copy, Clone, Debug)]\n\
+     struct Dimension { width: u32, height: u32 }\n\
+     #[allow(non_snake_case)]\n\
+     fn Dimension(width: u32, height: u32) -> Dimension { Dimension { width, height } }";
+
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
     // Subscript access on a collection yields an element, not a collection.
     // E.g. `arr.collect::<Vec<_>>()[0].clone()` is a scalar, not a Vec.
@@ -699,39 +708,6 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
 /// Returns `true` if any top-level item in the list contains a `task expr` (either as a
 /// standalone detached task statement or as the RHS of a `let` binding).  Used by
 /// `emit_program` to decide whether the auto-generated `main` needs to be `async`.
-/// Returns true if any statement in the body declares a T'actor or T'guard binding, meaning
-/// the function will implicitly generate `.lock().await` / `.read().await` calls and needs to be async.
-#[allow(dead_code)]
-pub(crate) fn body_has_actor_binding(stmts: &[Stmt]) -> bool {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Let(l) => {
-                if let Some(ty) = &l.ty {
-                    if Transpiler::is_mutex_binding(l.binding.is_mutable(), ty) {
-                        return true;
-                    }
-                    if Transpiler::is_rwlock_binding(l.binding.is_mutable(), ty) {
-                        return true;
-                    }
-                }
-                // Recurse into nested blocks
-                if l.value.as_ref().is_some_and(expr_has_actor_binding) { return true; }
-            }
-            Stmt::If(i)
-                if (i.branches.iter().any(|(_, body)| body_has_actor_binding(body))
-                    || i.else_body.as_deref().is_some_and(body_has_actor_binding))
-                => {
-                    return true;
-                }
-            Stmt::While(w) if body_has_actor_binding(&w.body) => { return true; }
-            Stmt::For(f) if body_has_actor_binding(&f.body) => { return true; }
-            Stmt::Defer(b) if body_has_actor_binding(b) => { return true; }
-            _ => {}
-        }
-    }
-    false
-}
-
 /// Returns true if any `for item in stream_fn():` appears in `stmts`
 /// (direct call to a known stream function as the for-loop iterable).
 pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections::HashSet<String>) -> bool {
@@ -755,14 +731,6 @@ pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections:
         }
     }
     false
-}
-
-#[allow(dead_code)]
-pub(crate) fn expr_has_actor_binding(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Block(stmts) => body_has_actor_binding(stmts),
-        _ => false,
-    }
 }
 
 /// Returns true if any `channel<T>(n)` call or `task:` expression appears in `stmts`.

@@ -48,7 +48,7 @@ pub(crate) enum ThreadValue {
     Array(Vec<ThreadValue>),
     Object { type_name: String, fields: Vec<(String, ThreadValue)> },
     EnumVariant { type_name: String, variant: String, fields: Vec<ThreadValue> },
-    Fn(crate::ast::FnDecl),
+    Fn(Box<crate::ast::FnDecl>),
 }
 
 impl PartialEq for ThreadValue {
@@ -83,7 +83,7 @@ fn to_thread_value(v: &Value) -> Option<ThreadValue> {
         Value::Uint(n)            => Some(ThreadValue::Uint(*n)),
         Value::Float(f)           => Some(ThreadValue::Float(*f)),
         Value::Str(s)             => Some(ThreadValue::Str(s.clone())),
-        Value::Fn { decl, .. }    => Some(ThreadValue::Fn(decl.clone())),
+        Value::Fn { decl, .. }    => Some(ThreadValue::Fn(Box::new(decl.clone()))),
         Value::Array(arr)         => {
             let tvs: Option<Vec<_>> = arr.iter().map(to_thread_value).collect();
             tvs.map(ThreadValue::Array)
@@ -116,7 +116,7 @@ fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
         ThreadValue::Uint(n)          => Value::Uint(n),
         ThreadValue::Float(f)         => Value::Float(f),
         ThreadValue::Str(s)           => Value::Str(s),
-        ThreadValue::Fn(decl)         => Value::Fn { decl, captured: Rc::clone(captured) },
+        ThreadValue::Fn(decl)         => Value::Fn { decl: *decl, captured: Rc::clone(captured) },
         ThreadValue::Array(arr)       => Value::Array(
             arr.into_iter().map(|tv| from_thread_value(tv, captured)).collect::<Vec<_>>().into()
         ),
@@ -164,21 +164,27 @@ struct ThreadResult {
 
 // ─── Core kernel simulation ───────────────────────────────────────────────────
 
-/// Run the kernel's anonymous entry point for `total_threads` threads in parallel.
+/// Thread/block/grid dimensions for a single kernel launch (`run_kernel_parallel`).
+pub(crate) struct LaunchDims {
+    pub total_threads: usize,
+    pub block_x:       usize,
+    pub block_y:       usize,
+    pub grid_x:        usize,
+    pub grid_y:        usize,
+}
+
+/// Run the kernel's anonymous entry point for `dims.total_threads` threads in parallel.
 ///
 /// Returns the final kernel object with all thread writes merged.
 fn run_kernel_parallel(
-    interp:        &Interpreter,
-    decl:          &crate::ast::KernelDecl,
-    captured:      &EnvRef,
-    kernel_obj:    Value,
-    entry:         &crate::ast::FnDecl,
-    total_threads: usize,
-    block_x:       usize,
-    block_y:       usize,
-    grid_x:        usize,
-    grid_y:        usize,
+    interp:     &Interpreter,
+    decl:       &crate::ast::KernelDecl,
+    captured:   &EnvRef,
+    kernel_obj: Value,
+    entry:      &crate::ast::FnDecl,
+    dims:       LaunchDims,
 ) -> Result<Value, Signal> {
+    let LaunchDims { total_threads, block_x, block_y, grid_x, grid_y } = dims;
     // Snapshot the initial field values and the captured env once (before threads).
     let initial_fields: Vec<(String, ThreadValue)> = if let Value::Object(ref obj) = kernel_obj {
         obj.borrow().fields.iter()
@@ -226,7 +232,7 @@ fn run_kernel_parallel(
             let cap_env = Env::child(Rc::clone(&ti.global));
             for (name, tv) in &captured_snapshot {
                 let val = from_thread_value(tv.clone(), &cap_env);
-                cap_env.borrow_mut().define(&name, val);
+                cap_env.borrow_mut().define(name, val);
             }
 
             // Build the thread env.
@@ -237,9 +243,9 @@ fn run_kernel_parallel(
                 let val = from_thread_value(tv.clone(), &thread_env);
                 match field_decl.binding {
                     FieldBinding::Mut | FieldBinding::Var =>
-                        thread_env.borrow_mut().define_mut(&name, val),
+                        thread_env.borrow_mut().define_mut(name, val),
                     FieldBinding::Let =>
-                        thread_env.borrow_mut().define(&name, val),
+                        thread_env.borrow_mut().define(name, val),
                 }
             }
 
@@ -469,7 +475,7 @@ impl Interpreter {
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
                 self, &decl, &captured, kernel_obj, entry,
-                total_threads, block_x, block_y, grid_x, grid_y,
+                LaunchDims { total_threads, block_x, block_y, grid_x, grid_y },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
         } else {
@@ -551,7 +557,7 @@ impl Interpreter {
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
                 self, &decl, &captured, kernel_obj, entry,
-                total_threads, block_x, block_y, grid_x, grid_y,
+                LaunchDims { total_threads, block_x, block_y, grid_x, grid_y },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
         } else {
