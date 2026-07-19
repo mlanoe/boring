@@ -191,7 +191,7 @@ x %= 4    # 2
 
 **Rust equivalent**
 ```rust
-let mut x: i64 = 10;
+let mut x: isize = 10;
 x += 5;   // 15
 x -= 3;   // 12
 x *= 2;   // 24
@@ -215,7 +215,7 @@ var bool flag = true
 
 **Rust equivalent**
 ```rust
-let x: i64 = 42;
+let x: isize = 42;
 let pi: f64 = 3.14159;
 let label: &str = "ok";   // literal stays &str; promoted to Rc<str> when stored
 let mut flag: bool = true;
@@ -286,11 +286,54 @@ print a            # error: use of moved value 'a': the value was moved
 
 | Boring         | Rust            | Notes                              |
 |----------------|-----------------|-------------------------------------|
-| `int`          | `i64`           | 64-bit signed integer               |
-| `uint`         | `u64`           | 64-bit unsigned integer             |
+| `int`          | `isize`         | pointer-width signed integer        |
+| `uint`         | `usize`         | pointer-width unsigned integer      |
+| `int8`         | `i8`            | 8-bit signed integer                |
+| `int16`        | `i16`           | 16-bit signed integer               |
+| `int32`        | `i32`           | 32-bit signed integer               |
+| `int64`        | `i64`           | 64-bit signed integer               |
+| `int128`       | `i128`          | 128-bit signed integer              |
+| `uint8`        | `u8`            | 8-bit unsigned integer              |
+| `uint16`       | `u16`           | 16-bit unsigned integer             |
+| `uint32`       | `u32`           | 32-bit unsigned integer             |
+| `uint64`       | `u64`           | 64-bit unsigned integer             |
+| `uint128`      | `u128`          | 128-bit unsigned integer            |
 | `float`        | `f64`           | 64-bit floating-point               |
 | `bool`         | `bool`          | `true` / `false`                    |
 | `string`       | `&str` (literal) / `Rc<str>` · `Arc<str>` (stored/computed) | Literals stay `&str`; the transpiler promotes to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it |
+
+The Rust-style spellings `i8`/`i16`/`i32`/`i64`/`i128`/`isize` and `u8`/`u16`/`u32`/`u64`/`u128`/`usize` are accepted as aliases for the corresponding Boring name (`i32` ≡ `int32`, `isize` ≡ `int`, etc.) and transpile identically.
+
+### Fixed-width integers
+
+Each fixed-width type is a distinct type at runtime — mixing two *different* explicit fixed-width types in one expression (`a_uint16 + a_int32`) is a type error, same as Rust's own refusal to implicitly coerce between distinct integer types. Cast explicitly instead:
+
+```boring
+let uint16 a = 100
+let int32 b = 5
+let c = (a as int32) + b   # explicit cast required
+```
+
+A fixed-width value mixes freely with a bare integer literal or an `int`/`uint`-typed value (the flexible kind literals use by default):
+
+```boring
+let uint32 count = 10
+let bigger = count + 1     # fine — `1` is the flexible `int` literal kind
+```
+
+Casting to a narrower type checks the range and produces `nil` (or errors, depending on context) if the value doesn't fit — same as the existing `uint8` behavior (`300 as uint8` is out of range).
+
+**GPU targets.** Each GPU backend's own numeric type system limits which widths a `kernel` struct field can use:
+
+| Width | `--target wgpu` (WGSL) | `--target cuda` (CUDA C) | `--target metal` (MSL) |
+|-------|-------------------------|---------------------------|--------------------------|
+| 8-bit | not supported (compile error) | full support (`uint8_t`/`int8_t`) | full support (`uchar`/`char`) |
+| 16-bit | not supported (compile error) | full support | full support (`ushort`/`short`) |
+| 32-bit | full support (`i32`/`u32`) | full support | full support (`int`/`uint`) |
+| 64-bit | not supported (compile error) | full support | not supported (compile error) |
+| 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | not supported (compile error) |
+
+WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.
 
 ### Integer literals
 
@@ -459,7 +502,7 @@ let b = t.1                # "hello"  (string)
 
 **Rust equivalent**
 ```rust
-let t = (42i64, Arc::from("hello"));
+let t = (42isize, Arc::from("hello"));
 let a = t.0;
 let b = t.1;
 ```
@@ -474,7 +517,7 @@ let (int, string) t = (0, "hello")
 
 **Rust equivalent**
 ```rust
-let t: (i64, Arc<str>) = (0i64, Arc::from("hello"));
+let t: (isize, Arc<str>) = (0isize, Arc::from("hello"));
 ```
 
 #### Destructuring
@@ -504,7 +547,7 @@ let (a, b) = t;   // types inferred from tuple
 
 **Rust equivalent**
 ```rust
-fn minmax(nums: Vec<i64>) -> (i64, i64) {
+fn minmax(nums: Vec<isize>) -> (isize, isize) {
     (nums[0].clone(), nums[1].clone())
 }
 ```
@@ -560,10 +603,10 @@ let safe = ("42" as int) else -1
 
 **Rust equivalent**
 ```rust
-let n: Option<i64> = "42".parse().ok();
-let f = 42i64 as f64;
-let s = 3i64.to_string();
-let safe = "42".parse::<i64>().unwrap_or(-1);
+let n: Option<isize> = "42".parse().ok();
+let f = 42isize as f64;
+let s = 3isize.to_string();
+let safe = "42".parse::<isize>().unwrap_or(-1);
 ```
 
 Supported cast targets: `int`, `uint`, `float`, `string`, `bool`, and any type that implements `Display` or `FromStr`.
@@ -616,7 +659,7 @@ The last expression in the body is the implicit return value. No `return` keywor
 
 **Rust equivalent**
 ```rust
-fn add(a: i64, b: i64) -> i64 {
+fn add(a: isize, b: isize) -> isize {
     a + b
 }
 ```
@@ -659,9 +702,9 @@ Functions can return any collection type — arrays, sets, and dicts are all sup
 
 **Rust equivalent**
 ```rust
-fn first_n(n: i64) -> Vec<i64> { (1..=n).collect() }
-fn unique_squares() -> std::collections::HashSet<i64> { [1,4,9].into() }
-fn char_count(s: &str) -> std::collections::HashMap<Arc<str>, i64> { ... }
+fn first_n(n: isize) -> Vec<isize> { (1..=n).collect() }
+fn unique_squares() -> std::collections::HashSet<isize> { [1,4,9].into() }
+fn char_count(s: &str) -> std::collections::HashMap<Arc<str>, isize> { ... }
 ```
 
 ### Multi-line parameter lists
@@ -837,8 +880,8 @@ print n    # 6
 
 **Rust equivalent**
 ```rust
-fn add_one(x: &mut i64) { *x += 1; }
-let mut n = 5i64;
+fn add_one(x: &mut isize) { *x += 1; }
+let mut n = 5isize;
 add_one(&mut n);
 println!("{}", n); // 6
 ```
@@ -886,7 +929,7 @@ string fn(int a):           "{a}"
 
 **Rust equivalent** — the transpiler mangles names with the parameter types:
 ```rust
-fn describe__int(n: i64) -> Arc<str> { ... }
+fn describe__int(n: isize) -> Arc<str> { ... }
 fn describe__float(f: f64) -> Arc<str> { ... }
 fn describe__string(s: Arc<str>) -> Arc<str> { ... }
 fn describe__bool(b: bool) -> Arc<str> { ... }
@@ -910,7 +953,7 @@ print a.speak("woof")  # → Dog: woof!
 
 **Rust equivalent** — method names are also mangled:
 ```rust
-fn speak__int(&self, times: i64) -> Arc<str> { ... }
+fn speak__int(&self, times: isize) -> Arc<str> { ... }
 fn speak__string(&self, sound: Arc<str>) -> Arc<str> { ... }
 ```
 
@@ -953,7 +996,7 @@ int divide(int a, int b) throws:
 
 **Rust equivalent**
 ```rust
-fn divide(a: i64, b: i64) -> Result<i64, Box<dyn std::error::Error>> {
+fn divide(a: isize, b: isize) -> Result<isize, Box<dyn std::error::Error>> {
     if b == 0 { return Err("division by zero".into()); }
     Ok(a / b)
 }
@@ -968,7 +1011,7 @@ int apply(int f(int), int x):
 
 **Rust equivalent**
 ```rust
-fn apply(f: impl Fn(i64) -> i64, x: i64) -> i64 {
+fn apply(f: impl Fn(isize) -> isize, x: isize) -> isize {
     f(x)
 }
 ```
@@ -985,7 +1028,7 @@ let x = 42   # inline comment (not preserved by the transpiler)
 **Rust equivalent** (full-line comments are preserved by `boring build`)
 ```rust
 // This is a comment
-let x: i64 = 42;
+let x: isize = 42;
 ```
 
 Only full-line comments are preserved in the transpiled output. Inline comments are stripped.
@@ -1114,7 +1157,7 @@ string check(int n):
 
 **Rust equivalent**
 ```rust
-fn check(n: i64) -> Arc<str> {
+fn check(n: isize) -> Arc<str> {
     if n < 0 { return Arc::from("negative"); }
     Arc::<str>::from(format!("ok ({})", n))
 }
@@ -1159,7 +1202,7 @@ string describe(int n):
 
 **Rust equivalent**
 ```rust
-fn describe(n: i64) -> Arc<str> {
+fn describe(n: isize) -> Arc<str> {
     match n {
         0          => "zero",
         1 | 2 | 3  => "small",
@@ -1186,7 +1229,7 @@ while i < 5: i += 1
 
 **Rust equivalent**
 ```rust
-let mut i = 0i64;
+let mut i = 0isize;
 while i < 5 { i += 1; }
 ```
 
@@ -1340,8 +1383,8 @@ for k in 1..5:        # exclusive: 1, 2, 3, 4
 
 **Rust equivalent**
 ```rust
-for k in 1i64..=5 { println!("{}", k); }
-for k in 1i64..5  { println!("{}", k); }
+for k in 1isize..=5 { println!("{}", k); }
+for k in 1isize..5  { println!("{}", k); }
 ```
 
 ### `for` without a variable — repeat N times
@@ -1359,7 +1402,7 @@ for _ in 1..=5:
 
 **Rust equivalent**
 ```rust
-for _ in 1i64..=5 { println!("tick"); }
+for _ in 1isize..=5 { println!("tick"); }
 ```
 
 ### `loop` with `break` and `continue`
@@ -1382,8 +1425,8 @@ loop: tick()
 
 **Rust equivalent**
 ```rust
-let mut acc = 0i64;
-let mut idx = 0i64;
+let mut acc = 0isize;
+let mut idx = 0isize;
 loop {
     idx += 1;
     if idx % 2 == 0 { continue; }
@@ -1443,7 +1486,7 @@ do: j += 1 while j < 3
 
 **Rust equivalent**
 ```rust
-let mut j = 0i64;
+let mut j = 0isize;
 loop {
     j += 1;
     if !(j < 3) { break; }
@@ -1512,8 +1555,8 @@ let [int] empty = []
 
 **Rust equivalent**
 ```rust
-let numbers: Vec<i64> = vec![1, 2, 3, 4, 5];
-let empty: Vec<i64> = Vec::new();
+let numbers: Vec<isize> = vec![1, 2, 3, 4, 5];
+let empty: Vec<isize> = Vec::new();
 ```
 
 #### Array fill and comprehension
@@ -1529,8 +1572,8 @@ The range must be `..n` (exclusive, starting at 0) or `0..n`. In the comprehensi
 
 **Rust equivalent**
 ```rust
-let zeros: Vec<i64>   = vec![0i64; 10];
-let squares: Vec<i64> = (0..5i64).map(|i| i * i).collect();
+let zeros: Vec<isize>   = vec![0isize; 10];
+let squares: Vec<isize> = (0..5isize).map(|i| i * i).collect();
 ```
 
 #### Fixed-size arrays — `[T, N]`
@@ -1551,7 +1594,7 @@ print m.data[0]                       # 0
 **Rust equivalent**
 ```rust
 let v: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-let z: [i64; 3] = [0i64; 3];
+let z: [isize; 3] = [0isize; 3];
 ```
 
 `N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
@@ -1620,8 +1663,8 @@ let {int=int} empty_map = {=}
 
 **Rust equivalent**
 ```rust
-let scores: HashMap<Arc<str>, i64> = HashMap::from([...]); // literals coerced via .to_arc()
-let empty_map: HashMap<i64, i64> = HashMap::new();
+let scores: HashMap<Arc<str>, isize> = HashMap::from([...]); // literals coerced via .to_arc()
+let empty_map: HashMap<isize, isize> = HashMap::new();
 ```
 
 #### Dictionary methods
@@ -1646,8 +1689,8 @@ let {int} empty_set = {}
 
 **Rust equivalent**
 ```rust
-let unique: HashSet<i64> = HashSet::from([1, 2, 3]);
-let empty_set: HashSet<i64> = HashSet::new();
+let unique: HashSet<isize> = HashSet::from([1, 2, 3]);
+let empty_set: HashSet<isize> = HashSet::new();
 ```
 
 #### Set methods
@@ -2124,7 +2167,7 @@ print c.value            # 3
 **Rust equivalent**
 ```rust
 impl Adder {
-    fn __call__(&self) -> i64 { self.base + 10 }
+    fn __call__(&self) -> isize { self.base + 10 }
 }
 impl Counter {
     fn __call__(&mut self) { self.value += 1; }
@@ -2148,9 +2191,9 @@ enum Expr:
 ```rust
 #[derive(Clone)]
 enum Expr {
-    Num(i64),
-    Add(i64, i64),
-    Mul(i64, i64),
+    Num(isize),
+    Add(isize, isize),
+    Mul(isize, isize),
 }
 ```
 
@@ -2179,7 +2222,7 @@ int eval(Expr e):
 
 **Rust equivalent**
 ```rust
-fn eval(e: Expr) -> i64 {
+fn eval(e: Expr) -> isize {
     match e {
         Expr::Num(v)      => v,
         Expr::Add(l, r)   => l + r,
@@ -2648,12 +2691,12 @@ trait Transformer:
 trait Container {
     type Item;
     fn first(&self) -> Self::Item;
-    fn count(&self) -> i64;
+    fn count(&self) -> isize;
 }
 impl Container for IntBox {
-    type Item = i64;
-    fn first(&self) -> i64 { self.values[0].clone() }
-    fn count(&self) -> i64 { self.values.len() as i64 }
+    type Item = isize;
+    fn first(&self) -> isize { self.values[0].clone() }
+    fn count(&self) -> isize { self.values.len() as isize }
 }
 ```
 
@@ -2687,8 +2730,8 @@ trait Producer {
     fn next<'a>(&'a self) -> Self::Item<'a>;
 }
 impl Producer for Counter {
-    type Item<'a> = i64;
-    fn next<'a>(&'a self) -> i64 { self.value + 1 }
+    type Item<'a> = isize;
+    fn next<'a>(&'a self) -> isize { self.value + 1 }
 }
 ```
 
@@ -3072,7 +3115,7 @@ if let v = r1:
 
 **Rust equivalent**
 ```rust
-fn divide(a: i64, b: i64) -> Result<i64, Box<dyn std::error::Error>> {
+fn divide(a: isize, b: isize) -> Result<isize, Box<dyn std::error::Error>> {
     if b == 0 { return Err("division by zero".into()); }
     Ok(a / b)
 }
@@ -3111,8 +3154,8 @@ let int? no_val   = nil
 
 **Rust equivalent**
 ```rust
-let some_val: Option<i64> = Some(42);
-let no_val:   Option<i64> = None;
+let some_val: Option<isize> = Some(42);
+let no_val:   Option<isize> = None;
 ```
 
 ### `else` — nil coalescing
@@ -3312,7 +3355,7 @@ var Container<&a, string> buf = Container(items = ["x", "y"])
 
 **Rust equivalent**
 ```rust
-copy_items::<i64>(src, dst);           // bound already on fn, not repeated at call site
+copy_items::<isize>(src, dst);           // bound already on fn, not repeated at call site
 let buf: Container<'a, Arc<str>>;   // lifetime preserved
 ```
 
@@ -3336,11 +3379,11 @@ struct Stack<T, uint N>:
 ```rust
 struct Stack<T: Clone + std::fmt::Debug, const N: usize> {
     data: Vec<T>,
-    len:  i64,
+    len:  isize,
 }
 impl<T: Clone + std::fmt::Debug, const N: usize> Stack<T, N> {
     fn capacity(&self) -> usize { N }
-    fn is_full(&self)  -> bool  { self.len == N as i64 }
+    fn is_full(&self)  -> bool  { self.len == N as isize }
 }
 ```
 
@@ -3358,8 +3401,8 @@ uint capacity_of(Stack<T, uint N> s):
 
 **Rust equivalent**
 ```rust
-fn get<T: Clone + std::fmt::Debug, const N: usize>(s: &Stack<T, N>, i: i64) -> T {
-    if !(i < N as i64) { return Err(…) }
+fn get<T: Clone + std::fmt::Debug, const N: usize>(s: &Stack<T, N>, i: isize) -> T {
+    if !(i < N as isize) { return Err(…) }
     s.data[i as usize].clone()
 }
 fn capacity_of<T: Clone + std::fmt::Debug, const N: usize>(s: &Stack<T, N>) -> usize { N }
@@ -3375,7 +3418,7 @@ string describe<T, uint N>(Stack<T, uint N> s):
 | Boring syntax | Rust equivalent | Notes |
 |---------------|-----------------|-------|
 | `<uint N>` | `const N: usize` | Most common — array lengths, capacities |
-| `<int N>` | `const N: i64` | Signed integer constant |
+| `<int N>` | `const N: isize` | Signed integer constant |
 | `<bool B>` | `const B: bool` | Feature flag at compile time |
 
 > `uint` maps to `usize` (not `u64`) for const generics — `usize` is the standard Rust type for sizes and indices.
@@ -3393,8 +3436,8 @@ let add_one = (n): n + 1
 
 **Rust equivalent**
 ```rust
-let double  = |n: i64| n * 2;
-let add_one = |n: i64| n + 1;
+let double  = |n: isize| n * 2;
+let add_one = |n: isize| n + 1;
 ```
 
 ### Block closure
@@ -3408,7 +3451,7 @@ let classify = (int n):
 
 **Rust equivalent**
 ```rust
-let classify = |n: i64| {
+let classify = |n: isize| {
     if n > 0 { "pos" } else if n < 0 { "neg" } else { "zero" }
 };
 ```
@@ -3625,7 +3668,7 @@ words.filter(w: w.length > 3 && w.length < 8)
 ```rust
 people.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
 people.iter().filter(|p| p.age >= 18).cloned().collect::<Vec<_>>();
-words.iter().filter(|__x| __x.len() as i64 > 3).cloned().collect::<Vec<_>>();
+words.iter().filter(|__x| __x.len() as isize > 3).cloned().collect::<Vec<_>>();
 ```
 
 ---
@@ -3696,13 +3739,13 @@ Rename or qualify a type:
 
 ```boring
 use NodeRef as Node'shared      # Arc<Node> or Rc<Node> depending on --threading
-use Score   as int              # i64
+use Score   as int              # isize
 ```
 
 **Rust equivalent**
 ```rust
 type NodeRef = Arc<Node>;
-type Score   = i64;
+type Score   = isize;
 ```
 
 ### Newtype wrappers — `type … as`
@@ -3739,10 +3782,10 @@ print "user {id}"       # prints "user 42"
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct UserId(u64);
+struct UserId(usize);
 
-impl From<u64> for UserId { fn from(v: u64) -> Self { UserId(v) } }
-impl From<UserId> for u64 { fn from(v: UserId) -> u64 { v.0 } }
+impl From<usize> for UserId { fn from(v: usize) -> Self { UserId(v) } }
+impl From<UserId> for usize { fn from(v: UserId) -> usize { v.0 } }
 impl std::fmt::Display for UserId { … }
 ```
 
@@ -3751,8 +3794,8 @@ The `Copy` derive is added automatically for numeric inner types (`uint`, `int`,
 Alias a function type — the return type comes first, then the parameter types in parentheses. Optional prefixes: `req` (pure, `Fn`) or `def` (mutating, `FnMut`, the default); `task` (async). Optional suffix: `throws`.
 
 ```boring
-use Predicate   as req bool(int)              # pure:    impl Fn(i64) -> bool
-use Transformer as def int(int)               # mutable: impl FnMut(i64) -> i64
+use Predicate   as req bool(int)              # pure:    impl Fn(isize) -> bool
+use Transformer as def int(int)               # mutable: impl FnMut(isize) -> isize
 use Parser      as string(string) throws         # impl FnMut(&str) -> Result<…>
 use AsyncFetch  as task string(string) throws    # async FnMut → Result<…>
 use Worker      as req task int() throws      # pure async: impl Fn() -> Future<…>
@@ -3760,7 +3803,7 @@ use Worker      as req task int() throws      # pure async: impl Fn() -> Future<
 
 **Rust equivalent**
 ```rust
-type Predicate  = fn(i64) -> bool;
+type Predicate  = fn(isize) -> bool;
 type Parser     = fn(&str) -> Result<Arc<str>, Box<dyn std::error::Error>>;
 // async and throws/task equivalents are function signatures, not type aliases in plain Rust
 ```
@@ -3912,9 +3955,9 @@ stream int count_up(int n):
 
 **Rust equivalent**
 ```rust
-fn count_up(n: i64) -> impl Iterator<Item = i64> {
-    let mut __items: Vec<i64> = Vec::new();
-    let mut i = 0i64;
+fn count_up(n: isize) -> impl Iterator<Item = isize> {
+    let mut __items: Vec<isize> = Vec::new();
+    let mut i = 0isize;
     while i < n {
         __items.push(i);
         i += 1;
@@ -4013,10 +4056,10 @@ let tx, rx = channel<int>(4)
 
 | Mode | Boring | Rust emitted |
 |------|--------|--------------|
-| Multi-thread (default) | `channel<int>(32)` or `channel<int, 32>` | `tokio::sync::mpsc::channel::<i64>(32)` |
-| Single-thread | `channel<int>(32)` or `channel<int, 32>` | `local_channel::mpsc::channel::<i64>()` — unbounded |
-| Kernel (`channel<T, N>`) | `channel<int, 32>` | `kernel_channel::<i64, 32>()` → `KernelSender/Receiver<i64, 32>` |
-| Kernel (`channel<T>(cap)`) | `channel<int>(32)` | `dyn_kernel_channel::<i64>(32)` → `DynKernelSender/Receiver<i64>` |
+| Multi-thread (default) | `channel<int>(32)` or `channel<int, 32>` | `tokio::sync::mpsc::channel::<isize>(32)` |
+| Single-thread | `channel<int>(32)` or `channel<int, 32>` | `local_channel::mpsc::channel::<isize>()` — unbounded |
+| Kernel (`channel<T, N>`) | `channel<int, 32>` | `kernel_channel::<isize, 32>()` → `KernelSender/Receiver<isize, 32>` |
+| Kernel (`channel<T>(cap)`) | `channel<int>(32)` | `dyn_kernel_channel::<isize>(32)` → `DynKernelSender/Receiver<isize>` |
 
 
 ### Sending and receiving
@@ -4071,7 +4114,7 @@ h.wait
 
 ```rust
 // let tx, rx = channel<int>(4)
-let (tx, mut rx) = tokio::sync::mpsc::channel::<i64>(4);
+let (tx, mut rx) = tokio::sync::mpsc::channel::<isize>(4);
 
 // tx.send(v)
 tx.send(v).await.unwrap();
@@ -4112,7 +4155,7 @@ task run():
 
 **Rust equivalent**
 ```rust
-let (tx, rx) = tokio::sync::oneshot::channel::<i64>();
+let (tx, rx) = tokio::sync::oneshot::channel::<isize>();
 tokio::spawn(async move { tx.send(42).ok(); });
 let result = rx.await.unwrap();
 ```
@@ -4201,7 +4244,7 @@ task run():
 
 **Rust equivalent**
 ```rust
-let (tx, mut rx) = tokio::sync::watch::channel::<i64>(0);
+let (tx, mut rx) = tokio::sync::watch::channel::<isize>(0);
 // ...
 while rx.changed().await.is_ok() {
     let val = rx.borrow().clone();
@@ -4419,7 +4462,7 @@ task process():
 **Rust equivalent**
 ```rust
 async fn monitor() {
-    let mut ticks: i64 = 0;
+    let mut ticks: isize = 0;
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         ticks += 1;
@@ -4822,8 +4865,8 @@ The primitive types are defined as aliases with an explicit qualifier:
 Primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` always compiles to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread).
 
 ```boring
-let int   x = 42    # i64
-let uint  n = 100   # u64
+let int   x = 42    # isize
+let uint  n = 100   # usize
 ```
 
 > For `string` details see [Advanced — Strings](#advanced--strings-string-and-arc-str).
@@ -4888,6 +4931,106 @@ print describe(w1)   # resource: config.toml
 
 > In most programs you never need to write a qualifier explicitly. The transpiler infers the right one from how each variable is used. See [chapter 30 — Qualifier Inference](#30-qualifier-inference) for the full inference algorithm, including signal table, size-based fallback, and cross-function propagation.
 
+### Scoped access blocks — `with`
+
+A `T'actor`/`T'guard` value normally acquires and releases its lock **once per method call or field access** — `c.increment()` transpiles to `c.lock().unwrap().increment()`. `with` holds the lock across an entire block instead, so several operations happen under one critical section:
+
+```boring
+struct Counter:
+    var int value = 0
+
+    def increment():
+        value += 1
+
+var c'actor = Counter(0)
+
+with c:
+    c.increment()
+    c.increment()
+    c.increment()
+print c.value   # 3
+```
+
+**Rust equivalent**
+```rust
+let mut c: Arc<std::sync::Mutex<Counter>> = Arc::new(std::sync::Mutex::new(Counter { value: 0 }));
+{
+    let mut c = c.lock().unwrap();
+    c.increment();
+    c.increment();
+    c.increment();
+}
+println!("{}", c.lock().unwrap().value);
+```
+
+Existing per-call locking is unchanged for code that doesn't use `with` — this is purely additive.
+
+`with` is one keyword, not a read/write pair — the access level is decided per block:
+
+- **`let`-bound name** — always read-only (mutation on a `let` binding is already a compile error, so there is nothing to scan for).
+- **`mut`/`var`-bound name** — the compiler scans the block's own body (recursing into `if`/`while`/`for`/`match`/closures nested inside it, but never into a called function's own body) for a direct assignment, an index/field assignment, or a `def` (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.
+
+```boring
+struct Cell:
+    var int value = 0
+
+    req int peek():
+        value
+
+    def bump():
+        value += 1
+
+var b'guard = Cell(10)
+
+with b:
+    print b.peek()   # read-only block — RwLock::read()
+
+with b:
+    b.bump()          # mutation found — RwLock::write()
+```
+
+`'actor`/`'actor'task` always acquire the same `Mutex` either way — a `Mutex` has no shared-read mode, so the scan only decides which method calls are legal inside the block (`def` vs `req`), not what gets locked.
+
+Multiple names may be listed together — each gets its own acquire/release, but the block reads as one critical section:
+
+```boring
+with a, b:
+    a.increment()
+    b.increment()
+```
+
+Nesting a block on the **same** name inside itself is a compile error (double-acquire — `Mutex`/`RwLock` are not reentrant). Nesting on **different** names is unrestricted.
+
+### `with` for GPU kernel fields — `'gpu'unified`, `'gpu'global`
+
+A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'gpu'unified`/`'gpu'global`-qualified alias and reading it inside a `with` block materializes it exactly once instead, however many times the block's body indexes it:
+
+```boring
+var k = VectorAdd(host_a, host_b)
+kernel:
+    k(block = 256)
+
+let [int]'gpu'unified result = k.result   # compile-time alias — no transfer yet
+with result:                              # `result` is `let`-bound -> read-only
+    for i in 0..n:
+        print "c[{i}] = {result[i]}"      # readback happens once, here
+```
+
+This is purely additive — `k.result[i]` without an alias still works exactly as before, and is the right choice for a single access. The alias only pays off when the same field is read (or written) more than once in the same scope. A `mut`/`var`-bound alias follows the same read/write scan as `'actor`/`'guard`: mutating it inside the block (`result[i] = v`) writes the whole array back to the GPU once, at block close; a read-only block never does.
+
+The `'gpu'unified`/`'gpu'global` annotation itself is optional here — it's inferred whenever the initializer is a bare `k.field` read on a tracked kernel instance whose field is actually declared `'unified`/`'global`, so `let result = k.result` behaves identically to the explicit form above:
+
+```boring
+let result = k.result   # qualifier inferred from k.result's own 'unified declaration
+with result:
+    for i in 0..n:
+        print "c[{i}] = {result[i]}"
+```
+
+A `'gpu'unified`/`'gpu'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
+
+> This works for a kernel constructed and read back within the same function — the shape every kernel example in this book uses. Returning a resident value across a function boundary is a separate, not-yet-implemented extension of this design — see [Scoped Access Blocks](scoped-access-blocks.html) for the full design and current status.
+
 ---
 
 ## 22. Defer
@@ -4942,7 +5085,7 @@ task int fetch(int a, int b):
 
 **Rust equivalent**
 ```rust
-async fn fetch(a: i64, b: i64) -> i64 { a + b }
+async fn fetch(a: isize, b: isize) -> isize { a + b }
 ```
 
 > The `task` prefix works with all function qualifiers: `task req` (non-mutating async), `task set` (async setter), and `task def` (explicit mutating async — `def` is always optional when a return type is present). Write `task int fetch(...)` or `task f()` for the common cases.
@@ -5093,7 +5236,7 @@ def main():
 
 **Rust equivalent**
 ```rust
-async fn compute(n: i64) -> i64 { n * n }
+async fn compute(n: isize) -> isize { n * n }
 
 #[tokio::main]
 async fn main() {
@@ -5186,7 +5329,7 @@ def main():
 
 **Rust equivalent**
 ```rust
-async fn fetch(a: i64, b: i64) -> i64 { a + b }
+async fn fetch(a: isize, b: isize) -> isize { a + b }
 async fn greet(name: &str) -> Arc<str> { Arc::<str>::from(format!("hello, {}", name)) }
 
 #[tokio::main]
@@ -5505,7 +5648,7 @@ struct Color:
 **Rust equivalent**
 ```rust
 #[derive(Debug, Clone, PartialEq)]
-struct Color { r: i64, g: i64, b: i64 }
+struct Color { r: isize, g: isize, b: isize }
 ```
 
 The no-parentheses form applies to all `@` attributes, including `@error` on enum variants:
@@ -5707,7 +5850,7 @@ drop(buf)                   # free early, before the scope ends
 
 **Rust equivalent**
 ```rust
-let buf = vec![1i64, 2, 3, 4, 5];
+let buf = vec![1isize, 2, 3, 4, 5];
 drop(buf);
 ```
 
@@ -5737,7 +5880,7 @@ let u2 = fromJson<User>(s)         # → User? (nil on parse error)
 #[derive(Clone, Serialize, Deserialize)]
 struct User {
     name: Arc<str>,
-    age:  i64,
+    age:  isize,
 }
 
 let s: String = serde_json::to_string(&u).unwrap_or_default();
@@ -5815,8 +5958,8 @@ int impossible(int x):
 ```
 
 ```rust
-fn not_yet(x: i64) -> i64 { todo!() }
-fn impossible(x: i64) -> i64 { unreachable!() }
+fn not_yet(x: isize) -> isize { todo!() }
+fn impossible(x: isize) -> isize { unreachable!() }
 ```
 
 Both accept an optional message argument:
@@ -5881,8 +6024,8 @@ unreachable("variant {v} should have been handled above")
 
 | Boring            | Alias for       | Rust                                  |
 |-------------------|-----------------|---------------------------------------|
-| `int`             | `Int'stack`     | `i64`                                 |
-| `uint`            | `Uint'stack`    | `u64`                                 |
+| `int`             | `Int'stack`     | `isize`                               |
+| `uint`            | `Uint'stack`    | `usize`                               |
 | `float`           | `Float'stack`   | `f64`                                 |
 | `bool`            | `Bool'stack`    | `bool`                                |
 | `string` (literal)         | —               | `&str` — zero allocation; promoted to `Rc<str>`/`Arc<str>` when stored |
@@ -5909,7 +6052,7 @@ unreachable("variant {v} should have been handled above")
 | `Trait` (bare)     | —           | `Box<dyn Trait>` — dynamic dispatch, heap |
 | `<Trait>`          | —           | `impl Trait` — static dispatch, no allocation |
 | `<uint N>` in generic list | — | `const N: usize` — const generic parameter |
-| `<int N>` in generic list  | — | `const N: i64` |
+| `<int N>` in generic list  | — | `const N: isize` |
 | `<bool B>` in generic list | — | `const B: bool` |
 
 ### Expressions
@@ -5928,8 +6071,8 @@ unreachable("variant {v} should have been handled above")
 | `x += n` / `-=` / `*=` / `/=` / `%=` | `x += n` etc. (numeric types only) |
 | `x ?= expr`                           | `x = x.unwrap_or_else(\|\| expr)` — assign if nil |
 | `let x = …` (name already in scope)   | `let x = …` — Rust shadowing; type may change freely |
-| `1..=5`                     | `1i64..=5`                                  |
-| `1..4`                    | `1i64..5`                                   |
+| `1..=5`                     | `1isize..=5`                                |
+| `1..4`                    | `1isize..5`                                 |
 | `x?.field`                 | `x.map(\|v\| v.field)`                      |
 | `task fn(args)`            | `tokio::spawn(async move { fn(args).await })`  |
 | `future.value`             | `future.await.unwrap()`                     |
@@ -6139,11 +6282,11 @@ print x              # 7 — outer binding unchanged
 
 **Rust equivalent** — translates directly to Rust shadowing:
 ```rust
-let val: i64 = 10;
+let val: isize = 10;
 let val: &str = "toto";
 
 let n: &str = "42";
-let n: i64 = n.trim().parse().unwrap_or(0);
+let n: isize = n.trim().parse().unwrap_or(0);
 ```
 
 ### Advanced — `transient` fields and `?=` nil-coalescing assignment
@@ -6180,12 +6323,12 @@ use std::cell::Cell;
 
 struct TextStats {
     text: Arc<str>,
-    _length: Cell<Option<i64>>,
+    _length: Cell<Option<isize>>,
 }
 impl TextStats {
-    fn length(&self) -> i64 {
+    fn length(&self) -> isize {
         if let Some(cached) = self._length.get() { return cached; }
-        let n = self.text.len() as i64;
+        let n = self.text.len() as isize;
         self._length.set(Some(n));   // &self is enough — Cell provides interior mutability
         n
     }
@@ -6357,7 +6500,7 @@ sum(1, 2, 3, 4, 5)    # 15
 
 **Rust equivalent**
 ```rust
-fn sum(values: Vec<i64>) -> i64 {
+fn sum(values: Vec<isize>) -> isize {
     values.iter().sum()
 }
 sum(vec![1, 2, 3, 4, 5]);
@@ -6372,17 +6515,17 @@ This section describes the generated Rust representation for Boring's `throw`/`c
 Every `throws` function returns `Result<T, Box<dyn std::error::Error>>`. String-literal throws are wrapped in `BoringError::Str` (zero allocation); interpolated-string throws use `BoringError::String`. The Boring compiler inserts `?` automatically on every call to a `throws` function from inside another `throws` function, so errors propagate up the call stack without explicit forwarding:
 
 ```rust
-fn parse_int(s: Arc<str>) -> Result<i64, Box<dyn std::error::Error>> {
-    if !(s.len() as i64 > 0) {
+fn parse_int(s: Arc<str>) -> Result<isize, Box<dyn std::error::Error>> {
+    if !(s.len() as isize > 0) {
         return Err(Box::new(BoringError::Str("empty string")));
     }
-    let Some(n) = s.trim().parse::<i64>().ok() else {
+    let Some(n) = s.trim().parse::<isize>().ok() else {
         return Err(Box::new(BoringError::String(Arc::<str>::from(format!("not a number: {}", s)))));
     };
     Ok(n)
 }
 
-fn double_parse(s: Arc<str>) -> Result<i64, Box<dyn std::error::Error>> {
+fn double_parse(s: Arc<str>) -> Result<isize, Box<dyn std::error::Error>> {
     Ok(parse_int(s.clone())? * 2)   // ? inserted by the compiler
 }
 
@@ -6397,7 +6540,7 @@ fn process(s: Arc<str>) -> Result<Arc<str>, Box<dyn std::error::Error>> {
 When a function declares `throws CalcError`, typed errors are wrapped in `BoringError::Other` with a `TypeId` so `catch CalcError:` can dispatch correctly at the catch site. The return type remains `Result<T, Box<dyn Error>>` in both typed and untyped cases.
 
 ```rust
-fn checked_divide(a: i64, b: i64) -> Result<i64, Box<dyn std::error::Error>> {
+fn checked_divide(a: isize, b: isize) -> Result<isize, Box<dyn std::error::Error>> {
     if !(b != 0) {
         return Err(Box::new(BoringError::Other(
             std::any::TypeId::of::<CalcError>(),
@@ -6831,7 +6974,7 @@ boring build --instrument main.br
 An inline `__boring_instrument` module is prepended to the Rust output — no extra `Cargo.toml` dependency.  Every function body receives a `Span` guard:
 
 ```rust
-fn add(a: i64, b: i64) -> i64 {
+fn add(a: isize, b: isize) -> isize {
     let _boring_span = __boring_instrument::Span::enter("add");
     // … body …
 }
@@ -6981,6 +7124,9 @@ Deep dive into the three binding forms (`let` / `mut` / `var`), their interactio
 
 **[`new` placement operator](new-placement.html)**
 Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
+
+**[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
+Full design and implementation notes for `with` (see [chapter 21](#scoped-access-blocks--with) above for the language reference). The `'actor`/`'guard` per-block locking half and the same-scope `'gpu'unified`/`'gpu'global` kernel-field materialization half are both implemented and shipped; returning a GPU-resident value across a function boundary is a further, not-yet-implemented extension — this document records exactly what's done and what's missing.
 
 ### GPU computing
 

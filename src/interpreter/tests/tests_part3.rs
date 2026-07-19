@@ -33,26 +33,27 @@ let _result = p.a + p.b
 
 #[test]
 fn test_numeric_i32_alias() {
-    // i32 is an alias for int'copy at runtime
+    // i32 is a distinct real 32-bit type at runtime (Value::Int32), not an int alias.
     let src = r#"
 def i32 add(i32 x, i32 y):
     return x + y
 
 let _result = add(10, 32)
 "#;
-    assert_eq!(run_src(src), Value::Int(42));
+    assert_eq!(run_src(src), Value::Int32(42));
 }
 
 #[test]
 fn test_numeric_u64_alias() {
-    // u64 is an alias for uint'copy at runtime
+    // u64 is a distinct real 64-bit type at runtime (Value::Uint64), not a uint alias.
+    // Mixing with a bare int literal (`2`) is allowed — literals are the flexible Int kind.
     let src = r#"
 def u64 double(u64 x):
     return x * 2
 
 let _result = double(21)
 "#;
-    assert_eq!(run_src(src), Value::Uint(42));
+    assert_eq!(run_src(src), Value::Uint64(42));
 }
 
 #[test]
@@ -90,30 +91,117 @@ let isize _result = n + 5
 
 #[test]
 fn test_numeric_all_int_aliases() {
-    // i8, i16, i32, i64, isize all act as int at runtime
+    // i8, i16, i32, i64 are distinct real fixed-width types at runtime; isize is the
+    // bare `int` alias (unlike the old collapsing behavior where all of these acted as int).
     let src = r#"
 let i8 a = 1
 let i16 b = 2
 let i32 c = 3
 let i64 d = 4
 let isize e = 5
-let _result = a + b + c + d + e
 "#;
-    assert_eq!(run_src(src), Value::Int(15));
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "a"), Value::Int8(1));
+    assert_eq!(get_var(&interp, "b"), Value::Int16(2));
+    assert_eq!(get_var(&interp, "c"), Value::Int32(3));
+    assert_eq!(get_var(&interp, "d"), Value::Int64(4));
+    assert_eq!(get_var(&interp, "e"), Value::Int(5));
 }
 
 #[test]
 fn test_numeric_all_uint_aliases() {
-    // u8, u16, u32, u64, usize all act as uint at runtime
+    // u8, u16, u32, u64 are distinct real fixed-width types at runtime; usize is the
+    // bare `uint` alias (unlike the old collapsing behavior where all of these acted as uint).
     let src = r#"
 let u8 a = 1
 let u16 b = 2
 let u32 c = 3
 let u64 d = 4
 let usize e = 5
-let _result = a + b + c + d + e
 "#;
-    assert_eq!(run_src(src), Value::Uint(15));
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "a"), Value::Uint8(1));
+    assert_eq!(get_var(&interp, "b"), Value::Uint16(2));
+    assert_eq!(get_var(&interp, "c"), Value::Uint32(3));
+    assert_eq!(get_var(&interp, "d"), Value::Uint64(4));
+    assert_eq!(get_var(&interp, "e"), Value::Uint(5));
+}
+
+#[test]
+fn test_numeric_fixed_width_same_kind_arithmetic() {
+    // Same-kind arithmetic works natively at each width, including the 128-bit kinds.
+    let src = r#"
+let i32 a = 1000000000
+let i32 b = 500000000
+let sum32 = a + b
+let u128 c = 1
+let u128 d = 2
+let sum128 = c + d
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "sum32"), Value::Int32(1500000000));
+    assert_eq!(get_var(&interp, "sum128"), Value::Uint128(3));
+}
+
+#[test]
+fn test_numeric_fixed_width_mixes_with_bare_int_literal() {
+    // A fixed-width value mixes freely with the flexible bare `Int`/`Uint` literal kind
+    // (the common case: `counter + 1`), widening/narrowing per the wider-kind-wins rule.
+    let src = r#"
+let uint32 count = 10
+let bigger = count + 1
+let int8 small = 5
+let smaller = small - 2
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    // `count`(32-bit) is wider than the bare literal(would-be 64-bit only if bare were
+    // narrower) — here bare `Int` (64-bit) is wider than Uint32, so the bare kind wins.
+    assert_eq!(get_var(&interp, "bigger"), Value::Int(11));
+    assert_eq!(get_var(&interp, "smaller"), Value::Int(3));
+}
+
+#[test]
+fn test_numeric_distinct_fixed_width_mix_is_error() {
+    // Mixing two *different* explicit fixed-width kinds directly is a type error —
+    // mirrors Rust's own refusal to implicitly coerce between distinct integer types.
+    let src = r#"
+let uint16 a = 1
+let int32 b = 2
+let _result = a + b
+"#;
+    let (_interp, res) = run(src);
+    let err = res.expect_err("expected a runtime error mixing Uint16 and Int32 directly");
+    assert!(err.message.contains("cannot add"), "unexpected error: {}", err.message);
+}
+
+#[test]
+fn test_numeric_fixed_width_cast_range_check() {
+    // Casting to a narrower fixed-width type checks the range, same as the existing
+    // `uint8` behavior — an out-of-range value casts to nil rather than wrapping.
+    let src = r#"
+let int8 in_range = 100 as int8
+let out_of_range = 300 as int8
+"#;
+    let (interp, res) = run(src);
+    res.expect("no runtime error");
+    assert_eq!(get_var(&interp, "in_range"), Value::Int8(100));
+    assert_eq!(get_var(&interp, "out_of_range"), Value::Nil);
+}
+
+#[test]
+fn test_numeric_fixed_width_cross_cast() {
+    // `as` is the escape hatch for mixing two distinct fixed-width kinds: cast one
+    // explicitly to the other's kind (or to the flexible bare kind) first.
+    let src = r#"
+let uint16 a = 100
+let int32 b = 5
+let _result = (a as int32) + b
+"#;
+    assert_eq!(run_src(src), Value::Int32(105));
 }
 
 // ─── Point 5: Module declarations ───────────────────────────────────────────
@@ -2268,4 +2356,92 @@ let _result = [items[0].name, items[1].name, items[2].name]
             Value::Str("a".into()),
         ].into())
     );
+}
+
+// ─── `with` scoped-access blocks (docs/scoped-access-blocks.md) ────────────────
+
+#[test]
+fn test_with_actor_write() {
+    let src = r#"
+struct Counter:
+    var int value = 0
+
+    def increment():
+        value += 1
+
+var c'actor = Counter(0)
+with c:
+    c.increment()
+    c.increment()
+    c.increment()
+let _result = c.value
+"#;
+    assert_eq!(run_src(src), Value::Int(3));
+}
+
+#[test]
+fn test_with_guard_read_only_no_write_back_needed() {
+    let src = r#"
+struct Cell:
+    var int value = 0
+
+    req int peek():
+        value
+
+var b'guard = Cell(10)
+var int seen = 0
+with b:
+    seen = b.peek()
+let _result = seen
+"#;
+    assert_eq!(run_src(src), Value::Int(10));
+}
+
+#[test]
+fn test_with_guard_write_then_read_reflects_mutation() {
+    let src = r#"
+struct Cell:
+    var int value = 0
+
+    def bump():
+        value += 1
+
+var b'guard = Cell(10)
+with b:
+    b.bump()
+let _result = b.value
+"#;
+    assert_eq!(run_src(src), Value::Int(11));
+}
+
+#[test]
+fn test_with_multiple_names() {
+    let src = r#"
+struct Counter:
+    var int value = 0
+
+    def increment():
+        value += 1
+
+var a'actor = Counter(0)
+var b'actor = Counter(10)
+with a, b:
+    a.increment()
+    b.increment()
+let _result = a.value + b.value
+"#;
+    assert_eq!(run_src(src), Value::Int(12));
+}
+
+#[test]
+fn test_with_plain_value_is_noop_passthrough() {
+    // A `with` on a value with no GPU/actor/guard qualifier degrades to running the
+    // body directly — there is nothing to acquire or write back.
+    let src = r#"
+var int x = 1
+with x:
+    x = x + 41
+let _result = x
+"#;
+    assert_eq!(run_src(src), Value::Int(42));
 }

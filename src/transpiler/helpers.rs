@@ -124,6 +124,17 @@ pub(crate) fn is_collection_type(ty: Option<&Type>) -> bool {
     }
 }
 
+/// Boring-side method names on `[T]` / `{K=V}` / `{T}` that require `&mut` access on their
+/// receiver (they mutate the collection in place). Every other built-in collection method
+/// (`len`, `contains`, `map`, `first`, …) is read-only. Used both to gate write access on
+/// `'actor`-qualified fields and to decide whether a bare array/dict/set parameter can be
+/// passed by reference (see infer_qualifiers.rs) instead of cloned.
+pub(crate) const MUTATING_COLLECTION_METHODS: &[&str] = &[
+    "append", "add", "push", "extend", "insert", "set", "remove", "removeAt", "remove_at",
+    "pop", "clear", "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup",
+    "retain", "truncate", "drain",
+];
+
 /// Normalize boring primitive type names (lowercase aliases) to Rust equivalents.
 /// Pass `use_rc = true` in single-thread mode so `string` maps to `Rc<str>` instead of `Arc<str>`.
 pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
@@ -131,17 +142,26 @@ pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
         "string"            => if use_rc { "Rc<str>".into() } else { "Arc<str>".into() },
         "str"               => "&str".into(),
         "String"            => "String".into(),
-        "int"    | "Int"    => "i64".into(),
-        "uint"   | "Uint"   => "u64".into(),
+        "int"    | "Int"    => "isize".into(),
+        "uint"   | "Uint"   => "usize".into(),
         "uint8"  | "Uint8"  => "u8".into(),
+        "int8"    | "Int8"    => "i8".into(),
+        "int16"   | "Int16"   => "i16".into(),
+        "int32"   | "Int32"   => "i32".into(),
+        "int64"   | "Int64"   => "i64".into(),
+        "int128"  | "Int128"  => "i128".into(),
+        "uint16"  | "Uint16"  => "u16".into(),
+        "uint32"  | "Uint32"  => "u32".into(),
+        "uint64"  | "Uint64"  => "u64".into(),
+        "uint128" | "Uint128" => "u128".into(),
         "float"  | "Float"  => "f64".into(),
         "bool"   | "Bool"   => "bool".into(),
         "void"   | "Void"   => "()".into(),
         "nil"    | "Nil"    => "()".into(),
         "never"  | "Never"  => "!".into(),
         // Rust numeric aliases pass through unchanged
-        "i8" | "i16" | "i32" | "i64" | "isize" => name.into(),
-        "u8" | "u16" | "u32" | "u64" | "usize" => name.into(),
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => name.into(),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => name.into(),
         "f32" | "f64" => name.into(),
         // Qualify stdlib module paths that may not be in scope
         other if other.starts_with("io::") => format!("std::{}", other),
@@ -178,11 +198,12 @@ pub(crate) fn binop_str(op: &BinOp) -> &'static str {
 /// Map boring method names to (rust_method, optional_suffix).
 pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static str>) {
     match name {
-        // len() returns usize; Boring's length/count returns int (i64).
-        "length" | "count" => ("len".into(), Some(" as i64")),
-        // len() called directly (not via length/count) — cast to u64 so comparisons
-        // with Boring's `uint` (u64) variables don't cause type mismatch errors.
-        "len"              => ("len".into(), Some(" as u64")),
+        // len() returns usize; Boring's length/count returns int (isize).
+        "length" | "count" => ("len".into(), Some(" as isize")),
+        // len() called directly (not via length/count) — cast to usize so comparisons
+        // with Boring's `uint` (usize) variables don't cause type mismatch errors.
+        // (usize is len()'s native return type, so this is a no-op cast kept for symmetry.)
+        "len"              => ("len".into(), Some(" as usize")),
         "isEmpty"          => ("is_empty".into(), None),
         "push"             => ("push".into(), None),
         // Vec::pop() returns Option<T>; unwrap to match Boring semantics (returns the value or default).
@@ -210,7 +231,7 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         // chars() returns Chars iterator in Rust; collect to Vec<Arc<str>> so .len() and indexing work.
         "chars"            => ("chars().map(|c| Arc::<str>::from(c.to_string())).collect::<Vec<Arc<str>>>".into(), Some("")),
         "trim"             => ("trim".into(), None),
-        "parse_int"        => ("parse::<i64>().ok".into(), Some("")),
+        "parse_int"        => ("parse::<isize>().ok".into(), Some("")),
         "parse_float"      => ("parse::<f64>().ok".into(), Some("")),
         "toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper" => ("to_uppercase".into(), None),
         "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => ("to_lowercase".into(), None),
@@ -267,8 +288,8 @@ pub(crate) fn is_option_expr(expr: &Expr) -> bool {
 /// Map boring field names to Rust field names.
 pub(crate) fn map_field(name: &str) -> &str {
     match name {
-        // len() returns usize in Rust; Boring's `int` is i64 — cast so the type matches.
-        "length" | "count" => "len() as i64",
+        // len() returns usize in Rust; Boring's `int` is isize — cast so the type matches.
+        "length" | "count" => "len() as isize",
         "isEmpty" => "is_empty()",
         other => other,
     }
@@ -1023,8 +1044,8 @@ pub(crate) fn collect_pattern_variants(pat: &Pattern, out: &mut Vec<String>) {
 
 /// Returns true if the Rust type string is a specific numeric type that may need coercion.
 pub(crate) fn is_specific_numeric_type(ty: &str) -> bool {
-    matches!(ty, "i8" | "i16" | "i32" | "i64" | "isize"
-               | "u8" | "u16" | "u32" | "u64" | "usize"
+    matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+               | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                | "f32" | "f64")
 }
 
@@ -1038,11 +1059,13 @@ pub(crate) fn wider_numeric_type(a: &str, b: &str) -> String {
             "u16"   => (0, 16),
             "u32"   => (0, 32),
             "u64"   => (0, 64),
+            "u128"  => (0, 128),
             "usize" => (0, 64),
             "i8"    => (1, 8),
             "i16"   => (1, 16),
             "i32"   => (1, 32),
             "i64"   => (1, 64),
+            "i128"  => (1, 128),
             "isize" => (1, 64),
             "f32"   => (2, 32),
             "f64"   => (2, 64),

@@ -23,14 +23,16 @@ let i16 b = 2
 let i32 c = 3
 let i64 d = 4
 let isize e = 5
-print a + b + c + d + e
+let sum_i = (a as int) + (b as int) + (c as int) + (d as int) + e
+print sum_i
 
 let u8 ua = 1
 let u16 ub = 2
 let u32 uc = 3
 let u64 ud = 4
 let usize ue = 5
-print ua + ub + uc + ud + ue
+let sum_u = (ua as uint) + (ub as uint) + (uc as uint) + (ud as uint) + ue
+print sum_u
 
 let int xint = 42
 print xint + 1

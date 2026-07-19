@@ -84,6 +84,15 @@ def string val_to_string(Value v):
         Value.Int(n): int_to_string(n)
         Value.Uint(n): "{n}"
         Value.Uint8(n): "{n}"
+        Value.Int8(n): "{n}"
+        Value.Int16(n): "{n}"
+        Value.Int32(n): "{n}"
+        Value.Int64(n): "{n}"
+        Value.Int128(n): "{n}"
+        Value.Uint16(n): "{n}"
+        Value.Uint32(n): "{n}"
+        Value.Uint64(n): "{n}"
+        Value.Uint128(n): "{n}"
         Value.Float(f): "{f}"
         Value.Str(s): s
         Value.Array(elems):
@@ -202,34 +211,11 @@ def bool values_equal(Value a, Value b):
             match b:
                 Value.Bool(y): x == y
                 _: false
-        Value.Int(x):
-            match b:
-                Value.Int(y): x == y
-                Value.Uint(y): x == (y as int)
-                Value.Uint8(y): x == (y as int)
-                Value.Float(y): float(x) == y
-                _: false
-        Value.Uint(x):
-            match b:
-                Value.Uint(y): x == y
-                Value.Int(y): (x as int) == y
-                Value.Uint8(y): x == (y as uint)
-                Value.Float(y): float(x) == y
-                _: false
-        Value.Uint8(x):
-            match b:
-                Value.Uint8(y): x == y
-                Value.Int(y): (x as int) == y
-                Value.Uint(y): (x as uint) == y
-                Value.Float(y): float(x) == y
-                _: false
         Value.Float(x):
             match b:
                 Value.Float(y): x == y
-                Value.Int(y): x == float(y)
-                Value.Uint(y): x == float(y)
-                Value.Uint8(y): x == float(y)
-                _: false
+                _:
+                    if let yv = value_as_float_numeric(b): x == yv else: false
         Value.Str(x):
             match b:
                 Value.Str(y): x == y
@@ -280,10 +266,21 @@ def bool values_equal(Value a, Value b):
             match b:
                 Value.Range(s2, e2, inc2, _): s1 == s2 and e1 == e2 and inc1 == inc2
                 _: false
+        # Any of the 12 numeric int-kinds (Int/Uint/Uint8/Int8../Uint128) — same-kind
+        # and cross-kind (including vs. Float) numeric equality, generalized instead
+        # of one hand-written match arm per pair.
         # Set/Dict/Object/closures/etc. — no cross-type numeric coercion applies,
         # so defer to native structural equality (this is also what set-literal
         # normalization relies on for order-independent set equality).
-        _: a == b
+        _:
+            guard let ka = num_kind_of(a) else: return a == b
+            guard let av = value_as_i128(a) else: return false
+            if let bv = value_as_i128(b):
+                av == bv
+            elif let bf = value_as_float_numeric(b):
+                (av as float) == bf
+            else:
+                false
 
 # ─── env_define ───────────────────────────────────────────────────────────────
 
@@ -318,6 +315,9 @@ def void register_stdlib(mut Interpreter interp):
 
     let uint8_fn = Value.NativeFn("uint8", Value.Nil)
     env_define(env, "uint8", uint8_fn, false)
+
+    for name in ["int8", "int16", "int32", "int64", "int128", "uint16", "uint32", "uint64", "uint128"]:
+        env_define(env, name, Value.NativeFn(name, Value.Nil), false)
 
     let float_fn = Value.NativeFn("float", Value.Nil)
     env_define(env, "float", float_fn, false)

@@ -3,6 +3,194 @@ use std::collections::{HashMap, VecDeque};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+// ─── Generic numeric promotion ───────────────────────────────────────────────
+//
+// Boring has 12 numeric Value kinds (Int/Uint/Uint8 plus the 9 fixed-width types).
+// Same-kind arithmetic is still hand-written per operator (native wrapping ops, same
+// as the original Int/Uint/Uint8 arms). This section generalizes the OTHER supported
+// case — mixing a fixed-width kind with the flexible bare `Int`/`Uint` literal kind
+// (e.g. `some_uint32_var + 1`) — instead of hand-writing the full pairwise matrix.
+// Mixing two *distinct* explicit fixed-width kinds directly (`uint16_val + int32_val`)
+// is intentionally unsupported (falls through to the existing "cannot add X and Y"
+// error, requiring an explicit cast) — this mirrors Rust's own refusal to implicitly
+// coerce between distinct integer types.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NumKind { Int, Uint, Uint8, Int8, Int16, Int32, Int64, Int128, Uint16, Uint32, Uint64, Uint128 }
+
+impl NumKind {
+    fn of(v: &Value) -> Option<NumKind> {
+        Some(match v {
+            Value::Int(_) => NumKind::Int,
+            Value::Uint(_) => NumKind::Uint,
+            Value::Uint8(_) => NumKind::Uint8,
+            Value::Int8(_) => NumKind::Int8,
+            Value::Int16(_) => NumKind::Int16,
+            Value::Int32(_) => NumKind::Int32,
+            Value::Int64(_) => NumKind::Int64,
+            Value::Int128(_) => NumKind::Int128,
+            Value::Uint16(_) => NumKind::Uint16,
+            Value::Uint32(_) => NumKind::Uint32,
+            Value::Uint64(_) => NumKind::Uint64,
+            Value::Uint128(_) => NumKind::Uint128,
+            _ => return None,
+        })
+    }
+
+    fn bits(self) -> u32 {
+        use NumKind::*;
+        match self {
+            Int8 | Uint8 => 8,
+            Int16 | Uint16 => 16,
+            Int32 | Uint32 => 32,
+            Int | Uint | Int64 | Uint64 => 64,
+            Int128 | Uint128 => 128,
+        }
+    }
+
+    fn signed(self) -> bool {
+        use NumKind::*;
+        matches!(self, Int | Int8 | Int16 | Int32 | Int64 | Int128)
+    }
+
+    fn is_bare(self) -> bool { matches!(self, NumKind::Int | NumKind::Uint) }
+
+    fn name(self) -> &'static str {
+        match self {
+            NumKind::Int => "int", NumKind::Uint => "uint", NumKind::Uint8 => "uint8",
+            NumKind::Int8 => "int8", NumKind::Int16 => "int16", NumKind::Int32 => "int32",
+            NumKind::Int64 => "int64", NumKind::Int128 => "int128",
+            NumKind::Uint16 => "uint16", NumKind::Uint32 => "uint32",
+            NumKind::Uint64 => "uint64", NumKind::Uint128 => "uint128",
+        }
+    }
+
+    /// Result kind when mixing two *different* kinds where at least one is the bare
+    /// `Int`/`Uint`. Returns `None` when neither is bare (unsupported direct mix).
+    ///
+    /// Rule: the wider kind wins. On a tied width with mixed signs: for every op
+    /// except `Sub`, unsigned wins (matches the original `Int`+`Uint` precedent,
+    /// symmetric regardless of operand order). `Sub`'s existing precedent is
+    /// order-dependent (`Uint - Int` stays Uint, `Int - Uint` stays Int) — generalized
+    /// here as "the LHS's kind wins on a tied-width sign mismatch".
+    fn promote(ka: NumKind, kb: NumKind, is_sub: bool) -> Option<NumKind> {
+        if ka == kb { return None; }
+        if !ka.is_bare() && !kb.is_bare() { return None; }
+        if ka.bits() != kb.bits() {
+            return Some(if ka.bits() > kb.bits() { ka } else { kb });
+        }
+        if ka.signed() == kb.signed() {
+            // Tied width, same sign, different kind label (bare vs. same-width specific
+            // type, e.g. `Int` vs `Int64`) — prefer the more specific, non-bare kind.
+            return Some(if ka.is_bare() { kb } else { ka });
+        }
+        if is_sub {
+            Some(ka)
+        } else {
+            Some(if ka.signed() { kb } else { ka }) // unsigned wins
+        }
+    }
+}
+
+/// Widen any numeric Value's payload into i128 staging space. Returns `None` for
+/// non-numeric values and for `Uint128` values above `i128::MAX` — that ultra-wide
+/// corner case is intentionally not supported for mixed-kind arithmetic (same-kind
+/// `Uint128 op Uint128` still works fully via native `u128` ops elsewhere).
+fn value_as_i128(v: &Value) -> Option<i128> {
+    Some(match v {
+        Value::Int(n) => *n as i128,
+        Value::Uint(n) => *n as i128,
+        Value::Uint8(n) => *n as i128,
+        Value::Int8(n) => *n as i128,
+        Value::Int16(n) => *n as i128,
+        Value::Int32(n) => *n as i128,
+        Value::Int64(n) => *n as i128,
+        Value::Int128(n) => *n,
+        Value::Uint16(n) => *n as i128,
+        Value::Uint32(n) => *n as i128,
+        Value::Uint64(n) => *n as i128,
+        Value::Uint128(n) => i128::try_from(*n).ok()?,
+        _ => return None,
+    })
+}
+
+/// Narrow an i128 staging value back into `kind`'s native Value (wrapping, matching
+/// the `wrapping_*` semantics used throughout the same-kind arithmetic arms).
+fn i128_to_kind(kind: NumKind, x: i128) -> Value {
+    match kind {
+        NumKind::Int => Value::Int(x as i64),
+        NumKind::Uint => Value::Uint(x as u64),
+        NumKind::Uint8 => Value::Uint8(x as u8),
+        NumKind::Int8 => Value::Int8(x as i8),
+        NumKind::Int16 => Value::Int16(x as i16),
+        NumKind::Int32 => Value::Int32(x as i32),
+        NumKind::Int64 => Value::Int64(x as i64),
+        NumKind::Int128 => Value::Int128(x),
+        NumKind::Uint16 => Value::Uint16(x as u16),
+        NumKind::Uint32 => Value::Uint32(x as u32),
+        NumKind::Uint64 => Value::Uint64(x as u64),
+        NumKind::Uint128 => Value::Uint128(x as u128),
+    }
+}
+
+/// Generic fallback for a binary numeric op between two *different* numeric kinds,
+/// used from the catch-all arm of each arithmetic/bitwise operator's match — after
+/// the hand-written same-kind and legacy `Int`/`Uint`/`Uint8` arms have already had
+/// first shot. Returns `None` when the pair isn't a supported mixed combination
+/// (the caller falls through to the existing "cannot <op> X and Y" error).
+fn eval_numeric_mixed(l: &Value, r: &Value, op: &BinOp, line: usize, rcol: usize, rlen: usize) -> Option<Result<Value, Signal>> {
+    let ka = NumKind::of(l)?;
+    let kb = NumKind::of(r)?;
+    let is_sub = matches!(op, BinOp::Sub);
+    let result_kind = NumKind::promote(ka, kb, is_sub)?;
+    let lv = value_as_i128(l)?;
+    let rv = value_as_i128(r)?;
+
+    if !result_kind.signed() {
+        // A negative LHS can never land in an unsigned result.
+        if ka.signed() && lv < 0 {
+            return Some(Err(err_span(format!("cannot combine negative {} with unsigned type", l.type_name()), line, rcol, rlen)));
+        }
+        // A negative RHS is allowed only for Sub (subtracting a negative == adding),
+        // mirroring the original Uint - Int special case.
+        if kb.signed() && rv < 0 && !is_sub {
+            return Some(Err(err_span(format!("cannot combine negative {} with unsigned type", r.type_name()), line, rcol, rlen)));
+        }
+    }
+
+    let result = match op {
+        BinOp::Add => lv.wrapping_add(rv),
+        BinOp::Sub => {
+            if !result_kind.signed() && rv >= 0 && rv > lv {
+                return Some(Err(err_span(format!("{} subtraction underflow", result_kind.name()), line, rcol, rlen)));
+            }
+            lv.wrapping_sub(rv)
+        }
+        BinOp::Mul => lv.wrapping_mul(rv),
+        BinOp::Div => {
+            if rv == 0 { return Some(Err(err_span("division by zero", line, rcol, rlen))); }
+            lv.wrapping_div(rv)
+        }
+        BinOp::Rem => {
+            if rv == 0 { return Some(Err(err_span("remainder by zero", line, rcol, rlen))); }
+            lv.wrapping_rem(rv)
+        }
+        BinOp::BitAnd => lv & rv,
+        BinOp::BitOr  => lv | rv,
+        BinOp::BitXor => lv ^ rv,
+        BinOp::Shl => {
+            if rv < 0 { return Some(Err(err_span("shift amount cannot be negative", line, rcol, rlen))); }
+            lv.wrapping_shl(rv as u32)
+        }
+        BinOp::Shr => {
+            if rv < 0 { return Some(Err(err_span("shift amount cannot be negative", line, rcol, rlen))); }
+            lv.wrapping_shr(rv as u32)
+        }
+        _ => return None,
+    };
+    Some(Ok(i128_to_kind(result_kind, result)))
+}
+
 /// Parse `Screen(Dimension(w,h), title="...")` or `Screen(w, h, title="...")` arguments.
 fn parse_screen_args(args: &[Value]) -> (u64, u64, String) {
     let mut width: u64 = 800;
@@ -1257,178 +1445,22 @@ impl Interpreter {
         let r = self.eval_expr(rhs, env)?;
 
         match op {
-            BinOp::Add => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_add(b))),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_add(b))),
-                (Value::Uint(a), Value::Int(b)) => {
-                    if b < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a.wrapping_add(b as u64))) }
-                }
-                (Value::Int(a), Value::Uint(b)) => {
-                    if a < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
-                    else { Ok(Value::Uint((a as u64).wrapping_add(b))) }
-                }
-                (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_add(b))),
-                (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_add(b as u64))),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-                (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
-                (Value::Array(a), Value::Array(b)) => {
-                    let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
-                    new_vec.extend(b.iter().cloned());
-                    Ok(Value::Array(new_vec.into()))
-                }
-                (a, b) => {
-                    // Try user-defined operator overload first (e.g. `Vec2 + Vec2`)
-                    if let Some(result) = self.try_operator_method(&a, "add", b.clone(), line)? {
-                        return Ok(result);
-                    }
-                    // RustType / opaque Object arithmetic: Instant + Duration, etc.
-                    // These are stubs in the interpreter (no real time); return the left
-                    // operand so `let deadline = Instant.now() + dur` yields an opaque value
-                    // that timeout/wait stubs can ignore.
-                    if matches!(&a, Value::RustType { .. } | Value::Object { .. }) {
-                        return Ok(a);
-                    }
-                    Err(err_span(format!("cannot add {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
-                }
-            },
-            BinOp::Sub => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(b))),
-                (Value::Uint(a), Value::Uint(b)) => {
-                    if b > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a - b)) }
-                }
-                (Value::Uint8(a), Value::Uint8(b)) => {
-                    if b > a { Err(err_span("uint8 subtraction underflow", line, rcol, rlen)) }
-                    else { Ok(Value::Uint8(a - b)) }
-                }
-                (Value::Uint(a), Value::Int(b)) => {
-                    if b < 0 { Ok(Value::Uint(a.wrapping_add((-b) as u64))) }
-                    else if (b as u64) > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a - b as u64)) }
-                }
-                (Value::Int(a), Value::Uint(b)) => Ok(Value::Int(a - b as i64)),
-                (Value::Uint8(a), Value::Uint(b)) => {
-                    let au = a as u64;
-                    if b > au { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(au - b)) }
-                }
-                (Value::Uint(a), Value::Uint8(b)) => {
-                    let bu = b as u64;
-                    if bu > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a - bu)) }
-                }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
-                (a, b) => {
-                    if let Some(result) = self.try_operator_method(&a, "sub", b.clone(), line)? {
-                        Ok(result)
-                    } else {
-                        Err(err_span(format!("cannot subtract {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
-                    }
-                }
-            },
-            BinOp::Mul => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_mul(b))),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_mul(b))),
-                (Value::Uint(a), Value::Int(b)) => {
-                    if b < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a.wrapping_mul(b as u64))) }
-                }
-                (Value::Int(a), Value::Uint(b)) => {
-                    if a < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
-                    else { Ok(Value::Uint((a as u64).wrapping_mul(b))) }
-                }
-                (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_mul(b))),
-                (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_mul(b as u64))),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
-                (a, b) => {
-                    if let Some(result) = self.try_operator_method(&a, "mul", b.clone(), line)? {
-                        Ok(result)
-                    } else {
-                        Err(err_span(format!("cannot multiply {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
-                    }
-                }
-            },
-            BinOp::Div => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => {
-                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Int(a / b)) }
-                }
-                (Value::Uint(a), Value::Uint(b)) => {
-                    Ok(Value::Uint(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
-                }
-                (Value::Uint8(a), Value::Uint8(b)) => {
-                    Ok(Value::Uint8(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
-                }
-                (Value::Uint(a), Value::Int(b)) => {
-                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
-                    else if b < 0 { Err(err_span("cannot divide Uint by negative Int", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a / b as u64)) }
-                }
-                (Value::Int(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
-                    else { Ok(Value::Int(a / b as i64)) }
-                }
-                (Value::Uint8(a), Value::Uint(b)) => {
-                    Ok(Value::Uint((a as u64).checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
-                }
-                (Value::Uint(a), Value::Uint8(b)) => {
-                    Ok(Value::Uint(a.checked_div(b as u64).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
-                }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
-                (a, b) => {
-                    if let Some(result) = self.try_operator_method(&a, "div", b.clone(), line)? {
-                        Ok(result)
-                    } else {
-                        Err(err_span(format!("cannot divide {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
-                    }
-                }
-            },
-            BinOp::Rem => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int(a % b)) }
-                }
-                (Value::Uint(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % b)) }
-                }
-                (Value::Uint8(a), Value::Uint8(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint8(a % b)) }
-                }
-                (Value::Uint(a), Value::Int(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
-                    else if b < 0 { Err(err_span("cannot take remainder of Uint by negative Int", line, rcol, rlen)) }
-                    else { Ok(Value::Uint(a % b as u64)) }
-                }
-                (Value::Int(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
-                    else { Ok(Value::Int(a % b as i64)) }
-                }
-                (Value::Uint8(a), Value::Uint(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint((a as u64) % b)) }
-                }
-                (Value::Uint(a), Value::Uint8(b)) => {
-                    if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % (b as u64))) }
-                }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
-                (Value::Int(a),   Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
-                (Value::Float(a), Value::Int(b))   => Ok(Value::Float(a % (b as f64))),
-                (a, b) => {
-                    if let Some(result) = self.try_operator_method(&a, "rem", b.clone(), line)? {
-                        Ok(result)
-                    } else {
-                        Err(err_span(format!("cannot remainder {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
-                    }
-                }
-            },
+            // Each arithmetic/bitwise op is dispatched to its own method rather than inlined
+            // here — with 12 numeric kinds, a single function holding all ten ops' match arms
+            // inline gave `eval_binop` a huge debug-mode stack frame (every arm's temporaries
+            // count toward the frame regardless of which branch runs), which blew the stack on
+            // deeply-recursive struct-method call chains. Splitting scopes each op's frame to
+            // only when that op actually executes.
+            BinOp::Add => self.eval_add(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Sub => self.eval_sub(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Mul => self.eval_mul(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Div => self.eval_div(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Rem => self.eval_rem(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::BitAnd => self.eval_bitand(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::BitOr => self.eval_bitor(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::BitXor => self.eval_bitxor(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Shl => self.eval_shl(l, r, line, lcol, llen, rcol, rlen),
+            BinOp::Shr => self.eval_shr(l, r, line, lcol, llen, rcol, rlen),
             BinOp::Eq => {
                 if let Some(result) = self.try_operator_method(&l, "eq", r.clone(), line)? {
                     Ok(result)
@@ -1486,48 +1518,6 @@ impl Interpreter {
                 }
             }
             BinOp::And | BinOp::Or => unreachable!(),
-            BinOp::BitAnd => match (l, r) {
-                (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a & b)),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a & b)),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a & b)),
-                (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a & b as u64)),
-                (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a & b as i64)),
-                (a, b) => Err(err_span(format!("cannot bitwise-and {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
-            },
-            BinOp::BitOr => match (l, r) {
-                (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a | b)),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a | b)),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a | b)),
-                (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a | b as u64)),
-                (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a | b as i64)),
-                (a, b) => Err(err_span(format!("cannot bitwise-or {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
-            },
-            BinOp::BitXor => match (l, r) {
-                (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a ^ b)),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a ^ b)),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a ^ b)),
-                (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a ^ b as u64)),
-                (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a ^ b as i64)),
-                (a, b) => Err(err_span(format!("cannot bitwise-xor {} and {}", a.type_name(), b.type_name()), line, lcol, llen)),
-            },
-            BinOp::Shl => match (l, r) {
-                (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shl(b as u32))),
-                (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shl(b as u32))),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shl(b as u32))),
-                (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
-                (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
-                (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
-            },
-            BinOp::Shr => match (l, r) {
-                (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shr(b as u32))),
-                (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shr(b as u32))),
-                (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shr(b as u32))),
-                (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
-                (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
-                (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
-                (a, b) => Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen)),
-            },
             BinOp::Is => {
                 // Case 1: `x is nil` — nil check
                 if matches!(r, Value::Nil) {
@@ -1576,40 +1566,461 @@ impl Interpreter {
         }
     }
 
+    // Each of the following ten methods holds one arithmetic/bitwise operator's full
+    // match arms (see the doc comment on the `eval_binop` dispatch above for why these
+    // are split into separate functions rather than inlined into one big match).
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_add(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_add(b))),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_add(b))),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_add(b))),
+            (Value::Uint(a), Value::Int(b)) => {
+                if b < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a.wrapping_add(b as u64))) }
+            }
+            (Value::Int(a), Value::Uint(b)) => {
+                if a < 0 { Err(err_span("cannot add negative Int to Uint", line, rcol, rlen)) }
+                else { Ok(Value::Uint((a as u64).wrapping_add(b))) }
+            }
+            (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_add(b))),
+            (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_add(b as u64))),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.wrapping_add(b))),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.wrapping_add(b))),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.wrapping_add(b))),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.wrapping_add(b))),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.wrapping_add(b))),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.wrapping_add(b))),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_add(b))),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_add(b))),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_add(b))),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
+            (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
+            (Value::Array(a), Value::Array(b)) => {
+                let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
+                new_vec.extend(b.iter().cloned());
+                Ok(Value::Array(new_vec.into()))
+            }
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Add, line, rcol, rlen) {
+                    return result;
+                }
+                // Try user-defined operator overload first (e.g. `Vec2 + Vec2`)
+                if let Some(result) = self.try_operator_method(&a, "add", b.clone(), line)? {
+                    return Ok(result);
+                }
+                // RustType / opaque Object arithmetic: Instant + Duration, etc.
+                // These are stubs in the interpreter (no real time); return the left
+                // operand so `let deadline = Instant.now() + dur` yields an opaque value
+                // that timeout/wait stubs can ignore.
+                if matches!(&a, Value::RustType { .. } | Value::Object { .. }) {
+                    return Ok(a);
+                }
+                Err(err_span(format!("cannot add {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_sub(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_sub(b))),
+            (Value::Uint(a), Value::Uint(b)) => {
+                if b > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a - b)) }
+            }
+            (Value::Uint8(a), Value::Uint8(b)) => {
+                if b > a { Err(err_span("uint8 subtraction underflow", line, rcol, rlen)) }
+                else { Ok(Value::Uint8(a - b)) }
+            }
+            (Value::Uint(a), Value::Int(b)) => {
+                if b < 0 { Ok(Value::Uint(a.wrapping_add((-b) as u64))) }
+                else if (b as u64) > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a - b as u64)) }
+            }
+            (Value::Int(a), Value::Uint(b)) => Ok(Value::Int(a - b as i64)),
+            (Value::Uint8(a), Value::Uint(b)) => {
+                let au = a as u64;
+                if b > au { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                else { Ok(Value::Uint(au - b)) }
+            }
+            (Value::Uint(a), Value::Uint8(b)) => {
+                let bu = b as u64;
+                if bu > a { Err(err_span("uint subtraction underflow", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a - bu)) }
+            }
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.wrapping_sub(b))),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.wrapping_sub(b))),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.wrapping_sub(b))),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.wrapping_sub(b))),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.wrapping_sub(b))),
+            (Value::Uint16(a), Value::Uint16(b)) => {
+                if b > a { Err(err_span("uint16 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint16(a - b)) }
+            }
+            (Value::Uint32(a), Value::Uint32(b)) => {
+                if b > a { Err(err_span("uint32 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint32(a - b)) }
+            }
+            (Value::Uint64(a), Value::Uint64(b)) => {
+                if b > a { Err(err_span("uint64 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint64(a - b)) }
+            }
+            (Value::Uint128(a), Value::Uint128(b)) => {
+                if b > a { Err(err_span("uint128 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint128(a - b)) }
+            }
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Sub, line, rcol, rlen) {
+                    return result;
+                }
+                if let Some(result) = self.try_operator_method(&a, "sub", b.clone(), line)? {
+                    Ok(result)
+                } else {
+                    Err(err_span(format!("cannot subtract {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_mul(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_mul(b))),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_mul(b))),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_mul(b))),
+            (Value::Uint(a), Value::Int(b)) => {
+                if b < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a.wrapping_mul(b as u64))) }
+            }
+            (Value::Int(a), Value::Uint(b)) => {
+                if a < 0 { Err(err_span("cannot multiply Uint by negative Int", line, rcol, rlen)) }
+                else { Ok(Value::Uint((a as u64).wrapping_mul(b))) }
+            }
+            (Value::Uint8(a), Value::Uint(b)) => Ok(Value::Uint((a as u64).wrapping_mul(b))),
+            (Value::Uint(a), Value::Uint8(b)) => Ok(Value::Uint(a.wrapping_mul(b as u64))),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.wrapping_mul(b))),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.wrapping_mul(b))),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.wrapping_mul(b))),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.wrapping_mul(b))),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.wrapping_mul(b))),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.wrapping_mul(b))),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_mul(b))),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_mul(b))),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_mul(b))),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Mul, line, rcol, rlen) {
+                    return result;
+                }
+                if let Some(result) = self.try_operator_method(&a, "mul", b.clone(), line)? {
+                    Ok(result)
+                } else {
+                    Err(err_span(format!("cannot multiply {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_div(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => {
+                if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) } else { Ok(Value::Int(a / b)) }
+            }
+            (Value::Uint(a), Value::Uint(b)) => {
+                Ok(Value::Uint(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+            }
+            (Value::Uint8(a), Value::Uint8(b)) => {
+                Ok(Value::Uint8(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+            }
+            (Value::Uint(a), Value::Int(b)) => {
+                if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
+                else if b < 0 { Err(err_span("cannot divide Uint by negative Int", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a / b as u64)) }
+            }
+            (Value::Int(a), Value::Uint(b)) => {
+                if b == 0 { Err(err_span("division by zero", line, rcol, rlen)) }
+                else { Ok(Value::Int(a / b as i64)) }
+            }
+            (Value::Uint8(a), Value::Uint(b)) => {
+                Ok(Value::Uint((a as u64).checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+            }
+            (Value::Uint(a), Value::Uint8(b)) => {
+                Ok(Value::Uint(a.checked_div(b as u64).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?))
+            }
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Div, line, rcol, rlen) {
+                    return result;
+                }
+                if let Some(result) = self.try_operator_method(&a, "div", b.clone(), line)? {
+                    Ok(result)
+                } else {
+                    Err(err_span(format!("cannot divide {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_rem(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a), Value::Int(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int(a % b)) }
+            }
+            (Value::Uint(a), Value::Uint(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % b)) }
+            }
+            (Value::Uint8(a), Value::Uint8(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint8(a % b)) }
+            }
+            (Value::Uint(a), Value::Int(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
+                else if b < 0 { Err(err_span("cannot take remainder of Uint by negative Int", line, rcol, rlen)) }
+                else { Ok(Value::Uint(a % b as u64)) }
+            }
+            (Value::Int(a), Value::Uint(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) }
+                else { Ok(Value::Int(a % b as i64)) }
+            }
+            (Value::Uint8(a), Value::Uint(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint((a as u64) % b)) }
+            }
+            (Value::Uint(a), Value::Uint8(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint(a % (b as u64))) }
+            }
+            (Value::Int8(a), Value::Int8(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int8(a % b)) }
+            }
+            (Value::Int16(a), Value::Int16(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int16(a % b)) }
+            }
+            (Value::Int32(a), Value::Int32(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int32(a % b)) }
+            }
+            (Value::Int64(a), Value::Int64(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int64(a % b)) }
+            }
+            (Value::Int128(a), Value::Int128(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Int128(a % b)) }
+            }
+            (Value::Uint16(a), Value::Uint16(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint16(a % b)) }
+            }
+            (Value::Uint32(a), Value::Uint32(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint32(a % b)) }
+            }
+            (Value::Uint64(a), Value::Uint64(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint64(a % b)) }
+            }
+            (Value::Uint128(a), Value::Uint128(b)) => {
+                if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint128(a % b)) }
+            }
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+            (Value::Int(a),   Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
+            (Value::Float(a), Value::Int(b))   => Ok(Value::Float(a % (b as f64))),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Rem, line, rcol, rlen) {
+                    return result;
+                }
+                if let Some(result) = self.try_operator_method(&a, "rem", b.clone(), line)? {
+                    Ok(result)
+                } else {
+                    Err(err_span(format!("cannot remainder {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_bitand(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a & b)),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a & b)),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a & b)),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a & b)),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a & b)),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a & b)),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a & b)),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a & b)),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a & b)),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a & b)),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a & b)),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a & b)),
+            (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a & b as u64)),
+            (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a & b as i64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::BitAnd, line, rcol, rlen) { return result; }
+                Err(err_span(format!("cannot bitwise-and {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_bitor(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a | b)),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a | b)),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a | b)),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a | b)),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a | b)),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a | b)),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a | b)),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a | b)),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a | b)),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a | b)),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a | b)),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a | b)),
+            (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a | b as u64)),
+            (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a | b as i64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::BitOr, line, rcol, rlen) { return result; }
+                Err(err_span(format!("cannot bitwise-or {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_bitxor(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a),  Value::Int(b))  => Ok(Value::Int(a ^ b)),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a ^ b)),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a ^ b)),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a ^ b)),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a ^ b)),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a ^ b)),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a ^ b)),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a ^ b)),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a ^ b)),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a ^ b)),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a ^ b)),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a ^ b)),
+            (Value::Uint(a), Value::Int(b))  => Ok(Value::Uint(a ^ b as u64)),
+            (Value::Int(a),  Value::Uint(b)) => Ok(Value::Int(a ^ b as i64)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::BitXor, line, rcol, rlen) { return result; }
+                Err(err_span(format!("cannot bitwise-xor {} and {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_shl(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shl(b as u32))),
+            (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shl(b as u32))),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shl(b as u32))),
+            (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shl(b as u32))),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.wrapping_shl(b as u32))),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.wrapping_shl(b as u32))),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.wrapping_shl(b as u32))),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.wrapping_shl(b as u32))),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.wrapping_shl(b as u32))),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.wrapping_shl(b as u32))),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_shl(b))),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_shl(b as u32))),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_shl(b as u32))),
+            (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Shl, line, rcol, rlen) { return result; }
+                Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_shr(&mut self, l: Value, r: Value, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Eval {
+        match (l, r) {
+            (Value::Int(a),  Value::Int(b))  if b >= 0 => Ok(Value::Int(a.wrapping_shr(b as u32))),
+            (Value::Uint(a), Value::Int(b))  if b >= 0 => Ok(Value::Uint(a.wrapping_shr(b as u32))),
+            (Value::Uint(a), Value::Uint(b)) => Ok(Value::Uint(a.wrapping_shr(b as u32))),
+            (Value::Uint8(a), Value::Int(b)) if b >= 0 => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
+            (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.wrapping_shr(b as u32))),
+            (Value::Int8(a), Value::Int8(b)) => Ok(Value::Int8(a.wrapping_shr(b as u32))),
+            (Value::Int16(a), Value::Int16(b)) => Ok(Value::Int16(a.wrapping_shr(b as u32))),
+            (Value::Int32(a), Value::Int32(b)) => Ok(Value::Int32(a.wrapping_shr(b as u32))),
+            (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a.wrapping_shr(b as u32))),
+            (Value::Int128(a), Value::Int128(b)) => Ok(Value::Int128(a.wrapping_shr(b as u32))),
+            (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.wrapping_shr(b as u32))),
+            (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_shr(b))),
+            (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_shr(b as u32))),
+            (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_shr(b as u32))),
+            (_, Value::Int(b)) if b < 0 => Err(err_span("shift amount cannot be negative", line, rcol, rlen)),
+            (a, b) => {
+                if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Shr, line, rcol, rlen) { return result; }
+                Err(err_span(format!("cannot shift {} by {}", a.type_name(), b.type_name()), line, lcol, llen))
+            }
+        }
+    }
+
     // Cross-numeric-type equality (Int/Uint/Uint8/Float), matching the promotions
     // `compare_values` applies for `<`/`>`/etc. — otherwise derived PartialEq treats
     // e.g. Value::Int(5) and Value::Uint(5) as unequal since they're different variants.
     pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
-        match (l, r) {
-            (Value::Uint(a), Value::Int(b)) => (*a as i128) == (*b as i128),
-            (Value::Int(a), Value::Uint(b)) => (*a as i128) == (*b as i128),
-            (Value::Uint8(a), Value::Int(b)) => (*a as i128) == (*b as i128),
-            (Value::Int(a), Value::Uint8(b)) => (*a as i128) == (*b as i128),
-            (Value::Uint8(a), Value::Uint(b)) => (*a as u64) == *b,
-            (Value::Uint(a), Value::Uint8(b)) => *a == (*b as u64),
-            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
-            (Value::Uint(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Uint(b)) => *a == (*b as f64),
-            (Value::Uint8(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Uint8(b)) => *a == (*b as f64),
-            _ => l == r,
+        // Float mixed with any integer kind — compare as f64 (generalizes the old
+        // Int/Uint/Uint8-only arms to all 12 numeric kinds, fixing the pre-existing gap
+        // where Uint8 vs Float wasn't wired in here).
+        if let Value::Float(a) = l {
+            if let Some(b) = value_as_i128(r) { return *a == b as f64; }
         }
+        if let Value::Float(b) = r {
+            if let Some(a) = value_as_i128(l) { return a as f64 == *b; }
+        }
+        // Two different integer kinds — compare via i128 staging (same-kind pairs fall
+        // through to the derived `l == r` below, which handles full-width Uint128/Int128).
+        if let (Some(ka), Some(kb)) = (NumKind::of(l), NumKind::of(r)) {
+            if ka != kb {
+                if let (Some(a), Some(b)) = (value_as_i128(l), value_as_i128(r)) {
+                    return a == b;
+                }
+            }
+        }
+        l == r
     }
 
     pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
-        let ord = match (&l, &r) {
-            (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            (Value::Uint(a), Value::Uint(b)) => a.cmp(b),
-            (Value::Uint8(a), Value::Uint8(b)) => a.cmp(b),
-            // Cross Int/Uint comparison: promote both to i128 to handle all cases safely
-            (Value::Uint(a), Value::Int(b)) => (*a as i128).cmp(&(*b as i128)),
-            (Value::Int(a), Value::Uint(b)) => (*a as i128).cmp(&(*b as i128)),
-            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Str(a), Value::Str(b)) => a.cmp(b),
-            _ => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+        let ord = if let (Value::Float(a), Value::Float(b)) = (&l, &r) {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let Value::Float(a) = &l {
+            match value_as_i128(&r) {
+                Some(b) => a.partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else if let Value::Float(b) = &r {
+            match value_as_i128(&l) {
+                Some(a) => (a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else if let (Value::Str(a), Value::Str(b)) = (&l, &r) {
+            a.cmp(b)
+        } else if let (Value::Uint128(a), Value::Uint128(b)) = (&l, &r) {
+            a.cmp(b)
+        } else if let (Value::Int128(a), Value::Int128(b)) = (&l, &r) {
+            a.cmp(b)
+        } else if NumKind::of(&l).is_some() && NumKind::of(&r).is_some() {
+            match (value_as_i128(&l), value_as_i128(&r)) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else {
+            return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col));
         };
         Ok(Value::Bool(pred(ord)))
     }

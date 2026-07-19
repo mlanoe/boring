@@ -151,6 +151,7 @@ interp_test!(enums);
 interp_test!(streams);
 interp_test!(newtypes);
 interp_test!(guard);
+interp_test!(with_stmt);
 interp_test!(generics);
 interp_test!(operators);
 interp_test!(macros);

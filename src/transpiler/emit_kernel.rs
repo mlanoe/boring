@@ -41,6 +41,77 @@ use super::Transpiler;
 use crate::ast::{Arg, GpuQual, InitDecl, KernelBlockStmt, KernelDecl, KernelFieldDecl, Stmt, Type};
 
 impl Transpiler {
+    /// If `s` declares a name initialized directly from a bare kernel-field read
+    /// (`let py'gpu'unified = k.y`, or, with the qualifier inferred, plain
+    /// `let py = k.y`), registers it as a resident alias (`gpu_resident_vars`) and
+    /// emits nothing at all — no Rust binding exists for `py`; its only legal use is
+    /// as the subject of a `with` block (`emit_stmt::emit_with` resolves it back to
+    /// `k.copy_y_to_host`/`copy_y_to_device`), which is also all the checker allows
+    /// (`Binding::resident_from_field`, `Checker::infer_gpu_resident` — same
+    /// inference, mirrored here). Returns `true` when handled so the caller skips
+    /// ordinary `let` codegen.
+    ///
+    /// Otherwise returns `false` — this also covers a `'gpu'unified`/`'gpu'global`
+    /// array *literal* (`examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for
+    /// ..N]`), which is just a plain host array today (freely indexed/assigned, no
+    /// `with` required) and falls through to ordinary `let` codegen unchanged.
+    pub(crate) fn try_emit_gpu_resident_let(&mut self, s: &LetStmt) -> bool {
+        if self.kernel_decls.is_empty() {
+            return false;
+        }
+        // An explicit annotation of anything OTHER than 'gpu'unified/'gpu'global
+        // means this isn't our concern (e.g. `let [float] n = k.alpha`, reading a
+        // kernel field into a differently-qualified/plain binding on purpose).
+        let has_explicit_qual = match &s.ty {
+            Some(ty) => ty.gpu_resident_qual().is_some(),
+            None => false,
+        };
+        if s.ty.is_some() && !has_explicit_qual {
+            return false;
+        }
+        let Some(val) = &s.value else { return false };
+        let ExprKind::Field(obj, field) = &val.kind else { return false };
+        let ExprKind::Var(kvar) = &obj.kind else { return false };
+        let Some(kname) = self.kernel_vars.get(kvar.as_str()) else { return false };
+        if !has_explicit_qual {
+            // No annotation at all — only infer residency when the kernel's own
+            // field declaration actually says `'unified`/`'global` on an array (the
+            // same gate `try_emit_kernel_field_read` uses below); an untyped read of
+            // a scalar or other-qualified field is just an ordinary field access.
+            let is_gpu_array_field = self.kernel_decls.get(kname)
+                .and_then(|decl| decl.fields.iter().find(|f| &f.name == field))
+                .map(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global)
+                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                .unwrap_or(false);
+            if !is_gpu_array_field { return false; }
+        }
+        self.gpu_resident_vars.insert(s.name.clone(), (kvar.clone(), field.clone()));
+        true
+    }
+
+    /// If `s`'s initializer is `GPU(n)`, registers `s.name` as a GPU-device handle
+    /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
+    /// `emit_call`'s own `"GPU"` special case (this function only adds the
+    /// tracking `try_emit_gpu_device_let` needs on top of that shared emission —
+    /// see `gpu_device_vars`'s doc comment for why every index resolves to the
+    /// same single real adapter on wgpu) and `emit_methods.rs`'s method-call
+    /// rewrite for `.name()`/`.totalMem()`/etc on a tracked variable.
+    pub(crate) fn try_emit_gpu_device_let(&mut self, s: &LetStmt) -> bool {
+        if !self.is_gpu_target {
+            return false;
+        }
+        let Some(val) = &s.value else { return false };
+        let ExprKind::Call(callee, _) = &val.kind else { return false };
+        let ExprKind::Var(name) = &callee.kind else { return false };
+        if name != "GPU" { return false; }
+        // Routes through emit_call's own "GPU" special case (emits a plain usize).
+        let expr_s = self.emit_expr(val);
+        self.gpu_device_vars.insert(s.name.clone());
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        self.line(&format!("{} {} = {};", kw, s.name, expr_s));
+        true
+    }
+
     /// If `s`'s initializer is a call to a known kernel type, emit the GPU
     /// construction code (device/queue-backed wrapper + host->device buffer
     /// copies / scalar field sets) and return `true`. Otherwise, does nothing
@@ -321,7 +392,7 @@ impl Transpiler {
     }
 }
 
-fn array_inner_type(ty: &Type) -> Type {
+pub(crate) fn array_inner_type(ty: &Type) -> Type {
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => (**inner).clone(),
         other => other.clone(),
@@ -330,15 +401,35 @@ fn array_inner_type(ty: &Type) -> Type {
 
 /// GPU-buffer element type for a boring scalar type (matches
 /// `wgpu::host::host_scalar_type` — GPU buffers always use 32-bit elements).
-fn kernel_host_scalar_type(ty: &Type) -> &'static str {
+pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
     match ty {
         Type::Int   => "i32",
         Type::Uint  => "u32",
+        Type::Uint8 => "u8",
+        Type::Int8   => "i8",
+        Type::Int16  => "i16",
+        Type::Int32  => "i32",
+        Type::Int64  => "i64",
+        Type::Int128 => "i128",
+        Type::Uint16 => "u16",
+        Type::Uint32 => "u32",
+        Type::Uint64 => "u64",
+        Type::Uint128 => "u128",
         Type::Float => "f32",
         Type::Bool  => "bool",
         Type::Named(n) => match n.as_str() {
             "int"                    => "i32",
             "uint"                   => "u32",
+            "uint8"                  => "u8",
+            "int8"                   => "i8",
+            "int16"                  => "i16",
+            "int32"                  => "i32",
+            "int64"                  => "i64",
+            "int128"                 => "i128",
+            "uint16"                 => "u16",
+            "uint32"                 => "u32",
+            "uint64"                 => "u64",
+            "uint128"                => "u128",
             "float"                  => "f32",
             "bool"                   => "bool",
             _                        => "i64",
@@ -350,14 +441,36 @@ fn kernel_host_scalar_type(ty: &Type) -> &'static str {
 
 /// Host-side (non-GPU) element type a value read back from a GPU buffer
 /// should be converted to — boring `int`/`float` are `i64`/`f64` everywhere
-/// outside a kernel buffer.
-fn kernel_host_element_type(ty: &Type) -> &'static str {
+/// outside a kernel buffer. Explicit fixed-width types keep their own exact
+/// width (there's no "narrow for GPU-buffer efficiency" concept once the
+/// width is already explicit).
+pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
     match ty {
         Type::Int | Type::Uint => "i64",
+        Type::Uint8 => "u8",
+        Type::Int8   => "i8",
+        Type::Int16  => "i16",
+        Type::Int32  => "i32",
+        Type::Int64  => "i64",
+        Type::Int128 => "i128",
+        Type::Uint16 => "u16",
+        Type::Uint32 => "u32",
+        Type::Uint64 => "u64",
+        Type::Uint128 => "u128",
         Type::Float => "f64",
         Type::Bool => "bool",
         Type::Named(n) => match n.as_str() {
             "int" | "uint" => "i64",
+            "uint8"        => "u8",
+            "int8"         => "i8",
+            "int16"        => "i16",
+            "int32"        => "i32",
+            "int64"        => "i64",
+            "int128"       => "i128",
+            "uint16"       => "u16",
+            "uint32"       => "u32",
+            "uint64"       => "u64",
+            "uint128"      => "u128",
             "float"        => "f64",
             "bool"         => "bool",
             _              => "i64",

@@ -94,6 +94,15 @@ fn fmt_type(ty: &Type) -> String {
         Type::Int    => "int".into(),
         Type::Uint   => "uint".into(),
         Type::Uint8  => "uint8".into(),
+        Type::Int8   => "int8".into(),
+        Type::Int16  => "int16".into(),
+        Type::Int32  => "int32".into(),
+        Type::Int64  => "int64".into(),
+        Type::Int128 => "int128".into(),
+        Type::Uint16 => "uint16".into(),
+        Type::Uint32 => "uint32".into(),
+        Type::Uint64 => "uint64".into(),
+        Type::Uint128 => "uint128".into(),
         Type::Float  => "float".into(),
         Type::Bool   => "bool".into(),
         Type::Str    => "string".into(),
@@ -110,11 +119,22 @@ fn types_match_for_overload(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
         (Int, Int) | (Uint, Uint) | (Uint8, Uint8) | (Float, Float) | (Bool, Bool) | (Str, Str) => true,
+        (Int8, Int8) | (Int16, Int16) | (Int32, Int32) | (Int64, Int64) | (Int128, Int128) => true,
+        (Uint16, Uint16) | (Uint32, Uint32) | (Uint64, Uint64) | (Uint128, Uint128) => true,
         (Named(x), Named(y)) => x == y,
         (Named(n), t) | (t, Named(n)) => match n.as_str() {
             "int"    => matches!(t, Int),
             "uint"   => matches!(t, Uint),
             "uint8"  => matches!(t, Uint8),
+            "int8"   => matches!(t, Int8),
+            "int16"  => matches!(t, Int16),
+            "int32"  => matches!(t, Int32),
+            "int64"  => matches!(t, Int64),
+            "int128" => matches!(t, Int128),
+            "uint16" => matches!(t, Uint16),
+            "uint32" => matches!(t, Uint32),
+            "uint64" => matches!(t, Uint64),
+            "uint128" => matches!(t, Uint128),
             "float"  => matches!(t, Float),
             "bool"   => matches!(t, Bool),
             "string" => matches!(t, Str),
@@ -236,6 +256,15 @@ pub enum Value {
     Int(i64),
     Uint(u64),
     Uint8(u8),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Int128(i128),
+    Uint16(u16),
+    Uint32(u32),
+    Uint64(u64),
+    Uint128(u128),
     Float(f64),
     Str(String),
     Array(Rc<Vec<Value>>),
@@ -345,6 +374,15 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Uint(a), Value::Uint(b)) => a == b,
             (Value::Uint8(a), Value::Uint8(b)) => a == b,
+            (Value::Int8(a), Value::Int8(b)) => a == b,
+            (Value::Int16(a), Value::Int16(b)) => a == b,
+            (Value::Int32(a), Value::Int32(b)) => a == b,
+            (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Int128(a), Value::Int128(b)) => a == b,
+            (Value::Uint16(a), Value::Uint16(b)) => a == b,
+            (Value::Uint32(a), Value::Uint32(b)) => a == b,
+            (Value::Uint64(a), Value::Uint64(b)) => a == b,
+            (Value::Uint128(a), Value::Uint128(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
@@ -385,6 +423,15 @@ impl fmt::Debug for Value {
             Value::Int(n) => write!(f, "Int({:?})", n),
             Value::Uint(n) => write!(f, "Uint({:?})", n),
             Value::Uint8(n) => write!(f, "Uint8({:?})", n),
+            Value::Int8(n) => write!(f, "Int8({:?})", n),
+            Value::Int16(n) => write!(f, "Int16({:?})", n),
+            Value::Int32(n) => write!(f, "Int32({:?})", n),
+            Value::Int64(n) => write!(f, "Int64({:?})", n),
+            Value::Int128(n) => write!(f, "Int128({:?})", n),
+            Value::Uint16(n) => write!(f, "Uint16({:?})", n),
+            Value::Uint32(n) => write!(f, "Uint32({:?})", n),
+            Value::Uint64(n) => write!(f, "Uint64({:?})", n),
+            Value::Uint128(n) => write!(f, "Uint128({:?})", n),
             Value::Float(n) => write!(f, "Float({:?})", n),
             Value::Str(s) => write!(f, "Str({:?})", s),
             Value::Array(v) => write!(f, "Array({:?})", v),
@@ -432,6 +479,15 @@ impl Value {
             Value::Int(_) => "Int".into(),
             Value::Uint(_) => "Uint".into(),
             Value::Uint8(_) => "Uint8".into(),
+            Value::Int8(_) => "Int8".into(),
+            Value::Int16(_) => "Int16".into(),
+            Value::Int32(_) => "Int32".into(),
+            Value::Int64(_) => "Int64".into(),
+            Value::Int128(_) => "Int128".into(),
+            Value::Uint16(_) => "Uint16".into(),
+            Value::Uint32(_) => "Uint32".into(),
+            Value::Uint64(_) => "Uint64".into(),
+            Value::Uint128(_) => "Uint128".into(),
             Value::Float(_) => "Float".into(),
             Value::Str(_) => "String".into(),
             Value::Array(_) => "Array".into(),
@@ -471,6 +527,15 @@ impl fmt::Display for Value {
             Value::Int(n) => write!(f, "{}", n),
             Value::Uint(n) => write!(f, "{}", n),
             Value::Uint8(n) => write!(f, "{}", n),
+            Value::Int8(n) => write!(f, "{}", n),
+            Value::Int16(n) => write!(f, "{}", n),
+            Value::Int32(n) => write!(f, "{}", n),
+            Value::Int64(n) => write!(f, "{}", n),
+            Value::Int128(n) => write!(f, "{}", n),
+            Value::Uint16(n) => write!(f, "{}", n),
+            Value::Uint32(n) => write!(f, "{}", n),
+            Value::Uint64(n) => write!(f, "{}", n),
+            Value::Uint128(n) => write!(f, "{}", n),
             Value::Float(n) => write!(f, "{}", n),
             Value::Str(s) => write!(f, "{}", s),
             Value::Array(elems) => {
@@ -874,6 +939,44 @@ impl Env {
 
 // ─── Stdlib ──────────────────────────────────────────────────────────────────
 
+/// Defines a global fixed-width integer conversion builtin (`int8()`, `uint16()`, …).
+/// Mirrors the hand-written `uint8()` builtin, generalized via `TryFrom` (implemented
+/// by std for every pair among the fixed-width integer primitives) so one macro body
+/// covers both signed and unsigned target widths.
+macro_rules! define_int_conv_builtin {
+    ($e:expr, $name:literal, $variant:ident, $ty:ty) => {
+        $e.define($name, Value::NativeFn {
+            name: $name.into(),
+            func: |args, line| {
+                if args.len() != 1 {
+                    return Err(err(concat!($name, "() takes 1 argument"), line));
+                }
+                match &args[0] {
+                    Value::$variant(n) => Ok(Value::$variant(*n)),
+                    Value::Int(n) => <$ty>::try_from(*n)
+                        .map(Value::$variant)
+                        .map_err(|_| err(format!("cannot convert Int {} to {} (out of range)", n, $name), line)),
+                    Value::Uint(n) => <$ty>::try_from(*n)
+                        .map(Value::$variant)
+                        .map_err(|_| err(format!("cannot convert Uint {} to {} (out of range)", n, $name), line)),
+                    Value::Float(f) => {
+                        if *f < <$ty>::MIN as f64 || *f > <$ty>::MAX as f64 {
+                            Err(err(format!("cannot convert Float to {} (out of range)", $name), line))
+                        } else {
+                            Ok(Value::$variant(*f as $ty))
+                        }
+                    }
+                    Value::Str(s) => s.trim().parse::<$ty>()
+                        .map(Value::$variant)
+                        .map_err(|_| err(format!("cannot convert '{}' to {}", s, $name), line)),
+                    Value::Bool(b) => Ok(Value::$variant(if *b { 1 as $ty } else { 0 as $ty })),
+                    other => Err(err(format!("cannot convert {} to {}", other.type_name(), $name), line)),
+                }
+            },
+        });
+    };
+}
+
 fn register_stdlib(env: &EnvRef) {
     let mut e = env.borrow_mut();
 
@@ -1042,6 +1145,15 @@ fn register_stdlib(env: &EnvRef) {
                 Value::Int(n) => Ok(Value::Int(*n)),
                 Value::Uint(n) => Ok(Value::Int(*n as i64)),
                 Value::Uint8(n) => Ok(Value::Int(*n as i64)),
+                Value::Int8(n) => Ok(Value::Int(*n as i64)),
+                Value::Int16(n) => Ok(Value::Int(*n as i64)),
+                Value::Int32(n) => Ok(Value::Int(*n as i64)),
+                Value::Int64(n) => Ok(Value::Int(*n)),
+                Value::Int128(n) => Ok(Value::Int(*n as i64)),
+                Value::Uint16(n) => Ok(Value::Int(*n as i64)),
+                Value::Uint32(n) => Ok(Value::Int(*n as i64)),
+                Value::Uint64(n) => Ok(Value::Int(*n as i64)),
+                Value::Uint128(n) => Ok(Value::Int(*n as i64)),
                 Value::Float(f) => Ok(Value::Int(*f as i64)),
                 Value::Str(s) => s.trim().parse::<i64>()
                     .map(Value::Int)
@@ -1061,8 +1173,32 @@ fn register_stdlib(env: &EnvRef) {
             match &args[0] {
                 Value::Uint(n) => Ok(Value::Uint(*n)),
                 Value::Uint8(n) => Ok(Value::Uint(*n as u64)),
+                Value::Uint16(n) => Ok(Value::Uint(*n as u64)),
+                Value::Uint32(n) => Ok(Value::Uint(*n as u64)),
+                Value::Uint64(n) => Ok(Value::Uint(*n)),
+                Value::Uint128(n) => Ok(Value::Uint(*n as u64)),
                 Value::Int(n) => {
                     if *n < 0 { Err(err(format!("cannot convert negative Int {} to Uint", n), line)) }
+                    else { Ok(Value::Uint(*n as u64)) }
+                }
+                Value::Int8(n) => {
+                    if *n < 0 { Err(err(format!("cannot convert negative Int8 {} to Uint", n), line)) }
+                    else { Ok(Value::Uint(*n as u64)) }
+                }
+                Value::Int16(n) => {
+                    if *n < 0 { Err(err(format!("cannot convert negative Int16 {} to Uint", n), line)) }
+                    else { Ok(Value::Uint(*n as u64)) }
+                }
+                Value::Int32(n) => {
+                    if *n < 0 { Err(err(format!("cannot convert negative Int32 {} to Uint", n), line)) }
+                    else { Ok(Value::Uint(*n as u64)) }
+                }
+                Value::Int64(n) => {
+                    if *n < 0 { Err(err(format!("cannot convert negative Int64 {} to Uint", n), line)) }
+                    else { Ok(Value::Uint(*n as u64)) }
+                }
+                Value::Int128(n) => {
+                    if *n < 0 { Err(err(format!("cannot convert negative Int128 {} to Uint", n), line)) }
                     else { Ok(Value::Uint(*n as u64)) }
                 }
                 Value::Float(f) => {
@@ -1107,6 +1243,16 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+    define_int_conv_builtin!(e, "int8", Int8, i8);
+    define_int_conv_builtin!(e, "int16", Int16, i16);
+    define_int_conv_builtin!(e, "int32", Int32, i32);
+    define_int_conv_builtin!(e, "int64", Int64, i64);
+    define_int_conv_builtin!(e, "int128", Int128, i128);
+    define_int_conv_builtin!(e, "uint16", Uint16, u16);
+    define_int_conv_builtin!(e, "uint32", Uint32, u32);
+    define_int_conv_builtin!(e, "uint64", Uint64, u64);
+    define_int_conv_builtin!(e, "uint128", Uint128, u128);
+
     e.define("float", Value::NativeFn {
         name: "float".into(),
         func: |args, line| {
@@ -1118,6 +1264,15 @@ fn register_stdlib(env: &EnvRef) {
                 Value::Int(n)   => Ok(Value::Float(*n as f64)),
                 Value::Uint(n)  => Ok(Value::Float(*n as f64)),
                 Value::Uint8(n) => Ok(Value::Float(*n as f64)),
+                Value::Int8(n)  => Ok(Value::Float(*n as f64)),
+                Value::Int16(n) => Ok(Value::Float(*n as f64)),
+                Value::Int32(n) => Ok(Value::Float(*n as f64)),
+                Value::Int64(n) => Ok(Value::Float(*n as f64)),
+                Value::Int128(n) => Ok(Value::Float(*n as f64)),
+                Value::Uint16(n) => Ok(Value::Float(*n as f64)),
+                Value::Uint32(n) => Ok(Value::Float(*n as f64)),
+                Value::Uint64(n) => Ok(Value::Float(*n as f64)),
+                Value::Uint128(n) => Ok(Value::Float(*n as f64)),
                 Value::Bool(b)  => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
                 Value::Str(s) => s.trim().parse::<f64>()
                     .map(Value::Float)
@@ -1716,21 +1871,34 @@ impl Interpreter {
         aliases.insert("int".into(),    Type::Int);
         aliases.insert("uint".into(),   Type::Uint);
         aliases.insert("uint8".into(),  Type::Uint8);
+        aliases.insert("int8".into(),    Type::Int8);
+        aliases.insert("int16".into(),   Type::Int16);
+        aliases.insert("int32".into(),   Type::Int32);
+        aliases.insert("int64".into(),   Type::Int64);
+        aliases.insert("int128".into(),  Type::Int128);
+        aliases.insert("uint16".into(),  Type::Uint16);
+        aliases.insert("uint32".into(),  Type::Uint32);
+        aliases.insert("uint64".into(),  Type::Uint64);
+        aliases.insert("uint128".into(), Type::Uint128);
         aliases.insert("float".into(),  Type::Float);
         aliases.insert("bool".into(),   Type::Bool);
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
         aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Stack));
-        // Rust-specific numeric types — same runtime representation, preserved for transpilation.
-        aliases.insert("i8".into(),    Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
-        aliases.insert("i16".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
-        aliases.insert("i32".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
-        aliases.insert("i64".into(),   Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
-        aliases.insert("isize".into(), Type::Qualified(Box::new(Type::Int),   OwnerQual::Stack));
-        aliases.insert("u8".into(),    Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
-        aliases.insert("u16".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
-        aliases.insert("u32".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
-        aliases.insert("u64".into(),   Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
-        aliases.insert("usize".into(), Type::Qualified(Box::new(Type::Uint),  OwnerQual::Stack));
+        // Rust-specific numeric types — distinct real types (each a real Value variant),
+        // preserved by name for the transpiler to emit the exact integer width. `isize`/
+        // `usize` alias to the bare `int`/`uint` types, which now transpile to isize/usize.
+        aliases.insert("i8".into(),    Type::Int8);
+        aliases.insert("i16".into(),   Type::Int16);
+        aliases.insert("i32".into(),   Type::Int32);
+        aliases.insert("i64".into(),   Type::Int64);
+        aliases.insert("i128".into(),  Type::Int128);
+        aliases.insert("isize".into(), Type::Int);
+        aliases.insert("u8".into(),    Type::Uint8);
+        aliases.insert("u16".into(),   Type::Uint16);
+        aliases.insert("u32".into(),   Type::Uint32);
+        aliases.insert("u64".into(),   Type::Uint64);
+        aliases.insert("u128".into(),  Type::Uint128);
+        aliases.insert("usize".into(), Type::Uint);
         aliases.insert("f32".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
         aliases.insert("f64".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
         // Uppercase base-type aliases — resolve Named("String") etc. to the primitive type so
@@ -1739,6 +1907,15 @@ impl Interpreter {
         aliases.insert("Int".into(),    Type::Int);
         aliases.insert("Uint".into(),   Type::Uint);
         aliases.insert("Uint8".into(),  Type::Uint8);
+        aliases.insert("Int8".into(),    Type::Int8);
+        aliases.insert("Int16".into(),   Type::Int16);
+        aliases.insert("Int32".into(),   Type::Int32);
+        aliases.insert("Int64".into(),   Type::Int64);
+        aliases.insert("Int128".into(),  Type::Int128);
+        aliases.insert("Uint16".into(),  Type::Uint16);
+        aliases.insert("Uint32".into(),  Type::Uint32);
+        aliases.insert("Uint64".into(),  Type::Uint64);
+        aliases.insert("Uint128".into(), Type::Uint128);
         aliases.insert("Float".into(),  Type::Float);
         aliases.insert("Bool".into(),   Type::Bool);
         let global = Env::new_global();

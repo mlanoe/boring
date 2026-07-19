@@ -24,5 +24,12 @@ var k = VectorAdd(host_a, host_b)
 kernel:
     k(block = 256)
 
-for i in 0..n:
-    print "c[{i}] = {k.result[i]}"
+# `k.result[i]` alone would read the whole buffer back from the GPU on every
+# iteration of this loop. Binding it through an alias and reading it inside a
+# `with` block materializes it exactly once instead — see
+# docs/scoped-access-blocks.md. The `'gpu'unified` qualifier is inferred here
+# from `k.result` itself being declared `'unified` above; no annotation needed.
+let result = k.result
+with result:
+    for i in 0..n:
+        print "c[{i}] = {result[i]}"

@@ -335,7 +335,7 @@ impl Transpiler {
         let derives = match inner.as_str() {
             "f64" | "f32" => "#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]",
             "u64" | "i64" | "u32" | "i32" | "u8" | "i8" | "u16" | "i16" |
-            "usize" | "isize" | "bool" =>
+            "u128" | "i128" | "usize" | "isize" | "bool" =>
                 "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]",
             _ => "#[derive(Debug, Clone, PartialEq, Eq, Hash)]",
         };
@@ -752,15 +752,34 @@ impl Transpiler {
             let param_tys: std::collections::HashMap<String, String> = f.params.iter()
                 .filter_map(|p| {
                     let ty_s = match p.ty.as_ref()? {
-                        Type::Int  | Type::Uint => Some("i64".to_string()),
+                        Type::Int   => Some("isize".to_string()),
+                        Type::Uint  => Some("usize".to_string()),
                         Type::Uint8 => Some("u8".to_string()),
+                        Type::Int8   => Some("i8".to_string()),
+                        Type::Int16  => Some("i16".to_string()),
+                        Type::Int32  => Some("i32".to_string()),
+                        Type::Int64  => Some("i64".to_string()),
+                        Type::Int128 => Some("i128".to_string()),
+                        Type::Uint16 => Some("u16".to_string()),
+                        Type::Uint32 => Some("u32".to_string()),
+                        Type::Uint64 => Some("u64".to_string()),
+                        Type::Uint128 => Some("u128".to_string()),
                         Type::Float => Some("f64".to_string()),
                         Type::Bool  => Some("bool".to_string()),
                         Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                         Type::Named(n) => match n.as_str() {
-                            "int" | "i64" | "i32" | "i16" | "i8" | "isize" => Some("i64".to_string()),
-                            "uint" | "u64" | "u32" | "u16" | "usize" => Some("u64".to_string()),
+                            "int" | "isize" => Some("isize".to_string()),
+                            "uint" | "usize" => Some("usize".to_string()),
                             "uint8" | "u8" => Some("u8".to_string()),
+                            "int8" | "i8" => Some("i8".to_string()),
+                            "int16" | "i16" => Some("i16".to_string()),
+                            "int32" | "i32" => Some("i32".to_string()),
+                            "int64" | "i64" => Some("i64".to_string()),
+                            "int128" | "i128" => Some("i128".to_string()),
+                            "uint16" | "u16" => Some("u16".to_string()),
+                            "uint32" | "u32" => Some("u32".to_string()),
+                            "uint64" | "u64" => Some("u64".to_string()),
+                            "uint128" | "u128" => Some("u128".to_string()),
                             "float" | "f64" | "f32" => Some("f64".to_string()),
                             "bool"   => Some("bool".to_string()),
                             "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
@@ -2015,9 +2034,16 @@ impl Transpiler {
     /// Determines whether a `transient` field should use `Cell<T>` (Copy) or `RefCell<T>` (!Copy).
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Uint | Type::Float | Type::Bool | Type::Nil | Type::Void => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool | Type::Nil | Type::Void => true,
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             // Lowercase aliases: `int`, `float`, `bool`, `uint` parse as Named in the user source.
-            Type::Named(n) => matches!(n.as_str(), "int" | "uint" | "float" | "bool"),
+            Type::Named(n) => matches!(n.as_str(),
+                "int" | "uint" | "uint8" | "float" | "bool"
+                | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint16" | "uint32" | "uint64" | "uint128"
+                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"),
             Type::Optional(inner) => Self::is_copy_type(inner),
             _ => false,
         }
@@ -2031,9 +2057,18 @@ impl Transpiler {
 
     pub(crate) fn emit_type(&self, ty: &Type) -> String {
         match ty {
-            Type::Int   => "i64".into(),
-            Type::Uint  => "u64".into(),
+            Type::Int   => "isize".into(),
+            Type::Uint  => "usize".into(),
             Type::Uint8 => "u8".into(),
+            Type::Int8   => "i8".into(),
+            Type::Int16  => "i16".into(),
+            Type::Int32  => "i32".into(),
+            Type::Int64  => "i64".into(),
+            Type::Int128 => "i128".into(),
+            Type::Uint16 => "u16".into(),
+            Type::Uint32 => "u32".into(),
+            Type::Uint64 => "u64".into(),
+            Type::Uint128 => "u128".into(),
             Type::Float => "f64".into(),
             Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },
             Type::Bool  => "bool".into(),
@@ -2238,9 +2273,21 @@ impl Transpiler {
                 OwnerQual::Union(_) => self.emit_type(inner),
                 // 'new pseudo-qualifier: infer-excluding-stack, emits as Box<T> (same as Owned).
                 OwnerQual::New => format!("Box<{}>", self.emit_type(inner)),
-                // GPU memory qualifiers: emitted as pointer types (placeholders).
-                OwnerQual::GpuUnified => format!("*mut {}", self.emit_type(inner)),
-                OwnerQual::GpuGlobal | OwnerQual::GpuActorGlobal => format!("*mut {}", self.emit_type(inner)),
+                // Host-context `'gpu'unified`/`'gpu'global`: emits as the plain inner
+                // type. Confirmed against real usage (`examples/saxpy.br`'s
+                // `var [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned
+                // as an ordinary host array with no wrapper) — the qualifier only
+                // matters at the point the value is passed into a kernel constructor
+                // (upload happens there, see `emit_kernel::emit_kernel_construction`)
+                // or read from a kernel field inside a `with` block (see
+                // `emit_kernel::try_emit_gpu_resident_let`, `emit_stmt::emit_with`);
+                // neither needs a special Rust-level wrapper type.
+                OwnerQual::GpuUnified | OwnerQual::GpuGlobal => self.emit_type(inner),
+                // Kernel-context-only qualifiers with no host-context form (see
+                // docs/scoped-access-blocks.md) — still placeholders if ever annotated
+                // on an ordinary host variable, which is not a legal/meaningful thing
+                // to do in the first place.
+                OwnerQual::GpuActorGlobal => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuSync    => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuLocal   => self.emit_type(inner), // local = stack in Rust
                 OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),

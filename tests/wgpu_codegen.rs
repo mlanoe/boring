@@ -270,3 +270,176 @@ kernel:
     assert!(rs.contains("event_loop.run_app(&mut app)"), "run_app used");
     assert!(rs.contains("NamedKey::Escape"), "Escape named key in key handler");
 }
+
+// ── `with` GPU-residency materialization (docs/scoped-access-blocks.md) ────────
+//
+// `let py'gpu'unified = k.y` followed by `with py:` should read the kernel field
+// back exactly once (`k.copy_y_to_host()`), regardless of how many times the
+// block's body indexes `py` — the actual bug this exists to fix, confirmed against
+// `examples/vector_add_gpu.br`'s `for i in 0..n: print k.result[i]`, which today
+// re-reads the whole buffer on every loop iteration with no `with` available.
+
+#[test]
+fn test_with_gpu_resident_read_only_single_readback() {
+    let src = r#"
+kernel Saxpy:
+    let float alpha
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float a, [float]'unified xs, [float]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+var [float] hx = [0.0, 1.0]
+var [float] hy = [1.0, 1.0]
+mut k = Saxpy(2.0, hx, hy)
+kernel:
+    k(block = 2)
+
+let [float]'gpu'unified py = k.y
+with py:
+    for i in 0..2:
+        print "{py[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_read", src);
+
+    // Exactly one readback CALL (`k.copy_y_to_host()`), bound before the loop — not
+    // one per iteration. `copy_y_to_host` alone also matches the method's own `fn`
+    // definition, so count the call form specifically.
+    assert_eq!(rs.matches("k.copy_y_to_host()").count(), 1, "expected exactly one copy_y_to_host call:\n{rs}");
+    assert!(rs.contains("let py = k.copy_y_to_host()"), "missing single materializing readback:\n{rs}");
+    // Read-only block: no write-back targeting `py` (the constructor's own initial
+    // upload, `k.copy_y_to_device(&hy...)`, is unrelated and expected), and the
+    // alias binding isn't `mut`.
+    assert!(!rs.contains("k.copy_y_to_device(&py"), "read-only with-block should not write back:\n{rs}");
+    assert!(!rs.contains("let mut py"), "read-only alias should not be `mut`:\n{rs}");
+    // No leftover placeholder pointer type for the plain host arrays.
+    assert!(!rs.contains("*mut Vec"), "gpu'unified/gpu'global should emit a plain Vec, not a pointer:\n{rs}");
+}
+
+#[test]
+fn test_with_gpu_resident_write_back_on_mutation() {
+    let src = r#"
+kernel Saxpy:
+    let float alpha
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float a, [float]'unified xs, [float]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+var [float] hx = [0.0, 1.0]
+var [float] hy = [1.0, 1.0]
+mut k = Saxpy(2.0, hx, hy)
+kernel:
+    k(block = 2)
+
+let [float]'gpu'unified py = k.y
+with py:
+    py[0] = 0.0
+"#;
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_write", src);
+
+    assert!(rs.contains("let mut py = k.copy_y_to_host()"), "mutating block needs a `mut` alias:\n{rs}");
+    assert!(rs.contains("k.copy_y_to_device(&py"), "write-back should target the kernel field:\n{rs}");
+    // The constructor's own initial upload (`k.copy_y_to_device(&hy...)`) is a
+    // separate, expected call — only the with-block's write-back targets `py`.
+    assert_eq!(rs.matches("k.copy_y_to_device(&py").count(), 1, "expected exactly one write-back call targeting py:\n{rs}");
+}
+
+#[test]
+fn test_with_gpu_resident_infers_qualifier_without_annotation() {
+    // Same as test_with_gpu_resident_read_only_single_readback, but `py` has no
+    // explicit 'gpu'unified annotation at all — the qualifier is inferred from `k.y`
+    // being a 'unified array field on a tracked kernel instance.
+    let src = r#"
+kernel Saxpy:
+    let float alpha
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float a, [float]'unified xs, [float]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+var [float] hx = [0.0, 1.0]
+var [float] hy = [1.0, 1.0]
+mut k = Saxpy(2.0, hx, hy)
+kernel:
+    k(block = 2)
+
+let py = k.y
+with py:
+    for i in 0..2:
+        print "{py[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_inferred", src);
+
+    assert_eq!(rs.matches("k.copy_y_to_host()").count(), 1, "expected exactly one copy_y_to_host call:\n{rs}");
+    assert!(rs.contains("let py = k.copy_y_to_host()"), "missing single materializing readback:\n{rs}");
+    assert!(!rs.contains("*mut Vec"), "inferred qualifier should emit a plain Vec, not a pointer:\n{rs}");
+}
+
+// ── `GPU` introspection (portable between the interpreter's simulation and
+// --target wgpu — see examples/saxpy.br's `GPU(0)`/`.name()`/`.totalMem()`) ────
+
+#[test]
+fn test_gpu_device_handle_and_properties() {
+    let src = r#"
+let g = GPU(0)
+print g.name()
+print g.totalMem()
+print g.freeMem()
+print g.computeCapability()
+print g.warpSize()
+print g.maxThreads()
+print g.maxSharedMem()
+print g.index()
+"#;
+    let (_wgsl, rs) = wgpu_codegen("gpu_device_properties", src);
+
+    assert!(rs.contains("let g = ((0) as usize);"), "GPU(0) should emit a plain usize:\n{rs}");
+    assert!(rs.contains("__boring_gpu_name()"), "missing .name() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_total_mem()"), "missing .totalMem() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_free_mem()"), "missing .freeMem() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_compute_capability()"), "missing .computeCapability() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_warp_size()"), "missing .warpSize() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_max_threads()"), "missing .maxThreads() rewrite:\n{rs}");
+    assert!(rs.contains("__boring_gpu_max_shared_mem()"), "missing .maxSharedMem() rewrite:\n{rs}");
+    assert!(rs.contains("(g as i64)"), "missing .index() rewrite:\n{rs}");
+    // Backing globals/helpers must actually be emitted.
+    assert!(rs.contains("static __BORING_GPU_ADAPTER"), "missing adapter global:\n{rs}");
+    assert!(rs.contains("fn __boring_gpu_name() -> String { __boring_gpu_adapter().get_info().name }"), "missing name() helper body:\n{rs}");
+    assert!(rs.contains("let _ = __BORING_GPU_ADAPTER.set("), "adapter global is never populated:\n{rs}");
+}
+
+#[test]
+fn test_gpu_all_returns_single_device_and_loop_var_gets_properties() {
+    let src = r#"
+for g in GPU.all():
+    print g.name()
+    print g.index()
+"#;
+    let (_wgsl, rs) = wgpu_codegen("gpu_all_loop", src);
+
+    assert!(rs.contains("for g in vec![0usize].into_iter()"), "GPU.all() should be a single-element usize vec:\n{rs}");
+    assert!(rs.contains("__boring_gpu_name()"), "loop var should get the .name() rewrite:\n{rs}");
+    assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");
+}

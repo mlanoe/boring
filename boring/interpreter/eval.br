@@ -707,334 +707,379 @@ def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
             else:
                 apply_binop(op, l, r)
 
+# ─── Generic numeric kind model ──────────────────────────────────────────────
+#
+# Same-kind arithmetic and mixing a fixed-width kind with the flexible bare
+# Int/Uint kind are handled generically here instead of one hand-written match
+# arm per pair — with 12 numeric kinds that would mean up to 144 arms per
+# operator. Mixing two *distinct* explicit fixed-width kinds directly
+# (`a_uint16 + a_int32`) is unsupported — falls through to the caller's
+# "cannot <op> X and Y" error, requiring an explicit `as` cast first, mirroring
+# Rust's own refusal to implicitly coerce between distinct integer types.
+
+enum NumKind:
+    Int
+    Uint
+    Uint8
+    Int8
+    Int16
+    Int32
+    Int64
+    Int128
+    Uint16
+    Uint32
+    Uint64
+    Uint128
+
+NumKind? num_kind_of(Value v):
+    match v:
+        Value.Int(_): NumKind.Int
+        Value.Uint(_): NumKind.Uint
+        Value.Uint8(_): NumKind.Uint8
+        Value.Int8(_): NumKind.Int8
+        Value.Int16(_): NumKind.Int16
+        Value.Int32(_): NumKind.Int32
+        Value.Int64(_): NumKind.Int64
+        Value.Int128(_): NumKind.Int128
+        Value.Uint16(_): NumKind.Uint16
+        Value.Uint32(_): NumKind.Uint32
+        Value.Uint64(_): NumKind.Uint64
+        Value.Uint128(_): NumKind.Uint128
+        _: nil
+
+int num_kind_bits(NumKind k):
+    match k:
+        NumKind.Int8: 8
+        NumKind.Uint8: 8
+        NumKind.Int16: 16
+        NumKind.Uint16: 16
+        NumKind.Int32: 32
+        NumKind.Uint32: 32
+        NumKind.Int128: 128
+        NumKind.Uint128: 128
+        _: 64
+
+bool num_kind_signed(NumKind k):
+    match k:
+        NumKind.Int: true
+        NumKind.Int8: true
+        NumKind.Int16: true
+        NumKind.Int32: true
+        NumKind.Int64: true
+        NumKind.Int128: true
+        _: false
+
+bool num_kind_is_bare(NumKind k):
+    k == NumKind.Int or k == NumKind.Uint
+
+string num_kind_name(NumKind k):
+    match k:
+        NumKind.Int: "int"
+        NumKind.Uint: "uint"
+        NumKind.Uint8: "uint8"
+        NumKind.Int8: "int8"
+        NumKind.Int16: "int16"
+        NumKind.Int32: "int32"
+        NumKind.Int64: "int64"
+        NumKind.Int128: "int128"
+        NumKind.Uint16: "uint16"
+        NumKind.Uint32: "uint32"
+        NumKind.Uint64: "uint64"
+        NumKind.Uint128: "uint128"
+
+NumKind? type_to_num_kind(Type t):
+    match t:
+        Type.Int: NumKind.Int
+        Type.Uint: NumKind.Uint
+        Type.Uint8: NumKind.Uint8
+        Type.Int8: NumKind.Int8
+        Type.Int16: NumKind.Int16
+        Type.Int32: NumKind.Int32
+        Type.Int64: NumKind.Int64
+        Type.Int128: NumKind.Int128
+        Type.Uint16: NumKind.Uint16
+        Type.Uint32: NumKind.Uint32
+        Type.Uint64: NumKind.Uint64
+        Type.Uint128: NumKind.Uint128
+        _: nil
+
+# Reconstructs a fresh `Type` literal from one of the 9 fixed-width names —
+# used instead of reusing a `Type` value that might already be partially
+# moved (e.g. a preceding `match ty: Type.Named(name): name ...` moves `name`
+# out of `ty`, and Rust's borrow checker then forbids using `ty` again).
+Type num_kind_type_of_name(string name):
+    match name:
+        "int8": Type.Int8
+        "int16": Type.Int16
+        "int32": Type.Int32
+        "int64": Type.Int64
+        "int128": Type.Int128
+        "uint16": Type.Uint16
+        "uint32": Type.Uint32
+        "uint64": Type.Uint64
+        "uint128": Type.Uint128
+        _: Type.Void
+
+NumKind? num_kind_from_name(string name):
+    match name:
+        "int": NumKind.Int
+        "uint": NumKind.Uint
+        "uint8": NumKind.Uint8
+        "int8": NumKind.Int8
+        "int16": NumKind.Int16
+        "int32": NumKind.Int32
+        "int64": NumKind.Int64
+        "int128": NumKind.Int128
+        "uint16": NumKind.Uint16
+        "uint32": NumKind.Uint32
+        "uint64": NumKind.Uint64
+        "uint128": NumKind.Uint128
+        _: nil
+
+# Generic `as <numeric type>` cast from any Value — used by cast_value for the
+# 9 fixed-width kinds beyond int/uint/uint8 (which keep their own hand-written
+# branches, unchanged, since they also handle string-parsing/Object-conversion
+# cases this generic path doesn't need to replicate).
+Value? cast_numeric_generic(Value val, string type_name):
+    guard let tk = num_kind_from_name(type_name) else: return nil
+    match val:
+        Value.Float(f):
+            if not num_kind_signed(tk) and f < 0.0:
+                i128_to_kind(tk, 0)
+            else:
+                i128_to_kind(tk, f as int128)
+        _:
+            if let iv = value_as_i128(val):
+                i128_to_kind(tk, iv)
+            else:
+                nil
+
+# Result kind when mixing two *different* kinds where at least one is bare
+# (`Int`/`Uint`). Returns nil when neither is bare (unsupported direct mix).
+# Rule: the wider kind wins. On a tied width with mixed signs: unsigned wins
+# for every op except Sub, whose existing Int/Uint precedent is order-dependent
+# (`Uint - Int` stays Uint, `Int - Uint` stays Int) — generalized here as "the
+# LHS's kind wins on a tied-width sign mismatch".
+NumKind? promote_kind(NumKind ka, NumKind kb, bool is_sub):
+    if not num_kind_is_bare(ka) and not num_kind_is_bare(kb):
+        return nil
+    let abits = num_kind_bits(ka)
+    let bbits = num_kind_bits(kb)
+    if abits != bbits:
+        if abits > bbits:
+            return ka
+        else:
+            return kb
+    if num_kind_signed(ka) == num_kind_signed(kb):
+        if num_kind_is_bare(ka):
+            return kb
+        else:
+            return ka
+    if is_sub:
+        return ka
+    if num_kind_signed(ka):
+        kb
+    else:
+        ka
+
+# Widen any of the 12 numeric kinds into int128 staging space. Rust's `as`
+# between integer types truncates/extends but never panics (unlike bare
+# `+`/`-`/`*`, which panic on overflow) — this is why every op below stages
+# through int128 and narrows back with `as` rather than operating on the
+# narrow types directly. Returns nil for a `Uint128` value above `int128`'s
+# range — that ultra-wide corner case only affects mixed-kind ops; same-kind
+# `Uint128 op Uint128` still works fully since it goes through this same
+# staging with both operands already the same (in-range or not) width.
+int128? value_as_i128(Value v):
+    match v:
+        Value.Int(n): n as int128
+        Value.Uint(n): n as int128
+        Value.Uint8(n): n as int128
+        Value.Int8(n): n as int128
+        Value.Int16(n): n as int128
+        Value.Int32(n): n as int128
+        Value.Int64(n): n as int128
+        Value.Int128(n): n
+        Value.Uint16(n): n as int128
+        Value.Uint32(n): n as int128
+        Value.Uint64(n): n as int128
+        Value.Uint128(n): n as int128
+        _: nil
+
+float? value_as_float_numeric(Value v):
+    match v:
+        Value.Float(f): f
+        _:
+            if let iv = value_as_i128(v):
+                iv as float
+            else:
+                nil
+
+# Narrow an int128 staging value back into `k`'s native Value (truncating,
+# matching the wrapping semantics the old per-pair arms computed by hand).
+Value i128_to_kind(NumKind k, int128 x):
+    match k:
+        NumKind.Int: Value.Int(x as int)
+        NumKind.Uint: Value.Uint(x as uint)
+        NumKind.Uint8: Value.Uint8(x as uint8)
+        NumKind.Int8: Value.Int8(x as int8)
+        NumKind.Int16: Value.Int16(x as int16)
+        NumKind.Int32: Value.Int32(x as int32)
+        NumKind.Int64: Value.Int64(x as int64)
+        NumKind.Int128: Value.Int128(x)
+        NumKind.Uint16: Value.Uint16(x as uint16)
+        NumKind.Uint32: Value.Uint32(x as uint32)
+        NumKind.Uint64: Value.Uint64(x as uint64)
+        NumKind.Uint128: Value.Uint128(x as uint128)
+
+# Add/Sub/Mul/Div/Rem between two numeric (int-kind) values — same-kind and
+# bare-mixed pairs. Returns nil when the pair isn't numeric or isn't a
+# supported combination (the caller falls through to its own error/float path).
+Value? apply_binop_numeric(BinOp op, Value l, Value r):
+    guard let ka = num_kind_of(l) else: return nil
+    guard let kb = num_kind_of(r) else: return nil
+    let is_sub = op == BinOp.Sub
+    var NumKind result_kind
+    if ka == kb:
+        result_kind = ka
+    else:
+        guard let pk = promote_kind(ka, kb, is_sub) else: return nil
+        result_kind = pk
+    guard let lv = value_as_i128(l) else: return nil
+    guard let rv = value_as_i128(r) else: return nil
+    let signed = num_kind_signed(result_kind)
+    if not signed:
+        if num_kind_signed(ka) and lv < 0:
+            throw "cannot combine negative {l.type_name()} with unsigned type"
+        if num_kind_signed(kb) and rv < 0 and not is_sub:
+            throw "cannot combine negative {r.type_name()} with unsigned type"
+    match op:
+        BinOp.Add:
+            i128_to_kind(result_kind, lv + rv)
+        BinOp.Sub:
+            if not signed and rv >= 0 and rv > lv:
+                throw "{num_kind_name(result_kind)} subtraction underflow"
+            i128_to_kind(result_kind, lv - rv)
+        BinOp.Mul:
+            i128_to_kind(result_kind, lv * rv)
+        BinOp.Div:
+            if rv == 0:
+                throw "division by zero"
+            i128_to_kind(result_kind, lv / rv)
+        BinOp.Rem:
+            if rv == 0:
+                throw "remainder by zero"
+            i128_to_kind(result_kind, lv % rv)
+        _: nil
+
+# Add/Sub/Mul/Div/Rem where at least one operand is Float and the other is
+# Float or any numeric int-kind.
+Value? apply_binop_float_mixed(BinOp op, Value l, Value r):
+    let l_is_float = match l:
+        Value.Float(_): true
+        _: false
+    let r_is_float = match r:
+        Value.Float(_): true
+        _: false
+    if not (l_is_float or r_is_float):
+        return nil
+    guard let lf = value_as_float_numeric(l) else: return nil
+    guard let rf = value_as_float_numeric(r) else: return nil
+    match op:
+        BinOp.Add: Value.Float(lf + rf)
+        BinOp.Sub: Value.Float(lf - rf)
+        BinOp.Mul: Value.Float(lf * rf)
+        BinOp.Div: Value.Float(lf / rf)
+        BinOp.Rem: Value.Float(lf % rf)
+        _: nil
+
+# BitAnd/BitOr/BitXor — same-kind only (matches the existing, stricter policy:
+# unlike arithmetic, bitwise ops never mix with the bare Int/Uint kind either).
+Value? apply_binop_bitwise_samekind(BinOp op, Value l, Value r):
+    guard let ka = num_kind_of(l) else: return nil
+    guard let kb = num_kind_of(r) else: return nil
+    if ka != kb:
+        return nil
+    guard let lv = value_as_i128(l) else: return nil
+    guard let rv = value_as_i128(r) else: return nil
+    match op:
+        BinOp.BitAnd: i128_to_kind(ka, lv & rv)
+        BinOp.BitOr: i128_to_kind(ka, lv | rv)
+        BinOp.BitXor: i128_to_kind(ka, lv ^ rv)
+        _: nil
+
+# Shl/Shr — result kind always follows the *left* operand's own kind (shifting
+# never changes a value's declared width); the right operand is just consumed
+# as a shift count via `value_as_i128`, masked to the left kind's bit width to
+# avoid Rust panicking on a shift amount >= that width.
+Value? apply_binop_shift(BinOp op, Value l, Value r):
+    guard let ka = num_kind_of(l) else: return nil
+    guard let rv = value_as_i128(r) else: return nil
+    if rv < 0:
+        throw "shift amount cannot be negative"
+    guard let lv = value_as_i128(l) else: return nil
+    let width = num_kind_bits(ka) as int128
+    let count = rv % width
+    match op:
+        BinOp.Shl: i128_to_kind(ka, lv << count)
+        BinOp.Shr: i128_to_kind(ka, lv >> count)
+        _: nil
+
 # Apply a binary operator to two already-evaluated values
 def Value apply_binop(BinOp op, Value l, Value r):
     match op:
         BinOp.Add:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a + b)
-                        Value.Uint(b):
-                            Value.Int(a + (b as int))
-                        Value.Uint8(b):
-                            Value.Int(a + (b as int))
-                        Value.Float(b):
-                            Value.Float(a as float + b)
-                        _:
-                            throw "cannot add Int and {r.type_name()}"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            Value.Uint(a + b)
-                        Value.Uint8(b):
-                            Value.Uint(a + (b as uint))
-                        Value.Int(b):
-                            Value.Int((a as int) + b)
-                        Value.Float(b):
-                            Value.Float(a as float + b)
-                        _:
-                            throw "cannot add Uint and {r.type_name()}"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            # Plain `a + b` on uint8 panics on overflow (the range is only
-                            # 0-255, so ordinary programs hit it easily) — wrap like the
-                            # Rust interpreter's wrapping_add by reducing mod 256.
-                            Value.Uint8((((a as uint) + (b as uint)) % 256) as uint8)
-                        Value.Uint(b):
-                            Value.Uint((a as uint) + b)
-                        Value.Int(b):
-                            Value.Int((a as int) + b)
-                        Value.Float(b):
-                            Value.Float(a as float + b)
-                        _:
-                            throw "cannot add Uint8 and {r.type_name()}"
-                Value.Float(a):
-                    match r:
-                        Value.Float(b):
-                            Value.Float(a + b)
-                        Value.Int(b):
-                            Value.Float(a + b as float)
-                        Value.Uint(b):
-                            Value.Float(a + b as float)
-                        Value.Uint8(b):
-                            Value.Float(a + b as float)
-                        _:
-                            throw "cannot add Float and {r.type_name()}"
-                Value.Str(a):
-                    match r:
-                        Value.Str(b):
-                            Value.Str(a + b)
-                        _:
-                            throw "cannot add String and {r.type_name()}"
-                Value.Array(a):
-                    match r:
-                        Value.Array(b):
-                            var merged = a
-                            for item in b:
-                                merged.push(item)
-                            Value.Array(merged)
-                        _:
-                            throw "cannot add Array and {r.type_name()}"
-                _:
-                    throw "cannot add {l.type_name()} and {r.type_name()}"
+            if let result = apply_binop_numeric(op, l, r):
+                result
+            elif let result2 = apply_binop_float_mixed(op, l, r):
+                result2
+            else:
+                match l:
+                    Value.Str(a):
+                        match r:
+                            Value.Str(b):
+                                Value.Str(a + b)
+                            _:
+                                throw "cannot add String and {r.type_name()}"
+                    Value.Array(a):
+                        match r:
+                            Value.Array(b):
+                                var merged = a
+                                for item in b:
+                                    merged.push(item)
+                                Value.Array(merged)
+                            _:
+                                throw "cannot add Array and {r.type_name()}"
+                    _:
+                        throw "cannot add {l.type_name()} and {r.type_name()}"
         BinOp.Sub:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a - b)
-                        Value.Uint(b):
-                            Value.Int(a - (b as int))
-                        Value.Uint8(b):
-                            Value.Int(a - (b as int))
-                        Value.Float(b):
-                            Value.Float(a as float - b)
-                        _:
-                            throw "cannot subtract {r.type_name()} from Int"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            if b > a:
-                                throw "uint subtraction underflow"
-                            Value.Uint(a - b)
-                        Value.Uint8(b):
-                            let bu = b as uint
-                            if bu > a:
-                                throw "uint subtraction underflow"
-                            Value.Uint(a - bu)
-                        Value.Int(b):
-                            Value.Int((a as int) - b)
-                        Value.Float(b):
-                            Value.Float(a as float - b)
-                        _:
-                            throw "cannot subtract {r.type_name()} from Uint"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            if b > a:
-                                throw "uint8 subtraction underflow"
-                            Value.Uint8(a - b)
-                        Value.Uint(b):
-                            let au = a as uint
-                            if b > au:
-                                throw "uint subtraction underflow"
-                            Value.Uint(au - b)
-                        Value.Int(b):
-                            Value.Int((a as int) - b)
-                        Value.Float(b):
-                            Value.Float(a as float - b)
-                        _:
-                            throw "cannot subtract {r.type_name()} from Uint8"
-                Value.Float(a):
-                    match r:
-                        Value.Float(b):
-                            Value.Float(a - b)
-                        Value.Int(b):
-                            Value.Float(a - b as float)
-                        Value.Uint(b):
-                            Value.Float(a - b as float)
-                        Value.Uint8(b):
-                            Value.Float(a - b as float)
-                        _:
-                            throw "cannot subtract {r.type_name()} from Float"
-                _:
-                    throw "cannot subtract {r.type_name()} from {l.type_name()}"
+            if let result = apply_binop_numeric(op, l, r):
+                result
+            elif let result2 = apply_binop_float_mixed(op, l, r):
+                result2
+            else:
+                throw "cannot subtract {r.type_name()} from {l.type_name()}"
         BinOp.Mul:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a * b)
-                        Value.Uint(b):
-                            Value.Int(a * (b as int))
-                        Value.Uint8(b):
-                            Value.Int(a * (b as int))
-                        Value.Float(b):
-                            Value.Float(a as float * b)
-                        _:
-                            throw "cannot multiply Int by {r.type_name()}"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            Value.Uint(a * b)
-                        Value.Uint8(b):
-                            Value.Uint(a * (b as uint))
-                        Value.Int(b):
-                            Value.Int((a as int) * b)
-                        Value.Float(b):
-                            Value.Float(a as float * b)
-                        _:
-                            throw "cannot multiply Uint by {r.type_name()}"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            # Same overflow-wrapping rationale as uint8 addition above.
-                            Value.Uint8((((a as uint) * (b as uint)) % 256) as uint8)
-                        Value.Uint(b):
-                            Value.Uint((a as uint) * b)
-                        Value.Int(b):
-                            Value.Int((a as int) * b)
-                        Value.Float(b):
-                            Value.Float(a as float * b)
-                        _:
-                            throw "cannot multiply Uint8 by {r.type_name()}"
-                Value.Float(a):
-                    match r:
-                        Value.Float(b):
-                            Value.Float(a * b)
-                        Value.Int(b):
-                            Value.Float(a * b as float)
-                        Value.Uint(b):
-                            Value.Float(a * b as float)
-                        Value.Uint8(b):
-                            Value.Float(a * b as float)
-                        _:
-                            throw "cannot multiply Float by {r.type_name()}"
-                _:
-                    throw "cannot multiply {l.type_name()} and {r.type_name()}"
+            if let result = apply_binop_numeric(op, l, r):
+                result
+            elif let result2 = apply_binop_float_mixed(op, l, r):
+                result2
+            else:
+                throw "cannot multiply {l.type_name()} and {r.type_name()}"
         BinOp.Div:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Int(a / b)
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Int(a / (b as int))
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Int(a / (b as int))
-                        Value.Float(b):
-                            Value.Float(a as float / b)
-                        _:
-                            throw "cannot divide Int by {r.type_name()}"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Uint(a / b)
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Uint(a / (b as uint))
-                        Value.Int(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Int((a as int) / b)
-                        Value.Float(b):
-                            Value.Float(a as float / b)
-                        _:
-                            throw "cannot divide Uint by {r.type_name()}"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Uint8(a / b)
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Uint((a as uint) / b)
-                        Value.Int(b):
-                            if b == 0:
-                                throw "division by zero"
-                            Value.Int((a as int) / b)
-                        Value.Float(b):
-                            Value.Float(a as float / b)
-                        _:
-                            throw "cannot divide Uint8 by {r.type_name()}"
-                Value.Float(a):
-                    match r:
-                        Value.Float(b):
-                            Value.Float(a / b)
-                        Value.Int(b):
-                            Value.Float(a / b as float)
-                        Value.Uint(b):
-                            Value.Float(a / b as float)
-                        Value.Uint8(b):
-                            Value.Float(a / b as float)
-                        _:
-                            throw "cannot divide Float by {r.type_name()}"
-                _:
-                    throw "cannot divide {l.type_name()} by {r.type_name()}"
+            if let result = apply_binop_numeric(op, l, r):
+                result
+            elif let result2 = apply_binop_float_mixed(op, l, r):
+                result2
+            else:
+                throw "cannot divide {l.type_name()} by {r.type_name()}"
         BinOp.Rem:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Int(a % b)
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Int(a % (b as int))
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Int(a % (b as int))
-                        Value.Float(b):
-                            Value.Float(a as float % b)
-                        _:
-                            throw "cannot remainder Int by {r.type_name()}"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Uint(a % b)
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Uint(a % (b as uint))
-                        Value.Int(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Int((a as int) % b)
-                        Value.Float(b):
-                            Value.Float(a as float % b)
-                        _:
-                            throw "cannot remainder Uint by {r.type_name()}"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Uint8(a % b)
-                        Value.Uint(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Uint((a as uint) % b)
-                        Value.Int(b):
-                            if b == 0:
-                                throw "remainder by zero"
-                            Value.Int((a as int) % b)
-                        Value.Float(b):
-                            Value.Float(a as float % b)
-                        _:
-                            throw "cannot remainder Uint8 by {r.type_name()}"
-                Value.Float(a):
-                    match r:
-                        Value.Float(b):
-                            Value.Float(a % b)
-                        Value.Int(b):
-                            Value.Float(a % b as float)
-                        Value.Uint(b):
-                            Value.Float(a % b as float)
-                        Value.Uint8(b):
-                            Value.Float(a % b as float)
-                        _:
-                            throw "cannot remainder Float by {r.type_name()}"
-                _:
-                    throw "cannot remainder {l.type_name()} by {r.type_name()}"
+            if let result = apply_binop_numeric(op, l, r):
+                result
+            elif let result2 = apply_binop_float_mixed(op, l, r):
+                result2
+            else:
+                throw "cannot remainder {l.type_name()} by {r.type_name()}"
         BinOp.Eq:
             Value.Bool(values_equal(l, r))
         BinOp.NotEq:
@@ -1048,137 +1093,30 @@ def Value apply_binop(BinOp op, Value l, Value r):
         BinOp.GtEq:
             Value.Bool(compare_values(l, r) >= 0)
         BinOp.BitAnd:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a & b)
-                        _:
-                            throw "bitwise-and requires Int operands"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            Value.Uint(a & b)
-                        _:
-                            throw "bitwise-and requires Uint operands"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            Value.Uint8(a & b)
-                        _:
-                            throw "bitwise-and requires Uint8 operands"
-                _:
-                    throw "bitwise-and requires Int operands"
+            if let result = apply_binop_bitwise_samekind(op, l, r):
+                result
+            else:
+                throw "bitwise-and requires matching operand types (got {l.type_name()} and {r.type_name()})"
         BinOp.BitOr:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a | b)
-                        _:
-                            throw "bitwise-or requires Int operands"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            Value.Uint(a | b)
-                        _:
-                            throw "bitwise-or requires Uint operands"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            Value.Uint8(a | b)
-                        _:
-                            throw "bitwise-or requires Uint8 operands"
-                _:
-                    throw "bitwise-or requires Int operands"
+            if let result = apply_binop_bitwise_samekind(op, l, r):
+                result
+            else:
+                throw "bitwise-or requires matching operand types (got {l.type_name()} and {r.type_name()})"
         BinOp.BitXor:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            Value.Int(a ^ b)
-                        _:
-                            throw "bitwise-xor requires Int operands"
-                Value.Uint(a):
-                    match r:
-                        Value.Uint(b):
-                            Value.Uint(a ^ b)
-                        _:
-                            throw "bitwise-xor requires Uint operands"
-                Value.Uint8(a):
-                    match r:
-                        Value.Uint8(b):
-                            Value.Uint8(a ^ b)
-                        _:
-                            throw "bitwise-xor requires Uint8 operands"
-                _:
-                    throw "bitwise-xor requires Int operands"
+            if let result = apply_binop_bitwise_samekind(op, l, r):
+                result
+            else:
+                throw "bitwise-xor requires matching operand types (got {l.type_name()} and {r.type_name()})"
         BinOp.Shl:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            Value.Int(a << b)
-                        _:
-                            throw "shift requires Int operands"
-                Value.Uint(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            Value.Uint(a << b)
-                        Value.Uint(b):
-                            Value.Uint(a << b)
-                        _:
-                            throw "shift requires Int operands"
-                Value.Uint8(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            # A shift amount >= the 8-bit width panics like the earlier
-                            # overflow case — mask it mod 8, matching wrapping_shl.
-                            Value.Uint8(a << (b % 8))
-                        Value.Uint8(b):
-                            Value.Uint8(a << (b % 8))
-                        _:
-                            throw "shift requires Int operands"
-                _:
-                    throw "shift requires Int operands"
+            if let result = apply_binop_shift(op, l, r):
+                result
+            else:
+                throw "shift requires numeric operands (got {l.type_name()} and {r.type_name()})"
         BinOp.Shr:
-            match l:
-                Value.Int(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            Value.Int(a >> b)
-                        _:
-                            throw "shift requires Int operands"
-                Value.Uint(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            Value.Uint(a >> b)
-                        Value.Uint(b):
-                            Value.Uint(a >> b)
-                        _:
-                            throw "shift requires Int operands"
-                Value.Uint8(a):
-                    match r:
-                        Value.Int(b):
-                            if b < 0:
-                                throw "shift amount cannot be negative"
-                            Value.Uint8(a >> (b % 8))
-                        Value.Uint8(b):
-                            Value.Uint8(a >> (b % 8))
-                        _:
-                            throw "shift requires Int operands"
-                _:
-                    throw "shift requires Int operands"
+            if let result = apply_binop_shift(op, l, r):
+                result
+            else:
+                throw "shift requires numeric operands (got {l.type_name()} and {r.type_name()})"
         BinOp.Is:
             match r:
                 Value.Nil:
@@ -1258,112 +1196,37 @@ def Value apply_binop(BinOp op, Value l, Value r):
 
 # Compare two values: returns negative/zero/positive
 req int compare_values(Value l, Value r):
-    match l:
-        Value.Int(a):
-            match r:
-                Value.Int(b):
-                    if a < b: -1
-                    else if a > b: 1
-                    else: 0
-                Value.Uint(b):
-                    let bi = b as int
-                    if a < bi: -1
-                    else if a > bi: 1
-                    else: 0
-                Value.Uint8(b):
-                    let bi = b as int
-                    if a < bi: -1
-                    else if a > bi: 1
-                    else: 0
-                Value.Float(b):
-                    let af = a as float
-                    if af < b: -1
-                    else if af > b: 1
-                    else: 0
-                _:
-                    throw "cannot compare Int and {r.type_name()}"
-        Value.Uint(a):
-            match r:
-                Value.Uint(b):
-                    if a < b: -1
-                    else if a > b: 1
-                    else: 0
-                Value.Int(b):
-                    let ai = a as int
-                    if ai < b: -1
-                    else if ai > b: 1
-                    else: 0
-                Value.Uint8(b):
-                    let bu = b as uint
-                    if a < bu: -1
-                    else if a > bu: 1
-                    else: 0
-                Value.Float(b):
-                    let af = a as float
-                    if af < b: -1
-                    else if af > b: 1
-                    else: 0
-                _:
-                    throw "cannot compare Uint and {r.type_name()}"
-        Value.Uint8(a):
-            match r:
-                Value.Uint8(b):
-                    if a < b: -1
-                    else if a > b: 1
-                    else: 0
-                Value.Uint(b):
-                    let au = a as uint
-                    if au < b: -1
-                    else if au > b: 1
-                    else: 0
-                Value.Int(b):
-                    let ai = a as int
-                    if ai < b: -1
-                    else if ai > b: 1
-                    else: 0
-                Value.Float(b):
-                    let af = a as float
-                    if af < b: -1
-                    else if af > b: 1
-                    else: 0
-                _:
-                    throw "cannot compare Uint8 and {r.type_name()}"
-        Value.Float(a):
-            match r:
-                Value.Float(b):
-                    if a < b: -1
-                    else if a > b: 1
-                    else: 0
-                Value.Int(b):
-                    let bf = b as float
-                    if a < bf: -1
-                    else if a > bf: 1
-                    else: 0
-                Value.Uint(b):
-                    let bf = b as float
-                    if a < bf: -1
-                    else if a > bf: 1
-                    else: 0
-                Value.Uint8(b):
-                    let bf = b as float
-                    if a < bf: -1
-                    else if a > bf: 1
-                    else: 0
-                _:
-                    throw "cannot compare Float and {r.type_name()}"
-        Value.Str(a):
-            match r:
-                Value.Str(b):
-                    if a < b: -1
-                    else if a > b: 1
-                    else: 0
-                _:
-                    throw "cannot compare String and {r.type_name()}"
-        Value.NativeFn(_, _): 0
-        Value.Fn(_, _): 0
-        Value.Closure(_, _, _): 0
-        _:
-            throw "cannot compare {l.type_name()} and {r.type_name()}"
+    let l_is_float = match l:
+        Value.Float(_): true
+        _: false
+    let r_is_float = match r:
+        Value.Float(_): true
+        _: false
+    if l_is_float or r_is_float:
+        guard let lf = value_as_float_numeric(l) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+        guard let rf = value_as_float_numeric(r) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+        if lf < rf: -1
+        elif lf > rf: 1
+        else: 0
+    else:
+        match l:
+            Value.Str(a):
+                match r:
+                    Value.Str(b):
+                        if a < b: -1
+                        elif a > b: 1
+                        else: 0
+                    _:
+                        throw "cannot compare String and {r.type_name()}"
+            Value.NativeFn(_, _): 0
+            Value.Fn(_, _): 0
+            Value.Closure(_, _, _): 0
+            _:
+                guard let av = value_as_i128(l) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+                guard let bv = value_as_i128(r) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+                if av < bv: -1
+                elif av > bv: 1
+                else: 0
 
 # Field access on a value
 def Value get_tuple_field([Value] elems, string field_name):
@@ -1535,6 +1398,24 @@ def Value call_method(mut Interpreter interp, Value recv, string method, [Value]
             call_uint_method(n, method, args)
         Value.Uint8(n):
             call_uint8_method(n, method, args)
+        Value.Int8(n):
+            call_int8_method(n, method, args)
+        Value.Int16(n):
+            call_int16_method(n, method, args)
+        Value.Int32(n):
+            call_int32_method(n, method, args)
+        Value.Int64(n):
+            call_int64_method(n, method, args)
+        Value.Int128(n):
+            call_int128_method(n, method, args)
+        Value.Uint16(n):
+            call_uint16_method(n, method, args)
+        Value.Uint32(n):
+            call_uint32_method(n, method, args)
+        Value.Uint64(n):
+            call_uint64_method(n, method, args)
+        Value.Uint128(n):
+            call_uint128_method(n, method, args)
         Value.Float(f):
             call_float_method(f, method, args)
         Value.Tuple(elems):
@@ -1857,6 +1738,82 @@ def Value call_uint8_method(uint8 n, string method, [Value] args):
         _:
             throw "no method '{method}' on Uint8"
 
+# Call built-in methods for the 9 fixed-width integer kinds beyond uint8 —
+# same small method set as call_int_method/call_uint_method above, one
+# function per width since Boring has no generic dispatch over primitive
+# scalar types.
+def Value call_int8_method(int8 n, string method, [Value] args):
+    match method:
+        "abs": if n < 0: Value.Int8(0 - n) else: Value.Int8(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Int8"
+
+def Value call_int16_method(int16 n, string method, [Value] args):
+    match method:
+        "abs": if n < 0: Value.Int16(0 - n) else: Value.Int16(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Int16"
+
+def Value call_int32_method(int32 n, string method, [Value] args):
+    match method:
+        "abs": if n < 0: Value.Int32(0 - n) else: Value.Int32(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Int32"
+
+def Value call_int64_method(int64 n, string method, [Value] args):
+    match method:
+        "abs": if n < 0: Value.Int64(0 - n) else: Value.Int64(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Int64"
+
+def Value call_int128_method(int128 n, string method, [Value] args):
+    match method:
+        "abs": if n < 0: Value.Int128(0 - n) else: Value.Int128(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Int128"
+
+def Value call_uint16_method(uint16 n, string method, [Value] args):
+    match method:
+        "abs": Value.Uint16(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Uint16"
+
+def Value call_uint32_method(uint32 n, string method, [Value] args):
+    match method:
+        "abs": Value.Uint32(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Uint32"
+
+def Value call_uint64_method(uint64 n, string method, [Value] args):
+    match method:
+        "abs": Value.Uint64(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Uint64"
+
+def Value call_uint128_method(uint128 n, string method, [Value] args):
+    match method:
+        "abs": Value.Uint128(n)
+        "to_string": Value.Str("{n}")
+        "as_float": Value.Float(n as float)
+        "as_int": Value.Int(n as int)
+        _: throw "no method '{method}' on Uint128"
+
 # Call built-in float methods
 def Value call_float_method(float f, string method, [Value] args):
     match method:
@@ -1910,6 +1867,15 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
         Type.Str: "string"
         Type.Uint: "uint"
         Type.Uint8: "uint8"
+        Type.Int8: "int8"
+        Type.Int16: "int16"
+        Type.Int32: "int32"
+        Type.Int64: "int64"
+        Type.Int128: "int128"
+        Type.Uint16: "uint16"
+        Type.Uint32: "uint32"
+        Type.Uint64: "uint64"
+        Type.Uint128: "uint128"
         _: "unknown"
     match type_name:
         "int":
@@ -1925,7 +1891,11 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         Value.Int(v)
                     else:
                         Value.Nil
-                _: Value.Nil
+                _:
+                    if let g = cast_numeric_generic(val, "int"):
+                        g
+                    else:
+                        Value.Nil
         "float":
             match val:
                 Value.Float(f): Value.Float(f)
@@ -1945,7 +1915,11 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         fv
                     else:
                         Value.Nil
-                _: Value.Nil
+                _:
+                    if let g = cast_numeric_generic(val, "float"):
+                        g
+                    else:
+                        Value.Nil
         "string":
             # Check for as string: conversion block on objects or enums
             match val:
@@ -2019,7 +1993,11 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         cast_value(interp, uv, Type.Uint)
                     else:
                         throw "cannot cast {uint_inner.type_name} to uint"
-                _: throw "cannot cast to uint"
+                _:
+                    if let g = cast_numeric_generic(val, "uint"):
+                        g
+                    else:
+                        throw "cannot cast to uint"
         "uint8":
             match val:
                 Value.Uint8(n): Value.Uint8(n)
@@ -2032,7 +2010,28 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         cast_value(interp, u8v, Type.Uint8)
                     else:
                         throw "cannot cast {uint8_inner.type_name} to uint8"
-                _: throw "cannot cast to uint8"
+                _:
+                    if let g = cast_numeric_generic(val, "uint8"):
+                        g
+                    else:
+                        throw "cannot cast to uint8"
+        "int8" | "int16" | "int32" | "int64" | "int128" | "uint16" | "uint32" | "uint64" | "uint128":
+            match val:
+                Value.Object(fw_inner):
+                    let fwv_opt = fw_inner.get_field("value")
+                    if let fwv = fwv_opt:
+                        # Reconstruct the target Type from `type_name` rather than reusing
+                        # `ty` — `ty` was already partially moved by the `Type.Named(name)`
+                        # arm above (`name` moves out of it) when this function's first
+                        # `match ty:` computed `type_name`.
+                        cast_value(interp, fwv, num_kind_type_of_name(type_name))
+                    else:
+                        throw "cannot cast {fw_inner.type_name} to {type_name}"
+                _:
+                    if let g = cast_numeric_generic(val, type_name):
+                        g
+                    else:
+                        throw "cannot cast to {type_name}"
         "bool":
             match val:
                 Value.Bool(b): Value.Bool(b)
@@ -2254,6 +2253,15 @@ req string display_value(Interpreter interp, Value val):
         Value.Int(n): "{n}"
         Value.Uint(n): "{n}"
         Value.Uint8(n): "{n}"
+        Value.Int8(n): "{n}"
+        Value.Int16(n): "{n}"
+        Value.Int32(n): "{n}"
+        Value.Int64(n): "{n}"
+        Value.Int128(n): "{n}"
+        Value.Uint16(n): "{n}"
+        Value.Uint32(n): "{n}"
+        Value.Uint64(n): "{n}"
+        Value.Uint128(n): "{n}"
         Value.Float(f): "{f}"
         Value.Str(s): s
         Value.Array(items):

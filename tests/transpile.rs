@@ -182,6 +182,7 @@ transpile_test!(optionals);
 transpile_test!(enums);
 transpile_test!(newtypes);
 transpile_test!(guard);
+transpile_test!(with_stmt);
 transpile_test!(generics);
 transpile_test!(operators);
 transpile_test!(macros);

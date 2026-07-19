@@ -494,6 +494,13 @@ pub enum Stmt {
     /// Body is a sequence of statements (may contain an inner `loop:` for GPU-driven rendering).
     /// Distinct from `kernel Foo:` (named struct declaration) by the absence of a name.
     KernelBlock(KernelBlockStmt),
+    /// `with <name> [, <name> ...]:` — scoped access block.
+    /// Grants extended, multi-statement host access to a value normally touched
+    /// one operation at a time (`'gpu'unified`/`'gpu'global` residency, `'actor`/`'guard` locks).
+    /// The qualifier and read/write access level are NOT resolved here — the checker
+    /// looks each name's binding and qualifier up in scope, exactly like `def`/`req`
+    /// method-call legality already is.
+    With(WithStmt),
 }
 
 /// An unnamed `kernel:` execution block.
@@ -694,6 +701,29 @@ pub struct ThrowStmt {
 pub struct ForStmt {
     pub vars: Vec<String>,
     pub iterable: Expr,
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// `with <name> [, <name> ...]:` — scoped access block.
+///
+/// ```boring
+/// with pr:
+///     print "pr[0] = {pr[0]}"
+///
+/// with c:
+///     c.value += 1
+///     c.value += 1
+/// ```
+///
+/// Deliberately does *not* carry each name's qualifier or read/write access level —
+/// both are resolved later by the checker/transpiler from each name's already-known
+/// binding and qualifier, the same way `def`/`req` method-call legality is resolved
+/// without being baked into the AST.
+#[derive(Debug, Clone)]
+pub struct WithStmt {
+    pub names: Vec<String>,
     pub body: Vec<Stmt>,
     pub line: usize,
     pub col: usize,
@@ -976,7 +1006,8 @@ pub enum OwnerQual {
     /// the transpiler emits `&mut T`.
     BorrowMut,
     /// GPU memory qualifiers.
-    /// Host-side: `T'gpu'unified`, `T'gpu'global`, `T'gpu'const`.
+    /// Host-side: `T'gpu'unified`, `T'gpu'global`. `'const` has no host-side form — it has
+    /// no host access (like `'local`), so it can only appear inside a `kernel` struct.
     /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'sync`, `T'local`, `T'const`.
     GpuUnified,
     GpuGlobal,
@@ -1008,13 +1039,23 @@ impl PartialEq for ConstExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    /// Bare `int` — maps to Rust `isize`.
     Int,
+    /// Bare `uint` — maps to Rust `usize`.
     Uint,
-    /// Unsigned 8-bit integer (Rust `u8`) — distinct from `Uint` (64-bit).
-    /// Unambiguous single-width type, unlike the pre-existing `u8` alias
-    /// (which resolves to bare `Uint`/`u64` under `boring run` but real
-    /// Rust `u8` under `boring build` — a run/build semantic split).
+    /// Unsigned 8-bit integer (Rust `u8`) — distinct from `Uint` (usize).
     Uint8,
+    /// Signed 8/16/32/64/128-bit integers (Rust `i8`/`i16`/`i32`/`i64`/`i128`).
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Int128,
+    /// Unsigned 16/32/64/128-bit integers (Rust `u16`/`u32`/`u64`/`u128`).
+    Uint16,
+    Uint32,
+    Uint64,
+    Uint128,
     Float,
     Str,
     Bool,
@@ -1070,7 +1111,10 @@ fn owner_qual_is_copy(q: &OwnerQual) -> bool {
 impl Type {
     pub fn is_copy(&self) -> bool {
         match self {
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+            Type::Int | Type::Uint | Type::Uint8
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
+                | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
             Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
@@ -1097,7 +1141,10 @@ impl Type {
     pub fn is_task_safe(&self) -> bool {
         match self {
             // Primitive copy types are always safe
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+            Type::Int | Type::Uint | Type::Uint8
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
+                | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Fn(..) => true,
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),
@@ -1126,5 +1173,221 @@ impl Type {
             Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
             Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuSync | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal | OwnerQual::GpuSurface) => false,
         }
+    }
+
+    /// The host-context GPU-residency qualifier (`'gpu'unified` / `'gpu'global`) at the
+    /// outermost qualifier layer, if any. Qualifiers are always the outermost wrapper
+    /// around a declared type (`[T]'gpu'unified` parses as `Qualified(Array(T), GpuUnified)`),
+    /// so no recursion is needed. See docs/scoped-access-blocks.md, "The qualifier".
+    pub fn gpu_resident_qual(&self) -> Option<&OwnerQual> {
+        match self {
+            Type::Qualified(_, q @ (OwnerQual::GpuUnified | OwnerQual::GpuGlobal)) => Some(q),
+            _ => None,
+        }
+    }
+}
+
+// ─── `with` scoped-access-block analysis ────────────────────────────────────
+//
+// Shared, pure AST walk used by both the checker (opacity enforcement) and the
+// transpiler (deciding map-for-read vs map-for-read-write / RwLock::read vs
+// write / Mutex::lock at `with` codegen time) — see docs/scoped-access-blocks.md,
+// "Read vs. write access level".
+//
+// A `let`-bound `with` name is always read-only (checked by the caller from the
+// binding's `BindingKind` before ever calling this). For a `mut`/`var`-bound name,
+// this scans the block's own body — recursing into `if`/`while`/`do-while`/`loop`/
+// `for`/`match`/`try`/`guard`/closures/nested-`with` lexically inside it, but never
+// into the body of a called function or method (only its signature, via the two
+// callbacks) — for:
+//   - a direct or index/field assignment targeting `name`;
+//   - `name` passed as an argument at a position the callee declares `var`;
+//   - a `def` (mutating) method called on `name`.
+// Any of these grant the block write access; none found means read-only, even
+// though the binding itself could support a mutation elsewhere.
+
+/// Returns `true` if `name` is mutated anywhere in `body`, per the rules above.
+///
+/// `is_var_param(callee_name, arg_index)` — does the free function named
+/// `callee_name` declare a `var` parameter at position `arg_index`? Signature-only
+/// lookup, matching how `def`/`req` legality is already resolved elsewhere.
+///
+/// `is_mutating_method(receiver_name, method_name)` — when `receiver_name == name`
+/// (the with-block subject), is `method_name` a `def` (mutating) method rather than
+/// a `req`? Callers only need to answer this for the with-block's own name(s); it is
+/// still invoked for other receivers so a caller may choose to ignore those safely.
+pub fn with_block_mutates(
+    body: &[Stmt],
+    name: &str,
+    is_var_param: &mut dyn FnMut(&str, usize) -> bool,
+    is_mutating_method: &mut dyn FnMut(&str, &str) -> bool,
+) -> bool {
+    body.iter().any(|s| with_stmt_mutates(s, name, is_var_param, is_mutating_method))
+}
+
+fn with_stmt_mutates(
+    stmt: &Stmt,
+    name: &str,
+    ivp: &mut dyn FnMut(&str, usize) -> bool,
+    imm: &mut dyn FnMut(&str, &str) -> bool,
+) -> bool {
+    let e = |ex: &Expr, ivp: &mut dyn FnMut(&str, usize) -> bool, imm: &mut dyn FnMut(&str, &str) -> bool| with_expr_mutates(ex, name, ivp, imm);
+    let b = |body: &[Stmt], ivp: &mut dyn FnMut(&str, usize) -> bool, imm: &mut dyn FnMut(&str, &str) -> bool| with_block_mutates(body, name, ivp, imm);
+    match stmt {
+        Stmt::Let(s) => s.value.as_ref().map(|v| e(v, ivp, imm)).unwrap_or(false),
+        Stmt::LetDestructure(s) => e(&s.value, ivp, imm),
+        Stmt::Return(r) => r.value.as_ref().map(|v| e(v, ivp, imm)).unwrap_or(false),
+        Stmt::Throw(t) => t.value.as_ref().map(|v| e(v, ivp, imm)).unwrap_or(false),
+        Stmt::If(s) => {
+            s.branches.iter().any(|(c, body)| e(c, ivp, imm) || b(body, ivp, imm))
+                || s.else_body.as_ref().map(|body| b(body, ivp, imm)).unwrap_or(false)
+        }
+        Stmt::IfLet(s) => {
+            s.clauses.iter().any(|c| with_cond_clause_mutates(c, name, ivp, imm))
+                || b(&s.then_body, ivp, imm)
+                || s.elif_branches.iter().any(|br| {
+                    br.clauses.iter().any(|c| with_cond_clause_mutates(c, name, ivp, imm)) || b(&br.body, ivp, imm)
+                })
+                || s.else_body.as_ref().map(|body| b(body, ivp, imm)).unwrap_or(false)
+        }
+        Stmt::Match(s) => with_match_mutates(s, name, ivp, imm),
+        Stmt::While(s) => e(&s.condition, ivp, imm) || b(&s.body, ivp, imm),
+        Stmt::WhileLet(s) => e(&s.value, ivp, imm) || b(&s.body, ivp, imm),
+        Stmt::DoWhile(s) => b(&s.body, ivp, imm) || e(&s.condition, ivp, imm),
+        Stmt::Loop(s) => b(&s.body, ivp, imm),
+        Stmt::For(s) => e(&s.iterable, ivp, imm) || b(&s.body, ivp, imm),
+        Stmt::Guard(s) => {
+            let cond_hit = match &s.cond {
+                GuardCond::Expr(ex) => e(ex, ivp, imm),
+                GuardCond::Clauses(cs) => cs.iter().any(|c| with_cond_clause_mutates(c, name, ivp, imm)),
+            };
+            cond_hit || b(&s.else_body, ivp, imm)
+        }
+        Stmt::Try(s) => {
+            b(&s.body, ivp, imm) || s.catch_clauses.iter().any(|c| b(&c.body, ivp, imm))
+        }
+        Stmt::Defer(body) => b(body, ivp, imm),
+        // Lexically nested `with` (same or different name) is still part of this
+        // block's body — recurse into it, same as any other nested construct.
+        Stmt::With(s) => b(&s.body, ivp, imm),
+        Stmt::Yield(ex, _) | Stmt::Wait(ex, _) => e(ex, ivp, imm),
+        Stmt::Break(_, v) => v.as_ref().map(|ex| e(ex, ivp, imm)).unwrap_or(false),
+        Stmt::KernelBlock(s) => b(&s.body, ivp, imm),
+        Stmt::Expr(ex) => e(ex, ivp, imm),
+        // New scope / new callable — signature only, never the body.
+        Stmt::Fn(_) | Stmt::Struct(_) | Stmt::Enum(_) | Stmt::Mod(_) | Stmt::Alias(_)
+        | Stmt::Continue(_) | Stmt::Comment(_) => false,
+    }
+}
+
+fn with_match_mutates(
+    s: &MatchStmt,
+    name: &str,
+    ivp: &mut dyn FnMut(&str, usize) -> bool,
+    imm: &mut dyn FnMut(&str, &str) -> bool,
+) -> bool {
+    with_expr_mutates(&s.subject, name, ivp, imm)
+        || s.arms.iter().any(|a| {
+            a.guard.as_ref().map(|g| with_expr_mutates(g, name, ivp, imm)).unwrap_or(false)
+                || match &a.body {
+                    MatchBody::Expr(ex) => with_expr_mutates(ex, name, ivp, imm),
+                    MatchBody::Block(body) => with_block_mutates(body, name, ivp, imm),
+                }
+        })
+}
+
+fn with_cond_clause_mutates(
+    c: &CondClause,
+    name: &str,
+    ivp: &mut dyn FnMut(&str, usize) -> bool,
+    imm: &mut dyn FnMut(&str, &str) -> bool,
+) -> bool {
+    match c {
+        CondClause::Expr(ex) | CondClause::Let(_, ex) | CondClause::LetPat(_, ex) => with_expr_mutates(ex, name, ivp, imm),
+    }
+}
+
+fn with_expr_mutates(
+    expr: &Expr,
+    name: &str,
+    ivp: &mut dyn FnMut(&str, usize) -> bool,
+    imm: &mut dyn FnMut(&str, &str) -> bool,
+) -> bool {
+    let e = |ex: &Expr, ivp: &mut dyn FnMut(&str, usize) -> bool, imm: &mut dyn FnMut(&str, &str) -> bool| with_expr_mutates(ex, name, ivp, imm);
+    let b = |body: &[Stmt], ivp: &mut dyn FnMut(&str, usize) -> bool, imm: &mut dyn FnMut(&str, &str) -> bool| with_block_mutates(body, name, ivp, imm);
+    match &expr.kind {
+        ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => {
+            let target_hit = match &lhs.kind {
+                ExprKind::Var(v) => v == name,
+                ExprKind::Index(obj, _) | ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => {
+                    matches!(&obj.kind, ExprKind::Var(v) if v == name)
+                }
+                _ => false,
+            };
+            target_hit || e(lhs, ivp, imm) || e(rhs, ivp, imm)
+        }
+        ExprKind::Call(callee, args) => {
+            let mut hit = e(callee, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm));
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                for (i, a) in args.iter().enumerate() {
+                    if matches!(&a.value.kind, ExprKind::Var(v) if v == name) && ivp(fn_name, i) {
+                        hit = true;
+                    }
+                }
+            }
+            hit
+        }
+        ExprKind::MethodCall(recv, method, args) | ExprKind::OptionalMethodCall(recv, method, args) => {
+            let mut hit = e(recv, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm));
+            if matches!(&recv.kind, ExprKind::Var(v) if v == name) && imm(name, method) {
+                hit = true;
+            }
+            hit
+        }
+        ExprKind::GenericCall(callee, _, args) => e(callee, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm)),
+        ExprKind::Pipe(lhs, _, args) => e(lhs, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm)),
+        ExprKind::New { ctor, arena } => e(ctor, ivp, imm) || arena.as_ref().map(|a| e(a, ivp, imm)).unwrap_or(false),
+        ExprKind::BinOp(_, l, r) => e(l, ivp, imm) || e(r, ivp, imm),
+        ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e(ex, ivp, imm),
+        ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e(ex, ivp, imm),
+        ExprKind::Index(obj, idx) => e(obj, ivp, imm) || e(idx, ivp, imm),
+        ExprKind::Else(ex, d) | ExprKind::TryElse(ex, d) => e(ex, ivp, imm) || e(d, ivp, imm),
+        ExprKind::TryElseBlock(body, els) => b(body, ivp, imm) || b(els, ivp, imm),
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => elems.iter().any(|ex| e(ex, ivp, imm)),
+        ExprKind::ArrayFill { value, count } => e(value, ivp, imm) || e(count, ivp, imm),
+        ExprKind::ArrayAlloc { count } => e(count, ivp, imm),
+        ExprKind::ArrayComp { expr: ex, count, .. } => e(count, ivp, imm) || e(ex, ivp, imm),
+        ExprKind::ArrayCompIter { expr: ex, iter, .. } => e(iter, ivp, imm) || e(ex, ivp, imm),
+        ExprKind::Dict(pairs) => pairs.iter().any(|(k, v)| e(k, ivp, imm) || e(v, ivp, imm)),
+        ExprKind::Range { start, end, .. } => e(start, ivp, imm) || e(end, ivp, imm),
+        ExprKind::SliceRange { start, end, .. } => {
+            start.as_ref().map(|s| e(s, ivp, imm)).unwrap_or(false) || end.as_ref().map(|ex| e(ex, ivp, imm)).unwrap_or(false)
+        }
+        ExprKind::StringInterp(segs) => segs.iter().any(|seg| match seg {
+            StringSegment::Expr(ex) | StringSegment::FormattedExpr(ex, _) => e(ex, ivp, imm),
+            _ => false,
+        }),
+        ExprKind::If(s) => {
+            s.branches.iter().any(|(c, body)| e(c, ivp, imm) || b(body, ivp, imm))
+                || s.else_body.as_ref().map(|body| b(body, ivp, imm)).unwrap_or(false)
+        }
+        ExprKind::Match(s) => with_match_mutates(s, name, ivp, imm),
+        ExprKind::Block(stmts) | ExprKind::Do(stmts) => b(stmts, ivp, imm),
+        ExprKind::Loop(s) => b(&s.body, ivp, imm),
+        ExprKind::Task(ex) => e(ex, ivp, imm),
+        ExprKind::TaskWithTimeout(dur, ex) => e(dur, ivp, imm) || e(ex, ivp, imm),
+        ExprKind::JoinAll(exprs) => exprs.iter().any(|ex| e(ex, ivp, imm)),
+        ExprKind::KernelLaunch { kernel, config } => {
+            e(kernel, ivp, imm)
+                || config.block.as_ref().map(|ex| e(ex, ivp, imm)).unwrap_or(false)
+                || config.grid.as_ref().map(|ex| e(ex, ivp, imm)).unwrap_or(false)
+        }
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(ex) => e(ex, ivp, imm),
+            ClosureBody::Block(stmts) => b(stmts, ivp, imm),
+        },
+        ExprKind::MacroCall { args, .. } => args.iter().any(|ex| e(ex, ivp, imm)),
+        ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => false,
     }
 }

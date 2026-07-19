@@ -605,6 +605,12 @@ impl KernelValidator {
             Stmt::Yield(e, _) => self.check_expr(e),
             Stmt::Comment(_) => {}
             Stmt::KernelBlock(s) => { for stmt in &s.body { self.check_stmt(stmt); } }
+            // `with` is a host-context construct (materializing GPU-resident data on the
+            // host, or holding an `'actor`/`'guard` lock across statements) — neither concept
+            // applies inside device code, which already runs each field access directly.
+            Stmt::With(w) => {
+                self.error(w.line, "`with` blocks are host-context only and cannot appear inside kernel device code");
+            }
         }
     }
 

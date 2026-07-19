@@ -214,7 +214,7 @@ x *= <span class="nb">2</span>    <span class="co"># 24</span>
 x /= <span class="nb">4</span>    <span class="co"># 6</span>
 x %= <span class="nb">4</span>    <span class="co"># 2</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> x: i64 = <span class="nb">10</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> x: isize = <span class="nb">10</span>;
 x += <span class="nb">5</span>;   <span class="co">// 15</span>
 x -= <span class="nb">3</span>;   <span class="co">// 12</span>
 x *= <span class="nb">2</span>;   <span class="co">// 24</span>
@@ -228,7 +228,7 @@ x %= <span class="nb">4</span>;   <span class="co">// 2</span></code></pre></div
 <span class="kw">let</span> <span class="kt">string</span> label = <span class="s">"ok"</span>
 <span class="kw">var</span> <span class="kt">bool</span> flag = <span class="kw">true</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> x: i64 = <span class="nb">42</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> x: isize = <span class="nb">42</span>;
 <span class="kw">let</span> pi: f64 = <span class="nb">3.14159</span>;
 <span class="kw">let</span> label: &amp;str = <span class="s">&quot;ok&quot;</span>;   <span class="co">// literal stays &amp;str; promoted to Rc&lt;str&gt; when stored</span>
 <span class="kw">let</span> <span class="kw">mut</span> flag: bool = <span class="kw">true</span>;</code></pre></div>
@@ -269,7 +269,20 @@ print a            <span class="co"># error: use of moved value &#x27;a&#x27;: t
 <hr>
 <h2 id="3-data-types">3. Data Types</h2>
 <h3 id="scalar-types">Scalar types</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td>64-bit signed integer</td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td>64-bit unsigned integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>64-bit floating-point</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code></td></tr><tr><td><code>string</code></td><td><code>&amp;str</code> (literal) / <code>Rc&lt;str&gt;</code> · <code>Arc&lt;str&gt;</code> (stored/computed)</td><td>Literals stay <code>&amp;str</code>; the transpiler promotes to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread) when the context requires it</td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>isize</code></td><td>pointer-width signed integer</td></tr><tr><td><code>uint</code></td><td><code>usize</code></td><td>pointer-width unsigned integer</td></tr><tr><td><code>int8</code></td><td><code>i8</code></td><td>8-bit signed integer</td></tr><tr><td><code>int16</code></td><td><code>i16</code></td><td>16-bit signed integer</td></tr><tr><td><code>int32</code></td><td><code>i32</code></td><td>32-bit signed integer</td></tr><tr><td><code>int64</code></td><td><code>i64</code></td><td>64-bit signed integer</td></tr><tr><td><code>int128</code></td><td><code>i128</code></td><td>128-bit signed integer</td></tr><tr><td><code>uint8</code></td><td><code>u8</code></td><td>8-bit unsigned integer</td></tr><tr><td><code>uint16</code></td><td><code>u16</code></td><td>16-bit unsigned integer</td></tr><tr><td><code>uint32</code></td><td><code>u32</code></td><td>32-bit unsigned integer</td></tr><tr><td><code>uint64</code></td><td><code>u64</code></td><td>64-bit unsigned integer</td></tr><tr><td><code>uint128</code></td><td><code>u128</code></td><td>128-bit unsigned integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>64-bit floating-point</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code></td></tr><tr><td><code>string</code></td><td><code>&amp;str</code> (literal) / <code>Rc&lt;str&gt;</code> · <code>Arc&lt;str&gt;</code> (stored/computed)</td><td>Literals stay <code>&amp;str</code>; the transpiler promotes to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread) when the context requires it</td></tr></tbody></table>
+<p>The Rust-style spellings <code>i8</code>/<code>i16</code>/<code>i32</code>/<code>i64</code>/<code>i128</code>/<code>isize</code> and <code>u8</code>/<code>u16</code>/<code>u32</code>/<code>u64</code>/<code>u128</code>/<code>usize</code> are accepted as aliases for the corresponding Boring name (<code>i32</code> ≡ <code>int32</code>, <code>isize</code> ≡ <code>int</code>, etc.) and transpile identically.</p>
+<h3 id="fixed-width-integers">Fixed-width integers</h3>
+<p>Each fixed-width type is a distinct type at runtime — mixing two <em>different</em> explicit fixed-width types in one expression (<code>a_uint16 + a_int32</code>) is a type error, same as Rust&#x27;s own refusal to implicitly coerce between distinct integer types. Cast explicitly instead:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">uint16</span> a = <span class="nb">100</span>
+<span class="kw">let</span> <span class="kt">int32</span> b = <span class="nb">5</span>
+<span class="kw">let</span> c = (a <span class="kw">as</span> <span class="kt">int32</span>) + b   <span class="co"># explicit cast required</span></code></pre></div>
+<p>A fixed-width value mixes freely with a bare integer literal or an <code>int</code>/<code>uint</code>-typed value (the flexible kind literals use by default):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">uint32</span> count = <span class="nb">10</span>
+<span class="kw">let</span> bigger = count + <span class="nb">1</span>     <span class="co"># fine — `1` is the flexible `int` literal kind</span></code></pre></div>
+<p>Casting to a narrower type checks the range and produces <code>nil</code> (or errors, depending on context) if the value doesn&#x27;t fit — same as the existing <code>uint8</code> behavior (<code>300 as uint8</code> is out of range).</p>
+<p><strong>GPU targets.</strong> Each GPU backend&#x27;s own numeric type system limits which widths a <code>kernel</code> struct field can use:</p>
+<table><thead><tr><th>Width</th><th><code>--target wgpu</code> (WGSL)</th><th><code>--target cuda</code> (CUDA C)</th><th><code>--target metal</code> (MSL)</th></tr></thead><tbody><tr><td>8-bit</td><td>not supported (compile error)</td><td>full support (<code>uint8_t</code>/<code>int8_t</code>)</td><td>full support (<code>uchar</code>/<code>char</code>)</td></tr><tr><td>16-bit</td><td>not supported (compile error)</td><td>full support</td><td>full support (<code>ushort</code>/<code>short</code>)</td></tr><tr><td>32-bit</td><td>full support (<code>i32</code>/<code>u32</code>)</td><td>full support</td><td>full support (<code>int</code>/<code>uint</code>)</td></tr><tr><td>64-bit</td><td>not supported (compile error)</td><td>full support</td><td>not supported (compile error)</td></tr><tr><td>128-bit</td><td>not supported (compile error)</td><td>supported via the non-standard <code>__int128</code> GCC/NVCC extension</td><td>not supported (compile error)</td></tr></tbody></table>
+<p>WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.</p>
 <h3 id="integer-literals">Integer literals</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="nb">42</span>
 <span class="kw">let</span> b = <span class="nb">-7</span></code></pre></div>
@@ -360,14 +373,14 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <span class="kw">let</span> a = t.<span class="nb">0</span>                <span class="co"># 42  (int)</span>
 <span class="kw">let</span> b = t.<span class="nb">1</span>                <span class="co"># &quot;hello&quot;  (string)</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> t = (<span class="nb">42i64</span>, <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;hello&quot;</span>));
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> t = (<span class="nb">42i</span>size, <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;hello&quot;</span>));
 <span class="kw">let</span> a = t.<span class="nb">0</span>;
 <span class="kw">let</span> b = t.<span class="nb">1</span>;</code></pre></div>
 <h4 id="typed-tuple-variable">Typed tuple variable</h4>
 <p>The type annotation <code>(T1, T2)</code> is written <strong>before</strong> the name, consistent with all other type annotations. This is especially useful to guide generic inference:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> (<span class="kt">int</span>, <span class="kt">string</span>) t = (<span class="nb">0</span>, <span class="s">"hello"</span>)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> t: (i64, <span class="kw">Arc</span>&lt;str&gt;) = (<span class="nb">0i64</span>, <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;hello&quot;</span>));</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> t: (isize, <span class="kw">Arc</span>&lt;str&gt;) = (<span class="nb">0i</span>size, <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;hello&quot;</span>));</code></pre></div>
 <h4 id="destructuring">Destructuring</h4>
 <p>All four forms are equivalent:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = t               <span class="co"># bare</span>
@@ -381,7 +394,7 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>(<span class="kt">int</span>, <span class="kt">int</span>) <span class="fn">minmax</span>([<span class="kt">int</span>] nums):
     (nums[<span class="nb">0</span>], nums[<span class="nb">1</span>])</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">minmax</span>(nums: <span class="kw">Vec</span>&lt;i64&gt;) -&gt; (i64, i64) {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">minmax</span>(nums: <span class="kw">Vec</span>&lt;isize&gt;) -&gt; (isize, isize) {
     (nums[<span class="nb">0</span>].<span class="fn">clone</span>(), nums[<span class="nb">1</span>].<span class="fn">clone</span>())
 }</code></pre></div>
 <h4 id="tuple-methods">Tuple methods</h4>
@@ -412,10 +425,10 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <span class="kw">let</span> s    = <span class="nb">3</span> <span class="kw">as</span> <span class="kt">string</span>
 <span class="kw">let</span> safe = (<span class="s">"42"</span> <span class="kw">as</span> <span class="kt">int</span>) <span class="kw">else</span> <span class="nb">-1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> n: <span class="kw">Option</span>&lt;i64&gt; = <span class="s">&quot;42&quot;</span>.<span class="fn">parse</span>().<span class="fn">ok</span>();
-<span class="kw">let</span> f = <span class="nb">42i64</span> <span class="kw">as</span> f64;
-<span class="kw">let</span> s = <span class="nb">3i64.</span><span class="fn">to_string</span>();
-<span class="kw">let</span> safe = <span class="s">&quot;42&quot;</span>.parse::&lt;i64&gt;().<span class="fn">unwrap_or</span>(-<span class="nb">1</span>);</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> n: <span class="kw">Option</span>&lt;isize&gt; = <span class="s">&quot;42&quot;</span>.<span class="fn">parse</span>().<span class="fn">ok</span>();
+<span class="kw">let</span> f = <span class="nb">42i</span>size <span class="kw">as</span> f64;
+<span class="kw">let</span> s = <span class="nb">3i</span>size.<span class="fn">to_string</span>();
+<span class="kw">let</span> safe = <span class="s">&quot;42&quot;</span>.parse::&lt;isize&gt;().<span class="fn">unwrap_or</span>(-<span class="nb">1</span>);</code></pre></div>
 <p>Supported cast targets: <code>int</code>, <code>uint</code>, <code>float</code>, <code>string</code>, <code>bool</code>, and any type that implements <code>Display</code> or <code>FromStr</code>.</p>
 <h3 id="reference-identity">Reference identity — <code>===</code></h3>
 <p><code>===</code> tests whether two variables point to the <strong>exact same object in memory</strong>, bypassing any user-defined <code>==</code>. Two objects may compare equal with <code>==</code> while being distinct instances; <code>===</code> distinguishes them.</p>
@@ -445,7 +458,7 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
     a + b</code></pre></div>
 <p>The last expression in the body is the implicit return value. No <code>return</code> keyword needed.</p>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add</span>(a: i64, b: i64) -&gt; i64 {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add</span>(a: isize, b: isize) -&gt; isize {
     a + b
 }</code></pre></div>
 <h3 id="the-def-keyword-is-optional">The <code>def</code> keyword is optional</h3>
@@ -471,9 +484,9 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
         counts[ch] = (counts[ch] <span class="kw">else</span> <span class="nb">0</span>) + <span class="nb">1</span>
     counts</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">first_n</span>(n: i64) -&gt; <span class="kw">Vec</span>&lt;i64&gt; { (<span class="nb">1..</span>=n).<span class="fn">collect</span>() }
-<span class="kw">fn</span> <span class="fn">unique_squares</span>() -&gt; std::collections::<span class="kw">HashSet</span>&lt;i64&gt; { [<span class="nb">1</span>,<span class="nb">4</span>,<span class="nb">9</span>].<span class="fn">into</span>() }
-<span class="kw">fn</span> <span class="fn">char_count</span>(s: &amp;str) -&gt; std::collections::<span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, i64&gt; { ... }</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">first_n</span>(n: isize) -&gt; <span class="kw">Vec</span>&lt;isize&gt; { (<span class="nb">1..</span>=n).<span class="fn">collect</span>() }
+<span class="kw">fn</span> <span class="fn">unique_squares</span>() -&gt; std::collections::<span class="kw">HashSet</span>&lt;isize&gt; { [<span class="nb">1</span>,<span class="nb">4</span>,<span class="nb">9</span>].<span class="fn">into</span>() }
+<span class="kw">fn</span> <span class="fn">char_count</span>(s: &amp;str) -&gt; std::collections::<span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, isize&gt; { ... }</code></pre></div>
 <h3 id="multi-line-parameter-lists">Multi-line parameter lists</h3>
 <p>Both definitions and call sites accept newlines inside <code>(...)</code>. A trailing comma is optional.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">add</span>(
@@ -581,8 +594,8 @@ print <span class="s">"<span class="si">{a === c}</span>"</span>   <span class="
 <span class="fn">add_one</span>(n)
 print n    <span class="co"># 6</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add_one</span>(x: &amp;<span class="kw">mut</span> i64) { *x += <span class="nb">1</span>; }
-<span class="kw">let</span> <span class="kw">mut</span> n = <span class="nb">5i64</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add_one</span>(x: &amp;<span class="kw">mut</span> isize) { *x += <span class="nb">1</span>; }
+<span class="kw">let</span> <span class="kw">mut</span> n = <span class="nb">5i</span>size;
 <span class="fn">add_one</span>(&amp;<span class="kw">mut</span> n);
 <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, n); <span class="co">// 6</span></code></pre></div>
 <p><strong>For reference-counted types</strong> (<code>T&#x27;shared</code>), <code>var</code> makes the local pointer reassignable — the object itself remains immutable through a shared reference. Field mutation and mutating methods are still forbidden.</p>
@@ -611,7 +624,7 @@ print n    <span class="co"># 6</span></code></pre></div>
 <span class="kt">string</span> <span class="fn">fn</span>(<span class="kt">int</span> a, <span class="kt">bool</span> c):   <span class="s">"<span class="si">{a}</span>/<span class="si">{c}</span>"</span>
 <span class="kt">string</span> <span class="fn">fn</span>(<span class="kt">int</span> a):           <span class="s">"<span class="si">{a}</span>"</span></code></pre></div>
 <p><strong>Rust equivalent</strong> — the transpiler mangles names with the parameter types:</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">describe__int</span>(n: i64) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">describe__int</span>(n: isize) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
 <span class="kw">fn</span> <span class="fn">describe__float</span>(f: f64) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
 <span class="kw">fn</span> <span class="fn">describe__string</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
 <span class="kw">fn</span> <span class="fn">describe__bool</span>(b: bool) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }</code></pre></div>
@@ -628,7 +641,7 @@ print n    <span class="co"># 6</span></code></pre></div>
 print a.<span class="fn">speak</span>(<span class="nb">3</span>)       <span class="co"># → Dog x3</span>
 print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span class="co"># → Dog: woof!</span></code></pre></div>
 <p><strong>Rust equivalent</strong> — method names are also mangled:</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">speak__int</span>(&amp;<span class="kw">self</span>, times: i64) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">speak__int</span>(&amp;<span class="kw">self</span>, times: isize) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }
 <span class="kw">fn</span> <span class="fn">speak__string</span>(&amp;<span class="kw">self</span>, sound: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Arc</span>&lt;str&gt; { ... }</code></pre></div>
 <hr>
 <p><strong>Conflict detection</strong> — the compiler rejects overloads that create ambiguity. A function with default parameters can be called with fewer arguments; if that reduced call matches another overload, it is an error:</p>
@@ -646,7 +659,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
     <span class="kw">guard</span> b != <span class="nb">0</span> <span class="kw">else</span> <span class="kw">throw</span> <span class="s">"division by zero"</span>
     a / b</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">divide</span>(a: i64, b: i64) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">divide</span>(a: isize, b: isize) -&gt; <span class="kw">Result</span>&lt;isize, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
     <span class="kw">if</span> b == <span class="nb">0</span> { <span class="kw">return</span> <span class="kw">Err</span>(<span class="s">&quot;division by zero&quot;</span>.<span class="fn">into</span>()); }
     <span class="kw">Ok</span>(a / b)
 }</code></pre></div>
@@ -654,7 +667,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">int</span> <span class="fn">apply</span>(<span class="kt">int</span> <span class="fn">f</span>(<span class="kt">int</span>), <span class="kt">int</span> x):
     <span class="fn">f</span>(x)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">apply</span>(f: <span class="kw">impl</span> <span class="fn">Fn</span>(i64) -&gt; i64, x: i64) -&gt; i64 {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">apply</span>(f: <span class="kw">impl</span> <span class="fn">Fn</span>(isize) -&gt; isize, x: isize) -&gt; isize {
     <span class="fn">f</span>(x)
 }</code></pre></div>
 <hr>
@@ -663,7 +676,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <span class="kw">let</span> x = <span class="nb">42</span>   <span class="co"># inline comment (not preserved by the transpiler)</span></code></pre></div>
 <p><strong>Rust equivalent</strong> (full-line comments are preserved by <code>boring build</code>)</p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// This is a comment</span>
-<span class="kw">let</span> x: i64 = <span class="nb">42</span>;</code></pre></div>
+<span class="kw">let</span> x: isize = <span class="nb">42</span>;</code></pre></div>
 <p>Only full-line comments are preserved in the transpiled output. Inline comments are stripped.</p>
 <hr>
 <h2 id="6-control-flow">6. Control Flow</h2>
@@ -742,7 +755,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
     <span class="kw">guard</span> n &gt;= <span class="nb">0</span> <span class="kw">else</span> <span class="kw">return</span> <span class="s">"negative"</span>
     <span class="s">"ok (<span class="si">{n}</span>)"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">check</span>(n: i64) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">check</span>(n: isize) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
     <span class="kw">if</span> n &lt; <span class="nb">0</span> { <span class="kw">return</span> <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;negative&quot;</span>); }
     <span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;ok ({})&quot;</span>, n))
 }</code></pre></div>
@@ -768,7 +781,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
         x <span class="kw">if</span> x &lt; <span class="nb">0</span>: <span class="s">"negative"</span>
         _:           <span class="s">"large"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">describe</span>(n: i64) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">describe</span>(n: isize) -&gt; <span class="kw">Arc</span>&lt;str&gt; {
     <span class="kw">match</span> n {
         <span class="nb">0</span>          =&gt; <span class="s">&quot;zero&quot;</span>,
         <span class="nb">1</span> | <span class="nb">2</span> | <span class="nb">3</span>  =&gt; <span class="s">&quot;small&quot;</span>,
@@ -784,7 +797,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> i = <span class="nb">0</span>
 <span class="kw">while</span> i &lt; <span class="nb">5</span>: i += <span class="nb">1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> i = <span class="nb">0i64</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> i = <span class="nb">0i</span>size;
 <span class="kw">while</span> i &lt; <span class="nb">5</span> { i += <span class="nb">1</span>; }</code></pre></div>
 <h3 id="while-let"><code>while let</code></h3>
 <p>Loop while an expression returns a non-<code>nil</code> value, binding it each iteration. The loop stops as soon as the expression returns <code>nil</code>.</p>
@@ -868,8 +881,8 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <span class="kw">for</span> k <span class="kw">in</span> <span class="nb">1..5</span>:        <span class="co"># exclusive: 1, 2, 3, 4</span>
     print <span class="s">"<span class="si">{k}</span>"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">for</span> k <span class="kw">in</span> <span class="nb">1i64..</span>=<span class="nb">5</span> { <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, k); }
-<span class="kw">for</span> k <span class="kw">in</span> <span class="nb">1i64..5</span>  { <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, k); }</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">for</span> k <span class="kw">in</span> <span class="nb">1i</span>size..=<span class="nb">5</span> { <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, k); }
+<span class="kw">for</span> k <span class="kw">in</span> <span class="nb">1i</span>size..<span class="nb">5</span>  { <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, k); }</code></pre></div>
 <h3 id="for-without-a-variable--repeat-n-times"><code>for</code> without a variable — repeat N times</h3>
 <p>When you only need to repeat a body without using the index, omit the binding entirely:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">for</span> <span class="nb">1..</span>=<span class="nb">5</span>:
@@ -879,7 +892,7 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <span class="kw">for</span> _ <span class="kw">in</span> <span class="nb">1..</span>=<span class="nb">5</span>:
     print <span class="s">"tick"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">for</span> _ <span class="kw">in</span> <span class="nb">1i64..</span>=<span class="nb">5</span> { <span class="fm">println!</span>(<span class="s">&quot;tick&quot;</span>); }</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">for</span> _ <span class="kw">in</span> <span class="nb">1i</span>size..=<span class="nb">5</span> { <span class="fm">println!</span>(<span class="s">&quot;tick&quot;</span>); }</code></pre></div>
 <h3 id="loop-with-break-and-continue"><code>loop</code> with <code>break</code> and <code>continue</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> acc = <span class="nb">0</span>
 <span class="kw">var</span> idx = <span class="nb">0</span>
@@ -891,8 +904,8 @@ print a.<span class="fn">speak</span>(<span class="s">"woof"</span>)  <span clas
 <p>Inline form:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">loop</span>: <span class="fn">tick</span>()</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> acc = <span class="nb">0i64</span>;
-<span class="kw">let</span> <span class="kw">mut</span> idx = <span class="nb">0i64</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> acc = <span class="nb">0i</span>size;
+<span class="kw">let</span> <span class="kw">mut</span> idx = <span class="nb">0i</span>size;
 <span class="kw">loop</span> {
     idx += <span class="nb">1</span>;
     <span class="kw">if</span> idx % <span class="nb">2</span> == <span class="nb">0</span> { <span class="kw">continue</span>; }
@@ -928,7 +941,7 @@ print <span class="s">"total: <span class="si">{total}</span>"</span>   <span cl
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> j = <span class="nb">0</span>
 <span class="kw">do</span>: j += <span class="nb">1</span> <span class="kw">while</span> j &lt; <span class="nb">3</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> j = <span class="nb">0i64</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> j = <span class="nb">0i</span>size;
 <span class="kw">loop</span> {
     j += <span class="nb">1</span>;
     <span class="kw">if</span> !(j &lt; <span class="nb">3</span>) { <span class="kw">break</span>; }
@@ -966,16 +979,16 @@ print <span class="s">"after: <span class="si">{msg}</span>"</span>   <span clas
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> numbers = [<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>]
 <span class="kw">let</span> [<span class="kt">int</span>] empty = []</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> numbers: <span class="kw">Vec</span>&lt;i64&gt; = <span class="fm">vec!</span>[<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>];
-<span class="kw">let</span> empty: <span class="kw">Vec</span>&lt;i64&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> numbers: <span class="kw">Vec</span>&lt;isize&gt; = <span class="fm">vec!</span>[<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>];
+<span class="kw">let</span> empty: <span class="kw">Vec</span>&lt;isize&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();</code></pre></div>
 <h4 id="array-fill-and-comprehension">Array fill and comprehension</h4>
 <p>Two shorthand forms create arrays without listing every element:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> zeros  = [<span class="nb">0</span> <span class="kw">for</span> ..<span class="nb">10</span>]             <span class="co"># fill: 10 zeros</span>
 <span class="kw">let</span> squares = [i * i <span class="kw">for</span> i <span class="kw">in</span> ..<span class="nb">5</span>]   <span class="co"># comprehension: [0, 1, 4, 9, 16]</span></code></pre></div>
 <p>The range must be <code>..n</code> (exclusive, starting at 0) or <code>0..n</code>. In the comprehension form, <code>i</code> is bound to the index (0-based, type <code>int</code>). Both forms produce a <code>[T]</code> (<code>Vec&lt;T&gt;</code>).</p>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> zeros: <span class="kw">Vec</span>&lt;i64&gt;   = <span class="fm">vec!</span>[<span class="nb">0i64</span>; <span class="nb">10</span>];
-<span class="kw">let</span> squares: <span class="kw">Vec</span>&lt;i64&gt; = (<span class="nb">0..5i64</span>).<span class="fn">map</span>(|i| i * i).<span class="fn">collect</span>();</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> zeros: <span class="kw">Vec</span>&lt;isize&gt;   = <span class="fm">vec!</span>[<span class="nb">0i</span>size; <span class="nb">10</span>];
+<span class="kw">let</span> squares: <span class="kw">Vec</span>&lt;isize&gt; = (<span class="nb">0..5i</span>size).<span class="fn">map</span>(|i| i * i).<span class="fn">collect</span>();</code></pre></div>
 <h4 id="fixed-size-arrays--t-n">Fixed-size arrays — <code>[T, N]</code></h4>
 <p>A compile-time size can be given as a second element of the type, separated by a comma. The result is a stack-allocated array of exactly <code>N</code> elements, analogous to Rust&#x27;s <code>[T; N]</code>.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> [<span class="kt">float</span>, <span class="nb">4</span>] v = [<span class="nb">1.0</span>, <span class="nb">2.0</span>, <span class="nb">3.0</span>, <span class="nb">4.0</span>]
@@ -988,7 +1001,7 @@ print <span class="s">"after: <span class="si">{msg}</span>"</span>   <span clas
 print m.data[<span class="nb">0</span>]                       <span class="co"># 0</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> v: [f64; <span class="nb">4</span>] = [<span class="nb">1.0</span>, <span class="nb">2.0</span>, <span class="nb">3.0</span>, <span class="nb">4.0</span>];
-<span class="kw">let</span> z: [i64; <span class="nb">3</span>] = [<span class="nb">0i64</span>; <span class="nb">3</span>];</code></pre></div>
+<span class="kw">let</span> z: [isize; <span class="nb">3</span>] = [<span class="nb">0i</span>size; <span class="nb">3</span>];</code></pre></div>
 <p><code>N</code> must be a non-negative integer literal — it cannot be a runtime variable. Use <code>[T]</code> (<code>Vec&lt;T&gt;</code>) when the size is dynamic.</p>
 <h4 id="array-slicing">Array slicing</h4>
 <p>A sub-array can be extracted with slice syntax. The result is a new <code>[T]</code> containing a copy of the selected elements.</p>
@@ -1015,16 +1028,16 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> {<span class="kt">string</span>=<span class="kt">int</span>} scores = {<span class="s">"Alice"</span> = <span class="nb">90</span>, <span class="s">"Bob"</span> = <span class="nb">85</span>}
 <span class="kw">let</span> {<span class="kt">int</span>=<span class="kt">int</span>} empty_map = {=}</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> scores: <span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, i64&gt; = <span class="kw">HashMap</span>::<span class="fn">from</span>([...]); <span class="co">// literals coerced via .to_arc()</span>
-<span class="kw">let</span> empty_map: <span class="kw">HashMap</span>&lt;i64, i64&gt; = <span class="kw">HashMap</span>::<span class="fn">new</span>();</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> scores: <span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, isize&gt; = <span class="kw">HashMap</span>::<span class="fn">from</span>([...]); <span class="co">// literals coerced via .to_arc()</span>
+<span class="kw">let</span> empty_map: <span class="kw">HashMap</span>&lt;isize, isize&gt; = <span class="kw">HashMap</span>::<span class="fn">new</span>();</code></pre></div>
 <h4 id="dictionary-methods">Dictionary methods</h4>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>d.keys()</code></td><td><code>d.keys().cloned().collect()</code></td></tr><tr><td><code>d.values()</code></td><td><code>d.values().cloned().collect()</code></td></tr><tr><td><code>d.contains(k)</code></td><td><code>d.contains_key(&amp;k)</code></td></tr><tr><td><code>d.remove(k)</code></td><td><code>d.remove(&amp;k)</code></td></tr><tr><td><code>d.length</code></td><td><code>d.len()</code></td></tr><tr><td><code>d.isEmpty()</code></td><td><code>d.is_empty()</code></td></tr><tr><td><code>d.map((k,v): expr)</code></td><td><code>d.iter().map(|(k,v)| expr).collect()</code></td></tr><tr><td><code>d.filter((k,v): cond)</code></td><td><code>d.into_iter().filter(|(k,v)| cond).collect()</code></td></tr></tbody></table>
 <h3 id="sets--t">Sets — <code>{T}</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> {<span class="kt">int</span>} unique = {<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">2</span>, <span class="nb">1</span>}   <span class="co"># deduplicates → {1, 2, 3}</span>
 <span class="kw">let</span> {<span class="kt">int</span>} empty_set = {}</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> unique: <span class="kw">HashSet</span>&lt;i64&gt; = <span class="kw">HashSet</span>::<span class="fn">from</span>([<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>]);
-<span class="kw">let</span> empty_set: <span class="kw">HashSet</span>&lt;i64&gt; = <span class="kw">HashSet</span>::<span class="fn">new</span>();</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> unique: <span class="kw">HashSet</span>&lt;isize&gt; = <span class="kw">HashSet</span>::<span class="fn">from</span>([<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>]);
+<span class="kw">let</span> empty_set: <span class="kw">HashSet</span>&lt;isize&gt; = <span class="kw">HashSet</span>::<span class="fn">new</span>();</code></pre></div>
 <h4 id="set-methods">Set methods</h4>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>s.contains(v)</code></td><td><code>s.contains(&amp;v)</code></td></tr><tr><td><code>s.add(v)</code></td><td><code>s.insert(v)</code></td></tr><tr><td><code>s.remove(v)</code></td><td><code>s.remove(&amp;v)</code></td></tr><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.isEmpty()</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
 <h3 id="index--opaque-collection-cursor">Index — opaque collection cursor</h3>
@@ -1325,7 +1338,7 @@ print <span class="fn">a</span>()                <span class="co"># 15</span></c
 print c.value            <span class="co"># 3</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">impl</span> <span class="kt">Adder</span> {
-    <span class="kw">fn</span> <span class="fn">__call__</span>(&amp;<span class="kw">self</span>) -&gt; i64 { <span class="kw">self</span>.base + <span class="nb">10</span> }
+    <span class="kw">fn</span> <span class="fn">__call__</span>(&amp;<span class="kw">self</span>) -&gt; isize { <span class="kw">self</span>.base + <span class="nb">10</span> }
 }
 <span class="kw">impl</span> <span class="kt">Counter</span> {
     <span class="kw">fn</span> <span class="fn">__call__</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>) { <span class="kw">self</span>.value += <span class="nb">1</span>; }
@@ -1340,9 +1353,9 @@ print c.value            <span class="co"># 3</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Clone)]</span>
 <span class="kw">enum</span> <span class="kt">Expr</span> {
-    <span class="fn">Num</span>(i64),
-    <span class="fn">Add</span>(i64, i64),
-    <span class="fn">Mul</span>(i64, i64),
+    <span class="fn">Num</span>(isize),
+    <span class="fn">Add</span>(isize, isize),
+    <span class="fn">Mul</span>(isize, isize),
 }</code></pre></div>
 <h3 id="constructing-variants">Constructing variants</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> e = Expr.<span class="fn">Num</span>(<span class="nb">7</span>)
@@ -1357,7 +1370,7 @@ print c.value            <span class="co"># 3</span></code></pre></div>
         <span class="fn">Add</span>(l, r):   l + r
         <span class="fn">Mul</span>(l, r):   l * r</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">eval</span>(e: <span class="kt">Expr</span>) -&gt; i64 {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">eval</span>(e: <span class="kt">Expr</span>) -&gt; isize {
     <span class="kw">match</span> e {
         <span class="kt">Expr</span>::<span class="fn">Num</span>(v)      =&gt; v,
         <span class="kt">Expr</span>::<span class="fn">Add</span>(l, r)   =&gt; l + r,
@@ -1444,7 +1457,7 @@ print <span class="fn">label</span>(.South)</code></pre></div>
 <blockquote><strong>Limitation</strong> — the shorthand requires a single unambiguous type at the call site. When the type cannot be inferred (no annotation, overloaded parameter), use the full form.</blockquote>
 <h3 id="inline-match--match--with">Inline match — <code>match … with</code></h3>
 <p>When a match fits on one line, use the <code>with</code> form instead of an indented block:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> s = <span class="kw">match</span> x with <span class="nb">0</span>: <span class="s">"zero"</span>, <span class="nb">1</span>: <span class="s">"one"</span>, _: <span class="s">"other"</span></code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> s = <span class="kw">match</span> x <span class="kw">with</span> <span class="nb">0</span>: <span class="s">"zero"</span>, <span class="nb">1</span>: <span class="s">"one"</span>, _: <span class="s">"other"</span></code></pre></div>
 <p>Arms are separated by <code>,</code>. Each arm is <code>Pattern: expression</code> — the same syntax as block match arms, just without the newline and indent.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Block form (multi-line)</span>
 <span class="kw">match</span> status:
@@ -1453,9 +1466,9 @@ print <span class="fn">label</span>(.South)</code></pre></div>
     _:   <span class="s">"error"</span>
 
 <span class="co"># Inline form (single line)</span>
-<span class="kw">let</span> msg = <span class="kw">match</span> status with <span class="nb">200</span>: <span class="s">"ok"</span>, <span class="nb">404</span>: <span class="s">"not found"</span>, _: <span class="s">"error"</span></code></pre></div>
+<span class="kw">let</span> msg = <span class="kw">match</span> status <span class="kw">with</span> <span class="nb">200</span>: <span class="s">"ok"</span>, <span class="nb">404</span>: <span class="s">"not found"</span>, _: <span class="s">"error"</span></code></pre></div>
 <p>Useful inside expressions, closures, and function arguments:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>scores.<span class="fn">map</span>((s): <span class="kw">match</span> s with <span class="nb">0</span>: <span class="s">"fail"</span>, <span class="nb">100</span>: <span class="s">"perfect"</span>, _: <span class="s">"pass"</span>)</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>scores.<span class="fn">map</span>((s): <span class="kw">match</span> s <span class="kw">with</span> <span class="nb">0</span>: <span class="s">"fail"</span>, <span class="nb">100</span>: <span class="s">"perfect"</span>, _: <span class="s">"pass"</span>)</code></pre></div>
 <p><strong>Rules:</strong></p>
 <ul><li><code>with</code> replaces the <code>:</code> + newline + indent of the block form.</li><li>Arm bodies are expressions (no block statements).</li><li>Guards (<code>if cond</code>) and pattern alternatives (<code>|</code>) are not supported in the inline form — use the block form for those.</li></ul>
 <p><strong>Rust equivalent</strong> — the transpiler emits a standard <code>match</code> block:</p>
@@ -1656,12 +1669,12 @@ print <span class="fn">label</span>(.South)</code></pre></div>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">trait</span> <span class="kt">Container</span> {
     <span class="kw">type</span> <span class="kt">Item</span>;
     <span class="kw">fn</span> <span class="fn">first</span>(&amp;<span class="kw">self</span>) -&gt; <span class="kw">Self</span>::<span class="kt">Item</span>;
-    <span class="kw">fn</span> <span class="fn">count</span>(&amp;<span class="kw">self</span>) -&gt; i64;
+    <span class="kw">fn</span> <span class="fn">count</span>(&amp;<span class="kw">self</span>) -&gt; isize;
 }
 <span class="kw">impl</span> <span class="kt">Container</span> <span class="kw">for</span> <span class="kt">IntBox</span> {
-    <span class="kw">type</span> <span class="kt">Item</span> = i64;
-    <span class="kw">fn</span> <span class="fn">first</span>(&amp;<span class="kw">self</span>) -&gt; i64 { <span class="kw">self</span>.values[<span class="nb">0</span>].<span class="fn">clone</span>() }
-    <span class="kw">fn</span> <span class="fn">count</span>(&amp;<span class="kw">self</span>) -&gt; i64 { <span class="kw">self</span>.values.<span class="fn">len</span>() <span class="kw">as</span> i64 }
+    <span class="kw">type</span> <span class="kt">Item</span> = isize;
+    <span class="kw">fn</span> <span class="fn">first</span>(&amp;<span class="kw">self</span>) -&gt; isize { <span class="kw">self</span>.values[<span class="nb">0</span>].<span class="fn">clone</span>() }
+    <span class="kw">fn</span> <span class="fn">count</span>(&amp;<span class="kw">self</span>) -&gt; isize { <span class="kw">self</span>.values.<span class="fn">len</span>() <span class="kw">as</span> isize }
 }</code></pre></div>
 <h3 id="generic-associated-types-gat">Generic Associated Types (GAT)</h3>
 <p>An associated type can itself be parameterised by a lifetime, forming a <em>Generic Associated Type</em> (GAT). Write the lifetime parameter as <code>&amp;a</code> inside angle brackets after the type name.</p>
@@ -1687,8 +1700,8 @@ print c.<span class="fn">next</span>()                  <span class="co"># 11</s
     <span class="kw">fn</span> next&lt;<span class="lf">&#x27;a</span>&gt;(&amp;<span class="lf">&#x27;a</span> <span class="kw">self</span>) -&gt; <span class="kw">Self</span>::<span class="kt">Item</span>&lt;<span class="lf">&#x27;a</span>&gt;;
 }
 <span class="kw">impl</span> <span class="kt">Producer</span> <span class="kw">for</span> <span class="kt">Counter</span> {
-    <span class="kw">type</span> <span class="kt">Item</span>&lt;<span class="lf">&#x27;a</span>&gt; = i64;
-    <span class="kw">fn</span> next&lt;<span class="lf">&#x27;a</span>&gt;(&amp;<span class="lf">&#x27;a</span> <span class="kw">self</span>) -&gt; i64 { <span class="kw">self</span>.value + <span class="nb">1</span> }
+    <span class="kw">type</span> <span class="kt">Item</span>&lt;<span class="lf">&#x27;a</span>&gt; = isize;
+    <span class="kw">fn</span> next&lt;<span class="lf">&#x27;a</span>&gt;(&amp;<span class="lf">&#x27;a</span> <span class="kw">self</span>) -&gt; isize { <span class="kw">self</span>.value + <span class="nb">1</span> }
 }</code></pre></div>
 <h3 id="traits-as-types">Traits as types</h3>
 <p>A trait name used as a return or parameter type means <strong>dynamic dispatch</strong> — the concrete type is selected at runtime via a vtable. The value is heap-allocated (<code>Box&lt;dyn Trait&gt;</code>):</p>
@@ -1920,7 +1933,7 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <span class="kw">if</span> <span class="kw">let</span> v = r1:
     print <span class="s">"got <span class="si">{v}</span>"</span>                 <span class="co"># got 5</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">divide</span>(a: i64, b: i64) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">divide</span>(a: isize, b: isize) -&gt; <span class="kw">Result</span>&lt;isize, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
     <span class="kw">if</span> b == <span class="nb">0</span> { <span class="kw">return</span> <span class="kw">Err</span>(<span class="s">&quot;division by zero&quot;</span>.<span class="fn">into</span>()); }
     <span class="kw">Ok</span>(a / b)
 }
@@ -1944,8 +1957,8 @@ print r4   <span class="co"># not found</span></code></pre></div>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">int</span>? some_val = <span class="nb">42</span>
 <span class="kw">let</span> <span class="kt">int</span>? no_val   = <span class="kw">nil</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> some_val: <span class="kw">Option</span>&lt;i64&gt; = <span class="kw">Some</span>(<span class="nb">42</span>);
-<span class="kw">let</span> no_val:   <span class="kw">Option</span>&lt;i64&gt; = <span class="kw">None</span>;</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> some_val: <span class="kw">Option</span>&lt;isize&gt; = <span class="kw">Some</span>(<span class="nb">42</span>);
+<span class="kw">let</span> no_val:   <span class="kw">Option</span>&lt;isize&gt; = <span class="kw">None</span>;</code></pre></div>
 <h3 id="else--nil-coalescing"><code>else</code> — nil coalescing</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>print <span class="s">"<span class="si">{some_val else 0}</span>"</span>   <span class="co"># 42</span>
 print <span class="s">"<span class="si">{no_val   else 0}</span>"</span>   <span class="co"># 0</span></code></pre></div>
@@ -2056,7 +2069,7 @@ copy_items&lt;<span class="kt">int</span>&gt;(src, dst)
 <p><strong>Rules:</strong></p>
 <ul><li><code>&amp;a</code> in a type argument position becomes <code>&#x27;a</code> in the emitted Rust.</li><li>Constraints (<code>as Bound</code>) belong only on the <strong>definition</strong> — never repeat them at call sites.</li></ul>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>copy_items::&lt;i64&gt;(src, dst);           <span class="co">// bound already on fn, not repeated at call site</span>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>copy_items::&lt;isize&gt;(src, dst);           <span class="co">// bound already on fn, not repeated at call site</span>
 <span class="kw">let</span> buf: <span class="kt">Container</span>&lt;<span class="lf">&#x27;a</span>, <span class="kw">Arc</span>&lt;str&gt;&gt;;   <span class="co">// lifetime preserved</span></code></pre></div>
 <h3 id="const-generics--uint-n">Const generics — <code>&lt;uint N&gt;</code></h3>
 <p>A <strong>const generic</strong> is a compile-time integer or bool value that is part of a type&#x27;s signature. Write it as <code>&lt;uint N&gt;</code> (or <code>&lt;int N&gt;</code>, <code>&lt;bool N&gt;</code>) inside the generic parameter list — the type comes first, then the name, just like a regular variable declaration.</p>
@@ -2072,11 +2085,11 @@ copy_items&lt;<span class="kt">int</span>&gt;(src, dst)
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">struct</span> <span class="kt">Stack</span>&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt; {
     data: <span class="kw">Vec</span>&lt;<span class="kt">T</span>&gt;,
-    len:  i64,
+    len:  isize,
 }
 <span class="kw">impl</span>&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt; <span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt; {
     <span class="kw">fn</span> <span class="fn">capacity</span>(&amp;<span class="kw">self</span>) -&gt; usize { <span class="kt">N</span> }
-    <span class="kw">fn</span> <span class="fn">is_full</span>(&amp;<span class="kw">self</span>)  -&gt; bool  { <span class="kw">self</span>.len == <span class="kt">N</span> <span class="kw">as</span> i64 }
+    <span class="kw">fn</span> <span class="fn">is_full</span>(&amp;<span class="kw">self</span>)  -&gt; bool  { <span class="kw">self</span>.len == <span class="kt">N</span> <span class="kw">as</span> isize }
 }</code></pre></div>
 <p>Const generics work on functions too. The implicit type-param collection picks up <code>&lt;uint N&gt;</code> from parameter types automatically:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># N is inferred from the param type `Stack&lt;T, uint N&gt;` — no explicit &lt;T, uint N&gt; needed</span>
@@ -2087,15 +2100,15 @@ T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, 
 <span class="kt">uint</span> <span class="fn">capacity_of</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
     N</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> get&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt;(s: &amp;<span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt;, i: i64) -&gt; <span class="kt">T</span> {
-    <span class="kw">if</span> !(i &lt; <span class="kt">N</span> <span class="kw">as</span> i64) { <span class="kw">return</span> <span class="kw">Err</span>(…) }
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> get&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt;(s: &amp;<span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt;, i: isize) -&gt; <span class="kt">T</span> {
+    <span class="kw">if</span> !(i &lt; <span class="kt">N</span> <span class="kw">as</span> isize) { <span class="kw">return</span> <span class="kw">Err</span>(…) }
     s.data[i <span class="kw">as</span> usize].<span class="fn">clone</span>()
 }
 <span class="kw">fn</span> capacity_of&lt;<span class="kt">T</span>: <span class="kt">Clone</span> + std::fmt::<span class="kt">Debug</span>, <span class="kw">const</span> <span class="kt">N</span>: usize&gt;(s: &amp;<span class="kt">Stack</span>&lt;<span class="kt">T</span>, <span class="kt">N</span>&gt;) -&gt; usize { <span class="kt">N</span> }</code></pre></div>
 <p>Or declare them explicitly and use <code>N</code> directly as a value in the body:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> describe&lt;T, <span class="kt">uint</span> N&gt;(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
     <span class="s">"capacity=<span class="si">{N}</span>, used=<span class="si">{s.len}</span>"</span></code></pre></div>
-<table><thead><tr><th>Boring syntax</th><th>Rust equivalent</th><th>Notes</th></tr></thead><tbody><tr><td><code>&lt;uint N&gt;</code></td><td><code>const N: usize</code></td><td>Most common — array lengths, capacities</td></tr><tr><td><code>&lt;int N&gt;</code></td><td><code>const N: i64</code></td><td>Signed integer constant</td></tr><tr><td><code>&lt;bool B&gt;</code></td><td><code>const B: bool</code></td><td>Feature flag at compile time</td></tr></tbody></table>
+<table><thead><tr><th>Boring syntax</th><th>Rust equivalent</th><th>Notes</th></tr></thead><tbody><tr><td><code>&lt;uint N&gt;</code></td><td><code>const N: usize</code></td><td>Most common — array lengths, capacities</td></tr><tr><td><code>&lt;int N&gt;</code></td><td><code>const N: isize</code></td><td>Signed integer constant</td></tr><tr><td><code>&lt;bool B&gt;</code></td><td><code>const B: bool</code></td><td>Feature flag at compile time</td></tr></tbody></table>
 <blockquote><code>uint</code> maps to <code>usize</code> (not <code>u64</code>) for const generics — <code>usize</code> is the standard Rust type for sizes and indices.</blockquote>
 <hr>
 <h2 id="14-closures-and-higher-order-functions">14. Closures and Higher-Order Functions</h2>
@@ -2103,15 +2116,15 @@ T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, 
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> double  = (n): n * <span class="nb">2</span>
 <span class="kw">let</span> add_one = (n): n + <span class="nb">1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> double  = |n: i64| n * <span class="nb">2</span>;
-<span class="kw">let</span> add_one = |n: i64| n + <span class="nb">1</span>;</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> double  = |n: isize| n * <span class="nb">2</span>;
+<span class="kw">let</span> add_one = |n: isize| n + <span class="nb">1</span>;</code></pre></div>
 <h3 id="block-closure">Block closure</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> classify = (<span class="kt">int</span> n):
     <span class="kw">if</span> n &gt; <span class="nb">0</span>: <span class="s">"pos"</span>
     <span class="kw">elif</span> n &lt; <span class="nb">0</span>: <span class="s">"neg"</span>
     <span class="kw">else</span>: <span class="s">"zero"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> classify = |n: i64| {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> classify = |n: isize| {
     <span class="kw">if</span> n &gt; <span class="nb">0</span> { <span class="s">&quot;pos&quot;</span> } <span class="kw">else</span> <span class="kw">if</span> n &lt; <span class="nb">0</span> { <span class="s">&quot;neg&quot;</span> } <span class="kw">else</span> { <span class="s">&quot;zero&quot;</span> }
 };</code></pre></div>
 <h3 id="closures-as-arguments">Closures as arguments</h3>
@@ -2235,7 +2248,7 @@ words.<span class="fn">filter</span>(w: w.length &gt; <span class="nb">3</span> 
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>people.<span class="fn">iter</span>().<span class="fn">map</span>(|p| p.name.<span class="fn">clone</span>()).collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
 people.<span class="fn">iter</span>().<span class="fn">filter</span>(|p| p.age &gt;= <span class="nb">18</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
-words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<span class="fn">len</span>() <span class="kw">as</span> i64 &gt; <span class="nb">3</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();</code></pre></div>
+words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<span class="fn">len</span>() <span class="kw">as</span> isize &gt; <span class="nb">3</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();</code></pre></div>
 <hr>
 <h2 id="15-modules">15. Modules</h2>
 <h3 id="defining-a-module">Defining a module</h3>
@@ -2270,10 +2283,10 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
 <h3 id="type-aliases--use--as">Type aliases — <code>use … as</code></h3>
 <p>Rename or qualify a type:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> NodeRef <span class="kw">as</span> Node<span class="lf">&#x27;shared</span>      <span class="co"># Arc&lt;Node&gt; or Rc&lt;Node&gt; depending on --threading</span>
-<span class="kw">use</span> Score   <span class="kw">as</span> <span class="kt">int</span>              <span class="co"># i64</span></code></pre></div>
+<span class="kw">use</span> Score   <span class="kw">as</span> <span class="kt">int</span>              <span class="co"># isize</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">type</span> <span class="kt">NodeRef</span> = <span class="kw">Arc</span>&lt;<span class="kt">Node</span>&gt;;
-<span class="kw">type</span> <span class="kt">Score</span>   = i64;</code></pre></div>
+<span class="kw">type</span> <span class="kt">Score</span>   = isize;</code></pre></div>
 <h3 id="newtype-wrappers--type--as">Newtype wrappers — <code>type … as</code></h3>
 <p>A newtype creates a <strong>distinct type</strong> that wraps an existing one. Unlike a type alias, <code>UserId</code> and <code>OrderId</code> are incompatible even though both wrap <code>uint</code> — the compiler rejects accidental mix-ups.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">type</span> UserId  <span class="kw">as</span> <span class="kt">uint</span>
@@ -2289,20 +2302,20 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>print <span class="s">"user <span class="si">{id}</span>"</span>       <span class="co"># prints &quot;user 42&quot;</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]</span>
-<span class="kw">struct</span> <span class="fn">UserId</span>(u64);
+<span class="kw">struct</span> <span class="fn">UserId</span>(usize);
 
-<span class="kw">impl</span> <span class="kt">From</span>&lt;u64&gt; <span class="kw">for</span> <span class="kt">UserId</span> { <span class="kw">fn</span> <span class="fn">from</span>(v: u64) -&gt; <span class="kw">Self</span> { <span class="fn">UserId</span>(v) } }
-<span class="kw">impl</span> <span class="kt">From</span>&lt;<span class="kt">UserId</span>&gt; <span class="kw">for</span> u64 { <span class="kw">fn</span> <span class="fn">from</span>(v: <span class="kt">UserId</span>) -&gt; u64 { v.<span class="nb">0</span> } }
+<span class="kw">impl</span> <span class="kt">From</span>&lt;usize&gt; <span class="kw">for</span> <span class="kt">UserId</span> { <span class="kw">fn</span> <span class="fn">from</span>(v: usize) -&gt; <span class="kw">Self</span> { <span class="fn">UserId</span>(v) } }
+<span class="kw">impl</span> <span class="kt">From</span>&lt;<span class="kt">UserId</span>&gt; <span class="kw">for</span> usize { <span class="kw">fn</span> <span class="fn">from</span>(v: <span class="kt">UserId</span>) -&gt; usize { v.<span class="nb">0</span> } }
 <span class="kw">impl</span> std::fmt::<span class="kt">Display</span> <span class="kw">for</span> <span class="kt">UserId</span> { … }</code></pre></div>
 <p>The <code>Copy</code> derive is added automatically for numeric inner types (<code>uint</code>, <code>int</code>, <code>float</code>, <code>bool</code>). String newtypes use <code>String</code> as the inner type and do not derive <code>Copy</code>.</p>
 <p>Alias a function type — the return type comes first, then the parameter types in parentheses. Optional prefixes: <code>req</code> (pure, <code>Fn</code>) or <code>def</code> (mutating, <code>FnMut</code>, the default); <code>task</code> (async). Optional suffix: <code>throws</code>.</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> Predicate   <span class="kw">as</span> <span class="kw">req</span> <span class="kt">bool</span>(<span class="kt">int</span>)              <span class="co"># pure:    impl Fn(i64) -&gt; bool</span>
-<span class="kw">use</span> Transformer <span class="kw">as</span> <span class="kw">def</span> <span class="kt">int</span>(<span class="kt">int</span>)               <span class="co"># mutable: impl FnMut(i64) -&gt; i64</span>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> Predicate   <span class="kw">as</span> <span class="kw">req</span> <span class="kt">bool</span>(<span class="kt">int</span>)              <span class="co"># pure:    impl Fn(isize) -&gt; bool</span>
+<span class="kw">use</span> Transformer <span class="kw">as</span> <span class="kw">def</span> <span class="kt">int</span>(<span class="kt">int</span>)               <span class="co"># mutable: impl FnMut(isize) -&gt; isize</span>
 <span class="kw">use</span> Parser      <span class="kw">as</span> <span class="kt">string</span>(<span class="kt">string</span>) <span class="kw">throws</span>         <span class="co"># impl FnMut(&amp;str) -&gt; Result&lt;…&gt;</span>
 <span class="kw">use</span> AsyncFetch  <span class="kw">as</span> <span class="kw">task</span> <span class="kt">string</span>(<span class="kt">string</span>) <span class="kw">throws</span>    <span class="co"># async FnMut → Result&lt;…&gt;</span>
 <span class="kw">use</span> Worker      <span class="kw">as</span> <span class="kw">req</span> <span class="kw">task</span> <span class="kt">int</span>() <span class="kw">throws</span>      <span class="co"># pure async: impl Fn() -&gt; Future&lt;…&gt;</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">type</span> <span class="kt">Predicate</span>  = <span class="kw">fn</span>(i64) -&gt; bool;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">type</span> <span class="kt">Predicate</span>  = <span class="kw">fn</span>(isize) -&gt; bool;
 <span class="kw">type</span> <span class="kt">Parser</span>     = <span class="kw">fn</span>(&amp;str) -&gt; <span class="kw">Result</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt;;
 <span class="co">// async and throws/task equivalents are function signatures, not type aliases in plain Rust</span></code></pre></div>
 <p>Built-in primitives (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>) are always <code>Copy</code> Rust types — they carry no qualifier. <code>string</code> literals emit as <code>&amp;str</code>; the transpiler promotes them to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread) when they are stored or concatenated. See <a href="#advanced--strings-string-and-arc-str">Advanced — Strings</a>.</p>
@@ -2386,9 +2399,9 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
         <span class="kw">yield</span> i
         i += <span class="nb">1</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">count_up</span>(n: i64) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = i64&gt; {
-    <span class="kw">let</span> <span class="kw">mut</span> __items: <span class="kw">Vec</span>&lt;i64&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();
-    <span class="kw">let</span> <span class="kw">mut</span> i = <span class="nb">0i64</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">count_up</span>(n: isize) -&gt; <span class="kw">impl</span> <span class="kt">Iterator</span>&lt;<span class="kt">Item</span> = isize&gt; {
+    <span class="kw">let</span> <span class="kw">mut</span> __items: <span class="kw">Vec</span>&lt;isize&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();
+    <span class="kw">let</span> <span class="kw">mut</span> i = <span class="nb">0i</span>size;
     <span class="kw">while</span> i &lt; n {
         __items.<span class="fn">push</span>(i);
         i += <span class="nb">1</span>;
@@ -2447,7 +2460,7 @@ words.<span class="fn">iter</span>().<span class="fn">filter</span>(|__x| __x.<s
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># single-thread mode — capacity is ignored; channel is unbounded</span>
 <span class="kw">let</span> tx, rx = <span class="kw">channel</span>&lt;<span class="kt">int</span>&gt;(<span class="nb">4</span>)</code></pre></div>
 <p><strong>Transpilation comparison</strong></p>
-<table><thead><tr><th>Mode</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Multi-thread (default)</td><td><code>channel&lt;int&gt;(32)</code> or <code>channel&lt;int, 32&gt;</code></td><td><code>tokio::sync::mpsc::channel::&lt;i64&gt;(32)</code></td></tr><tr><td>Single-thread</td><td><code>channel&lt;int&gt;(32)</code> or <code>channel&lt;int, 32&gt;</code></td><td><code>local_channel::mpsc::channel::&lt;i64&gt;()</code> — unbounded</td></tr><tr><td>Kernel (<code>channel&lt;T, N&gt;</code>)</td><td><code>channel&lt;int, 32&gt;</code></td><td><code>kernel_channel::&lt;i64, 32&gt;()</code> → <code>KernelSender/Receiver&lt;i64, 32&gt;</code></td></tr><tr><td>Kernel (<code>channel&lt;T&gt;(cap)</code>)</td><td><code>channel&lt;int&gt;(32)</code></td><td><code>dyn_kernel_channel::&lt;i64&gt;(32)</code> → <code>DynKernelSender/Receiver&lt;i64&gt;</code></td></tr></tbody></table>
+<table><thead><tr><th>Mode</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Multi-thread (default)</td><td><code>channel&lt;int&gt;(32)</code> or <code>channel&lt;int, 32&gt;</code></td><td><code>tokio::sync::mpsc::channel::&lt;isize&gt;(32)</code></td></tr><tr><td>Single-thread</td><td><code>channel&lt;int&gt;(32)</code> or <code>channel&lt;int, 32&gt;</code></td><td><code>local_channel::mpsc::channel::&lt;isize&gt;()</code> — unbounded</td></tr><tr><td>Kernel (<code>channel&lt;T, N&gt;</code>)</td><td><code>channel&lt;int, 32&gt;</code></td><td><code>kernel_channel::&lt;isize, 32&gt;()</code> → <code>KernelSender/Receiver&lt;isize, 32&gt;</code></td></tr><tr><td>Kernel (<code>channel&lt;T&gt;(cap)</code>)</td><td><code>channel&lt;int&gt;(32)</code></td><td><code>dyn_kernel_channel::&lt;isize&gt;(32)</code> → <code>DynKernelSender/Receiver&lt;isize&gt;</code></td></tr></tbody></table>
 <h3 id="sending-and-receiving">Sending and receiving</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Sender — .send() is async; it blocks until there is room in the buffer</span>
 tx.<span class="fn">send</span>(<span class="nb">42</span>)
@@ -2486,7 +2499,7 @@ consumer.wait</code></pre></div>
 h.wait</code></pre></div>
 <h3 id="transpilation-1">Transpilation</h3>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// let tx, rx = channel&lt;int&gt;(4)</span>
-<span class="kw">let</span> (tx, <span class="kw">mut</span> rx) = tokio::sync::mpsc::channel::&lt;i64&gt;(<span class="nb">4</span>);
+<span class="kw">let</span> (tx, <span class="kw">mut</span> rx) = tokio::sync::mpsc::channel::&lt;isize&gt;(<span class="nb">4</span>);
 
 <span class="co">// tx.send(v)</span>
 tx.<span class="fn">send</span>(v).<span class="kw">await</span>.<span class="fn">unwrap</span>();
@@ -2507,7 +2520,7 @@ tx.<span class="fn">send</span>(v).<span class="kw">await</span>.<span class="fn
     <span class="kw">let</span> result = rx.value    <span class="co"># waits for the single value</span>
     print result</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (tx, rx) = tokio::sync::oneshot::channel::&lt;i64&gt;();
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (tx, rx) = tokio::sync::oneshot::channel::&lt;isize&gt;();
 tokio::<span class="fn">spawn</span>(<span class="kw">async</span> <span class="kw">move</span> { tx.<span class="fn">send</span>(<span class="nb">42</span>).<span class="fn">ok</span>(); });
 <span class="kw">let</span> result = rx.<span class="kw">await</span>.<span class="fn">unwrap</span>();</code></pre></div>
 <table><thead><tr><th>Operation</th><th>Boring</th><th>Rust emitted</th></tr></thead><tbody><tr><td>Create</td><td><code>let tx, rx = oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td>Send</td><td><code>tx.send(v)</code></td><td><code>tx.send(v).ok()</code> — non-async, consumes <code>tx</code></td></tr><tr><td>Receive</td><td><code>rx.value</code> or <code>rx.recv()</code></td><td><code>rx.await.unwrap()</code> — consumes <code>rx</code></td></tr></tbody></table>
@@ -2559,7 +2572,7 @@ tx.<span class="fn">send</span>(<span class="kw">Arc</span>::<span class="fn">fr
 
     print <span class="s">"current: <span class="si">{rx.value}</span>"</span>     <span class="co"># current value, no wait</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (tx, <span class="kw">mut</span> rx) = tokio::sync::watch::channel::&lt;i64&gt;(<span class="nb">0</span>);
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (tx, <span class="kw">mut</span> rx) = tokio::sync::watch::channel::&lt;isize&gt;(<span class="nb">0</span>);
 <span class="co">// ...</span>
 <span class="kw">while</span> rx.<span class="fn">changed</span>().<span class="kw">await</span>.<span class="fn">is_ok</span>() {
     <span class="kw">let</span> val = rx.<span class="fn">borrow</span>().<span class="fn">clone</span>();
@@ -2694,7 +2707,7 @@ wait .<span class="fn">fromSecs</span>(<span class="nb">1</span>)</code></pre></
         wait .<span class="fn">fromMillis</span>(<span class="nb">10</span>)  <span class="co"># then pause</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">monitor</span>() {
-    <span class="kw">let</span> <span class="kw">mut</span> ticks: i64 = <span class="nb">0</span>;
+    <span class="kw">let</span> <span class="kw">mut</span> ticks: isize = <span class="nb">0</span>;
     <span class="kw">loop</span> {
         tokio::time::<span class="fn">sleep</span>(<span class="kt">Duration</span>::<span class="fn">from_secs</span>(<span class="nb">1</span>)).<span class="kw">await</span>;
         ticks += <span class="nb">1</span>;
@@ -2891,8 +2904,8 @@ c.<span class="fn">get</span>()       <span class="co"># OK — req (non-mutatin
 <h3 id="built-in-type-aliases">Built-in type aliases</h3>
 <p>The primitive types are defined as aliases with an explicit qualifier:</p>
 <p>Primitives (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>) are always <code>Copy</code> Rust types — they carry no qualifier. <code>string</code> always compiles to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread).</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">int</span>   x = <span class="nb">42</span>    <span class="co"># i64</span>
-<span class="kw">let</span> <span class="kt">uint</span>  n = <span class="nb">100</span>   <span class="co"># u64</span></code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">int</span>   x = <span class="nb">42</span>    <span class="co"># isize</span>
+<span class="kw">let</span> <span class="kt">uint</span>  n = <span class="nb">100</span>   <span class="co"># usize</span></code></pre></div>
 <blockquote>For <code>string</code> details see <a href="#advanced--strings-string-and-arc-str">Advanced — Strings</a>.</blockquote>
 <h3 id="weak-references--tsharedweak-tactorweak-tguardweak">Weak references — <code>T&#x27;shared&#x27;weak</code>, <code>T&#x27;actor&#x27;weak</code>, <code>T&#x27;guard&#x27;weak</code></h3>
 <p>A <code>&#x27;weak</code> qualifier produces a non-owning pointer that does not prevent the pointee from being dropped. The base qualifier is written explicitly or inferred from the right-hand side:</p>
@@ -2928,6 +2941,73 @@ print r.label                          <span class="co"># config.toml</span></co
 print <span class="fn">describe</span>(w1)   <span class="co"># resource: config.toml</span></code></pre></div>
 <blockquote>The transpiler selects <code>Weak&lt;T&gt;</code> (single-thread) or <code>std::sync::Weak&lt;T&gt;</code> (multi-thread) based on <code>--threading</code>.</blockquote>
 <blockquote>In most programs you never need to write a qualifier explicitly. The transpiler infers the right one from how each variable is used. See <a href="#30-qualifier-inference">chapter 30 — Qualifier Inference</a> for the full inference algorithm, including signal table, size-based fallback, and cross-function propagation.</blockquote>
+<h3 id="scoped-access-blocks--with">Scoped access blocks — <code>with</code></h3>
+<p>A <code>T&#x27;actor</code>/<code>T&#x27;guard</code> value normally acquires and releases its lock <strong>once per method call or field access</strong> — <code>c.increment()</code> transpiles to <code>c.lock().unwrap().increment()</code>. <code>with</code> holds the lock across an entire block instead, so several operations happen under one critical section:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+
+    <span class="kw">def</span> <span class="fn">increment</span>():
+        value += <span class="nb">1</span>
+
+<span class="kw">var</span> c<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+
+<span class="kw">with</span> c:
+    c.<span class="fn">increment</span>()
+    c.<span class="fn">increment</span>()
+    c.<span class="fn">increment</span>()
+print c.value   <span class="co"># 3</span></code></pre></div>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> c: <span class="kw">Arc</span>&lt;std::sync::<span class="kt">Mutex</span>&lt;<span class="kt">Counter</span>&gt;&gt; = <span class="kw">Arc</span>::<span class="fn">new</span>(std::sync::<span class="kt">Mutex</span>::<span class="fn">new</span>(<span class="kt">Counter</span> { value: <span class="nb">0</span> }));
+{
+    <span class="kw">let</span> <span class="kw">mut</span> c = c.<span class="fn">lock</span>().<span class="fn">unwrap</span>();
+    c.<span class="fn">increment</span>();
+    c.<span class="fn">increment</span>();
+    c.<span class="fn">increment</span>();
+}
+<span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, c.<span class="fn">lock</span>().<span class="fn">unwrap</span>().value);</code></pre></div>
+<p>Existing per-call locking is unchanged for code that doesn&#x27;t use <code>with</code> — this is purely additive.</p>
+<p><code>with</code> is one keyword, not a read/write pair — the access level is decided per block:</p>
+<ul><li><strong><code>let</code>-bound name</strong> — always read-only (mutation on a <code>let</code> binding is already a compile error, so there is nothing to scan for).</li><li><strong><code>mut</code>/<code>var</code>-bound name</strong> — the compiler scans the block&#x27;s own body (recursing into <code>if</code>/<code>while</code>/<code>for</code>/<code>match</code>/closures nested inside it, but never into a called function&#x27;s own body) for a direct assignment, an index/field assignment, or a <code>def</code> (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.</li></ul>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Cell:
+    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+
+    <span class="kw">req</span> <span class="kt">int</span> <span class="fn">peek</span>():
+        value
+
+    <span class="kw">def</span> <span class="fn">bump</span>():
+        value += <span class="nb">1</span>
+
+<span class="kw">var</span> b<span class="lf">&#x27;guard</span> = <span class="fn">Cell</span>(<span class="nb">10</span>)
+
+<span class="kw">with</span> b:
+    print b.<span class="fn">peek</span>()   <span class="co"># read-only block — RwLock::read()</span>
+
+<span class="kw">with</span> b:
+    b.<span class="fn">bump</span>()          <span class="co"># mutation found — RwLock::write()</span></code></pre></div>
+<p><code>&#x27;actor</code>/<code>&#x27;actor&#x27;task</code> always acquire the same <code>Mutex</code> either way — a <code>Mutex</code> has no shared-read mode, so the scan only decides which method calls are legal inside the block (<code>def</code> vs <code>req</code>), not what gets locked.</p>
+<p>Multiple names may be listed together — each gets its own acquire/release, but the block reads as one critical section:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">with</span> a, b:
+    a.<span class="fn">increment</span>()
+    b.<span class="fn">increment</span>()</code></pre></div>
+<p>Nesting a block on the <strong>same</strong> name inside itself is a compile error (double-acquire — <code>Mutex</code>/<code>RwLock</code> are not reentrant). Nesting on <strong>different</strong> names is unrestricted.</p>
+<h3 id="with-for-gpu-kernel-fields--gpuunified-gpuglobal"><code>with</code> for GPU kernel fields — <code>&#x27;gpu&#x27;unified</code>, <code>&#x27;gpu&#x27;global</code></h3>
+<p>A <code>kernel Name:</code> struct&#x27;s <code>&#x27;unified</code>/<code>&#x27;global</code> field is read back from the GPU <strong>on every single access</strong> — <code>k.result[i]</code> inside a loop re-reads the <em>entire</em> buffer back from the GPU on every iteration. Binding the field through a <code>&#x27;gpu&#x27;unified</code>/<code>&#x27;gpu&#x27;global</code>-qualified alias and reading it inside a <code>with</code> block materializes it exactly once instead, however many times the block&#x27;s body indexes it:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> k = <span class="fn">VectorAdd</span>(host_a, host_b)
+<span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = <span class="nb">256</span>)
+
+<span class="kw">let</span> [<span class="kt">int</span>]<span class="lf">&#x27;gpu</span><span class="lf">&#x27;unified</span> result = k.result   <span class="co"># compile-time alias — no transfer yet</span>
+<span class="kw">with</span> result:                              <span class="co"># `result` is `let`-bound -&gt; read-only</span>
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
+        print <span class="s">"c[<span class="si">{i}</span>] = <span class="si">{result[i]}</span>"</span>      <span class="co"># readback happens once, here</span></code></pre></div>
+<p>This is purely additive — <code>k.result[i]</code> without an alias still works exactly as before, and is the right choice for a single access. The alias only pays off when the same field is read (or written) more than once in the same scope. A <code>mut</code>/<code>var</code>-bound alias follows the same read/write scan as <code>&#x27;actor</code>/<code>&#x27;guard</code>: mutating it inside the block (<code>result[i] = v</code>) writes the whole array back to the GPU once, at block close; a read-only block never does.</p>
+<p>The <code>&#x27;gpu&#x27;unified</code>/<code>&#x27;gpu&#x27;global</code> annotation itself is optional here — it&#x27;s inferred whenever the initializer is a bare <code>k.field</code> read on a tracked kernel instance whose field is actually declared <code>&#x27;unified</code>/<code>&#x27;global</code>, so <code>let result = k.result</code> behaves identically to the explicit form above:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> result = k.result   <span class="co"># qualifier inferred from k.result&#x27;s own &#x27;unified declaration</span>
+<span class="kw">with</span> result:
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="nb">0..</span>n:
+        print <span class="s">"c[<span class="si">{i}</span>] = <span class="si">{result[i]}</span>"</span></code></pre></div>
+<p>A <code>&#x27;gpu&#x27;unified</code>/<code>&#x27;gpu&#x27;global</code>-qualified variable that is <strong>not</strong> initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no <code>with</code> wrapper required anywhere; the qualifier only matters once it&#x27;s passed into a kernel constructor, which uploads it.</p>
+<blockquote>This works for a kernel constructed and read back within the same function — the shape every kernel example in this book uses. Returning a resident value across a function boundary is a separate, not-yet-implemented extension of this design — see <a href="scoped-access-blocks.html">Scoped Access Blocks</a> for the full design and current status.</blockquote>
 <hr>
 <h2 id="22-defer">22. Defer</h2>
 <p><code>defer</code> registers a block of code to run when the enclosing function exits, regardless of how it exits. Multiple defers execute in <strong>LIFO</strong> order (last registered, first executed).</p>
@@ -2961,7 +3041,7 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">task</span> <span class="kt">int</span> <span class="fn">fetch</span>(<span class="kt">int</span> a, <span class="kt">int</span> b):
     a + b</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">fetch</span>(a: i64, b: i64) -&gt; i64 { a + b }</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">fetch</span>(a: isize, b: isize) -&gt; isize { a + b }</code></pre></div>
 <blockquote>The <code>task</code> prefix works with all function qualifiers: <code>task req</code> (non-mutating async), <code>task set</code> (async setter), and <code>task def</code> (explicit mutating async — <code>def</code> is always optional when a return type is present). Write <code>task int fetch(...)</code> or <code>task f()</code> for the common cases.</blockquote>
 <h3 id="spawning-a-task--task-expr--task-expr">Spawning a task — <code>task expr</code> / <code>task: expr</code></h3>
 <p>Use <code>task</code> as a keyword-expression to spawn an async computation and obtain a future. Both inline and block forms are available:</p>
@@ -3042,7 +3122,7 @@ Data <span class="fn">compress</span>(Data d):
     fn.wait                     <span class="co"># waits but discards the result (void)</span>
     print <span class="s">"notified"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">compute</span>(n: i64) -&gt; i64 { n * n }
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">compute</span>(n: isize) -&gt; isize { n * n }
 
 <span class="at">#[tokio::main]</span>
 <span class="kw">async</span> <span class="kw">fn</span> <span class="fn">main</span>() {
@@ -3102,7 +3182,7 @@ Data <span class="fn">compress</span>(Data d):
     print f1.value             <span class="co"># 30</span>
     print f2.value             <span class="co"># hello, world</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">fetch</span>(a: i64, b: i64) -&gt; i64 { a + b }
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">async</span> <span class="kw">fn</span> <span class="fn">fetch</span>(a: isize, b: isize) -&gt; isize { a + b }
 <span class="kw">async</span> <span class="kw">fn</span> <span class="fn">greet</span>(name: &amp;str) -&gt; <span class="kw">Arc</span>&lt;str&gt; { <span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;hello, {}&quot;</span>, name)) }
 
 <span class="at">#[tokio::main]</span>
@@ -3300,7 +3380,7 @@ c.<span class="fn">write</span>().<span class="kw">await</span>.<span class="fn"
     <span class="kt">int</span> b</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Debug, Clone, PartialEq)]</span>
-<span class="kw">struct</span> <span class="kt">Color</span> { r: i64, g: i64, b: i64 }</code></pre></div>
+<span class="kw">struct</span> <span class="kt">Color</span> { r: isize, g: isize, b: isize }</code></pre></div>
 <p>The no-parentheses form applies to all <code>@</code> attributes, including <code>@error</code> on enum variants:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> Shape:
     <span class="at">@error</span> <span class="s">"unknown shape: <span class="si">{0}</span>"</span>    <span class="co"># no parentheses</span>
@@ -3368,7 +3448,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> buf = [<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>]
 <span class="fn">drop</span>(buf)                   <span class="co"># free early, before the scope ends</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> buf = <span class="fm">vec!</span>[<span class="nb">1i64</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>];
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> buf = <span class="fm">vec!</span>[<span class="nb">1i</span>size, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>];
 <span class="fn">drop</span>(buf);</code></pre></div>
 <h3 id="json-serialization--json--fromjson">JSON serialization — <code>json</code> / <code>fromJson</code></h3>
 <p><code>json(v)</code> serializes any <code>@derive(Serialize)</code> value to a JSON string. <code>fromJson&lt;T&gt;(s)</code> parses a JSON string into a <code>T</code> that implements <code>@derive(Deserialize)</code>.</p>
@@ -3387,7 +3467,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Clone, Serialize, Deserialize)]</span>
 <span class="kw">struct</span> <span class="kt">User</span> {
     name: <span class="kw">Arc</span>&lt;str&gt;,
-    age:  i64,
+    age:  isize,
 }
 
 <span class="kw">let</span> s: <span class="kt">String</span> = serde_json::<span class="fn">to_string</span>(&amp;u).<span class="fn">unwrap_or_default</span>();
@@ -3427,8 +3507,8 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 
 <span class="kt">int</span> <span class="fn">impossible</span>(<span class="kt">int</span> x):
     <span class="fn">unreachable</span>()           <span class="co"># panics with &quot;entered unreachable code&quot;</span></code></pre></div>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">not_yet</span>(x: i64) -&gt; i64 { <span class="fm">todo!</span>() }
-<span class="kw">fn</span> <span class="fn">impossible</span>(x: i64) -&gt; i64 { <span class="fm">unreachable!</span>() }</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">not_yet</span>(x: isize) -&gt; isize { <span class="fm">todo!</span>() }
+<span class="kw">fn</span> <span class="fn">impossible</span>(x: isize) -&gt; isize { <span class="fm">unreachable!</span>() }</code></pre></div>
 <p>Both accept an optional message argument:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">todo</span>(<span class="s">"implement sorting"</span>)
 <span class="fn">unreachable</span>(<span class="s">"variant <span class="si">{v}</span> should have been handled above"</span>)</code></pre></div>
@@ -3438,9 +3518,9 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="declarations">Declarations</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>let x = v</code></td><td><code>let x = v;</code></td></tr><tr><td><code>var x = v</code></td><td><code>let mut x = v;</code></td></tr><tr><td><code>let T x = v</code></td><td><code>let x: T = v;</code></td></tr><tr><td><code>let x&#x27;q = v</code></td><td><code>let x: Q&lt;T&gt; = Q::new(v);</code> — qualifier on name, type inferred</td></tr><tr><td><code>req R f(T a):  body</code></td><td><code>fn f(&amp;self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>def R f(T a):  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>R f(T a):  body</code></td><td>same as <code>def R f(T a): body</code> — <code>def</code> implicit when return type is present</td></tr><tr><td><code>req R ():  body</code></td><td><code>fn __call__(&amp;self) -&gt; R { body }</code> — anonymous call, callable on <code>let</code>/<code>var</code></td></tr><tr><td><code>def ():  body</code></td><td><code>fn __call__(&amp;mut self) { body }</code> — anonymous call, callable on <code>var</code> only</td></tr><tr><td><code>set prop(T v): body</code></td><td><code>fn set_prop(&amp;mut self, v: T) { body }</code></td></tr><tr><td><code>def R f(T a) throws:  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td><code>def R f(T a) throws E.T: body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, E::T&gt;</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td><code>async fn f(a: T) -&gt; R</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td>same as <code>task R f(T a): body</code> — <code>def</code> always optional when return type is present</td></tr><tr><td><code>task req R f(T a):  body</code></td><td><code>async fn f(&amp;self, a: T) -&gt; R</code></td></tr><tr><td><code>task set prop(T v):  body</code></td><td><code>async fn set_prop(&amp;mut self, v: T)</code></td></tr><tr><td><code>def R f(T vals...):  body</code></td><td><code>fn f(&amp;mut self, vals: Vec&lt;T&gt;) -&gt; R</code></td></tr><tr><td><code>type N as T</code></td><td><code>struct N(T)</code> + <code>From&lt;T&gt;</code>, <code>From&lt;N&gt;</code>, <code>Display</code> impls</td></tr><tr><td><code>struct S:  fields</code></td><td><code>struct S { fields }</code> + <code>impl S { ... }</code></td></tr><tr><td><code>S(..base, field = v)</code></td><td><code>S { field: v, ..base }</code> — struct update syntax</td></tr><tr><td><code>field</code> (bare name in method body)</td><td><code>self.field</code> — implicit self; local variables shadow fields</td></tr><tr><td><code>as T:  expr</code> (in struct body)</td><td><code>fn into_t(&amp;self) -&gt; T { expr }</code> inside <code>impl S</code>; if body is <code>self.field</code>, also <code>fn into_t_mut(&amp;mut self) -&gt; &amp;mut T</code></td></tr><tr><td><code>enum E:  variants</code></td><td><code>enum E { variants }</code> (always <code>#[derive(Clone)]</code>)</td></tr><tr><td><code>trait T:  req methods</code></td><td><code>trait T { fn methods; }</code></td></tr><tr><td><code>ext S:  methods</code></td><td><code>impl S { methods }</code></td></tr><tr><td><code>ext S as T:  methods</code></td><td><code>impl T for S { methods }</code></td></tr><tr><td><code>def S.f(T a):  body</code></td><td><code>impl S { fn f(&amp;mut self, a: T) { body } }</code></td></tr><tr><td><code>mod m:  items</code></td><td><code>mod m { items }</code></td></tr><tr><td><code>pub def …</code></td><td><code>pub fn …</code></td></tr><tr><td><code>@attr(…)</code></td><td><code>#[attr(…)]</code></td></tr></tbody></table>
 <h3 id="types">Types</h3>
-<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;stack</code></td><td><code>i64</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;stack</code></td><td><code>u64</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;stack</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;stack</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (literal)</td><td>—</td><td><code>&amp;str</code> — zero allocation; promoted to <code>Rc&lt;str&gt;</code>/<code>Arc&lt;str&gt;</code> when stored</td></tr><tr><td><code>string</code> (stored/computed)</td><td>—</td><td><code>Rc&lt;str&gt;</code> (single-thread) / <code>Arc&lt;str&gt;</code> (multi-thread)</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td>—</td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>T?&amp;</code></td><td>—</td><td><code>&amp;Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code> — dynamic array</td></tr><tr><td><code>[T, N]</code></td><td>—</td><td><code>[T; N]</code> — fixed-size stack array</td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;stack</code></td><td>—</td><td><code>T</code> — stack (read only), copied on pass</td></tr><tr><td><code>T&#x27;shared</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, sync lock</td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, async lock</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (sync)</td></tr><tr><td><code>T&#x27;guard&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (async)</td></tr><tr><td><code>T&#x27;shared&#x27;weak</code></td><td>—</td><td><code>Weak&lt;T&gt;</code> — weak ref to <code>Arc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td>—</td><td><code>Weak&lt;Mutex&lt;T&gt;&gt;</code> — weak ref to actor</td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td>—</td><td><code>Weak&lt;RwLock&lt;T&gt;&gt;</code> — weak ref to guard</td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (bare)</td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;Trait&gt;</code></td><td>—</td><td><code>impl Trait</code> — static dispatch, no allocation</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: i64</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;stack</code></td><td><code>isize</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;stack</code></td><td><code>usize</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;stack</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;stack</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (literal)</td><td>—</td><td><code>&amp;str</code> — zero allocation; promoted to <code>Rc&lt;str&gt;</code>/<code>Arc&lt;str&gt;</code> when stored</td></tr><tr><td><code>string</code> (stored/computed)</td><td>—</td><td><code>Rc&lt;str&gt;</code> (single-thread) / <code>Arc&lt;str&gt;</code> (multi-thread)</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td>—</td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>T?&amp;</code></td><td>—</td><td><code>&amp;Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code> — dynamic array</td></tr><tr><td><code>[T, N]</code></td><td>—</td><td><code>[T; N]</code> — fixed-size stack array</td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;stack</code></td><td>—</td><td><code>T</code> — stack (read only), copied on pass</td></tr><tr><td><code>T&#x27;shared</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, sync lock</td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, async lock</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (sync)</td></tr><tr><td><code>T&#x27;guard&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (async)</td></tr><tr><td><code>T&#x27;shared&#x27;weak</code></td><td>—</td><td><code>Weak&lt;T&gt;</code> — weak ref to <code>Arc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td>—</td><td><code>Weak&lt;Mutex&lt;T&gt;&gt;</code> — weak ref to actor</td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td>—</td><td><code>Weak&lt;RwLock&lt;T&gt;&gt;</code> — weak ref to guard</td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (bare)</td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;Trait&gt;</code></td><td>—</td><td><code>impl Trait</code> — static dispatch, no allocation</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: isize</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
 <h3 id="expressions">Expressions</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1i64..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1i64..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>let a, b = join(f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1isize..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1isize..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>let a, b = join(f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>if c: a elif c2: b else d</code></td><td><code>if c { a } else if c2 { b } else { d }</code></td></tr><tr><td><code>if let x = opt:</code></td><td><code>if let Some(x) = opt {</code></td></tr><tr><td><code>if let x:</code></td><td><code>if let Some(x) = x {</code> (shorthand)</td></tr><tr><td><code>if let x = a: … elif let y = b: …</code></td><td><code>if let Some(x) = a { … } else if let Some(y) = b { … }</code></td></tr><tr><td><code>while let x = expr:</code></td><td><code>while let Some(x) = expr {</code></td></tr><tr><td><code>guard c else return v</code></td><td><code>if !c { return v; }</code></td></tr><tr><td><code>guard let x = opt else return v</code></td><td><code>let Some(x) = opt else { return v; };</code></td></tr><tr><td><code>guard let x else return v</code></td><td><code>let Some(x) = x else { return v; };</code> (shorthand)</td></tr><tr><td><code>match v:  p: e</code></td><td><code>match v { p =&gt; e, }</code></td></tr><tr><td><code>for x in coll:</code></td><td><code>for x in coll.iter().cloned() {</code></td></tr><tr><td><code>for i, v in arr:</code></td><td><code>for (i, v) in arr.iter().enumerate() {</code> — auto-enumerate when elements are not tuples</td></tr><tr><td><code>for i, v in arr.enumerate():</code></td><td>same as above — explicit form still works</td></tr><tr><td><code>for a, b in tuple_arr:</code></td><td><code>for (a, b) in tuple_arr.iter() {</code> — tuple destructuring when elements are tuples</td></tr><tr><td><code>for k, v in dict:</code></td><td><code>for (k, v) in dict.iter() {</code></td></tr><tr><td><code>for k in a..=b:</code></td><td><code>for k in a..=b {</code></td></tr><tr><td><code>for k in a..b:</code></td><td><code>for k in a..b {</code></td></tr><tr><td><code>for a..=b:</code></td><td><code>for _ in a..=b {</code></td></tr><tr><td><code>loop:</code></td><td><code>loop {</code></td></tr><tr><td><code>let x = loop: break v</code></td><td><code>let x = loop { break v; }</code></td></tr><tr><td><code>do: … while c</code></td><td><code>loop { …; if !c { break; } }</code></td></tr><tr><td><code>do: …</code> (no while)</td><td><code>{ … }</code> (scoped block expression)</td></tr><tr><td><code>throw &quot;msg&quot;</code></td><td><code>return Err(&quot;msg&quot;.into())</code></td></tr><tr><td><code>try e else d</code></td><td>closure/async block pattern with <code>error</code> bound</td></tr><tr><td><code>catch String:</code></td><td>typed catch — dispatches on <code>BoringError</code> variant</td></tr><tr><td><code>catch String, Int:</code></td><td>multi-catch — same handler for multiple types</td></tr><tr><td><code>defer: block</code></td><td>(LIFO cleanup before return)</td></tr></tbody></table>
 <hr>
@@ -3516,11 +3596,11 @@ print count             <span class="co"># 5</span></code></pre></div>
     print x          <span class="co"># 14</span>
 print x              <span class="co"># 7 — outer binding unchanged</span></code></pre></div>
 <p><strong>Rust equivalent</strong> — translates directly to Rust shadowing:</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> val: i64 = <span class="nb">10</span>;
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> val: isize = <span class="nb">10</span>;
 <span class="kw">let</span> val: &amp;str = <span class="s">&quot;toto&quot;</span>;
 
 <span class="kw">let</span> n: &amp;str = <span class="s">&quot;42&quot;</span>;
-<span class="kw">let</span> n: i64 = n.<span class="fn">trim</span>().<span class="fn">parse</span>().<span class="fn">unwrap_or</span>(<span class="nb">0</span>);</code></pre></div>
+<span class="kw">let</span> n: isize = n.<span class="fn">trim</span>().<span class="fn">parse</span>().<span class="fn">unwrap_or</span>(<span class="nb">0</span>);</code></pre></div>
 <h3 id="advanced--transient-fields-and--nil-coalescing-assignment">Advanced — <code>transient</code> fields and <code>?=</code> nil-coalescing assignment</h3>
 <p>These two features are designed to work together for the <strong>lazy-initialisation / cache pattern</strong>: a <code>transient</code> field can be written from a <code>req</code> (non-mutating) method, and <code>?=</code> initialises it only on the first access.</p>
 <h4 id="transient--mutable-field-from-a-req-method"><code>transient</code> — mutable field from a <code>req</code> method</h4>
@@ -3543,12 +3623,12 @@ print s.length    <span class="co"># served from cache: 12</span></code></pre></
 
 <span class="kw">struct</span> <span class="kt">TextStats</span> {
     text: <span class="kw">Arc</span>&lt;str&gt;,
-    _length: <span class="kt">Cell</span>&lt;<span class="kw">Option</span>&lt;i64&gt;&gt;,
+    _length: <span class="kt">Cell</span>&lt;<span class="kw">Option</span>&lt;isize&gt;&gt;,
 }
 <span class="kw">impl</span> <span class="kt">TextStats</span> {
-    <span class="kw">fn</span> <span class="fn">length</span>(&amp;<span class="kw">self</span>) -&gt; i64 {
+    <span class="kw">fn</span> <span class="fn">length</span>(&amp;<span class="kw">self</span>) -&gt; isize {
         <span class="kw">if</span> <span class="kw">let</span> <span class="kw">Some</span>(cached) = <span class="kw">self</span>._length.<span class="fn">get</span>() { <span class="kw">return</span> cached; }
-        <span class="kw">let</span> n = <span class="kw">self</span>.text.<span class="fn">len</span>() <span class="kw">as</span> i64;
+        <span class="kw">let</span> n = <span class="kw">self</span>.text.<span class="fn">len</span>() <span class="kw">as</span> isize;
         <span class="kw">self</span>._length.<span class="fn">set</span>(<span class="kw">Some</span>(n));   <span class="co">// &amp;self is enough — Cell provides interior mutability</span>
         n
     }
@@ -3636,7 +3716,7 @@ weights.<span class="fn">get_or_init</span>(|| <span class="fn">load_weights</sp
 
 <span class="fn">sum</span>(<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>)    <span class="co"># 15</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">sum</span>(values: <span class="kw">Vec</span>&lt;i64&gt;) -&gt; i64 {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">sum</span>(values: <span class="kw">Vec</span>&lt;isize&gt;) -&gt; isize {
     values.<span class="fn">iter</span>().<span class="fn">sum</span>()
 }
 <span class="fn">sum</span>(<span class="fm">vec!</span>[<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>]);</code></pre></div>
@@ -3644,17 +3724,17 @@ weights.<span class="fn">get_or_init</span>(|| <span class="fn">load_weights</sp
 <p>This section describes the generated Rust representation for Boring&#x27;s <code>throw</code>/<code>catch</code> system.</p>
 <h4 id="propagation--boringerror-and">Propagation — <code>BoringError</code> and <code>?</code></h4>
 <p>Every <code>throws</code> function returns <code>Result&lt;T, Box&lt;dyn std::error::Error&gt;&gt;</code>. String-literal throws are wrapped in <code>BoringError::Str</code> (zero allocation); interpolated-string throws use <code>BoringError::String</code>. The Boring compiler inserts <code>?</code> automatically on every call to a <code>throws</code> function from inside another <code>throws</code> function, so errors propagate up the call stack without explicit forwarding:</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">parse_int</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
-    <span class="kw">if</span> !(s.<span class="fn">len</span>() <span class="kw">as</span> i64 &gt; <span class="nb">0</span>) {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">parse_int</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Result</span>&lt;isize, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+    <span class="kw">if</span> !(s.<span class="fn">len</span>() <span class="kw">as</span> isize &gt; <span class="nb">0</span>) {
         <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">Str</span>(<span class="s">&quot;empty string&quot;</span>)));
     }
-    <span class="kw">let</span> <span class="kw">Some</span>(n) = s.<span class="fn">trim</span>().parse::&lt;i64&gt;().<span class="fn">ok</span>() <span class="kw">else</span> {
+    <span class="kw">let</span> <span class="kw">Some</span>(n) = s.<span class="fn">trim</span>().parse::&lt;isize&gt;().<span class="fn">ok</span>() <span class="kw">else</span> {
         <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">String</span>(<span class="kw">Arc</span>::&lt;str&gt;::<span class="fn">from</span>(<span class="fm">format!</span>(<span class="s">&quot;not a number: {}&quot;</span>, s)))));
     };
     <span class="kw">Ok</span>(n)
 }
 
-<span class="kw">fn</span> <span class="fn">double_parse</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+<span class="kw">fn</span> <span class="fn">double_parse</span>(s: <span class="kw">Arc</span>&lt;str&gt;) -&gt; <span class="kw">Result</span>&lt;isize, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
     <span class="kw">Ok</span>(<span class="fn">parse_int</span>(s.<span class="fn">clone</span>())? * <span class="nb">2</span>)   <span class="co">// ? inserted by the compiler</span>
 }
 
@@ -3664,7 +3744,7 @@ weights.<span class="fn">get_or_init</span>(|| <span class="fn">load_weights</sp
 }</code></pre></div>
 <h4 id="typed-errors--boringerrorother-and-typeid">Typed errors — <code>BoringError::Other</code> and <code>TypeId</code></h4>
 <p>When a function declares <code>throws CalcError</code>, typed errors are wrapped in <code>BoringError::Other</code> with a <code>TypeId</code> so <code>catch CalcError:</code> can dispatch correctly at the catch site. The return type remains <code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code> in both typed and untyped cases.</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">checked_divide</span>(a: i64, b: i64) -&gt; <span class="kw">Result</span>&lt;i64, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">checked_divide</span>(a: isize, b: isize) -&gt; <span class="kw">Result</span>&lt;isize, <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span>&gt;&gt; {
     <span class="kw">if</span> !(b != <span class="nb">0</span>) {
         <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">Other</span>(
             std::any::<span class="kt">TypeId</span>::of::&lt;<span class="kt">CalcError</span>&gt;(),
@@ -3865,7 +3945,7 @@ boring build --sanitize memory  main.br   # reads of uninitialised memory</code>
 <p><code>boring build --instrument</code> adds zero-dependency, RAII-based profiling to every function.  No changes to Boring source files are needed.</p>
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --instrument main.br</code></pre></div>
 <p>An inline <code>__boring_instrument</code> module is prepended to the Rust output — no extra <code>Cargo.toml</code> dependency.  Every function body receives a <code>Span</code> guard:</p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add</span>(a: i64, b: i64) -&gt; i64 {
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">add</span>(a: isize, b: isize) -&gt; isize {
     <span class="kw">let</span> _boring_span = __boring_instrument::<span class="kt">Span</span>::<span class="fn">enter</span>(<span class="s">&quot;add&quot;</span>);
     <span class="co">// … body …</span>
 }
@@ -3940,6 +4020,7 @@ cd main_rust &amp;&amp; cargo +nightly run</code></pre></div>
 <p><strong><a href="qualifiers.html">Qualifiers — Complete Reference</a></strong> All ownership qualifiers (<code>&#x27;stack</code>, <code>&#x27;heap</code>, <code>&#x27;shared</code>, <code>&#x27;actor</code>, <code>&#x27;guard</code>, <code>&#x27;weak</code>): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (<code>&#x27;stack</code>→<code>&#x27;heap</code>→<code>&#x27;shared</code>→<code>&#x27;actor</code>), parameter passing, zero-annotation inference algorithm, and known limitations.</p>
 <p><strong><a href="binding-mutability.html">Binding and mutability</a></strong> Deep dive into the three binding forms (<code>let</code> / <code>mut</code> / <code>var</code>), their interaction with qualifiers, and how they map to Rust&#x27;s ownership and mutability model.</p>
 <p><strong><a href="new-placement.html">`new` placement operator</a></strong> Explicit placement syntax for arena, heap, and GPU device allocators — <code>new(arena) T(...)</code>. Covers qualifier interaction, GPU device placement, and the full inference override rules.</p>
+<p><strong><a href="scoped-access-blocks.html">Scoped Access Blocks — `with`</a></strong> Full design and implementation notes for <code>with</code> (see <a href="#scoped-access-blocks--with">chapter 21</a> above for the language reference). The <code>&#x27;actor</code>/<code>&#x27;guard</code> per-block locking half and the same-scope <code>&#x27;gpu&#x27;unified</code>/<code>&#x27;gpu&#x27;global</code> kernel-field materialization half are both implemented and shipped; returning a GPU-resident value across a function boundary is a further, not-yet-implemented extension — this document records exactly what&#x27;s done and what&#x27;s missing.</p>
 <h3 id="gpu-computing">GPU computing</h3>
 <p><strong><a href="gpu-module.html">GPU computing — language reference</a></strong> Complete GPU language reference: <code>kernel</code> struct syntax, const generic kernel declarations (<code>kernel Blur&lt;int N&gt;:</code>), memory qualifiers and inference rules, dispatch, the <code>GPU</code> type, atomics, multi-device dispatch, <code>after =</code> ordering, and simulation mode and profiles.</p>
 <p><strong><a href="cuda-module.html">CUDA backend</a></strong> CUDA codegen internals: generated file layout, <code>cudarc</code> host API, PTX compilation via <code>build.rs</code>, Boring construct to CUDA C mapping, and known limitations.</p>

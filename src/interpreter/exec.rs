@@ -366,6 +366,18 @@ impl Interpreter {
             Stmt::KernelBlock(s) => {
                 self.exec_kernel_block(&s.body, env)
             }
+            // `with <name>:` — a no-op wrapper under the interpreter. `GpuQual` (the
+            // kernel-field qualifier enum) is never referenced anywhere in this module:
+            // a single-threaded tree-walk simulation has no host/device split to model,
+            // so every kernel-context qualifier already behaves as a plain value here.
+            // The same precedent extends to the host-context qualifiers this statement
+            // exists for (`'gpu'unified`/`'gpu'global` residency, `'actor`/`'guard`
+            // per-block locking) — there is nothing to acquire or write back; the body
+            // just runs directly. See docs/scoped-access-blocks.md, "Cross-target behavior".
+            Stmt::With(s) => {
+                let child = Env::child(Rc::clone(&env));
+                self.exec_block(&s.body, child)
+            }
         }
     }
 
@@ -824,17 +836,16 @@ impl Interpreter {
     /// that the subsequent `value_matches_type` check fails and the caller emits a proper
     /// type error rather than silently wrapping -1 to 18446744073709551615.
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
-        let target = match ty {
-            Type::Uint => Some(Type::Uint),
-            Type::Uint8 => Some(Type::Uint8),
-            Type::Qualified(inner, _) => match inner.as_ref() {
-                Type::Uint => Some(Type::Uint),
-                Type::Uint8 => Some(Type::Uint8),
+        fn base(ty: &Type) -> Option<Type> {
+            match ty {
+                Type::Uint | Type::Uint8
+                    | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Some(ty.clone()),
+                Type::Qualified(inner, _) => base(inner),
                 _ => None,
-            },
-            _ => None,
-        };
-        match target {
+            }
+        }
+        match base(ty) {
             Some(Type::Uint) => match val {
                 Value::Int(n) if n >= 0 => Value::Uint(n as u64),
                 other => other, // negative Int: leave unchanged → type-check will reject it
@@ -842,6 +853,42 @@ impl Interpreter {
             Some(Type::Uint8) => match val {
                 Value::Int(n) if (0..=255).contains(&n) => Value::Uint8(n as u8),
                 other => other, // out-of-range Int: leave unchanged → type-check will reject it
+            },
+            Some(Type::Int8) => match val {
+                Value::Int(n) if (i8::MIN as i64..=i8::MAX as i64).contains(&n) => Value::Int8(n as i8),
+                other => other,
+            },
+            Some(Type::Int16) => match val {
+                Value::Int(n) if (i16::MIN as i64..=i16::MAX as i64).contains(&n) => Value::Int16(n as i16),
+                other => other,
+            },
+            Some(Type::Int32) => match val {
+                Value::Int(n) if (i32::MIN as i64..=i32::MAX as i64).contains(&n) => Value::Int32(n as i32),
+                other => other,
+            },
+            Some(Type::Int64) => match val {
+                Value::Int(n) => Value::Int64(n),
+                other => other,
+            },
+            Some(Type::Int128) => match val {
+                Value::Int(n) => Value::Int128(n as i128),
+                other => other,
+            },
+            Some(Type::Uint16) => match val {
+                Value::Int(n) if (0..=u16::MAX as i64).contains(&n) => Value::Uint16(n as u16),
+                other => other,
+            },
+            Some(Type::Uint32) => match val {
+                Value::Int(n) if (0..=u32::MAX as i64).contains(&n) => Value::Uint32(n as u32),
+                other => other,
+            },
+            Some(Type::Uint64) => match val {
+                Value::Int(n) if n >= 0 => Value::Uint64(n as u64),
+                other => other,
+            },
+            Some(Type::Uint128) => match val {
+                Value::Int(n) if n >= 0 => Value::Uint128(n as u128),
+                other => other,
             },
             _ => val,
         }
@@ -868,6 +915,15 @@ impl Interpreter {
             Type::Int    => "int".into(),
             Type::Uint   => "uint".into(),
             Type::Uint8  => "uint8".into(),
+            Type::Int8   => "int8".into(),
+            Type::Int16  => "int16".into(),
+            Type::Int32  => "int32".into(),
+            Type::Int64  => "int64".into(),
+            Type::Int128 => "int128".into(),
+            Type::Uint16 => "uint16".into(),
+            Type::Uint32 => "uint32".into(),
+            Type::Uint64 => "uint64".into(),
+            Type::Uint128 => "uint128".into(),
             Type::Float  => "float".into(),
             Type::Str    => "string".into(),
             Type::Bool   => "bool".into(),
@@ -977,6 +1033,15 @@ impl Interpreter {
             Type::Uint   => matches!(val, Value::Uint(_)) || matches!(val, Value::Int(n) if *n >= 0),
             // Uint8 accepts Int only when it fits in 0..=255 (coerce_to_type handles the cast).
             Type::Uint8  => matches!(val, Value::Uint8(_)) || matches!(val, Value::Int(n) if (0..=255).contains(n)),
+            Type::Int8   => matches!(val, Value::Int8(_)) || matches!(val, Value::Int(n) if (i8::MIN as i64..=i8::MAX as i64).contains(n)),
+            Type::Int16  => matches!(val, Value::Int16(_)) || matches!(val, Value::Int(n) if (i16::MIN as i64..=i16::MAX as i64).contains(n)),
+            Type::Int32  => matches!(val, Value::Int32(_)) || matches!(val, Value::Int(n) if (i32::MIN as i64..=i32::MAX as i64).contains(n)),
+            Type::Int64  => matches!(val, Value::Int64(_)) || matches!(val, Value::Int(_)),
+            Type::Int128 => matches!(val, Value::Int128(_)) || matches!(val, Value::Int(_)),
+            Type::Uint16 => matches!(val, Value::Uint16(_)) || matches!(val, Value::Int(n) if (0..=u16::MAX as i64).contains(n)),
+            Type::Uint32 => matches!(val, Value::Uint32(_)) || matches!(val, Value::Int(n) if (0..=u32::MAX as i64).contains(n)),
+            Type::Uint64 => matches!(val, Value::Uint64(_)) || matches!(val, Value::Int(n) if *n >= 0),
+            Type::Uint128 => matches!(val, Value::Uint128(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),

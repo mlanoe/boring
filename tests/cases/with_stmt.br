@@ -1,0 +1,48 @@
+# `with` scoped-access blocks (docs/scoped-access-blocks.md)
+
+struct Counter:
+    var int value = 0
+
+    def increment():
+        value += 1
+
+# 'actor — with grants write access (mutation found), one lock for the whole block
+var c'actor = Counter(0)
+with c:
+    c.increment()
+    c.increment()
+    c.increment()
+print c.value
+
+struct Cell:
+    var int value = 0
+
+    def bump():
+        value += 1
+
+    req int peek():
+        value
+
+# 'guard, read-only block (no mutation found) — RwLock::read()
+var b'guard = Cell(10)
+with b:
+    print b.peek()
+
+# 'guard, write block (mutation found) — RwLock::write()
+with b:
+    b.bump()
+print b.value
+
+# multiple names acquired by one `with`
+var a'actor = Counter(0)
+var d'actor = Counter(10)
+with a, d:
+    a.increment()
+    d.increment()
+print a.value + d.value
+
+# plain (unqualified) value — no-op passthrough
+var int x = 1
+with x:
+    x = x + 41
+print x

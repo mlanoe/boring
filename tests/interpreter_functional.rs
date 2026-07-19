@@ -121,6 +121,7 @@ itest!(enums);
 itest!(streams);
 itest!(newtypes);
 itest!(guard);
+itest!(with_stmt);
 itest!(generics);
 itest!(operators);
 itest!(macros);

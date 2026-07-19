@@ -498,11 +498,19 @@ impl Transpiler {
                 // For auto-ref params declared without `mut`: this is a compile error.
                 if let ExprKind::Var(var_name) = &obj.kind {
                     if anonymous_vars.contains(var_name.as_str()) {
-                        let is_req = var_struct_types.get(var_name.as_str())
-                            .map(|struct_name| {
-                                self.struct_req_methods.contains(&format!("{}::{}", struct_name, method))
-                            })
-                            .unwrap_or(false);
+                        let is_req = if let Some(struct_name) = var_struct_types.get(var_name.as_str()) {
+                            self.struct_req_methods.contains(&format!("{}::{}", struct_name, method))
+                        } else {
+                            // Not a user struct — check whether it's a bare array/dict/set
+                            // param. Built-in collection methods are read-only unless listed
+                            // in MUTATING_COLLECTION_METHODS (mirrors the ACTOR_FIELD_MUTATING
+                            // check in emit_methods.rs), so e.g. `.len()`/`.contains()` on an
+                            // unqualified `[T]`/`{K=V}`/`{T}` param no longer blocks auto-ref.
+                            matches!(
+                                self.fn_current_params.get(var_name.as_str()),
+                                Some(Type::Array(_) | Type::Dict(_, _) | Type::Set(_))
+                            ) && !super::helpers::MUTATING_COLLECTION_METHODS.contains(&method.as_str())
+                        };
                         if !is_req {
                             let is_auto_ref_param = auto_ref_param_vars.contains(var_name.as_str());
                             let is_mut_param = self.fn_current_params_mut.contains(var_name.as_str());

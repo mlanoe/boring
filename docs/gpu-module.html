@@ -213,7 +213,8 @@ print k.buf[<span class="nb">0</span>]</code></pre></div>
 <blockquote><code>&#x27;const</code> and <code>&#x27;local</code> are always inferred and rarely written explicitly. <code>&#x27;unified</code>, <code>&#x27;global</code>, and <code>&#x27;sync</code> are always explicit.</blockquote>
 <hr>
 <p><strong>Host-context</strong> (bindings outside <code>kernel</code> struct):</p>
-<table><thead><tr><th>Qualifier</th><th>Location</th></tr></thead><tbody><tr><td><code>&#x27;gpu&#x27;unified</code></td><td>unified host + device DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;global</code></td><td>device-only DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;const</code></td><td>GPU constant cache</td></tr></tbody></table>
+<table><thead><tr><th>Qualifier</th><th>Location</th></tr></thead><tbody><tr><td><code>&#x27;gpu&#x27;unified</code></td><td>unified host + device DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;global</code></td><td>device-only DRAM</td></tr></tbody></table>
+<p><code>&#x27;const</code> (like <code>&#x27;sync</code> and <code>&#x27;local</code>) has no host-context form — it has no host access at all (see the table above), so a host-side binding could never be read from or written to. It&#x27;s only meaningful as a field qualifier inside a <code>kernel</code> struct.</p>
 <hr>
 <h2 id="kernel-block"><code>kernel:</code> block</h2>
 <p>GPU kernels are dispatched inside a <code>kernel:</code> block. The block is <strong>synchronous</strong> — execution resumes after the closing line, and all kernel fields are accessible directly.</p>

@@ -82,6 +82,30 @@ impl<'a> HostEmitter<'a> {
         self.line("fn __boring_gpu_device() -> std::sync::Arc<wgpu::Device> { std::sync::Arc::clone(__BORING_GPU_DEVICE.get().expect(\"GPU device not initialized\")) }");
         self.line("fn __boring_gpu_queue() -> std::sync::Arc<wgpu::Queue> { std::sync::Arc::clone(__BORING_GPU_QUEUE.get().expect(\"GPU queue not initialized\")) }");
         self.blank();
+        self.emit_gpu_introspection_globals();
+    }
+
+    /// Backing storage + accessors for the `GPU` type (`GPU(n)`, `GPU.all()`,
+    /// `.name()`/`.totalMem()`/etc — see `emit_expr.rs`'s `gpu_device_vars`
+    /// handling). wgpu only ever has one real adapter here (the one already
+    /// selected for `device`/`queue` above) — there is no genuine multi-device
+    /// support on this backend (see docs/wgpu-backend.md), so every `GPU(n)`
+    /// resolves to this same adapter regardless of `n`, matching the
+    /// interpreter's own simulation-mode behavior (a single mock device).
+    fn emit_gpu_introspection_globals(&mut self) {
+        self.line("static __BORING_GPU_ADAPTER: std::sync::OnceLock<std::sync::Arc<wgpu::Adapter>> = std::sync::OnceLock::new();");
+        self.line("fn __boring_gpu_adapter() -> std::sync::Arc<wgpu::Adapter> { std::sync::Arc::clone(__BORING_GPU_ADAPTER.get().expect(\"GPU adapter not initialized\")) }");
+        self.line("fn __boring_gpu_name() -> String { __boring_gpu_adapter().get_info().name }");
+        // wgpu's AdapterInfo has no memory-size fields on any backend -- there is
+        // no real value to report, so these match the interpreter's/CUDA docs'
+        // own "not available" convention (0) rather than fabricating a number.
+        self.line("fn __boring_gpu_total_mem() -> i64 { 0 }");
+        self.line("fn __boring_gpu_free_mem() -> i64 { 0 }");
+        self.line("fn __boring_gpu_compute_capability() -> Vec<i64> { vec![0, 0] }"); // CUDA-only concept
+        self.line("fn __boring_gpu_warp_size() -> i64 { 32 }"); // conservative default, not queryable via wgpu
+        self.line("fn __boring_gpu_max_threads() -> i64 { __boring_gpu_adapter().limits().max_compute_invocations_per_workgroup as i64 }");
+        self.line("fn __boring_gpu_max_shared_mem() -> i64 { __boring_gpu_adapter().limits().max_compute_workgroup_storage_size as i64 }");
+        self.blank();
     }
 
     fn emit_header(&mut self) {
@@ -109,6 +133,21 @@ impl<'a> HostEmitter<'a> {
     fn emit_kernel_structs(&mut self) {
         // Use effective_kernels (monomorphised) rather than raw program items.
         let decls: Vec<KernelDecl> = self.effective_kernels.to_vec();
+        if !decls.is_empty() {
+            // Every kernel struct's `new()` used to call `create_shader_module` +
+            // `create_compute_pipeline` on EVERY instantiation -- and boring code
+            // constructs a fresh kernel instance on every single `linear_gpu`/
+            // `attention_gpu`/etc. call (see math_gpu.br's helpers), so a hot loop of
+            // a few hundred calls recompiled the entire WGSL module (all kernels,
+            // not just the one being constructed) that many times over. Shader
+            // compilation dominates pipeline setup cost, so this was the single
+            // largest cost in any wgpu-target program with more than a handful of
+            // kernel dispatches. Compile the module and each kernel's pipeline
+            // exactly once (lazily, on first use) and clone the cheap `Arc` handle
+            // out for every later instantiation instead.
+            self.line("static __BORING_SHADER_MODULE: std::sync::OnceLock<wgpu::ShaderModule> = std::sync::OnceLock::new();");
+            self.blank();
+        }
         for decl in &decls {
             self.emit_kernel_struct(decl);
         }
@@ -116,6 +155,14 @@ impl<'a> HostEmitter<'a> {
 
     fn emit_kernel_struct(&mut self, decl: &KernelDecl) {
         let name = &decl.name;
+
+        // Cache of this kernel type's compiled pipeline (see emit_kernel_structs'
+        // doc comment on __BORING_SHADER_MODULE for why this exists).
+        self.line(&format!(
+            "static {}_PIPELINE: std::sync::OnceLock<std::sync::Arc<wgpu::ComputePipeline>> = std::sync::OnceLock::new();",
+            name.to_uppercase()
+        ));
+        self.blank();
 
         // Params struct (scalars + Dimension fields for uniform buffer).
         let params_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
@@ -146,7 +193,7 @@ impl<'a> HostEmitter<'a> {
         self.line(&format!("struct {} {{", name));
         self.line("    device: std::sync::Arc<wgpu::Device>,");
         self.line("    queue: std::sync::Arc<wgpu::Queue>,");
-        self.line("    pipeline: wgpu::ComputePipeline,");
+        self.line("    pipeline: std::sync::Arc<wgpu::ComputePipeline>,");
         self.line("    bind_group: wgpu::BindGroup,");
         for f in &decl.fields {
             match f.qual {
@@ -236,12 +283,6 @@ impl<'a> HostEmitter<'a> {
         let dim_param = if has_dim_field { "width: i32, height: i32, " } else { "" };
 
         self.line(&format!("    fn new({}{dim_param}device: std::sync::Arc<wgpu::Device>, queue: std::sync::Arc<wgpu::Queue>) -> Self {{", params_sig));
-
-        // Load shader.
-        self.line("        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {");
-        self.line("            label: None,");
-        self.line("            source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
-        self.line("        });");
         self.blank();
 
         // Collect buffer fields.
@@ -300,14 +341,24 @@ impl<'a> HostEmitter<'a> {
         self.blank();
 
         // Pipeline (workgroup size is hardcoded in WGSL, no override constants needed).
-        self.line("        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {");
-        self.line("            label: None,");
-        self.line("            layout: None,");
-        self.line("            module: &shader,");
-        self.line(&format!("            entry_point: \"{}_main\",", name));
-        self.line("            compilation_options: wgpu::PipelineCompilationOptions::default(),");
-        self.line("            cache: None,");
-        self.line("        });");
+        // Compiled once and cached (see the `{}_PIPELINE`/`__BORING_SHADER_MODULE`
+        // statics' doc comment) -- every later `new()` call just clones the Arc.
+        self.line(&format!("        let pipeline = {}_PIPELINE.get_or_init(|| {{", name.to_uppercase()));
+        self.line("            let shader = __BORING_SHADER_MODULE.get_or_init(|| {");
+        self.line("                device.create_shader_module(wgpu::ShaderModuleDescriptor {");
+        self.line("                    label: None,");
+        self.line("                    source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
+        self.line("                })");
+        self.line("            });");
+        self.line("            std::sync::Arc::new(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {");
+        self.line("                label: None,");
+        self.line("                layout: None,");
+        self.line("                module: shader,");
+        self.line(&format!("                entry_point: \"{}_main\",", name));
+        self.line("                compilation_options: wgpu::PipelineCompilationOptions::default(),");
+        self.line("                cache: None,");
+        self.line("            }))");
+        self.line("        }).clone();");
         self.blank();
 
         // Bind group.
@@ -622,10 +673,16 @@ impl<'a> HostEmitter<'a> {
             self.line("    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
             self.line("    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.expect(\"No GPU adapter found\");");
             self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.expect(\"Failed to create device\");");
+            // Defensive: make sure the device is fully settled before any real
+            // dispatch work begins. There's nothing queued yet, so this returns
+            // essentially immediately -- it's here only to rule out adapter/device
+            // warm-up timing as a source of flaky early-kernel behavior.
+            self.line("    device.poll(wgpu::MaintainBase::Wait);");
             self.line("    let device = std::sync::Arc::new(device);");
             self.line("    let queue = std::sync::Arc::new(queue);");
             self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
             self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
+            self.line("    let _ = __BORING_GPU_ADAPTER.set(std::sync::Arc::new(adapter));");
             self.blank();
             if self.has_boring_main {
                 self.line("    if let Err(e) = boring_main() {");
@@ -844,8 +901,17 @@ impl<'a> HostEmitter<'a> {
         self.line("            .await.expect(\"Failed to create device\");");
         self.line("        (instance, adapter, device, queue)");
         self.line("    });");
+        // Defensive: see the non-Screen async_main path for why.
+        self.line("    device.poll(wgpu::MaintainBase::Wait);");
         self.line("    let device = std::sync::Arc::new(device);");
         self.line("    let queue  = std::sync::Arc::new(queue);");
+        self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
+        self.line("    let _ = __BORING_GPU_QUEUE.set(std::sync::Arc::clone(&queue));");
+        // Note: __BORING_GPU_ADAPTER is intentionally NOT set here, unlike the
+        // non-Screen async_main path -- `adapter` (plain wgpu::Adapter, not Clone)
+        // is still owned by the `__App` struct literal below, and this path has no
+        // existing example that calls GPU(n)/.name()/etc from Screen-based code.
+        // GPU introspection is unsupported inside a Screen program for now.
         for (name, val) in &scalar_fields {
             self.line(&format!("    let {name}: i64 = {val};"));
         }
@@ -1276,11 +1342,36 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         Type::Uint  => "u32",
         Type::Float => "f32",
         Type::Bool  => "bool",
+        // Explicit fixed-width fields keep their own exact width in the host-side buffer —
+        // WGSL itself can't represent 8/16/64/128-bit ints (see `wgsl_scalar` in device.rs,
+        // which emits a clear compile error for those widths); the host Rust type still
+        // reflects the declared width so the mismatch is visible on the device side, not
+        // silently mis-typed here too (the previous behavior for `Uint8`, which fell to `i64`).
+        Type::Uint8 => "u8",
+        Type::Int8   => "i8",
+        Type::Int16  => "i16",
+        Type::Int32  => "i32",
+        Type::Int64  => "i64",
+        Type::Int128 => "i128",
+        Type::Uint16 => "u16",
+        Type::Uint32 => "u32",
+        Type::Uint64 => "u64",
+        Type::Uint128 => "u128",
         Type::Named(n) => match n.as_str() {
-            "int" | "i64" | "i32"   => "i32",
-            "uint" | "u64" | "u32"  => "u32",
+            "int" | "i32"   => "i32",
+            "uint" | "u32"  => "u32",
             "float" | "f64" | "f32" => "f32",
             "bool"                  => "bool",
+            "uint8"                 => "u8",
+            "int8"                  => "i8",
+            "int16"                 => "i16",
+            "uint16"                => "u16",
+            "int32"                 => "i32",
+            "uint32"                => "u32",
+            "int64" | "i64"         => "i64",
+            "uint64" | "u64"        => "u64",
+            "int128" | "i128"       => "i128",
+            "uint128" | "u128"      => "u128",
             _                       => "i64",
         },
         Type::Qualified(inner, _) => host_scalar_type(inner),

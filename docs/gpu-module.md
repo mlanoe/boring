@@ -177,7 +177,10 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 |---|---|
 | `'gpu'unified` | unified host + device DRAM |
 | `'gpu'global` | device-only DRAM |
-| `'gpu'const` | GPU constant cache |
+
+`'const` (like `'sync` and `'local`) has no host-context form — it has no host access at
+all (see the table above), so a host-side binding could never be read from or written to.
+It's only meaningful as a field qualifier inside a `kernel` struct.
 
 ---
 

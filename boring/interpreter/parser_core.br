@@ -517,6 +517,9 @@ def string parser_peek_debug(mut Parser p) throws:
 
 # ── Type parsing ──────────────────────────────────────────────────────────────
 
+bool is_fixed_width_int_name(string s):
+    s == "int8" or s == "int16" or s == "int32" or s == "int64" or s == "int128" or s == "uint16" or s == "uint32" or s == "uint64" or s == "uint128"
+
 def Type parse_type(mut Parser p) throws:
     let base = parse_type_base(p)
     # Handle `T&` borrow syntax — consume `&` and treat as the base type
@@ -535,6 +538,15 @@ def Type parse_type_base(mut Parser p) throws:
                 "int":   Type.Int
                 "uint":  Type.Uint
                 "uint8": Type.Uint8
+                "int8":    Type.Int8
+                "int16":   Type.Int16
+                "int32":   Type.Int32
+                "int64":   Type.Int64
+                "int128":  Type.Int128
+                "uint16":  Type.Uint16
+                "uint32":  Type.Uint32
+                "uint64":  Type.Uint64
+                "uint128": Type.Uint128
                 "float": Type.Float
                 "string": Type.Str
                 "bool":  Type.Bool
@@ -687,7 +699,7 @@ def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
     let peek1k = token_kind_name(parser_peek_token_at(p, 1).kind)
     let peek0txt = parser_peek_token_at(p, 0).text()
     # Callable req only fires for known primitive return types or Void
-    let peek0_is_prim_type = peek0txt == "int" or peek0txt == "float" or peek0txt == "string" or peek0txt == "bool" or peek0txt == "void" or peek0txt == "uint" or peek0txt == "uint8"
+    let peek0_is_prim_type = peek0txt == "int" or peek0txt == "float" or peek0txt == "string" or peek0txt == "bool" or peek0txt == "void" or peek0txt == "uint" or peek0txt == "uint8" or is_fixed_width_int_name(peek0txt)
     let is_callable_req = peek0k == "Ident" and peek1k == "LParen" and peek0_is_prim_type
     if is_callable_def:
         var name = "__call__"
@@ -1638,6 +1650,9 @@ def Stmt stmt_try(TryStmt stmt):
 def Stmt stmt_guard(GuardStmt stmt):
     Stmt.Guard(stmt)
 
+def Stmt stmt_with(WithStmt stmt):
+    Stmt.With(stmt)
+
 def Stmt stmt_defer([Stmt] body):
     Stmt.Defer(body)
 
@@ -1687,6 +1702,9 @@ def WhileStmt make_while_stmt(Expr condition, [Stmt] body, int line):
 
 def ForStmt make_for_stmt([string] vars, Expr iterable, [Stmt] body, int line):
     ForStmt(vars= vars, iterable= iterable, body= body, line= line)
+
+def WithStmt make_with_stmt([string] names, [Stmt] body, int line):
+    WithStmt(names= names, body= body, line= line)
 
 def MatchStmt make_match_stmt(Expr subject, [MatchArm] arms, int line):
     MatchStmt(subject= subject, arms= arms, line= line)
@@ -2381,7 +2399,10 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Uint8(n): return Value.Int(n as int)
             Value.Float(f): return Value.Int(int(f))
             Value.Bool(b): return if b: Value.Int(1) else Value.Int(0)
-            _: return Value.Nil
+            _:
+                if let g = cast_numeric_generic(v, "int"):
+                    return g
+                return Value.Nil
     if name == "uint":
         let v = args[0] else Value.Nil
         match v:
@@ -2389,7 +2410,10 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Uint8(n): return Value.Uint(n as uint)
             Value.Int(n): return Value.Uint(n as uint)
             Value.Float(f): return Value.Uint(f as uint)
-            _: return Value.Nil
+            _:
+                if let g = cast_numeric_generic(v, "uint"):
+                    return g
+                return Value.Nil
     if name == "uint8":
         let v = args[0] else Value.Nil
         match v:
@@ -2397,7 +2421,10 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Uint(n): return Value.Uint8(n as uint8)
             Value.Int(n): return Value.Uint8(n as uint8)
             Value.Float(f): return Value.Uint8(f as uint8)
-            _: return Value.Nil
+            _:
+                if let g = cast_numeric_generic(v, "uint8"):
+                    return g
+                return Value.Nil
     if name == "float":
         let v = args[0] else Value.Nil
         match v:
@@ -2405,7 +2432,15 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Int(n): return Value.Float(float(n))
             Value.Uint(n): return Value.Float(n as float)
             Value.Uint8(n): return Value.Float(n as float)
-            _: return Value.Nil
+            _:
+                if let iv = value_as_i128(v):
+                    return Value.Float(iv as float)
+                return Value.Nil
+    if is_fixed_width_int_name(name):
+        let v = args[0] else Value.Nil
+        if let g = cast_numeric_generic(v, name):
+            return g
+        return Value.Nil
     if name == "string":
         let v = args[0] else Value.Nil
         return Value.Str(val_to_string(v))

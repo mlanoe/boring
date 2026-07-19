@@ -168,19 +168,22 @@ wgpu buffers are not implicitly host-visible. The transpiler uses different wgpu
 
 ## `GPU` type on wgpu
 
-| Boring method | wgpu API |
-|---|---|
-| `name()` | `adapter.get_info().name` |
-| `totalMem()` | `adapter.get_info().dedicated_video_memory` (may be 0 on unified-memory GPUs — returns `shared_system_memory` as fallback) |
-| `freeMem()` | not available via wgpu — returns 0 |
-| `computeCapability()` | `[0, 0]` — not meaningful outside CUDA |
-| `warpSize()` | 32 (conservative default) |
-| `maxThreads()` | `limits.max_compute_invocations_per_workgroup` |
-| `maxSharedMem()` | `limits.max_compute_workgroup_storage_size` (bytes per workgroup) |
-| `index()` | index passed to `GPU(i)` |
+Implemented as a **single simulated device**, not real multi-adapter support: wgpu already only ever opens one adapter at program startup (for `device`/`queue`), so `GPU(n)` and every element of `GPU.all()` resolve to that same adapter regardless of `n` — this exists so `GPU`-introspecting source (e.g. `examples/saxpy.br`'s `let g = GPU(0); print g.name()`) is portable between the interpreter's simulation mode (also a single mock device, `Value::GpuDevice`) and `--target wgpu`, without requiring genuine multi-device selection.
 
-`GPU(0)` → `wgpu::Instance::enumerate_adapters`, first adapter.
-`GPU.all()` → all adapters, sorted by index.
+| Boring method | wgpu API | Notes |
+|---|---|---|
+| `GPU(n)` | — | a plain `usize` index; not a real device selector |
+| `GPU.all()` | — | always a single-element array, `[GPU(0)]` |
+| `.name()` | `adapter.get_info().name` | real adapter name |
+| `.totalMem()` | — | always `0` — `wgpu::AdapterInfo` has no memory-size field on any backend (checked against `wgpu-types` 22.0.0's struct definition) |
+| `.freeMem()` | — | always `0`, same reason |
+| `.computeCapability()` | — | always `[0, 0]` — a CUDA-only concept |
+| `.warpSize()` | — | always `32` — a conservative default, not queryable via wgpu |
+| `.maxThreads()` | `limits.max_compute_invocations_per_workgroup` | real adapter limit |
+| `.maxSharedMem()` | `limits.max_compute_workgroup_storage_size` | real adapter limit, bytes per workgroup |
+| `.index()` | — | echoes back whatever index was passed to `GPU(n)`, even though it isn't a real per-device index |
+
+Real multi-device support (a distinct adapter per index, like CUDA's `CudaContext::new(idx)`/Metal's per-index `MTLDevice`) is **not implemented** — see "Known limitations vs CUDA" below.
 
 ---
 
@@ -259,7 +262,7 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | `priority =` | `cuStreamCreateWithPriority` | no-op — wgpu has no queue priority API |
 | `freeMem()` | `cuMemGetInfo` | always 0 — wgpu does not expose free VRAM |
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
-| Multi-device (`GPU(1)`, `new(g1) K`) | full support | supported — one wgpu adapter per `GPU(i)` |
+| Multi-device (`GPU(1)`, `new(g1) K`) | full support — distinct `CudaContext` per index | `GPU(n)` compiles and runs (see "`GPU` type on wgpu" above), but every index resolves to the same single real adapter — not real multi-device selection. `new(g1) K` (placing a kernel on a specific device) is not implemented |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
 
 ---

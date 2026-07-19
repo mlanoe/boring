@@ -21,6 +21,30 @@ impl Transpiler {
                         _ => None,
                     })
             }
+            // `arr[i]` — resolve the array's declared element type (not `arr`'s own
+            // type): `self.blocks[i]` needs `self.blocks`'s field type to be
+            // `Type::Array(Named("DecoderBlock"))` to know indexing it yields a
+            // DecoderBlock, one level further than the Field case above.
+            ExprKind::Index(inner, _) => {
+                let elem_ty = match &inner.kind {
+                    ExprKind::Field(obj, field) => {
+                        let owner_ty = self.resolve_expr_struct_type(obj)?;
+                        self.struct_fields.get(owner_ty.as_str())?
+                            .iter()
+                            .find(|(fname, _)| fname == field)
+                            .map(|(_, fty)| fty.clone())
+                    }
+                    ExprKind::Var(v) => self.var_types.get(v.as_str()).cloned(),
+                    _ => None,
+                }?;
+                match elem_ty {
+                    Type::Array(elem) => match elem.as_ref() {
+                        Type::Named(n) => Some(n.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -30,6 +54,32 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if v == "fs" {
                 return self.emit_fs_call(method, args);
+            }
+            // `GPU.all()` — iterate all GPU devices. wgpu only has one real adapter
+            // (see `gpu_device_vars`'s doc comment), so this is a single-element
+            // array — matching the interpreter's own simulation-mode behavior.
+            if v == "GPU" && method == "all" && self.is_gpu_target {
+                return "vec![0usize]".to_string();
+            }
+        }
+        // `g.name()`/`.totalMem()`/etc on a tracked `GPU(n)` handle (`let g = GPU(0)`,
+        // or a `for g in GPU.all():` loop variable) — rewritten to the introspection
+        // helpers `wgpu::host::emit_gpu_introspection_globals` emits. `.index()` is
+        // just the stored usize itself; every other property has no per-device
+        // notion on wgpu (one real adapter total), so the index is otherwise unused.
+        if let ExprKind::Var(v) = &obj.kind {
+            if self.gpu_device_vars.contains(v.as_str()) {
+                return match method {
+                    "name"              => "__boring_gpu_name()".to_string(),
+                    "totalMem"          => "__boring_gpu_total_mem()".to_string(),
+                    "freeMem"           => "__boring_gpu_free_mem()".to_string(),
+                    "computeCapability" => "__boring_gpu_compute_capability()".to_string(),
+                    "warpSize"          => "__boring_gpu_warp_size()".to_string(),
+                    "maxThreads"        => "__boring_gpu_max_threads()".to_string(),
+                    "maxSharedMem"      => "__boring_gpu_max_shared_mem()".to_string(),
+                    "index"             => format!("({} as i64)", v),
+                    _ => format!("{}.{}({})", v, method, args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ")),
+                };
             }
         }
 
@@ -453,12 +503,7 @@ impl Transpiler {
         // `actor_var.lock().unwrap().field.method(args)` (multi).
         // Only applies to methods that require `&mut self` on the field — read-only methods
         // (get, len, contains, …) fall through to more specific handlers below.
-        const ACTOR_FIELD_MUTATING: &[&str] = &[
-            "append", "add", "push", "extend", "insert", "set", "remove", "remove_at",
-            "pop", "clear", "sort", "sortBy", "sort_by", "reverse", "shuffle", "dedup",
-            "retain", "truncate", "drain",
-        ];
-        if ACTOR_FIELD_MUTATING.contains(&method) {
+        if MUTATING_COLLECTION_METHODS.contains(&method) {
             if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
                 if let ExprKind::Var(v) = &inner_obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
@@ -681,7 +726,7 @@ impl Transpiler {
             let obj_s = self.emit_expr(obj);
             match method {
                 "parseInt" => {
-                    return format!("{}.trim().parse::<i64>().ok()", obj_s);
+                    return format!("{}.trim().parse::<isize>().ok()", obj_s);
                 }
                 "parseFloat" => {
                     return format!("{}.trim().parse::<f64>().ok()", obj_s);
@@ -699,7 +744,7 @@ impl Transpiler {
                     let sub_s = args.first().map(|a| self.emit_expr(&a.value))
                         .unwrap_or_else(|| "\"\"".to_string());
                     // Use &* to coerce Arc<str>/Arc<str> argument to &str for str::find.
-                    return format!("{}.find(&*{}).map(|i| i as i64)", obj_s, sub_s);
+                    return format!("{}.find(&*{}).map(|i| i as isize)", obj_s, sub_s);
                 }
                 "slice" if args.len() >= 2 => {
                     let start_s = self.emit_expr(&args[0].value);
@@ -1107,13 +1152,13 @@ impl Transpiler {
         }
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
         // Note: the map_method fallback maps indexOf → iter().position which returns Option<usize>;
-        // we need Option<i64> to match interpreter semantics.
+        // we need Option<isize> to match interpreter semantics (indexOf returns `int`).
         if method == "indexOf" && !receiver_is_string {
             if let Some(val_arg) = args.first() {
                 let obj_s = self.emit_expr(obj);
                 let val_s = self.emit_expr(&val_arg.value);
                 return format!(
-                    "{}.iter().position(|__x| __x == &({})).map(|i| i as i64)",
+                    "{}.iter().position(|__x| __x == &({})).map(|i| i as isize)",
                     obj_s, val_s
                 );
             }
@@ -1141,8 +1186,18 @@ impl Transpiler {
             ExprKind::Var(v) => matches!(
                 self.var_types.get(v.as_str()),
                 Some(crate::ast::Type::Float) | Some(crate::ast::Type::Int) | Some(crate::ast::Type::Uint)
+                | Some(crate::ast::Type::Uint8)
+                | Some(crate::ast::Type::Int8) | Some(crate::ast::Type::Int16) | Some(crate::ast::Type::Int32)
+                | Some(crate::ast::Type::Int64) | Some(crate::ast::Type::Int128)
+                | Some(crate::ast::Type::Uint16) | Some(crate::ast::Type::Uint32)
+                | Some(crate::ast::Type::Uint64) | Some(crate::ast::Type::Uint128)
             ),
-            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float | crate::ast::Type::Int | crate::ast::Type::Uint),
+            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float | crate::ast::Type::Int | crate::ast::Type::Uint
+                | crate::ast::Type::Uint8
+                | crate::ast::Type::Int8 | crate::ast::Type::Int16 | crate::ast::Type::Int32
+                | crate::ast::Type::Int64 | crate::ast::Type::Int128
+                | crate::ast::Type::Uint16 | crate::ast::Type::Uint32
+                | crate::ast::Type::Uint64 | crate::ast::Type::Uint128),
             _ => false,
         };
         if receiver_is_float {
@@ -1288,6 +1343,9 @@ impl Transpiler {
                 }
             }
             ExprKind::Field(..) => self.resolve_expr_struct_type(obj)
+                .map(|t| self.struct_fields.contains_key(t.as_str()))
+                .unwrap_or(false),
+            ExprKind::Index(..) => self.resolve_expr_struct_type(obj)
                 .map(|t| self.struct_fields.contains_key(t.as_str()))
                 .unwrap_or(false),
             _ => false,
@@ -2253,6 +2311,8 @@ impl Transpiler {
             struct_rwlock_fields: self.struct_rwlock_fields.clone(),
             struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
+            fn_var_params: self.fn_var_params.clone(),
+            with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
             fn_returns_void: self.fn_returns_void,
@@ -2358,6 +2418,8 @@ impl Transpiler {
             callable_structs: self.callable_structs.clone(),
             kernel_decls: self.kernel_decls.clone(),
             kernel_vars: self.kernel_vars.clone(),
+            gpu_resident_vars: self.gpu_resident_vars.clone(),
+            gpu_device_vars: self.gpu_device_vars.clone(),
             is_gpu_target: self.is_gpu_target,
             user_top_level_names: self.user_top_level_names.clone(),
             gpu_main_emitted: std::cell::Cell::new(false),
@@ -2630,7 +2692,9 @@ fn is_unqualified_actor_source_param(ty: Option<&Type>, actor_source_types: &std
 /// Returns true when param_ty is a primitive Copy type that never needs .clone().
 fn param_ty_is_copy(ty: Option<&Type>) -> bool {
     matches!(ty,
-        Some(Type::Int | Type::Uint | Type::Float | Type::Bool) |
+        Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool
+            | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+            | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128) |
         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
     )
 }

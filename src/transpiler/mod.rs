@@ -377,6 +377,19 @@ struct Transpiler {
     /// Used by qualifier inference to disambiguate 'actor'task/'guard'task from
     /// 'actor/'guard when a task-captured variable has a task method called on it.
     pub(crate) struct_task_methods: std::collections::HashSet<String>,
+    /// Free function name -> which positional params are declared `var` (out-parameter).
+    /// Signature-only, collected once up front from the whole program — used by the
+    /// `with` block mutation scan (see ast::with_block_mutates and docs/scoped-access-blocks.md)
+    /// to decide whether passing the with-subject into a call grants write access.
+    pub(crate) fn_var_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Names currently open in an enclosing `with` block. `with c:` shadows `c` with
+    /// its already-acquired guard (`let mut c = c.lock().unwrap();` or the RwLock/GPU
+    /// equivalent) once at block entry, so ordinary method/field codegen on `c` inside
+    /// the block — which normally re-locks per access via `var_mutex_types` etc. — must
+    /// be suppressed for the block's duration and fall through to plain-struct-receiver
+    /// codegen instead; that's correct because the shadowed binding auto-derefs through
+    /// the guard. See emit_stmt.rs's `Stmt::With` arm.
+    pub(crate) with_open_names: std::collections::HashSet<String>,
     /// Struct types that implement the iterator protocol: a `def T? next():` method.
     /// When the iterable of a `for` loop is one of these types, the transpiler emits
     /// `while let Some(x) = __iter.next()` instead of `.into_iter()`.
@@ -661,6 +674,23 @@ struct Transpiler {
     /// Populated by `emit_let`; consumed by kernel-construction, `kernel:` dispatch, and
     /// kernel 'unified-field-read codegen (GPU targets only -- see `kernel_decls`).
     pub(crate) kernel_vars: std::collections::HashMap<String, String>,
+    /// Local variable name -> (kernel variable name, field name), for a `'gpu'unified`/
+    /// `'gpu'global`-qualified `let`/`var` initialized directly from a bare kernel-field
+    /// read (`let py'gpu'unified = k.y`) — see `emit_kernel::try_emit_gpu_resident_let`.
+    /// Such a binding is a pure compile-time alias: no Rust variable is ever emitted for
+    /// it, so its only legal use is as the subject of a `with` block, which resolves it
+    /// back to `copy_{field}_to_host`/`copy_{field}_to_device` on the kernel variable
+    /// (see `emit_stmt::emit_with`). The checker enforces this is the only legal use
+    /// (`Binding::resident_from_field`). GPU targets only, same gate as `kernel_vars`.
+    pub(crate) gpu_resident_vars: std::collections::HashMap<String, (String, String)>,
+    /// Local variable names bound to a `GPU(n)` device handle (`let g = GPU(0)`), or a
+    /// `for` loop variable iterating `GPU.all()` — tracked so a later `g.name()`/
+    /// `.totalMem()`/etc. method call can be rewritten to the introspection helpers
+    /// emitted by `wgpu::host::emit_gpu_introspection_globals`. wgpu only ever has one
+    /// real adapter (see that function's doc comment), so every `GPU(n)` and every
+    /// element of `GPU.all()` resolves to it regardless of index — matching the
+    /// interpreter's own single mock `GpuDevice` in simulation mode. GPU targets only.
+    pub(crate) gpu_device_vars: std::collections::HashSet<String>,
     /// Names of every top-level `let` (across the whole reachable `use` graph, collected
     /// by `pre_scan`/`deep_pre_scan` before the prelude is emitted). Used to skip the
     /// prelude's `use std::f64::consts::{PI, E, TAU}` for any of those three names a
@@ -760,6 +790,8 @@ impl Transpiler {
             struct_rwlock_task_fields: std::collections::HashSet::new(),
             struct_req_methods: std::collections::HashSet::new(),
             struct_task_methods: std::collections::HashSet::new(),
+            fn_var_params: std::collections::HashMap::new(),
+            with_open_names: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
             fn_returns_void: false,
@@ -860,6 +892,8 @@ impl Transpiler {
             callable_structs: std::collections::HashSet::new(),
             kernel_decls,
             kernel_vars: std::collections::HashMap::new(),
+            gpu_resident_vars: std::collections::HashMap::new(),
+            gpu_device_vars: std::collections::HashSet::new(),
             user_top_level_names: std::collections::HashSet::new(),
             is_gpu_target,
             gpu_main_emitted: std::cell::Cell::new(false),
@@ -929,13 +963,22 @@ impl Transpiler {
     fn estimate_size_inner(ty: &Type, program: &Program, visiting: &mut std::collections::HashSet<String>) -> Option<usize> {
         match ty {
             Type::Int | Type::Uint | Type::Float => Some(8),
-            Type::Uint8 => Some(1),
+            Type::Uint8 | Type::Int8 => Some(1),
+            Type::Int16 | Type::Uint16 => Some(2),
+            Type::Int32 | Type::Uint32 => Some(4),
+            Type::Int64 | Type::Uint64 => Some(8),
+            Type::Int128 | Type::Uint128 => Some(16),
             Type::Bool => Some(1),
             Type::Str => Some(16), // Arc<str> = 2 pointers
             Type::Nil | Type::Void => Some(0),
             // Primitive type names that may appear as Named() from init-param parsing
-            Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float") => Some(8),
-            Type::Named(n) if n.as_str() == "uint8" => Some(1),
+            Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "isize" | "usize" | "i64" | "u64") => Some(8),
+            Type::Named(n) if matches!(n.as_str(), "float" | "f64") => Some(8),
+            Type::Named(n) if matches!(n.as_str(), "uint8" | "int8" | "u8" | "i8") => Some(1),
+            Type::Named(n) if matches!(n.as_str(), "int16" | "uint16" | "i16" | "u16") => Some(2),
+            Type::Named(n) if matches!(n.as_str(), "int32" | "uint32" | "i32" | "u32") => Some(4),
+            Type::Named(n) if matches!(n.as_str(), "int64" | "uint64") => Some(8),
+            Type::Named(n) if matches!(n.as_str(), "int128" | "uint128" | "i128" | "u128") => Some(16),
             Type::Named(n) if n.as_str() == "bool" => Some(1),
             Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
             Type::Qualified(inner, OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
@@ -1368,9 +1411,9 @@ impl Transpiler {
                 } else if init.starts_with("Arc::new(") || init.starts_with("Arc::<str>::from(") || init.starts_with("Rc::<str>::from(") || init.starts_with("\"") {
                     "Arc<str>".to_string()
                 } else if init.starts_with("vec![") {
-                    "Vec<i64>".to_string()
+                    "Vec<isize>".to_string()
                 } else {
-                    "i64".to_string()
+                    "isize".to_string()
                 };
                 let static_name = name.to_uppercase();
                 // Use std::sync::LazyLock<Mutex<T>> for module-level mutable state.
@@ -1615,8 +1658,15 @@ impl Transpiler {
     fn top_level_let_is_const_safe(&self, s: &LetStmt) -> bool {
         fn is_scalar(t: &Type) -> bool {
             match t {
-                Type::Int | Type::Uint | Type::Float | Type::Bool => true,
-                Type::Named(n) => matches!(n.as_str(), "int" | "uint" | "float" | "bool"),
+                Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool => true,
+                Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
+                Type::Named(n) => matches!(n.as_str(),
+                    "int" | "uint" | "uint8" | "float" | "bool"
+                    | "int8" | "int16" | "int32" | "int64" | "int128"
+                    | "uint16" | "uint32" | "uint64" | "uint128"
+                    | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                    | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"),
                 Type::Optional(inner) | Type::Qualified(inner, _) => is_scalar(inner),
                 _ => false,
             }
@@ -1876,6 +1926,8 @@ impl Transpiler {
                             }
                         }
                     }
+                    // Signature-only var-param positions, for the `with` mutation scan.
+                    self.fn_var_params.insert(f.name.clone(), f.params.iter().map(|p| p.rebindable).collect());
                     self.pre_register_fn(f);
                 }
                 Item::Struct(s) if s.name == "Box" => {

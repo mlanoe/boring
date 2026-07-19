@@ -724,20 +724,49 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
 }
 
 /// WGSL scalar type for kernel use (i32, u32, f32, bool→u32).
+/// WGSL only has 32-bit `i32`/`u32`/`f32` scalars natively — no 8/16/64/128-bit integer
+/// types. A kernel field declared with one of those widths can't be represented on this
+/// target; rather than silently mis-narrowing it (the previous behavior for `Uint8`,
+/// which fell through to `i32`), emit a WGSL comment naming the problem inline so the
+/// generated shader fails to compile with a clear reason instead of running with wrong
+/// data layout. Mirrors the same "emit a comment as a fallback" convention already used
+/// for `float` on the `kernel` (no_std) target.
+fn wgsl_unsupported_width(name: &str, fallback: &str) -> String {
+    format!("/* ERROR: `{}` is not supported on --target wgpu (WGSL has no 8/16/64/128-bit integers) */ {}", name, fallback)
+}
+
 fn wgsl_scalar(ty: &Type) -> String {
     match ty {
         Type::Int              => "i32".into(),
         Type::Uint             => "u32".into(),
+        Type::Int32             => "i32".into(),
+        Type::Uint32            => "u32".into(),
+        Type::Uint8             => wgsl_unsupported_width("uint8", "u32"),
+        Type::Int8               => wgsl_unsupported_width("int8", "i32"),
+        Type::Int16              => wgsl_unsupported_width("int16", "i32"),
+        Type::Uint16             => wgsl_unsupported_width("uint16", "u32"),
+        Type::Int64               => wgsl_unsupported_width("int64", "i32"),
+        Type::Uint64              => wgsl_unsupported_width("uint64", "u32"),
+        Type::Int128              => wgsl_unsupported_width("int128", "i32"),
+        Type::Uint128              => wgsl_unsupported_width("uint128", "u32"),
         Type::Float            => "f32".into(),
         // bool is not allowed in storage/uniform buffers in WGSL — use u32.
         Type::Bool             => "u32".into(),
         Type::Named(n) => match n.as_str() {
-            "int"   | "i32" | "i64" => "i32",
-            "uint"  | "u32" | "u64" => "u32",
-            "float" | "f32" | "f64" => "f32",
-            "bool"                  => "u32",
-            other                   => return other.to_string(),
-        }.into(),
+            "int"   | "i32" => "i32".to_string(),
+            "uint"  | "u32" => "u32".to_string(),
+            "float" | "f32" | "f64" => "f32".to_string(),
+            "bool"                  => "u32".to_string(),
+            "uint8"                 => wgsl_unsupported_width("uint8", "u32"),
+            "int8"                  => wgsl_unsupported_width("int8", "i32"),
+            "int16"                 => wgsl_unsupported_width("int16", "i32"),
+            "uint16"                => wgsl_unsupported_width("uint16", "u32"),
+            "int32"                 => "i32".to_string(),
+            "uint32"                => "u32".to_string(),
+            "int64" | "i64" | "int128" | "i128" => wgsl_unsupported_width("int64/int128", "i32"),
+            "uint64" | "u64" | "uint128" | "u128" => wgsl_unsupported_width("uint64/uint128", "u32"),
+            other                   => other.to_string(),
+        },
         Type::Qualified(inner, _) => wgsl_scalar(inner),
         _ => "i32".into(),
     }
@@ -900,39 +929,72 @@ fn first_loop_index(stmts: &[Stmt]) -> usize {
 }
 
 /// Scan `kernel:` blocks for `kname(block = ...)` calls and return per-kernel block sizes.
+/// `kernel:` blocks live anywhere a statement can — most commonly inside a free
+/// function's body (e.g. `math_gpu.br`'s `linear_gpu`/`attention_gpu` helpers wrap
+/// every kernel construction+dispatch in its own function), not just as bare
+/// top-level statements — so every function body (and every nested statement
+/// container within it) must be walked, not only `program.items` directly.
 fn collect_block_sizes(program: &Program) -> std::collections::HashMap<String, (u32, u32, u32)> {
-    // Build var_name → kernel_type_name mapping from top-level let/var declarations.
     let mut var_to_type: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let resolve_let = |s: &LetStmt, map: &mut std::collections::HashMap<String, String>| {
-        if let Some(val) = &s.value {
-            if let ExprKind::Call(callee, _) = &val.kind {
-                if let ExprKind::Var(type_name) = &callee.kind {
-                    map.insert(s.name.clone(), type_name.clone());
-                }
-            }
-        }
-    };
-    for item in &program.items {
-        match item {
-            Item::Let(s) => resolve_let(s, &mut var_to_type),
-            Item::Stmt(Stmt::Let(s)) => resolve_let(s, &mut var_to_type),
-            _ => {}
-        }
-    }
     let mut map = std::collections::HashMap::new();
     for item in &program.items {
-        if let Item::Stmt(Stmt::KernelBlock(block)) = item {
-            for s in &block.body {
-                scan_call_block_size(s, &mut map, &var_to_type);
-            }
+        match item {
+            Item::Let(s) => resolve_let_kernel_type(s, &mut var_to_type),
+            Item::Stmt(s) => scan_call_block_size(s, &mut map, &mut var_to_type),
+            Item::Fn(f) => { for s in &f.body { scan_call_block_size(s, &mut map, &mut var_to_type); } }
+            Item::Struct(s) => { for m in &s.methods { for st in &m.body { scan_call_block_size(st, &mut map, &mut var_to_type); } } }
+            _ => {}
         }
     }
     map
 }
 
-fn scan_call_block_size(s: &Stmt, map: &mut std::collections::HashMap<String, (u32, u32, u32)>, var_to_type: &std::collections::HashMap<String, String>) {
+fn resolve_let_kernel_type(s: &LetStmt, map: &mut std::collections::HashMap<String, String>) {
+    if let Some(val) = &s.value {
+        if let ExprKind::Call(callee, _) = &val.kind {
+            if let ExprKind::Var(type_name) = &callee.kind {
+                map.insert(s.name.clone(), type_name.clone());
+            }
+        }
+    }
+}
+
+fn scan_call_block_size(
+    s: &Stmt,
+    map: &mut std::collections::HashMap<String, (u32, u32, u32)>,
+    var_to_type: &mut std::collections::HashMap<String, String>,
+) {
     match s {
+        Stmt::Let(ls) => resolve_let_kernel_type(ls, var_to_type),
         Stmt::Loop(ls) => { for inner in &ls.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::While(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::WhileLet(ws) => { for inner in &ws.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::DoWhile(ds) => { for inner in &ds.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::For(fs) => { for inner in &fs.body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::Guard(gs) => { for inner in &gs.else_body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::Try(ts) => {
+            for inner in &ts.body { scan_call_block_size(inner, map, var_to_type); }
+            for c in &ts.catch_clauses { for inner in &c.body { scan_call_block_size(inner, map, var_to_type); } }
+        }
+        Stmt::Defer(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+        Stmt::If(is) => {
+            for (_, body) in &is.branches { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+        }
+        Stmt::IfLet(is) => {
+            for inner in &is.then_body { scan_call_block_size(inner, map, var_to_type); }
+            for branch in &is.elif_branches { for inner in &branch.body { scan_call_block_size(inner, map, var_to_type); } }
+            if let Some(body) = &is.else_body { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+        }
+        Stmt::Match(ms) => {
+            for arm in &ms.arms {
+                match &arm.body {
+                    MatchBody::Block(body) => { for inner in body { scan_call_block_size(inner, map, var_to_type); } }
+                    MatchBody::Expr(_) => {}
+                }
+            }
+        }
+        Stmt::KernelBlock(block) => { for inner in &block.body { scan_call_block_size(inner, map, var_to_type); } }
         Stmt::Expr(e) => {
             if let ExprKind::Call(callee, args) = &e.kind {
                 if let ExprKind::Var(kname) = &callee.kind {

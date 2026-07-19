@@ -1,46 +1,43 @@
 # == BUILT-IN METHODS ==
 
+# Generalized instead of one hand-written match arm per numeric-kind pair —
+# see the NumKind model in eval.br (num_kind_of/value_as_i128/etc.).
 def bool value_lt(Value a, Value b):
-    match a:
-        Value.Int(x):
-            match b:
-                Value.Int(y): x < y
-                Value.Uint(y): x < (y as int)
-                Value.Uint8(y): x < (y as int)
-                Value.Float(y): (x as float) < y
-                _: false
-        Value.Uint(x):
-            match b:
-                Value.Uint(y): x < y
-                Value.Uint8(y): x < (y as uint)
-                Value.Int(y): (x as int) < y
-                Value.Float(y): (x as float) < y
-                _: false
-        Value.Uint8(x):
-            match b:
-                Value.Uint8(y): x < y
-                Value.Uint(y): (x as uint) < y
-                Value.Int(y): (x as int) < y
-                Value.Float(y): (x as float) < y
-                _: false
-        Value.Float(x):
-            match b:
-                Value.Int(y): x < (y as float)
-                Value.Uint(y): x < (y as float)
-                Value.Uint8(y): x < (y as float)
-                Value.Float(y): x < y
-                _: false
-        Value.Str(x):
-            match b:
-                Value.Str(y): x < y
-                _: false
+    let a_is_float = match a:
+        Value.Float(_): true
         _: false
+    let b_is_float = match b:
+        Value.Float(_): true
+        _: false
+    if a_is_float or b_is_float:
+        guard let af = value_as_float_numeric(a) else: return false
+        guard let bf = value_as_float_numeric(b) else: return false
+        af < bf
+    else:
+        match a:
+            Value.Str(x):
+                match b:
+                    Value.Str(y): x < y
+                    _: false
+            _:
+                guard let av = value_as_i128(a) else: return false
+                guard let bv = value_as_i128(b) else: return false
+                av < bv
 
 def string val_type_name(Value v):
     match v:
         Value.Int(_): "int"
         Value.Uint(_): "uint"
         Value.Uint8(_): "uint8"
+        Value.Int8(_): "int8"
+        Value.Int16(_): "int16"
+        Value.Int32(_): "int32"
+        Value.Int64(_): "int64"
+        Value.Int128(_): "int128"
+        Value.Uint16(_): "uint16"
+        Value.Uint32(_): "uint32"
+        Value.Uint64(_): "uint64"
+        Value.Uint128(_): "uint128"
         Value.Float(_): "float"
         Value.Str(_): "string"
         Value.Bool(_): "bool"
@@ -901,6 +898,114 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Str("{n:x}")
                 _:
                     throw "unknown method {method_name} on {recv_type}"
+
+        Value.Int8(n):
+            match method_name:
+                "abs": if n < 0: Value.Int8(0 - n) else: Value.Int8(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Int8(n)
+                "ceil": Value.Int8(n)
+                "round": Value.Int8(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Int16(n):
+            match method_name:
+                "abs": if n < 0: Value.Int16(0 - n) else: Value.Int16(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Int16(n)
+                "ceil": Value.Int16(n)
+                "round": Value.Int16(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Int32(n):
+            match method_name:
+                "abs": if n < 0: Value.Int32(0 - n) else: Value.Int32(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Int32(n)
+                "ceil": Value.Int32(n)
+                "round": Value.Int32(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Int64(n):
+            match method_name:
+                "abs": if n < 0: Value.Int64(0 - n) else: Value.Int64(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Int64(n)
+                "ceil": Value.Int64(n)
+                "round": Value.Int64(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Int128(n):
+            match method_name:
+                "abs": if n < 0: Value.Int128(0 - n) else: Value.Int128(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Int128(n)
+                "ceil": Value.Int128(n)
+                "round": Value.Int128(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint16(n):
+            match method_name:
+                "abs": Value.Uint16(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Uint16(n)
+                "ceil": Value.Uint16(n)
+                "round": Value.Uint16(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint32(n):
+            match method_name:
+                "abs": Value.Uint32(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Uint32(n)
+                "ceil": Value.Uint32(n)
+                "round": Value.Uint32(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint64(n):
+            match method_name:
+                "abs": Value.Uint64(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Uint64(n)
+                "ceil": Value.Uint64(n)
+                "round": Value.Uint64(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
+
+        Value.Uint128(n):
+            match method_name:
+                "abs": Value.Uint128(n)
+                "sqrt": Value.Float((n as float).sqrt())
+                "floor": Value.Uint128(n)
+                "ceil": Value.Uint128(n)
+                "round": Value.Uint128(n)
+                "toStr": Value.Str("{n}")
+                "toBin": Value.Str("{n:b}")
+                "toHex": Value.Str("{n:x}")
+                _: throw "unknown method {method_name} on {recv_type}"
 
         Value.Float(f):
             match method_name:

@@ -155,6 +155,9 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                             match val:
                                 Value.Uint8(_): nil
                                 _: val = cast_value(interp, val, Type.Uint8)
+                        Type.Int8 | Type.Int16 | Type.Int32 | Type.Int64 | Type.Int128 | Type.Uint16 | Type.Uint32 | Type.Uint64 | Type.Uint128:
+                            if num_kind_of(val) != type_to_num_kind(declared_ty):
+                                val = cast_value(interp, val, declared_ty)
                         _: nil
             if s.is_lazy:
                 interp.current_env.define_lazy(s.name)
@@ -322,6 +325,19 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
 
         KernelBlock(body, _):
             exec_kernel_block(interp, body)
+
+        With(s):
+            # No-op wrapper here: this tree-walk interpreter has no host/device
+            # split and no per-call lock semantics to simulate, so every qualifier
+            # `with` exists for already behaves as a plain value — same precedent
+            # as every kernel-context qualifier already being a no-op in this
+            # interpreter. See docs/scoped-access-blocks.md, "Cross-target behavior".
+            let child = new_env(interp.current_env)
+            let prev = interp.current_env
+            interp.current_env = child
+            let sig = exec_block(interp, s.body)
+            interp.current_env = prev
+            sig
 
         _: nil
 
@@ -981,6 +997,15 @@ def string value_type_name(Value val):
         Int(_): "int"
         Uint(_): "uint"
         Uint8(_): "uint8"
+        Int8(_): "int8"
+        Int16(_): "int16"
+        Int32(_): "int32"
+        Int64(_): "int64"
+        Int128(_): "int128"
+        Uint16(_): "uint16"
+        Uint32(_): "uint32"
+        Uint64(_): "uint64"
+        Uint128(_): "uint128"
         Float(_): "float"
         Str(_): "string"
         Array(_): "array"

@@ -490,8 +490,10 @@ impl Parser {
             || matches!(s,
                 "int" | "uint" | "uint8" | "float" | "bool" | "string" | "str"
                 | "void" | "never"
-                | "i8" | "i16" | "i32" | "i64"
-                | "u8" | "u16" | "u32" | "u64" | "usize"
+                | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint16" | "uint32" | "uint64" | "uint128"
+                | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                 | "isize" | "f32" | "f64"
             )
     }
@@ -694,7 +696,7 @@ impl Parser {
                     let type_kw = if let TokenKind::Ident(s) = self.peek().clone() { self.advance(); s } else { unreachable!() };
                     let rust_ty = match type_kw.as_str() {
                         "uint" => "usize",
-                        "int"  => "i64",
+                        "int"  => "isize",
                         "bool" => "bool",
                         _      => "usize",
                     };
@@ -1146,7 +1148,7 @@ impl Parser {
                         let type_kw = if let TokenKind::Ident(s) = self.peek().clone() { self.advance(); s } else { unreachable!() };
                         let rust_ty = match type_kw.as_str() {
                             "uint"  => "usize",
-                            "int"   => "i64",
+                            "int"   => "isize",
                             "bool"  => "bool",
                             _       => "usize",
                         };

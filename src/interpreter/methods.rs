@@ -440,6 +440,15 @@ impl Interpreter {
             Type::Int    => matches!(val, Value::Int(_)),
             Type::Uint   => matches!(val, Value::Uint(_)),
             Type::Uint8  => matches!(val, Value::Uint8(_)),
+            Type::Int8   => matches!(val, Value::Int8(_)),
+            Type::Int16  => matches!(val, Value::Int16(_)),
+            Type::Int32  => matches!(val, Value::Int32(_)),
+            Type::Int64  => matches!(val, Value::Int64(_)),
+            Type::Int128 => matches!(val, Value::Int128(_)),
+            Type::Uint16 => matches!(val, Value::Uint16(_)),
+            Type::Uint32 => matches!(val, Value::Uint32(_)),
+            Type::Uint64 => matches!(val, Value::Uint64(_)),
+            Type::Uint128 => matches!(val, Value::Uint128(_)),
             Type::Float  => matches!(val, Value::Float(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
@@ -448,6 +457,15 @@ impl Interpreter {
                 "int"    => matches!(val, Value::Int(_)),
                 "uint"   => matches!(val, Value::Uint(_)),
                 "uint8"  => matches!(val, Value::Uint8(_)),
+                "int8"   => matches!(val, Value::Int8(_)),
+                "int16"  => matches!(val, Value::Int16(_)),
+                "int32"  => matches!(val, Value::Int32(_)),
+                "int64"  => matches!(val, Value::Int64(_)),
+                "int128" => matches!(val, Value::Int128(_)),
+                "uint16" => matches!(val, Value::Uint16(_)),
+                "uint32" => matches!(val, Value::Uint32(_)),
+                "uint64" => matches!(val, Value::Uint64(_)),
+                "uint128" => matches!(val, Value::Uint128(_)),
                 "float"  => matches!(val, Value::Float(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),
@@ -1806,36 +1824,69 @@ impl Interpreter {
         match ty {
             // Strip ownership qualifiers — `int` = Qualified(Int, Copy), etc.
             Type::Qualified(inner, _) => self.cast_value(val, inner, line),
-            Type::Int => match val {
-                Value::Int(n) => Ok(Value::Int(n)),
-                Value::Uint(n) => Ok(Value::Int(n as i64)),
-                Value::Uint8(n) => Ok(Value::Int(n as i64)),
-                Value::Float(f) => Ok(Value::Int(f as i64)),
-                Value::Str(s) => Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil)),
-                Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
-                _ => Ok(Value::Nil),
-            },
-            Type::Uint => match val {
-                Value::Uint(n) => Ok(Value::Uint(n)),
-                Value::Uint8(n) => Ok(Value::Uint(n as u64)),
-                Value::Int(n) if n >= 0 => Ok(Value::Uint(n as u64)),
-                Value::Float(f) if f >= 0.0 => Ok(Value::Uint(f as u64)),
-                Value::Str(s) => Ok(s.trim().parse::<u64>().map(Value::Uint).unwrap_or(Value::Nil)),
-                _ => Ok(Value::Nil),
-            },
-            Type::Uint8 => match val {
-                Value::Uint8(n) => Ok(Value::Uint8(n)),
-                Value::Int(n) if (0..=255).contains(&n) => Ok(Value::Uint8(n as u8)),
-                Value::Uint(n) if n <= 255 => Ok(Value::Uint8(n as u8)),
-                Value::Float(f) if (0.0..=255.0).contains(&f) => Ok(Value::Uint8(f as u8)),
-                Value::Str(s) => Ok(s.trim().parse::<u8>().map(Value::Uint8).unwrap_or(Value::Nil)),
-                _ => Ok(Value::Nil),
-            },
+            // `as int`/`as uint8`/`as int32`/... — every numeric kind is a valid source for
+            // every other numeric kind's cast target (mirrors Rust's own `as` cast, which is
+            // exactly the escape hatch users reach for since direct arithmetic between two
+            // *distinct* fixed-width kinds is otherwise a type error). One macro arm covers
+            // the full 13x13 matrix (12 numeric kinds + bool/string) instead of hand-listing
+            // each pair, using `TryFrom` (implemented by std for every integer-width pair).
+            Type::Int | Type::Uint | Type::Uint8
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => {
+                macro_rules! cast_to {
+                    ($Variant:ident, $ty:ty) => {
+                        Ok(match val {
+                            Value::Int(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint8(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Int8(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Int16(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Int32(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Int64(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Int128(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint16(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint32(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint64(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Uint128(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Float(f) => {
+                                if f >= <$ty>::MIN as f64 && f <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
+                            }
+                            Value::Str(ref s) => s.trim().parse::<$ty>().map(Value::$Variant).unwrap_or(Value::Nil),
+                            Value::Bool(b) => Value::$Variant(if b { 1 as $ty } else { 0 as $ty }),
+                            _ => Value::Nil,
+                        })
+                    };
+                }
+                match ty {
+                    Type::Int => cast_to!(Int, i64),
+                    Type::Uint => cast_to!(Uint, u64),
+                    Type::Uint8 => cast_to!(Uint8, u8),
+                    Type::Int8 => cast_to!(Int8, i8),
+                    Type::Int16 => cast_to!(Int16, i16),
+                    Type::Int32 => cast_to!(Int32, i32),
+                    Type::Int64 => cast_to!(Int64, i64),
+                    Type::Int128 => cast_to!(Int128, i128),
+                    Type::Uint16 => cast_to!(Uint16, u16),
+                    Type::Uint32 => cast_to!(Uint32, u32),
+                    Type::Uint64 => cast_to!(Uint64, u64),
+                    Type::Uint128 => cast_to!(Uint128, u128),
+                    _ => unreachable!(),
+                }
+            }
             Type::Float => match val {
                 Value::Float(f) => Ok(Value::Float(f)),
                 Value::Int(n) => Ok(Value::Float(n as f64)),
                 Value::Uint(n) => Ok(Value::Float(n as f64)),
                 Value::Uint8(n) => Ok(Value::Float(n as f64)),
+                Value::Int8(n) => Ok(Value::Float(n as f64)),
+                Value::Int16(n) => Ok(Value::Float(n as f64)),
+                Value::Int32(n) => Ok(Value::Float(n as f64)),
+                Value::Int64(n) => Ok(Value::Float(n as f64)),
+                Value::Int128(n) => Ok(Value::Float(n as f64)),
+                Value::Uint16(n) => Ok(Value::Float(n as f64)),
+                Value::Uint32(n) => Ok(Value::Float(n as f64)),
+                Value::Uint64(n) => Ok(Value::Float(n as f64)),
+                Value::Uint128(n) => Ok(Value::Float(n as f64)),
                 Value::Str(s) => Ok(s.trim().parse::<f64>().map(Value::Float).unwrap_or(Value::Nil)),
                 _ => Ok(Value::Nil),
             },
@@ -1999,6 +2050,8 @@ impl Interpreter {
 
             // Bare primitive types: stack-allocated by default, always valid.
             Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool => Ok(()),
+            Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Ok(()),
             // Bare String without qualifier: requires explicit qualification.
             Type::Str => Err(err("use 'string' instead of bare 'String' (which has no ownership qualifier)", line)),
 
@@ -2063,6 +2116,15 @@ impl Interpreter {
             Value::Int(n)  => Ok(n),
             Value::Uint(n) => Ok(n as i64),
             Value::Uint8(n) => Ok(n as i64),
+            Value::Int8(n) => Ok(n as i64),
+            Value::Int16(n) => Ok(n as i64),
+            Value::Int32(n) => Ok(n as i64),
+            Value::Int64(n) => Ok(n),
+            Value::Int128(n) => Ok(n as i64),
+            Value::Uint16(n) => Ok(n as i64),
+            Value::Uint32(n) => Ok(n as i64),
+            Value::Uint64(n) => Ok(n as i64),
+            Value::Uint128(n) => Ok(n as i64),
             other => Err(err(format!("expected Int, got {}", other.type_name()), line)),
         }
     }
@@ -2082,6 +2144,15 @@ impl Interpreter {
             Value::Int(_)   => Type::Int,
             Value::Uint(_)  => Type::Uint,
             Value::Uint8(_) => Type::Uint8,
+            Value::Int8(_)  => Type::Int8,
+            Value::Int16(_) => Type::Int16,
+            Value::Int32(_) => Type::Int32,
+            Value::Int64(_) => Type::Int64,
+            Value::Int128(_) => Type::Int128,
+            Value::Uint16(_) => Type::Uint16,
+            Value::Uint32(_) => Type::Uint32,
+            Value::Uint64(_) => Type::Uint64,
+            Value::Uint128(_) => Type::Uint128,
             Value::Float(_) => Type::Float,
             Value::Str(_)   => Type::Str,
             Value::Bool(_)  => Type::Bool,
@@ -2216,6 +2287,8 @@ impl Interpreter {
             // Primitives are assumed to satisfy any constraint
             match base {
                 Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool => continue,
+                Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => continue,
                 _ => {}
             }
             let type_name = match base {

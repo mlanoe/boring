@@ -307,6 +307,9 @@ impl KernelTranspiler {
                 let body = s.body.clone();
                 for stmt in &body { self.emit_stmt(stmt); }
             }
+            // `with` is host-context only; the kernel validator (`validator/kernel.rs`)
+            // rejects it inside device code before this transpiler ever runs.
+            Stmt::With(_) => unreachable!("`with` blocks are rejected by the kernel validator before device-code emission"),
         }
     }
 

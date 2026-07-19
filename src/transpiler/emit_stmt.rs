@@ -43,7 +43,25 @@ impl Transpiler {
                     self.line(&format!("tokio::time::sleep({}).await;", d));
                 }
             }
-            Stmt::For(s)            => self.emit_for(s),
+            Stmt::For(s)            => {
+                // `for g in GPU.all():` — track the loop var as a GPU-device handle
+                // for the body's duration (see `gpu_device_vars`'s doc comment),
+                // restored via a snapshot here rather than threading extra
+                // bookkeeping through emit_for's several iterable-shape branches.
+                let is_gpu_all = self.is_gpu_target && s.vars.len() == 1 && matches!(
+                    &s.iterable.kind,
+                    ExprKind::MethodCall(obj, method, _)
+                        if method == "all" && matches!(&obj.kind, ExprKind::Var(v) if v == "GPU")
+                );
+                if is_gpu_all {
+                    let saved_gpu_device_vars = self.gpu_device_vars.clone();
+                    self.gpu_device_vars.insert(s.vars[0].clone());
+                    self.emit_for(s);
+                    self.gpu_device_vars = saved_gpu_device_vars;
+                } else {
+                    self.emit_for(s);
+                }
+            }
             Stmt::Guard(s)          => self.emit_guard(s),
             Stmt::Try(s)            => self.emit_try(s),
             Stmt::Defer(body)       => self.emit_defer(body),
@@ -182,7 +200,159 @@ impl Transpiler {
                     self.emit_stmt(stmt, i == last);
                 }
             }
+            Stmt::With(s) => self.emit_with(s),
         }
+    }
+
+    /// `with <name> [, <name> ...]:` — scoped access block (docs/scoped-access-blocks.md).
+    ///
+    /// For `'actor`/`'actor'task`/`'guard`/`'guard'task` names (supported on every host
+    /// target, including plain `boring build`, since these qualifiers already work there
+    /// today): acquires the lock once, shadowing `name` with the guard for the block's
+    /// duration, instead of the per-call `.lock()`/`.read()`/`.write()` that ordinary
+    /// method/field codegen on `name` would otherwise emit on every access. Because a
+    /// lock guard auto-derefs to the inner value, the shadowed binding lets the block's
+    /// body be emitted with completely ordinary (plain-struct-receiver) codegen — so
+    /// `name` is temporarily removed from the actor/guard tracking sets for exactly the
+    /// duration of this block, then restored, rather than teaching every call site in
+    /// emit_methods.rs/emit_expr.rs a new "suppressed" case.
+    ///
+    /// For a `'gpu'unified`/`'gpu'global` name registered in `gpu_resident_vars`
+    /// (`let py'gpu'unified = k.y` — see `emit_kernel::try_emit_gpu_resident_let`):
+    /// materializes it to a plain host `Vec` exactly once via `k.copy_y_to_host()`
+    /// (the same conversion `emit_kernel::try_emit_kernel_field_read` already does
+    /// for a bare `k.y`), regardless of how many times the block's body indexes it —
+    /// which is the actual round-trip-per-access problem this whole feature exists to
+    /// fix (`examples/vector_add_gpu.br`'s `for i in 0..n: print k.result[i]` reads
+    /// the whole buffer back on *every* iteration today). Write-back (`copy_y_to_device`)
+    /// happens once at block close, only if the body's own mutation scan finds an
+    /// index-assignment into it.
+    ///
+    /// Unqualified names fall through unhandled here — the block's body is still
+    /// emitted (see the shared `{ }` wrapper and `emit_loop_body` call below), just
+    /// without any acquire/write-back codegen, which is the correct no-op degradation.
+    /// See docs/scoped-access-blocks.md, "Cross-target behavior".
+    pub(crate) fn emit_with(&mut self, s: &WithStmt) {
+        self.line("{");
+        self.indent += 1;
+
+        struct Opened { name: String, was_mutex: bool, was_mutex_task: bool, was_rwlock: bool, was_rwlock_task: bool }
+        let mut opened: Vec<Opened> = Vec::new();
+
+        struct GpuOpened { name: String, kernel_var: String, field: String, is_write: bool, kernel_scalar_ty: &'static str }
+        let mut gpu_opened: Vec<GpuOpened> = Vec::new();
+        let saved_locals = self.known_local_vars.clone();
+        let saved_var_types = self.var_types.clone();
+
+        for name in &s.names {
+            if let Some((kvar, field)) = self.gpu_resident_vars.get(name.as_str()).cloned() {
+                let field_ty = self.kernel_vars.get(kvar.as_str())
+                    .and_then(|kname| self.kernel_decls.get(kname))
+                    .and_then(|decl| decl.fields.iter().find(|f| f.name == field))
+                    .map(|f| f.ty.clone());
+                // The checker only ever allows this shape when `kvar` is a real tracked
+                // kernel var with a matching field (`Binding::resident_from_field` +
+                // `try_emit_gpu_resident_let`'s own `kernel_vars` check) — but stay
+                // defensive rather than panicking if that invariant is ever violated.
+                let Some(field_ty) = field_ty else { continue };
+                let inner_ty = super::emit_kernel::array_inner_type(&field_ty);
+                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                let kernel_scalar_ty = super::emit_kernel::kernel_host_scalar_type(&inner_ty);
+
+                // GPU arrays have no `def`/`req` methods to scan for — only a direct
+                // index-assignment (`name[i] = v`) can mutate one, which the shared
+                // scan already detects via its assignment-target check.
+                let mut is_var_param = |_: &str, _: usize| false;
+                let mut is_mutating_method = |_: &str, _: &str| false;
+                let is_write = crate::ast::with_block_mutates(&s.body, name, &mut is_var_param, &mut is_mutating_method);
+
+                self.line(&format!(
+                    "let {}{} = {}.copy_{}_to_host().iter().map(|&x| x as {}).collect::<Vec<{}>>();",
+                    if is_write { "mut " } else { "" }, name, kvar, field, host_ty, host_ty,
+                ));
+                self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
+                self.known_local_vars.insert(name.clone());
+                self.with_open_names.insert(name.clone());
+                gpu_opened.push(GpuOpened { name: name.clone(), kernel_var: kvar, field, is_write, kernel_scalar_ty });
+                continue;
+            }
+
+            let is_mutex = self.var_mutex_types.contains(name.as_str());
+            let is_mutex_task = self.var_mutex_task_types.contains(name.as_str());
+            let is_rwlock = self.var_rwlock_types.contains(name.as_str());
+            let is_rwlock_task = self.var_rwlock_task_types.contains(name.as_str());
+            if !(is_mutex || is_mutex_task || is_rwlock || is_rwlock_task) {
+                continue;
+            }
+
+            // Two-step hybrid access scan (ast::with_block_mutates) — signature-only
+            // lookups, never opening a called function/method's body. `let`-bound names
+            // never satisfy the scan in valid Boring code (mutating them would already
+            // require a rejected `def` call), so no separate binding-kind check is needed.
+            let struct_name = self.var_struct_types.get(name.as_str()).cloned();
+            let req_methods = self.struct_req_methods.clone();
+            let fn_var_params = self.fn_var_params.clone();
+            let mut is_var_param = |fn_name: &str, idx: usize| {
+                fn_var_params.get(fn_name).and_then(|v| v.get(idx)).copied().unwrap_or(false)
+            };
+            let mut is_mutating_method = |recv: &str, method: &str| {
+                if recv != name.as_str() { return false; }
+                match &struct_name {
+                    Some(sn) => !req_methods.contains(&format!("{}::{}", sn, method)),
+                    None => true, // unknown struct — conservative: assume mutating
+                }
+            };
+            let is_write = crate::ast::with_block_mutates(&s.body, name, &mut is_var_param, &mut is_mutating_method);
+
+            let guard_expr = if is_mutex || is_mutex_task {
+                // Mutex has one mode regardless of read/write — only method-call
+                // legality (def vs req) differs, per docs/scoped-access-blocks.md.
+                self.mutex_var_write(name, name)
+            } else if is_rwlock_task {
+                if is_write { self.guard_task_write_guard(name) } else { self.guard_task_read_access(name) }
+            } else if is_write {
+                self.guard_write_guard(name)
+            } else {
+                self.guard_read_access(name)
+            };
+            let needs_mut = is_mutex || is_mutex_task || is_write;
+            self.line(&format!("let {}{} = {};", if needs_mut { "mut " } else { "" }, name, guard_expr));
+
+            opened.push(Opened { name: name.clone(), was_mutex: is_mutex, was_mutex_task: is_mutex_task, was_rwlock: is_rwlock, was_rwlock_task: is_rwlock_task });
+            self.var_mutex_types.remove(name.as_str());
+            self.var_mutex_task_types.remove(name.as_str());
+            self.var_rwlock_types.remove(name.as_str());
+            self.var_rwlock_task_types.remove(name.as_str());
+            self.with_open_names.insert(name.clone());
+        }
+
+        self.emit_loop_body(&s.body);
+
+        for o in opened.into_iter().rev() {
+            if o.was_mutex { self.var_mutex_types.insert(o.name.clone()); }
+            if o.was_mutex_task { self.var_mutex_task_types.insert(o.name.clone()); }
+            if o.was_rwlock { self.var_rwlock_types.insert(o.name.clone()); }
+            if o.was_rwlock_task { self.var_rwlock_task_types.insert(o.name.clone()); }
+            self.with_open_names.remove(&o.name);
+        }
+
+        for o in &gpu_opened {
+            if o.is_write {
+                self.line(&format!(
+                    "{}.copy_{}_to_device(&{}.iter().map(|&x| x as {}).collect::<Vec<{}>>());",
+                    o.kernel_var, o.field, o.name, o.kernel_scalar_ty, o.kernel_scalar_ty,
+                ));
+            }
+            self.with_open_names.remove(&o.name);
+        }
+        // `name` was a pure block-local alias (no Rust binding predates this `with`) —
+        // restore the outer scope's view exactly like a loop body would, so it doesn't
+        // leak into surrounding code as a spuriously "already known" local/type.
+        self.known_local_vars = saved_locals;
+        self.var_types = saved_var_types;
+
+        self.indent -= 1;
+        self.line("}");
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
@@ -190,6 +360,13 @@ impl Transpiler {
         // `kernel Name(...)` constructor needs GPU-specific codegen, not the plain
         // tuple-constructor call the rest of this function would otherwise emit.
         if self.try_emit_kernel_let(s) {
+            self.known_local_vars.insert(s.name.clone());
+            return;
+        }
+        if self.try_emit_gpu_resident_let(s) {
+            return;
+        }
+        if self.try_emit_gpu_device_let(s) {
             self.known_local_vars.insert(s.name.clone());
             return;
         }
@@ -424,7 +601,9 @@ impl Transpiler {
                 && !val.starts_with("Arc::")
                 && !val.starts_with("Rc::")
                 && !val.starts_with("{ let __g")
-                && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Float | Type::Bool))
+                && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool
+                    | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
             {
                 format!("{}.clone()", val)
             } else {
@@ -772,8 +951,15 @@ impl Transpiler {
             if let ExprKind::Cast(src_expr, dst_ty) = &s_value.kind {
                 let src_is_str = matches!(&src_expr.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                     || matches!(&src_expr.kind, ExprKind::Var(v) if self.string_vars.contains(v.as_str()));
-                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Float)
-                    || matches!(dst_ty, Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "float"));
+                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float
+                        | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                        | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
+                    || matches!(dst_ty, Type::Named(n) if matches!(n.as_str(),
+                        "int" | "uint" | "uint8" | "float"
+                        | "int8" | "int16" | "int32" | "int64" | "int128"
+                        | "uint16" | "uint32" | "uint64" | "uint128"
+                        | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                        | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"));
                 let src_is_numeric = matches!(&src_expr.kind, ExprKind::Int(_) | ExprKind::Float(_));
                 let dst_is_bool = matches!(dst_ty, Type::Bool)
                     || matches!(dst_ty, Type::Named(n) if n == "bool");
@@ -1521,7 +1707,10 @@ impl Transpiler {
         let is_nil = matches!(value.kind, ExprKind::Nil);
         // A Cast to a numeric type (or directly to Optional) already returns Option<T>
         let is_option_cast = matches!(&value.kind, ExprKind::Cast(_, ty)
-            if matches!(ty, Type::Int | Type::Uint | Type::Float | Type::Named(_) | Type::Optional(_)));
+            if matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
+                | Type::Named(_) | Type::Optional(_)));
         match declared_ty {
             Some(Type::Optional(inner)) if !is_nil => {
                 // If-expression with mixed branches (some nil, some non-optional): emit via a
@@ -1536,17 +1725,16 @@ impl Transpiler {
                 if is_option_cast {
                     // Cast to a numeric type with an Optional declared type: emit `.ok()` so
                     // the result is Option<T>, matching the annotation.
-                    // e.g. `let int? v = s as int` → `s.trim().parse::<i64>().ok()`
+                    // e.g. `let int? v = s as int` → `s.trim().parse::<isize>().ok()`
                     if let ExprKind::Cast(src, cast_ty) = &value.kind {
                         let src_s = self.emit_expr(src);
-                        let parse_ty = match cast_ty {
-                            Type::Int                          => Some("i64"),
-                            Type::Uint                         => Some("u64"),
-                            Type::Float                        => Some("f64"),
-                            Type::Named(n) if n == "int"       => Some("i64"),
-                            Type::Named(n) if n == "uint"      => Some("u64"),
-                            Type::Named(n) if n == "float"     => Some("f64"),
-                            _                                  => None,
+                        let cast_dst = self.emit_type(cast_ty);
+                        let parse_ty = if matches!(cast_ty, Type::Float) || matches!(cast_ty, Type::Named(n) if n == "float") {
+                            Some("f64".to_string())
+                        } else if crate::transpiler::helpers::is_specific_numeric_type(&cast_dst) && cast_dst != "f32" && cast_dst != "f64" {
+                            Some(cast_dst)
+                        } else {
+                            None
                         };
                         if let Some(pt) = parse_ty {
                             return format!("{}.trim().parse::<{}>().ok()", src_s, pt);
@@ -1572,12 +1760,12 @@ impl Transpiler {
                 // • starts with "Some(" or equals "None"
                 // • var already in optional_vars
                 // • method calls known to return Option (indexOf, parseInt, parseFloat, string indexOf/find)
-                //   whose emitted form ends with ".ok()" or ".map(|i| i as i64)"
+                //   whose emitted form ends with ".ok()" or ".map(|i| i as isize)"
                 let already_opt = inner_val.starts_with("Some(") || inner_val == "None"
                     || matches!(&value.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str())
                         || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
                     || inner_val.ends_with(".ok()")
-                    || inner_val.ends_with(".map(|i| i as i64)")
+                    || inner_val.ends_with(".map(|i| i as isize)")
                     // A throws-propagated call (ending in `?`) in an Optional declared context
                     // is already Option<T> — the throws function returns Result<Option<T>>.
                     || (inner_val.ends_with("?") && matches!(&value.kind, ExprKind::Call(_, _)))
@@ -3780,13 +3968,28 @@ impl Transpiler {
                 // Primitive element types: `int`/`uint`/`float`/`bool` parse as `Type::Named`
                 // (lowercase source syntax), not the bare `Type::Int` etc. builtin variants —
                 // match both forms.
-                Some(ty @ (Type::Int | Type::Uint | Type::Float | Type::Bool)) => {
+                Some(ty @ (Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool
+                    | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)) => {
                     self.var_types.insert(s.vars[0].clone(), ty.clone());
                 }
-                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "bool") => {
+                Some(Type::Named(n)) if matches!(n.as_str(),
+                    "int" | "uint" | "uint8" | "float" | "bool"
+                    | "int8" | "int16" | "int32" | "int64" | "int128"
+                    | "uint16" | "uint32" | "uint64" | "uint128") => {
                     let canonical = match n.as_str() {
                         "int" => Type::Int,
                         "uint" => Type::Uint,
+                        "uint8" => Type::Uint8,
+                        "int8" => Type::Int8,
+                        "int16" => Type::Int16,
+                        "int32" => Type::Int32,
+                        "int64" => Type::Int64,
+                        "int128" => Type::Int128,
+                        "uint16" => Type::Uint16,
+                        "uint32" => Type::Uint32,
+                        "uint64" => Type::Uint64,
+                        "uint128" => Type::Uint128,
                         "float" => Type::Float,
                         _ => Type::Bool,
                     };
@@ -4232,6 +4435,9 @@ impl Transpiler {
                 const PRIM_TYPES: &[&str] = &[
                     "String", "string", "cstring", "tstring",
                     "Int", "int", "Float", "float", "Bool", "bool",
+                    "Uint", "uint", "Uint8", "uint8",
+                    "Int8", "int8", "Int16", "int16", "Int32", "int32", "Int64", "int64", "Int128", "int128",
+                    "Uint16", "uint16", "Uint32", "uint32", "Uint64", "uint64", "Uint128", "uint128",
                 ];
                 let prim_clauses: Vec<_> = typed_clauses.iter()
                     .filter(|c| c.types.iter().any(|t| PRIM_TYPES.contains(&t.as_str())))

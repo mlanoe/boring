@@ -43,6 +43,7 @@ pub struct CheckResult {
 
 pub fn check(program: &Program) -> CheckResult {
     let mut checker = Checker::new();
+    checker.collect_signatures(program);
     checker.check_program(program);
     CheckResult { errors: checker.errors, warnings: checker.warnings }
 }
@@ -53,6 +54,31 @@ pub fn check(program: &Program) -> CheckResult {
 #[derive(Clone)]
 struct Binding {
     kind: BindingKind,
+    /// Declared type, when known (`let`/`var` with an explicit annotation, or a typed
+    /// parameter). Needed for `with` blocks: a name's GPU-residency/actor/guard
+    /// qualifier, and the struct it names for method-mutability lookup, both come
+    /// from here. `None` when the type is inferred — such a binding can never be the
+    /// subject of a `with` block that needs qualifier-specific codegen, only the
+    /// no-op-everywhere-else path.
+    ty: Option<Type>,
+    /// `true` only for a `'gpu'unified`/`'gpu'global` binding initialized directly
+    /// from a bare kernel-field read (`let py'gpu'unified = k.y`). This is the only
+    /// case that is actually GPU-resident and opaque outside a `with` block.
+    ///
+    /// A `'gpu'unified`/`'gpu'global`-qualified variable initialized from anything
+    /// else (an array literal/comprehension, a plain function call, ...) is just an
+    /// ordinary host array up until it's passed into a kernel constructor — see
+    /// `examples/saxpy.br`'s `var [float]'gpu'unified x = [0.0 for ..N]`, freely
+    /// indexed and assigned on the host with no `with` wrapper anywhere. Gating
+    /// opacity on the initializer's shape, rather than on the qualifier alone,
+    /// is what keeps that existing, working pattern legal.
+    resident_from_field: bool,
+    /// For `let k = SomeKernel(...)` — the kernel declaration's name, when the
+    /// initializer is a call to a known `kernel Name:` type. Lets a *later*,
+    /// unannotated `let result = k.y` still infer GPU residency (see
+    /// `Checker::infer_gpu_resident`) without requiring `'gpu'unified`/`'gpu'global`
+    /// to be written out by hand.
+    kernel_type: Option<String>,
 }
 
 struct Checker {
@@ -60,11 +86,31 @@ struct Checker {
     warnings: Vec<CheckWarning>,
     /// Stack of scopes; each scope maps a name to its binding info.
     scopes:   Vec<HashMap<String, Binding>>,
+    /// Names currently open in an enclosing `with` block — used to enforce that a
+    /// `'gpu'unified`/`'gpu'global` value is opaque (no indexing/`.length`/iteration/
+    /// interpolation) outside its own `with` wrapper. See docs/scoped-access-blocks.md.
+    open_with_names: std::collections::HashSet<String>,
+    /// Free function name -> which positional params are declared `var` (out-parameter).
+    /// Signature-only, collected once up front — same lookup `def`/`req` legality
+    /// already relies on elsewhere, reused here for the `with` mutation scan.
+    fn_var_params: HashMap<String, Vec<bool>>,
+    /// (struct name, method name) -> `true` if `def` (mutating), `false` if `req`.
+    method_mutating: HashMap<(String, String), bool>,
+    /// `kernel Name: ...` declarations, by name — collected once up front so a
+    /// `let result = k.y` with no explicit qualifier can still be recognized as
+    /// GPU-resident by checking `k`'s kernel type's own field declarations.
+    kernel_decls: HashMap<String, KernelDecl>,
 }
 
 impl Checker {
     fn new() -> Self {
-        Checker { errors: Vec::new(), warnings: Vec::new(), scopes: vec![HashMap::new()] }
+        Checker {
+            errors: Vec::new(), warnings: Vec::new(), scopes: vec![HashMap::new()],
+            open_with_names: std::collections::HashSet::new(),
+            fn_var_params: HashMap::new(),
+            method_mutating: HashMap::new(),
+            kernel_decls: HashMap::new(),
+        }
     }
 
     // ── Scope helpers ─────────────────────────────────────────────────────────
@@ -74,9 +120,64 @@ impl Checker {
     fn pop_scope(&mut self) { self.scopes.pop(); }
 
     fn define(&mut self, name: &str, kind: BindingKind) {
+        self.define_typed(name, kind, None);
+    }
+
+    fn define_typed(&mut self, name: &str, kind: BindingKind, ty: Option<Type>) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { kind });
+            scope.insert(name.to_string(), Binding { kind, ty, resident_from_field: false, kernel_type: None });
         }
+    }
+
+    fn define_let(&mut self, name: &str, kind: BindingKind, ty: Option<Type>, value: Option<&Expr>) {
+        // `let k = SomeKernel(...)` — track which kernel type `k` is an instance of,
+        // so a later unannotated read of one of its fields can be recognized too.
+        let kernel_type = value.and_then(|v| match &v.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) if self.kernel_decls.contains_key(n.as_str()) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+
+        let (resident_from_field, ty) = if ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false) {
+            // Explicit `'gpu'unified`/`'gpu'global` annotation — resident only if
+            // sourced from a bare kernel-field read, same as before.
+            let resident = matches!(value, Some(e) if is_kernel_field_read(e));
+            (resident, ty)
+        } else if ty.is_none() {
+            // No annotation at all — infer from `value`'s shape: a bare `k.field`
+            // read where `k` is a tracked kernel instance and its declared field is
+            // `'unified`/`'global` (device-side `GpuQual`, on the kernel struct decl).
+            match self.infer_gpu_resident(value) {
+                Some(inferred_ty) => (true, Some(inferred_ty)),
+                None => (false, ty),
+            }
+        } else {
+            (false, ty)
+        };
+
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), Binding { kind, ty, resident_from_field, kernel_type });
+        }
+    }
+
+    /// If `value` is `k.field` where `k` is bound to a known kernel type and that
+    /// kernel's `field` is declared `'unified`/`'global` (`GpuQual`), returns the
+    /// equivalent host-context `Type::Qualified(_, OwnerQual::GpuUnified|GpuGlobal)` —
+    /// the same type an explicit `'gpu'unified`/`'gpu'global` annotation would give.
+    fn infer_gpu_resident(&self, value: Option<&Expr>) -> Option<Type> {
+        let ExprKind::Field(obj, field) = &value?.kind else { return None };
+        let ExprKind::Var(kvar) = &obj.kind else { return None };
+        let kernel_type = self.lookup(kvar)?.kernel_type.as_ref()?;
+        let decl = self.kernel_decls.get(kernel_type)?;
+        let field_decl = decl.fields.iter().find(|f| &f.name == field)?;
+        let qual = match field_decl.qual {
+            GpuQual::Unified => OwnerQual::GpuUnified,
+            GpuQual::Global => OwnerQual::GpuGlobal,
+            _ => return None,
+        };
+        Some(Type::Qualified(Box::new(field_decl.ty.clone()), qual))
     }
 
     fn lookup(&self, name: &str) -> Option<&Binding> {
@@ -84,6 +185,58 @@ impl Checker {
             if let Some(b) = scope.get(name) { return Some(b); }
         }
         None
+    }
+
+    // ── Signature collection (pre-pass) ───────────────────────────────────────
+    // Signature-only lookup for the `with` mutation scan — never opens a callee's
+    // body, matching how `def`/`req` legality is already resolved without reading
+    // the called method's body.
+
+    fn collect_signatures(&mut self, program: &Program) {
+        for item in &program.items { self.collect_item_signatures(item); }
+    }
+
+    fn collect_item_signatures(&mut self, item: &Item) {
+        match item {
+            Item::Fn(f)     => self.collect_fn_signature(f),
+            Item::Struct(s) => self.collect_struct_signature(s),
+            Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
+            Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
+            Item::Stmt(s)   => self.collect_stmt_signatures(s),
+            _ => {}
+        }
+    }
+
+    fn collect_stmt_signatures(&mut self, stmt: &Stmt) {
+        // Local (nested) fn/struct declarations are visible to `with` blocks in the
+        // same or later scopes, so their signatures are worth collecting too.
+        match stmt {
+            Stmt::Fn(f)     => self.collect_fn_signature(f),
+            Stmt::Struct(s) => self.collect_struct_signature(s),
+            Stmt::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
+            Stmt::If(s)     => { for (_, b) in &s.branches { for st in b { self.collect_stmt_signatures(st); } } if let Some(b) = &s.else_body { for st in b { self.collect_stmt_signatures(st); } } }
+            Stmt::While(s)  => { for st in &s.body { self.collect_stmt_signatures(st); } }
+            Stmt::For(s)    => { for st in &s.body { self.collect_stmt_signatures(st); } }
+            Stmt::Loop(s)   => { for st in &s.body { self.collect_stmt_signatures(st); } }
+            Stmt::DoWhile(s) => { for st in &s.body { self.collect_stmt_signatures(st); } }
+            Stmt::Try(s)    => { for st in &s.body { self.collect_stmt_signatures(st); } for c in &s.catch_clauses { for st in &c.body { self.collect_stmt_signatures(st); } } }
+            Stmt::Guard(s)  => { for st in &s.else_body { self.collect_stmt_signatures(st); } }
+            Stmt::Defer(b)  => { for st in b { self.collect_stmt_signatures(st); } }
+            Stmt::With(s)   => { for st in &s.body { self.collect_stmt_signatures(st); } }
+            _ => {}
+        }
+    }
+
+    fn collect_fn_signature(&mut self, f: &FnDecl) {
+        let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
+        self.fn_var_params.insert(f.name.clone(), var_flags);
+        for stmt in &f.body { self.collect_stmt_signatures(stmt); }
+    }
+
+    fn collect_struct_signature(&mut self, s: &StructDecl) {
+        for m in &s.methods {
+            self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
+        }
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
@@ -149,7 +302,7 @@ impl Checker {
         for m in &s.methods { self.check_fn(m); }
         for m in &s.type_methods {
             self.push_scope();
-            for p in &m.params { self.define(&p.name, param_binding(p)); }
+            for p in &m.params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
             for stmt in &m.body { self.check_stmt(stmt); }
             self.pop_scope();
         }
@@ -171,7 +324,7 @@ impl Checker {
             if p.mutable {
                 self.check_qualifier_constraint(&BindingKind::Mut, &p.ty, p.line, p.col);
             }
-            self.define(&p.name, param_binding(p));
+            self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
         for stmt in &f.body { self.check_stmt(stmt); }
         self.pop_scope();
@@ -186,7 +339,7 @@ impl Checker {
                 self.check_expr(&s.value);
                 for b in &s.bindings {
                     if b.name != "_" {
-                        self.define(&b.name, s.binding.clone());
+                        self.define_typed(&b.name, s.binding.clone(), b.ty.clone());
                     }
                 }
             }
@@ -240,13 +393,14 @@ impl Checker {
             Stmt::Mod(m)       => { for i in &m.items { self.check_item(i); } }
             Stmt::Continue(_) | Stmt::Alias(_) | Stmt::Comment(_) => {}
             Stmt::KernelBlock(s) => { for stmt in &s.body { self.check_stmt(stmt); } }
+            Stmt::With(s) => self.check_with_stmt(s),
         }
     }
 
     fn check_let_stmt(&mut self, s: &LetStmt) {
         self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
-        self.define(&s.name, s.binding.clone());
+        self.define_let(&s.name, s.binding.clone(), s.ty.clone(), s.value.as_ref());
     }
 
     fn check_if(&mut self, s: &IfStmt) {
@@ -337,9 +491,12 @@ impl Checker {
             // ── Recurse into sub-expressions ──────────────────────────────
             ExprKind::BinOp(_, l, r) => { self.check_expr(l); self.check_expr(r); }
             ExprKind::UnaryOp(_, e)  => self.check_expr(e),
-            ExprKind::Field(e, _)    => self.check_expr(e),
+            ExprKind::Field(e, _) => self.check_expr(e),
             ExprKind::OptionalField(e, _) => self.check_expr(e),
-            ExprKind::Index(obj, idx) => { self.check_expr(obj); self.check_expr(idx); }
+            ExprKind::Index(obj, idx) => {
+                self.check_expr(obj);
+                self.check_expr(idx);
+            }
             ExprKind::Call(callee, args) => {
                 self.check_expr(callee);
                 for a in args { self.check_expr(&a.value); }
@@ -417,7 +574,7 @@ impl Checker {
             }
             ExprKind::Closure(params, _, body, _, _) => {
                 self.push_scope();
-                for p in params { self.define(&p.name, param_binding(p)); }
+                for p in params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
                 match body {
                     ClosureBody::Expr(e)      => self.check_expr(e),
                     ClosureBody::Block(stmts) => self.check_block_in_current_scope(stmts),
@@ -428,8 +585,14 @@ impl Checker {
                 for a in args { self.check_expr(a); }
             }
 
+            // A bare variable reference is where every host-materializing use of a
+            // GPU-resident name bottoms out — indexing, `.length`, iteration, string
+            // interpolation, an argument in a call — since check_expr always recurses
+            // down to this leaf for each of those. One check here covers all of them.
+            ExprKind::Var(name) => self.check_gpu_opacity(name, expr.line, expr.col),
+
             // Leaves — nothing to recurse into.
-            ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::Float(_)
+            ExprKind::Int(_) | ExprKind::Float(_)
             | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil
             | ExprKind::Void | ExprKind::DotIdent(_) => {}
         }
@@ -463,9 +626,67 @@ impl Checker {
         // Field and index targets are not checked here: mutability of those
         // requires type information not yet available at this pass.
     }
+
+    // ── `with` scoped-access blocks ─────────────────────────────────────────────
+    // See docs/scoped-access-blocks.md. Two things are checked here (both target-
+    // independent, so they fire under `boring run` too, not just `boring build`):
+    //   - nesting a `with` block on the same name inside itself (double-acquire);
+    //   - using a `'gpu'unified`/`'gpu'global` value's host-materializing operations
+    //     (indexing, `.length`, iteration, string interpolation) outside a `with`
+    //     wrapper that opens it.
+    // The two-step read/write access scan itself (`with_block_mutates` in ast::mod)
+    // doesn't produce an error here — nothing about a block's chosen access level is
+    // ever illegal — it's consumed by the transpiler at `with` codegen time to pick
+    // map-for-read vs map-for-read-write / a shared vs exclusive lock.
+
+    fn check_with_stmt(&mut self, s: &WithStmt) {
+        let mut newly_opened = Vec::new();
+        for name in &s.names {
+            if self.open_with_names.contains(name.as_str()) {
+                self.error(
+                    format!("nested `with {name}:` block on the same name is not allowed (double-acquire)"),
+                    s.line, s.col,
+                );
+            } else {
+                self.open_with_names.insert(name.clone());
+                newly_opened.push(name.clone());
+            }
+        }
+        self.check_block(&s.body);
+        for name in &newly_opened { self.open_with_names.remove(name); }
+    }
+
+    /// If `name` is a `'gpu'unified`/`'gpu'global` binding sourced from a bare
+    /// kernel-field read (`resident_from_field` — see `Binding`) and isn't currently
+    /// open in an enclosing `with` block, records a compile error: any use at all
+    /// (indexing, `.length`, iteration, string interpolation, passed as an argument,
+    /// ...) requires a `with` wrapper first. A `'gpu'unified`/`'gpu'global` binding
+    /// that is just a plain array (not sourced from a kernel field) is unrestricted —
+    /// see `examples/saxpy.br`.
+    fn check_gpu_opacity(&mut self, name: &str, line: usize, col: usize) {
+        if self.open_with_names.contains(name) { return; }
+        let Some(binding) = self.lookup(name) else { return };
+        if !binding.resident_from_field { return; }
+        let Some(ty) = &binding.ty else { return };
+        if ty.gpu_resident_qual().is_some() {
+            self.error(
+                format!("`{name}` is GPU-resident (sourced from a kernel field) and cannot be used outside a `with {name}:` block"),
+                line, col,
+            );
+        }
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Does `expr` look like a bare kernel-field read (`k.field`)? Purely syntactic —
+/// the checker doesn't track which names are kernel instances (that's transpiler
+/// state); the shape alone is enough to distinguish "sourced from a kernel field"
+/// from "a plain array literal/expression", which is what `resident_from_field`
+/// needs. See `Binding::resident_from_field`.
+fn is_kernel_field_read(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(_)))
+}
 
 fn param_binding(p: &Param) -> BindingKind {
     if p.rebindable { BindingKind::Var }
@@ -480,5 +701,156 @@ fn bind_in_pattern(pat: &Pattern, line: usize, col: usize, f: &mut impl FnMut(&s
         Pattern::Variant(_, sub)  => { for p in sub { bind_in_pattern(p, line, col, f); } }
         Pattern::Tuple(sub)       => { for p in sub { bind_in_pattern(p, line, col, f); } }
         Pattern::Wildcard | Pattern::None | Pattern::Lit(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod with_stmt_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    #[test]
+    fn with_block_grants_indexing_of_gpu_resident_value() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+with fc:
+    print "{fc[0]}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn indexing_gpu_resident_value_outside_with_is_an_error() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+print "{fc[0]}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("with fc:")), "expected an opacity error, got {errs:?}");
+    }
+
+    #[test]
+    fn length_of_gpu_resident_value_outside_with_is_an_error() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'global tok_emb = k.embeddings
+let int n = tok_emb.length
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("tok_emb")), "expected an opacity error, got {errs:?}");
+    }
+
+    #[test]
+    fn iterating_gpu_resident_value_outside_with_is_an_error() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+for x in fc:
+    print "{x}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("fc")), "expected an opacity error, got {errs:?}");
+    }
+
+    #[test]
+    fn string_interpolation_of_gpu_resident_value_outside_with_is_an_error() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+print "value: {fc}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("fc")), "expected an opacity error, got {errs:?}");
+    }
+
+    #[test]
+    fn nested_with_on_same_name_is_double_acquire_error() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+with fc:
+    with fc:
+        print "{fc[0]}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("double-acquire")), "expected a double-acquire error, got {errs:?}");
+    }
+
+    #[test]
+    fn nested_with_on_different_names_is_fine() {
+        let src = r#"
+let k = Kernel()
+let [float]'gpu'unified fc = k.y
+let [float]'gpu'unified act = k.z
+with fc:
+    with act:
+        print "{fc[0]} {act[0]}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn plain_gpu_qualified_array_literal_is_unrestricted() {
+        // examples/saxpy.br's real pattern: a 'gpu'unified array literal, not sourced
+        // from a kernel field, is just a plain host array — freely indexed/assigned
+        // with no `with` wrapper required anywhere.
+        let src = r#"
+var [float]'gpu'unified x = [0.0, 0.0, 0.0]
+x[0] = 1.0
+print "{x[0]}"
+for v in x:
+    print "{v}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    // ── Inferred GPU residency (no explicit 'gpu'unified/'gpu'global annotation) ──
+
+    const KERNEL_DECL: &str = r#"
+kernel Saxpy:
+    mut [float]'unified y
+    def ():
+        y[0] = 1.0
+"#;
+
+    #[test]
+    fn unannotated_kernel_field_read_infers_residency_and_needs_with() {
+        let src = format!("{KERNEL_DECL}\nlet k = Saxpy()\nlet result = k.y\nprint \"{{result[0]}}\"\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("result")), "expected an inferred opacity error, got {errs:?}");
+    }
+
+    #[test]
+    fn unannotated_kernel_field_read_with_block_is_fine() {
+        let src = format!("{KERNEL_DECL}\nlet k = Saxpy()\nlet result = k.y\nwith result:\n    print \"{{result[0]}}\"\n");
+        let errs = errors_for(&src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn unannotated_read_of_non_kernel_field_is_not_gpu_resident() {
+        // `k.y` only infers residency when `k` is actually bound to a known kernel
+        // type. An ordinary struct field read is unaffected.
+        let src = r#"
+struct Point:
+    float y
+
+let k = Point(1.0)
+let result = k.y
+print "{result}"
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 }

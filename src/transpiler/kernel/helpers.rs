@@ -84,9 +84,18 @@ impl KernelTranspiler {
     /// Translate a Boring type to its Rust-for-Linux equivalent.
     pub(super) fn emit_type(&self, ty: &Type) -> String {
         match ty {
-            Type::Int   => "i64".into(),
-            Type::Uint  => "u64".into(),
+            Type::Int   => "isize".into(),
+            Type::Uint  => "usize".into(),
             Type::Uint8 => "u8".into(),
+            Type::Int8   => "i8".into(),
+            Type::Int16  => "i16".into(),
+            Type::Int32  => "i32".into(),
+            Type::Int64  => "i64".into(),
+            Type::Int128 => "i128".into(),
+            Type::Uint16 => "u16".into(),
+            Type::Uint32 => "u32".into(),
+            Type::Uint64 => "u64".into(),
+            Type::Uint128 => "u128".into(),
             // float is forbidden in kernel code; emit a comment as a fallback
             Type::Float => "/* float forbidden */ f64".into(),
             Type::Str   => "kernel::str::CString".into(),
@@ -95,9 +104,18 @@ impl KernelTranspiler {
             Type::Never => "!".into(),
 
             Type::Named(n) => match n.as_str() {
-                "int"    => "i64".into(),
-                "uint"   => "u64".into(),
+                "int"    | "isize" => "isize".into(),
+                "uint"   | "usize" => "usize".into(),
                 "uint8"  => "u8".into(),
+                "int8"   => "i8".into(),
+                "int16"  => "i16".into(),
+                "int32"  => "i32".into(),
+                "int64"  => "i64".into(),
+                "int128" => "i128".into(),
+                "uint16" => "u16".into(),
+                "uint32" => "u32".into(),
+                "uint64" => "u64".into(),
+                "uint128" => "u128".into(),
                 "float"  => "/* float forbidden */ f64".into(),
                 "bool"   => "bool".into(),
                 "string" | "str" => "kernel::str::CString".into(),

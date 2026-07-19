@@ -118,9 +118,18 @@ impl Parser {
                 let s = s.clone();
                 self.advance();
                 let base = match s.as_str() {
-                    "Int"    => Type::Int,
-                    "Uint"   => Type::Uint,
-                    "Uint8"  => Type::Uint8,
+                    "Int"     => Type::Int,
+                    "Uint"    => Type::Uint,
+                    "Uint8"   => Type::Uint8,
+                    "Int8"    => Type::Int8,
+                    "Int16"   => Type::Int16,
+                    "Int32"   => Type::Int32,
+                    "Int64"   => Type::Int64,
+                    "Int128"  => Type::Int128,
+                    "Uint16"  => Type::Uint16,
+                    "Uint32"  => Type::Uint32,
+                    "Uint64"  => Type::Uint64,
+                    "Uint128" => Type::Uint128,
                     "Float"  => Type::Float,
                     "String" => Type::Str,
                     "Bool"   => Type::Bool,
@@ -311,26 +320,27 @@ impl Parser {
                 "const"   => { self.advance(); OwnerQual::GpuConst }
                 "gpu"    => {
                     self.advance();
-                    // `T'gpu'unified`, `T'gpu'global`, `T'gpu'const` — host-side GPU qualifiers.
+                    // `T'gpu'unified`, `T'gpu'global` — host-side GPU qualifiers.
+                    // `'const` is deliberately excluded: it has no host access (like `'local`),
+                    // so a host-context binding could never be read from or written to.
                     if self.eat(&TokenKind::Tick) {
                         match self.peek().clone() {
                             TokenKind::Ident(ref s) => match s.as_str() {
                                 "unified" => { self.advance(); OwnerQual::GpuUnified }
                                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
-                                "const"   => { self.advance(); OwnerQual::GpuConst }
                                 _ => return Err(ParseError::Generic {
-                                    msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
+                                    msg: "expected 'unified or 'global after 'gpu".into(),
                                     line: self.line(), col: self.col(), len: self.tok_len(),
                                 }),
                             },
                             _ => return Err(ParseError::Generic {
-                                msg: "expected 'unified, 'global, or 'const after 'gpu".into(),
+                                msg: "expected 'unified or 'global after 'gpu".into(),
                                 line: self.line(), col: self.col(), len: self.tok_len(),
                             }),
                         }
                     } else {
                         return Err(ParseError::Generic {
-                            msg: "'gpu must be followed by 'unified, 'global, or 'const".into(),
+                            msg: "'gpu must be followed by 'unified or 'global".into(),
                             line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }

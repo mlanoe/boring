@@ -1038,6 +1038,15 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     let mut visited = std::collections::HashSet::new();
     let mut items = Vec::new();
     let mut search_paths: Vec<PathBuf> = Vec::new();
+    // Mirror `run_file`'s project-root discovery: a file under `test/` or
+    // `examples/` can `use` a module living in the project's `src/` directory
+    // without requiring `BORING_PATH` to be set manually.
+    if let Some(root) = find_project_root(&path) {
+        let src_dir = root.join("src");
+        if src_dir.is_dir() {
+            search_paths.push(src_dir);
+        }
+    }
     if let Ok(env_path) = std::env::var("BORING_PATH") {
         search_paths.extend(std::env::split_paths(&env_path));
     }

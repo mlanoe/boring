@@ -1069,6 +1069,8 @@ def Stmt parse_stmt(mut Parser p) throws:
         return stmt_for(parse_for_stmt(p))
     if parser_check(p, "Guard"):
         return stmt_guard(parse_guard_stmt(p))
+    if parser_check(p, "With"):
+        return stmt_with(parse_with_stmt(p))
     if parser_check(p, "Try"):
         if parser_peek_next_is(p, "Colon"):
             return stmt_try(parse_try_stmt(p))
@@ -1412,6 +1414,25 @@ def ForStmt parse_for_stmt(mut Parser p) throws:
         parser_expect_newline(p)
         parse_block(p)
     make_for_stmt(vars_iterable.0, vars_iterable.1, body, line)
+
+# `with <name> [, <name> ...]:` — scoped access block. Each name must already be
+# bound in scope; qualifier and read/write access level are resolved elsewhere,
+# not by the parser. See docs/scoped-access-blocks.md.
+def WithStmt parse_with_stmt(mut Parser p) throws:
+    let line = parser_line(p)
+    parser_expect(p, "With")
+    var names = [parser_expect_ident(p)]
+    while parser_eat(p, "Comma"):
+        names.push(parser_expect_ident(p))
+    parser_expect(p, "Colon")
+    let body = if not parser_is_newline(p) and not parser_check(p, "Eof"):
+        let stmts = parse_inline_stmts(p)
+        parser_expect_newline_soft(p)
+        stmts
+    else:
+        parser_expect_newline(p)
+        parse_block(p)
+    make_with_stmt(names, body, line)
 
 def MatchStmt parse_match_stmt(mut Parser p) throws:
     let line = parser_line(p)

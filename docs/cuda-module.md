@@ -40,7 +40,10 @@ GPU qualifiers appear in two contexts with different syntax:
 |---|---|---|
 | `'gpu'unified` | unified host + device DRAM | `cudaMallocManaged` |
 | `'gpu'global` | device-only DRAM | device pointer |
-| `'gpu'const` | GPU constant cache | `__constant__` |
+
+`'const` has no host-context form — it has no host access at all (see below), so a
+host-side binding could never be read from or written to. It's only meaningful as a
+kernel-struct field qualifier.
 
 ### Kernel-context qualifiers
 
@@ -247,7 +250,7 @@ kernel Histogram:
 | `init` allocation | `Vec<T>::with_capacity(n)` |
 | `'shared` (block SRAM) | local array (stack or heap) |
 | `'local` (register) | local variable |
-| `'gpu'const` | `let` binding |
+| `'const` (kernel) | `let` binding |
 | kernel launch | sequential loop over all threads |
 | `gpu.thread.x/y/z`, `gpu.block.x/y/z`… | loop variables |
 | `sync` | no-op |

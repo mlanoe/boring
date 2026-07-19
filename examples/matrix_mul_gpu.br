@@ -32,6 +32,13 @@ var k = MatrixMul(host_a, host_b, Dimension(width, width))
 kernel:
     k(block = (16, 16))
 
-for i in 0..10:
-    for j in 0..10:
-        print "C[{i}][{j}] = {k.c[i * width + j]:.4f}"
+# `k.c[...]` alone would read the whole result buffer back from the GPU on every
+# one of these 100 accesses. Binding it through an alias and reading it inside a
+# `with` block materializes it exactly once instead — see
+# docs/scoped-access-blocks.md. The `'gpu'unified` qualifier is inferred here
+# from `k.c` itself being declared `'unified` above; no annotation needed.
+let c = k.c
+with c:
+    for i in 0..10:
+        for j in 0..10:
+            print "C[{i}][{j}] = {c[i * width + j]:.4f}"

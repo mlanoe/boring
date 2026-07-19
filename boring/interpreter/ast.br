@@ -252,6 +252,7 @@ enum Stmt:
     Yield(Expr expr, int line)
     Comment(string text)
     KernelBlock([Stmt] body, int line)
+    With(WithStmt stmt)
 
 struct LetDestructureStmt:
     bool mutable
@@ -357,6 +358,15 @@ struct ForStmt:
 struct GuardStmt:
     GuardCond cond
     [Stmt] else_body
+    int line
+
+# `with <name> [, <name> ...]:` — scoped access block (docs/scoped-access-blocks.md).
+# Deliberately does not carry each name's qualifier or read/write access level —
+# both are resolved elsewhere from each name's already-known binding/qualifier,
+# same as `def`/`req` method-call legality already is.
+struct WithStmt:
+    [string] names
+    [Stmt] body
     int line
 
 struct DeferStmt:
@@ -515,6 +525,15 @@ enum Type:
     Int
     Uint
     Uint8
+    Int8
+    Int16
+    Int32
+    Int64
+    Int128
+    Uint16
+    Uint32
+    Uint64
+    Uint128
     Float
     Str
     Bool

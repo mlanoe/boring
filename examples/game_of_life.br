@@ -32,8 +32,12 @@ kernel Step:
                     if dx == 0 and dy == 0:
                         continue
                     # toroidal wrap-around
-                    let nx = uint((int(col) + dx + int(dim.width))  % int(dim.width))
-                    let ny = uint((int(row) + dy + int(dim.height)) % int(dim.height))
+                    # Kept `int`, not `uint`: array indexing already casts to the
+                    # right width automatically, and mixing int/uint here would make
+                    # `ny * dim.width` an i32*u32 multiply, which WGSL's validator
+                    # rejects (no implicit signedness conversion).
+                    let nx = (int(col) + dx + int(dim.width))  % int(dim.width)
+                    let ny = (int(row) + dy + int(dim.height)) % int(dim.height)
                     n += int(cells_in[ny * dim.width + nx])
             let alive = cells_in[row * dim.width + col]
             # survival: 2–3 neighbours; birth: exactly 3

@@ -161,6 +161,11 @@ impl Parser {
             }
             TokenKind::For => Ok(Stmt::For(self.parse_for_stmt()?)),
             TokenKind::Guard => Ok(Stmt::Guard(self.parse_guard_stmt()?)),
+            // `with <name> [, <name> ...]:` — scoped access block. Only ever reached here,
+            // at top-level statement dispatch; the other `with` (inline `match expr with …`)
+            // is consumed inside `parse_match_stmt` after `match` + subject, never here —
+            // no grammar conflict between the two uses of the keyword.
+            TokenKind::With => Ok(Stmt::With(self.parse_with_stmt()?)),
             TokenKind::Try => {
                 // `try:` block form → TryStmt
                 // `try expr else …` inline form → expression statement
@@ -1065,6 +1070,31 @@ impl Parser {
             self.parse_block()?
         };
         Ok(ForStmt { vars, iterable, body, line, col })
+    }
+
+    /// `with <name> [, <name> ...]:` — scoped access block.
+    /// Each name must already be bound in scope; qualifier and read/write access
+    /// level are resolved later by the checker, not here.
+    pub(crate) fn parse_with_stmt(&mut self) -> Result<WithStmt, ParseError> {
+        let line = self.line();
+        let col = self.col();
+        self.expect(&TokenKind::With)?;
+
+        let mut names = vec![self.expect_ident()?];
+        while self.eat(&TokenKind::Comma) {
+            names.push(self.expect_ident()?);
+        }
+
+        self.expect(&TokenKind::Colon)?;
+        let body = if !self.is_newline() && !self.check(&TokenKind::Eof) {
+            let stmts = self.parse_inline_stmts()?;
+            self.expect_newline_soft();
+            stmts
+        } else {
+            self.expect_newline()?;
+            self.parse_block()?
+        };
+        Ok(WithStmt { names, body, line, col })
     }
 
     pub(crate) fn parse_guard_stmt(&mut self) -> Result<GuardStmt, ParseError> {

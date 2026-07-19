@@ -561,10 +561,28 @@ fn buffer_field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     }).collect()
 }
 
+/// MSL has no native 64/128-bit integer type (Apple GPUs historically lack native 64-bit
+/// int ALU ops) — flag it in a comment rather than silently emitting a type that doesn't
+/// exist in MSL (the previous behavior for `Uint8`, which fell through to `void*`).
+fn msl_unsupported_width(name: &str, fallback: &str) -> String {
+    format!("{} /* ERROR: `{}` is not supported on --target metal (MSL has no 64/128-bit integers) */", fallback, name)
+}
+
 fn msl_type(ty: &Type) -> String {
     match ty {
         Type::Int              => "int64_t".into(),
         Type::Uint             => "uint64_t".into(),
+        // MSL natively supports char/uchar (8-bit), short/ushort (16-bit), int/uint (32-bit).
+        Type::Uint8             => "uchar".into(),
+        Type::Int8               => "char".into(),
+        Type::Int16              => "short".into(),
+        Type::Uint16             => "ushort".into(),
+        Type::Int32              => "int".into(),
+        Type::Uint32             => "uint".into(),
+        Type::Int64               => msl_unsupported_width("int64", "int64_t"),
+        Type::Uint64               => msl_unsupported_width("uint64", "uint64_t"),
+        Type::Int128               => msl_unsupported_width("int128", "int64_t"),
+        Type::Uint128               => msl_unsupported_width("uint128", "uint64_t"),
         Type::Float            => "float".into(),
         Type::Bool             => "bool".into(),
         Type::Str              => "const char*".into(),
@@ -572,12 +590,22 @@ fn msl_type(ty: &Type) -> String {
         Type::Array(inner)     => format!("{}*", msl_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", msl_type(inner), n),
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" | "f32" => "float",
-            "int"   | "i64"         => "int64_t",
-            "uint"  | "u64"         => "uint64_t",
-            "bool"                  => "bool",
-            other                   => return other.to_string(),
-        }.into(),
+            "float" | "f64" | "f32" => "float".to_string(),
+            "int"                   => "int64_t".to_string(),
+            "uint"                  => "uint64_t".to_string(),
+            "uint8"                 => "uchar".to_string(),
+            "int8"                  => "char".to_string(),
+            "int16"                 => "short".to_string(),
+            "uint16"                => "ushort".to_string(),
+            "int32"                 => "int".to_string(),
+            "uint32"                => "uint".to_string(),
+            "int64" | "i64"         => msl_unsupported_width("int64", "int64_t"),
+            "uint64" | "u64"        => msl_unsupported_width("uint64", "uint64_t"),
+            "int128" | "i128"       => msl_unsupported_width("int128", "int64_t"),
+            "uint128" | "u128"      => msl_unsupported_width("uint128", "uint64_t"),
+            "bool"                  => "bool".to_string(),
+            other                   => other.to_string(),
+        },
         Type::Qualified(inner, _) => msl_type(inner),
         Type::Optional(inner)  => msl_type(inner),
         Type::TypeParam(p)     => p.clone(),

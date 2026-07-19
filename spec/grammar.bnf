@@ -418,6 +418,7 @@ stmt            ::= let_stmt
                   | for_stmt
                   | try_stmt
                   | guard_stmt
+                  | with_stmt
                   | wait_stmt
                   | fn_decl
                   | struct_decl    # local struct — invisible outside the enclosing function
@@ -538,6 +539,16 @@ catch_type_list ::= catch_type ("," catch_type)*
 catch_type      ::= IDENT ("." IDENT)?   # type name, optionally dotted for enum variant: Error.Expired
 
 guard_stmt      ::= "guard" guard_cond "else" ":"? (stmt | block)
+
+# Scoped access block — grants extended, multi-statement host access to a value
+# normally touched one operation at a time: `'gpu'unified`/`'gpu'global` residency
+# (map-for-read/write, write-back on close) and `'actor`/`'guard` locks (held across
+# the whole block instead of once per call). Each `name` must already be bound in
+# scope; its qualifier and read/write access level are resolved by the checker, not
+# here. Reuses the `with` keyword already used by inline `match expr with …` — that
+# form is only ever consumed inside match_stmt, never at top-level stmt dispatch,
+# so there is no grammar conflict.
+with_stmt       ::= "with" IDENT ("," IDENT)* ":" block
 guard_cond      ::= cond_clause ("," cond_clause)*   # let-bindings bind in ENCLOSING scope
                   | expr
 
@@ -866,14 +877,25 @@ borrow_qual     ::= "heap" | "stack" | "shared" | "actor" | "guard" | "option" |
 primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "never"
                   # Capitalised aliases (Int, Float, …) are accepted by the parser for
                   # compatibility but normalised to lowercase in the AST.
+                  # `int`/`uint` transpile to Rust `isize`/`usize` (pointer-width).
 
-# Precise numeric type aliases — same runtime semantics as the primitive, but the name is
-# preserved in the AST for the Rust transpiler to emit the exact integer/float width.
-#   Signed integers:   i8  i16  i32  i64  isize  (→ interpreter: int'copy)
-#   Unsigned integers: u8  u16  u32  u64  usize  (→ interpreter: uint'copy)
-#   Floats:            f32  f64                  (→ interpreter: float'copy)
-numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "isize"
-                  | "u8" | "u16" | "u32" | "u64" | "usize"
+# Fixed-width numeric types — each is a distinct runtime type (its own Value variant in
+# the interpreter, e.g. `uint8` → `Value::Uint8(u8)`), not an alias collapsing into the
+# bare `int`/`uint` above. The Rust-style spellings (`i8`, `u32`, …) are accepted as
+# aliases for the corresponding boring name and transpile to the identical Rust type.
+#   Signed:   int8/i8  int16/i16  int32/i32  int64/i64  int128/i128
+#   Unsigned: uint8/u8  uint16/u16  uint32/u32  uint64/u64  uint128/u128
+#   Floats:   f32  f64                  (→ interpreter: float'copy)
+# Mixing two *distinct* fixed-width types directly (`a_uint16 + a_int32`) is a type
+# error requiring an explicit `as` cast — mirrors Rust's own refusal to implicitly
+# coerce between distinct integer types. Each fixed-width type freely mixes with the
+# flexible bare `int`/`uint` kind (e.g. an untyped integer literal).
+# GPU targets: WGSL (`--target wgpu`) only has native 32-bit int/uint — 8/16/64/128-bit
+# fields are a compile error. MSL (`--target metal`) has no native 64/128-bit integer.
+# CUDA (`--target cuda`) supports the full range via <cstdint> (128-bit via the
+# non-standard `__int128` GCC/NVCC extension).
+numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                  | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                   | "f32" | "f64"
 
 type_list       ::= type ("," type)*
