@@ -1280,6 +1280,215 @@ fn with_stmt_mutates(
     }
 }
 
+/// Scans `body` for every occurrence of `Var(name)`, classifying each one via
+/// `classify(fn_name, arg_index)` — called when the occurrence is a bare argument at
+/// position `arg_index` of a call to `fn_name(...)` (this also covers a kernel
+/// constructor call, since `let mut k = Kernel(x, ...)` is just an `ExprKind::Call`
+/// initializer like any other); return `true` from it when that particular position
+/// counts as a "qualifying" use. Recurses into `if`/`while`/`for`/`match`/closures/
+/// etc. nested in `body` (same bounded-scan convention `with_block_mutates` uses),
+/// never into a called function's own body. Returns `(has_any_use,
+/// has_only_qualifying_uses)` — the second is only meaningful when the first is
+/// `true`. See `Checker::scan_fn_gpu_arg_params` (checker/mod.rs) for the caller.
+pub fn scan_var_call_arg_uses(
+    body: &[Stmt],
+    name: &str,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+) -> (bool, bool) {
+    let mut any = false;
+    let mut other = false;
+    for s in body { scan_stmt_var_arg(s, name, classify, &mut any, &mut other); }
+    (any, any && !other)
+}
+
+fn scan_stmt_var_arg(
+    stmt: &Stmt,
+    name: &str,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+    any: &mut bool,
+    other: &mut bool,
+) {
+    // Local macros rather than closures: two sibling closures both capturing
+    // `classify` (a `&mut dyn FnMut`) by move would conflict with each other, since
+    // that reference can't be split. A macro just reborrows it fresh at each
+    // expansion site, which is all a `&mut` parameter needs across sequential calls.
+    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, any, other) }; }
+    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, any, other); } }; }
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { e!(v); } }
+        Stmt::LetDestructure(s) => e!(&s.value),
+        Stmt::Return(r) => { if let Some(v) = &r.value { e!(v); } }
+        Stmt::Throw(t) => { if let Some(v) = &t.value { e!(v); } }
+        Stmt::If(s) => {
+            for (c, body) in &s.branches { e!(c); b!(body); }
+            if let Some(body) = &s.else_body { b!(body); }
+        }
+        Stmt::IfLet(s) => {
+            for c in &s.clauses { scan_cond_clause_var_arg(c, name, classify, any, other); }
+            b!(&s.then_body);
+            for br in &s.elif_branches {
+                for c in &br.clauses { scan_cond_clause_var_arg(c, name, classify, any, other); }
+                b!(&br.body);
+            }
+            if let Some(body) = &s.else_body { b!(body); }
+        }
+        Stmt::Match(s) => scan_match_var_arg(s, name, classify, any, other),
+        Stmt::While(s) => { e!(&s.condition); b!(&s.body); }
+        Stmt::WhileLet(s) => { e!(&s.value); b!(&s.body); }
+        Stmt::DoWhile(s) => { b!(&s.body); e!(&s.condition); }
+        Stmt::Loop(s) => b!(&s.body),
+        Stmt::For(s) => { e!(&s.iterable); b!(&s.body); }
+        Stmt::Guard(s) => {
+            match &s.cond {
+                GuardCond::Expr(ex) => e!(ex),
+                GuardCond::Clauses(cs) => { for c in cs { scan_cond_clause_var_arg(c, name, classify, any, other); } }
+            }
+            b!(&s.else_body);
+        }
+        Stmt::Try(s) => {
+            b!(&s.body);
+            for c in &s.catch_clauses { b!(&c.body); }
+        }
+        Stmt::Defer(body) => b!(body),
+        Stmt::With(s) => b!(&s.body),
+        Stmt::Yield(ex, _) | Stmt::Wait(ex, _) => e!(ex),
+        Stmt::Break(_, v) => { if let Some(ex) = v { e!(ex); } }
+        Stmt::KernelBlock(s) => b!(&s.body),
+        Stmt::Expr(ex) => e!(ex),
+        // New scope / new callable — signature only, never the body.
+        Stmt::Fn(_) | Stmt::Struct(_) | Stmt::Enum(_) | Stmt::Mod(_) | Stmt::Alias(_)
+        | Stmt::Continue(_) | Stmt::Comment(_) => {}
+    }
+}
+
+fn scan_match_var_arg(
+    s: &MatchStmt,
+    name: &str,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+    any: &mut bool,
+    other: &mut bool,
+) {
+    scan_expr_var_arg(&s.subject, name, classify, any, other);
+    for a in &s.arms {
+        if let Some(g) = &a.guard { scan_expr_var_arg(g, name, classify, any, other); }
+        match &a.body {
+            MatchBody::Expr(ex) => scan_expr_var_arg(ex, name, classify, any, other),
+            MatchBody::Block(body) => { for s in body { scan_stmt_var_arg(s, name, classify, any, other); } }
+        }
+    }
+}
+
+fn scan_cond_clause_var_arg(
+    c: &CondClause,
+    name: &str,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+    any: &mut bool,
+    other: &mut bool,
+) {
+    match c {
+        CondClause::Expr(ex) | CondClause::Let(_, ex) | CondClause::LetPat(_, ex) => scan_expr_var_arg(ex, name, classify, any, other),
+    }
+}
+
+fn scan_expr_var_arg(
+    expr: &Expr,
+    name: &str,
+    classify: &mut dyn FnMut(&str, usize) -> bool,
+    any: &mut bool,
+    other: &mut bool,
+) {
+    macro_rules! e { ($ex:expr) => { scan_expr_var_arg($ex, name, classify, any, other) }; }
+    macro_rules! b { ($body:expr) => { for s in $body { scan_stmt_var_arg(s, name, classify, any, other); } }; }
+    match &expr.kind {
+        ExprKind::Var(v) => { if v == name { *any = true; *other = true; } }
+        ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => { e!(lhs); e!(rhs); }
+        ExprKind::Call(callee, args) => {
+            e!(callee);
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                for (i, a) in args.iter().enumerate() {
+                    if matches!(&a.value.kind, ExprKind::Var(v) if v == name) {
+                        *any = true;
+                        if !classify(fn_name, i) { *other = true; }
+                    } else {
+                        e!(&a.value);
+                    }
+                }
+            } else {
+                for a in args { e!(&a.value); }
+            }
+        }
+        ExprKind::MethodCall(recv, _, args) | ExprKind::OptionalMethodCall(recv, _, args) => {
+            e!(recv);
+            for a in args { e!(&a.value); }
+        }
+        ExprKind::GenericCall(callee, _, args) => { e!(callee); for a in args { e!(&a.value); } }
+        ExprKind::Pipe(lhs, _, args) => { e!(lhs); for a in args { e!(&a.value); } }
+        ExprKind::New { ctor, arena } => { e!(ctor); if let Some(a) = arena { e!(a); } }
+        ExprKind::BinOp(_, l, r) => { e!(l); e!(r); }
+        ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e!(ex),
+        // `<name>.length`/`.count` is a size query, not a host materialization -- a
+        // `BoringGpuArg<T>` value can answer it without ever touching the buffer
+        // (`Resident` already carries its length, `Host` can `.len()` its Vec — see
+        // the `BoringGpuArg::len()` helper `wgpu::host::emit_gpu_copy_helpers` emits).
+        // Every kernel-launcher wrapper in practice sizes its dispatch block off the
+        // very array it also passes to the kernel constructor (`k(block = x.length)`),
+        // so treating this as disqualifying would make the exclusive-ctor-arg scan
+        // never actually fire for a realistic function -- count it as a qualifying use
+        // instead of falling through to the generic `Field` recursion below.
+        ExprKind::Field(ex, field) | ExprKind::OptionalField(ex, field)
+            if (field == "length" || field == "count")
+                && matches!(&ex.kind, ExprKind::Var(v) if v == name) =>
+        {
+            *any = true;
+        }
+        ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e!(ex),
+        ExprKind::Index(obj, idx) => { e!(obj); e!(idx); }
+        ExprKind::Else(ex, d) | ExprKind::TryElse(ex, d) => { e!(ex); e!(d); }
+        ExprKind::TryElseBlock(body, els) => { b!(body); b!(els); }
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => { for ex in elems { e!(ex); } }
+        ExprKind::ArrayFill { value, count } => { e!(value); e!(count); }
+        ExprKind::ArrayAlloc { count } => e!(count),
+        ExprKind::ArrayComp { expr: ex, count, .. } => { e!(count); e!(ex); }
+        ExprKind::ArrayCompIter { expr: ex, iter, .. } => { e!(iter); e!(ex); }
+        ExprKind::Dict(pairs) => { for (k, v) in pairs { e!(k); e!(v); } }
+        ExprKind::Range { start, end, .. } => { e!(start); e!(end); }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { e!(s); }
+            if let Some(ex) = end { e!(ex); }
+        }
+        ExprKind::StringInterp(segs) => {
+            for seg in segs {
+                match seg {
+                    StringSegment::Expr(ex) | StringSegment::FormattedExpr(ex, _) => e!(ex),
+                    _ => {}
+                }
+            }
+        }
+        ExprKind::If(s) => {
+            for (c, body) in &s.branches { e!(c); b!(body); }
+            if let Some(body) = &s.else_body { b!(body); }
+        }
+        ExprKind::Match(s) => scan_match_var_arg(s, name, classify, any, other),
+        ExprKind::Block(stmts) | ExprKind::Do(stmts) => b!(stmts),
+        ExprKind::Loop(s) => b!(&s.body),
+        ExprKind::Task(ex) => e!(ex),
+        ExprKind::TaskWithTimeout(dur, ex) => { e!(dur); e!(ex); }
+        ExprKind::JoinAll(exprs) => { for ex in exprs { e!(ex); } }
+        ExprKind::KernelLaunch { kernel, config } => {
+            e!(kernel);
+            if let Some(ex) = &config.block { e!(ex); }
+            if let Some(ex) = &config.grid { e!(ex); }
+        }
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(ex) => e!(ex),
+            ClosureBody::Block(stmts) => b!(stmts),
+        },
+        ExprKind::MacroCall { args, .. } => { for ex in args { e!(ex); } }
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
+    }
+}
+
 fn with_match_mutates(
     s: &MatchStmt,
     name: &str,

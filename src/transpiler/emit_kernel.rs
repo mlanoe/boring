@@ -89,6 +89,106 @@ impl Transpiler {
         true
     }
 
+    /// If `s` declares a name initialized directly from a call to a function whose
+    /// own declared return type is GPU-resident (`self.fn_returns_resident`) — `let
+    /// fc = linear_gpu(...)`, explicit `'gpu'unified`/`'gpu'global` annotation or
+    /// inferred — this is the *interprocedural* counterpart to
+    /// `try_emit_gpu_resident_let` above. Unlike that same-scope alias (no Rust
+    /// binding at all, since the data is just a re-readable kernel field), this call
+    /// already executed with real side effects, so `fc` needs a genuine `let`
+    /// binding — just typed `BoringGpuArg<T>` (via the callee's own return-type
+    /// codegen, see `emit_top.rs`) instead of a plain host array. Registers `fc` in
+    /// `resident_call_vars` so `with fc:` (see `emit_stmt::emit_with`) and further
+    /// chained calls (see `emit_call`) know to treat it residently. Returns `true`
+    /// when handled.
+    ///
+    /// A caller that does *not* opt in — an explicit, ordinary (non-resident) type
+    /// annotation, e.g. `let [float] fc = linear_gpu(...)`, exactly how every call
+    /// site written before `linear_gpu` grew a resident return type still reads —
+    /// is intercepted here too, not left to fall through: the callee's Rust
+    /// signature returns `BoringGpuArg<T>` unconditionally now, regardless of what
+    /// this particular call site wants, so falling through to ordinary `let`
+    /// codegen would bind that enum to a `Vec<T>`-declared binding, a hard type
+    /// mismatch (confirmed against a real `cargo check` — this is not
+    /// hypothetical). Opting a function's return type into residency must stay
+    /// purely additive for every existing, unannotated caller: it materializes,
+    /// once, right here — exactly the eager download this call site already paid
+    /// before the function had a resident return type at all, just now expressed
+    /// as a match instead of a plain field read.
+    pub(crate) fn try_emit_gpu_resident_call_let(&mut self, s: &LetStmt) -> bool {
+        if self.fn_returns_resident.is_empty() {
+            return false;
+        }
+        let Some(val) = &s.value else { return false };
+        let ExprKind::Call(callee, _) = &val.kind else { return false };
+        let ExprKind::Var(fn_name) = &callee.kind else { return false };
+        let Some(ret_ty) = self.fn_returns_resident.get(fn_name.as_str()).cloned() else { return false };
+
+        let has_explicit_qual = match &s.ty {
+            Some(ty) => ty.gpu_resident_qual().is_some(),
+            None => false,
+        };
+        if s.ty.is_some() && !has_explicit_qual {
+            let materialized = self.materialize_resident_call(val, &ret_ty);
+            let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+            self.line(&format!("{kw} {name} = {materialized};", kw = kw, name = s.name));
+            self.var_types.insert(s.name.clone(), s.ty.clone().expect("checked by the outer `if`"));
+            self.known_local_vars.insert(s.name.clone());
+            return true;
+        }
+
+        let call_rust = self.emit_expr(val);
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        self.line(&format!("{} {} = {};", kw, s.name, call_rust));
+        self.resident_call_vars.insert(s.name.clone(), ret_ty);
+        self.known_local_vars.insert(s.name.clone());
+        true
+    }
+
+    /// Emits a materializing match over `call_expr` (a call to a function whose
+    /// return type is `ret_ty`, itself GPU-resident) that downloads a `Resident`
+    /// buffer or passes a `Host` vec straight through — the shared shape behind
+    /// every "caller doesn't opt in" fallback (`try_emit_gpu_resident_call_let`
+    /// above, and the tail-expression/plain-assignment call sites in
+    /// `emit_stmt.rs`/`emit_expr.rs`). Same pattern `emit_with`'s
+    /// `resident_call_vars` branch already uses to unwrap a `BoringGpuArg<T>` back
+    /// to a plain host `Vec<T>`, just built from a fresh call instead of a
+    /// pre-bound variable — no `.clone()` needed on the `Host` arm since we own
+    /// the enum value outright here.
+    pub(crate) fn materialize_resident_call(&self, call_expr: &Expr, ret_ty: &Type) -> String {
+        let call_rust = self.emit_expr(call_expr);
+        let inner_ty = match ret_ty {
+            Type::Qualified(inner, _) => array_inner_type(inner),
+            other => array_inner_type(other),
+        };
+        let host_ty = kernel_host_element_type(&inner_ty);
+        let device_ty = kernel_host_scalar_type(&inner_ty);
+        format!(
+            "match {call_rust} {{ \
+             BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), \
+             BoringGpuArg::Host(v) => v \
+             }}"
+        )
+    }
+
+    /// If `expr` is a bare call to a `fn_returns_resident` function, emits the
+    /// same materializing match `materialize_resident_call` does and returns
+    /// `Some`. For any consumption context that doesn't opt into keeping the
+    /// value resident — a tail expression of a function whose own return type
+    /// isn't itself resident, or a plain (re-)assignment — the callee's Rust
+    /// signature returns `BoringGpuArg<T>` unconditionally now, so skipping this
+    /// check is a real type mismatch, not just a missed optimization (confirmed
+    /// against real `cargo check` failures on whisper-boring's own call sites:
+    /// `Ok(linear_gpu(normed, ...))` as a plain-`[float]`-returning function's
+    /// tail, and `self.cache_ca_k = linear_gpu(...)` as a struct-field
+    /// assignment, both broke this way before this check existed).
+    pub(crate) fn try_materialize_resident_call(&self, expr: &Expr) -> Option<String> {
+        let ExprKind::Call(callee, _) = &expr.kind else { return None };
+        let ExprKind::Var(fn_name) = &callee.kind else { return None };
+        let ret_ty = self.fn_returns_resident.get(fn_name.as_str()).cloned()?;
+        Some(self.materialize_resident_call(expr, &ret_ty))
+    }
+
     /// If `s`'s initializer is `GPU(n)`, registers `s.name` as a GPU-device handle
     /// (`gpu_device_vars`) and emits it as a plain `usize` index. See
     /// `emit_call`'s own `"GPU"` special case (this function only adds the
@@ -131,6 +231,39 @@ impl Transpiler {
         true
     }
 
+    /// Resolves `expr` to a `(source kernel var, source field)` pair when it names a
+    /// resident `'unified`/`'global` kernel buffer that can be handed to another
+    /// kernel constructor directly (`Arc::clone`), bypassing any host round-trip.
+    /// Two shapes recognized, both needing the exact same qualifying check:
+    ///   - `ExprKind::Var(name)` — a same-scope alias registered in
+    ///     `gpu_resident_vars` (`let fc = k1.y`, no Rust binding of its own).
+    ///   - `ExprKind::Field(Var(kvar), field)` — a bare kernel-field read used
+    ///     directly as the argument, with no `let` alias at all
+    ///     (`Kernel2(k1.y, ...)`) — the shape `attention_heads_gpu` uses internally
+    ///     to chain its three kernel stages (`SoftmaxRowsKernel(k_scores.c, ...)`,
+    ///     `MatMulHeadsKernel(k_soft.probs, ...)`): the alias case above only ever
+    ///     fires when boring source happens to bind the field read to a name first,
+    ///     which nothing forces a kernel-internal chain to do.
+    /// Either way `kvar` must be a tracked kernel instance and `field` must be
+    /// declared `'unified`/`'global` on an array on that kernel — otherwise this is
+    /// just an ordinary value (or a scalar/differently-qualified field) that the
+    /// normal argument-emission path should keep handling as before.
+    fn resident_field_alias(&self, expr: &Expr) -> Option<(String, String)> {
+        match &expr.kind {
+            ExprKind::Var(name) => self.gpu_resident_vars.get(name.as_str()).cloned(),
+            ExprKind::Field(obj, field) => {
+                let ExprKind::Var(kvar) = &obj.kind else { return None };
+                let kname = self.kernel_vars.get(kvar.as_str())?;
+                let decl = self.kernel_decls.get(kname)?;
+                let field_decl = decl.fields.iter().find(|f| &f.name == field)?;
+                let is_gpu_array_field = matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
+                    && matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _));
+                is_gpu_array_field.then(|| (kvar.clone(), field.clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn emit_kernel_construction(&mut self, var_name: &str, decl: &KernelDecl, args: &[Arg]) {
         // Dimension-sized kernels (a `Dimension`-typed 'const field -- e.g. `let Dimension
         // dim`, set via `init(Dimension d): ... dim = d`, see examples/game_of_life.br)
@@ -160,6 +293,13 @@ impl Transpiler {
         // into the same caller-visible values instead of the init param names, which
         // don't exist as Rust bindings at this call site.
         let mut param_to_arg: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        // param name -> a ready-made `.length`/`.count` expression (already a full
+        // `usize` count, not a value `.len()` can be appended to) for a param consumed
+        // via the resident-alias fast path below, which has no Rust array/Vec value at
+        // all to call `.len()` on -- only a raw `Arc<wgpu::Buffer>` reachable through
+        // the *source* kernel var. Checked by `substitute_and_emit` before it falls
+        // back to appending `.len()` to whatever `param_to_arg` has for the same name.
+        let mut param_to_len: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
 
         for (i, arg) in args.iter().enumerate() {
             // Each of these three lookups failing means this constructor argument would
@@ -186,15 +326,75 @@ impl Transpiler {
                 );
             };
 
-            let arg_rust = self.emit_expr(&arg.value);
-            param_to_arg.insert(param_name, arg_rust.clone());
             let is_buffer = matches!(field.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
                 && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+
+            // A resident source for this argument — either a same-scope alias
+            // (`let fc = k1.y` — `gpu_resident_vars`, no Rust binding of its own) or a
+            // bare kernel-field read used *inline*, with no `let` at all
+            // (`Kernel2(k1.y, ...)`, e.g. `attention_heads_gpu`'s
+            // `SoftmaxRowsKernel(k_scores.c, ...)`) — see `resident_field_alias`'s doc
+            // for why both need the same check. Either way the source kernel's buffer
+            // is cloned straight across, no upload, no `with` required
+            // (docs/scoped-access-blocks.md's "no new syntax at all" rule). Must be
+            // checked before `self.emit_expr(&arg.value)` below — an alias has no Rust
+            // identifier to emit at all, and an inline field read would otherwise go
+            // through `try_emit_kernel_field_read`'s unconditional download.
+            let resident_alias = if is_buffer {
+                self.resident_field_alias(&arg.value)
+            } else {
+                None
+            };
+            if let Some((src_kvar, src_field)) = resident_alias {
+                self.line(&format!("{var_name}.{field_name}_buf = std::sync::Arc::clone(&{src_kvar}.{src_field}_buf);"));
+                self.line(&format!("{var_name}.rebuild_bind_group();"));
+                // No Rust value exists for `param_name` to record in `param_to_arg` --
+                // record only the one thing a sibling output field's fill expression
+                // might still need from it (its element count), computed straight from
+                // the buffer's byte size divided by this field's own device element
+                // width (the aliased buffer is reused as-is, so the width matches).
+                let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+                param_to_len.insert(param_name, format!(
+                    "({src_kvar}.{src_field}_buf.size() as usize / std::mem::size_of::<{inner}>())"
+                ));
+                continue;
+            }
+
+            let arg_rust = self.emit_expr(&arg.value);
+            param_to_arg.insert(param_name, arg_rust.clone());
             if is_buffer {
                 let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
-                self.line(&format!(
-                    "{var_name}.copy_{field_name}_to_device(&{arg_rust}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
-                ));
+                // If this constructor argument is literally one of the *current*
+                // function's own parameters, and that parameter is typed
+                // `BoringGpuArg<T>` (`current_fn_gpu_arg_param_names` —
+                // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found it
+                // used *only* this way), or a same-function local bound directly to a
+                // `fn_returns_resident` call (`resident_call_vars` —
+                // `try_emit_gpu_resident_call_let`, also a genuine `BoringGpuArg<T>`-typed
+                // Rust binding), branch on the enum instead of always uploading: a
+                // resident argument hands its buffer over directly (an `Arc::clone`, no
+                // data copy), a host argument uploads exactly as before. See
+                // docs/scoped-access-blocks.md's "Kernel Constructor Interaction".
+                let is_gpu_arg_param = matches!(&arg.value.kind, ExprKind::Var(pname)
+                    if self.current_fn_gpu_arg_param_names.contains(pname.as_str())
+                        || self.resident_call_vars.contains_key(pname.as_str()));
+                if is_gpu_arg_param {
+                    self.line(&format!("match &{arg_rust} {{"));
+                    self.line("    BoringGpuArg::Resident(buf, _len) => {");
+                    self.line(&format!("        {var_name}.{field_name}_buf = std::sync::Arc::clone(buf);"));
+                    self.line(&format!("        {var_name}.rebuild_bind_group();"));
+                    self.line("    }");
+                    self.line("    BoringGpuArg::Host(v) => {");
+                    self.line(&format!(
+                        "        {var_name}.copy_{field_name}_to_device(&v.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                    ));
+                    self.line("    }");
+                    self.line("}");
+                } else {
+                    self.line(&format!(
+                        "{var_name}.copy_{field_name}_to_device(&{arg_rust}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"
+                    ));
+                }
             } else {
                 let cast = kernel_host_scalar_type(&field.ty);
                 self.line(&format!("{var_name}.{field_name} = ({arg_rust}) as {cast};"));
@@ -215,8 +415,8 @@ impl Transpiler {
             if param_to_field.values().any(|f| f == &field_name) { continue; }
             let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
             let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
-            let value_rust = self.substitute_and_emit(&value, &param_to_arg);
-            let count_rust = self.substitute_and_emit(&count, &param_to_arg);
+            let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
+            let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
             self.line(&format!(
                 "{var_name}.copy_{field_name}_to_device(&vec![({value_rust}) as {inner}; ({count_rust}) as usize]);"
             ));
@@ -253,15 +453,39 @@ impl Transpiler {
     /// richer falls back to the general emitter (which won't have the substitution
     /// applied, but is a safe default since these expressions are deliberately simple by
     /// convention — see `kernel_output_fill_map`'s doc).
-    fn substitute_and_emit(&self, expr: &Expr, subst: &std::collections::HashMap<&str, String>) -> String {
+    fn substitute_and_emit(
+        &self,
+        expr: &Expr,
+        subst: &std::collections::HashMap<&str, String>,
+        len_subst: &std::collections::HashMap<&str, String>,
+    ) -> String {
         match &expr.kind {
             ExprKind::Var(name) => subst.get(name.as_str()).cloned().unwrap_or_else(|| name.clone()),
             ExprKind::Int(n) => n.to_string(),
             ExprKind::Float(f) => f.to_string(),
             ExprKind::BinOp(op, l, r) => {
-                let l_s = self.substitute_and_emit(l, subst);
-                let r_s = self.substitute_and_emit(r, subst);
+                let l_s = self.substitute_and_emit(l, subst, len_subst);
+                let r_s = self.substitute_and_emit(r, subst, len_subst);
                 format!("({} {} {})", l_s, crate::transpiler::helpers::binop_str(op), r_s)
+            }
+            // `init_param.length`/`.count` (e.g. `y = [0.0 for ..xs.length]`) — substitute
+            // the object first, then `.len()`, same as the general `map_field` convention.
+            // Falling through to `self.emit_expr(expr)` for this shape (the old
+            // behavior) is wrong two ways over: it never applies the substitution (the
+            // init param name isn't a real Rust binding at this call site), and
+            // `emit_expr` itself treats an unknown lowercase name as a module path,
+            // producing `xs::length` — not merely unsubstituted but not even valid
+            // field-access syntax. `len_subst` takes priority when present: a param
+            // consumed via the resident-alias fast path (see
+            // `emit_kernel_construction`) has no Rust value to append `.len()` to at
+            // all, only a pre-computed count expression.
+            ExprKind::Field(obj, field) if field == "length" || field == "count" => {
+                if let ExprKind::Var(name) = &obj.kind {
+                    if let Some(ready) = len_subst.get(name.as_str()) {
+                        return ready.clone();
+                    }
+                }
+                format!("{}.len()", self.substitute_and_emit(obj, subst, len_subst))
             }
             _ => self.emit_expr(expr),
         }
@@ -389,6 +613,102 @@ impl Transpiler {
         Some(format!(
             "{var_name}.copy_{field}_to_host().iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>()"
         ))
+    }
+
+    /// If the function currently being emitted has a GPU-resident return type
+    /// (`current_fn_returns_resident`, set in `emit_top.rs::emit_fn`) and `expr` is a
+    /// bare `k.field` read on a tracked kernel instance whose field is
+    /// `'unified`/`'global`, emits `BoringGpuArg::Resident(Arc::clone(&k.field_buf),
+    /// len)` instead of the unconditional `copy_field_to_host()` download
+    /// `try_emit_kernel_field_read` would otherwise produce. The buffer survives the
+    /// kernel instance's own drop at function exit because the field is already
+    /// `Arc<wgpu::Buffer>` (`wgpu::host::emit_kernel_struct`) — cloning the `Arc` out
+    /// is all this needs; no `Rc<RefCell<_>>`/`Arc<Mutex<_>>` wrapping of the whole
+    /// kernel instance is required (see docs/scoped-access-blocks.md's
+    /// "Implementation Notes" for why that was originally thought necessary).
+    /// Called from `emit_stmt.rs`'s tail-expression handling, in place of the normal
+    /// expression emitter, when this returns `Some`.
+    pub(crate) fn try_emit_gpu_resident_return(&self, expr: &Expr) -> Option<String> {
+        self.current_fn_returns_resident.as_ref()?;
+        let ExprKind::Field(obj, field) = &expr.kind else { return None };
+        let ExprKind::Var(var_name) = &obj.kind else { return None };
+        let kname = self.kernel_vars.get(var_name.as_str())?;
+        let decl = self.kernel_decls.get(kname)?;
+        let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| &f.name == field)?;
+        if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
+            || !matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _))
+        {
+            return None;
+        }
+        // The GPU buffer holds device-native (32-bit) elements regardless of the
+        // host-facing element type -- divide by *that* size to get the element count.
+        let device_ty = kernel_host_scalar_type(&array_inner_type(&field_decl.ty));
+        Some(format!(
+            "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), ({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>())"
+        ))
+    }
+
+    /// One element of a resident-tuple return's tail tuple-literal (see
+    /// `try_emit_gpu_resident_tuple_return`): is `expr` itself already resident —
+    /// either a bare `k.field` read (same construction `try_emit_gpu_resident_return`
+    /// builds for the single-value case), or a bare `Var` already bound to a
+    /// `BoringGpuArg<T>` Rust value (a same-scope `'gpu'unified` alias
+    /// (`gpu_resident_vars`), a local bound to a `fn_returns_resident` call
+    /// (`resident_call_vars`), or the *enclosing* function's own
+    /// transitively-qualifying parameter (`current_fn_gpu_arg_param_names`) forwarded
+    /// straight through)? `None` means "not detectably resident" — the caller falls
+    /// back to wrapping it in `BoringGpuArg::Host(...)`, since the Rust return type at
+    /// this tuple position is `BoringGpuArg<T>` regardless of what this particular
+    /// tail expression happens to produce.
+    fn try_resident_tuple_element(&self, expr: &Expr) -> Option<String> {
+        if let ExprKind::Field(obj, field) = &expr.kind {
+            let ExprKind::Var(var_name) = &obj.kind else { return None };
+            let kname = self.kernel_vars.get(var_name.as_str())?;
+            let decl = self.kernel_decls.get(kname)?;
+            let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| &f.name == field)?;
+            if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
+                || !matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _))
+            {
+                return None;
+            }
+            let device_ty = kernel_host_scalar_type(&array_inner_type(&field_decl.ty));
+            return Some(format!(
+                "BoringGpuArg::Resident(std::sync::Arc::clone(&{var_name}.{field}_buf), ({var_name}.{field}_buf.size() as usize) / std::mem::size_of::<{device_ty}>())"
+            ));
+        }
+        if let ExprKind::Var(name) = &expr.kind {
+            if self.gpu_resident_vars.contains_key(name.as_str())
+                || self.resident_call_vars.contains_key(name.as_str())
+                || self.current_fn_gpu_arg_param_names.contains(name.as_str())
+            {
+                return Some(format!("{name}.clone()"));
+            }
+        }
+        None
+    }
+
+    /// Tuple counterpart of `try_emit_gpu_resident_return`: if the function currently
+    /// being emitted has a resident-tuple return type (`current_fn_returns_resident_tuple`,
+    /// set in `emit_top.rs::emit_fn`) and `expr` is a tuple literal matching that
+    /// arity, emits each element according to its own position's residency —
+    /// `try_resident_tuple_element` (chained, no download) when recognized,
+    /// `BoringGpuArg::Host((expr).clone())` otherwise (a plain host value surfacing at
+    /// a position whose Rust type is `BoringGpuArg<T>` regardless), and the ordinary
+    /// expression emitter for a non-resident position. Called from `emit_stmt.rs`'s
+    /// tail-expression handling, same convention as `try_emit_gpu_resident_return`.
+    pub(crate) fn try_emit_gpu_resident_tuple_return(&self, expr: &Expr) -> Option<String> {
+        let flags = self.current_fn_returns_resident_tuple.as_ref()?;
+        let ExprKind::Tuple(elems) = &expr.kind else { return None };
+        if elems.len() != flags.len() { return None; }
+        let parts: Vec<String> = elems.iter().enumerate().map(|(i, el)| {
+            if flags.get(i).copied().unwrap_or(false) {
+                self.try_resident_tuple_element(el)
+                    .unwrap_or_else(|| format!("BoringGpuArg::Host(({}).clone())", self.emit_expr(el)))
+            } else {
+                self.emit_expr_owned(el)
+            }
+        }).collect();
+        Some(format!("({})", parts.join(", ")))
     }
 }
 

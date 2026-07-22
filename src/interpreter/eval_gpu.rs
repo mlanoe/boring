@@ -15,9 +15,11 @@
 //   4. Wrap the merged kernel object in a `KernelHandle`.
 
 use super::*;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use rayon::prelude::*;
+use crate::ast::{GpuQual, TraitDecl, EnumDecl, FnDecl, Stmt, Type};
 
 // Thread pool with an enlarged stack (64 MB) for the recursive tree-walk interpreter.
 static KERNEL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
@@ -94,7 +96,7 @@ impl PartialEq for ThreadValue {
     }
 }
 
-fn to_thread_value(v: &Value) -> Option<ThreadValue> {
+pub(crate) fn to_thread_value(v: &Value) -> Option<ThreadValue> {
     match v {
         Value::Nil                => Some(ThreadValue::Nil),
         Value::Void               => Some(ThreadValue::Void),
@@ -137,7 +139,7 @@ fn to_thread_value(v: &Value) -> Option<ThreadValue> {
     }
 }
 
-fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
+pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
     match v {
         ThreadValue::Nil              => Value::Nil,
         ThreadValue::Void             => Value::Void,
@@ -209,8 +211,10 @@ pub(crate) struct LaunchDims {
     pub total_threads: usize,
     pub block_x:       usize,
     pub block_y:       usize,
+    pub block_z:       usize,
     pub grid_x:        usize,
     pub grid_y:        usize,
+    pub grid_z:        usize,
 }
 
 /// Run the kernel's anonymous entry point for `dims.total_threads` threads in parallel.
@@ -224,7 +228,7 @@ fn run_kernel_parallel(
     entry:      &crate::ast::FnDecl,
     dims:       LaunchDims,
 ) -> Result<Value, Signal> {
-    let LaunchDims { total_threads, block_x, block_y, grid_x, grid_y } = dims;
+    let LaunchDims { total_threads, block_x, block_y, block_z, grid_x, grid_y, grid_z } = dims;
     // Snapshot the initial field values and the captured env once (before threads).
     let initial_fields: Vec<(String, ThreadValue)> = if let Value::Object(ref obj) = kernel_obj {
         obj.borrow().fields.iter()
@@ -238,128 +242,303 @@ fn run_kernel_parallel(
         .filter(|f| matches!(f.binding, FieldBinding::Mut | FieldBinding::Var))
         .map(|f| f.name.clone())
         .collect();
+    let initial_fields = Arc::new(initial_fields);
+    let mutable_names   = Arc::new(mutable_names);
 
-    let captured_snapshot = snapshot_env(captured);
-    let entry_body        = entry.body.clone();
-    let decl_fields       = decl.fields.clone();
-    let decl_methods      = decl.methods.clone();
-    let traits            = interp.traits.clone();
-    let enums_map         = interp.enums.clone();
-    let aliases           = interp.aliases.clone();
-    let gpu_profile       = interp.gpu_profile.clone();
+    // Arc-wrapped so the `'sync` path's job closures (run on pooled worker
+    // threads that outlive this call) can hold cheap, owned, `'static` clones
+    // instead of borrowing from this stack frame. The fast path below just
+    // derefs through these the same as it would a plain `&T` — no behavior
+    // change there.
+    let captured_snapshot = Arc::new(snapshot_env(captured));
+    let entry_body        = Arc::new(entry.body.clone());
+    let decl_fields       = Arc::new(decl.fields.clone());
+    let decl_methods      = Arc::new(decl.methods.clone());
+    let traits            = Arc::new(interp.traits.clone());
+    let enums_map         = Arc::new(interp.enums.clone());
+    let aliases           = Arc::new(interp.aliases.clone());
+    let gpu_profile       = Arc::new(interp.gpu_profile.clone());
 
-    // Run all threads in parallel with a large-stack pool to accommodate the
-    // recursive tree-walk interpreter.
-    let thread_results: Vec<Result<ThreadResult, String>> = kernel_pool().install(|| {
-        (0..total_threads).into_par_iter().map(|thread_idx| {
-            let threads_per_block = block_x * block_y;
-            let flat_block        = thread_idx / threads_per_block;
-            let flat_thread       = thread_idx % threads_per_block;
-            let block_idx_x       = flat_block % grid_x;
-            let block_idx_y       = flat_block / grid_x;
-            let thread_in_x       = flat_thread % block_x;
-            let thread_in_y       = flat_thread / block_x;
-
-            // Build a fresh interpreter for this thread.
-            let mut ti = Interpreter::new_for_kernel(
-                traits.clone(),
-                enums_map.clone(),
-                aliases.clone(),
-                gpu_profile.clone(),
-            );
-
-            // Reconstruct the captured env as a child of the fresh global.
-            let cap_env = Env::child(Rc::clone(&ti.global));
-            for (name, tv) in &captured_snapshot {
-                let val = from_thread_value(tv.clone(), &cap_env);
-                cap_env.borrow_mut().define(name, val);
-            }
-
-            // Build the thread env.
-            let thread_env = Env::child(Rc::clone(&cap_env));
-
-            // Inject field values (mutable fields are define_mut so the body can write them).
-            for (field_decl, (name, tv)) in decl_fields.iter().zip(initial_fields.iter()) {
-                let val = from_thread_value(tv.clone(), &thread_env);
-                match field_decl.binding {
-                    FieldBinding::Mut | FieldBinding::Var =>
-                        thread_env.borrow_mut().define_mut(name, val),
-                    FieldBinding::Let =>
-                        thread_env.borrow_mut().define(name, val),
-                }
-            }
-
-            // Reconstruct the kernel object as `self`.
-            let self_fields: Vec<(String, Value)> = initial_fields.iter()
-                .map(|(n, tv)| (n.clone(), from_thread_value(tv.clone(), &thread_env)))
-                .collect();
-            let self_obj = Value::Object(Rc::new(RefCell::new(ObjectInner {
-                type_name: decl_fields.first().map(|_| "".to_string()).unwrap_or_default(),
-                fields: self_fields,
-            })));
-            thread_env.borrow_mut().define("self", self_obj);
-
-            // Inject gpu.* builtins.
-            let gpu_thread = make_object("GpuThread".into(), vec![
-                ("x".into(), Value::Int(thread_in_x as i64)),
-                ("y".into(), Value::Int(thread_in_y as i64)),
-                ("z".into(), Value::Int(0)),
-            ]);
-            let gpu_block = make_object("GpuBlock".into(), vec![
-                ("x".into(), Value::Int(block_idx_x as i64)),
-                ("y".into(), Value::Int(block_idx_y as i64)),
-                ("z".into(), Value::Int(0)),
-            ]);
-            let gpu_block_dim = make_object("GpuBlockDim".into(), vec![
-                ("x".into(), Value::Int(block_x as i64)),
-                ("y".into(), Value::Int(block_y as i64)),
-                ("z".into(), Value::Int(1)),
-            ]);
-            let gpu_grid_dim = make_object("GpuGridDim".into(), vec![
-                ("x".into(), Value::Int(grid_x as i64)),
-                ("y".into(), Value::Int(grid_y as i64)),
-                ("z".into(), Value::Int(1)),
-            ]);
-            thread_env.borrow_mut().define("gpu", make_object("Gpu".into(), vec![
-                ("thread".into(),    gpu_thread),
-                ("block".into(),     gpu_block),
-                ("block_dim".into(), gpu_block_dim),
-                ("grid_dim".into(),  gpu_grid_dim),
-            ]));
-
-            // Inject kernel methods.
-            for method in &decl_methods {
-                if !method.name.is_empty() {
-                    let fn_val = Value::Fn { decl: method.clone(), captured: Rc::clone(&thread_env) };
-                    thread_env.borrow_mut().define(&method.name, fn_val);
-                }
-            }
-
-            // Run the entry point.
-            let result = ti.exec_block(&entry_body, Rc::clone(&thread_env));
-            match result {
-                Ok(_) | Err(Signal::Return(_)) => {}
-                Err(Signal::Error(e)) => return Err(e.message),
-                Err(e) => return Err(format!("{:?}", e)),
-            }
-
-            // Collect changed mutable fields.
-            let mut changed = Vec::new();
-            for name in &mutable_names {
-                let initial = initial_fields.iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, tv)| tv.clone())
-                    .unwrap_or(ThreadValue::Nil);
-                if let Some(new_val) = thread_env.borrow().vars.get(name).and_then(to_thread_value) {
-                    if new_val != initial {
-                        changed.push((name.clone(), initial, new_val));
-                    }
-                }
-            }
-            Ok(ThreadResult { fields: changed })
+    // `'sync` fields need real cross-thread visibility within a block (one thread
+    // reading another's write after a barrier) — see `run_one_kernel_thread`'s doc
+    // comment for why that needs a genuinely different execution strategy than the
+    // rest of this function's "run every thread independently, merge afterward" model.
+    let sync_field_specs: Vec<(String, crate::ast::Type, usize)> = decl_fields.iter()
+        .filter_map(|f| match (&f.qual, &f.ty) {
+            (GpuQual::Sync, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
+            _ => None,
         })
-        .collect::<Vec<_>>()
-    }); // kernel_pool().install
+        .collect();
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_one_kernel_thread(
+        traits: &HashMap<String, TraitDecl>,
+        enums_map: &HashMap<String, EnumDecl>,
+        aliases: &HashMap<String, Type>,
+        gpu_profile: &gpu_profile::GpuProfile,
+        captured_snapshot: &[(String, ThreadValue)],
+        entry_body: &[Stmt],
+        decl_fields: &[crate::ast::KernelFieldDecl],
+        decl_methods: &[FnDecl],
+        initial_fields: &[(String, ThreadValue)],
+        mutable_names: &[String],
+        block_x: usize, block_y: usize, block_z: usize,
+        grid_x: usize, grid_y: usize, grid_z: usize,
+        block_idx_x: usize, block_idx_y: usize, block_idx_z: usize,
+        thread_in_x: usize, thread_in_y: usize, thread_in_z: usize,
+        sync_ctx: Option<(&HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>, &Arc<Barrier>)>,
+    ) -> Result<ThreadResult, String> {
+        // Build a fresh interpreter for this thread.
+        let mut ti = Interpreter::new_for_kernel(
+            traits.clone(),
+            enums_map.clone(),
+            aliases.clone(),
+            gpu_profile.clone(),
+        );
+        if let Some((sync_fields, barrier)) = sync_ctx {
+            ti.sync_fields = sync_fields.clone();
+            ti.kernel_barrier = Some(Arc::clone(barrier));
+        }
+
+        // Reconstruct the captured env as a child of the fresh global.
+        let cap_env = Env::child(Rc::clone(&ti.global));
+        for (name, tv) in captured_snapshot {
+            let val = from_thread_value(tv.clone(), &cap_env);
+            cap_env.borrow_mut().define(name, val);
+        }
+
+        // Build the thread env.
+        let thread_env = Env::child(Rc::clone(&cap_env));
+
+        // Inject field values (mutable fields are define_mut so the body can write them).
+        // `'sync` fields are still bound here too (harmless placeholder — reads/writes
+        // to their name are intercepted before ever consulting this binding, see
+        // `Interpreter::sync_fields`'s doc comment), so non-kernel code paths that
+        // check "is this name bound" keep working unchanged.
+        for (field_decl, (name, tv)) in decl_fields.iter().zip(initial_fields.iter()) {
+            let val = from_thread_value(tv.clone(), &thread_env);
+            match field_decl.binding {
+                FieldBinding::Mut | FieldBinding::Var =>
+                    thread_env.borrow_mut().define_mut(name, val),
+                FieldBinding::Let =>
+                    thread_env.borrow_mut().define(name, val),
+            }
+        }
+
+        // Reconstruct the kernel object as `self`.
+        let self_fields: Vec<(String, Value)> = initial_fields.iter()
+            .map(|(n, tv)| (n.clone(), from_thread_value(tv.clone(), &thread_env)))
+            .collect();
+        let self_obj = Value::Object(Rc::new(RefCell::new(ObjectInner {
+            type_name: decl_fields.first().map(|_| "".to_string()).unwrap_or_default(),
+            fields: self_fields,
+        })));
+        thread_env.borrow_mut().define("self", self_obj);
+
+        // Inject gpu.* builtins.
+        let gpu_thread = make_object("GpuThread".into(), vec![
+            ("x".into(), Value::Int(thread_in_x as i64)),
+            ("y".into(), Value::Int(thread_in_y as i64)),
+            ("z".into(), Value::Int(thread_in_z as i64)),
+        ]);
+        let gpu_block = make_object("GpuBlock".into(), vec![
+            ("x".into(), Value::Int(block_idx_x as i64)),
+            ("y".into(), Value::Int(block_idx_y as i64)),
+            ("z".into(), Value::Int(block_idx_z as i64)),
+        ]);
+        let gpu_block_dim = make_object("GpuBlockDim".into(), vec![
+            ("x".into(), Value::Int(block_x as i64)),
+            ("y".into(), Value::Int(block_y as i64)),
+            ("z".into(), Value::Int(block_z as i64)),
+        ]);
+        let gpu_grid_dim = make_object("GpuGridDim".into(), vec![
+            ("x".into(), Value::Int(grid_x as i64)),
+            ("y".into(), Value::Int(grid_y as i64)),
+            ("z".into(), Value::Int(grid_z as i64)),
+        ]);
+        thread_env.borrow_mut().define("gpu", make_object("Gpu".into(), vec![
+            ("thread".into(),    gpu_thread),
+            ("block".into(),     gpu_block),
+            ("block_dim".into(), gpu_block_dim),
+            ("grid_dim".into(),  gpu_grid_dim),
+        ]));
+
+        // Inject kernel methods.
+        for method in decl_methods {
+            if !method.name.is_empty() {
+                let fn_val = Value::Fn { decl: method.clone(), captured: Rc::clone(&thread_env) };
+                thread_env.borrow_mut().define(&method.name, fn_val);
+            }
+        }
+
+        // Run the entry point.
+        let result = ti.exec_block(entry_body, Rc::clone(&thread_env));
+        match result {
+            Ok(_) | Err(Signal::Return(_)) => {}
+            Err(Signal::Error(e)) => return Err(e.message),
+            Err(e) => return Err(format!("{:?}", e)),
+        }
+
+        // Collect changed mutable fields (never includes `'sync` fields — those
+        // aren't in `mutable_names`'s source list in the caller for kernels with
+        // sync_ctx... actually they are FieldBinding::Mut too, so this DOES walk
+        // them, but their `thread_env` binding was never updated by the body (all
+        // real reads/writes went through `sync_ctx` instead), so it never differs
+        // from its initial snapshot and never shows up as "changed" here — matching
+        // `'sync` fields never escaping the kernel body, same as real hardware.
+        let mut changed = Vec::new();
+        for name in mutable_names {
+            let initial = initial_fields.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, tv)| tv.clone())
+                .unwrap_or(ThreadValue::Nil);
+            if let Some(new_val) = thread_env.borrow().vars.get(name).and_then(to_thread_value) {
+                if new_val != initial {
+                    changed.push((name.clone(), initial, new_val));
+                }
+            }
+        }
+        Ok(ThreadResult { fields: changed })
+    }
+
+    let thread_results: Vec<Result<ThreadResult, String>> = if sync_field_specs.is_empty() {
+        // Fast path — no `'sync` fields, every thread is independent. Unchanged
+        // from before except block/thread z-indices are now real (previously
+        // hardcoded to 0/1); existing kernels never dispatch with block_z/grid_z
+        // > 1, so block_idx_z/thread_in_z are still always 0 for them — identical
+        // behavior, this only newly matters for kernels that use grid.z/block.z.
+        kernel_pool().install(|| {
+            (0..total_threads).into_par_iter().map(|thread_idx| {
+                let threads_per_block = block_x * block_y * block_z;
+                let blocks_per_layer   = grid_x * grid_y;
+                let flat_block         = thread_idx / threads_per_block;
+                let flat_thread        = thread_idx % threads_per_block;
+                let block_idx_x        = flat_block % grid_x;
+                let block_idx_y        = (flat_block / grid_x) % grid_y;
+                let block_idx_z        = flat_block / blocks_per_layer;
+                let thread_in_x        = flat_thread % block_x;
+                let thread_in_y        = (flat_thread / block_x) % block_y;
+                let thread_in_z        = flat_thread / (block_x * block_y);
+
+                run_one_kernel_thread(
+                    &traits, &enums_map, &aliases, &gpu_profile,
+                    &captured_snapshot, &entry_body, &decl_fields, &decl_methods,
+                    &initial_fields, &mutable_names,
+                    block_x, block_y, block_z, grid_x, grid_y, grid_z,
+                    block_idx_x, block_idx_y, block_idx_z,
+                    thread_in_x, thread_in_y, thread_in_z,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>()
+        })
+    } else {
+        // `'sync` fields are block-scoped shared memory on real hardware: every
+        // thread in the same block must observe writes another thread in that
+        // block made before the last barrier. That's incompatible with the fast
+        // path's model (every thread runs independently to completion, merged
+        // afterward) — no thread would ever see another's write. Rayon's
+        // work-stealing pool is also unsafe to block threads-within-a-block on a
+        // real `Barrier` over: the pool has a fixed worker count, and if a block
+        // has more threads than there are free workers, the workers that did get
+        // scheduled can deadlock waiting at the barrier for sibling threads that
+        // the pool has no free worker left to even start.
+        //
+        // So: parallelize across BLOCKS with rayon (blocks are always
+        // independent, real hardware never synchronizes across them either), and
+        // within each block spawn genuine OS threads via `std::thread::scope` —
+        // sized exactly to that block's thread count, so every one of them is
+        // actually running concurrently and a shared `Barrier` can't deadlock.
+        // Real OS threads also sidestep needing to rearchitect this tree-walking
+        // interpreter into a suspend/resume (coroutine) model to support a
+        // `sync` statement arbitrarily deep inside nested control flow (e.g.
+        // inside a `while` loop, as gpu-module.md's manual-mode example does) —
+        // blocking a real thread on `Barrier::wait()` just naturally pauses its
+        // Rust call stack wherever it happens to be.
+        //
+        // A prior version of this path tried a persistent, checked-out/in
+        // worker-thread pool (parked on a channel between jobs) specifically to
+        // avoid the spawn/destroy cost below. Measured, not assumed: it was
+        // SLOWER in every variant tried (~65s and ~52s on a test file this
+        // version runs in ~32s) — the channel round-trip to wake a parked
+        // worker and collect its result apparently costs more than the thread
+        // spawn it was meant to save, at this workload's scale (~100 dispatches
+        // of up to a few hundred threads each). Spawn-and-destroy per block, as
+        // below, measured faster — don't reintroduce a pool here without a new
+        // measurement showing it actually wins.
+        let threads_per_block = block_x * block_y * block_z;
+        let n_blocks = grid_x * grid_y * grid_z;
+        let blocks_per_layer = grid_x * grid_y;
+
+        // Plain `&T` references (Copy) to the shared, per-dispatch-constant data —
+        // so the innermost `move` closure (spawned once per thread, many times per
+        // block, many blocks) copies a reference each time instead of trying to
+        // move the same owned `HashMap`/`Vec` out of its enclosing scope repeatedly.
+        let traits_r            = traits.as_ref();
+        let enums_map_r         = enums_map.as_ref();
+        let aliases_r           = aliases.as_ref();
+        let gpu_profile_r       = gpu_profile.as_ref();
+        let captured_snapshot_r = captured_snapshot.as_ref();
+        let entry_body_r        = entry_body.as_ref();
+        let decl_fields_r       = decl_fields.as_ref();
+        let decl_methods_r      = decl_methods.as_ref();
+        let initial_fields_r    = initial_fields.as_ref();
+        let mutable_names_r     = mutable_names.as_ref();
+
+        kernel_pool().install(|| {
+            (0..n_blocks).into_par_iter().map(|block_idx| {
+                let block_idx_x = block_idx % grid_x;
+                let block_idx_y = (block_idx / grid_x) % grid_y;
+                let block_idx_z = block_idx / blocks_per_layer;
+
+                let sync_fields: HashMap<String, Arc<Mutex<Vec<ThreadValue>>>> = sync_field_specs.iter()
+                    .map(|(name, elem_ty, n)| {
+                        let zero = to_thread_value(&zero_value(elem_ty)).unwrap_or(ThreadValue::Nil);
+                        (name.clone(), Arc::new(Mutex::new(vec![zero; *n])))
+                    })
+                    .collect();
+                let barrier = Arc::new(Barrier::new(threads_per_block.max(1)));
+
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = (0..threads_per_block).map(|flat_thread| {
+                        let thread_in_x = flat_thread % block_x;
+                        let thread_in_y = (flat_thread / block_x) % block_y;
+                        let thread_in_z = flat_thread / (block_x * block_y);
+                        let sync_fields = &sync_fields;
+                        let barrier = &barrier;
+                        // Enlarged (but not `kernel_pool()`-sized) stack — this
+                        // tree-walking interpreter's recursion can blow the
+                        // OS-default stack size (see that pool's own doc
+                        // comment), and a stack overflow deep inside a thread
+                        // that's mid-recursion while holding a `'sync` field's
+                        // Mutex (or waiting at the Barrier) hangs every other
+                        // thread in the block rather than failing loudly. 8 MB
+                        // (not 64 MB) — verified against the full test suite
+                        // (486+ interpreter tests, including real nested-loop
+                        // kernel bodies) with no overflow; smaller reservations
+                        // measurably speed up repeated spawn/destroy cycles.
+                        std::thread::Builder::new()
+                            .stack_size(64 * 1024 * 1024)
+                            .spawn_scoped(scope, move || {
+                                run_one_kernel_thread(
+                                    traits_r, enums_map_r, aliases_r, gpu_profile_r,
+                                    captured_snapshot_r, entry_body_r, decl_fields_r, decl_methods_r,
+                                    initial_fields_r, mutable_names_r,
+                                    block_x, block_y, block_z, grid_x, grid_y, grid_z,
+                                    block_idx_x, block_idx_y, block_idx_z,
+                                    thread_in_x, thread_in_y, thread_in_z,
+                                    Some((sync_fields, barrier)),
+                                )
+                            })
+                            .expect("failed to spawn kernel simulation thread")
+                    }).collect();
+                    handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("kernel thread panicked".to_string()))).collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .collect::<Vec<_>>()
+        })
+    }; // thread_results
 
     // Check for any thread errors.
     let mut all_results = Vec::with_capacity(total_threads);
@@ -372,7 +551,7 @@ fn run_kernel_parallel(
 
     // Merge results back into kernel_obj using element-wise merge for arrays.
     if let Value::Object(ref obj) = kernel_obj {
-        for name in &mutable_names {
+        for name in mutable_names.iter() {
             let base_tv = initial_fields.iter()
                 .find(|(n, _)| n == name)
                 .map(|(_, tv)| tv.clone())
@@ -475,47 +654,49 @@ impl Interpreter {
             _ => return Ok(Value::KernelHandle { result: Box::new(kernel_val) }),
         };
 
-        let (block_x, block_y) = if let Some(block_expr) = &config.block {
+        let (block_x, block_y, block_z) = if let Some(block_expr) = &config.block {
             match self.eval_expr(block_expr, Rc::clone(&env))? {
-                Value::Int(n) => (n.max(1) as usize, 1),
+                Value::Int(n) => (n.max(1) as usize, 1, 1),
                 Value::Tuple(t) => {
                     let x = match t.first() { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
                     let y = match t.get(1)  { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
-                    (x, y)
+                    let z = match t.get(2)  { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
+                    (x, y, z)
                 }
-                _ => (1, 1),
+                _ => (1, 1, 1),
             }
         } else {
-            (1, 1)
+            (1, 1, 1)
         };
 
-        let (grid_x, grid_y) = if let Some(grid_expr) = &config.grid {
+        let (grid_x, grid_y, grid_z) = if let Some(grid_expr) = &config.grid {
             match self.eval_expr(grid_expr, Rc::clone(&env))? {
-                Value::Int(n) => (n.max(1) as usize, 1),
+                Value::Int(n) => (n.max(1) as usize, 1, 1),
                 Value::Tuple(t) => {
                     let x = match t.first() { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
                     let y = match t.get(1)  { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
-                    (x, y)
+                    let z = match t.get(2)  { Some(Value::Int(n)) => (*n).max(1) as usize, _ => 1 };
+                    (x, y, z)
                 }
-                _ => (1, 1),
+                _ => (1, 1, 1),
             }
         } else {
             let max_len = fields.iter()
                 .filter_map(|(_, v)| if let Value::Array(a) = v { Some(a.len()) } else { None })
                 .max()
                 .unwrap_or(0);
-            let inferred_x = if max_len > 0 { max_len.div_ceil(block_x * block_y) } else { 1 };
-            (inferred_x, 1)
+            let inferred_x = if max_len > 0 { max_len.div_ceil(block_x * block_y * block_z) } else { 1 };
+            (inferred_x, 1, 1)
         };
 
-        let total_threads = block_x * block_y * grid_x * grid_y;
+        let total_threads = block_x * block_y * block_z * grid_x * grid_y * grid_z;
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
                 self, &decl, &captured, kernel_obj, entry,
-                LaunchDims { total_threads, block_x, block_y, grid_x, grid_y },
+                LaunchDims { total_threads, block_x, block_y, block_z, grid_x, grid_y, grid_z },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
         } else {
@@ -545,9 +726,9 @@ impl Interpreter {
             _ => return Ok(Value::KernelHandle { result: Box::new(kernel_val) }),
         };
 
-        let (block_x, block_y) = match block_val {
-            Value::Int(n)   => (n.max(1) as usize, 1),
-            Value::Uint(n)  => (n.max(1) as usize, 1),
+        let (block_x, block_y, block_z) = match block_val {
+            Value::Int(n)   => (n.max(1) as usize, 1, 1),
+            Value::Uint(n)  => (n.max(1) as usize, 1, 1),
             Value::Tuple(ref t) => {
                 let x = match t.first() {
                     Some(Value::Int(n))  => (*n).max(1) as usize,
@@ -559,9 +740,14 @@ impl Interpreter {
                     Some(Value::Uint(n)) => (*n).max(1) as usize,
                     _ => 1,
                 };
-                (x, y)
+                let z = match t.get(2) {
+                    Some(Value::Int(n))  => (*n).max(1) as usize,
+                    Some(Value::Uint(n)) => (*n).max(1) as usize,
+                    _ => 1,
+                };
+                (x, y, z)
             }
-            _ => (1, 1),
+            _ => (1, 1, 1),
         };
 
         let max_len = fields.iter()
@@ -570,7 +756,7 @@ impl Interpreter {
             .unwrap_or(0);
 
         let (grid_x, grid_y) = if max_len > 0 {
-            let bxy = block_x * block_y;
+            let bxy = block_x * block_y * block_z;
             let dim_w = fields.iter().find(|(n, _)| n == "dim")
                 .and_then(|(_, v)| if let Value::Object(o) = v {
                     o.borrow().fields.iter().find(|(k, _)| k == "width")
@@ -589,15 +775,16 @@ impl Interpreter {
         } else {
             (1, 1)
         };
+        let grid_z = 1;
 
-        let total_threads = block_x * block_y * grid_x * grid_y;
+        let total_threads = block_x * block_y * block_z * grid_x * grid_y * grid_z;
 
         let entry = decl.methods.iter().find(|m| m.name.is_empty() && m.params.is_empty());
         if let Some(entry) = entry {
             let kernel_obj = make_object(type_name, fields);
             let kernel_obj = run_kernel_parallel(
                 self, &decl, &captured, kernel_obj, entry,
-                LaunchDims { total_threads, block_x, block_y, grid_x, grid_y },
+                LaunchDims { total_threads, block_x, block_y, block_z, grid_x, grid_y, grid_z },
             )?;
             Ok(Value::KernelHandle { result: Box::new(kernel_obj) })
         } else {
@@ -666,6 +853,20 @@ impl Interpreter {
             }
         }
 
+        // Fixed-size array fields (`[T, N]'sync` / `[T, N]'local`) don't need an
+        // init() assignment — real GPU targets declare them unconditionally
+        // (WGSL `var<workgroup>`/CUDA `__shared__` are zero-initialized by the
+        // hardware) — see gpu-module.md's "no init() assignment needed". Mirror
+        // that here instead of leaving the field `Nil`, which would hard-error
+        // on the first `tile[i] = ...` inside the kernel body.
+        for (field_decl, (_, val)) in decl.fields.iter().zip(fields.iter_mut()) {
+            if matches!(val, Value::Nil) {
+                if let crate::ast::Type::ArrayN(inner, n) = &field_decl.ty {
+                    *val = Value::Array(vec![zero_value(inner); *n].into());
+                }
+            }
+        }
+
         Ok(make_object(decl.name.clone(), fields))
     }
 
@@ -710,6 +911,29 @@ impl Interpreter {
             }
         }
         Ok(())
+    }
+}
+
+/// Zero value for a kernel field's scalar element type — used to default
+/// `[T, N]'sync`/`[T, N]'local` fields the kernel's `init()` never assigns
+/// (see `instantiate_kernel_struct`).
+fn zero_value(ty: &crate::ast::Type) -> Value {
+    use crate::ast::Type;
+    match ty {
+        Type::Float => Value::Float(0.0),
+        Type::Bool => Value::Bool(false),
+        Type::Uint => Value::Uint(0),
+        Type::Uint8 => Value::Uint8(0),
+        Type::Uint16 => Value::Uint16(0),
+        Type::Uint32 => Value::Uint32(0),
+        Type::Uint64 => Value::Uint64(0),
+        Type::Uint128 => Value::Uint128(0),
+        Type::Int8 => Value::Int8(0),
+        Type::Int16 => Value::Int16(0),
+        Type::Int32 => Value::Int32(0),
+        Type::Int64 => Value::Int64(0),
+        Type::Int128 => Value::Int128(0),
+        _ => Value::Int(0),
     }
 }
 

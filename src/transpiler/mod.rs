@@ -418,6 +418,14 @@ struct Transpiler {
     /// All local variables known to hold `Arc<str>` (string type), including params.
     /// Used for string concatenation detection: `x + y` where both are strings.
     pub(crate) string_vars: std::collections::HashSet<String>,
+    /// String variables/params (scoped to the current function/method body) that get
+    /// indexed with a non-constant `name[idx]` somewhere in that body — see
+    /// `collect_str_index_targets`. For names in this set that are also `let`-bound or
+    /// non-`var` parameters (so the checker guarantees they're never reassigned), a
+    /// `__strchars_<name>: Vec<char>` shadow is materialized once at the binding site,
+    /// and single-index access reads from it (O(1)) instead of `.chars().nth(idx)`
+    /// (O(idx), turning any sequential scan into O(n^2)).
+    pub(crate) str_index_cache_vars: std::collections::HashSet<String>,
     /// Type parameters already declared at the `impl<...>` level (set by emit_ext).
     /// Methods inside a generic impl must NOT re-declare these params on their own `fn<...>`.
     pub(crate) impl_type_params: Vec<String>,
@@ -683,6 +691,64 @@ struct Transpiler {
     /// (see `emit_stmt::emit_with`). The checker enforces this is the only legal use
     /// (`Binding::resident_from_field`). GPU targets only, same gate as `kernel_vars`.
     pub(crate) gpu_resident_vars: std::collections::HashMap<String, (String, String)>,
+    /// Free function name -> its declared return type, for functions whose return
+    /// type is `'gpu'unified`/`'gpu'global`-qualified — mirrors the checker's own
+    /// `fn_returns_resident` (checker/mod.rs). Populated once up front (`pre_scan`).
+    /// Drives: (1) `emit_top.rs`'s return-type emission (`BoringGpuArg<T>` instead of
+    /// `Vec<T>`), (2) `emit_kernel::try_emit_gpu_resident_call_let` recognizing
+    /// `let fc = some_fn(...)` as an interprocedural resident binding. See
+    /// docs/scoped-access-blocks.md's interprocedural residency case.
+    pub(crate) fn_returns_resident: std::collections::HashMap<String, Type>,
+    /// Free function name -> per-position flags: `true` when that parameter is used
+    /// *exclusively*, everywhere in the function's body, as a bare argument to a
+    /// kernel constructor at a `'unified`/`'global` field position (mirrors the
+    /// checker's own `fn_gpu_arg_params`, computed independently here from the same
+    /// bounded scan, `ast::scan_var_call_arg_uses`). Such a parameter is emitted
+    /// `BoringGpuArg<T>` instead of a plain host array (`emit_top.rs`), and the
+    /// kernel-construction codegen that consumes it branches on the enum instead of
+    /// always uploading (`emit_kernel::emit_kernel_construction`).
+    pub(crate) fn_gpu_arg_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Free function name -> per-position flags, for a function whose return type is
+    /// a `Type::Tuple` with at least one `'gpu'unified`/`'gpu'global`-qualified
+    /// element (mirrors the checker's own `fn_returns_resident_tuple`). The tuple
+    /// analogue of `fn_returns_resident`: `mha_step_gpu`-style `([float]'gpu'unified,
+    /// [float], [float])` returns, chaining the tail tuple literal's resident
+    /// elements instead of eagerly downloading them. See
+    /// `emit_kernel::try_emit_gpu_resident_tuple_return`.
+    pub(crate) fn_returns_resident_tuple: std::collections::HashMap<String, Vec<bool>>,
+    /// Local variable name -> its declared/inferred resident `Type`, for a `let`/
+    /// `var` bound directly to a call to a `fn_returns_resident` function (`let fc =
+    /// linear_gpu(...)`) — the *interprocedural* counterpart to `gpu_resident_vars`.
+    /// Unlike that map (a pure compile-time alias with no Rust binding, since the
+    /// data is just a re-readable kernel field), this call already executed with
+    /// real side effects, so `fc` gets a real `let` binding, just typed
+    /// `BoringGpuArg<T>` — see `emit_kernel::try_emit_gpu_resident_call_let` and
+    /// `emit_stmt::emit_with`'s matching materialization branch.
+    pub(crate) resident_call_vars: std::collections::HashMap<String, Type>,
+    /// Scoped to the function currently being emitted (saved/restored around the
+    /// body in `emit_top.rs::emit_fn`, same convention as `fn_current_params` etc.):
+    /// `Some(return type)` when this function's declared return is GPU-resident, so
+    /// the tail-expression emitter can branch to `BoringGpuArg::Resident(...)`
+    /// instead of the unconditional `copy_{field}_to_host()` download.
+    pub(crate) current_fn_returns_resident: Option<Type>,
+    /// Scoped to the function currently being emitted, same convention as
+    /// `current_fn_returns_resident`: `Some(per-position flags)` copied from
+    /// `fn_returns_resident_tuple` when this function's declared return is a
+    /// resident tuple, so the tail-expression emitter can recognize a tuple-literal
+    /// tail and chain its resident positions instead of materializing them.
+    pub(crate) current_fn_returns_resident_tuple: Option<Vec<bool>>,
+    /// Scoped to the function currently being emitted, same convention as
+    /// `current_fn_returns_resident`: per-position flags copied from
+    /// `fn_gpu_arg_params` for whichever function is being emitted right now, so
+    /// `emit_kernel_construction`'s buffer-argument branch knows which of *this*
+    /// function's own parameters to treat as `BoringGpuArg<T>`.
+    pub(crate) current_fn_gpu_arg_params: Vec<bool>,
+    /// Same information as `current_fn_gpu_arg_params`, but by parameter *name*
+    /// rather than position — the convenient form for consumption sites that only
+    /// have a bare `Var(name)` in hand (`emit_kernel_construction`'s buffer-argument
+    /// branch, `emit_call`'s argument-wrapping), which don't have the enclosing
+    /// `FnDecl`'s param list available to translate a position back to a name.
+    pub(crate) current_fn_gpu_arg_param_names: std::collections::HashSet<String>,
     /// Local variable names bound to a `GPU(n)` device handle (`let g = GPU(0)`), or a
     /// `for` loop variable iterating `GPU.all()` — tracked so a later `g.name()`/
     /// `.totalMem()`/etc. method call can be rewritten to the introspection helpers
@@ -801,6 +867,7 @@ impl Transpiler {
             user_conv_targets: std::collections::HashSet::new(),
             string_arc_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
+            str_index_cache_vars: std::collections::HashSet::new(),
             impl_type_params: Vec::new(),
             fn_return_ty: None,
             fn_current_params: std::collections::HashMap::new(),
@@ -893,6 +960,14 @@ impl Transpiler {
             kernel_decls,
             kernel_vars: std::collections::HashMap::new(),
             gpu_resident_vars: std::collections::HashMap::new(),
+            fn_returns_resident: std::collections::HashMap::new(),
+            fn_gpu_arg_params: std::collections::HashMap::new(),
+            fn_returns_resident_tuple: std::collections::HashMap::new(),
+            resident_call_vars: std::collections::HashMap::new(),
+            current_fn_returns_resident: None,
+            current_fn_returns_resident_tuple: None,
+            current_fn_gpu_arg_params: Vec::new(),
+            current_fn_gpu_arg_param_names: std::collections::HashSet::new(),
             gpu_device_vars: std::collections::HashSet::new(),
             user_top_level_names: std::collections::HashSet::new(),
             is_gpu_target,
@@ -1120,6 +1195,11 @@ impl Transpiler {
     // ── Program ───────────────────────────────────────────────────────────────
 
     fn emit_program(&mut self, program: &Program) {
+        // Interprocedural GPU residency (docs/scoped-access-blocks.md), transitive
+        // parameter case: needs the whole program's call graph in one shot for its
+        // fixed point, so it runs once here rather than folding into `pre_scan`,
+        // which recurses per-module-scope on a series of smaller pseudo-programs.
+        self.compute_gpu_arg_params(program);
         // Pre-scan: collect enum variants and fn defaults before emitting anything.
         self.pre_scan(program);
 
@@ -1681,6 +1761,88 @@ impl Transpiler {
         )
     }
 
+    /// Mirrors `Checker::collect_gpu_arg_params` (checker/mod.rs) — same fixed-point
+    /// dataflow, recomputed independently here since the transpiler doesn't share
+    /// checker state (same existing pattern as `kernel_decls`). See that function's
+    /// doc comment for why this needs to be a whole-program fixed point rather than a
+    /// single top-to-bottom walk: a parameter forwarded into another Boring function
+    /// (not just a raw kernel constructor) qualifies too, transitively, when that
+    /// callee's own corresponding parameter already qualifies.
+    fn compute_gpu_arg_params(&mut self, program: &Program) {
+        if self.kernel_decls.is_empty() { return; }
+        let mut all_fns: Vec<&FnDecl> = Vec::new();
+        for item in &program.items { Self::gather_gpu_arg_fns_item(item, &mut all_fns); }
+
+        let mut flags_by_fn: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
+            .map(|f| (f.name.as_str(), vec![false; f.params.len()]))
+            .collect();
+
+        // See `Checker::collect_gpu_arg_params` — this bound is never actually hit,
+        // just a guard against a future logic error turning this into an infinite loop.
+        let max_passes = all_fns.iter().map(|f| f.params.len()).sum::<usize>() + 2;
+
+        for _ in 0..max_passes {
+            let mut changed = false;
+            for f in &all_fns {
+                let mut new_flags = vec![false; f.params.len()];
+                for (i, p) in f.params.iter().enumerate() {
+                    let kernel_decls = &self.kernel_decls;
+                    let known = &flags_by_fn;
+                    let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
+                        if let Some(decl) = kernel_decls.get(fn_name) {
+                            let Some(init) = decl.inits.first() else { return false };
+                            let Some(init_param) = init.params.get(arg_idx) else { return false };
+                            let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
+                            let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
+                            return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
+                                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+                        }
+                        known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
+                    };
+                    let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify);
+                    new_flags[i] = only_qualifying;
+                }
+                if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {
+                    changed = true;
+                    flags_by_fn.insert(f.name.as_str(), new_flags);
+                }
+            }
+            if !changed { break; }
+        }
+
+        for (name, flags) in flags_by_fn {
+            if flags.iter().any(|b| *b) {
+                self.fn_gpu_arg_params.insert(name.to_string(), flags);
+            }
+        }
+    }
+
+    fn gather_gpu_arg_fns_item<'a>(item: &'a Item, out: &mut Vec<&'a FnDecl>) {
+        match item {
+            Item::Fn(f)   => out.push(f),
+            Item::Mod(m)  => { for i in &m.items { Self::gather_gpu_arg_fns_item(i, out); } }
+            Item::Stmt(s) => Self::gather_gpu_arg_fns_stmt(s, out),
+            _ => {}
+        }
+    }
+
+    fn gather_gpu_arg_fns_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a FnDecl>) {
+        match stmt {
+            Stmt::Fn(f)     => out.push(f),
+            Stmt::Mod(m)    => { for i in &m.items { Self::gather_gpu_arg_fns_item(i, out); } }
+            Stmt::If(s)     => { for (_, b) in &s.branches { for st in b { Self::gather_gpu_arg_fns_stmt(st, out); } } if let Some(b) = &s.else_body { for st in b { Self::gather_gpu_arg_fns_stmt(st, out); } } }
+            Stmt::While(s)  => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::For(s)    => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::Loop(s)   => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::DoWhile(s) => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::Try(s)    => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } for c in &s.catch_clauses { for st in &c.body { Self::gather_gpu_arg_fns_stmt(st, out); } } }
+            Stmt::Guard(s)  => { for st in &s.else_body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::Defer(b)  => { for st in b { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            Stmt::With(s)   => { for st in &s.body { Self::gather_gpu_arg_fns_stmt(st, out); } }
+            _ => {}
+        }
+    }
+
     fn pre_scan(&mut self, program: &Program) {
         // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
         self.typed_error_enums.insert("Error".to_string());
@@ -1928,6 +2090,26 @@ impl Transpiler {
                     }
                     // Signature-only var-param positions, for the `with` mutation scan.
                     self.fn_var_params.insert(f.name.clone(), f.params.iter().map(|p| p.rebindable).collect());
+                    // Interprocedural GPU residency (docs/scoped-access-blocks.md) — mirrors
+                    // the checker's own `fn_returns_resident`/`fn_gpu_arg_params`
+                    // (checker/mod.rs), recomputed independently here since the transpiler
+                    // doesn't share checker state (same existing pattern as `kernel_decls`,
+                    // tracked separately on both sides).
+                    if let Some(rt) = &f.return_ty {
+                        if rt.gpu_resident_qual().is_some() {
+                            self.fn_returns_resident.insert(f.name.clone(), rt.clone());
+                        } else if let Type::Tuple(elems) = rt {
+                            let flags: Vec<bool> = elems.iter().map(|t| t.gpu_resident_qual().is_some()).collect();
+                            if flags.iter().any(|b| *b) {
+                                self.fn_returns_resident_tuple.insert(f.name.clone(), flags);
+                            }
+                        }
+                    }
+                    // `fn_gpu_arg_params` itself is computed once, up front, over the
+                    // whole program by `compute_gpu_arg_params` (called from
+                    // `emit_program` before `pre_scan` even starts) — it needs the
+                    // full call graph in one shot for its transitive fixed point, which
+                    // this per-item, per-recursive-module-scope walk can't give it.
                     self.pre_register_fn(f);
                 }
                 Item::Struct(s) if s.name == "Box" => {
@@ -2449,6 +2631,28 @@ impl Transpiler {
 }
 
 // ─── Pre-scan helpers ─────────────────────────────────────────────────────────
+
+/// Which field a kernel's `init` assigns a given parameter name to (`field = param`,
+/// the only pattern kernel-constructor codegen understands). Mirrors
+/// `Checker::kernel_init_field_for_param` (checker/mod.rs) — duplicated rather than
+/// shared since the transpiler doesn't depend on the checker (same existing pattern
+/// as `kernel_decls`, tracked independently on both sides). Not reusing
+/// `emit_kernel::kernel_param_to_field_map` (private to that module, builds a whole
+/// map rather than a single lookup) to avoid a cross-module visibility change for
+/// what's a small, self-contained scan.
+fn kernel_init_field_for_param<'a>(decl: &'a crate::ast::KernelDecl, param_name: &str) -> Option<&'a str> {
+    let init = decl.inits.first()?;
+    for stmt in &init.body {
+        if let crate::ast::Stmt::Expr(e) = stmt {
+            if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                if let (ExprKind::Var(field), ExprKind::Var(param)) = (&lhs.kind, &rhs.kind) {
+                    if param == param_name { return Some(field.as_str()); }
+                }
+            }
+        }
+    }
+    None
+}
 
 fn program_uses_broadcast(program: &Program) -> bool {
     use crate::ast::{Item, Stmt, ExprKind};

@@ -316,6 +316,18 @@ impl Interpreter {
             }
 
             ExprKind::Var(name) => {
+                // `'sync` fields: materialize a fresh snapshot from block-shared
+                // storage on every read (not just indexed reads — `for v in tile:`,
+                // whole-array copies, `.length`, etc. all read the bare Var) so any
+                // consumer sees writes other threads in the block made before the
+                // last barrier. See `Interpreter::sync_fields`'s doc comment.
+                if let Some(shared) = self.sync_fields.get(name) {
+                    let arr = shared.lock().unwrap();
+                    let vals: Vec<Value> = arr.iter()
+                        .map(|tv| super::eval_gpu::from_thread_value(tv.clone(), &env))
+                        .collect();
+                    return Ok(Value::Array(vals.into()));
+                }
                 if let Some(val) = env.borrow().get(name) {
                     if matches!(val, Value::Uninitialized) {
                         return Err(err(format!("variable '{}' used before being assigned", name), line));
@@ -666,6 +678,27 @@ impl Interpreter {
                         .map(|v| matches!(v, Value::KernelStruct { .. }))
                         .unwrap_or(false);
                     let has_block = args.iter().any(|a| a.label.as_deref() == Some("block"));
+                    let has_grid  = args.iter().any(|a| a.label.as_deref() == Some("grid"));
+                    if is_kernel && has_block && has_grid {
+                        // `grid =` is given explicitly alongside `block =` — dispatch
+                        // through `eval_kernel_launch`, which actually honors `grid`
+                        // (parses int/tuple, up to 3D). The shorthand path below
+                        // (`eval_kernel_launch_with_val`) NEVER looks at a `grid=`
+                        // argument at all, even when one is present — it always
+                        // infers grid from the longest array-typed field divided by
+                        // block size. That inference silently produces the wrong
+                        // grid whenever the largest field's length doesn't happen to
+                        // correspond to the intended dispatch shape (e.g. a `'global`
+                        // input array bigger than the output, common in tiled GEMM
+                        // kernels) — invisible in small single-block test kernels,
+                        // where both the explicit and the inferred grid are 1 anyway.
+                        let block_expr = args.iter().find(|a| a.label.as_deref() == Some("block")).map(|a| a.value.clone());
+                        let grid_expr  = args.iter().find(|a| a.label.as_deref() == Some("grid")).map(|a| a.value.clone());
+                        let config = crate::ast::KernelConfig {
+                            block: block_expr, grid: grid_expr, after: None, priority: None, line, col: 0,
+                        };
+                        return self.eval_kernel_launch(&config, callee_expr, env);
+                    }
                     if is_kernel && has_block {
                         // Build a synthetic KernelConfig from the labeled args.
                         let block_arg = args.iter().find(|a| a.label.as_deref() == Some("block"))

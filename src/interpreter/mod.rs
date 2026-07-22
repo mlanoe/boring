@@ -1862,6 +1862,20 @@ pub struct Interpreter {
     /// Keyed by param name. Cleared and repopulated by every call_fn invocation.
     /// Read by the call site to write back mutated values to caller variables.
     pub(crate) last_var_params: HashMap<String, Value>,
+    /// Block-shared storage for the currently-executing kernel's `'sync` fields
+    /// (field name -> shared, mutex-protected backing array), populated only on
+    /// the per-thread `Interpreter` instances `run_kernel_parallel` builds for a
+    /// kernel that has at least one `'sync` field. Reads/writes to a name in
+    /// this map bypass the normal `Env` lookup entirely (see `eval_expr`'s
+    /// `ExprKind::Index` case and `assign`'s), so every real OS thread in the
+    /// same block observes the same underlying storage — unlike every other
+    /// kernel field, which each thread runs against its own independent copy.
+    pub(crate) sync_fields: HashMap<String, std::sync::Arc<std::sync::Mutex<Vec<eval_gpu::ThreadValue>>>>,
+    /// Barrier shared by every thread in the current kernel block, sized to
+    /// the block's thread count. `sync` (parsed as `Stmt::Comment("sync")`)
+    /// calls `.wait()` on this when present instead of being a no-op — only
+    /// set on kernels with `'sync` fields (see `sync_fields`).
+    pub(crate) kernel_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
 }
 
 impl Interpreter {
@@ -1939,6 +1953,8 @@ impl Interpreter {
             stream_yields: Vec::new(),
             user_args: Vec::new(),
             last_var_params: HashMap::new(),
+            sync_fields: HashMap::new(),
+            kernel_barrier: None,
         }
     }
 
@@ -1971,6 +1987,8 @@ impl Interpreter {
             stream_yields: Vec::new(),
             user_args: Vec::new(),
             last_var_params: HashMap::new(),
+            sync_fields: HashMap::new(),
+            kernel_barrier: None,
         }
     }
 

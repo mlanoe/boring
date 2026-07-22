@@ -1631,6 +1631,51 @@ impl Transpiler {
                 break;
             }
             if let Some(a) = args.get(i) {
+                // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
+                // position is known, via the checker's bounded body scan (mirrored
+                // here in `fn_gpu_arg_params`), to be consumed *only* as a kernel-
+                // constructor argument in the callee — by construction its declared
+                // type is always a plain, unqualified array, so none of the richer
+                // per-position coercion below (weak-ref checks, Borrow handling,
+                // hierarchy checks) can ever actually apply to it. Short-circuit
+                // straight to the `BoringGpuArg<T>` wrap instead: pass an already-
+                // resident value through directly (`resident_call_vars` — an
+                // `Arc::clone` inside, no data copy), otherwise wrap the plain host
+                // value as `BoringGpuArg::Host(...)` for upload as today. Caller keeps
+                // ownership either way (`.clone()` on a bare variable), matching
+                // Boring's normal by-value argument semantics.
+                if self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false) {
+                    let wrapped = if let ExprKind::Var(vname) = &a.value.kind {
+                        // Already a `BoringGpuArg<T>`-typed Rust binding either way:
+                        // `resident_call_vars` (a same-function local bound to a
+                        // `fn_returns_resident` call) or `current_fn_gpu_arg_param_names`
+                        // (the *enclosing* function's own transitively-qualifying
+                        // parameter, forwarded straight through — the two-hop wrapper
+                        // case: `wrap_scale`'s `x` is itself `BoringGpuArg<T>`, so
+                        // re-wrapping it in `Host(...)` on the way into `scale(x, n)`
+                        // would be a type error, not just a missed optimization).
+                        if self.resident_call_vars.contains_key(vname.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(vname.as_str())
+                        {
+                            format!("{}.clone()", vname)
+                        } else {
+                            format!("BoringGpuArg::Host({}.clone())", vname)
+                        }
+                    } else {
+                        // Any other expression shape (most commonly a struct field —
+                        // `linear_gpu(x, self.mlp_fc_w, ...)`) needs the same clone the
+                        // `Var` branch above gives a bare local: `self.mlp_fc_w` is
+                        // behind `&self`/`&mut self`, and moving it into
+                        // `BoringGpuArg::Host(...)` without cloning is a real E0507,
+                        // confirmed against a real `cargo check` on whisper-boring's
+                        // actual call sites (every weight-matrix argument is a struct
+                        // field, never a bare local).
+                        format!("BoringGpuArg::Host(({}).clone())", self.emit_expr(&a.value))
+                    };
+                    result.push(wrapped);
+                    i += 1;
+                    continue;
+                }
                 let param_ty = sig.get(i);
                 let param_rebindable = rebindable_flags.get(i).copied().unwrap_or(false);
                 let param_mutable = mutable_flags.get(i).copied().unwrap_or(false);
@@ -2346,6 +2391,7 @@ impl Transpiler {
             match_subject_enum: self.match_subject_enum.clone(),
             var_types: self.var_types.clone(),
             string_vars: self.string_vars.clone(),
+            str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),
             struct_operator_param_types: self.struct_operator_param_types.clone(),
             var_struct_type: self.var_struct_type.clone(),
@@ -2419,6 +2465,14 @@ impl Transpiler {
             kernel_decls: self.kernel_decls.clone(),
             kernel_vars: self.kernel_vars.clone(),
             gpu_resident_vars: self.gpu_resident_vars.clone(),
+            fn_returns_resident: self.fn_returns_resident.clone(),
+            fn_gpu_arg_params: self.fn_gpu_arg_params.clone(),
+            fn_returns_resident_tuple: self.fn_returns_resident_tuple.clone(),
+            resident_call_vars: self.resident_call_vars.clone(),
+            current_fn_returns_resident: self.current_fn_returns_resident.clone(),
+            current_fn_returns_resident_tuple: self.current_fn_returns_resident_tuple.clone(),
+            current_fn_gpu_arg_params: self.current_fn_gpu_arg_params.clone(),
+            current_fn_gpu_arg_param_names: self.current_fn_gpu_arg_param_names.clone(),
             gpu_device_vars: self.gpu_device_vars.clone(),
             is_gpu_target: self.is_gpu_target,
             user_top_level_names: self.user_top_level_names.clone(),

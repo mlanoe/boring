@@ -362,6 +362,16 @@ impl Interpreter {
                 self.stream_yields.push(val);
                 Ok(())
             }
+            // `sync` parses as `Stmt::Comment("sync")` (see parse_stmt.rs) — a real
+            // block-level barrier when the kernel has `'sync` fields (`kernel_barrier`
+            // is only set on the per-thread interpreters `run_kernel_parallel` builds
+            // for such a kernel); an ordinary comment (no-op) otherwise.
+            Stmt::Comment(c) if c == "sync" => {
+                if let Some(barrier) = &self.kernel_barrier {
+                    barrier.wait();
+                }
+                Ok(())
+            }
             Stmt::Comment(_) => Ok(()),
             Stmt::KernelBlock(s) => {
                 self.exec_kernel_block(&s.body, env)

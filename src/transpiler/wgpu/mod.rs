@@ -89,11 +89,19 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // synthesized one from bare top-level statements/non-const `let`s (invisible here --
     // it exists only in `general_out.code` -- so `general_out.gpu_main_emitted` is the
     // only way to know; see `emit_program_items`).
-    let has_boring_main = general_out.gpu_main_emitted || renamed_program.items.iter().any(|item| {
-        matches!(item, Item::Fn(f) if f.name == "boring_main" && f.qualifier.is_none())
+    let explicit_boring_main_throws = renamed_program.items.iter().find_map(|item| {
+        match item {
+            Item::Fn(f) if f.name == "boring_main" && f.qualifier.is_none() => Some(f.throws),
+            _ => None,
+        }
     });
+    let has_boring_main = general_out.gpu_main_emitted || explicit_boring_main_throws.is_some();
+    // A synthesized `boring_main` (from bare top-level statements, no explicit user
+    // `def main():`) always returns a `Result` -- see `emit_gpu_boring_main`. An
+    // explicit user main only does when it declares `throws`.
+    let boring_main_throws = explicit_boring_main_throws.unwrap_or(true);
 
-    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main);
+    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws);
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
     WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml }

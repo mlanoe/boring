@@ -11,8 +11,9 @@ pub(super) fn emit_host_rs(
     effective_kernels: &[KernelDecl],
     general_code: &str,
     has_boring_main: bool,
+    boring_main_throws: bool,
 ) -> String {
-    let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main);
+    let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main, boring_main_throws);
     e.emit();
     e.out
 }
@@ -33,6 +34,13 @@ struct HostEmitter<'a> {
     /// backend only needs to splice the result in and, if present, call `boring_main()`.
     general_code: &'a str,
     has_boring_main: bool,
+    /// Whether the emitted `boring_main` actually returns a `Result` — an explicit
+    /// user `def main():` only does when it declares `throws`; a synthesized one
+    /// (from bare top-level statements, `emit_gpu_boring_main`) always does. Gates
+    /// whether `emit_main` calls it as `if let Err(e) = boring_main() { .. }` or as
+    /// a plain statement — the two aren't interchangeable, calling a `()`-returning
+    /// fn through the `Err` pattern is a real `cargo check` E0308, not just style.
+    boring_main_throws: bool,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -42,6 +50,7 @@ impl<'a> HostEmitter<'a> {
         effective_kernels: &'a [KernelDecl],
         general_code: &'a str,
         has_boring_main: bool,
+        boring_main_throws: bool,
     ) -> Self {
         let has_screen = program.items.iter().any(|item| {
             if let Item::Let(s) = item {
@@ -55,7 +64,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -199,7 +208,12 @@ impl<'a> HostEmitter<'a> {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal => {
                     if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
-                        self.line(&format!("    {}_buf: wgpu::Buffer,", f.name));
+                        // Arc-wrapped so a `'unified`/`'global` value returned across a
+                        // function-call boundary can hand its buffer directly to the next
+                        // kernel's constructor (an Arc::clone, no data copy) without the
+                        // producing kernel instance itself needing to stay alive — see
+                        // docs/scoped-access-blocks.md's interprocedural residency case.
+                        self.line(&format!("    {}_buf: std::sync::Arc<wgpu::Buffer>,", f.name));
                         // Keep Vec mirror for 'unified fields accessible from host.
                         if matches!(f.qual, GpuQual::Unified | GpuQual::Surface) {
                             let inner_ty = array_inner(&f.ty);
@@ -321,12 +335,12 @@ impl<'a> HostEmitter<'a> {
                 }
             };
             let _ = init_data;
-            self.line(&format!("        let {}_buf = device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
+            self.line(&format!("        let {}_buf = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
             self.line("            label: None,");
             self.line(&format!("            size: {},", size_expr));
             self.line(&format!("            usage: {},", usages));
             self.line("            mapped_at_creation: false,");
-            self.line("        });");
+            self.line("        }));");
         }
 
         // Params buffer.
@@ -536,12 +550,12 @@ impl<'a> HostEmitter<'a> {
                 self.line(&format!("    fn copy_{}_to_device(&mut self, data: &[{}]) {{", f.name, host_ty));
                 self.line(&format!("        let needed = (data.len() * std::mem::size_of::<{}>()) as u64;", host_ty));
                 self.line(&format!("        if self.{}_buf.size() != needed {{", f.name));
-                self.line(&format!("            self.{}_buf = self.device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
+                self.line(&format!("            self.{}_buf = std::sync::Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {{", f.name));
                 self.line("                label: None,");
                 self.line("                size: needed,");
                 self.line(&format!("                usage: {},", buffer_usages(f)));
                 self.line("                mapped_at_creation: false,");
-                self.line("            });");
+                self.line("            }));");
                 self.line("            self.rebuild_bind_group();");
                 self.line("        }");
                 self.line(&format!("        __boring_gpu_copy_h2d(&self.device, &self.queue, bytemuck::cast_slice(data), &self.{}_buf);", f.name));
@@ -554,14 +568,64 @@ impl<'a> HostEmitter<'a> {
     // â"€â"€ Staging buffer helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     fn emit_gpu_copy_helpers(&mut self) {
+        // Dual-mode argument for a free function whose parameter is consumed
+        // directly by a kernel constructor at a `'unified`/`'global` field position
+        // (`Checker::fn_gpu_arg_params`, transpiler-side `fn_gpu_arg_params` mirror) —
+        // lets a caller pass an already GPU-resident value straight through (an
+        // `Arc::clone`, no round-trip) or a plain host array (uploaded as today) with
+        // the same call syntax either way. See docs/scoped-access-blocks.md's
+        // "Kernel Constructor Interaction".
+        self.line("#[allow(dead_code)]");
+        self.line("#[derive(Clone)]");
+        self.line("enum BoringGpuArg<T> {");
+        self.line("    Resident(std::sync::Arc<wgpu::Buffer>, usize),");
+        self.line("    Host(Vec<T>),");
+        self.line("}");
+        self.blank();
+        // `<param>.length`/`.count` (mapped to `.len()` by the general `map_field`
+        // convention, same as a plain array) needs an inherent method here since a
+        // dual-typed param doesn't materialize just to answer a size query -- a
+        // `Resident` buffer already carries its element count.
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> BoringGpuArg<T> {");
+        self.line("    fn len(&self) -> usize {");
+        self.line("        match self {");
+        self.line("            BoringGpuArg::Resident(_, len) => *len,");
+        self.line("            BoringGpuArg::Host(v) => v.len(),");
+        self.line("        }");
+        self.line("    }");
+        self.line("}");
+        self.blank();
+
+        // Staging-buffer pool for D2H readbacks. GPU targets run their whole
+        // dispatch/readback chain on a single thread (see the GPU-target
+        // `task`/stream/channel ban in `transpiler::mod.rs`'s
+        // `emit_gpu_boring_main` -- there's no tokio runtime here, only
+        // `pollster`), so a plain `thread_local!` is sufficient: no
+        // cross-thread contention to guard against. Exact-size matching
+        // (rather than a size-bucketing scheme) is enough because a given
+        // call site's buffer shape doesn't change across calls (kernel field
+        // sizes are fixed once allocated) -- the same handful of distinct
+        // sizes recur call after call.
+        self.line("thread_local! {");
+        self.line("    static __BORING_STAGING_POOL: std::cell::RefCell<Vec<wgpu::Buffer>> = std::cell::RefCell::new(Vec::new());");
+        self.line("}");
+        self.blank();
+
         // D2H helper.
         self.line("fn __boring_gpu_copy_d2h<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> Vec<T> {");
         self.line("    let size = src.size();");
-        self.line("    let staging = device.create_buffer(&wgpu::BufferDescriptor {");
-        self.line("        label: None,");
-        self.line("        size,");
-        self.line("        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,");
-        self.line("        mapped_at_creation: false,");
+        self.line("    let staging = __BORING_STAGING_POOL.with(|pool| {");
+        self.line("        let mut pool = pool.borrow_mut();");
+        self.line("        match pool.iter().position(|b| b.size() == size) {");
+        self.line("            Some(i) => pool.swap_remove(i),");
+        self.line("            None => device.create_buffer(&wgpu::BufferDescriptor {");
+        self.line("                label: None,");
+        self.line("                size,");
+        self.line("                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,");
+        self.line("                mapped_at_creation: false,");
+        self.line("            }),");
+        self.line("        }");
         self.line("    });");
         self.line("    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });");
         self.line("    encoder.copy_buffer_to_buffer(src, 0, &staging, 0, size);");
@@ -574,6 +638,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    rx.recv().unwrap().unwrap();");
         self.line("    let data = bytemuck::cast_slice(&staging.slice(..).get_mapped_range()).to_vec();");
         self.line("    staging.unmap();");
+        self.line("    __BORING_STAGING_POOL.with(|pool| pool.borrow_mut().push(staging));");
         self.line("    data");
         self.line("}");
         self.blank();
@@ -685,10 +750,14 @@ impl<'a> HostEmitter<'a> {
             self.line("    let _ = __BORING_GPU_ADAPTER.set(std::sync::Arc::new(adapter));");
             self.blank();
             if self.has_boring_main {
-                self.line("    if let Err(e) = boring_main() {");
-                self.line("        eprintln!(\"error: {}\", e);");
-                self.line("        std::process::exit(1);");
-                self.line("    }");
+                if self.boring_main_throws {
+                    self.line("    if let Err(e) = boring_main() {");
+                    self.line("        eprintln!(\"error: {}\", e);");
+                    self.line("        std::process::exit(1);");
+                    self.line("    }");
+                } else {
+                    self.line("    boring_main();");
+                }
             }
             self.line("}");
         }

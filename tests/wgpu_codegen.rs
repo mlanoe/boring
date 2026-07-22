@@ -130,6 +130,18 @@ kernel Tile:
     assert!(wgsl.contains("var<workgroup>"), "missing workgroup var");
     assert!(wgsl.contains("array<f32, 256>"), "missing fixed-size array type");
     assert!(wgsl.contains("workgroupBarrier()"), "missing explicit barrier");
+
+    // `var<workgroup>` is only legal at WGSL module scope — naga rejects it as a
+    // statement inside a function body ("expected identifier, found '<'"). Make
+    // sure the declaration appears before the entry point's `@compute` annotation
+    // (i.e. outside the function), not after it (i.e. inside the function body).
+    let workgroup_pos = wgsl.find("var<workgroup>").expect("workgroup var present");
+    let entry_pos = wgsl.find("@compute @workgroup_size(").expect("entry point present");
+    assert!(
+        workgroup_pos < entry_pos,
+        "var<workgroup> must be declared at module scope, before the @compute entry point — \
+         found it after, which means it was emitted inside the function body"
+    );
 }
 
 #[test]
@@ -217,6 +229,43 @@ kernel Compute:
     assert!(rs.contains("__boring_gpu_copy_d2h"), "missing D2H staging helper");
     assert!(rs.contains("__boring_gpu_copy_h2d"), "missing H2D staging helper");
     assert!(rs.contains("MAP_READ | wgpu::BufferUsages::COPY_DST"), "staging D2H usages");
+}
+
+#[test]
+fn test_d2h_staging_buffer_pool_reuse() {
+    // Same source as test_global_buffer_d2h_helper -- this test asserts on the
+    // *shape* of __boring_gpu_copy_d2h's generated body: repeated readbacks of
+    // the same size must reuse a pooled staging buffer instead of allocating a
+    // fresh one every call. There's no real GPU in this test harness (these are
+    // codegen-shape snapshot tests, see the module doc comment), so we verify
+    // the pooling logic is structurally present rather than exercising it at
+    // runtime against real device readbacks.
+    let src = r#"
+kernel Compute:
+    mut [float]'global result
+
+    def ():
+        result[0] = 1.0
+"#;
+    let (_wgsl, rs) = wgpu_codegen("d2h_staging_pool", src);
+
+    assert!(rs.contains("thread_local!"), "missing thread_local staging pool declaration:\n{rs}");
+    assert!(rs.contains("__BORING_STAGING_POOL"), "missing staging pool storage:\n{rs}");
+
+    // The pool lookup (by exact size match) must happen before falling back to
+    // `device.create_buffer` -- i.e. create_buffer is reached only on a pool miss.
+    let copy_d2h_start = rs.find("fn __boring_gpu_copy_d2h").expect("missing __boring_gpu_copy_d2h fn");
+    let copy_d2h_body = &rs[copy_d2h_start..];
+    let pool_lookup_pos = copy_d2h_body.find("pool.iter().position").expect("missing pool lookup by size");
+    let create_buffer_pos = copy_d2h_body.find("device.create_buffer").expect("missing create_buffer fallback");
+    assert!(pool_lookup_pos < create_buffer_pos,
+        "pool lookup must be attempted before falling back to device.create_buffer:\n{copy_d2h_body}");
+
+    // The staging buffer must be unmapped, then returned to the pool -- not dropped.
+    let unmap_pos = copy_d2h_body.find("staging.unmap()").expect("missing staging.unmap()");
+    let pool_push_pos = copy_d2h_body.find("pool.borrow_mut().push(staging)").expect("missing pool push-back of staging buffer");
+    assert!(unmap_pos < pool_push_pos,
+        "staging buffer must be fully unmapped before being returned to the pool:\n{copy_d2h_body}");
 }
 
 #[test]
@@ -395,6 +444,428 @@ with py:
     assert_eq!(rs.matches("k.copy_y_to_host()").count(), 1, "expected exactly one copy_y_to_host call:\n{rs}");
     assert!(rs.contains("let py = k.copy_y_to_host()"), "missing single materializing readback:\n{rs}");
     assert!(!rs.contains("*mut Vec"), "inferred qualifier should emit a plain Vec, not a pointer:\n{rs}");
+}
+
+// ── Interprocedural residency: `with` surviving a function-call boundary ──────
+//
+// The intra-procedural tests above cover a kernel instance and its field read living
+// in the *same* scope. These tests cover the actual motivating case
+// (docs/scoped-access-blocks.md): a free function returning a `'gpu'unified`-typed
+// value, chained into a second call, with only the *final* consumer paying a host
+// round-trip — the shape of whisper-boring's `linear_gpu` -> `gelu_gpu` -> `linear_gpu`.
+
+const SCALE_GPU_KERNEL: &str = r#"
+kernel Saxpy:
+    let float alpha
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float a, [float]'unified xs, [float]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        y[i] = alpha * x[i] + y[i]
+"#;
+
+#[test]
+fn test_with_gpu_resident_call_chain_no_intermediate_roundtrip() {
+    // `scale_gpu` wraps kernel construction+dispatch+field-read behind a function
+    // boundary with an explicit `'gpu'unified` return type — exactly the shape a
+    // real kernel-launcher wrapper (`linear_gpu`, etc.) uses. Called twice in a
+    // chain: the second call's argument is the first call's still-resident return
+    // value, and only the final `with` pays a real device->host transfer.
+    let src = format!(r#"{SCALE_GPU_KERNEL}
+req [float]'gpu'unified scale_gpu([float] xv, float factor):
+    var [float] zero = [0.0, 0.0]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+
+var [float] ha = [1.0, 2.0]
+let [float]'gpu'unified fc = scale_gpu(ha, 2.0)
+let [float]'gpu'unified fc2 = scale_gpu(fc, 3.0)
+with fc2:
+    print "{{fc2[0]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_call_chain", &src);
+
+    // Signature: dual-typed param (the only use of `xv` is as a kernel-constructor
+    // argument at a 'unified field position), resident return type.
+    assert!(rs.contains("fn scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+        "expected dual-typed param + resident return signature:\n{rs}");
+
+    // Tail expression returns the buffer directly -- no download.
+    assert!(rs.contains("BoringGpuArg::Resident(std::sync::Arc::clone(&k.y_buf)"),
+        "tail expression should return a Resident handle, not a download:\n{rs}");
+
+    // Kernel-construction consumes `xv` via the dual-mode branch, not an
+    // unconditional upload.
+    assert!(rs.contains("match &xv {"), "constructor argument for `xv` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "resident branch should reuse the buffer directly:\n{rs}");
+    assert!(rs.contains("k.rebuild_bind_group();"), "resident branch should rebuild the bind group:\n{rs}");
+
+    // Call sites: `ha` (a plain host array) is wrapped; `fc` (already resident) is
+    // passed straight through, not re-wrapped as a host upload.
+    assert!(rs.contains("scale_gpu(BoringGpuArg::Host(ha.clone())"), "plain host argument should wrap as BoringGpuArg::Host:\n{rs}");
+    assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
+    assert!(!rs.contains("BoringGpuArg::Host(fc"), "resident value should not be re-wrapped as a host upload:\n{rs}");
+
+    // The whole point: no kernel-field download (`copy_y_to_host`) happens anywhere
+    // in the chain -- only the final `with fc2:` materializes, via the free d2h
+    // helper directly on the retained buffer (no live kernel instance to call
+    // `copy_y_to_host` on at that point).
+    assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur anywhere in the chain:\n{rs}");
+    assert!(rs.contains("__boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), buf)"),
+        "final `with` should materialize via the free d2h helper on the raw buffer:\n{rs}");
+    // Read-only `with` block -- no write-back for `fc2` specifically. (The bare
+    // `__boring_gpu_copy_h2d` helper still appears elsewhere in the file -- it's
+    // also what `copy_x_to_device`/`copy_y_to_device` call internally for the
+    // kernel's own H2D uploads, unrelated to this `with` block.)
+    assert!(!rs.contains("__fc2_buf"), "read-only with-block should not capture a buffer handle for write-back:\n{rs}");
+}
+
+#[test]
+fn test_with_gpu_resident_call_infers_qualifier_without_annotation() {
+    // Same shape as the chain test above, but neither `fc` nor `fc2` has an explicit
+    // `'gpu'unified` annotation -- inferred from `scale_gpu`'s own declared return
+    // type, mirroring the same-scope `let py = k.y` inference precedent.
+    let src = format!(r#"{SCALE_GPU_KERNEL}
+req [float]'gpu'unified scale_gpu([float] xv, float factor):
+    var [float] zero = [0.0, 0.0]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+
+var [float] ha = [1.0, 2.0]
+let fc = scale_gpu(ha, 2.0)
+let fc2 = scale_gpu(fc, 3.0)
+with fc2:
+    print "{{fc2[0]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_call_chain_inferred", &src);
+
+    assert!(rs.contains("fn scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+        "expected dual-typed param + resident return signature:\n{rs}");
+    assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through even without an explicit annotation:\n{rs}");
+    assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur anywhere in the chain:\n{rs}");
+}
+
+// ── Regression tests: consuming a resident value, not just returning one ──────
+//
+// The tests above all cover the *return* side of interprocedural residency —
+// `scale_gpu`'s own kernel dispatches with a literal block size, never indexing or
+// sizing off its dual-typed param. Real kernel-launcher wrappers (whisper-boring's
+// `linear_gpu`/`gelu_gpu`/etc.) size their dispatch block off the very array they
+// pass to the kernel constructor (`k(block = x.length)`), and real pipelines chain
+// kernels directly in one scope as often as across a function boundary. These three
+// mirror that consuming shape exactly.
+
+const SCALE_ONE_ARG_KERNEL: &str = r#"
+kernel Scale:
+    let float factor
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float f, [float]'unified xs):
+        factor = f
+        x = xs
+        y = [0.0 for ..xs.length]
+
+    def ():
+        let i = gpu.thread.x
+        y[i] = x[i] * factor
+"#;
+
+#[test]
+fn test_with_gpu_resident_call_param_used_for_dispatch_size() {
+    // `x` is used both as the kernel-constructor argument AND to size the dispatch
+    // block (`x.length`) -- a second, non-constructor use that must NOT disqualify
+    // the exclusive-ctor-arg scan (`ast::scan_var_call_arg_uses`), since a dual-typed
+    // `BoringGpuArg<T>` can answer `.length` without ever materializing.
+    let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
+req [float]'gpu'unified scale_gpu([float] x, float factor):
+    mut k = Scale(factor, x)
+    kernel:
+        k(block = x.length)
+    k.y
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    let fc = scale_gpu(a, 2.0)
+    let fc2 = scale_gpu(fc, 3.0)
+    with fc2:
+        for i in 0..3:
+            print "{{fc2[i]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_dispatch_size", &src);
+
+    assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+        "x.length use should not disqualify x from the dual-typed param treatment:\n{rs}");
+    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "resident branch should reuse the buffer directly:\n{rs}");
+    assert!(rs.contains("(x.len()) as usize"), "x.length should compile via BoringGpuArg::len(), not a bare field access:\n{rs}");
+    assert!(!rs.contains("x::length") && !rs.contains("x::count"), "x.length must not be emitted as a module path:\n{rs}");
+
+    // Chain: plain host array wraps, already-resident value passes straight through.
+    assert!(rs.contains("scale_gpu(BoringGpuArg::Host(a.clone())"), "plain host argument should wrap as BoringGpuArg::Host:\n{rs}");
+    assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
+    assert!(!rs.contains("scale_gpu(&fc"), "the by-ref array-argument convention must not apply to a dual-typed param:\n{rs}");
+}
+
+#[test]
+fn test_with_gpu_resident_call_param_explicit_annotation_used_for_dispatch_size() {
+    // Same shape as above, but `x` carries an explicit `'gpu'unified` annotation --
+    // the annotation must not survive into the emitted parameter type (it should
+    // still collapse to the same dual-typed `BoringGpuArg<T>` signature, matching the
+    // return-type case), and the same `x.length` use must not disqualify it either.
+    let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
+req [float]'gpu'unified scale_gpu([float]'gpu'unified x, float factor):
+    mut k = Scale(factor, x)
+    kernel:
+        k(block = x.length)
+    k.y
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    let fc = scale_gpu(a, 2.0)
+    let fc2 = scale_gpu(fc, 3.0)
+    with fc2:
+        for i in 0..3:
+            print "{{fc2[i]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_annotated_dispatch_size", &src);
+
+    assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+        "an explicit 'gpu'unified annotation on the param should collapse to BoringGpuArg<T>, not a plain Vec:\n{rs}");
+    assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
+    assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
+}
+
+#[test]
+fn test_kernel_constructor_consumes_resident_local_no_function_boundary() {
+    // No function boundary at all: `k1.y` is aliased to `fc` (`gpu_resident_vars` --
+    // a pure compile-time alias with no Rust binding) and then used directly as
+    // `k2`'s constructor argument. This isolates the constructor-argument-consumption
+    // gap from the fn-parameter dual-typing above -- `fc` never has a Rust identifier
+    // to type `BoringGpuArg<T>` in the first place, so the fix must reach into
+    // `gpu_resident_vars` directly rather than going through that enum at all.
+    let src = r#"
+kernel Scale:
+    let float factor
+    let [float]'unified x
+    mut [float]'unified y
+
+    init(float f, [float]'unified xs):
+        factor = f
+        x = xs
+        y = [0.0 for ..xs.length]
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    mut k1 = Scale(2.0, a)
+    kernel:
+        k1(block = 3)
+    let fc = k1.y
+
+    mut k2 = Scale(3.0, fc)
+    kernel:
+        k2(block = 3)
+    let fc2 = k2.y
+
+    with fc2:
+        for i in 0..3:
+            print "{fc2[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("kernel_ctor_consumes_resident_local", src);
+
+    // The second kernel reuses the first kernel's buffer directly -- no host
+    // round-trip, and no dangling reference to a `fc` Rust binding that never exists.
+    assert!(rs.contains("k2.x_buf = std::sync::Arc::clone(&k1.y_buf);"),
+        "second kernel's x field should alias the first kernel's y buffer directly:\n{rs}");
+    assert!(rs.contains("k2.rebuild_bind_group();"), "buffer aliasing should rebuild the bind group:\n{rs}");
+    assert!(!rs.contains("k2.copy_x_to_device"), "no host upload should happen for a resident-aliased argument:\n{rs}");
+    assert!(!rs.contains("&fc") && !rs.contains("(fc)") && !rs.contains("fc.iter()"),
+        "`fc` has no Rust binding at all -- it must never appear as a bare identifier:\n{rs}");
+
+    // `Scale`'s own `y = [0.0 for ..xs.length]` zero-fill, for k2, must size off the
+    // aliased buffer's own length -- not the nonexistent `xs` init-param identifier
+    // (the `xs::length` bug) and not a stale reference to `fc`.
+    assert!(rs.contains("k2.copy_y_to_device(&vec![(0) as f32; ((k1.y_buf.size() as usize / std::mem::size_of::<f32>())) as usize]);"),
+        "k2's output zero-fill should size off k1's buffer directly:\n{rs}");
+    assert!(!rs.contains("xs::length") && !rs.contains("xs::count"), "init-param length must not be emitted as a module path:\n{rs}");
+}
+
+// ── Transitive parameter propagation: a wrapper function forwarding to another
+// Boring function (not a raw kernel constructor) qualifies too, any number of
+// call-graph hops deep — see `Checker::collect_gpu_arg_params`'s fixed point.
+
+#[test]
+fn test_fn_gpu_arg_param_transitive_two_hop_wrapper() {
+    // `wrap_scale_gpu` forwards its own parameter straight into `scale_gpu` — not a
+    // raw kernel constructor — so it only qualifies via the *transitive* fixed point,
+    // one call-graph hop beyond the base case `scale_gpu` itself uses. Exercises the
+    // actual gap this fix closes: a caller passing an already-resident value into the
+    // wrapper (confirmed against a real `cargo check` failure before this fix:
+    // `BoringGpuArg::Host(xv.clone())` passed where `scale_gpu` expects
+    // `BoringGpuArg<f64>` directly).
+    let src = format!(r#"{SCALE_GPU_KERNEL}
+req [float]'gpu'unified scale_gpu([float] xv, float factor):
+    var [float] zero = [0.0, 0.0]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+
+req [float]'gpu'unified wrap_scale_gpu([float] xv, float factor):
+    scale_gpu(xv, factor)
+
+var [float] ha = [1.0, 2.0]
+let [float]'gpu'unified fc = scale_gpu(ha, 2.0)
+let [float]'gpu'unified fc2 = wrap_scale_gpu(fc, 3.0)
+with fc2:
+    print "{{fc2[0]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("fn_gpu_arg_param_transitive_wrapper", &src);
+
+    // The wrapper's own parameter should be dual-typed too, transitively.
+    assert!(rs.contains("fn wrap_scale_gpu(xv: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
+        "wrapper's forwarded parameter should qualify transitively:\n{rs}");
+    // Forwarding `xv` into `scale_gpu(xv, factor)` inside the wrapper must pass the
+    // enum straight through, not re-wrap it as a host upload.
+    assert!(rs.contains("scale_gpu(xv.clone()"), "forwarded resident parameter should pass straight through:\n{rs}");
+    assert!(!rs.contains("BoringGpuArg::Host(xv"), "forwarded resident parameter must not be re-wrapped as a host upload:\n{rs}");
+    // Call site: an already-resident value (`fc`) passed into the wrapper passes
+    // straight through too.
+    assert!(rs.contains("wrap_scale_gpu(fc.clone()"), "already-resident argument into the wrapper should pass straight through:\n{rs}");
+    assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur anywhere in the chain:\n{rs}");
+}
+
+#[test]
+fn test_fn_gpu_arg_param_disqualified_when_any_use_is_not_qualifying() {
+    // `x` is used in TWO call positions inside `mixed_use`: one at a genuinely
+    // qualifying position (`scale_gpu`'s own dual-typed param, transitively valid),
+    // and one at a plain, non-qualifying function (`plain_use`, an ordinary host
+    // consumer). The "exclusively qualifying, everywhere in the body" rule must still
+    // hold under the transitive fixed point — a single disqualifying use anywhere
+    // disqualifies the whole parameter, even though another use of the same
+    // parameter would, on its own, have qualified.
+    let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
+req [float]'gpu'unified scale_gpu([float] x, float factor):
+    mut k = Scale(factor, x)
+    kernel:
+        k(block = x.length)
+    k.y
+
+def plain_use([float] x, float factor):
+    print "{{x[0]}}"
+
+req [float]'gpu'unified mixed_use([float] x, float factor):
+    plain_use(x, factor)
+    scale_gpu(x, factor)
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    let fc = mixed_use(a, 2.0)
+    with fc:
+        print "{{fc[0]}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("fn_gpu_arg_param_disqualified_mixed_use", &src);
+
+    assert!(!rs.contains("fn mixed_use(x: BoringGpuArg<f64>"),
+        "a parameter with any non-qualifying use anywhere must not dual-type, even transitively:\n{rs}");
+}
+
+// ── Tuple-return residency chaining (`mha_step_gpu`-style: a function returning
+// `([float]'gpu'unified, [float], ...)`, chaining whichever tail-tuple elements are
+// themselves resident while leaving genuinely host-side elements alone) ──────────
+
+#[test]
+fn test_gpu_resident_tuple_return_chains_with_explicit_opt_in() {
+    // `tuple_fn` returns a tuple whose first element is itself GPU-resident (chained
+    // from a kernel-wrapper call) and whose second element is a genuinely host-side
+    // array. The tail expression is a bare tuple literal `(doubled, side)` — the case
+    // `try_emit_gpu_resident_tuple_return` (emit_kernel.rs) exists for. At the call
+    // site, the destructured binding `r` carries an *explicit* `'gpu'unified` opt-in
+    // annotation -- unlike the single-value interprocedural case, a resident tuple
+    // position stays resident only when asked to (see `emit_resident_tuple_destructure`'s
+    // doc for why the default has to run the other way for tuples).
+    let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
+req [float]'gpu'unified scale_gpu([float] x, float factor):
+    mut k = Scale(factor, x)
+    kernel:
+        k(block = x.length)
+    k.y
+
+req ([float]'gpu'unified, [float]) tuple_fn([float] x, float factor):
+    let [float]'gpu'unified doubled = scale_gpu(x, factor)
+    let [float] side = [1.0, 2.0]
+    (doubled, side)
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    let ([float]'gpu'unified r, [float] s) = tuple_fn(a, 2.0)
+    with r:
+        print "{{r[0]}}"
+    print "{{s.length}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("gpu_resident_tuple_return", &src);
+
+    // Return type: position 0 collapses to BoringGpuArg<T>, position 1 stays Vec<T>.
+    assert!(rs.contains("fn tuple_fn(x: BoringGpuArg<f64>, factor: f64) -> (BoringGpuArg<f64>, Vec<f64>)"),
+        "tuple return type should substitute BoringGpuArg<T> only at the resident position:\n{rs}");
+    // Tail expression: element 0 (already a resident local) passes through as a
+    // clone, no download; element 1 emits normally.
+    assert!(rs.contains("(doubled.clone(), side.clone())"),
+        "resident tuple element should pass through as a clone, not a download:\n{rs}");
+    assert_eq!(rs.matches("copy_y_to_host()").count(), 0, "no kernel-field download should occur inside tuple_fn:\n{rs}");
+    // Destructure at the call site: `r` opted in explicitly, so it binds straight
+    // from the call with no materialization; `s` is an ordinary Vec<f64>.
+    assert!(rs.contains("let (r, s) = tuple_fn(BoringGpuArg::Host(a.clone()), 2.0);"),
+        "opted-in destructure should bind straight from the call, no extra materialization:\n{rs}");
+}
+
+#[test]
+fn test_gpu_resident_tuple_return_destructure_materializes_by_default() {
+    // Same shape as above, but the destructure has NO annotation at all on `r` —
+    // the default for a resident tuple position, since tuple destructuring predates
+    // this residency feature everywhere in real code (every existing unannotated
+    // `let (a, b, c) = some_tuple_fn(...)` already assumes a plain, immediately
+    // usable value — see `Checker::check_let_destructure`'s doc for the real
+    // `cargo check` failure an opt-*out* default caused against `test_math_gpu.br`).
+    // Materializes right at the destructure through a temp binding, since the call
+    // must run exactly once (no re-invoking `tuple_fn` to materialize a second time).
+    let src = format!(r#"{SCALE_ONE_ARG_KERNEL}
+req [float]'gpu'unified scale_gpu([float] x, float factor):
+    mut k = Scale(factor, x)
+    kernel:
+        k(block = x.length)
+    k.y
+
+req ([float]'gpu'unified, [float]) tuple_fn([float] x, float factor):
+    let [float]'gpu'unified doubled = scale_gpu(x, factor)
+    let [float] side = [1.0, 2.0]
+    (doubled, side)
+
+def main() throws:
+    var [float] a = [1.0, 2.0, 3.0]
+    let (r, s) = tuple_fn(a, 2.0)
+    print "{{r[0]}}"
+    print "{{s.length}}"
+"#);
+    let (_wgsl, rs) = wgpu_codegen("gpu_resident_tuple_return_default_materialize", &src);
+
+    // The call still runs exactly once, into per-position temp bindings.
+    assert_eq!(rs.matches("tuple_fn(BoringGpuArg::Host(a.clone())").count(), 1,
+        "tuple_fn should be called exactly once, not re-invoked to materialize a second time:\n{rs}");
+    // The unannotated resident position is materialized via a temp binding, not left as a raw enum.
+    assert!(rs.contains("BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf)"),
+        "unannotated resident position should materialize through the free d2h helper by default:\n{rs}");
+    assert!(rs.contains("let r ="), "default-materialized binding should still end up bound to the plain name `r`:\n{rs}");
 }
 
 // ── `GPU` introspection (portable between the interpreter's simulation and

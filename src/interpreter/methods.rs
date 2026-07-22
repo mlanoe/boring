@@ -1411,6 +1411,13 @@ impl Interpreter {
         if !matches!(env.borrow().get(name), Some(Value::Array(_))) {
             return None;
         }
+        // `'sync` fields need to write through to block-shared storage (see
+        // `Interpreter::sync_fields`) — bail out to `assign`'s slower Index path,
+        // which handles them explicitly, instead of writing to this thread's own
+        // private `env` copy where no other thread in the block would see it.
+        if self.sync_fields.contains_key(name) {
+            return None;
+        }
         Some((|| {
             let idx = self.eval_expr(idx_expr, Rc::clone(env))?;
             let taken = env.borrow_mut().take(name).unwrap_or(Value::Nil);
@@ -1641,6 +1648,24 @@ impl Interpreter {
                 if let ExprKind::Var(name) = &obj_expr.kind {
                     if let Some(result) = self.try_fast_array_index_assign(name, idx_expr, val.clone(), &env, line) {
                         return result;
+                    }
+                    // `'sync` fields: write straight into the block-shared backing
+                    // array instead of this thread's own private env copy, so every
+                    // other thread in the block observes it once they cross the next
+                    // barrier. See `Interpreter::sync_fields`'s doc comment.
+                    if let Some(shared) = self.sync_fields.get(name).cloned() {
+                        let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
+                        let i = self.expect_int(idx, line)?;
+                        let mut arr = shared.lock().unwrap();
+                        let pos = if i < 0 { arr.len() as i64 + i } else { i };
+                        if pos < 0 || pos as usize >= arr.len() {
+                            return Err(err(format!("array index {} out of bounds (len {})", i, arr.len()), line));
+                        }
+                        let Some(tv) = super::eval_gpu::to_thread_value(&val) else {
+                            return Err(err("value is not valid 'sync field data", line));
+                        };
+                        arr[pos as usize] = tv;
+                        return Ok(());
                     }
                 }
                 // Evaluate the object before the index — matches the real evaluation

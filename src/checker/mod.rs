@@ -44,6 +44,10 @@ pub struct CheckResult {
 pub fn check(program: &Program) -> CheckResult {
     let mut checker = Checker::new();
     checker.collect_signatures(program);
+    // Second pass: depends on `kernel_decls` being fully populated (a function may
+    // be declared before the kernel it constructs), so it can't be folded into the
+    // single-pass walk above. See `Checker::scan_fn_gpu_arg_params`.
+    checker.collect_gpu_arg_params(program);
     checker.check_program(program);
     CheckResult { errors: checker.errors, warnings: checker.warnings }
 }
@@ -100,6 +104,26 @@ struct Checker {
     /// `let result = k.y` with no explicit qualifier can still be recognized as
     /// GPU-resident by checking `k`'s kernel type's own field declarations.
     kernel_decls: HashMap<String, KernelDecl>,
+    /// Free function name -> its declared return type, for functions whose return
+    /// type is `'gpu'unified`/`'gpu'global`-qualified. Lets `let fc = some_fn(...)`
+    /// be recognized as GPU-resident (opaque outside `with`) the same way a bare
+    /// `k.field` read already is — see `define_let`/`infer_gpu_resident` and
+    /// docs/scoped-access-blocks.md's interprocedural case.
+    fn_returns_resident: HashMap<String, Type>,
+    /// Free function name -> per-position flags: `true` when the checker's bounded
+    /// body scan (`scan_fn_gpu_arg_params`) found that parameter used *exclusively*
+    /// as a bare-argument to a kernel constructor at a `'unified`/`'global` field
+    /// position — the transpiler uses this to type that parameter `BoringGpuArg<T>`
+    /// instead of a plain host array, and this carve-out is what lets a caller pass
+    /// a GPU-resident value into such a call without a `with` block first.
+    fn_gpu_arg_params: HashMap<String, Vec<bool>>,
+    /// Free function name -> per-position flags, for a function whose return type is
+    /// a `Type::Tuple` with at least one `'gpu'unified`/`'gpu'global`-qualified
+    /// element — the tuple analogue of `fn_returns_resident`. Lets `let (sa, k, v) =
+    /// mha_step_gpu(...)` infer per-binding residency from the corresponding tuple
+    /// position, the same way a plain `let fc = linear_gpu(...)` infers it from the
+    /// (single) return type. See `check_let_destructure`.
+    fn_returns_resident_tuple: HashMap<String, Vec<bool>>,
 }
 
 impl Checker {
@@ -110,6 +134,9 @@ impl Checker {
             fn_var_params: HashMap::new(),
             method_mutating: HashMap::new(),
             kernel_decls: HashMap::new(),
+            fn_returns_resident: HashMap::new(),
+            fn_gpu_arg_params: HashMap::new(),
+            fn_returns_resident_tuple: HashMap::new(),
         }
     }
 
@@ -141,9 +168,11 @@ impl Checker {
         });
 
         let (resident_from_field, ty) = if ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false) {
-            // Explicit `'gpu'unified`/`'gpu'global` annotation — resident only if
-            // sourced from a bare kernel-field read, same as before.
-            let resident = matches!(value, Some(e) if is_kernel_field_read(e));
+            // Explicit `'gpu'unified`/`'gpu'global` annotation — resident if sourced
+            // from a bare kernel-field read (same-scope case) or a call to a function
+            // whose own return type is resident (interprocedural case, `let fc =
+            // linear_gpu(...)` — docs/scoped-access-blocks.md).
+            let resident = matches!(value, Some(e) if is_kernel_field_read(e) || self.is_resident_call(e));
             (resident, ty)
         } else if ty.is_none() {
             // No annotation at all — infer from `value`'s shape: a bare `k.field`
@@ -166,8 +195,19 @@ impl Checker {
     /// kernel's `field` is declared `'unified`/`'global` (`GpuQual`), returns the
     /// equivalent host-context `Type::Qualified(_, OwnerQual::GpuUnified|GpuGlobal)` —
     /// the same type an explicit `'gpu'unified`/`'gpu'global` annotation would give.
+    /// Also recognizes a call to a function whose own declared return type is
+    /// already resident (`let fc = linear_gpu(...)`, no annotation) — the
+    /// interprocedural counterpart to the same-scope field-read case, same rationale.
     fn infer_gpu_resident(&self, value: Option<&Expr>) -> Option<Type> {
-        let ExprKind::Field(obj, field) = &value?.kind else { return None };
+        let value = value?;
+        if let ExprKind::Call(callee, _) = &value.kind {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                if let Some(ret_ty) = self.fn_returns_resident.get(fn_name) {
+                    return Some(ret_ty.clone());
+                }
+            }
+        }
+        let ExprKind::Field(obj, field) = &value.kind else { return None };
         let ExprKind::Var(kvar) = &obj.kind else { return None };
         let kernel_type = self.lookup(kvar)?.kernel_type.as_ref()?;
         let decl = self.kernel_decls.get(kernel_type)?;
@@ -178,6 +218,15 @@ impl Checker {
             _ => return None,
         };
         Some(Type::Qualified(Box::new(field_decl.ty.clone()), qual))
+    }
+
+    /// Is `expr` a call to a function whose declared return type is already
+    /// GPU-resident (`self.fn_returns_resident`)? See `infer_gpu_resident`'s doc for
+    /// why this and `is_kernel_field_read` are the two initializer shapes that make a
+    /// `'gpu'unified`/`'gpu'global`-annotated `let` actually opaque outside `with`.
+    fn is_resident_call(&self, expr: &Expr) -> bool {
+        matches!(&expr.kind, ExprKind::Call(callee, _)
+            if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n)))
     }
 
     fn lookup(&self, name: &str) -> Option<&Binding> {
@@ -230,12 +279,129 @@ impl Checker {
     fn collect_fn_signature(&mut self, f: &FnDecl) {
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
+        if let Some(rt) = &f.return_ty {
+            if rt.gpu_resident_qual().is_some() {
+                self.fn_returns_resident.insert(f.name.clone(), rt.clone());
+            } else if let Type::Tuple(elems) = rt {
+                let flags: Vec<bool> = elems.iter().map(|t| t.gpu_resident_qual().is_some()).collect();
+                if flags.iter().any(|b| *b) {
+                    self.fn_returns_resident_tuple.insert(f.name.clone(), flags);
+                }
+            }
+        }
         for stmt in &f.body { self.collect_stmt_signatures(stmt); }
     }
 
     fn collect_struct_signature(&mut self, s: &StructDecl) {
         for m in &s.methods {
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
+        }
+    }
+
+    // ── GPU-resident parameter scan (second pass) ─────────────────────────────
+    // Depends on `kernel_decls` being fully populated by the pass above, so it
+    // can't be folded into `collect_signatures` itself — a function may be
+    // declared before the kernel type it constructs.
+
+    /// A parameter becomes `BoringGpuArg`-dual-typed (see docs/scoped-access-blocks.md,
+    /// "Kernel Constructor Interaction") when it's used *exclusively*, everywhere in
+    /// its function's body, as a bare argument at a position that either (a) is a raw
+    /// kernel constructor's `'unified`/`'global` array-field init position, or (b) is
+    /// another Boring function whose own corresponding parameter *already* qualifies —
+    /// transitively, any number of call-graph hops deep (`wrap_scale(x, n)` forwarding
+    /// into `scale(x, n)` forwarding into a raw `ScaleKernel(x, n)` construction, say).
+    /// Any other use anywhere (indexing, `.length`, arithmetic, a disqualifying call
+    /// position, ...) disqualifies it for that parameter — no regression, just no
+    /// speedup for that one parameter.
+    ///
+    /// Because qualification of a parameter can depend on a *callee's* qualification
+    /// (computed from the same analysis), this can't be a single top-to-bottom walk —
+    /// it's a fixed point over the whole program's functions: repeat full passes,
+    /// each pass re-deriving every function's flags from the previous pass's known
+    /// flags, until a full pass changes nothing. Each pass only ever flips a flag
+    /// `false -> true` (a use only *gains* a qualifying classification as a callee's
+    /// own flags fill in — see `scan_var_call_arg_uses`'s "any use that isn't
+    /// qualifying disqualifies" rule), so this is a monotone dataflow problem over a
+    /// finite lattice and is guaranteed to converge — a pure recursive/mutual-recursion
+    /// cycle with no base case ever reaching a real kernel constructor simply never
+    /// flips anything and converges immediately, qualifying nothing (correct: there's
+    /// no actual kernel underneath to be resident from). File order doesn't matter —
+    /// all functions in the program are gathered up front, so a callee defined *after*
+    /// its caller in source is visible to every pass just like one defined before.
+    fn collect_gpu_arg_params(&mut self, program: &Program) {
+        if self.kernel_decls.is_empty() { return; }
+        let mut all_fns: Vec<&FnDecl> = Vec::new();
+        for item in &program.items { Self::gather_fns_item(item, &mut all_fns); }
+
+        let mut flags_by_fn: HashMap<&str, Vec<bool>> = all_fns.iter()
+            .map(|f| (f.name.as_str(), vec![false; f.params.len()]))
+            .collect();
+
+        // Defensive bound on passes: monotonicity over a lattice of this total size
+        // guarantees convergence in at most (total param slots + 1) passes, so this
+        // cap is never actually hit — it only guards against a future logic error
+        // turning this into an infinite loop.
+        let max_passes = all_fns.iter().map(|f| f.params.len()).sum::<usize>() + 2;
+
+        for _ in 0..max_passes {
+            let mut changed = false;
+            for f in &all_fns {
+                let mut new_flags = vec![false; f.params.len()];
+                for (i, p) in f.params.iter().enumerate() {
+                    let kernel_decls = &self.kernel_decls;
+                    let known = &flags_by_fn;
+                    let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
+                        if let Some(decl) = kernel_decls.get(fn_name) {
+                            let Some(init) = decl.inits.first() else { return false };
+                            let Some(init_param) = init.params.get(arg_idx) else { return false };
+                            let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
+                            let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
+                            return matches!(field.qual, GpuQual::Unified | GpuQual::Global)
+                                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+                        }
+                        known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
+                    };
+                    let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify);
+                    new_flags[i] = only_qualifying;
+                }
+                if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {
+                    changed = true;
+                    flags_by_fn.insert(f.name.as_str(), new_flags);
+                }
+            }
+            if !changed { break; }
+        }
+
+        for (name, flags) in flags_by_fn {
+            if flags.iter().any(|b| *b) {
+                self.fn_gpu_arg_params.insert(name.to_string(), flags);
+            }
+        }
+    }
+
+    fn gather_fns_item<'a>(item: &'a Item, out: &mut Vec<&'a FnDecl>) {
+        match item {
+            Item::Fn(f)   => out.push(f),
+            Item::Mod(m)  => { for i in &m.items { Self::gather_fns_item(i, out); } }
+            Item::Stmt(s) => Self::gather_fns_stmt(s, out),
+            _ => {}
+        }
+    }
+
+    fn gather_fns_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a FnDecl>) {
+        match stmt {
+            Stmt::Fn(f)     => out.push(f),
+            Stmt::Mod(m)    => { for i in &m.items { Self::gather_fns_item(i, out); } }
+            Stmt::If(s)     => { for (_, b) in &s.branches { for st in b { Self::gather_fns_stmt(st, out); } } if let Some(b) = &s.else_body { for st in b { Self::gather_fns_stmt(st, out); } } }
+            Stmt::While(s)  => { for st in &s.body { Self::gather_fns_stmt(st, out); } }
+            Stmt::For(s)    => { for st in &s.body { Self::gather_fns_stmt(st, out); } }
+            Stmt::Loop(s)   => { for st in &s.body { Self::gather_fns_stmt(st, out); } }
+            Stmt::DoWhile(s) => { for st in &s.body { Self::gather_fns_stmt(st, out); } }
+            Stmt::Try(s)    => { for st in &s.body { Self::gather_fns_stmt(st, out); } for c in &s.catch_clauses { for st in &c.body { Self::gather_fns_stmt(st, out); } } }
+            Stmt::Guard(s)  => { for st in &s.else_body { Self::gather_fns_stmt(st, out); } }
+            Stmt::Defer(b)  => { for st in b { Self::gather_fns_stmt(st, out); } }
+            Stmt::With(s)   => { for st in &s.body { Self::gather_fns_stmt(st, out); } }
+            _ => {}
         }
     }
 
@@ -335,14 +501,7 @@ impl Checker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(s) => self.check_let_stmt(s),
-            Stmt::LetDestructure(s) => {
-                self.check_expr(&s.value);
-                for b in &s.bindings {
-                    if b.name != "_" {
-                        self.define_typed(&b.name, s.binding.clone(), b.ty.clone());
-                    }
-                }
-            }
+            Stmt::LetDestructure(s) => self.check_let_destructure(s),
             Stmt::Expr(e)      => self.check_expr(e),
             Stmt::Return(r)    => { if let Some(v) = &r.value { self.check_expr(v); } }
             Stmt::Throw(t)     => { if let Some(v) = &t.value { self.check_expr(v); } }
@@ -401,6 +560,45 @@ impl Checker {
         self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         self.define_let(&s.name, s.binding.clone(), s.ty.clone(), s.value.as_ref());
+    }
+
+    /// Tuple analogue of `define_let`'s interprocedural case: if `s.value` is a call
+    /// to a `fn_returns_resident_tuple` function, a destructured binding at a
+    /// resident tuple position stays resident only with an *explicit*
+    /// `'gpu'unified`/`'gpu'global` opt-in annotation (e.g. `let
+    /// ([float]'gpu'unified sa, ...) = mha_step_gpu(...)`) — the opposite default
+    /// from the single-value interprocedural case (`let fc = linear_gpu(...)`
+    /// stays resident with *no* annotation at all). Tuple destructuring predates
+    /// this residency feature everywhere in real code, so every existing
+    /// unannotated `let (a, b, c) = some_tuple_fn(...)` was written expecting a
+    /// plain, already-materialized value it can index/iterate immediately — an
+    /// opt-in default would silently change that. Confirmed against a real
+    /// `cargo check` failure otherwise: `test_math_gpu.br`'s `let (step_out, ...) =
+    /// mha_step_gpu(...)` indexes `step_out` right away with no annotation, which
+    /// only compiles if the default is "materialize unless told otherwise".
+    fn check_let_destructure(&mut self, s: &LetDestructureStmt) {
+        self.check_expr(&s.value);
+        let tuple_flags: Option<Vec<bool>> = match &s.value.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(fn_name) => self.fn_returns_resident_tuple.get(fn_name).cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
+        for (i, b) in s.bindings.iter().enumerate() {
+            if b.name == "_" { continue; }
+            let position_resident = tuple_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+            let has_explicit_resident_ty = b.ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false);
+            let resident_from_field = position_resident && has_explicit_resident_ty;
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.insert(b.name.clone(), Binding {
+                    kind: s.binding.clone(),
+                    ty: b.ty.clone(),
+                    resident_from_field,
+                    kernel_type: None,
+                });
+            }
+        }
     }
 
     fn check_if(&mut self, s: &IfStmt) {
@@ -499,7 +697,24 @@ impl Checker {
             }
             ExprKind::Call(callee, args) => {
                 self.check_expr(callee);
-                for a in args { self.check_expr(&a.value); }
+                // A resident value passed as a bare argument at a position the callee
+                // is known to consume residently (`fn_gpu_arg_params`, populated by
+                // `scan_fn_gpu_arg_params`) is legal without `with` first — that's the
+                // whole point of the interprocedural carve-out (docs/scoped-access-
+                // blocks.md's "Kernel Constructor Interaction"). Every other
+                // host-materializing use of a resident `Var` still bottoms out at the
+                // `ExprKind::Var` leaf below and gets flagged as usual.
+                let gpu_arg_positions: Option<Vec<bool>> = match &callee.kind {
+                    ExprKind::Var(n) => self.fn_gpu_arg_params.get(n.as_str()).cloned(),
+                    _ => None,
+                };
+                for (i, a) in args.iter().enumerate() {
+                    let carved_out = matches!(&a.value.kind, ExprKind::Var(_))
+                        && gpu_arg_positions.as_ref().map(|flags| flags.get(i).copied().unwrap_or(false)).unwrap_or(false);
+                    if !carved_out {
+                        self.check_expr(&a.value);
+                    }
+                }
             }
             ExprKind::MethodCall(recv, _, args) | ExprKind::OptionalMethodCall(recv, _, args) => {
                 self.check_expr(recv);
@@ -686,6 +901,24 @@ impl Checker {
 /// needs. See `Binding::resident_from_field`.
 fn is_kernel_field_read(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(_)))
+}
+
+/// Which field a kernel's `init` assigns a given parameter name to (`field = param`,
+/// the only pattern kernel-constructor codegen understands — mirrors the
+/// transpiler's own `emit_kernel::kernel_param_to_field_map`, duplicated here rather
+/// than shared since the checker doesn't depend on the transpiler).
+fn kernel_init_field_for_param<'a>(decl: &'a KernelDecl, param_name: &str) -> Option<&'a str> {
+    let init = decl.inits.first()?;
+    for stmt in &init.body {
+        if let Stmt::Expr(e) = stmt {
+            if let ExprKind::Assign(lhs, rhs) = &e.kind {
+                if let (ExprKind::Var(field), ExprKind::Var(param)) = (&lhs.kind, &rhs.kind) {
+                    if param == param_name { return Some(field.as_str()); }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn param_binding(p: &Param) -> BindingKind {

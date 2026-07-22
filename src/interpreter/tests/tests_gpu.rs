@@ -296,7 +296,52 @@ let _result = k.buf
     );
 }
 
-// ─── sync is a no-op ────────────────────────────────────────────────────────
+// ─── unassigned fixed-size 'sync fields default to zero, not Nil ────────────
+
+#[test]
+fn test_unassigned_sync_fixed_array_defaults_to_zero() {
+    // Per gpu-module.md's "no init() assignment needed": a `[T, N]'sync` field
+    // the kernel's `init()` never touches must still be a real (zero-filled)
+    // array inside the kernel body, matching what every real GPU target does
+    // (WGSL `var<workgroup>` / CUDA `__shared__` are hardware zero-initialized)
+    // — not `Nil`, which would hard-error on the first `tile[i] = ...`.
+    let src = r#"
+kernel Tile:
+    mut [float]'unified   input
+    mut [float]'unified   out
+    mut [float, 4]'sync   tile
+
+    init([float]'unified data):
+        input = data
+        out   = [0.0, 0.0, 0.0, 0.0]
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = tile[tid] + input[tid]
+
+let data = [1.0, 2.0, 3.0, 4.0]
+mut k = Tile(data)
+kernel:
+    k(block = 4)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    // tile[tid] defaults to 0.0, so out == input unchanged.
+    assert_eq!(
+        val,
+        Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(3.0), Value::Float(4.0)].into())
+    );
+}
+
+// ─── sync is a no-op (for kernels with no `'sync` field) ────────────────────
+//
+// `sync` is a REAL cross-thread barrier when the kernel has a `'sync` field
+// (see `test_sync_barrier_cross_thread_visibility` below) — `kernel_barrier`
+// is only populated on kernels that declare one. A kernel with none, like
+// this one, never gets a barrier at all, so `sync` really is still a no-op
+// here — this test is about that narrower case, not `sync` in general.
 
 #[test]
 fn test_sync_is_noop() {
@@ -327,6 +372,124 @@ let _result = k.buf
         val,
         Value::Array(vec![Value::Float(4.0), Value::Float(6.0), Value::Float(8.0)].into())
     );
+}
+
+// ─── real cross-thread `'sync` barrier visibility ───────────────────────────
+
+#[test]
+fn test_sync_barrier_cross_thread_visibility() {
+    // Every thread writes its own tile slot, then (after a real barrier) reads
+    // slot 0 — written by a DIFFERENT thread. Only correct if `sync` actually
+    // blocks every thread in the block until all writes have landed, and if
+    // `tile` reads observe the shared (not per-thread-private) backing array.
+    let src = r#"
+kernel Broadcast:
+    mut [float]'unified   out
+    mut [float, 256]'sync tile
+
+    init([float]'unified o):
+        out = o
+
+    def ():
+        let tid = gpu.thread.x
+        tile[tid] = float(tid) + 1.0
+        sync
+        out[tid] = tile[0]
+
+var [float] data = []
+for i in 0..256:
+    data.push(0.0)
+mut k = Broadcast(data)
+kernel:
+    k(block = 256)
+let _out0 = k.out[0]
+let _out255 = k.out[255]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_out0"), Value::Float(1.0));
+    assert_eq!(get_var(&interp, "_out255"), Value::Float(1.0));
+}
+
+// ─── explicit `grid =` must be honored, not silently re-inferred ───────────
+
+#[test]
+fn test_explicit_grid_not_overridden_by_length_inference() {
+    // A dispatch that gives BOTH `block =` and `grid =` explicitly used to be
+    // routed through the "`k(block = N)` short-hand" path regardless, which
+    // ignores `grid` entirely and infers it from the longest array-typed
+    // field instead. Here the `'global` input `big` is deliberately longer
+    // than `block * the-grid-that-should-be-used`, so a silently-inferred
+    // grid would dispatch MORE threads than intended and corrupt `count`
+    // (every extra thread increments it once more than expected).
+    let src = r#"
+kernel MarkThreads:
+    let [float]'global  big
+    mut [float]'unified marks
+
+    init([float]'global b, [float]'unified m):
+        big = b
+        marks = m
+
+    def ():
+        let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        marks[i] = 1.0
+
+var [float] big = []
+for i in 0..1000:
+    big.push(0.0)
+var [float] marks = []
+for i in 0..1024:
+    marks.push(0.0)
+mut k = MarkThreads(big, marks)
+kernel:
+    k(block = 256, grid = 1)
+let _mark_255 = k.marks[255]
+let _mark_256 = k.marks[256]
+let _mark_1023 = k.marks[1023]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    // block=256, grid=1 (explicit) -> exactly 256 threads (indices 0..255
+    // marked). Length-inference from `big` (1000 elements) would instead give
+    // ceil(1000/256)=4 blocks — 1024 threads, marking indices up to 1023 too.
+    assert_eq!(get_var(&interp, "_mark_255"), Value::Float(1.0));
+    assert_eq!(get_var(&interp, "_mark_256"), Value::Float(0.0));
+    assert_eq!(get_var(&interp, "_mark_1023"), Value::Float(0.0));
+}
+
+// ─── 3D block/grid dispatch: gpu.thread.z / gpu.block.z are real ───────────
+
+#[test]
+fn test_3d_block_and_grid_dispatch() {
+    let src = r#"
+kernel Sum3D:
+    mut [float]'unified out
+
+    init([float]'unified o):
+        out = o
+
+    def ():
+        let idx = gpu.thread.z + gpu.block.z * gpu.block_dim.z
+        out[idx] = float(idx) * 10.0
+
+var [float] data = []
+for i in 0..4:
+    data.push(0.0)
+mut k = Sum3D(data)
+kernel:
+    k(block = (1, 1, 2), grid = (1, 1, 2))
+let _r0 = k.out[0]
+let _r1 = k.out[1]
+let _r2 = k.out[2]
+let _r3 = k.out[3]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_r0"), Value::Float(0.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float(10.0));
+    assert_eq!(get_var(&interp, "_r2"), Value::Float(20.0));
+    assert_eq!(get_var(&interp, "_r3"), Value::Float(30.0));
 }
 
 // ─── end-to-end: element-wise multiply ──────────────────────────────────────

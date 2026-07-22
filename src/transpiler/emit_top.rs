@@ -660,7 +660,40 @@ impl Transpiler {
             self.fn_current_param_cols = prev_param_cols;
             self.fn_current_params_mut = prev_mut;
         }
-        let params_s: Vec<String> = f.params.iter().map(|p| self.emit_param(p)).collect();
+        // Interprocedural GPU residency (docs/scoped-access-blocks.md): a parameter
+        // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found used
+        // *exclusively* as a kernel-constructor argument gets typed `BoringGpuArg<T>`
+        // instead of a plain host array, so a caller can pass an already-resident
+        // value straight through (`emit_expr::emit_call`) with no upload. Free
+        // functions only — `fn_gpu_arg_params` is keyed by plain fn name and only
+        // ever populated for top-level `Item::Fn` (see `pre_scan`).
+        let gpu_arg_param_flags: Option<Vec<bool>> = if self_ty.is_none() {
+            self.fn_gpu_arg_params.get(&f.name).cloned()
+        } else {
+            None
+        };
+        let params_s: Vec<String> = f.params.iter().enumerate().map(|(i, p)| {
+            let is_gpu_arg_param = gpu_arg_param_flags.as_ref()
+                .map(|flags| flags.get(i).copied().unwrap_or(false))
+                .unwrap_or(false);
+            if is_gpu_arg_param {
+                // The param's own declared type is usually a plain, unqualified array
+                // (`[float] x`) — the exclusive-ctor-arg scan doesn't require an
+                // explicit `'gpu'unified`/`'gpu'global` annotation — but strip one off
+                // if present, same as the return-type case below.
+                let unqualified = p.ty.as_ref().map(|ty| match ty {
+                    Type::Qualified(inner, _) => inner.as_ref().clone(),
+                    other => other.clone(),
+                });
+                let inner_ty = unqualified.as_ref()
+                    .map(super::emit_kernel::array_inner_type)
+                    .unwrap_or(Type::Float);
+                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                format!("{}: BoringGpuArg<{}>", p.name, host_ty)
+            } else {
+                self.emit_param(p)
+            }
+        }).collect();
         let all_params = match self_ty {
             Some(_) => {
                 // For struct methods, use &mut self (def) or &self (req/task).
@@ -727,6 +760,43 @@ impl Transpiler {
         // Return type
         let base_ret = f.return_ty.as_ref()
             .map(|t| {
+                // Interprocedural GPU residency (docs/scoped-access-blocks.md): an
+                // explicit `'gpu'unified`/`'gpu'global` return type means this
+                // function's tail expression (a bare `k.field` read — see
+                // `emit_kernel::try_emit_gpu_resident_return`, invoked from
+                // `emit_stmt.rs`'s tail-expression handling) returns
+                // `BoringGpuArg::Resident(...)` instead of a materialized `Vec<T>`.
+                if t.gpu_resident_qual().is_some() {
+                    let unqualified = match t {
+                        Type::Qualified(inner, _) => inner.as_ref(),
+                        other => other,
+                    };
+                    let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                    let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                    return format!("BoringGpuArg<{}>", host_ty);
+                }
+                // Tuple analogue of the above: `([float]'gpu'unified, [float], [float])`
+                // (`mha_step_gpu`-style) -- substitute `BoringGpuArg<T>` at whichever
+                // positions `fn_returns_resident_tuple` flagged resident, leaving the
+                // rest as their ordinary Rust type.
+                if let Type::Tuple(elems) = t {
+                    if let Some(flags) = self.fn_returns_resident_tuple.get(&f.name) {
+                        let parts: Vec<String> = elems.iter().enumerate().map(|(i, elem_ty)| {
+                            if flags.get(i).copied().unwrap_or(false) {
+                                let unqualified = match elem_ty {
+                                    Type::Qualified(inner, _) => inner.as_ref(),
+                                    other => other,
+                                };
+                                let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                                format!("BoringGpuArg<{}>", host_ty)
+                            } else {
+                                self.emit_type(elem_ty)
+                            }
+                        }).collect();
+                        return format!("({})", parts.join(", "));
+                    }
+                }
                 // If the return type is a known trait name, use `impl TraitName` (static dispatch).
                 // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
                 if let Type::Named(n) = t {
@@ -830,6 +900,37 @@ impl Transpiler {
         let prev_async         = self.in_async;
         let prev_fn_returns_void = self.fn_returns_void;
         let prev_fn_declared_void = self.fn_declared_void;
+        // Interprocedural GPU residency (docs/scoped-access-blocks.md): ambient,
+        // function-scoped state for the deeper body-emission helpers that don't have
+        // `f` in scope (`emit_kernel::try_emit_gpu_resident_return`,
+        // `emit_kernel_construction`'s buffer-argument branch). Free functions only —
+        // both maps are keyed by plain fn name and only ever populated for top-level
+        // `Item::Fn` (see `pre_scan`).
+        let prev_current_fn_returns_resident = self.current_fn_returns_resident.take();
+        let prev_current_fn_returns_resident_tuple = self.current_fn_returns_resident_tuple.take();
+        let prev_current_fn_gpu_arg_params = std::mem::take(&mut self.current_fn_gpu_arg_params);
+        let prev_current_fn_gpu_arg_param_names = std::mem::take(&mut self.current_fn_gpu_arg_param_names);
+        // `resident_call_vars` is genuinely per-function/method local state (a local
+        // `let`/`var` name -> its resident Type), not signature-derived like the maps
+        // above -- so it must be reset to empty (not repopulated from any lookup) at
+        // the start of every function/method and restored after, exactly like
+        // `known_local_vars`/`var_types` already are elsewhere. Without this, a
+        // resident local in one function whose name happens to be reused by an
+        // ordinary (non-resident) local of the same name in another function leaks
+        // across the boundary -- confirmed via a real `cargo check` failure on
+        // whisper-boring: encoder.br's resident `h2` leaking into decoder.br's own,
+        // unrelated, genuinely-plain `h2`, causing it to pass through unwrapped where
+        // `BoringGpuArg::Host(..)` was required.
+        let prev_resident_call_vars = std::mem::take(&mut self.resident_call_vars);
+        if self_ty.is_none() {
+            self.current_fn_returns_resident = self.fn_returns_resident.get(&f.name).cloned();
+            self.current_fn_returns_resident_tuple = self.fn_returns_resident_tuple.get(&f.name).cloned();
+            self.current_fn_gpu_arg_params = self.fn_gpu_arg_params.get(&f.name).cloned().unwrap_or_default();
+            self.current_fn_gpu_arg_param_names = f.params.iter().enumerate()
+                .filter(|(i, _)| self.current_fn_gpu_arg_params.get(*i).copied().unwrap_or(false))
+                .map(|(_, p)| p.name.clone())
+                .collect();
+        }
         // Track the current function's type parameters for generic match detection.
         let prev_fn_type_params = std::mem::replace(
             &mut self.current_fn_type_params,
@@ -861,6 +962,12 @@ impl Transpiler {
         let prev_var_types        = std::mem::take(&mut self.var_types);
         let prev_string_vars      = std::mem::take(&mut self.string_vars);
         let prev_string_arc_vars  = std::mem::take(&mut self.string_arc_vars);
+        // Which string bindings get indexed (`name[idx]`, non-constant idx) anywhere in
+        // this function -- see `collect_str_index_targets` for why that's worth caching.
+        let prev_str_index_cache_vars = std::mem::replace(
+            &mut self.str_index_cache_vars,
+            Self::collect_str_index_targets(&f.params, &f.body),
+        );
         let prev_vec_vars         = std::mem::take(&mut self.vec_vars);
         let prev_collection_vars  = std::mem::take(&mut self.collection_vars);
         let prev_dict_vars        = std::mem::take(&mut self.dict_vars);
@@ -1044,6 +1151,17 @@ impl Transpiler {
             }
             self.line(&format!("let _boring_span = __boring_instrument::Span::enter(\"{}\");", span_label));
         }
+        // A string parameter that's indexed (`name[idx]`) somewhere in the body and can
+        // never be reassigned (plain param, neither `mut` nor `var`) gets its `Vec<char>`
+        // cache materialized once, up front, so the shared index codegen in
+        // `emit_expr.rs` can read from it in O(1) instead of `.chars().nth(idx)`.
+        for p in &f.params {
+            if self.str_index_cache_vars.contains(p.name.as_str())
+                && self.immutable_local_vars.contains(p.name.as_str())
+            {
+                self.line(&format!("let __strchars_{name}: Vec<char> = {name}.chars().collect();", name = p.name));
+            }
+        }
         self.emit_body(&f.body);
         // Cross-function propagation: update fn_sigs with inferred param qualifiers so that
         // callers defined after this function see the qualified signature and can propagate
@@ -1082,6 +1200,11 @@ impl Transpiler {
         self.fn_returns_void   = prev_fn_returns_void;
         self.fn_declared_void  = prev_fn_declared_void;
         self.fn_return_ty      = prev_fn_return_ty;
+        self.current_fn_returns_resident = prev_current_fn_returns_resident;
+        self.current_fn_returns_resident_tuple = prev_current_fn_returns_resident_tuple;
+        self.resident_call_vars = prev_resident_call_vars;
+        self.current_fn_gpu_arg_params = prev_current_fn_gpu_arg_params;
+        self.current_fn_gpu_arg_param_names = prev_current_fn_gpu_arg_param_names;
         self.fn_current_params      = prev_fn_current_params;
         self.fn_current_param_lines = prev_fn_current_param_lines;
         self.fn_current_param_cols  = prev_fn_current_param_cols;
@@ -1103,6 +1226,7 @@ impl Transpiler {
         self.var_types         = prev_var_types;
         self.string_vars       = prev_string_vars;
         self.string_arc_vars   = prev_string_arc_vars;
+        self.str_index_cache_vars = prev_str_index_cache_vars;
         self.vec_vars          = prev_vec_vars;
         self.collection_vars   = prev_collection_vars;
         self.dict_vars         = prev_dict_vars;

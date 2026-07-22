@@ -219,7 +219,16 @@ impl DeviceEmitter {
         }
         let _ = binding;
 
-        // 3. Workgroup ('sync fixed arrays) — declared inside fn body.
+        // 3. Workgroup ('sync fixed arrays) — must be module-scope `var<workgroup>`
+        // declarations in WGSL, not statements inside the function body.
+        for f in &decl.fields {
+            if matches!(f.qual, GpuQual::Sync) {
+                if let Type::ArrayN(inner, n) = &f.ty {
+                    self.line(&format!("var<workgroup> {}: array<{}, {}>;",
+                        f.name, wgsl_scalar(inner), n));
+                }
+            }
+        }
 
         self.blank();
 
@@ -306,16 +315,6 @@ impl DeviceEmitter {
         self.line(") {");
         self.indent += 1;
         self.line(&format!("let bp_bdim = vec3<u32>({bx}u, {by}u, {bz}u);"));
-
-        // Declare fixed 'sync arrays as workgroup vars.
-        for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync) {
-                if let Type::ArrayN(inner, n) = &f.ty {
-                    self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        f.name, wgsl_scalar(inner), n));
-                }
-            }
-        }
 
         // Unpack 'const scalars and Dimension fields from params struct.
         let has_params = decl.fields.iter().any(is_params_field);

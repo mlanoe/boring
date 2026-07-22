@@ -1,6 +1,6 @@
 # Scoped Access Blocks — `with`
 
-> **Status: Shipped**, in a narrower form than originally scoped for the GPU side — see "Implementation Notes" near the end of this document for exactly what's implemented, what's verified, and what's still open. In short: `'actor`/`'actor'task`/`'guard`/`'guard'task` per-block locking is fully implemented, tested, and documented in the language book ([chapter 21](book.html#scoped-access-blocks--with)). `'gpu'unified`/`'gpu'global` GPU-residency — the original motivating problem in the Problem Statement below — is now also implemented, for the *intra-procedural* case (a kernel constructed and its field read back within the same function/scope, e.g. `examples/vector_add_gpu.br`/`matrix_mul_gpu.br`): the round-trip-per-access problem is genuinely fixed there, verified by codegen snapshot tests and cross-checked against the interpreter. Still open: an *inter-procedural* resident value returned across a function boundary (the `linear_gpu`-chain example below), and feeding a resident value directly into another kernel's constructor without a host round-trip at all (the `BoringGpuArg` sketch) — both need the kernel-struct-storage changes described in "Implementation Notes".
+> **Status: Shipped**, including the GPU-residency side end to end. `'actor`/`'actor'task`/`'guard`/`'guard'task` per-block locking is fully implemented, tested, and documented in the language book ([chapter 21](book.html#scoped-access-blocks--with)). `'gpu'unified`/`'gpu'global` GPU-residency — the original motivating problem in the Problem Statement below — is now implemented for both the *intra-procedural* case (a kernel constructed and its field read back within the same function/scope, e.g. `examples/vector_add_gpu.br`/`matrix_mul_gpu.br`) **and** the *inter-procedural* case (a resident value returned across a function-call boundary and chained into a further call, e.g. whisper-boring's `linear_gpu` → `gelu_gpu` → `linear_gpu`): both round-trip-per-access and round-trip-per-call-boundary are genuinely fixed, verified by codegen snapshot tests. See "Implementation Notes" for exactly what's built and — notably — a correction to this document's own original plan: the inter-procedural case turned out **not** to need the `Rc<RefCell<_>>`/`Arc<Mutex<_>>` kernel-struct wrapping originally thought necessary.
 
 ## Problem Statement
 
@@ -187,9 +187,9 @@ with result:                              # `result` is `let`-bound -> read-only
 
 Before this existed, `for i in 0..n: print "c[{i}] = {k.result[i]}"` read the *entire* buffer back from the GPU on every one of the `n` iterations.
 
-### Example — the motivating whisper-boring case (inter-procedural — still open)
+### Example — the motivating whisper-boring case (inter-procedural — implemented)
 
-> **Not implemented.** This example returns the resident value *across a function call boundary* (`linear_gpu`'s own return value) rather than reading a kernel field directly in the same scope as the example above — that needs the kernel-struct `Rc<RefCell<>>`/`Arc<Mutex<>>`-wrapping changes described in "Implementation Notes", not yet done. Today, `linear_gpu`'s real signature returns a plain `[float]` and its body's `k.y` still round-trips unconditionally on every call, exactly as in the "before" snippet below.
+> **Implemented and tested** — see `tests/wgpu_codegen.rs::test_with_gpu_resident_call_chain_no_intermediate_roundtrip`/`test_with_gpu_resident_call_infers_qualifier_without_annotation`. This example returns the resident value *across a function call boundary* (a wrapper function's own return value) rather than reading a kernel field directly in the same scope as the example above. Turned out **not** to need the kernel-struct `Rc<RefCell<>>`/`Arc<Mutex<>>`-wrapping this document originally proposed — see "Implementation Notes" for why. `whisper-boring/src/math_gpu.br`'s actual chaining functions (`linear_gpu`, `gelu_gpu`, etc.) still return a plain `[float]` as of this writing — updating them to declare `'gpu'unified`/`'gpu'global` return types is the natural follow-up now that the language feature itself is done, tracked separately.
 
 Before (current behavior, three round-trips):
 
@@ -202,9 +202,9 @@ let [float] pr  = linear_gpu(act, mlp_pr_w, mlp_pr_b, 1, d * 4, d)  # re-upload,
 After (three dispatches, one readback — for whichever value the caller actually needs on the host):
 
 ```boring
-let [float]'gpu fc  = linear_gpu(h3, mlp_fc_w, mlp_fc_b, 1, d, d * 4)   # dispatch, stays resident
-let [float]'gpu act = gelu_gpu(fc)                                      # dispatch, stays resident (fc consumed directly)
-let [float]'gpu pr  = linear_gpu(act, mlp_pr_w, mlp_pr_b, 1, d * 4, d)  # dispatch, stays resident
+let [float]'gpu'unified fc  = linear_gpu(h3, mlp_fc_w, mlp_fc_b, 1, d, d * 4)   # dispatch, stays resident
+let [float]'gpu'unified act = gelu_gpu(fc)                                      # dispatch, stays resident (fc consumed directly)
+let [float]'gpu'unified pr  = linear_gpu(act, mlp_pr_w, mlp_pr_b, 1, d * 4, d)  # dispatch, stays resident
 
 with pr:                       # `pr` is `let`-bound -> read-only, no write-back
     print "pr[0] = {pr[0]}"    # readback happens exactly here, once
@@ -214,7 +214,7 @@ If `pr` itself is only ever going to feed the *next* kernel in the caller (the c
 
 ### Example — `'gpu'global`, always-transfer inspection
 
-> **Not implemented** — inter-procedural (`load_embedding_matrix(...)` is a function call, not a same-scope kernel-field read), same status as the example above.
+> **Implemented** via the same code path as the `'unified` case above — every part of the interprocedural implementation (`fn_returns_resident`, the `BoringGpuArg<T>` dual-mode call boundary, `with`'s materialization in `emit_with`) keys off `Type::gpu_resident_qual()`, which covers `'unified`/`'global` uniformly; there's no qualifier-specific branch anywhere in the new code. Not independently exercised by a dedicated `'global`-flavored test, though — the codegen tests (`tests/wgpu_codegen.rs`) only cover `'unified`.
 
 ```boring
 let [float]'gpu'global tok_emb = load_embedding_matrix(...)   # uploaded once, lives in device DRAM only
@@ -229,10 +229,10 @@ Same syntax as the `'unified` case; the difference is entirely in what it costs,
 
 ### Example — mutating a GPU array in place
 
-> **Not implemented for this exact shape** — `gelu_gpu(fc)` is a function call (inter-procedural), same status as the two examples above. The write-back mechanics shown here (mutation scan → mandatory `mut` alias → `copy_..._to_device` on close) **are** implemented and tested for the same-scope case — see `test_with_gpu_resident_write_back_on_mutation`.
+> **Implemented, not independently tested for this exact (inter-procedural) shape.** The write-back mechanics for a same-scope alias (mutation scan → mandatory `mut` alias → `copy_..._to_device` on close) are implemented and tested — `test_with_gpu_resident_write_back_on_mutation`. The interprocedural counterpart (`emit_stmt::emit_with`'s `resident_call_vars` branch) reuses the identical mutation scan and, on a detected write, calls the free `__boring_gpu_copy_h2d` helper directly on the retained `Arc<wgpu::Buffer>` (there's no live kernel instance to call a `copy_..._to_device` method on at this point — the kernel that produced the buffer already returned). The codegen exists and follows the same pattern as the tested same-scope case, but no dedicated codegen test exercises a mutating `with` on an inter-procedural resident value specifically.
 
 ```boring
-var [float]'gpu act = gelu_gpu(fc)   # `var` -> mutation is possible for this value
+var [float]'gpu'unified act = gelu_gpu(fc)   # `var` -> mutation is possible for this value
 
 with act:
     act[0] = 0.0          # index-assignment detected in this block's body
@@ -242,10 +242,10 @@ with act:
 
 ### Example — `var`-bound, but read-only *in this particular block*
 
-> **Not implemented for this exact shape** (inter-procedural, same reason as above) — but the read/write scan itself is implemented and this exact behavior (no write-back when nothing in the block mutates) is verified both for the same-scope GPU case (`test_with_gpu_resident_read_only_single_readback`) and for `'actor`/`'guard` — see the next example and "Implementation Notes".
+> **Implemented** — the interprocedural `with` branch runs the identical `ast::with_block_mutates` scan the same-scope case uses, so this exact behavior (no write-back when nothing in the block mutates) falls out for free. Verified for the same-scope GPU case (`test_with_gpu_resident_read_only_single_readback`) and for the interprocedural case (`test_with_gpu_resident_call_chain_no_intermediate_roundtrip`, which asserts no buffer-capture/write-back codegen for its read-only `with fc2:`), and for `'actor`/`'guard` — see the next example and "Implementation Notes".
 
 ```boring
-var [float]'gpu act = gelu_gpu(fc)   # `var` overall -- mutated elsewhere in the function, say
+var [float]'gpu'unified act = gelu_gpu(fc)   # `var` overall -- mutated elsewhere in the function, say
 
 with act:
     print "act[0] = {act[0]}"   # only ever reads -- no assignment, no var-param call, no def call
@@ -292,15 +292,12 @@ A value's qualifier and binding are unaffected by entering or leaving a block �
 
 ## Kernel Constructor Interaction
 
-> **Not implemented** — see "Implementation Notes". This needs the same inter-procedural resident-value machinery the whisper-boring chaining example does; today a resident alias's only legal use is materializing via `with`, not feeding into another kernel's constructor.
+> **Implemented — for wgpu, and in a simpler shape than originally sketched below.** See "Implementation Notes" for the full explanation; in short, `Kernel::new()`'s own Rust signature never needed to change at all.
 
-For this to actually eliminate round-trips, kernel constructors that take a `'global`/`'unified` init parameter must accept **either** a plain host array **or** an already-resident `'gpu'unified` value, and skip the upload in the latter case. Concretely, the generated Rust constructor branches on which the argument is:
+For this to actually eliminate round-trips, kernel construction needs to accept **either** a plain host array **or** an already-resident value, and skip the upload in the latter case. This document originally proposed changing `Kernel::new()`'s own Rust signature to take a dual-mode `BoringGpuArg<T>` parameter directly:
 
 ```rust
-// today: always uploads
-fn new(x: &Vec<f64>, ...) -> Self { ... let x_buf = /* H2D copy of x */ ...; ... }
-
-// proposed: reuse the buffer directly when the argument is already GPU-resident
+// originally proposed — NOT what got built:
 fn new(x: BoringGpuArg<f64>, ...) -> Self {
     let x_buf = match x {
         BoringGpuArg::Resident(buf) => buf,          // no copy
@@ -310,7 +307,17 @@ fn new(x: BoringGpuArg<f64>, ...) -> Self {
 }
 ```
 
-This is an implementation-level change to kernel constructor codegen (`wgpu/host.rs`'s `emit_kernel_new`, and the analogous cuda/metal paths), not something visible in Boring source — a `linear_gpu(fc, ...)` call looks identical whether `fc` is a plain `[float]`, a `[float]'gpu'unified`, or a `[float]'gpu'global`. The buffer-reuse path is identical for both GPU qualifiers; only what happens inside a `with` block on that same value differs.
+That turned out to be based on a wrong assumption about the existing codegen: `Kernel::new()` **never actually takes host arrays as Rust parameters** — it only takes scalars/device/queue and allocates every buffer field at a placeholder size; the real upload happens via a separate `k.copy_{field}_to_device(...)` call emitted **at the call site**, after construction (`emit_kernel::emit_kernel_construction`). Since that upload step is already a separate, call-site-generated statement rather than baked into `new()`'s signature, the `BoringGpuArg<T>` duality only needs to exist at the **Boring free-function boundary** (a wrapping function like `linear_gpu`'s own parameter/return type — see "Implementation Notes"), and the call-site codegen for `mut k = Kernel(x, ...)` simply branches on that enum instead of always calling `copy_x_to_device`:
+
+```rust
+// what's actually emitted (emit_kernel::emit_kernel_construction):
+match &x {
+    BoringGpuArg::Resident(buf, _len) => { k.x_buf = std::sync::Arc::clone(buf); k.rebuild_bind_group(); }
+    BoringGpuArg::Host(v) => { k.copy_x_to_device(&v.iter().map(|&x| x as f32).collect::<Vec<f32>>()); }
+}
+```
+
+`Kernel::new()` itself is completely unchanged. This is an implementation-level change to kernel-construction codegen (`emit_kernel.rs`'s `emit_kernel_construction`, plus the Boring-function-boundary codegen in `emit_top.rs`/`emit_expr.rs` — wgpu only; cuda/metal don't share the general pipeline this was built against, see "Implementation Notes" below), not something visible in Boring source — a `linear_gpu(fc, ...)` call looks identical whether `fc` is a plain `[float]`, a `[float]'gpu'unified`, or a `[float]'gpu'global`. The buffer-reuse path is identical for both GPU qualifiers; only what happens inside a `with` block on that same value differs.
 
 ## Open Questions
 
@@ -333,19 +340,32 @@ The `'gpu'unified`/`'gpu'global` residency side is implemented for the **intra-p
 - Verified three ways: (1) `tests/wgpu_codegen.rs::test_with_gpu_resident_read_only_single_readback`/`test_with_gpu_resident_write_back_on_mutation` — exact codegen-shape snapshot tests (exactly one `copy_field_to_host`/`copy_field_to_device` call, correct `mut`, no leftover `*mut`); (2) cross-checked against the interpreter on the same source (identical output, since the interpreter treats it as a plain passthrough); (3) `examples/vector_add_gpu.br`/`matrix_mul_gpu.br` updated to use this pattern for their own print loops, confirmed identical output to before via the interpreter.
 - **Not independently verified against real GPU hardware for correct numeric output.** This machine has only integrated graphics (Intel UHD, no discrete GPU) and the wgpu backend has several pre-existing, unrelated correctness gaps that block a clean end-to-end run today, found while trying: `GPU(0)` device-info API has no wgpu implementation; an array-comprehension emits `Vec<i64>` where an `isize`-typed binding expects `Vec<isize>` (E0308); the checked-in `examples/saxpy_wgpu` snapshot fails to build against the current `naga`/`wgpu` versions (`Identifier starts with a reserved prefix: '__params'`); a from-scratch Saxpy kernel (`x`/`y` both `'unified`, uploaded post-construction via separate `copy_x_to_device`/`copy_y_to_device` calls) dispatches and compiles cleanly but returns each element's *initial* value rather than the computed one, on real hardware — confirmed to reproduce identically with a **plain `k.y[i]` control (no `with`, no alias, nothing this session touched)**, so it predates and is unrelated to this feature. None of these four are `with`-related; fixing them is separate work.
 
-**Still open — the inter-procedural case** (a resident value crossing a function-return boundary, e.g. `linear_gpu`):
+**Now implemented — the inter-procedural case** (a resident value crossing a function-return boundary, e.g. `linear_gpu`):
 
-1. **No existing `'gpu'unified`/`'gpu'global`-qualified *return value* anywhere in real code.** `whisper-boring/src/math_gpu.br`'s actual `linear_gpu` returns a plain `[float]`, tail-expression `k.y` — a kernel-field read that always round-trips via `try_emit_kernel_field_read`. Making `let fc'gpu'unified = linear_gpu(...)` real means changing `linear_gpu`'s own signature and body-emission (skip the eager readback when the *caller* wants residency) plus a new interprocedural `fn name -> (kernel type, field name)` table — a fundamentally different mechanism from the same-scope alias above, which needs no interprocedural bookkeeping at all.
-2. **Kernel struct buffer fields are not `Arc`-shaped.** `wgpu::host::emit_kernel_new`/`emit_kernel_struct` store every `'unified`/`'global` field as a bare `wgpu::Buffer` owned directly by the kernel struct, with a `bind_group` built once (and rebuilt on resize) referencing those buffers by value. A resident value that must outlive the function that constructed its kernel needs the kernel instance itself to stay reachable from both the return site and wherever it's later used, which means `Rc<RefCell<KernelStruct>>` (single-thread) / `Arc<Mutex<KernelStruct>>` (multi-thread) wrapping — a real change to kernel-struct storage, needed only for kernel instances actually returned as a `'gpu`-resident value, not the direct `kernel:`-block-in-`main()` usage every existing example/test (and the same-scope alias above) already relies on unchanged.
-3. **`cuda`/`metal` targets don't share the general pipeline `with` was implemented against**, for either half. Checked `src/transpiler/cuda/host.rs`/`metal/host.rs`: unlike wgpu (whose `mod.rs` runs the *same* `Transpiler`/`emit_stmt.rs` as `boring build` with no target, then splices its output in — see `transpile_wgpu`'s `general_out`), cuda and metal have their own separate, much smaller, kernel-only host transpilers with no `OwnerQual::Actor`/`Guard` support at all and a catch-all `_ => "/* unsupported stmt */"` that silently swallows `with`. Getting either half of `with` working there is blocked on first giving those backends the general-purpose statement/expression support wgpu already gets by reusing the shared pipeline — a gap that predates this feature.
+This landed simpler than the three-part plan originally sketched above, because point 2 below turned out to be unnecessary — worth reading before the "what's real" list.
 
-Net effect: the inter-procedural GPU-residency case remains a strictly bigger unit of work — (a) a return-type/body-emission change to every `'gpu`-returning function, (b) a new interprocedural fn→(kernel, field) table, (c) a conditional `Rc`/`Arc`-wrapping change to kernel-struct storage — and, for cuda/metal, (d) building general-purpose host codegen those backends don't have yet at all. Recommend fixing the four unrelated wgpu correctness gaps above first (on real discrete-GPU hardware, which this session didn't have), so the *already-implemented* same-scope case can be confirmed correct at runtime, before investing in (a)-(c).
+**The key finding that simplified everything**: the original plan assumed a resident value returned across a function boundary would need the *whole kernel instance* to somehow outlive the function that constructed it (hence "`Rc<RefCell<KernelStruct>>`/`Arc<Mutex<KernelStruct>>` wrapping"). That's not actually true. Only the **buffer** needs to survive — and a `wgpu::Buffer` is already independent of whatever kernel struct originally created it once `device.create_buffer(...)` returns (it isn't borrowed from the pipeline, bind group, or device in any lifetime-tied way). So making the buffer field `Arc<wgpu::Buffer>` (point 2's actual fix, much smaller than proposed) is *sufficient*: the producing function clones the `Arc` out into its return value, the kernel instance (and its now-irrelevant other fields) drops normally at function end, and the buffer keeps living, referenced by the `Arc` alone. No `Rc<RefCell<_>>`/`Arc<Mutex<_>>` wrapping of anything is needed anywhere.
+
+**What's real now** (wgpu only — see point 3 below for cuda/metal):
+
+- **`Checker::fn_returns_resident: HashMap<String, Type>`** and its transpiler-side mirror (`Transpiler::fn_returns_resident`, independently recomputed — same existing pattern as `kernel_decls` being tracked separately on both sides) — a free function's declared return type qualifies exactly like a `let`'s does: explicit `'gpu'unified`/`'gpu'global` annotation, or inferred from an unannotated bare `k.field` tail expression (`Checker::infer_gpu_resident` extended to also recognize a call to a `fn_returns_resident` function, so the inference chains transitively through `let fc = linear_gpu(...)`).
+- **`Checker::fn_gpu_arg_params: HashMap<String, Vec<bool>>`** (mirrored on the transpiler side too) — a bounded, single-pass body scan (`ast::scan_var_call_arg_uses`, structurally the same kind of scan `ast::with_block_mutates` already does) finds, per function, which parameters are used **exclusively** as a bare kernel-constructor argument at a `'unified`/`'global` field position — nothing else in the body may reference that parameter (no indexing, `.length`, arithmetic, passed elsewhere). Such a parameter is emitted `BoringGpuArg<T>`-typed instead of a plain host array; every other parameter is completely unaffected. This is a deliberate scope restriction: it matches the real shape every kernel-launcher wrapper function in this codebase uses (`linear_gpu(x, w, b, seq, d_in, d_out)` — `x`/`w`/`b` are consumed only by the kernel constructor, sizing uses the `int` params) — a parameter used more richly than that just keeps today's always-materialize behavior, not a regression, just no speedup for that one parameter.
+- **Kernel buffer fields are now `Arc<wgpu::Buffer>`** (`wgpu::host::emit_kernel_struct`/`emit_kernel_new`/the resize branch of `copy_{field}_to_device`) — the one storage change actually needed, per the finding above. `Kernel::new()`'s own Rust signature is otherwise completely unchanged.
+- **`BoringGpuArg<T>` enum** (`enum BoringGpuArg<T> { Resident(Arc<wgpu::Buffer>, usize), Host(Vec<T>) }`, `#[derive(Clone)]`), emitted once per wgpu-target program. Lives at the **Boring free-function boundary** (a resident-consuming parameter's/return's Rust type), not inside `Kernel::new()` — see "Kernel Constructor Interaction" above for why that's a smaller change than originally planned.
+- **Call-site argument wrapping** (`emit_methods::emit_args_coerced`, a narrow short-circuit at the top of its per-argument loop): a `fn_gpu_arg_params`-marked position gets the already-resident value passed straight through (`fc.clone()` — an `Arc::clone` inside, no data copy) if the argument is itself a tracked resident var, otherwise wrapped `BoringGpuArg::Host(expr.clone())` for upload as before. The checker's `ExprKind::Call` opacity check (`check_gpu_opacity`) carves out exactly this case — passing a resident value into a call that's actually going to consume it residently doesn't require `with` first; every other host-materializing use still does.
+- **`resident_call_vars: HashMap<String, Type>`** (transpiler) — the interprocedural counterpart to the same-scope `gpu_resident_vars`. Unlike that map (a pure compile-time alias with *no* Rust binding, since the data is just a re-readable kernel field), a call already executed with real side effects, so `let fc = linear_gpu(...)` (`emit_kernel::try_emit_gpu_resident_call_let`) emits a genuine `let` binding — just typed `BoringGpuArg<T>` — and registers `fc` here.
+- **`emit_stmt::emit_with`'s new branch** for `resident_call_vars` names: no kernel instance is reachable at this point (it was dropped when the producing function returned), so materialization/write-back goes through the free `__boring_gpu_copy_d2h`/`__boring_gpu_copy_h2d` helpers directly on the retained `Arc<wgpu::Buffer>`, using the same global `__boring_gpu_device()`/`__boring_gpu_queue()` accessors kernel construction already relies on. Same mutation-scan-gated write-back as the same-scope case.
+- **Function tail-expression codegen** (`emit_kernel::try_emit_gpu_resident_return`, hooked into `emit_stmt.rs`'s tail-expression handling): when the enclosing function's return type is resident and the tail expression is a bare `k.field` read, emits `BoringGpuArg::Resident(Arc::clone(&k.field_buf), len)` instead of the unconditional `copy_field_to_host()` download.
+- Verified by `tests/wgpu_codegen.rs::test_with_gpu_resident_call_chain_no_intermediate_roundtrip` (exact codegen-shape snapshot: dual-typed signature, `Arc::clone`-only argument passthrough on the second call, zero `copy_..._to_host()` calls anywhere in the chain, materialization only at the final `with`) and `test_with_gpu_resident_call_infers_qualifier_without_annotation` (same shape, unannotated `let`s).
+- **`cuda`/`metal` targets still don't share the general pipeline this was built against**, for either half of `with` (not just this feature) — unchanged from the previous version of this document. Checked `src/transpiler/cuda/host.rs`/`metal/host.rs`: unlike wgpu (whose `mod.rs` runs the *same* `Transpiler`/`emit_stmt.rs` as `boring build` with no target, then splices its output in — see `transpile_wgpu`'s `general_out`), cuda and metal have their own separate, much smaller, kernel-only host transpilers with no `OwnerQual::Actor`/`Guard` support at all and a catch-all `_ => "/* unsupported stmt */"` that silently swallows `with`. Getting either half of `with` working there is blocked on first giving those backends the general-purpose statement/expression support wgpu already gets by reusing the shared pipeline — a gap that predates this feature and this session didn't attempt.
+- **Not independently verified against real GPU hardware for correct numeric output**, same caveat as the same-scope case above (no discrete GPU available this session) — verified via codegen-shape snapshot tests only.
+- **The natural follow-up, not done in this pass**: `whisper-boring/src/math_gpu.br`'s real chaining functions (`linear_gpu`, `gelu_gpu`, `attention_heads_gpu`, etc.) still declare a plain `[float]` return type — updating them to `'gpu'unified`/`'gpu'global` and re-measuring the real pipeline (baseline ~92–123s on `test10s.wav`/`tiny`, measured in the session that wrote the Problem Statement) is separate, real-world validation work on top of the language feature itself.
 
 ## Summary
 
 | Concern | Solution |
 |---|---|
-| GPU kernel chaining forces a host round-trip per call | **Implemented for the same-scope case**: `let py'gpu'unified = k.y` is a compile-time alias (no Rust binding); a `with` block materializes it exactly once via `k.copy_y_to_host()`, however many times the body indexes it. The inter-procedural case (a resident value returned across a function boundary) is still open — see "Implementation Notes" |
+| GPU kernel chaining forces a host round-trip per call | **Implemented for both the same-scope and inter-procedural cases**: `let py'gpu'unified = k.y` is a compile-time alias (no Rust binding); a `with` block materializes it exactly once via `k.copy_y_to_host()`, however many times the body indexes it. Across a function-call boundary (a `'gpu'unified`/`'gpu'global`-returning wrapper function, chained into a further call), the value passes as `BoringGpuArg<T>` — an `Arc::clone`, no data copy — all the way through, with only the final consumer's `with` paying a real transfer. See "Implementation Notes" |
 | `'actor`/`'guard` lock per call, no multi-statement critical section | Same `with` block, reused: acquires once, releases on block exit |
 | Implicit lazy materialization (rejected alternative) | Requires hidden mutable state behind `let`, and dangerous clone-at-call-site semantics for GPU buffers — explicit blocks avoid both |
 | AST shape for `with` | New dedicated `Stmt::With(WithStmt { names: Vec<String>, body: Vec<Stmt>, .. })` — no existing variant fits (`Defer` has no name-list; `ForStmt`'s `vars`/`body` shape is the right field layout but the wrong construct); qualifier and mutation-detection are resolved later, by the checker, not baked into the AST |
@@ -353,7 +373,7 @@ Net effect: the inter-procedural GPU-residency case remains a strictly bigger un
 | `'actor'task`/`'guard'task` async locking | Already fully implemented for today's per-call locking (`actor_task_write_guard` and 3 siblings in `emit_top.rs`) — branches on threading mode and `self.in_async`, falling back to a sync lock outside async code rather than requiring one. `with` calls the same 8 existing functions; no new sync-vs-async logic needed, and holding the guard across further `.await`s in the block body is the intended use, not a new risk |
 | Read vs. write access level (rejected: two keywords) | `let` binding → read-only, free, no analysis. `mut`/`var` binding → the compiler scans the block's own body (assignment, `var`-parameter calls, `def`-method calls, signatures only, never callee bodies) to grant read-only or write per block — so a `var` value read in one block doesn't pay for a write-back it never needed |
 | Scan boundaries: aliasing (`let other = <name>`), closures | Both a non-issue: host access is gated by the value's *type*, checked at every use site, not tracked through data flow — an alias or a captured closure needs its own `with` block to do anything, and that block correctly handles its own write-back whenever it runs. Surfaces one explicit decision: `'gpu'unified`/`'gpu'global` rebinding must be a cheap `Arc`-alias (like `'actor`/`'guard`/`'shared`), not the deep clone plain arrays get on rebind today |
-| Kernel constructors uploading data that's already GPU-resident | **Not implemented** — the `BoringGpuArg` dual-mode acceptance sketched in "Kernel Constructor Interaction" needs the inter-procedural resident-value machinery (see "Implementation Notes"); today a resident alias's only legal use is materializing via `with`, not feeding directly into another kernel's constructor |
+| Kernel constructors uploading data that's already GPU-resident | **Implemented** — `BoringGpuArg<T>` dual-mode acceptance, but at the Boring free-function boundary rather than inside `Kernel::new()` itself (which never took host arrays as a Rust parameter to begin with — see "Kernel Constructor Interaction"); a resident argument hands its buffer over directly (`Arc::clone`), a host argument uploads as before |
 | `'global`'s documented `gpu.copy()` mechanism | Never actually implemented (no parser/checker/interpreter/transpiler support found) — dropped in favor of `with`, not kept alongside it; docs referencing it (`gpu-module.md`, `wgpu-backend.md`, `cuda-module.md`) need updating when this lands |
 | `'unified` vs `'global` cost | Same block syntax, different transfer guarantee: `'unified` free/cheap where the backend supports real unified memory (a real copy on wgpu today); `'global` is always a real transfer, by definition, on every backend |
 | `'sync` / `'local` / `pub` on kernel fields | Out of scope, by design, not by gap: both qualifiers have **no** host access at all per `gpu-module.md`; a kernel field's visibility is already expressed through its qualifier, which is why `pub` is disallowed on kernel fields entirely rather than needing its own rule |

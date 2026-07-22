@@ -5029,7 +5029,32 @@ with result:
 
 A `'gpu'unified`/`'gpu'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
 
-> This works for a kernel constructed and read back within the same function — the shape every kernel example in this book uses. Returning a resident value across a function boundary is a separate, not-yet-implemented extension of this design — see [Scoped Access Blocks](scoped-access-blocks.html) for the full design and current status.
+### Residency across a function boundary
+
+Everything above works when the kernel is constructed and read back in the same scope. Residency also survives a **function-call boundary**: a function declared with a `'gpu'unified`/`'gpu'global` return type hands its result straight to the next call as a still-resident value, with no host round-trip in between — only the final consumer's `with` pays a real transfer:
+
+```boring
+req [float]'gpu'unified linear_gpu([float] x, [float] w, [float] b, int seq, int d_in, int d_out):
+    mut k = Linear(x, w, b, seq, d_in, d_out)
+    kernel:
+        k(block = seq * d_out)
+    k.y
+
+req [float]'gpu'unified gelu_gpu([float] x, int n):
+    mut k = Gelu(x)
+    kernel:
+        k(block = n)
+    k.out
+
+let fc = linear_gpu(h, w1, b1, 1, d, d * 4)   # dispatch, stays resident
+let act = gelu_gpu(fc, d * 4)                  # fc consumed directly — no upload, no download
+with act:
+    print "act[0] = {act[0]}"                 # the only real device->host transfer in the chain
+```
+
+A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'gpu'unified`/`'gpu'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
+
+> Both halves of this design — same-scope kernel-field materialization and cross-function residency — are implemented and shipped. See [Scoped Access Blocks](scoped-access-blocks.html) for the full design, the codegen this actually produces, and current known limitations (cuda/metal targets don't share this yet).
 
 ---
 
@@ -7126,7 +7151,7 @@ Deep dive into the three binding forms (`let` / `mut` / `var`), their interactio
 Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
 
 **[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
-Full design and implementation notes for `with` (see [chapter 21](#scoped-access-blocks--with) above for the language reference). The `'actor`/`'guard` per-block locking half and the same-scope `'gpu'unified`/`'gpu'global` kernel-field materialization half are both implemented and shipped; returning a GPU-resident value across a function boundary is a further, not-yet-implemented extension — this document records exactly what's done and what's missing.
+Full design and implementation notes for `with` (see [chapter 21](#scoped-access-blocks--with) above for the language reference, including [residency across a function boundary](#residency-across-a-function-boundary)). The `'actor`/`'guard` per-block locking half, the same-scope `'gpu'unified`/`'gpu'global` kernel-field materialization half, and the inter-procedural case (a resident value returned across a function boundary and chained into a further call) are all implemented and shipped. This document records the full design, exactly what the generated Rust looks like, and current known limitations (cuda/metal targets don't share this yet).
 
 ### GPU computing
 

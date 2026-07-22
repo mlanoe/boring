@@ -5,7 +5,7 @@ use super::helpers::*;
 impl Transpiler {
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
         match stmt {
-            Stmt::Let(s)            => self.emit_let(s, false),
+            Stmt::Let(s)            => { self.emit_let(s, false); self.maybe_emit_str_index_cache(&s.name); }
             Stmt::LetDestructure(s) => self.emit_let_destructure(s),
             Stmt::Return(s)         => self.emit_return(s),
             Stmt::Throw(s)          => self.emit_throw(s),
@@ -116,9 +116,67 @@ impl Transpiler {
                     }
                     self.line("Ok(())");
                 } else if is_last && self.in_throws && !self.suppress_ok_wrap {
+                    // Interprocedural GPU residency: every real kernel-launcher wrapper in
+                    // practice declares `throws` (kernel dispatch can fail), so this branch —
+                    // not the non-throws one below — is the one that actually needs the
+                    // `try_emit_gpu_resident_return` check. Missing it here meant a `throws`
+                    // function with a `'gpu'unified`/`'gpu'global` return type and a bare
+                    // `k.field` tail expression still got an eager `Ok(k.copy_y_to_host()...)`
+                    // download wrapped in `Ok(...)`, which doesn't even type-check against the
+                    // function's own `Result<BoringGpuArg<T>, _>` return type — confirmed via a
+                    // real `cargo check` against every `throws`-declared function in this file.
+                    if let Some(resident) = self.try_emit_gpu_resident_return(e) {
+                        self.line(&format!("Ok({resident})"));
+                        return;
+                    }
+                    // Tuple counterpart: this function's return type is a resident
+                    // tuple (`mha_step_gpu`-style) and the tail is a tuple literal.
+                    if let Some(resident) = self.try_emit_gpu_resident_tuple_return(e) {
+                        self.line(&format!("Ok({resident})"));
+                        return;
+                    }
+                    // This function's own return type is NOT itself resident (the case
+                    // above already handled that, via a raw pass-through that "just
+                    // works" since both sides are `BoringGpuArg<T>`) — but the tail
+                    // expression may still be a bare call to a `fn_returns_resident`
+                    // function (e.g. `Ok(linear_gpu(normed, ...))` inside a plain
+                    // `[float]`-returning function). Materialize instead of letting
+                    // `Ok(...)` wrap a `BoringGpuArg<T>` where `Vec<T>` is expected.
+                    if self.current_fn_returns_resident.is_none() {
+                        if let Some(materialized) = self.try_materialize_resident_call(e) {
+                            self.line(&format!("Ok({materialized})"));
+                            return;
+                        }
+                    }
                     let s = format!("Ok({})", self.emit_expr_owned(e));
                     self.line(&s);
                 } else if is_last && !self.fn_returns_void {
+                    // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
+                    // function's declared return type is `'gpu'unified`/`'gpu'global` and
+                    // the tail expression is a bare `k.field` read — emit
+                    // `BoringGpuArg::Resident(...)` instead of the unconditional
+                    // `copy_field_to_host()` download the normal expression emitter would
+                    // otherwise produce via `try_emit_kernel_field_read`.
+                    if let Some(resident) = self.try_emit_gpu_resident_return(e) {
+                        self.line(&resident);
+                        return;
+                    }
+                    // Tuple counterpart: this function's return type is a resident
+                    // tuple (`mha_step_gpu`-style) and the tail is a tuple literal.
+                    if let Some(resident) = self.try_emit_gpu_resident_tuple_return(e) {
+                        self.line(&resident);
+                        return;
+                    }
+                    // Same materializing fallback as the `throws` branch above, for a
+                    // non-throws function whose tail is a bare call to a
+                    // `fn_returns_resident` function without this function's own
+                    // return type opting into residency.
+                    if self.current_fn_returns_resident.is_none() {
+                        if let Some(materialized) = self.try_materialize_resident_call(e) {
+                            self.line(&materialized);
+                            return;
+                        }
+                    }
                     // Expression return: no semicolon (value-returning function).
                     // If the function returns Option<T>, wrap non-nil, non-Some values in Some().
                     let is_optional_return = matches!(
@@ -241,10 +299,48 @@ impl Transpiler {
 
         struct GpuOpened { name: String, kernel_var: String, field: String, is_write: bool, kernel_scalar_ty: &'static str }
         let mut gpu_opened: Vec<GpuOpened> = Vec::new();
+
+        // Interprocedural counterpart to `GpuOpened`/`gpu_resident_vars` above: a
+        // resident value returned across a function-call boundary (`resident_call_vars`,
+        // `let fc = linear_gpu(...)`) has no kernel instance left to call
+        // `copy_{field}_to_{host,device}` on — it was dropped when that function
+        // returned. Materialization/write-back goes through the free d2h/h2d helpers
+        // directly on the retained `Arc<wgpu::Buffer>` plus the global device/queue
+        // accessors instead. See docs/scoped-access-blocks.md's interprocedural case.
+        struct ResidentCallOpened { name: String, is_write: bool, device_ty: &'static str }
+        let mut resident_call_opened: Vec<ResidentCallOpened> = Vec::new();
+
         let saved_locals = self.known_local_vars.clone();
         let saved_var_types = self.var_types.clone();
 
         for name in &s.names {
+            if let Some(ty) = self.resident_call_vars.get(name.as_str()).cloned() {
+                let inner_ty = match &ty {
+                    Type::Qualified(inner, _) => super::emit_kernel::array_inner_type(inner),
+                    other => super::emit_kernel::array_inner_type(other),
+                };
+                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                let device_ty = super::emit_kernel::kernel_host_scalar_type(&inner_ty);
+
+                let mut is_var_param = |_: &str, _: usize| false;
+                let mut is_mutating_method = |_: &str, _: &str| false;
+                let is_write = crate::ast::with_block_mutates(&s.body, name, &mut is_var_param, &mut is_mutating_method);
+
+                if is_write {
+                    self.line(&format!(
+                        "let __{name}_buf = match &{name} {{ BoringGpuArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringGpuArg::Host(_) => None }};"
+                    ));
+                }
+                self.line(&format!(
+                    "let {}{name} = match &{name} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }};",
+                    if is_write { "mut " } else { "" },
+                ));
+                self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
+                self.known_local_vars.insert(name.clone());
+                self.with_open_names.insert(name.clone());
+                resident_call_opened.push(ResidentCallOpened { name: name.clone(), is_write, device_ty });
+                continue;
+            }
             if let Some((kvar, field)) = self.gpu_resident_vars.get(name.as_str()).cloned() {
                 let field_ty = self.kernel_vars.get(kvar.as_str())
                     .and_then(|kname| self.kernel_decls.get(kname))
@@ -345,6 +441,16 @@ impl Transpiler {
             }
             self.with_open_names.remove(&o.name);
         }
+
+        for o in &resident_call_opened {
+            if o.is_write {
+                self.line(&format!(
+                    "if let Some(buf) = &__{name}_buf {{ __boring_gpu_copy_h2d(&__boring_gpu_device(), &__boring_gpu_queue(), bytemuck::cast_slice(&{name}.iter().map(|&x| x as {device_ty}).collect::<Vec<{device_ty}>>()), buf); }}",
+                    name = o.name, device_ty = o.device_ty,
+                ));
+            }
+            self.with_open_names.remove(&o.name);
+        }
         // `name` was a pure block-local alias (no Rust binding predates this `with`) —
         // restore the outer scope's view exactly like a loop body would, so it doesn't
         // leak into surrounding code as a spuriously "already known" local/type.
@@ -353,6 +459,17 @@ impl Transpiler {
 
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// After a `let` binding is emitted, additionally materialize a `Vec<char>` shadow
+    /// (`__strchars_<name>`) when `name` is both indexed elsewhere in the function
+    /// (`str_index_cache_vars`, from `collect_str_index_targets`) and truly immutable
+    /// (`immutable_local_vars` -- `let`-bound, never `mut`/`var`, so it can't go stale).
+    /// See `collect_str_index_targets` for the full rationale.
+    pub(crate) fn maybe_emit_str_index_cache(&mut self, name: &str) {
+        if self.str_index_cache_vars.contains(name) && self.immutable_local_vars.contains(name) {
+            self.line(&format!("let __strchars_{name}: Vec<char> = {name}.chars().collect();"));
+        }
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, _is_last: bool) {
@@ -364,6 +481,9 @@ impl Transpiler {
             return;
         }
         if self.try_emit_gpu_resident_let(s) {
+            return;
+        }
+        if self.try_emit_gpu_resident_call_let(s) {
             return;
         }
         if self.try_emit_gpu_device_let(s) {
@@ -2245,6 +2365,21 @@ impl Transpiler {
                 self.known_local_vars.insert(b.name.clone());
             }
         }
+        // Interprocedural GPU residency, tuple case (mirrors
+        // `emit_kernel::try_emit_gpu_resident_call_let` for the single-value case):
+        // when `s.value` calls a `fn_returns_resident_tuple` function, its Rust
+        // signature returns e.g. `(BoringGpuArg<f64>, Vec<f64>, Vec<f64>)` regardless
+        // of what this call site wants — handle that before any of the ordinary
+        // destructure logic below (channel/oneshot/broadcast detection etc. all
+        // assume a plain value and would mis-handle a `BoringGpuArg<T>` element).
+        if let ExprKind::Call(callee, _) = &s.value.kind {
+            if let ExprKind::Var(fn_name) = &callee.kind {
+                if let Some(flags) = self.fn_returns_resident_tuple.get(fn_name.as_str()).cloned() {
+                    self.emit_resident_tuple_destructure(s, &flags);
+                    return;
+                }
+            }
+        }
         // `let [a, b] = join [f1, f2]` — parallel JoinHandle await
         if let ExprKind::JoinAll(handles) = &s.value.kind {
             let n = handles.len();
@@ -2427,6 +2562,68 @@ impl Transpiler {
                 if matches!(ty, Type::Optional(_)) {
                     self.optional_vars.insert(binding.name.clone());
                 }
+            }
+        }
+    }
+
+    /// Destructure of a call to a `fn_returns_resident_tuple` function (see
+    /// `emit_let_destructure`'s dispatch to this). A binding at a resident tuple
+    /// position stays chained (registered in `resident_call_vars`) only with an
+    /// *explicit* `'gpu'unified`/`'gpu'global` opt-in annotation on that one binding
+    /// — the opposite default from the single-value interprocedural case (which
+    /// stays resident with *no* annotation). Tuple destructuring predates this
+    /// residency feature everywhere in real code, so the default has to be
+    /// "materialize right here through a temp binding", matching what every
+    /// existing unannotated `let (a, b, c) = some_tuple_fn(...)` already assumed —
+    /// see `Checker::check_let_destructure`'s doc for the real `cargo check`
+    /// failure (`test_math_gpu.br`) that an opt-*out* default caused. The call
+    /// itself must run exactly once, so this can't reuse `materialize_resident_call`
+    /// (which re-embeds the whole call expression per element); it destructures
+    /// once into per-position temps, then downloads only the ones that didn't opt in.
+    fn emit_resident_tuple_destructure(&mut self, s: &LetDestructureStmt, flags: &[bool]) {
+        let elem_tys: Vec<Type> = match &s.value.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(fn_name) => match self.fn_return_types.get(fn_name.as_str()) {
+                    Some(Type::Tuple(tys)) => tys.clone(),
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let val = self.emit_expr(&s.value);
+        let needs_materialize: Vec<bool> = s.bindings.iter().enumerate().map(|(i, b)| {
+            flags.get(i).copied().unwrap_or(false)
+                && !b.ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false)
+        }).collect();
+        let names: Vec<String> = s.bindings.iter().enumerate().map(|(i, b)| {
+            if b.name == "_" { "_".to_string() }
+            else if needs_materialize[i] { format!("__resid_tmp_{}", i) }
+            else {
+                let mut_kw = if s.binding.is_mutable() { "mut " } else { "" };
+                format!("{}{}", mut_kw, b.name)
+            }
+        }).collect();
+        self.line(&format!("let ({}) = {};", names.join(", "), val));
+        for (i, b) in s.bindings.iter().enumerate() {
+            if b.name == "_" { continue; }
+            if needs_materialize[i] {
+                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float)));
+                let inner_ty = match &elem_ty {
+                    Type::Qualified(inner, _) => super::emit_kernel::array_inner_type(inner),
+                    other => super::emit_kernel::array_inner_type(other),
+                };
+                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                let device_ty = super::emit_kernel::kernel_host_scalar_type(&inner_ty);
+                let tmp = format!("__resid_tmp_{}", i);
+                let mut_kw = if s.binding.is_mutable() { "mut " } else { "" };
+                self.line(&format!(
+                    "let {mut_kw}{name} = match {tmp} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v }};",
+                    name = b.name
+                ));
+            } else if flags.get(i).copied().unwrap_or(false) {
+                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float)));
+                self.resident_call_vars.insert(b.name.clone(), elem_ty);
             }
         }
     }
@@ -2877,6 +3074,240 @@ impl Transpiler {
         }
         let mut out = std::collections::HashSet::new();
         for s in stmts { stmt_mutated(bound, s, &mut out); }
+        out
+    }
+
+    /// Recursively collects every string-typed plain-variable name that is indexed
+    /// (`name[idx]`, non-constant `idx`) anywhere in `stmts`. `string[i]` transpiles to
+    /// `.chars().nth(i)` (Rust can't O(1)-index a UTF-8 `str` by char position) -- fine
+    /// for one-off access, but a sequential scan (`while i < s.length: ... s[i] ...`,
+    /// the idiomatic way to hand-parse a string in Boring) turns into O(n^2), since
+    /// every access re-walks the string from byte 0. Callers use this set to decide
+    /// which string bindings are worth materializing as a `Vec<char>` once (see
+    /// `emit_let`'s `__strchars_*` shadow) so indexed access becomes O(1).
+    ///
+    /// "String-typed" is intentionally narrow -- only names whose type is knowable
+    /// without full inference (an explicit `string`/`str` parameter or `let`
+    /// annotation, or a `let` with a string-literal initializer) -- because an
+    /// `Index` site alone can't distinguish `s[i]` (string) from `arr[i]` (array/Vec):
+    /// both parse to the same `ExprKind::Index(Var, _)` shape, and array elements are
+    /// never `char`, so wrongly caching one as `Vec<char>` would be a type error at
+    /// best. Under-detection here only costs a missed optimization (the access stays
+    /// correct, just slow) -- it is never relied on to prove a variable safe to cache;
+    /// callers separately restrict the optimization to `let` bindings and non-`var`
+    /// parameters, which the checker already guarantees can't be reassigned, so the
+    /// cached `Vec<char>` can never go stale.
+    pub(crate) fn collect_str_index_targets(params: &[Param], stmts: &[Stmt]) -> std::collections::HashSet<String> {
+        fn is_const_index(e: &Expr) -> bool {
+            matches!(e.kind, ExprKind::Int(_))
+        }
+        // Pass 1: which names are knowable, without inference, to be string-typed?
+        fn collect_string_typed(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+            for s in stmts {
+                match s {
+                    Stmt::Let(l) => {
+                        let is_string_annotated = l.ty.as_ref().is_some_and(Transpiler::is_string_type);
+                        let is_string_literal = l.ty.is_none()
+                            && matches!(l.value.as_ref().map(|v| &v.kind), Some(ExprKind::Str(_)) | Some(ExprKind::StringInterp(_)));
+                        if is_string_annotated || is_string_literal {
+                            out.insert(l.name.clone());
+                        }
+                    }
+                    Stmt::If(s) => {
+                        for (_, body) in &s.branches { collect_string_typed(body, out); }
+                        if let Some(eb) = &s.else_body { collect_string_typed(eb, out); }
+                    }
+                    Stmt::IfLet(s) => {
+                        collect_string_typed(&s.then_body, out);
+                        for branch in &s.elif_branches { collect_string_typed(&branch.body, out); }
+                        if let Some(eb) = &s.else_body { collect_string_typed(eb, out); }
+                    }
+                    Stmt::Match(m) => {
+                        for arm in &m.arms {
+                            if let MatchBody::Block(b) = &arm.body { collect_string_typed(b, out); }
+                        }
+                    }
+                    Stmt::While(w) => collect_string_typed(&w.body, out),
+                    Stmt::WhileLet(w) => collect_string_typed(&w.body, out),
+                    Stmt::DoWhile(d) => collect_string_typed(&d.body, out),
+                    Stmt::Loop(l) => collect_string_typed(&l.body, out),
+                    Stmt::For(f) => collect_string_typed(&f.body, out),
+                    Stmt::Guard(g) => collect_string_typed(&g.else_body, out),
+                    Stmt::Try(t) => {
+                        collect_string_typed(&t.body, out);
+                        for cc in &t.catch_clauses { collect_string_typed(&cc.body, out); }
+                    }
+                    Stmt::Defer(body) => collect_string_typed(body, out),
+                    Stmt::KernelBlock(k) => collect_string_typed(&k.body, out),
+                    Stmt::With(w) => collect_string_typed(&w.body, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut string_typed = std::collections::HashSet::new();
+        for p in params {
+            if p.ty.as_ref().is_some_and(Transpiler::is_string_type) {
+                string_typed.insert(p.name.clone());
+            }
+        }
+        collect_string_typed(stmts, &mut string_typed);
+        fn walk_expr(e: &Expr, string_typed: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+            match &e.kind {
+                ExprKind::Index(obj, idx) => {
+                    if !is_const_index(idx) {
+                        if let ExprKind::Var(v) = &obj.kind {
+                            if string_typed.contains(v.as_str()) { out.insert(v.clone()); }
+                        }
+                    }
+                    walk_expr(obj, string_typed, out);
+                    walk_expr(idx, string_typed, out);
+                }
+                ExprKind::BinOp(_, l, r) => { walk_expr(l, string_typed, out); walk_expr(r, string_typed, out); }
+                ExprKind::UnaryOp(_, x) => walk_expr(x, string_typed, out),
+                ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r) => {
+                    walk_expr(l, string_typed, out); walk_expr(r, string_typed, out);
+                }
+                ExprKind::Field(obj, _) => walk_expr(obj, string_typed, out),
+                ExprKind::Call(callee, args) => {
+                    walk_expr(callee, string_typed, out);
+                    for a in args { walk_expr(&a.value, string_typed, out); }
+                }
+                ExprKind::MethodCall(obj, _, args) => {
+                    walk_expr(obj, string_typed, out);
+                    for a in args { walk_expr(&a.value, string_typed, out); }
+                }
+                ExprKind::GenericCall(callee, _, args) => {
+                    walk_expr(callee, string_typed, out);
+                    for a in args { walk_expr(&a.value, string_typed, out); }
+                }
+                ExprKind::Pipe(obj, _, args) => {
+                    walk_expr(obj, string_typed, out);
+                    for a in args { walk_expr(&a.value, string_typed, out); }
+                }
+                ExprKind::New { arena, ctor } => {
+                    if let Some(a) = arena { walk_expr(a, string_typed, out); }
+                    walk_expr(ctor, string_typed, out);
+                }
+                ExprKind::KernelLaunch { kernel, .. } => walk_expr(kernel, string_typed, out),
+                ExprKind::TryElse(a, b) => { walk_expr(a, string_typed, out); walk_expr(b, string_typed, out); }
+                ExprKind::TryElseBlock(body, else_body) => {
+                    for s in body { walk_stmt(s, string_typed, out); }
+                    for s in else_body { walk_stmt(s, string_typed, out); }
+                }
+                ExprKind::Array(items) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
+                    for it in items { walk_expr(it, string_typed, out); }
+                }
+                ExprKind::ArrayFill { value, count } => {
+                    walk_expr(value, string_typed, out); walk_expr(count, string_typed, out);
+                }
+                ExprKind::ArrayAlloc { count } => walk_expr(count, string_typed, out),
+                ExprKind::ArrayComp { expr, count, .. } => {
+                    walk_expr(expr, string_typed, out); walk_expr(count, string_typed, out);
+                }
+                ExprKind::ArrayCompIter { expr, iter, .. } => {
+                    walk_expr(expr, string_typed, out); walk_expr(iter, string_typed, out);
+                }
+                ExprKind::Dict(pairs) => {
+                    for (k, v) in pairs { walk_expr(k, string_typed, out); walk_expr(v, string_typed, out); }
+                }
+                ExprKind::Range { start, end, .. } => {
+                    walk_expr(start, string_typed, out); walk_expr(end, string_typed, out);
+                }
+                ExprKind::SliceRange { start, end, .. } => {
+                    if let Some(s) = start { walk_expr(s, string_typed, out); }
+                    if let Some(e) = end { walk_expr(e, string_typed, out); }
+                }
+                ExprKind::Cast(x, _) => walk_expr(x, string_typed, out),
+                ExprKind::StringInterp(segs) => {
+                    for seg in segs {
+                        match seg {
+                            StringSegment::Expr(e) | StringSegment::FormattedExpr(e, _) => walk_expr(e, string_typed, out),
+                            StringSegment::Lit(_) => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn walk_cond_clause(c: &CondClause, string_typed: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+            match c {
+                CondClause::Let(_, e) => walk_expr(e, string_typed, out),
+                CondClause::LetPat(_, e) => walk_expr(e, string_typed, out),
+                CondClause::Expr(e) => walk_expr(e, string_typed, out),
+            }
+        }
+        fn walk_stmt(s: &Stmt, string_typed: &std::collections::HashSet<String>, out: &mut std::collections::HashSet<String>) {
+            match s {
+                Stmt::Let(l) => { if let Some(v) = &l.value { walk_expr(v, string_typed, out); } }
+                Stmt::LetDestructure(l) => walk_expr(&l.value, string_typed, out),
+                Stmt::Return(r) => { if let Some(e) = &r.value { walk_expr(e, string_typed, out); } }
+                Stmt::Throw(t) => { if let Some(e) = &t.value { walk_expr(e, string_typed, out); } }
+                Stmt::Break(_, e) => { if let Some(e) = e { walk_expr(e, string_typed, out); } }
+                Stmt::If(s) => {
+                    for (cond, body) in &s.branches {
+                        walk_expr(cond, string_typed, out);
+                        for st in body { walk_stmt(st, string_typed, out); }
+                    }
+                    if let Some(eb) = &s.else_body { for st in eb { walk_stmt(st, string_typed, out); } }
+                }
+                Stmt::IfLet(s) => {
+                    for c in &s.clauses { walk_cond_clause(c, string_typed, out); }
+                    for st in &s.then_body { walk_stmt(st, string_typed, out); }
+                    for branch in &s.elif_branches {
+                        for c in &branch.clauses { walk_cond_clause(c, string_typed, out); }
+                        for st in &branch.body { walk_stmt(st, string_typed, out); }
+                    }
+                    if let Some(eb) = &s.else_body { for st in eb { walk_stmt(st, string_typed, out); } }
+                }
+                Stmt::Match(m) => {
+                    walk_expr(&m.subject, string_typed, out);
+                    for arm in &m.arms {
+                        if let Some(g) = &arm.guard { walk_expr(g, string_typed, out); }
+                        match &arm.body {
+                            MatchBody::Block(stmts) => for st in stmts { walk_stmt(st, string_typed, out); },
+                            MatchBody::Expr(e) => walk_expr(e, string_typed, out),
+                        }
+                    }
+                }
+                Stmt::While(w) => {
+                    walk_expr(&w.condition, string_typed, out);
+                    for st in &w.body { walk_stmt(st, string_typed, out); }
+                }
+                Stmt::WhileLet(w) => {
+                    walk_expr(&w.value, string_typed, out);
+                    for st in &w.body { walk_stmt(st, string_typed, out); }
+                }
+                Stmt::DoWhile(d) => {
+                    for st in &d.body { walk_stmt(st, string_typed, out); }
+                    walk_expr(&d.condition, string_typed, out);
+                }
+                Stmt::Loop(l) => { for st in &l.body { walk_stmt(st, string_typed, out); } }
+                Stmt::Wait(e, _) => walk_expr(e, string_typed, out),
+                Stmt::For(f) => {
+                    walk_expr(&f.iterable, string_typed, out);
+                    for st in &f.body { walk_stmt(st, string_typed, out); }
+                }
+                Stmt::Guard(g) => {
+                    match &g.cond {
+                        GuardCond::Expr(e) => walk_expr(e, string_typed, out),
+                        GuardCond::Clauses(cs) => for c in cs { walk_cond_clause(c, string_typed, out); },
+                    }
+                    for st in &g.else_body { walk_stmt(st, string_typed, out); }
+                }
+                Stmt::Try(t) => {
+                    for st in &t.body { walk_stmt(st, string_typed, out); }
+                    for cc in &t.catch_clauses { for st in &cc.body { walk_stmt(st, string_typed, out); } }
+                }
+                Stmt::Defer(body) => { for st in body { walk_stmt(st, string_typed, out); } }
+                Stmt::Expr(e) => walk_expr(e, string_typed, out),
+                Stmt::KernelBlock(k) => { for st in &k.body { walk_stmt(st, string_typed, out); } }
+                Stmt::With(w) => { for st in &w.body { walk_stmt(st, string_typed, out); } }
+                Stmt::Yield(e, _) => walk_expr(e, string_typed, out),
+                _ => {}
+            }
+        }
+        let mut out = std::collections::HashSet::new();
+        for s in stmts { walk_stmt(s, &string_typed, &mut out); }
         out
     }
 

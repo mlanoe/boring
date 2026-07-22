@@ -556,7 +556,20 @@ impl Transpiler {
                     self.in_lhs_assign.set(false);
                     s
                 };
-                let rhs_s = self.emit_expr_owned(value);
+                // Interprocedural GPU residency: a plain (re-)assignment target (a
+                // struct field like `self.cache_ca_k`, or an ordinary already-declared
+                // local) has no way to opt into staying resident the way a fresh
+                // `let` binding does — so a bare call to a `fn_returns_resident`
+                // function on the RHS must always materialize here, unless the target
+                // is itself a tracked resident local being reassigned (rare, but a
+                // real "opt-in stays resident" case: don't force-materialize into it).
+                let target_is_resident = matches!(&target.kind, ExprKind::Var(name)
+                    if self.resident_call_vars.contains_key(name.as_str()));
+                let rhs_s = if target_is_resident {
+                    None
+                } else {
+                    self.try_materialize_resident_call(value)
+                }.unwrap_or_else(|| self.emit_expr_owned(value));
                 // When assigning an actor (Arc<Mutex<T>>) variable into a struct field, auto-clone
                 // so the original binding remains usable after the assignment. Arc::clone is cheap.
                 let rhs_s = if matches!(&target.kind, ExprKind::Field(..))
@@ -1048,7 +1061,6 @@ impl Transpiler {
                     _ => false,
                 };
                 if is_str {
-                    let obj_s = self.emit_expr(obj);
                     let raw = self.emit_expr(idx);
                     let idx_s = match &idx.kind {
                         ExprKind::Int(_) | ExprKind::Var(_) | ExprKind::BinOp(..) | ExprKind::Field(..) =>
@@ -1056,6 +1068,18 @@ impl Transpiler {
                         _ => raw,
                     };
                     let str_ptr = self.str_ptr();
+                    // A plain immutable binding that's indexed elsewhere in the function too
+                    // has a `__strchars_<name>: Vec<char>` shadow (see `maybe_emit_str_index_cache`
+                    // / the param-prologue in `emit_fn`) -- O(1) lookup instead of `.chars().nth(idx)`,
+                    // which is O(idx) and turns a sequential scan into O(n^2).
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if self.str_index_cache_vars.contains(v.as_str()) && self.immutable_local_vars.contains(v.as_str()) {
+                            return format!(
+                                "{str_ptr}::<str>::from(__strchars_{v}[{idx_s}].to_string().as_str())"
+                            );
+                        }
+                    }
+                    let obj_s = self.emit_expr(obj);
                     return format!(
                         "{str_ptr}::<str>::from({obj_s}.chars().nth({idx_s}).expect(\"string index out of bounds\").to_string().as_str())"
                     );
