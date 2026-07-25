@@ -3242,7 +3242,7 @@ impl Transpiler {
                 Stmt::LetDestructure(l) => walk_expr(&l.value, string_typed, out),
                 Stmt::Return(r) => { if let Some(e) = &r.value { walk_expr(e, string_typed, out); } }
                 Stmt::Throw(t) => { if let Some(e) = &t.value { walk_expr(e, string_typed, out); } }
-                Stmt::Break(_, e) => { if let Some(e) = e { walk_expr(e, string_typed, out); } }
+                Stmt::Break(_, Some(e)) => walk_expr(e, string_typed, out),
                 Stmt::If(s) => {
                     for (cond, body) in &s.branches {
                         walk_expr(cond, string_typed, out);

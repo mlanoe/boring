@@ -1870,7 +1870,7 @@ pub struct Interpreter {
     /// `ExprKind::Index` case and `assign`'s), so every real OS thread in the
     /// same block observes the same underlying storage — unlike every other
     /// kernel field, which each thread runs against its own independent copy.
-    pub(crate) sync_fields: HashMap<String, std::sync::Arc<std::sync::Mutex<Vec<eval_gpu::ThreadValue>>>>,
+    pub(crate) sync_fields: eval_gpu::SyncFieldsMap,
     /// Barrier shared by every thread in the current kernel block, sized to
     /// the block's thread count. `sync` (parsed as `Stmt::Comment("sync")`)
     /// calls `.wait()` on this when present instead of being a no-op — only

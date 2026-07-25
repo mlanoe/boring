@@ -244,10 +244,11 @@ impl Transpiler {
     ///     `MatMulHeadsKernel(k_soft.probs, ...)`): the alias case above only ever
     ///     fires when boring source happens to bind the field read to a name first,
     ///     which nothing forces a kernel-internal chain to do.
-    /// Either way `kvar` must be a tracked kernel instance and `field` must be
-    /// declared `'unified`/`'global` on an array on that kernel — otherwise this is
-    /// just an ordinary value (or a scalar/differently-qualified field) that the
-    /// normal argument-emission path should keep handling as before.
+    ///
+    ///     Either way `kvar` must be a tracked kernel instance and `field` must be
+    ///     declared `'unified`/`'global` on an array on that kernel — otherwise this is
+    ///     just an ordinary value (or a scalar/differently-qualified field) that the
+    ///     normal argument-emission path should keep handling as before.
     fn resident_field_alias(&self, expr: &Expr) -> Option<(String, String)> {
         match &expr.kind {
             ExprKind::Var(name) => self.gpu_resident_vars.get(name.as_str()).cloned(),

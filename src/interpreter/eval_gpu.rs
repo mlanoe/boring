@@ -21,6 +21,12 @@ use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use rayon::prelude::*;
 use crate::ast::{GpuQual, TraitDecl, EnumDecl, FnDecl, Stmt, Type};
 
+// Per-thread view of `'sync` kernel fields plus the barrier used to coordinate
+// reads/writes across threads within a block (see `run_one_kernel_thread`'s doc
+// comment for why `'sync` fields need this instead of the usual snapshot/merge).
+pub(crate) type SyncFieldsMap = HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>;
+type SyncCtx<'a> = (&'a SyncFieldsMap, &'a Arc<Barrier>);
+
 // Thread pool with an enlarged stack (64 MB) for the recursive tree-walk interpreter.
 static KERNEL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
@@ -286,7 +292,7 @@ fn run_kernel_parallel(
         grid_x: usize, grid_y: usize, grid_z: usize,
         block_idx_x: usize, block_idx_y: usize, block_idx_z: usize,
         thread_in_x: usize, thread_in_y: usize, thread_in_z: usize,
-        sync_ctx: Option<(&HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>, &Arc<Barrier>)>,
+        sync_ctx: Option<SyncCtx>,
     ) -> Result<ThreadResult, String> {
         // Build a fresh interpreter for this thread.
         let mut ti = Interpreter::new_for_kernel(
@@ -491,7 +497,7 @@ fn run_kernel_parallel(
                 let block_idx_y = (block_idx / grid_x) % grid_y;
                 let block_idx_z = block_idx / blocks_per_layer;
 
-                let sync_fields: HashMap<String, Arc<Mutex<Vec<ThreadValue>>>> = sync_field_specs.iter()
+                let sync_fields: SyncFieldsMap = sync_field_specs.iter()
                     .map(|(name, elem_ty, n)| {
                         let zero = to_thread_value(&zero_value(elem_ty)).unwrap_or(ThreadValue::Nil);
                         (name.clone(), Arc::new(Mutex::new(vec![zero; *n])))

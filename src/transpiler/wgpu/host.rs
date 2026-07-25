@@ -502,7 +502,7 @@ impl<'a> HostEmitter<'a> {
             .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal)
                      && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
             .collect();
-        let has_params = decl.fields.iter().any(|f| is_params_field(f));
+        let has_params = decl.fields.iter().any(is_params_field);
 
         self.line("    fn rebuild_bind_group(&mut self) {");
         self.line("        let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();");
