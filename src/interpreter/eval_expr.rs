@@ -283,6 +283,570 @@ impl Interpreter {
         })())
     }
 
+    /// `callee(args)` — built-in namespace calls (`channel`/`timeout`/`json`/`Dimension`/
+    /// `Screen`/`GPU`/print-family), the implicit-`self` fallback (`foo(args)` inside a
+    /// method resolves to `self.foo(args)` when `foo` isn't otherwise in scope), the
+    /// `k(block = N)` kernel-launch shorthand, and owned/`var`-param bookkeeping around
+    /// an ordinary call.
+    fn eval_expr_call(&mut self, callee_expr: &Expr, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        // channel/oneshot/broadcast/watch without type args: return (Sender, Receiver) pair
+        if let ExprKind::Var(name) = &callee_expr.kind {
+            if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
+                let buf = Rc::new(RefCell::new(VecDeque::new()));
+                let closed = Rc::new(RefCell::new(false));
+                let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
+                let receiver = Value::Channel { buf, closed, is_sender: false };
+                return Ok(Value::Tuple(vec![sender, receiver]));
+            }
+            // timeout(dur, fut_or_callable) — interpreter: skip duration, evaluate the future.
+            // Two forms:
+            //   timeout(dur, task f(args))  — second arg is already a Future expression
+            //   timeout(dur, f)             — second arg is a Callable<T>: call it to get Future
+            if name.as_str() == "timeout" {
+                if let Some(fut_arg) = args.get(1) {
+                    let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
+                    // If the second arg is a Fn/Closure (Callable<T>), call it with no args.
+                    return match val {
+                        v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
+                            let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
+                            // Unwrap Future if the callable returned one
+                            match result {
+                                Value::Future(inner) => Ok(*inner),
+                                other => Ok(other),
+                            }
+                        }
+                        Value::Future(inner) => Ok(*inner),
+                        other => Ok(other),
+                    };
+                }
+                return Ok(Value::Nil);
+            }
+            // json(v) — interpreter stub: convert value to its debug string representation
+            if name.as_str() == "json" {
+                if let Some(arg) = args.first() {
+                    let v = self.eval_expr(&arg.value, Rc::clone(&env))?;
+                    return Ok(Value::Str(format!("{:?}", v)));
+                }
+                return Ok(Value::Str("null".into()));
+            }
+            // Dimension(w, h) — built-in size descriptor.
+            // Stored as an Object with fields `width` and `height`.
+            if name.as_str() == "Dimension" {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                let (w, h) = match arg_vals.as_slice() {
+                    [Value::Uint(w), Value::Uint(h)] => (*w, *h),
+                    [Value::Int(w), Value::Int(h)] => (*w as u64, *h as u64),
+                    [Value::Uint(w)] => (*w, *w),
+                    _ => (0, 0),
+                };
+                let obj = crate::interpreter::ObjectInner {
+                    type_name: "Dimension".into(),
+                    fields: vec![
+                        ("width".into(),  Value::Uint(w)),
+                        ("height".into(), Value::Uint(h)),
+                    ],
+                };
+                return Ok(Value::Object(Rc::new(RefCell::new(obj))));
+            }
+            // Screen(Dimension | w, h, title = ...) — built-in window (simulation mode).
+            if name.as_str() == "Screen" {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                let (w, h, title) = parse_screen_args(&arg_vals);
+                return Ok(Value::Screen {
+                    width:   Rc::new(RefCell::new(w)),
+                    height:  Rc::new(RefCell::new(h)),
+                    title,
+                    frame:   Rc::new(RefCell::new(0)),
+                    resized: Rc::new(RefCell::new(false)),
+                    keys:    Rc::new(RefCell::new(vec![])),
+                    pixels:  Rc::new(RefCell::new(vec![])),
+                });
+            }
+            // GPU(n) — built-in GPU device handle (simulation mode).
+            if name.as_str() == "GPU" {
+                let idx = match args.first() {
+                    Some(a) => match self.eval_expr(&a.value, Rc::clone(&env))? {
+                        Value::Int(n) => n as usize,
+                        Value::Uint(n) => n as usize,
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                return Ok(Value::GpuDevice(idx));
+            }
+            // print / write / log-level — use `as string:` conversions for Object args
+            if matches!(name.as_str(), "print" | "write" | "error" | "warn" | "info" | "debug" | "trace") {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                return self.call_display_builtin(name, &arg_vals, line);
+            }
+        }
+        // Implicit self method call: `foo(args)` inside a struct method —
+        // if `foo` isn't in scope but `self` is, try `self.foo(args)`.
+        if let ExprKind::Var(name) = &callee_expr.kind {
+            let not_in_scope = env.borrow().get(name).is_none();
+            if not_in_scope {
+                let self_opt = env.borrow().get("self"); // borrow released after this line
+                if let Some(self_val) = self_opt {
+                    let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                    let mut modified_self: Option<Value> = None;
+                    match self.call_method(self_val, name, arg_vals, line, &mut modified_self) {
+                        Ok(result) => {
+                            if let Some(new_self) = modified_self {
+                                env.borrow_mut().force_set("self", new_self);
+                            }
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+        let callee = self.eval_expr(callee_expr, Rc::clone(&env))?;
+        // `k(block = N)` short-hand — if the callee is a kernel Object and the
+        // arguments contain a `block =` labeled arg, treat this as a kernel launch
+        // and return a KernelHandle. The handle immediately returns `k` on `.wait`.
+        if matches!(&callee, Value::Object(_)) {
+            let type_name = callee.type_name();
+            let is_kernel = self.global.borrow().get(&type_name)
+                .map(|v| matches!(v, Value::KernelStruct { .. }))
+                .unwrap_or(false);
+            let has_block = args.iter().any(|a| a.label.as_deref() == Some("block"));
+            let has_grid  = args.iter().any(|a| a.label.as_deref() == Some("grid"));
+            if is_kernel && has_block && has_grid {
+                // `grid =` is given explicitly alongside `block =` — dispatch
+                // through `eval_kernel_launch`, which actually honors `grid`
+                // (parses int/tuple, up to 3D). The shorthand path below
+                // (`eval_kernel_launch_with_val`) NEVER looks at a `grid=`
+                // argument at all, even when one is present — it always
+                // infers grid from the longest array-typed field divided by
+                // block size. That inference silently produces the wrong
+                // grid whenever the largest field's length doesn't happen to
+                // correspond to the intended dispatch shape (e.g. a `'global`
+                // input array bigger than the output, common in tiled GEMM
+                // kernels) — invisible in small single-block test kernels,
+                // where both the explicit and the inferred grid are 1 anyway.
+                let block_expr = args.iter().find(|a| a.label.as_deref() == Some("block")).map(|a| a.value.clone());
+                let grid_expr  = args.iter().find(|a| a.label.as_deref() == Some("grid")).map(|a| a.value.clone());
+                let config = crate::ast::KernelConfig {
+                    block: block_expr, grid: grid_expr, after: None, priority: None, line, col: 0,
+                };
+                return self.eval_kernel_launch(&config, callee_expr, env);
+            }
+            if is_kernel && has_block {
+                // Build a synthetic KernelConfig from the labeled args.
+                let block_arg = args.iter().find(|a| a.label.as_deref() == Some("block"))
+                    .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
+                let block_val = match block_arg {
+                    Some(Ok(v)) => v,
+                    _ => Value::Int(1),
+                };
+                let after_arg = args.iter().find(|a| a.label.as_deref() == Some("after"))
+                    .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
+                let _after_val = after_arg.and_then(|r| r.ok());
+                let config = crate::ast::KernelConfig {
+                    block: Some(Expr { kind: crate::ast::ExprKind::Nil, line, col: 0, len: 0 }),
+                    grid: None, after: None, priority: None, line, col: 0,
+                };
+                return self.eval_kernel_launch_with_val(config, callee, block_val, line, &env);
+            }
+        }
+        // Check for double-use of owned args before evaluating
+        if let Value::Fn { ref decl, .. } = callee {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (param, arg) in decl.params.iter().zip(args.iter()) {
+                if param.owned {
+                    if let ExprKind::Var(name) = &arg.value.kind {
+                        if !seen.insert(name.clone()) {
+                            return Err(err(format!("'{}' moved twice in the same call", name), line));
+                        }
+                    }
+                }
+            }
+        }
+        for arg in args.iter() {
+            Self::check_no_owned_extract(&arg.value, &env, line)?;
+        }
+        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+        let result = self.call_value(callee.clone(), arg_vals, line, false)?;
+        // Write back mutated `var` params to their caller variables.
+        if let Value::Fn { ref decl, .. } = callee {
+            for (param, arg) in decl.params.iter().zip(args.iter()) {
+                if param.mutable {
+                    if let ExprKind::Var(caller_name) = &arg.value.kind {
+                        if let Some(new_val) = self.last_var_params.get(&param.name).cloned() {
+                            env.borrow_mut().force_set(caller_name, new_val);
+                        }
+                    }
+                }
+            }
+        }
+        // Invalidate owned param sources after successful call
+        if let Value::Fn { ref decl, .. } = callee {
+            for (param, arg) in decl.params.iter().zip(args.iter()) {
+                if param.owned {
+                    if let ExprKind::Var(name) = &arg.value.kind {
+                        env.borrow_mut().invalidate(name);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// `obj.method(args)` — the `fs`/`GPU.all()` builtin namespaces, type-level calls
+    /// (`Counter.zero()`), the fast-path mutating-array-method shortcut, GPU-device
+    /// property mocks, the immutable-`let`-binding mutating-method diagnostic, and an
+    /// ordinary struct method call with its modified-`self`/owned-param write-back.
+    fn eval_expr_method_call(&mut self, obj_expr: &Expr, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        // Built-in `fs` module namespace — intercept before evaluating the receiver
+        // so that `fs` does not need to be defined as a variable.
+        if let ExprKind::Var(v) = &obj_expr.kind {
+            if v == "fs" {
+                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                return self.call_fs_method(method, arg_vals, line);
+            }
+            // GPU.all() — iterate all GPU devices (simulation: a single device).
+            if v == "GPU" && method == "all" {
+                return Ok(Value::Array(vec![Value::GpuDevice(0)].into()));
+            }
+        }
+
+        // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
+        if let ExprKind::Var(type_name) = &obj_expr.kind {
+            // Task.cancelled() — not supported in the interpreter (no cancellation
+            // token), so always return false to keep code that uses it runnable.
+            if type_name == "Task" && method == "cancelled" && args.is_empty() {
+                return Ok(Value::Bool(false));
+            }
+            if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                let struct_val = self.global.borrow().get(type_name);
+                if let Some(Value::Struct { decl, captured }) = struct_val {
+                    let tm = decl.type_methods.iter().find(|m| m.name == *method).cloned();
+                    if let Some(type_method) = tm {
+                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        return self.call_type_method(&decl.name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                    }
+                    return Err(err(
+                        format!("'{}' has no type method '{}'", type_name, method),
+                        line,
+                    ));
+                }
+            }
+        }
+        // Fast path: `var_name.mutatingArrayMethod(args)` on a plain local
+        // variable. See `try_fast_mutating_array_call`'s doc comment. Kept in
+        // its own #[inline(never)] function so this large `eval_expr` match
+        // doesn't gain extra stack-frame size for every call (this recursive
+        // function runs close to the debug-build stack limit in some existing
+        // call chains — inlining this directly here previously overflowed it).
+        if let ExprKind::Var(name) = &obj_expr.kind {
+            if let Some(result) = self.try_fast_mutating_array_call(name, method, args, &env, line) {
+                return result;
+            }
+        }
+        let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        // GPU device property methods — simulation mock values.
+        if let Value::GpuDevice(idx) = &obj {
+            let idx = *idx;
+            let p = &self.gpu_profile;
+            let (cc_major, cc_minor) = p.compute_capability;
+            return Ok(match method {
+                "name"              => Value::Str(format!("{} (sim {})", p.name, idx)),
+                "totalMem"          => Value::Int(p.total_mem),
+                "freeMem"           => Value::Int(p.total_mem),  // nothing else running
+                "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)].into()),
+                "warpSize"          => Value::Int(p.warp_size),
+                "maxThreads"        => Value::Int(p.max_threads),
+                "maxSharedMem"      => Value::Int(p.max_shared_mem),
+                "index"             => Value::Int(idx as i64),
+                other => return Err(err(
+                    format!("GPU has no property '{other}'"), line,
+                )),
+            });
+        }
+        // Enforce: mutating method cannot be called on an immutable (let) binding
+        // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
+        const BUILTIN_NON_MUTATING: &[&str] = &["upgrade", "clone"];
+        if let ExprKind::Var(binding_name) = &obj_expr.kind {
+            if !BUILTIN_NON_MUTATING.contains(&method) {
+                if let Value::Object(inner_rc) = &obj {
+                    let type_name = inner_rc.borrow().type_name.clone();
+                    let is_mutating = {
+                        let g = self.global.borrow();
+                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                            // `task` methods take Arc<Self> — not &mut self — so never count as mutating.
+                            decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
+                                .unwrap_or(true)
+                        } else { true }
+                    };
+                    let is_interior_mutable = env.borrow().is_actor(binding_name);
+                    if is_mutating && !is_interior_mutable && !env.borrow().is_mutable(binding_name) {
+                        return Err(err(
+                            format!("cannot call mutating method '{}' on let binding '{}'", method, binding_name),
+                            line,
+                        ));
+                    }
+                    if is_mutating && !is_interior_mutable && env.borrow().is_shared(binding_name) {
+                        return Err(err(
+                            format!("cannot call mutating method '{}' on shared binding '{}' — use T'actor for interior mutability", method, binding_name),
+                            line,
+                        ));
+                    }
+                }
+            }
+        }
+        // Check for double-use of owned args before evaluating
+        if let Value::Object(inner_rc) = &obj {
+            let type_name = inner_rc.borrow().type_name.clone();
+            let decl_opt = {
+                let g = self.global.borrow();
+                if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                    decl.methods.iter().find(|m| m.name == *method).cloned()
+                } else { None }
+            };
+            if let Some(fn_decl) = decl_opt {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
+                    if param.owned {
+                        if let ExprKind::Var(name) = &arg.value.kind {
+                            if !seen.insert(name.clone()) {
+                                return Err(err(format!("'{}' moved twice in the same call", name), line));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+        let mut modified_self: Option<Value> = None;
+        let result = self.call_method(obj.clone(), method, arg_vals, line, &mut modified_self)?;
+        // Write back modified self to source variable (force: mut method on let binding is OK)
+        if let Some(new_obj) = modified_self {
+            match &obj_expr.kind {
+                ExprKind::Var(name) => {
+                    let written = env.borrow_mut().force_set(name, new_obj.clone());
+                    // If not found in scope, try to write to self field (implicit self pattern).
+                    if !written {
+                        if let Some(Value::Object(ref inner_rc)) = env.borrow().get("self").as_ref() {
+                            if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
+                                let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
+                                let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
+                                let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
+                            }
+                        }
+                    }
+                }
+                _ => { let _ = self.assign(obj_expr, new_obj, Rc::clone(&env), line); }
+            }
+        }
+        // Collect owned-param source names before any borrow of global
+        let mut to_invalidate: Vec<String> = Vec::new();
+        if let Value::Object(inner_rc) = &obj {
+            let type_name = inner_rc.borrow().type_name.clone();
+            let names: Option<Vec<String>> = {
+                let g = self.global.borrow();
+                if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                    decl.methods.iter().find(|m| m.name == *method).map(|fn_decl| fn_decl.params.iter().zip(args.iter()).filter_map(|(param, arg)| {
+                            if param.owned {
+                                if let ExprKind::Var(name) = &arg.value.kind {
+                                    return Some(name.clone());
+                                }
+                            }
+                            None
+                        }).collect())
+                } else { None }
+            }; // global borrow dropped here
+            if let Some(names) = names {
+                to_invalidate = names;
+            }
+        }
+        for name in to_invalidate {
+            env.borrow_mut().invalidate(&name);
+        }
+        Ok(result)
+    }
+
+    /// `obj[idx]` — slice ranges (`a[M..N]`/`a[..N]`/`a[M..]`/`a[..]`, negative-index-aware,
+    /// on `Array` or `Str`) and plain single-index access via `get_index`.
+    fn eval_expr_index(&mut self, obj_expr: &Expr, idx_expr: &Expr, env: EnvRef, line: usize) -> Eval {
+        // Slice: a[M..N], a[..N], a[M..], a[..]
+        if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
+            let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+            match obj {
+                Value::Array(arr) => {
+                    let len = arr.len() as i64;
+                    let resolve = |v: i64| -> usize {
+                        let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                        i as usize
+                    };
+                    let lo = match start.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice start must be an integer", line));
+                            };
+                            resolve(v)
+                        }
+                        None => 0,
+                    };
+                    let hi = match end.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice end must be an integer", line));
+                            };
+                            if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
+                        }
+                        None => arr.len(),
+                    };
+                    let slice = if lo >= arr.len() || lo >= hi {
+                        vec![]
+                    } else {
+                        arr[lo..hi.min(arr.len())].to_vec()
+                    };
+                    return Ok(Value::Array(slice.into()));
+                }
+                Value::Str(s) => {
+                    let chars: Vec<char> = s.chars().collect();
+                    let len = chars.len() as i64;
+                    let resolve = |v: i64| -> usize {
+                        let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
+                        i as usize
+                    };
+                    let lo = match start.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice start must be an integer", line));
+                            };
+                            resolve(v)
+                        }
+                        None => 0,
+                    };
+                    let hi = match end.as_deref() {
+                        Some(e) => {
+                            let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
+                                return Err(err("slice end must be an integer", line));
+                            };
+                            if *inclusive { (resolve(v) + 1).min(chars.len()) } else { resolve(v) }
+                        }
+                        None => chars.len(),
+                    };
+                    let sliced: String = if lo >= chars.len() || lo >= hi {
+                        String::new()
+                    } else {
+                        chars[lo..hi.min(chars.len())].iter().collect()
+                    };
+                    return Ok(Value::Str(sliced));
+                }
+                other => return Err(err(
+                    format!("slice index requires an array or string, got {}", other.type_name()),
+                    line,
+                )),
+            }
+        }
+        let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
+        self.get_index(obj, idx, line, idx_expr.col, idx_expr.len)
+    }
+
+    /// `try stmts... else stmts...` (multi-line try/else block). Runs the try body; on
+    /// an `Err(...)` `Result` variant or a thrown `Signal::Exception`, runs the else body
+    /// with `error` bound to the **original thrown value** (not its string form), so the
+    /// else body can `match error:` on a typed enum. Unwraps a bare `Ok(v)` on success.
+    fn eval_expr_try_else_block(&mut self, try_stmts: &[Stmt], else_stmts: &[Stmt], env: EnvRef) -> Eval {
+        // `error` keeps its original type so the else body can pattern-match on it:
+        //   try risky() else:
+        //       match error:
+        //           MyError.NotFound: "not found"
+        //           _: "other: {error}"
+        //
+        // String interpolation `{error}` still works because the interpreter's
+        // `display_value` falls back to the Value's Display for non-Object types,
+        // and `as string:` conversions are honoured for struct/enum values.
+        let try_env = Env::child(Rc::clone(&env));
+        let result = self.eval_block_as_expr(try_stmts, try_env);
+
+        match result {
+            Ok(v) => {
+                // If the block returned Err(e) directly, fall through to else body
+                // with the inner error value bound to `error`.
+                if let Value::EnumVariant { ref type_name, ref variant, ref fields } = v {
+                    if type_name == "Result" && variant == "Err" {
+                        let err_val = fields.first().cloned().unwrap_or(Value::Nil);
+                        let else_env = Env::child(Rc::clone(&env));
+                        else_env.borrow_mut().define("error", err_val);
+                        return self.eval_block_as_expr(else_stmts, else_env);
+                    }
+                }
+                // Unwrap Ok(v) enum variants produced by `def Result` functions.
+                if let Value::EnumVariant { ref type_name, ref variant, ref fields } = v {
+                    if type_name == "Result" && variant == "Ok" {
+                        return Ok(fields.first().cloned().unwrap_or(Value::Nil));
+                    }
+                }
+                Ok(v)
+            }
+            Err(Signal::Exception(err_val)) => {
+                // Bind `error` to the original thrown value, not its string form.
+                // This allows `match error: MyEnum.Variant: …` in the else body.
+                let else_env = Env::child(Rc::clone(&env));
+                else_env.borrow_mut().define("error", err_val);
+                self.eval_block_as_expr(else_stmts, else_env)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// `callee<T>(args)` — type args are erased at runtime, so this is a regular call
+    /// plus the handful of builtins that need type info at the *call syntax* level
+    /// (`channel<T>`/`oneshot<T>`/etc., `timeout<T>`, `fromJson<T>`), mirroring the
+    /// untyped forms `eval_expr_call` already handles.
+    fn eval_expr_generic_call(&mut self, callee: &Expr, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        // In the interpreter, type args are erased — just evaluate as a regular call.
+        // Special built-ins that need type info (like `channel`) return a pair of arrays
+        // as a synchronous simulation: (sender_items, receiver_items) backed by a Vec.
+        if let ExprKind::Var(name) = &callee.kind {
+            if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
+                let buf = Rc::new(RefCell::new(VecDeque::new()));
+                let closed = Rc::new(RefCell::new(false));
+                let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
+                let receiver = Value::Channel { buf, closed, is_sender: false };
+                return Ok(Value::Tuple(vec![sender, receiver]));
+            }
+            if name.as_str() == "timeout" {
+                if let Some(fut_arg) = args.get(1) {
+                    let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
+                    return match val {
+                        v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
+                            let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
+                            match result {
+                                Value::Future(inner) => Ok(*inner),
+                                other => Ok(other),
+                            }
+                        }
+                        Value::Future(inner) => Ok(*inner),
+                        other => Ok(other),
+                    };
+                }
+                return Ok(Value::Nil);
+            }
+            // from_json<T>(s) — interpreter stub: return the string as-is (no deserialization)
+            if name.as_str() == "fromJson" {
+                if let Some(arg) = args.first() {
+                    return self.eval_expr(&arg.value, Rc::clone(&env));
+                }
+                return Ok(Value::Nil);
+            }
+        }
+        // Generic call with no special handling: evaluate callee and call it.
+        let callee_val = self.eval_expr(callee, Rc::clone(&env))?;
+        let mut evaled_args = Vec::new();
+        for a in args {
+            evaled_args.push(self.eval_expr(&a.value, Rc::clone(&env))?);
+        }
+        self.call_value(callee_val, evaled_args, line, false)
+    }
+
     pub fn eval_expr(&mut self, expr: &Expr, env: EnvRef) -> Eval {
         let line = expr.line;
         let col = expr.col;
@@ -474,460 +1038,11 @@ impl Interpreter {
                 self.get_field(obj, field, line)
             }
 
-            ExprKind::Index(obj_expr, idx_expr) => {
-                // Slice: a[M..N], a[..N], a[M..], a[..]
-                if let ExprKind::SliceRange { start, end, inclusive } = &idx_expr.kind {
-                    let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                    match obj {
-                        Value::Array(arr) => {
-                            let len = arr.len() as i64;
-                            let resolve = |v: i64| -> usize {
-                                let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
-                                i as usize
-                            };
-                            let lo = match start.as_deref() {
-                                Some(e) => {
-                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                        return Err(err("slice start must be an integer", line));
-                                    };
-                                    resolve(v)
-                                }
-                                None => 0,
-                            };
-                            let hi = match end.as_deref() {
-                                Some(e) => {
-                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                        return Err(err("slice end must be an integer", line));
-                                    };
-                                    if *inclusive { (resolve(v) + 1).min(arr.len()) } else { resolve(v) }
-                                }
-                                None => arr.len(),
-                            };
-                            let slice = if lo >= arr.len() || lo >= hi {
-                                vec![]
-                            } else {
-                                arr[lo..hi.min(arr.len())].to_vec()
-                            };
-                            return Ok(Value::Array(slice.into()));
-                        }
-                        Value::Str(s) => {
-                            let chars: Vec<char> = s.chars().collect();
-                            let len = chars.len() as i64;
-                            let resolve = |v: i64| -> usize {
-                                let i = if v < 0 { (len + v).max(0) } else { v.min(len) };
-                                i as usize
-                            };
-                            let lo = match start.as_deref() {
-                                Some(e) => {
-                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                        return Err(err("slice start must be an integer", line));
-                                    };
-                                    resolve(v)
-                                }
-                                None => 0,
-                            };
-                            let hi = match end.as_deref() {
-                                Some(e) => {
-                                    let Value::Int(v) = self.eval_expr(e, Rc::clone(&env))? else {
-                                        return Err(err("slice end must be an integer", line));
-                                    };
-                                    if *inclusive { (resolve(v) + 1).min(chars.len()) } else { resolve(v) }
-                                }
-                                None => chars.len(),
-                            };
-                            let sliced: String = if lo >= chars.len() || lo >= hi {
-                                String::new()
-                            } else {
-                                chars[lo..hi.min(chars.len())].iter().collect()
-                            };
-                            return Ok(Value::Str(sliced));
-                        }
-                        other => return Err(err(
-                            format!("slice index requires an array or string, got {}", other.type_name()),
-                            line,
-                        )),
-                    }
-                }
-                let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                let idx = self.eval_expr(idx_expr, Rc::clone(&env))?;
-                self.get_index(obj, idx, line, idx_expr.col, idx_expr.len)
-            }
+            ExprKind::Index(obj_expr, idx_expr) => self.eval_expr_index(obj_expr, idx_expr, env, line),
 
-            ExprKind::Call(callee_expr, args) => {
-                // channel/oneshot/broadcast/watch without type args: return (Sender, Receiver) pair
-                if let ExprKind::Var(name) = &callee_expr.kind {
-                    if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
-                        let buf = Rc::new(RefCell::new(VecDeque::new()));
-                        let closed = Rc::new(RefCell::new(false));
-                        let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
-                        let receiver = Value::Channel { buf, closed, is_sender: false };
-                        return Ok(Value::Tuple(vec![sender, receiver]));
-                    }
-                    // timeout(dur, fut_or_callable) — interpreter: skip duration, evaluate the future.
-                    // Two forms:
-                    //   timeout(dur, task f(args))  — second arg is already a Future expression
-                    //   timeout(dur, f)             — second arg is a Callable<T>: call it to get Future
-                    if name.as_str() == "timeout" {
-                        if let Some(fut_arg) = args.get(1) {
-                            let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
-                            // If the second arg is a Fn/Closure (Callable<T>), call it with no args.
-                            return match val {
-                                v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
-                                    let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
-                                    // Unwrap Future if the callable returned one
-                                    match result {
-                                        Value::Future(inner) => Ok(*inner),
-                                        other => Ok(other),
-                                    }
-                                }
-                                Value::Future(inner) => Ok(*inner),
-                                other => Ok(other),
-                            };
-                        }
-                        return Ok(Value::Nil);
-                    }
-                    // json(v) — interpreter stub: convert value to its debug string representation
-                    if name.as_str() == "json" {
-                        if let Some(arg) = args.first() {
-                            let v = self.eval_expr(&arg.value, Rc::clone(&env))?;
-                            return Ok(Value::Str(format!("{:?}", v)));
-                        }
-                        return Ok(Value::Str("null".into()));
-                    }
-                    // Dimension(w, h) — built-in size descriptor.
-                    // Stored as an Object with fields `width` and `height`.
-                    if name.as_str() == "Dimension" {
-                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        let (w, h) = match arg_vals.as_slice() {
-                            [Value::Uint(w), Value::Uint(h)] => (*w, *h),
-                            [Value::Int(w), Value::Int(h)] => (*w as u64, *h as u64),
-                            [Value::Uint(w)] => (*w, *w),
-                            _ => (0, 0),
-                        };
-                        let obj = crate::interpreter::ObjectInner {
-                            type_name: "Dimension".into(),
-                            fields: vec![
-                                ("width".into(),  Value::Uint(w)),
-                                ("height".into(), Value::Uint(h)),
-                            ],
-                        };
-                        return Ok(Value::Object(Rc::new(RefCell::new(obj))));
-                    }
-                    // Screen(Dimension | w, h, title = ...) — built-in window (simulation mode).
-                    if name.as_str() == "Screen" {
-                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        let (w, h, title) = parse_screen_args(&arg_vals);
-                        return Ok(Value::Screen {
-                            width:   Rc::new(RefCell::new(w)),
-                            height:  Rc::new(RefCell::new(h)),
-                            title,
-                            frame:   Rc::new(RefCell::new(0)),
-                            resized: Rc::new(RefCell::new(false)),
-                            keys:    Rc::new(RefCell::new(vec![])),
-                            pixels:  Rc::new(RefCell::new(vec![])),
-                        });
-                    }
-                    // GPU(n) — built-in GPU device handle (simulation mode).
-                    if name.as_str() == "GPU" {
-                        let idx = match args.first() {
-                            Some(a) => match self.eval_expr(&a.value, Rc::clone(&env))? {
-                                Value::Int(n) => n as usize,
-                                Value::Uint(n) => n as usize,
-                                _ => 0,
-                            },
-                            None => 0,
-                        };
-                        return Ok(Value::GpuDevice(idx));
-                    }
-                    // print / write / log-level — use `as string:` conversions for Object args
-                    if matches!(name.as_str(), "print" | "write" | "error" | "warn" | "info" | "debug" | "trace") {
-                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        return self.call_display_builtin(name, &arg_vals, line);
-                    }
-                }
-                // Implicit self method call: `foo(args)` inside a struct method —
-                // if `foo` isn't in scope but `self` is, try `self.foo(args)`.
-                if let ExprKind::Var(name) = &callee_expr.kind {
-                    let not_in_scope = env.borrow().get(name).is_none();
-                    if not_in_scope {
-                        let self_opt = env.borrow().get("self"); // borrow released after this line
-                        if let Some(self_val) = self_opt {
-                            let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                            let mut modified_self: Option<Value> = None;
-                            match self.call_method(self_val, name, arg_vals, line, &mut modified_self) {
-                                Ok(result) => {
-                                    if let Some(new_self) = modified_self {
-                                        env.borrow_mut().force_set("self", new_self);
-                                    }
-                                    return Ok(result);
-                                }
-                                Err(e) => {
-                                    return Err(e);
-                                }
-                            }
-                        }
-                    }
-                }
-                let callee = self.eval_expr(callee_expr, Rc::clone(&env))?;
-                // `k(block = N)` short-hand — if the callee is a kernel Object and the
-                // arguments contain a `block =` labeled arg, treat this as a kernel launch
-                // and return a KernelHandle. The handle immediately returns `k` on `.wait`.
-                if matches!(&callee, Value::Object(_)) {
-                    let type_name = callee.type_name();
-                    let is_kernel = self.global.borrow().get(&type_name)
-                        .map(|v| matches!(v, Value::KernelStruct { .. }))
-                        .unwrap_or(false);
-                    let has_block = args.iter().any(|a| a.label.as_deref() == Some("block"));
-                    let has_grid  = args.iter().any(|a| a.label.as_deref() == Some("grid"));
-                    if is_kernel && has_block && has_grid {
-                        // `grid =` is given explicitly alongside `block =` — dispatch
-                        // through `eval_kernel_launch`, which actually honors `grid`
-                        // (parses int/tuple, up to 3D). The shorthand path below
-                        // (`eval_kernel_launch_with_val`) NEVER looks at a `grid=`
-                        // argument at all, even when one is present — it always
-                        // infers grid from the longest array-typed field divided by
-                        // block size. That inference silently produces the wrong
-                        // grid whenever the largest field's length doesn't happen to
-                        // correspond to the intended dispatch shape (e.g. a `'global`
-                        // input array bigger than the output, common in tiled GEMM
-                        // kernels) — invisible in small single-block test kernels,
-                        // where both the explicit and the inferred grid are 1 anyway.
-                        let block_expr = args.iter().find(|a| a.label.as_deref() == Some("block")).map(|a| a.value.clone());
-                        let grid_expr  = args.iter().find(|a| a.label.as_deref() == Some("grid")).map(|a| a.value.clone());
-                        let config = crate::ast::KernelConfig {
-                            block: block_expr, grid: grid_expr, after: None, priority: None, line, col: 0,
-                        };
-                        return self.eval_kernel_launch(&config, callee_expr, env);
-                    }
-                    if is_kernel && has_block {
-                        // Build a synthetic KernelConfig from the labeled args.
-                        let block_arg = args.iter().find(|a| a.label.as_deref() == Some("block"))
-                            .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
-                        let block_val = match block_arg {
-                            Some(Ok(v)) => v,
-                            _ => Value::Int(1),
-                        };
-                        let after_arg = args.iter().find(|a| a.label.as_deref() == Some("after"))
-                            .map(|a| self.eval_expr(&a.value, Rc::clone(&env)));
-                        let _after_val = after_arg.and_then(|r| r.ok());
-                        let config = crate::ast::KernelConfig {
-                            block: Some(Expr { kind: crate::ast::ExprKind::Nil, line, col: 0, len: 0 }),
-                            grid: None, after: None, priority: None, line, col: 0,
-                        };
-                        return self.eval_kernel_launch_with_val(config, callee, block_val, line, &env);
-                    }
-                }
-                // Check for double-use of owned args before evaluating
-                if let Value::Fn { ref decl, .. } = callee {
-                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    for (param, arg) in decl.params.iter().zip(args.iter()) {
-                        if param.owned {
-                            if let ExprKind::Var(name) = &arg.value.kind {
-                                if !seen.insert(name.clone()) {
-                                    return Err(err(format!("'{}' moved twice in the same call", name), line));
-                                }
-                            }
-                        }
-                    }
-                }
-                for arg in args.iter() {
-                    Self::check_no_owned_extract(&arg.value, &env, line)?;
-                }
-                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                let result = self.call_value(callee.clone(), arg_vals, line, false)?;
-                // Write back mutated `var` params to their caller variables.
-                if let Value::Fn { ref decl, .. } = callee {
-                    for (param, arg) in decl.params.iter().zip(args.iter()) {
-                        if param.mutable {
-                            if let ExprKind::Var(caller_name) = &arg.value.kind {
-                                if let Some(new_val) = self.last_var_params.get(&param.name).cloned() {
-                                    env.borrow_mut().force_set(caller_name, new_val);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Invalidate owned param sources after successful call
-                if let Value::Fn { ref decl, .. } = callee {
-                    for (param, arg) in decl.params.iter().zip(args.iter()) {
-                        if param.owned {
-                            if let ExprKind::Var(name) = &arg.value.kind {
-                                env.borrow_mut().invalidate(name);
-                            }
-                        }
-                    }
-                }
-                Ok(result)
-            }
+            ExprKind::Call(callee_expr, args) => self.eval_expr_call(callee_expr, args, env, line),
 
-            ExprKind::MethodCall(obj_expr, method, args) => {
-                // Built-in `fs` module namespace — intercept before evaluating the receiver
-                // so that `fs` does not need to be defined as a variable.
-                if let ExprKind::Var(v) = &obj_expr.kind {
-                    if v == "fs" {
-                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                        return self.call_fs_method(method, arg_vals, line);
-                    }
-                    // GPU.all() — iterate all GPU devices (simulation: a single device).
-                    if v == "GPU" && method == "all" {
-                        return Ok(Value::Array(vec![Value::GpuDevice(0)].into()));
-                    }
-                }
-
-                // Type-level call: `Counter.zero()` or `Counter.set_count(v)`
-                if let ExprKind::Var(type_name) = &obj_expr.kind {
-                    // Task.cancelled() — not supported in the interpreter (no cancellation
-                    // token), so always return false to keep code that uses it runnable.
-                    if type_name == "Task" && method == "cancelled" && args.is_empty() {
-                        return Ok(Value::Bool(false));
-                    }
-                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                        let struct_val = self.global.borrow().get(type_name);
-                        if let Some(Value::Struct { decl, captured }) = struct_val {
-                            let tm = decl.type_methods.iter().find(|m| m.name == *method).cloned();
-                            if let Some(type_method) = tm {
-                                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                                return self.call_type_method(&decl.name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
-                            }
-                            return Err(err(
-                                format!("'{}' has no type method '{}'", type_name, method),
-                                line,
-                            ));
-                        }
-                    }
-                }
-                // Fast path: `var_name.mutatingArrayMethod(args)` on a plain local
-                // variable. See `try_fast_mutating_array_call`'s doc comment. Kept in
-                // its own #[inline(never)] function so this large `eval_expr` match
-                // doesn't gain extra stack-frame size for every call (this recursive
-                // function runs close to the debug-build stack limit in some existing
-                // call chains — inlining this directly here previously overflowed it).
-                if let ExprKind::Var(name) = &obj_expr.kind {
-                    if let Some(result) = self.try_fast_mutating_array_call(name, method, args, &env, line) {
-                        return result;
-                    }
-                }
-                let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
-                // GPU device property methods — simulation mock values.
-                if let Value::GpuDevice(idx) = &obj {
-                    let idx = *idx;
-                    let p = &self.gpu_profile;
-                    let (cc_major, cc_minor) = p.compute_capability;
-                    return Ok(match method.as_str() {
-                        "name"              => Value::Str(format!("{} (sim {})", p.name, idx)),
-                        "totalMem"          => Value::Int(p.total_mem),
-                        "freeMem"           => Value::Int(p.total_mem),  // nothing else running
-                        "computeCapability" => Value::Array(vec![Value::Int(cc_major), Value::Int(cc_minor)].into()),
-                        "warpSize"          => Value::Int(p.warp_size),
-                        "maxThreads"        => Value::Int(p.max_threads),
-                        "maxSharedMem"      => Value::Int(p.max_shared_mem),
-                        "index"             => Value::Int(idx as i64),
-                        other => return Err(err(
-                            format!("GPU has no property '{other}'"), line,
-                        )),
-                    });
-                }
-                // Enforce: mutating method cannot be called on an immutable (let) binding
-                // Built-in non-mutating methods (e.g. `upgrade`) bypass this check.
-                const BUILTIN_NON_MUTATING: &[&str] = &["upgrade", "clone"];
-                if let ExprKind::Var(binding_name) = &obj_expr.kind {
-                    if !BUILTIN_NON_MUTATING.contains(&method.as_str()) {
-                        if let Value::Object(inner_rc) = &obj {
-                            let type_name = inner_rc.borrow().type_name.clone();
-                            let is_mutating = {
-                                let g = self.global.borrow();
-                                if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
-                                    // `task` methods take Arc<Self> — not &mut self — so never count as mutating.
-                                    decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
-                                        .unwrap_or(true)
-                                } else { true }
-                            };
-                            let is_interior_mutable = env.borrow().is_actor(binding_name);
-                            if is_mutating && !is_interior_mutable && !env.borrow().is_mutable(binding_name) {
-                                return Err(err(
-                                    format!("cannot call mutating method '{}' on let binding '{}'", method, binding_name),
-                                    line,
-                                ));
-                            }
-                            if is_mutating && !is_interior_mutable && env.borrow().is_shared(binding_name) {
-                                return Err(err(
-                                    format!("cannot call mutating method '{}' on shared binding '{}' — use T'actor for interior mutability", method, binding_name),
-                                    line,
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Check for double-use of owned args before evaluating
-                if let Value::Object(inner_rc) = &obj {
-                    let type_name = inner_rc.borrow().type_name.clone();
-                    let decl_opt = {
-                        let g = self.global.borrow();
-                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
-                            decl.methods.iter().find(|m| m.name == *method).cloned()
-                        } else { None }
-                    };
-                    if let Some(fn_decl) = decl_opt {
-                        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                        for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
-                            if param.owned {
-                                if let ExprKind::Var(name) = &arg.value.kind {
-                                    if !seen.insert(name.clone()) {
-                                        return Err(err(format!("'{}' moved twice in the same call", name), line));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let arg_vals = self.eval_args(args, Rc::clone(&env))?;
-                let mut modified_self: Option<Value> = None;
-                let result = self.call_method(obj.clone(), method, arg_vals, line, &mut modified_self)?;
-                // Write back modified self to source variable (force: mut method on let binding is OK)
-                if let Some(new_obj) = modified_self {
-                    match &obj_expr.kind {
-                        ExprKind::Var(name) => {
-                            let written = env.borrow_mut().force_set(name, new_obj.clone());
-                            // If not found in scope, try to write to self field (implicit self pattern).
-                            if !written {
-                                if let Some(Value::Object(ref inner_rc)) = env.borrow().get("self").as_ref() {
-                                    if inner_rc.borrow().fields.iter().any(|(k, _)| k == name.as_str()) {
-                                        let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
-                                        let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
-                                        let _ = self.assign(&field_expr, new_obj, Rc::clone(&env), line);
-                                    }
-                                }
-                            }
-                        }
-                        _ => { let _ = self.assign(obj_expr, new_obj, Rc::clone(&env), line); }
-                    }
-                }
-                // Collect owned-param source names before any borrow of global
-                let mut to_invalidate: Vec<String> = Vec::new();
-                if let Value::Object(inner_rc) = &obj {
-                    let type_name = inner_rc.borrow().type_name.clone();
-                    let names: Option<Vec<String>> = {
-                        let g = self.global.borrow();
-                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
-                            decl.methods.iter().find(|m| m.name == *method).map(|fn_decl| fn_decl.params.iter().zip(args.iter()).filter_map(|(param, arg)| {
-                                    if param.owned {
-                                        if let ExprKind::Var(name) = &arg.value.kind {
-                                            return Some(name.clone());
-                                        }
-                                    }
-                                    None
-                                }).collect())
-                        } else { None }
-                    }; // global borrow dropped here
-                    if let Some(names) = names {
-                        to_invalidate = names;
-                    }
-                }
-                for name in to_invalidate {
-                    env.borrow_mut().invalidate(&name);
-                }
-                Ok(result)
-            }
+            ExprKind::MethodCall(obj_expr, method, args) => self.eval_expr_method_call(obj_expr, method, args, env, line),
 
             ExprKind::New { ctor, .. } => {
                 // Arena placement has no runtime effect — just evaluate the constructor.
@@ -960,53 +1075,7 @@ impl Interpreter {
                 }
             }
 
-            ExprKind::TryElseBlock(try_stmts, else_stmts) => {
-                // Multi-line try/else block expression.
-                // Execute try body; if it throws (or returns Err), execute else body with
-                // `error` bound to the **original thrown value** in the else scope.
-                //
-                // `error` keeps its original type so the else body can pattern-match on it:
-                //   try risky() else:
-                //       match error:
-                //           MyError.NotFound: "not found"
-                //           _: "other: {error}"
-                //
-                // String interpolation `{error}` still works because the interpreter's
-                // `display_value` falls back to the Value's Display for non-Object types,
-                // and `as string:` conversions are honoured for struct/enum values.
-                let try_env = Env::child(Rc::clone(&env));
-                let result = self.eval_block_as_expr(try_stmts, try_env);
-
-                match result {
-                    Ok(v) => {
-                        // If the block returned Err(e) directly, fall through to else body
-                        // with the inner error value bound to `error`.
-                        if let Value::EnumVariant { ref type_name, ref variant, ref fields } = v {
-                            if type_name == "Result" && variant == "Err" {
-                                let err_val = fields.first().cloned().unwrap_or(Value::Nil);
-                                let else_env = Env::child(Rc::clone(&env));
-                                else_env.borrow_mut().define("error", err_val);
-                                return self.eval_block_as_expr(else_stmts, else_env);
-                            }
-                        }
-                        // Unwrap Ok(v) enum variants produced by `def Result` functions.
-                        if let Value::EnumVariant { ref type_name, ref variant, ref fields } = v {
-                            if type_name == "Result" && variant == "Ok" {
-                                return Ok(fields.first().cloned().unwrap_or(Value::Nil));
-                            }
-                        }
-                        Ok(v)
-                    }
-                    Err(Signal::Exception(err_val)) => {
-                        // Bind `error` to the original thrown value, not its string form.
-                        // This allows `match error: MyEnum.Variant: …` in the else body.
-                        let else_env = Env::child(Rc::clone(&env));
-                        else_env.borrow_mut().define("error", err_val);
-                        self.eval_block_as_expr(else_stmts, else_env)
-                    }
-                    Err(other) => Err(other),
-                }
-            }
+            ExprKind::TryElseBlock(try_stmts, else_stmts) => self.eval_expr_try_else_block(try_stmts, else_stmts, env),
 
             ExprKind::Else(expr, default) => {
                 let val = self.eval_expr(expr, Rc::clone(&env))?;
@@ -1288,51 +1357,7 @@ impl Interpreter {
                 Ok(Value::Tuple(results))
             }
 
-            ExprKind::GenericCall(callee, _type_args, args) => {
-                // In the interpreter, type args are erased — just evaluate as a regular call.
-                // Special built-ins that need type info (like `channel`) return a pair of arrays
-                // as a synchronous simulation: (sender_items, receiver_items) backed by a Vec.
-                if let ExprKind::Var(name) = &callee.kind {
-                    if matches!(name.as_str(), "channel" | "oneshot" | "broadcast" | "watch") {
-                        let buf = Rc::new(RefCell::new(VecDeque::new()));
-                        let closed = Rc::new(RefCell::new(false));
-                        let sender = Value::Channel { buf: Rc::clone(&buf), closed: Rc::clone(&closed), is_sender: true };
-                        let receiver = Value::Channel { buf, closed, is_sender: false };
-                        return Ok(Value::Tuple(vec![sender, receiver]));
-                    }
-                    if name.as_str() == "timeout" {
-                        if let Some(fut_arg) = args.get(1) {
-                            let val = self.eval_expr(&fut_arg.value, Rc::clone(&env))?;
-                            return match val {
-                                v @ (Value::Fn { .. } | Value::Closure { .. } | Value::NativeFn { .. }) => {
-                                    let result = self.call_value(v, vec![], fut_arg.value.line, false)?;
-                                    match result {
-                                        Value::Future(inner) => Ok(*inner),
-                                        other => Ok(other),
-                                    }
-                                }
-                                Value::Future(inner) => Ok(*inner),
-                                other => Ok(other),
-                            };
-                        }
-                        return Ok(Value::Nil);
-                    }
-                    // from_json<T>(s) — interpreter stub: return the string as-is (no deserialization)
-                    if name.as_str() == "fromJson" {
-                        if let Some(arg) = args.first() {
-                            return self.eval_expr(&arg.value, Rc::clone(&env));
-                        }
-                        return Ok(Value::Nil);
-                    }
-                }
-                // Generic call with no special handling: evaluate callee and call it.
-                let callee_val = self.eval_expr(callee, Rc::clone(&env))?;
-                let mut evaled_args = Vec::new();
-                for a in args {
-                    evaled_args.push(self.eval_expr(&a.value, Rc::clone(&env))?);
-                }
-                self.call_value(callee_val, evaled_args, line, false)
-            }
+            ExprKind::GenericCall(callee, _type_args, args) => self.eval_expr_generic_call(callee, args, env, line),
 
             ExprKind::SliceRange { .. } => {
                 Err(err("SliceRange cannot appear outside an index expression", line))

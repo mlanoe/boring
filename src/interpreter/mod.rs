@@ -26,30 +26,21 @@ pub mod gpu_profile;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub struct RuntimeError {
-    pub message: String,
-    pub line: usize,
-    pub col: usize,
-    pub len: usize,
-}
-
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "runtime error (line {}): {}", self.line, self.message)
-    }
-}
+/// The interpreter's runtime-error payload -- shares its definition with the
+/// checker's/transpiler's error (and the checker's warning) types; see
+/// `crate::errors::SourceError`'s doc comment.
+pub use crate::errors::SourceError as RuntimeError;
 
 fn err(msg: impl Into<String>, line: usize) -> Signal {
-    Signal::Error(RuntimeError { message: msg.into(), line, col: 0, len: 0 })
+    Signal::Error(RuntimeError::at_line(msg, line))
 }
 
 fn err_at(msg: impl Into<String>, line: usize, col: usize) -> Signal {
-    Signal::Error(RuntimeError { message: msg.into(), line, col, len: 1 })
+    Signal::Error(RuntimeError::at(msg, line, col))
 }
 
 fn err_span(msg: impl Into<String>, line: usize, col: usize, len: usize) -> Signal {
-    Signal::Error(RuntimeError { message: msg.into(), line, col, len })
+    Signal::Error(RuntimeError::new(msg, line, col, len))
 }
 
 /// Check whether two overload FnDecls conflict and exit with an error if they do.
@@ -977,9 +968,7 @@ macro_rules! define_int_conv_builtin {
     };
 }
 
-fn register_stdlib(env: &EnvRef) {
-    let mut e = env.borrow_mut();
-
+fn register_io_and_diagnostics_builtins(e: &mut Env) {
     e.define("print", Value::NativeFn {
         name: "print".into(),
         func: |args, line| {
@@ -1134,7 +1123,9 @@ fn register_stdlib(env: &EnvRef) {
             Err(err(format!("panic: {}", msg), line))
         },
     });
+}
 
+fn register_numeric_conversion_builtins(e: &mut Env) {
     e.define("int", Value::NativeFn {
         name: "int".into(),
         func: |args, line| {
@@ -1282,6 +1273,9 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+}
+
+fn register_string_and_math_builtins(e: &mut Env) {
     e.define("str", Value::NativeFn {
         name: "str".into(),
         func: |args, line| {
@@ -1623,6 +1617,9 @@ fn register_stdlib(env: &EnvRef) {
         },
     });
 
+}
+
+fn register_concurrency_builtins(e: &mut Env) {
     // ─── Math constants ───────────────────────────────────────────────────────
 
     e.define("drop", Value::NativeFn {
@@ -1670,6 +1667,9 @@ fn register_stdlib(env: &EnvRef) {
         func: |_args, _line| Ok(Value::Nil),
     });
 
+}
+
+fn register_result_and_args_builtins(e: &mut Env) {
     // ─── Result constructors ──────────────────────────────────────────────────
     // `Ok(v)` and `Err(e)` produce EnumVariant values that pattern-matching
     // (`if let Ok(v) = ...` / `while let Ok(v) = ...`) recognises directly.
@@ -1781,7 +1781,9 @@ fn register_stdlib(env: &EnvRef) {
             std::process::exit(code);
         },
     });
+}
 
+fn register_misc_globals(e: &mut Env) {
     e.define("PI",  Value::Float(std::f64::consts::PI));
     e.define("E",   Value::Float(std::f64::consts::E));
     e.define("INF", Value::Float(f64::INFINITY));
@@ -1814,6 +1816,16 @@ fn register_stdlib(env: &EnvRef) {
     for name in &["Duration", "Instant"] {
         e.define(name, Value::RustType { name: name.to_string() });
     }
+}
+
+fn register_stdlib(env: &EnvRef) {
+    let mut e = env.borrow_mut();
+    register_io_and_diagnostics_builtins(&mut e);
+    register_numeric_conversion_builtins(&mut e);
+    register_string_and_math_builtins(&mut e);
+    register_concurrency_builtins(&mut e);
+    register_result_and_args_builtins(&mut e);
+    register_misc_globals(&mut e);
 }
 
 // ─── Interpreter ─────────────────────────────────────────────────────────────

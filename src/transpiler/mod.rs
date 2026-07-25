@@ -19,6 +19,10 @@ use crate::ast::*;
 mod emit_top;
 mod emit_struct;
 mod emit_stmt;
+mod emit_let;
+mod emit_match;
+mod emit_loop;
+mod emit_flow;
 mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
@@ -114,11 +118,10 @@ impl Default for TranspileConfig {
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-pub struct TranspileError {
-    pub message: String,
-    pub line: usize,
-    pub col: usize,
-}
+/// Shares its definition with the checker's/interpreter's error types (and the
+/// checker's warning type); see `crate::errors::SourceError`'s doc comment. Also
+/// doubles as `TranspileOutput::warnings`' element type -- same shape either way.
+pub use crate::errors::SourceError as TranspileError;
 
 pub struct TranspileOutput {
     pub code: String,
@@ -1170,11 +1173,11 @@ impl Transpiler {
     // ── Output helpers ────────────────────────────────────────────────────────
 
     fn push_error(&self, line: usize, col: usize, msg: impl Into<String>) {
-        self.errors.borrow_mut().push(TranspileError { message: msg.into(), line, col });
+        self.errors.borrow_mut().push(TranspileError::at(msg, line, col));
     }
 
     fn push_warning(&self, line: usize, col: usize, msg: impl Into<String>) {
-        self.warnings.borrow_mut().push(TranspileError { message: msg.into(), line, col });
+        self.warnings.borrow_mut().push(TranspileError::at(msg, line, col));
     }
 
     fn ind(&self) -> String {
@@ -1696,13 +1699,20 @@ impl Transpiler {
             || body_has_stream_for(&top_stmts, &self.stream_fns)
             || items_have_task_call(stmts, &self.task_fns);
         if needs_async {
-            panic!(
+            let (line, col) = match stmts.first() {
+                Some(Item::Stmt(Stmt::Expr(e))) => (e.line, e.col),
+                Some(Item::Let(s)) => (s.line, s.col),
+                _ => (0, 0),
+            };
+            self.push_error(line, col,
                 "top-level `task`/stream/channel usage isn't supported for GPU targets (wgpu/cuda/metal) yet -- \
                  the generated entry point runs under a minimal `pollster` executor, not a tokio runtime, so \
                  `tokio::spawn`/tokio channels/timers would panic at runtime (\"no reactor running\") even if this \
                  code were made async. Move this into a synchronous `def main():` instead, or avoid task/stream/\
                  channel usage in top-level GPU code for now."
             );
+            self.line("fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }");
+            return;
         }
         let result_ty = if self.user_defines_result { "std::result::Result" } else { "Result" };
         let box_ty = if self.user_defines_box { "std::boxed::Box" } else { "Box" };
@@ -1843,40 +1853,317 @@ impl Transpiler {
         }
     }
 
-    fn pre_scan(&mut self, program: &Program) {
-        // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
-        self.typed_error_enums.insert("Error".to_string());
-        for variant in &["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"] {
-            self.enum_variants.insert(variant.to_string(), "Error".to_string());
-            let key = format!("Error::{}", variant);
-            self.enum_variant_fields.insert(key.clone(), vec![]);
-            self.enum_variant_field_types.insert(key, vec![]);
-        }
-
-        // ── Collect user-defined type names (for managed mode wrapping) ────────
-        for item in &program.items {
-            match item {
-                Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
-                Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
-                Item::Let(s)    => {
-                    self.user_top_level_names.insert(s.name.clone());
-                    // Populated here (before any emission) rather than inline where the
-                    // `const` is actually emitted, so a function appearing earlier in
-                    // source order than the `let` it references still sees the name in
-                    // this set -- Rust doesn't care about const declaration order, but
-                    // this scan does, being a single pass over `program.items`.
-                    if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
-                        self.gpu_top_level_const_names.insert(s.name.clone());
+    /// `pre_scan`'s per-struct registration: struct fields (incl. body-less-init params),
+    /// callable-struct/init-body/init-default tracking, associated types, type vars/type
+    /// methods, getters/setters, task/throws/return-type method tracking, overloaded-method
+    /// detection, actor/rwlock/arc-qualified field tracking, iterator-protocol detection,
+    /// transient fields, `as T:` conversion targets, and (last, since it depends on
+    /// `struct_req_methods`) field-qualifier inference from method-body usage.
+    fn pre_scan_struct_item(
+        &mut self,
+        s: &crate::ast::StructDecl,
+        ext_methods_by_type: &std::collections::HashMap<&str, Vec<&crate::ast::FnDecl>>,
+        ext_setters_by_type: &std::collections::HashMap<&str, Vec<&crate::ast::SetDecl>>,
+    ) {
+        // Don't register method names in fn_sigs — they're only called as obj.method()
+        // and would shadow top-level functions with the same name.
+        let mut fields: Vec<(String, Type)> = s.fields.iter()
+            .map(|f| (f.name.clone(), f.ty.clone()))
+            .collect();
+        // Also include positional init params (those ARE the struct fields for init structs).
+        if fields.is_empty() {
+            for init in &s.inits {
+                if init.body.is_empty() {
+                    // No-body init: params become fields.
+                    for p in &init.params {
+                        if let Some(ty) = &p.ty {
+                            fields.push((p.name.clone(), ty.clone()));
+                        }
                     }
                 }
-                _ => {}
             }
         }
+        let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
+        if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
+        self.struct_fields.insert(s.name.clone(), fields);
+        if s.methods.iter().any(|m| m.name.is_empty()) {
+            self.callable_structs.insert(s.name.clone());
+        }
+        // Track inits that have a body (constructor call must use ::new(), not struct literal).
+        // Also collect default values for init params (for filling in omitted args).
+        for init in &s.inits {
+            if !init.body.is_empty() {
+                self.struct_has_init_body.insert(s.name.clone());
+            }
+            // Collect defaults (for both body and body-less inits).
+            let defaults: Vec<Option<String>> = init.params.iter()
+                .map(|p| p.default.as_ref().map(|d| self.emit_expr(d)))
+                .collect();
+            if defaults.iter().any(|d| d.is_some()) {
+                self.struct_init_defaults.insert(s.name.clone(), defaults);
+            }
+        }
+        // Register concrete associated type definitions for `T.AssocName` resolution.
+        if !s.assoc_type_defs.is_empty() {
+            let map: std::collections::HashMap<String, Type> = s.assoc_type_defs
+                .iter()
+                .map(|a| (a.name.clone(), a.ty.clone()))
+                .collect();
+            self.struct_assoc_types.insert(s.name.clone(), map);
+        }
+        // Register type vars and type methods for emission dispatch.
+        for tv in &s.type_vars {
+            let key = format!("{}::{}", s.name, tv.name);
+            if tv.mutable {
+                self.struct_type_mut_var_names.insert(key);
+            } else {
+                self.struct_type_var_names.insert(key);
+            }
+        }
+        let mut method_map = std::collections::HashMap::new();
+        for tm in &s.type_methods {
+            method_map.insert(tm.name.clone(), tm.kind.clone());
+        }
+        if !method_map.is_empty() {
+            self.struct_type_method_sigs.insert(s.name.clone(), method_map);
+        }
+        // Track `req` getter methods (property read, emit as call) and
+        // `set` setter methods (property write, emit as set_X call).
+        for m in &s.methods {
+            // `req` methods without params that return a value are getters.
+            if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
+                let key = format!("{}::{}", s.name, m.name);
+                self.struct_getters.insert(key);
+            }
+        }
+        for setter in &s.setters {
+            let key = format!("{}::{}", s.name, setter.name);
+            self.struct_setters.insert(key);
+        }
+        // Track instance methods that are `task` for .await at call sites.
+        for m in &s.methods {
+            if m.task { self.instance_task_methods.insert(m.name.clone()); }
+            if m.throws {
+                // Qualified key (checked first at call sites when the receiver's
+                // struct type is known) avoids a same-named-but-non-throwing
+                // method on a different struct picking up a stray `?` -- e.g.
+                // `EncoderBlock.forward` (no throws) vs `AudioEncoder.forward`
+                // (throws) both being named "forward".
+                self.struct_method_throws.insert(format!("{}::{}", s.name, m.name));
+                self.struct_method_throws.insert(m.name.clone());
+            }
+            // Track return types for already_opt detection in emit_stmt.
+            if let Some(ret_ty) = &m.return_ty {
+                let key = format!("{}::{}", s.name, m.name);
+                self.struct_method_return_types.insert(key, ret_ty.clone());
+            }
+        }
+        // Detect overloaded inline methods — same logic as ext blocks.
+        for m in &s.methods {
+            let method_key = format!("{}::{}", s.name, m.name);
+            let (new_errors, overloaded) = {
+                let method_variants = self.struct_method_overload_decls
+                    .entry(method_key.clone())
+                    .or_default();
+                let this_mangled = mangle_overload_name(&m.name, &m.params);
+                let already_registered = method_variants.iter()
+                    .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                let new_errors: Vec<_> = if !already_registered {
+                    let errs = method_variants.iter()
+                        .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
+                            "ambiguous overload for method '{}::{}' — \
+                             both match a call with {} argument(s)",
+                            s.name, m.name, n
+                        ))))
+                        .collect();
+                    method_variants.push(m.clone());
+                    errs
+                } else { Vec::new() };
+                (new_errors, method_variants.len() > 1)
+            };
+            for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
+            if overloaded { self.overloaded_method_keys.insert(method_key); }
+        }
+        // Track T'actor / T'actor'task struct fields → Arc<Mutex<T>> or Arc<tokio::sync::Mutex<T>>.
+        for f in &s.fields {
+            if Self::is_mutex_binding(f.mutable, &f.ty) {
+                let key = format!("{}::{}", s.name, f.name);
+                if Self::is_mutex_task_binding(f.mutable, &f.ty) {
+                    self.struct_mutex_task_fields.insert(key);
+                } else {
+                    self.struct_mutex_fields.insert(key);
+                }
+            }
+            if Self::is_rwlock_binding(f.mutable, &f.ty) {
+                let key = format!("{}::{}", s.name, f.name);
+                if Self::is_rwlock_task_binding(f.mutable, &f.ty) {
+                    self.struct_rwlock_task_fields.insert(key);
+                } else {
+                    self.struct_rwlock_fields.insert(key);
+                }
+            }
+            // Note: infer_struct_field_qualifiers runs after this loop and may add
+            // further entries to struct_mutex_fields / struct_rwlock_fields.
+            // Collect arc-qualified inner type names for task fn method validation.
+            if let Some(n) = Self::arc_inner_type_name(&f.ty) {
+                self.arc_qualified_types.insert(n.to_string());
+            }
+        }
+        // Collect arc-qualified types from method params too.
+        for m in &s.methods {
+            for p in &m.params {
+                if let Some(ty) = &p.ty {
+                    if let Some(n) = Self::arc_inner_type_name(ty) {
+                        self.arc_qualified_types.insert(n.to_string());
+                    }
+                }
+            }
+        }
+        // Track req (non-mutating) methods for 'guard read vs write dispatch.
+        for m in &s.methods {
+            if !m.mutating {
+                self.struct_req_methods.insert(format!("{}::{}", s.name, m.name));
+            }
+            if m.task {
+                self.struct_task_methods.insert(format!("{}::{}", s.name, m.name));
+            }
+        }
+        // Iterator protocol: a struct with `def T? next():` is iterable.
+        // `for x in obj:` desugars to `while let Some(x) = __iter.next()`.
+        for m in &s.methods {
+            if m.name == "next" && m.params.is_empty()
+                && matches!(&m.return_ty, Some(Type::Optional(_)))
+            {
+                self.iterable_structs.insert(s.name.clone());
+            }
+        }
+        // Track transient fields (Cell vs RefCell based on Copy-ness).
+        for f in &s.fields {
+            if f.transient {
+                let key = format!("{}::{}", s.name, f.name);
+                let is_copy = Self::is_copy_type(&f.ty);
+                // Pre-compute the inner default value string for Cell/RefCell init.
+                let default_val = if let Some(def) = &f.default {
+                    self.emit_let_value(Some(&f.ty), def)
+                } else {
+                    "None".to_string()
+                };
+                self.transient_fields.insert(key, (is_copy, f.ty.clone(), default_val));
+            }
+        }
+        // Register user-defined `as T:` conversion targets.
+        for conv in &s.conversions {
+            let tname = self.emit_type(&conv.ty);
+            self.user_conv_targets.insert(tname.to_lowercase());
+            // `as string:` emits a Display impl — mark the type so auto-Display is skipped.
+            if Self::is_string_conversion(conv) {
+                self.display_types.insert(s.name.clone());
+            }
+        }
+        // Infer qualifiers for private unqualified fields from method body usage.
+        // Must run after struct_req_methods is populated (used for def/req detection).
+        // Also include same-file `ext` block methods/setters for this type.
+        let empty_methods: Vec<&crate::ast::FnDecl> = Vec::new();
+        let empty_setters: Vec<&crate::ast::SetDecl> = Vec::new();
+        let ext_methods = ext_methods_by_type.get(s.name.as_str()).unwrap_or(&empty_methods);
+        let ext_setters = ext_setters_by_type.get(s.name.as_str()).unwrap_or(&empty_setters);
+        self.infer_struct_field_qualifiers(s, ext_methods, ext_setters);
+    }
 
-        // ── Inference pass ──────────────────────────────────────────────────────
-        // Runs before all other pre_scan work so that unit_enums / recursive_fields
-        // are populated when emit_struct / emit_enum read them.
+    /// `pre_scan`'s per-`ext`-block registration: arc-qualified param types, `as T:`
+    /// conversion targets, operator-method detection (so `emit_struct` skips deriving
+    /// `PartialEq` when a custom impl will be generated), getters/return-types/throws/
+    /// overloaded-method tracking (mirroring inline struct methods), setters, and
+    /// no-protocol method-override tracking.
+    fn pre_scan_ext_item(&mut self, e: &crate::ast::ExtDecl) {
+        // Collect arc-qualified types from ext method params.
+        for m in &e.methods {
+            for p in &m.params {
+                if let Some(ty) = &p.ty {
+                    if let Some(n) = Self::arc_inner_type_name(ty) {
+                        self.arc_qualified_types.insert(n.to_string());
+                    }
+                }
+            }
+        }
+        // Register user-defined `as T:` conversion targets from extensions too.
+        for conv in &e.conversions {
+            let tname = self.emit_type(&conv.ty);
+            self.user_conv_targets.insert(tname.to_lowercase());
+            // `as string:` in an ext block also emits Display — mark the type.
+            if Self::is_string_conversion(conv) {
+                self.display_types.insert(e.type_name.clone());
+            }
+        }
+        // Pre-scan operator methods so emit_struct can skip deriving PartialEq
+        // when a custom PartialEq impl will be generated by emit_operator_trait_impls.
+        const OPERATOR_METHOD_NAMES: &[&str] = &[
+            "add", "sub", "mul", "div", "rem", "neg",
+            "eq", "ne", "lt", "le", "gt", "ge",
+        ];
+        let tname = &e.type_name;
+        for m in &e.methods {
+            if OPERATOR_METHOD_NAMES.contains(&m.name.as_str()) {
+                self.struct_operator_methods.insert(format!("{}::{}", tname, m.name));
+            }
+            // Register `req` (getter) methods from ext blocks in struct_getters.
+            if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
+                self.struct_getters.insert(format!("{}::{}", tname, m.name));
+            }
+            // Track return types for managed-mode inference.
+            if let Some(ret_ty) = &m.return_ty {
+                self.struct_method_return_types.insert(
+                    format!("{}::{}", tname, m.name), ret_ty.clone());
+            }
+            if m.throws {
+                // Qualified key (checked first at call sites when the receiver's
+                // struct type is known) avoids a same-named-but-non-throwing
+                // method on a different struct picking up a stray `?` -- see the
+                // bare-name insert's doc comment.
+                self.struct_method_throws.insert(format!("{}::{}", tname, m.name));
+                self.struct_method_throws.insert(m.name.clone());
+            }
+            // Track overloaded struct methods (same name, different params).
+            let method_key = format!("{}::{}", tname, m.name);
+            let (new_errors, overloaded) = {
+                let method_variants = self.struct_method_overload_decls.entry(method_key.clone()).or_default();
+                let this_mangled = mangle_overload_name(&m.name, &m.params);
+                let already_registered = method_variants.iter()
+                    .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
+                let new_errors: Vec<_> = if !already_registered {
+                    let errs = method_variants.iter()
+                        .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
+                            "ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
+                            tname, m.name, n
+                        ))))
+                        .collect();
+                    method_variants.push(m.clone());
+                    errs
+                } else { Vec::new() };
+                (new_errors, method_variants.len() > 1)
+            };
+            for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
+            if overloaded { self.overloaded_method_keys.insert(method_key); }
+        }
+        // Register setters from ext blocks.
+        for setter in &e.setters {
+            self.struct_setters.insert(format!("{}::{}", tname, setter.name));
+        }
+        // Track methods overriding the struct's own methods (no protocol).
+        // An ext block with no traits overrides plain struct methods of the same name.
+        if e.traits.is_empty() {
+            for m in &e.methods {
+                self.struct_ext_method_overrides.insert(format!("{}::{}", tname, m.name));
+            }
+        }
+    }
 
+    /// Runs before all other `pre_scan` work so that `unit_enums`/`recursive_fields` are
+    /// populated when `emit_struct`/`emit_enum` read them: builds a non-heap direct-children
+    /// map per type, computes (via BFS) which types transitively reach each type without
+    /// crossing a heap-backed container, then uses that to mark recursive enum variants/
+    /// struct fields for `Box` wrapping and (strict mode only) emit stack-size warnings.
+    fn pre_scan_infer_recursive_and_size_warnings(&mut self, program: &Program) {
         // Build non-heap direct-children map for transitive cycle detection.
         // direct_children[A] = {B, C, …} means type A has a non-heap field of type B or C.
         // Array/Dict/Set/Qualified are heap-backed so they break infinite-size cycles.
@@ -2015,6 +2302,39 @@ impl Transpiler {
                 _ => {}
             }
         }
+    }
+
+    fn pre_scan(&mut self, program: &Program) {
+        // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
+        self.typed_error_enums.insert("Error".to_string());
+        for variant in &["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"] {
+            self.enum_variants.insert(variant.to_string(), "Error".to_string());
+            let key = format!("Error::{}", variant);
+            self.enum_variant_fields.insert(key.clone(), vec![]);
+            self.enum_variant_field_types.insert(key, vec![]);
+        }
+
+        // ── Collect user-defined type names (for managed mode wrapping) ────────
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
+                Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
+                Item::Let(s)    => {
+                    self.user_top_level_names.insert(s.name.clone());
+                    // Populated here (before any emission) rather than inline where the
+                    // `const` is actually emitted, so a function appearing earlier in
+                    // source order than the `let` it references still sees the name in
+                    // this set -- Rust doesn't care about const declaration order, but
+                    // this scan does, being a single pass over `program.items`.
+                    if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
+                        self.gpu_top_level_const_names.insert(s.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.pre_scan_infer_recursive_and_size_warnings(program);
 
         // ── Build type_sizes cache for auto-boxing in emit_type ─────────────────
         for item in &program.items {
@@ -2137,291 +2457,10 @@ impl Transpiler {
                     }
                 }
                 Item::Struct(s) => {
-                    // Don't register method names in fn_sigs — they're only called as obj.method()
-                    // and would shadow top-level functions with the same name.
-                    let mut fields: Vec<(String, Type)> = s.fields.iter()
-                        .map(|f| (f.name.clone(), f.ty.clone()))
-                        .collect();
-                    // Also include positional init params (those ARE the struct fields for init structs).
-                    if fields.is_empty() {
-                        for init in &s.inits {
-                            if init.body.is_empty() {
-                                // No-body init: params become fields.
-                                for p in &init.params {
-                                    if let Some(ty) = &p.ty {
-                                        fields.push((p.name.clone(), ty.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
-                    if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
-                    self.struct_fields.insert(s.name.clone(), fields);
-                    if s.methods.iter().any(|m| m.name.is_empty()) {
-                        self.callable_structs.insert(s.name.clone());
-                    }
-                    // Track inits that have a body (constructor call must use ::new(), not struct literal).
-                    // Also collect default values for init params (for filling in omitted args).
-                    for init in &s.inits {
-                        if !init.body.is_empty() {
-                            self.struct_has_init_body.insert(s.name.clone());
-                        }
-                        // Collect defaults (for both body and body-less inits).
-                        let defaults: Vec<Option<String>> = init.params.iter()
-                            .map(|p| p.default.as_ref().map(|d| self.emit_expr(d)))
-                            .collect();
-                        if defaults.iter().any(|d| d.is_some()) {
-                            self.struct_init_defaults.insert(s.name.clone(), defaults);
-                        }
-                    }
-                    // Register concrete associated type definitions for `T.AssocName` resolution.
-                    if !s.assoc_type_defs.is_empty() {
-                        let map: std::collections::HashMap<String, Type> = s.assoc_type_defs
-                            .iter()
-                            .map(|a| (a.name.clone(), a.ty.clone()))
-                            .collect();
-                        self.struct_assoc_types.insert(s.name.clone(), map);
-                    }
-                    // Register type vars and type methods for emission dispatch.
-                    for tv in &s.type_vars {
-                        let key = format!("{}::{}", s.name, tv.name);
-                        if tv.mutable {
-                            self.struct_type_mut_var_names.insert(key);
-                        } else {
-                            self.struct_type_var_names.insert(key);
-                        }
-                    }
-                    let mut method_map = std::collections::HashMap::new();
-                    for tm in &s.type_methods {
-                        method_map.insert(tm.name.clone(), tm.kind.clone());
-                    }
-                    if !method_map.is_empty() {
-                        self.struct_type_method_sigs.insert(s.name.clone(), method_map);
-                    }
-                    // Track `req` getter methods (property read, emit as call) and
-                    // `set` setter methods (property write, emit as set_X call).
-                    for m in &s.methods {
-                        // `req` methods without params that return a value are getters.
-                        if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
-                            let key = format!("{}::{}", s.name, m.name);
-                            self.struct_getters.insert(key);
-                        }
-                    }
-                    for setter in &s.setters {
-                        let key = format!("{}::{}", s.name, setter.name);
-                        self.struct_setters.insert(key);
-                    }
-                    // Track instance methods that are `task` for .await at call sites.
-                    for m in &s.methods {
-                        if m.task { self.instance_task_methods.insert(m.name.clone()); }
-                        if m.throws {
-                            // Qualified key (checked first at call sites when the receiver's
-                            // struct type is known) avoids a same-named-but-non-throwing
-                            // method on a different struct picking up a stray `?` -- e.g.
-                            // `EncoderBlock.forward` (no throws) vs `AudioEncoder.forward`
-                            // (throws) both being named "forward".
-                            self.struct_method_throws.insert(format!("{}::{}", s.name, m.name));
-                            self.struct_method_throws.insert(m.name.clone());
-                        }
-                        // Track return types for already_opt detection in emit_stmt.
-                        if let Some(ret_ty) = &m.return_ty {
-                            let key = format!("{}::{}", s.name, m.name);
-                            self.struct_method_return_types.insert(key, ret_ty.clone());
-                        }
-                    }
-                    // Detect overloaded inline methods — same logic as ext blocks.
-                    for m in &s.methods {
-                        let method_key = format!("{}::{}", s.name, m.name);
-                        let (new_errors, overloaded) = {
-                            let method_variants = self.struct_method_overload_decls
-                                .entry(method_key.clone())
-                                .or_default();
-                            let this_mangled = mangle_overload_name(&m.name, &m.params);
-                            let already_registered = method_variants.iter()
-                                .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
-                            let new_errors: Vec<_> = if !already_registered {
-                                let errs = method_variants.iter()
-                                    .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
-                                        "ambiguous overload for method '{}::{}' — \
-                                         both match a call with {} argument(s)",
-                                        s.name, m.name, n
-                                    ))))
-                                    .collect();
-                                method_variants.push(m.clone());
-                                errs
-                            } else { Vec::new() };
-                            (new_errors, method_variants.len() > 1)
-                        };
-                        for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
-                        if overloaded { self.overloaded_method_keys.insert(method_key); }
-                    }
-                    // Track T'actor / T'actor'task struct fields → Arc<Mutex<T>> or Arc<tokio::sync::Mutex<T>>.
-                    for f in &s.fields {
-                        if Self::is_mutex_binding(f.mutable, &f.ty) {
-                            let key = format!("{}::{}", s.name, f.name);
-                            if Self::is_mutex_task_binding(f.mutable, &f.ty) {
-                                self.struct_mutex_task_fields.insert(key);
-                            } else {
-                                self.struct_mutex_fields.insert(key);
-                            }
-                        }
-                        if Self::is_rwlock_binding(f.mutable, &f.ty) {
-                            let key = format!("{}::{}", s.name, f.name);
-                            if Self::is_rwlock_task_binding(f.mutable, &f.ty) {
-                                self.struct_rwlock_task_fields.insert(key);
-                            } else {
-                                self.struct_rwlock_fields.insert(key);
-                            }
-                        }
-                        // Note: infer_struct_field_qualifiers runs after this loop and may add
-                        // further entries to struct_mutex_fields / struct_rwlock_fields.
-                        // Collect arc-qualified inner type names for task fn method validation.
-                        if let Some(n) = Self::arc_inner_type_name(&f.ty) {
-                            self.arc_qualified_types.insert(n.to_string());
-                        }
-                    }
-                    // Collect arc-qualified types from method params too.
-                    for m in &s.methods {
-                        for p in &m.params {
-                            if let Some(ty) = &p.ty {
-                                if let Some(n) = Self::arc_inner_type_name(ty) {
-                                    self.arc_qualified_types.insert(n.to_string());
-                                }
-                            }
-                        }
-                    }
-                    // Track req (non-mutating) methods for 'guard read vs write dispatch.
-                    for m in &s.methods {
-                        if !m.mutating {
-                            self.struct_req_methods.insert(format!("{}::{}", s.name, m.name));
-                        }
-                        if m.task {
-                            self.struct_task_methods.insert(format!("{}::{}", s.name, m.name));
-                        }
-                    }
-                    // Iterator protocol: a struct with `def T? next():` is iterable.
-                    // `for x in obj:` desugars to `while let Some(x) = __iter.next()`.
-                    for m in &s.methods {
-                        if m.name == "next" && m.params.is_empty()
-                            && matches!(&m.return_ty, Some(Type::Optional(_)))
-                        {
-                            self.iterable_structs.insert(s.name.clone());
-                        }
-                    }
-                    // Track transient fields (Cell vs RefCell based on Copy-ness).
-                    for f in &s.fields {
-                        if f.transient {
-                            let key = format!("{}::{}", s.name, f.name);
-                            let is_copy = Self::is_copy_type(&f.ty);
-                            // Pre-compute the inner default value string for Cell/RefCell init.
-                            let default_val = if let Some(def) = &f.default {
-                                self.emit_let_value(Some(&f.ty), def)
-                            } else {
-                                "None".to_string()
-                            };
-                            self.transient_fields.insert(key, (is_copy, f.ty.clone(), default_val));
-                        }
-                    }
-                    // Register user-defined `as T:` conversion targets.
-                    for conv in &s.conversions {
-                        let tname = self.emit_type(&conv.ty);
-                        self.user_conv_targets.insert(tname.to_lowercase());
-                        // `as string:` emits a Display impl — mark the type so auto-Display is skipped.
-                        if Self::is_string_conversion(conv) {
-                            self.display_types.insert(s.name.clone());
-                        }
-                    }
-                    // Infer qualifiers for private unqualified fields from method body usage.
-                    // Must run after struct_req_methods is populated (used for def/req detection).
-                    // Also include same-file `ext` block methods/setters for this type.
-                    let empty_methods: Vec<&crate::ast::FnDecl> = Vec::new();
-                    let empty_setters: Vec<&crate::ast::SetDecl> = Vec::new();
-                    let ext_methods = ext_methods_by_type.get(s.name.as_str()).unwrap_or(&empty_methods);
-                    let ext_setters = ext_setters_by_type.get(s.name.as_str()).unwrap_or(&empty_setters);
-                    self.infer_struct_field_qualifiers(s, ext_methods, ext_setters);
+                    self.pre_scan_struct_item(s, &ext_methods_by_type, &ext_setters_by_type);
                 }
                 Item::Ext(e) => {
-                    // Collect arc-qualified types from ext method params.
-                    for m in &e.methods {
-                        for p in &m.params {
-                            if let Some(ty) = &p.ty {
-                                if let Some(n) = Self::arc_inner_type_name(ty) {
-                                    self.arc_qualified_types.insert(n.to_string());
-                                }
-                            }
-                        }
-                    }
-                    // Register user-defined `as T:` conversion targets from extensions too.
-                    for conv in &e.conversions {
-                        let tname = self.emit_type(&conv.ty);
-                        self.user_conv_targets.insert(tname.to_lowercase());
-                        // `as string:` in an ext block also emits Display — mark the type.
-                        if Self::is_string_conversion(conv) {
-                            self.display_types.insert(e.type_name.clone());
-                        }
-                    }
-                    // Pre-scan operator methods so emit_struct can skip deriving PartialEq
-                    // when a custom PartialEq impl will be generated by emit_operator_trait_impls.
-                    const OPERATOR_METHOD_NAMES: &[&str] = &[
-                        "add", "sub", "mul", "div", "rem", "neg",
-                        "eq", "ne", "lt", "le", "gt", "ge",
-                    ];
-                    let tname = &e.type_name;
-                    for m in &e.methods {
-                        if OPERATOR_METHOD_NAMES.contains(&m.name.as_str()) {
-                            self.struct_operator_methods.insert(format!("{}::{}", tname, m.name));
-                        }
-                        // Register `req` (getter) methods from ext blocks in struct_getters.
-                        if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
-                            self.struct_getters.insert(format!("{}::{}", tname, m.name));
-                        }
-                        // Track return types for managed-mode inference.
-                        if let Some(ret_ty) = &m.return_ty {
-                            self.struct_method_return_types.insert(
-                                format!("{}::{}", tname, m.name), ret_ty.clone());
-                        }
-                        if m.throws {
-                            // Qualified key (checked first at call sites when the receiver's
-                            // struct type is known) avoids a same-named-but-non-throwing
-                            // method on a different struct picking up a stray `?` -- see the
-                            // bare-name insert's doc comment.
-                            self.struct_method_throws.insert(format!("{}::{}", tname, m.name));
-                            self.struct_method_throws.insert(m.name.clone());
-                        }
-                        // Track overloaded struct methods (same name, different params).
-                        let method_key = format!("{}::{}", tname, m.name);
-                        let (new_errors, overloaded) = {
-                            let method_variants = self.struct_method_overload_decls.entry(method_key.clone()).or_default();
-                            let this_mangled = mangle_overload_name(&m.name, &m.params);
-                            let already_registered = method_variants.iter()
-                                .any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled);
-                            let new_errors: Vec<_> = if !already_registered {
-                                let errs = method_variants.iter()
-                                    .filter_map(|existing| overloads_conflict(existing, m).map(|n| (m.line, m.col, format!(
-                                        "ambiguous overload for method '{}::{}' — both match a call with {} argument(s)",
-                                        tname, m.name, n
-                                    ))))
-                                    .collect();
-                                method_variants.push(m.clone());
-                                errs
-                            } else { Vec::new() };
-                            (new_errors, method_variants.len() > 1)
-                        };
-                        for (line, col, msg) in new_errors { self.push_error(line, col, msg); }
-                        if overloaded { self.overloaded_method_keys.insert(method_key); }
-                    }
-                    // Register setters from ext blocks.
-                    for setter in &e.setters {
-                        self.struct_setters.insert(format!("{}::{}", tname, setter.name));
-                    }
-                    // Track methods overriding the struct's own methods (no protocol).
-                    // An ext block with no traits overrides plain struct methods of the same name.
-                    if e.traits.is_empty() {
-                        for m in &e.methods {
-                            self.struct_ext_method_overrides.insert(format!("{}::{}", tname, m.name));
-                        }
-                    }
+                    self.pre_scan_ext_item(e);
                 }
                 Item::Trait(t) => {
                     let mut names = std::collections::HashSet::new();

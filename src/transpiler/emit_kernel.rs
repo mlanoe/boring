@@ -226,7 +226,7 @@ impl Transpiler {
         let ExprKind::Var(kname) = &callee.kind else { return false };
         let Some(decl) = self.kernel_decls.get(kname).cloned() else { return false };
 
-        self.emit_kernel_construction(&s.name, &decl, args);
+        self.emit_kernel_construction(&s.name, &decl, args, s.line, s.col);
         self.kernel_vars.insert(s.name.clone(), kname.clone());
         true
     }
@@ -265,7 +265,7 @@ impl Transpiler {
         }
     }
 
-    fn emit_kernel_construction(&mut self, var_name: &str, decl: &KernelDecl, args: &[Arg]) {
+    fn emit_kernel_construction(&mut self, var_name: &str, decl: &KernelDecl, args: &[Arg], line: usize, col: usize) {
         // Dimension-sized kernels (a `Dimension`-typed 'const field -- e.g. `let Dimension
         // dim`, set via `init(Dimension d): ... dim = d`, see examples/game_of_life.br)
         // are constructed as `Kernel(Dimension(w, h))`. Their real `Kernel::new(...)` (see
@@ -276,7 +276,7 @@ impl Transpiler {
         // below (`kernel_param_to_field_map`) can express. Handle it separately and
         // return before reaching that scan.
         if Self::kernel_has_dim_field(decl) {
-            self.emit_dim_kernel_construction(var_name, decl, args);
+            self.emit_dim_kernel_construction(var_name, decl, args, line, col);
             return;
         }
 
@@ -309,22 +309,25 @@ impl Transpiler {
             // instead: the kernel's `init` needs to follow the plain `field = param`
             // convention this scan understands (see `kernel_param_to_field_map`'s doc).
             let Some(param_name) = init_param_names.get(i).copied() else {
-                panic!(
+                self.push_error(arg.value.line, arg.value.col, format!(
                     "kernel '{}': constructor call passes {} argument(s), but its `init` only declares {} parameter(s) -- argument #{} would be silently dropped",
                     decl.name, args.len(), init_param_names.len(), i + 1
-                );
+                ));
+                continue;
             };
             let Some(field_name) = param_to_field.get(param_name) else {
-                panic!(
+                self.push_error(arg.value.line, arg.value.col, format!(
                     "kernel '{}': `init` parameter '{}' is never assigned to a field via a plain `field = {}` statement -- only that pattern is supported for kernel constructor codegen, so this argument would be silently dropped",
                     decl.name, param_name, param_name
-                );
+                ));
+                continue;
             };
             let Some(field) = decl.fields.iter().find(|f| &f.name == field_name) else {
-                panic!(
+                self.push_error(arg.value.line, arg.value.col, format!(
                     "kernel '{}': `init` assigns parameter '{}' to '{}', which is not a declared field of this kernel",
                     decl.name, param_name, field_name
-                );
+                ));
+                continue;
             };
 
             let is_buffer = matches!(field.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
@@ -505,30 +508,34 @@ impl Transpiler {
     /// Construct a Dimension-sized kernel: `Kernel(Dimension(w, h))` → `Kernel::new((w)
     /// as i32, (h) as i32, device, queue)`, matching the flat `width, height` params
     /// `wgpu::host::emit_kernel_new` generates for a kernel with a Dimension field.
-    fn emit_dim_kernel_construction(&mut self, var_name: &str, decl: &KernelDecl, args: &[Arg]) {
+    fn emit_dim_kernel_construction(&mut self, var_name: &str, decl: &KernelDecl, args: &[Arg], line: usize, col: usize) {
         let Some(dim_arg) = args.first() else {
-            panic!(
+            self.push_error(line, col, format!(
                 "kernel '{}' has a Dimension field but its constructor call passes no arguments -- expected `{}(Dimension(w, h))`",
                 decl.name, decl.name
-            );
+            ));
+            return;
         };
         let ExprKind::Call(dim_callee, dim_args) = &dim_arg.value.kind else {
-            panic!(
+            self.push_error(dim_arg.value.line, dim_arg.value.col, format!(
                 "kernel '{}': expected a `Dimension(w, h)` constructor argument (this kernel has a Dimension field), got a different expression",
                 decl.name
-            );
+            ));
+            return;
         };
         if !matches!(&dim_callee.kind, ExprKind::Var(n) if n == "Dimension") {
-            panic!(
+            self.push_error(dim_arg.value.line, dim_arg.value.col, format!(
                 "kernel '{}': expected a `Dimension(w, h)` constructor argument (this kernel has a Dimension field), got a different call",
                 decl.name
-            );
+            ));
+            return;
         }
         if args.len() > 1 {
-            panic!(
+            self.push_error(line, col, format!(
                 "kernel '{}': constructor call passes {} argument(s), but only the leading `Dimension(w, h)` is supported for a kernel with a Dimension field -- the rest would be silently dropped",
                 decl.name, args.len()
-            );
+            ));
+            return;
         }
         let w = dim_args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0".into());
         let h = dim_args.get(1).map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0".into());

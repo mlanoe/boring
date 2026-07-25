@@ -22,19 +22,10 @@ use crate::ast::*;
 
 // ─── Public interface ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub struct CheckError {
-    pub message: String,
-    pub line: usize,
-    pub col: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct CheckWarning {
-    pub message: String,
-    pub line: usize,
-    pub col: usize,
-}
+/// Shares its definition with the interpreter's/transpiler's error type (and the
+/// transpiler's warning type); see `crate::errors::SourceError`'s doc comment.
+pub use crate::errors::SourceError as CheckError;
+pub use crate::errors::SourceError as CheckWarning;
 
 pub struct CheckResult {
     pub errors:   Vec<CheckError>,
@@ -408,7 +399,7 @@ impl Checker {
     // ── Diagnostics ───────────────────────────────────────────────────────────
 
     fn error(&mut self, msg: impl Into<String>, line: usize, col: usize) {
-        self.errors.push(CheckError { message: msg.into(), line, col });
+        self.errors.push(CheckError::at(msg, line, col));
     }
 
     // No current check calls this yet -- `CheckResult::warnings` is already wired up
@@ -416,7 +407,7 @@ impl Checker {
     // ready extension point for the next non-fatal check, not dead infrastructure.
     #[allow(dead_code)]
     fn warning(&mut self, msg: impl Into<String>, line: usize, col: usize) {
-        self.warnings.push(CheckWarning { message: msg.into(), line, col });
+        self.warnings.push(CheckWarning::at(msg, line, col));
     }
 
     // ── Qualifier constraint: `mut 'shared` ───────────────────────────────────

@@ -380,6 +380,346 @@ impl Transpiler {
 
     // ── Functions ─────────────────────────────────────────────────────────────
 
+    /// Computes a function's Rust return-type string: GPU-resident substitution
+    /// (`BoringGpuArg<T>`, including the resident-tuple-slot variant), `impl Trait`
+    /// for a return type that names a known trait, `throws` → `Result<T, Box<dyn Error>>`,
+    /// and bare `Result` return-type inference (`Ok`/`Err` return-statement scan).
+    fn compute_fn_return_type(&self, f: &FnDecl) -> String {
+        let base_ret = f.return_ty.as_ref()
+            .map(|t| {
+                // Interprocedural GPU residency (docs/scoped-access-blocks.md): an
+                // explicit `'gpu'unified`/`'gpu'global` return type means this
+                // function's tail expression (a bare `k.field` read — see
+                // `emit_kernel::try_emit_gpu_resident_return`, invoked from
+                // `emit_stmt.rs`'s tail-expression handling) returns
+                // `BoringGpuArg::Resident(...)` instead of a materialized `Vec<T>`.
+                if t.gpu_resident_qual().is_some() {
+                    let unqualified = match t {
+                        Type::Qualified(inner, _) => inner.as_ref(),
+                        other => other,
+                    };
+                    let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                    let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                    return format!("BoringGpuArg<{}>", host_ty);
+                }
+                // Tuple analogue of the above: `([float]'gpu'unified, [float], [float])`
+                // (`mha_step_gpu`-style) -- substitute `BoringGpuArg<T>` at whichever
+                // positions `fn_returns_resident_tuple` flagged resident, leaving the
+                // rest as their ordinary Rust type.
+                if let Type::Tuple(elems) = t {
+                    if let Some(flags) = self.fn_returns_resident_tuple.get(&f.name) {
+                        let parts: Vec<String> = elems.iter().enumerate().map(|(i, elem_ty)| {
+                            if flags.get(i).copied().unwrap_or(false) {
+                                let unqualified = match elem_ty {
+                                    Type::Qualified(inner, _) => inner.as_ref(),
+                                    other => other,
+                                };
+                                let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                                format!("BoringGpuArg<{}>", host_ty)
+                            } else {
+                                self.emit_type(elem_ty)
+                            }
+                        }).collect();
+                        return format!("({})", parts.join(", "));
+                    }
+                }
+                // If the return type is a known trait name, use `impl TraitName` (static dispatch).
+                // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
+                if let Type::Named(n) = t {
+                    if self.trait_method_names.contains_key(n.as_str()) {
+                        return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
+                    }
+                }
+                self.emit_type(t)
+            })
+            .unwrap_or_else(|| "()".to_string());
+        // Helper: check if declared return type is the bare `Result` name → infer generics.
+        let declared_result = matches!(&f.return_ty, Some(Type::Named(n)) if n == "Result");
+        if f.throws {
+            // Always use Box<dyn std::error::Error + Send + Sync> to stay consistent with trait signatures
+            // (emit_fn_sig always uses Box<dyn Error> for trait method declarations).
+            // This ensures trait + impl return types always match.
+            format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base_ret)
+        } else if declared_result {
+            // Infer Result<T, E> from Ok/Err return statements.
+            // Build a param-type map for variable type lookup inside Ok/Err arguments.
+            // Note: boring uses lowercase type aliases (`int`, `uint`, etc.) which the
+            // parser stores as `Type::Named("int")`, not as the primitive `Type::Int`.
+            let param_tys: std::collections::HashMap<String, String> = f.params.iter()
+                .filter_map(|p| {
+                    let ty_s = match p.ty.as_ref()? {
+                        Type::Int   => Some("isize".to_string()),
+                        Type::Uint  => Some("usize".to_string()),
+                        Type::Uint8 => Some("u8".to_string()),
+                        Type::Int8   => Some("i8".to_string()),
+                        Type::Int16  => Some("i16".to_string()),
+                        Type::Int32  => Some("i32".to_string()),
+                        Type::Int64  => Some("i64".to_string()),
+                        Type::Int128 => Some("i128".to_string()),
+                        Type::Uint16 => Some("u16".to_string()),
+                        Type::Uint32 => Some("u32".to_string()),
+                        Type::Uint64 => Some("u64".to_string()),
+                        Type::Uint128 => Some("u128".to_string()),
+                        Type::Float => Some("f64".to_string()),
+                        Type::Bool  => Some("bool".to_string()),
+                        Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
+                        Type::Named(n) => match n.as_str() {
+                            "int" | "isize" => Some("isize".to_string()),
+                            "uint" | "usize" => Some("usize".to_string()),
+                            "uint8" | "u8" => Some("u8".to_string()),
+                            "int8" | "i8" => Some("i8".to_string()),
+                            "int16" | "i16" => Some("i16".to_string()),
+                            "int32" | "i32" => Some("i32".to_string()),
+                            "int64" | "i64" => Some("i64".to_string()),
+                            "int128" | "i128" => Some("i128".to_string()),
+                            "uint16" | "u16" => Some("u16".to_string()),
+                            "uint32" | "u32" => Some("u32".to_string()),
+                            "uint64" | "u64" => Some("u64".to_string()),
+                            "uint128" | "u128" => Some("u128".to_string()),
+                            "float" | "f64" | "f32" => Some("f64".to_string()),
+                            "bool"   => Some("bool".to_string()),
+                            "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }?;
+                    Some((p.name.clone(), ty_s))
+                })
+                .collect();
+            let (ok_ty, err_ty) = body_returns_result(&f.body, &param_tys);
+            let t = ok_ty.as_deref().unwrap_or("()");
+            let e = err_ty.as_deref().unwrap_or("()");
+            format!("Result<{}, {}>", t, e)
+        } else {
+            base_ret
+        }
+    }
+
+    /// Computes a function/method's full Rust parameter list: `BoringGpuArg<T>` typing
+    /// for interprocedural-GPU-residency params, the `&self`/`&mut self` receiver for
+    /// struct methods (with the arc-qualified-type validation for external `task fn`
+    /// declarations), and the implicit `__task_cancel` parameter for cancellable
+    /// top-level task fns.
+    fn compute_fn_all_params(&self, f: &FnDecl, self_ty: Option<&str>, is_cancellable: bool) -> String {
+        // Interprocedural GPU residency (docs/scoped-access-blocks.md): a parameter
+        // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found used
+        // *exclusively* as a kernel-constructor argument gets typed `BoringGpuArg<T>`
+        // instead of a plain host array, so a caller can pass an already-resident
+        // value straight through (`emit_expr::emit_call`) with no upload. Free
+        // functions only — `fn_gpu_arg_params` is keyed by plain fn name and only
+        // ever populated for top-level `Item::Fn` (see `pre_scan`).
+        let gpu_arg_param_flags: Option<Vec<bool>> = if self_ty.is_none() {
+            self.fn_gpu_arg_params.get(&f.name).cloned()
+        } else {
+            None
+        };
+        let params_s: Vec<String> = f.params.iter().enumerate().map(|(i, p)| {
+            let is_gpu_arg_param = gpu_arg_param_flags.as_ref()
+                .map(|flags| flags.get(i).copied().unwrap_or(false))
+                .unwrap_or(false);
+            if is_gpu_arg_param {
+                // The param's own declared type is usually a plain, unqualified array
+                // (`[float] x`) — the exclusive-ctor-arg scan doesn't require an
+                // explicit `'gpu'unified`/`'gpu'global` annotation — but strip one off
+                // if present, same as the return-type case below.
+                let unqualified = p.ty.as_ref().map(|ty| match ty {
+                    Type::Qualified(inner, _) => inner.as_ref().clone(),
+                    other => other.clone(),
+                });
+                let inner_ty = unqualified.as_ref()
+                    .map(super::emit_kernel::array_inner_type)
+                    .unwrap_or(Type::Float);
+                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                format!("{}: BoringGpuArg<{}>", p.name, host_ty)
+            } else {
+                self.emit_param(p)
+            }
+        }).collect();
+        match self_ty {
+            Some(_) => {
+                // For struct methods, use &mut self (def) or &self (req/task).
+                // Task methods are called via Arc<Self> which provides &Self only (no DerefMut).
+                // The T'actor Arc<Mutex<T>> wrapping is handled at call sites via .lock().await.
+                // Exception: inside a trait impl block, mutating task methods must match the
+                // trait signature (which uses &mut self), since calls go through .lock().await.
+                // Enum methods: enums don't have mutable fields, so always use &self even for
+                // `def` (mutating) methods — otherwise the method can't be called on non-mut vars.
+                let is_enum_self = self_ty.map(|t| {
+                    self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", t)))
+                }).unwrap_or(false);
+                // Validate: an external `task fn` declaration (`def T.method()` outside the
+                // struct body) relies on the receiver being accessed through `Arc<Self>`.
+                // That is guaranteed only when `T` is arc-qualified (`'task`, `'actor`, or
+                // `'guard`) somewhere in the program. Inline struct methods (declared inside
+                // the struct body, `f.qualifier = None`) are exempt — they may be async for
+                // other reasons (calling task fns) without requiring Arc semantics.
+                if f.task && f.qualifier.is_some() && !self.inside_trait_impl && !is_enum_self {
+                    let sname = self_ty.unwrap_or("");
+                    if !sname.is_empty() && !self.arc_qualified_types.contains(sname) {
+                        self.push_error(f.line, f.col, format!(
+                            "`task fn` method '{}::{}' requires '{}' to be used with a \
+                             'task, 'actor, or 'guard qualifier at least once in the program \
+                             (no arc-qualified binding found)",
+                            sname, f.name, sname
+                        ));
+                    }
+                }
+                let self_s = if f.mutating && (!f.task || self.inside_trait_impl) && !is_enum_self {
+                    "&mut self"
+                } else {
+                    "&self"
+                };
+                if params_s.is_empty() {
+                    self_s.to_string()
+                } else {
+                    format!("{}, {}", self_s, params_s.join(", "))
+                }
+            }
+            None => {
+                // For cancellable task fns, prepend the implicit cancel token parameter.
+                if is_cancellable {
+                    let cancel_param = "__task_cancel: tokio_util::sync::CancellationToken".to_string();
+                    if params_s.is_empty() {
+                        cancel_param
+                    } else {
+                        format!("{}, {}", cancel_param, params_s.join(", "))
+                    }
+                } else {
+                    params_s.join(", ")
+                }
+            }
+        }
+    }
+
+    /// Computes a function's `<...>` generic-parameter clause: implicit lifetimes
+    /// collected from the (already concrete-type-filtered) param/return types, merged
+    /// with explicit type params (each bounded `Clone`, plus `std::any::Any` when used
+    /// in a generic struct-pattern match, plus any `where`-clause trait bounds), and an
+    /// extra `__BoringFut__: Future<Output=...>` bound when a param is a `task` closure.
+    fn compute_fn_type_params_str(&self, f: &FnDecl, has_task_fn_param: bool) -> String {
+        // Collect lifetimes used implicitly in the signature (params + return type).
+        // These are emitted as bare `'a` params without any explicit <'a> declaration in Boring.
+        let mut implicit_lifetimes: Vec<String> = Vec::new();
+        for p in &f.params {
+            if let Some(ty) = &p.ty { collect_lifetimes(ty, &mut implicit_lifetimes); }
+        }
+        if let Some(ret) = &f.return_ty { collect_lifetimes(ret, &mut implicit_lifetimes); }
+
+        let all_type_params: Vec<String> = {
+            let mut merged = implicit_lifetimes.iter()
+                .map(|lt| format!("'{}", lt))
+                .filter(|lt| !f.type_params.contains(lt))
+                .collect::<Vec<_>>();
+            merged.extend(f.type_params.iter().cloned());
+            // Filter out type params already declared at the impl<...> level
+            // (set by emit_ext for generic impl blocks). Re-declaring them on the
+            // method would cause "type parameter shadows outer type parameter" errors.
+            merged.retain(|p| !self.impl_type_params.contains(p));
+            merged
+        };
+        // Determine the return type of the task fn param (for the Future bound).
+        let task_fn_output_ty: Option<String> = if has_task_fn_param {
+            f.params.iter().find_map(|p| {
+                let ty = p.ty.as_ref();
+                let resolved = ty.and_then(|t| if let Type::Named(n) = t {
+                    self.fn_type_aliases.get(n.as_str())
+                } else { None }).or(ty);
+                if let Some(Type::Fn(ret, _, throws, true, _)) = resolved {
+                    let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or("()".to_string());
+                    let r = if *throws {
+                        format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base)
+                    } else { base };
+                    Some(r)
+                } else { None }
+            })
+        } else { None };
+        // Determine which type params are used in struct-pattern matches (need Any bound).
+        // Identify which type params are used in generic-struct pattern matches.
+        // A match `match s: MCircle(_): ...` where `s: S` (type param) needs Any bound.
+        // Build: (1) map from param variable name → type-param name (e.g. "s" → "S"),
+        //        (2) set of variable names typed with a type param,
+        //        (3) which of those type params appear in struct match arms.
+        let struct_match_type_params: std::collections::HashSet<String> = {
+            let struct_names: std::collections::HashSet<String> =
+                self.struct_fields.keys().cloned().collect();
+            let type_param_set: std::collections::HashSet<&str> =
+                f.type_params.iter().map(|s| s.as_str()).collect();
+            // Collect variable names (params) whose type is a function type parameter.
+            // Param types can be either Type::Named("S") or Type::TypeParam("S").
+            let mut tp_var_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for param in &f.params {
+                if let Some(ty) = &param.ty {
+                    let ty_name = match ty {
+                        Type::Named(n) => Some(n.as_str()),
+                        Type::TypeParam(n) => Some(n.as_str()),
+                        _ => None,
+                    };
+                    if let Some(tn) = ty_name {
+                        if type_param_set.contains(tn) {
+                            tp_var_names.insert(param.name.clone());
+                        }
+                    }
+                }
+            }
+            // Also include type param names themselves (in case the var name == type param name).
+            for p in &f.type_params { tp_var_names.insert(p.clone()); }
+
+            if tp_var_names.is_empty() || !stmts_have_struct_match(&f.body, &tp_var_names, &struct_names) {
+                std::collections::HashSet::new()
+            } else {
+                // Return the set of type param names that correspond to matched variables.
+                // We check each type param: is there a var with that type that participates?
+                f.type_params.iter()
+                    .filter(|p| {
+                        // Find vars typed as this param and check if those vars are used in struct matches.
+                        let this_tp_vars: std::collections::HashSet<String> = f.params.iter()
+                            .filter(|param| matches!(&param.ty, Some(Type::Named(tn)) if tn == *p)
+                                || matches!(&param.ty, Some(Type::TypeParam(tn)) if tn == *p))
+                            .map(|param| param.name.clone())
+                            .collect();
+                        // Also include if var name == type param name.
+                        let mut check_vars = this_tp_vars;
+                        check_vars.insert((**p).clone());
+                        stmts_have_struct_match(&f.body, &check_vars, &struct_names)
+                    })
+                    .cloned()
+                    .collect()
+            }
+        };
+
+        if all_type_params.is_empty() && task_fn_output_ty.is_none() {
+            String::new()
+        } else {
+            let mut bounded: Vec<String> = all_type_params.iter()
+                .map(|p| {
+                    // Lifetime parameters: emit bare `'a`, no bounds.
+                    if p.starts_with('\'') { return p.clone(); }
+                    // Const generic parameters: emit `const N: usize`, no Clone bound.
+                    if p.starts_with('$') { return emit_generic_param(p); }
+                    // Collect extra trait bounds from the where clause.
+                    let extra: Vec<String> = f.where_clause.iter()
+                        .filter(|(tp, _)| tp == p)
+                        .map(|(_, trait_name)| map_trait_bound(trait_name))
+                        .collect();
+                    // Type params used in generic struct-pattern matches need Any bound.
+                    let needs_any = struct_match_type_params.contains(p.as_str());
+                    let base = if needs_any { "Clone + std::any::Any" } else { "Clone" };
+                    if extra.is_empty() {
+                        format!("{}: {}", p, base)
+                    } else {
+                        format!("{}: {} + {}", p, base, extra.join(" + "))
+                    }
+                })
+                .collect();
+            // Add a generic type parameter for the Future returned by task fn params.
+            if let Some(output_ty) = task_fn_output_ty {
+                bounded.push(format!("__BoringFut__: std::future::Future<Output={}>", output_ty));
+            }
+            format!("<{}>", bounded.join(", "))
+        }
+    }
+
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
         // Register param types for ALL top-level functions — including native stdlib ones
         // (wait, timeout, …) — so that DotIdent type hints can be resolved at call sites:
@@ -468,14 +808,6 @@ impl Transpiler {
         let vis = if f.is_pub { "pub " } else { "" };
         let async_kw = if is_async { "async " } else { "" };
 
-        // Collect lifetimes used implicitly in the signature (params + return type).
-        // These are emitted as bare `'a` params without any explicit <'a> declaration in Boring.
-        let mut implicit_lifetimes: Vec<String> = Vec::new();
-        for p in &f.params {
-            if let Some(ty) = &p.ty { collect_lifetimes(ty, &mut implicit_lifetimes); }
-        }
-        if let Some(ret) = &f.return_ty { collect_lifetimes(ret, &mut implicit_lifetimes); }
-
         // Type parameters — add Clone bound so Vec<T>[i].clone() works.
         // Also incorporate where_clause constraints (e.g. `T as Display` → `T: std::fmt::Display`).
         // Lifetime parameters (starting with `'`) never receive trait bounds.
@@ -497,118 +829,7 @@ impl Transpiler {
             .cloned()
             .collect();
         let f = &FnDecl { type_params: f_type_params_filtered, ..f.clone() };
-        let all_type_params: Vec<String> = {
-            let mut merged = implicit_lifetimes.iter()
-                .map(|lt| format!("'{}", lt))
-                .filter(|lt| !f.type_params.contains(lt))
-                .collect::<Vec<_>>();
-            merged.extend(f.type_params.iter().cloned());
-            // Filter out type params already declared at the impl<...> level
-            // (set by emit_ext for generic impl blocks). Re-declaring them on the
-            // method would cause "type parameter shadows outer type parameter" errors.
-            merged.retain(|p| !self.impl_type_params.contains(p));
-            merged
-        };
-        // Determine the return type of the task fn param (for the Future bound).
-        let task_fn_output_ty: Option<String> = if has_task_fn_param {
-            f.params.iter().find_map(|p| {
-                let ty = p.ty.as_ref();
-                let resolved = ty.and_then(|t| if let Type::Named(n) = t {
-                    self.fn_type_aliases.get(n.as_str())
-                } else { None }).or(ty);
-                if let Some(Type::Fn(ret, _, throws, true, _)) = resolved {
-                    let base = ret.as_ref().map(|r| self.emit_type(r)).unwrap_or("()".to_string());
-                    let r = if *throws {
-                        format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base)
-                    } else { base };
-                    Some(r)
-                } else { None }
-            })
-        } else { None };
-        // Determine which type params are used in struct-pattern matches (need Any bound).
-        // Identify which type params are used in generic-struct pattern matches.
-        // A match `match s: MCircle(_): ...` where `s: S` (type param) needs Any bound.
-        // Build: (1) map from param variable name → type-param name (e.g. "s" → "S"),
-        //        (2) set of variable names typed with a type param,
-        //        (3) which of those type params appear in struct match arms.
-        let struct_match_type_params: std::collections::HashSet<String> = {
-            let struct_names: std::collections::HashSet<String> =
-                self.struct_fields.keys().cloned().collect();
-            let type_param_set: std::collections::HashSet<&str> =
-                f.type_params.iter().map(|s| s.as_str()).collect();
-            // Collect variable names (params) whose type is a function type parameter.
-            // Param types can be either Type::Named("S") or Type::TypeParam("S").
-            let mut tp_var_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for param in &f.params {
-                if let Some(ty) = &param.ty {
-                    let ty_name = match ty {
-                        Type::Named(n) => Some(n.as_str()),
-                        Type::TypeParam(n) => Some(n.as_str()),
-                        _ => None,
-                    };
-                    if let Some(tn) = ty_name {
-                        if type_param_set.contains(tn) {
-                            tp_var_names.insert(param.name.clone());
-                        }
-                    }
-                }
-            }
-            // Also include type param names themselves (in case the var name == type param name).
-            for p in &f.type_params { tp_var_names.insert(p.clone()); }
-
-            if tp_var_names.is_empty() || !stmts_have_struct_match(&f.body, &tp_var_names, &struct_names) {
-                std::collections::HashSet::new()
-            } else {
-                // Return the set of type param names that correspond to matched variables.
-                // We check each type param: is there a var with that type that participates?
-                f.type_params.iter()
-                    .filter(|p| {
-                        // Find vars typed as this param and check if those vars are used in struct matches.
-                        let this_tp_vars: std::collections::HashSet<String> = f.params.iter()
-                            .filter(|param| matches!(&param.ty, Some(Type::Named(tn)) if tn == *p)
-                                || matches!(&param.ty, Some(Type::TypeParam(tn)) if tn == *p))
-                            .map(|param| param.name.clone())
-                            .collect();
-                        // Also include if var name == type param name.
-                        let mut check_vars = this_tp_vars;
-                        check_vars.insert((**p).clone());
-                        stmts_have_struct_match(&f.body, &check_vars, &struct_names)
-                    })
-                    .cloned()
-                    .collect()
-            }
-        };
-
-        let type_params = if all_type_params.is_empty() && task_fn_output_ty.is_none() {
-            String::new()
-        } else {
-            let mut bounded: Vec<String> = all_type_params.iter()
-                .map(|p| {
-                    // Lifetime parameters: emit bare `'a`, no bounds.
-                    if p.starts_with('\'') { return p.clone(); }
-                    // Const generic parameters: emit `const N: usize`, no Clone bound.
-                    if p.starts_with('$') { return emit_generic_param(p); }
-                    // Collect extra trait bounds from the where clause.
-                    let extra: Vec<String> = f.where_clause.iter()
-                        .filter(|(tp, _)| tp == p)
-                        .map(|(_, trait_name)| map_trait_bound(trait_name))
-                        .collect();
-                    // Type params used in generic struct-pattern matches need Any bound.
-                    let needs_any = struct_match_type_params.contains(p.as_str());
-                    let base = if needs_any { "Clone + std::any::Any" } else { "Clone" };
-                    if extra.is_empty() {
-                        format!("{}: {}", p, base)
-                    } else {
-                        format!("{}: {} + {}", p, base, extra.join(" + "))
-                    }
-                })
-                .collect();
-            // Add a generic type parameter for the Future returned by task fn params.
-            if let Some(output_ty) = task_fn_output_ty {
-                bounded.push(format!("__BoringFut__: std::future::Future<Output={}>", output_ty));
-            }
-            format!("<{}>", bounded.join(", "))
-        };
+        let type_params = self.compute_fn_type_params_str(f, has_task_fn_param);
 
         // Build the full parameter list: [&[mut] self,] params...
         // Detect cancellable task functions: if this is a task def and uses Task.cancelled(),
@@ -660,94 +881,7 @@ impl Transpiler {
             self.fn_current_param_cols = prev_param_cols;
             self.fn_current_params_mut = prev_mut;
         }
-        // Interprocedural GPU residency (docs/scoped-access-blocks.md): a parameter
-        // `Checker::scan_fn_gpu_arg_params`/its transpiler-side mirror found used
-        // *exclusively* as a kernel-constructor argument gets typed `BoringGpuArg<T>`
-        // instead of a plain host array, so a caller can pass an already-resident
-        // value straight through (`emit_expr::emit_call`) with no upload. Free
-        // functions only — `fn_gpu_arg_params` is keyed by plain fn name and only
-        // ever populated for top-level `Item::Fn` (see `pre_scan`).
-        let gpu_arg_param_flags: Option<Vec<bool>> = if self_ty.is_none() {
-            self.fn_gpu_arg_params.get(&f.name).cloned()
-        } else {
-            None
-        };
-        let params_s: Vec<String> = f.params.iter().enumerate().map(|(i, p)| {
-            let is_gpu_arg_param = gpu_arg_param_flags.as_ref()
-                .map(|flags| flags.get(i).copied().unwrap_or(false))
-                .unwrap_or(false);
-            if is_gpu_arg_param {
-                // The param's own declared type is usually a plain, unqualified array
-                // (`[float] x`) — the exclusive-ctor-arg scan doesn't require an
-                // explicit `'gpu'unified`/`'gpu'global` annotation — but strip one off
-                // if present, same as the return-type case below.
-                let unqualified = p.ty.as_ref().map(|ty| match ty {
-                    Type::Qualified(inner, _) => inner.as_ref().clone(),
-                    other => other.clone(),
-                });
-                let inner_ty = unqualified.as_ref()
-                    .map(super::emit_kernel::array_inner_type)
-                    .unwrap_or(Type::Float);
-                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                format!("{}: BoringGpuArg<{}>", p.name, host_ty)
-            } else {
-                self.emit_param(p)
-            }
-        }).collect();
-        let all_params = match self_ty {
-            Some(_) => {
-                // For struct methods, use &mut self (def) or &self (req/task).
-                // Task methods are called via Arc<Self> which provides &Self only (no DerefMut).
-                // The T'actor Arc<Mutex<T>> wrapping is handled at call sites via .lock().await.
-                // Exception: inside a trait impl block, mutating task methods must match the
-                // trait signature (which uses &mut self), since calls go through .lock().await.
-                // Enum methods: enums don't have mutable fields, so always use &self even for
-                // `def` (mutating) methods — otherwise the method can't be called on non-mut vars.
-                let is_enum_self = self_ty.map(|t| {
-                    self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", t)))
-                }).unwrap_or(false);
-                // Validate: an external `task fn` declaration (`def T.method()` outside the
-                // struct body) relies on the receiver being accessed through `Arc<Self>`.
-                // That is guaranteed only when `T` is arc-qualified (`'task`, `'actor`, or
-                // `'guard`) somewhere in the program. Inline struct methods (declared inside
-                // the struct body, `f.qualifier = None`) are exempt — they may be async for
-                // other reasons (calling task fns) without requiring Arc semantics.
-                if f.task && f.qualifier.is_some() && !self.inside_trait_impl && !is_enum_self {
-                    let sname = self_ty.unwrap_or("");
-                    if !sname.is_empty() && !self.arc_qualified_types.contains(sname) {
-                        self.push_error(f.line, f.col, format!(
-                            "`task fn` method '{}::{}' requires '{}' to be used with a \
-                             'task, 'actor, or 'guard qualifier at least once in the program \
-                             (no arc-qualified binding found)",
-                            sname, f.name, sname
-                        ));
-                    }
-                }
-                let self_s = if f.mutating && (!f.task || self.inside_trait_impl) && !is_enum_self {
-                    "&mut self"
-                } else {
-                    "&self"
-                };
-                if params_s.is_empty() {
-                    self_s.to_string()
-                } else {
-                    format!("{}, {}", self_s, params_s.join(", "))
-                }
-            }
-            None => {
-                // For cancellable task fns, prepend the implicit cancel token parameter.
-                if is_cancellable {
-                    let cancel_param = "__task_cancel: tokio_util::sync::CancellationToken".to_string();
-                    if params_s.is_empty() {
-                        cancel_param
-                    } else {
-                        format!("{}, {}", cancel_param, params_s.join(", "))
-                    }
-                } else {
-                    params_s.join(", ")
-                }
-            }
-        };
+        let all_params = self.compute_fn_all_params(f, self_ty, is_cancellable);
 
         // ── Stream functions: iterator (sequential) or async_stream (async) ──
         if f.stream {
@@ -757,116 +891,7 @@ impl Transpiler {
             return self.emit_stream_fn(f, &type_params, &all_params);
         }
 
-        // Return type
-        let base_ret = f.return_ty.as_ref()
-            .map(|t| {
-                // Interprocedural GPU residency (docs/scoped-access-blocks.md): an
-                // explicit `'gpu'unified`/`'gpu'global` return type means this
-                // function's tail expression (a bare `k.field` read — see
-                // `emit_kernel::try_emit_gpu_resident_return`, invoked from
-                // `emit_stmt.rs`'s tail-expression handling) returns
-                // `BoringGpuArg::Resident(...)` instead of a materialized `Vec<T>`.
-                if t.gpu_resident_qual().is_some() {
-                    let unqualified = match t {
-                        Type::Qualified(inner, _) => inner.as_ref(),
-                        other => other,
-                    };
-                    let inner_ty = super::emit_kernel::array_inner_type(unqualified);
-                    let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                    return format!("BoringGpuArg<{}>", host_ty);
-                }
-                // Tuple analogue of the above: `([float]'gpu'unified, [float], [float])`
-                // (`mha_step_gpu`-style) -- substitute `BoringGpuArg<T>` at whichever
-                // positions `fn_returns_resident_tuple` flagged resident, leaving the
-                // rest as their ordinary Rust type.
-                if let Type::Tuple(elems) = t {
-                    if let Some(flags) = self.fn_returns_resident_tuple.get(&f.name) {
-                        let parts: Vec<String> = elems.iter().enumerate().map(|(i, elem_ty)| {
-                            if flags.get(i).copied().unwrap_or(false) {
-                                let unqualified = match elem_ty {
-                                    Type::Qualified(inner, _) => inner.as_ref(),
-                                    other => other,
-                                };
-                                let inner_ty = super::emit_kernel::array_inner_type(unqualified);
-                                let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                                format!("BoringGpuArg<{}>", host_ty)
-                            } else {
-                                self.emit_type(elem_ty)
-                            }
-                        }).collect();
-                        return format!("({})", parts.join(", "));
-                    }
-                }
-                // If the return type is a known trait name, use `impl TraitName` (static dispatch).
-                // Dynamic dispatch is expressed explicitly with `Type::Dyn` → Box<dyn Trait>.
-                if let Type::Named(n) = t {
-                    if self.trait_method_names.contains_key(n.as_str()) {
-                        return format!("impl {}", normalize_type_name(n, self.use_rc_str()));
-                    }
-                }
-                self.emit_type(t)
-            })
-            .unwrap_or_else(|| "()".to_string());
-        // Helper: check if declared return type is the bare `Result` name → infer generics.
-        let declared_result = matches!(&f.return_ty, Some(Type::Named(n)) if n == "Result");
-        let ret_ty = if f.throws {
-            // Always use Box<dyn std::error::Error + Send + Sync> to stay consistent with trait signatures
-            // (emit_fn_sig always uses Box<dyn Error> for trait method declarations).
-            // This ensures trait + impl return types always match.
-            format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base_ret)
-        } else if declared_result {
-            // Infer Result<T, E> from Ok/Err return statements.
-            // Build a param-type map for variable type lookup inside Ok/Err arguments.
-            // Note: boring uses lowercase type aliases (`int`, `uint`, etc.) which the
-            // parser stores as `Type::Named("int")`, not as the primitive `Type::Int`.
-            let param_tys: std::collections::HashMap<String, String> = f.params.iter()
-                .filter_map(|p| {
-                    let ty_s = match p.ty.as_ref()? {
-                        Type::Int   => Some("isize".to_string()),
-                        Type::Uint  => Some("usize".to_string()),
-                        Type::Uint8 => Some("u8".to_string()),
-                        Type::Int8   => Some("i8".to_string()),
-                        Type::Int16  => Some("i16".to_string()),
-                        Type::Int32  => Some("i32".to_string()),
-                        Type::Int64  => Some("i64".to_string()),
-                        Type::Int128 => Some("i128".to_string()),
-                        Type::Uint16 => Some("u16".to_string()),
-                        Type::Uint32 => Some("u32".to_string()),
-                        Type::Uint64 => Some("u64".to_string()),
-                        Type::Uint128 => Some("u128".to_string()),
-                        Type::Float => Some("f64".to_string()),
-                        Type::Bool  => Some("bool".to_string()),
-                        Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
-                        Type::Named(n) => match n.as_str() {
-                            "int" | "isize" => Some("isize".to_string()),
-                            "uint" | "usize" => Some("usize".to_string()),
-                            "uint8" | "u8" => Some("u8".to_string()),
-                            "int8" | "i8" => Some("i8".to_string()),
-                            "int16" | "i16" => Some("i16".to_string()),
-                            "int32" | "i32" => Some("i32".to_string()),
-                            "int64" | "i64" => Some("i64".to_string()),
-                            "int128" | "i128" => Some("i128".to_string()),
-                            "uint16" | "u16" => Some("u16".to_string()),
-                            "uint32" | "u32" => Some("u32".to_string()),
-                            "uint64" | "u64" => Some("u64".to_string()),
-                            "uint128" | "u128" => Some("u128".to_string()),
-                            "float" | "f64" | "f32" => Some("f64".to_string()),
-                            "bool"   => Some("bool".to_string()),
-                            "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
-                            _ => None,
-                        },
-                        _ => None,
-                    }?;
-                    Some((p.name.clone(), ty_s))
-                })
-                .collect();
-            let (ok_ty, err_ty) = body_returns_result(&f.body, &param_tys);
-            let t = ok_ty.as_deref().unwrap_or("()");
-            let e = err_ty.as_deref().unwrap_or("()");
-            format!("Result<{}, {}>", t, e)
-        } else {
-            base_ret
-        };
+        let ret_ty = self.compute_fn_return_type(f);
 
         // Use mangled name for overloaded functions/methods so each variant compiles as a distinct Rust fn.
         let is_free_overload = self_ty.is_none() && self.overloaded_fn_names.contains(&f.name);

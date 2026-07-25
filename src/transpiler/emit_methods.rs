@@ -49,17 +49,18 @@ impl Transpiler {
         }
     }
 
-    pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
-        // Built-in `fs` module namespace — intercept before any other dispatch.
+    /// Built-in `fs`/`GPU` module namespace calls, and property access on a tracked
+    /// `GPU(n)` device handle — intercepted before any other method-call dispatch.
+    fn try_emit_builtin_namespace_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         if let ExprKind::Var(v) = &obj.kind {
             if v == "fs" {
-                return self.emit_fs_call(method, args);
+                return Some(self.emit_fs_call(method, args));
             }
             // `GPU.all()` — iterate all GPU devices. wgpu only has one real adapter
             // (see `gpu_device_vars`'s doc comment), so this is a single-element
             // array — matching the interpreter's own simulation-mode behavior.
             if v == "GPU" && method == "all" && self.is_gpu_target {
-                return "vec![0usize]".to_string();
+                return Some("vec![0usize]".to_string());
             }
         }
         // `g.name()`/`.totalMem()`/etc on a tracked `GPU(n)` handle (`let g = GPU(0)`,
@@ -69,7 +70,7 @@ impl Transpiler {
         // notion on wgpu (one real adapter total), so the index is otherwise unused.
         if let ExprKind::Var(v) = &obj.kind {
             if self.gpu_device_vars.contains(v.as_str()) {
-                return match method {
+                return Some(match method {
                     "name"              => "__boring_gpu_name()".to_string(),
                     "totalMem"          => "__boring_gpu_total_mem()".to_string(),
                     "freeMem"           => "__boring_gpu_free_mem()".to_string(),
@@ -79,23 +80,28 @@ impl Transpiler {
                     "maxSharedMem"      => "__boring_gpu_max_shared_mem()".to_string(),
                     "index"             => format!("({} as i64)", v),
                     _ => format!("{}.{}({})", v, method, args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ")),
-                };
+                });
             }
         }
+        None
+    }
 
+    /// `.clone()` pass-through, plus `Task`-cancellation method calls: `Task.cancelled()`
+    /// (inside a cancellable `def` task fn), `v.cancel()` on a spawned join-handle var, and
+    /// `future.done()` — a non-blocking poll on a `JoinHandle`.
+    fn try_emit_clone_and_task_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // .clone() — pass-through to Rust's Clone trait. Used in .br source when a value
         // needs to be used multiple times (Boring has reference semantics; Rust needs explicit clone).
         if method == "clone" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!("{}.clone()", obj_s);
+            return Some(format!("{}.clone()", obj_s));
         }
-
         // Task.cancelled() → __task_cancel.cancelled() (inside a cancellable task def fn)
         if method == "cancelled" && args.is_empty() {
             if let ExprKind::Var(v) = &obj.kind {
                 if v == "Task" {
                     self.uses_tokio_util.set(true);
-                    return "__task_cancel.cancelled()".to_string();
+                    return Some("__task_cancel.cancelled()".to_string());
                 }
             }
         }
@@ -105,10 +111,10 @@ impl Transpiler {
                 if self.join_handle_vars.contains(v.as_str()) {
                     self.uses_tokio_util.set(true);
                     if let Some(cancel_var) = self.cancel_token_vars.get(v.as_str()) {
-                        return format!("{}.cancel()", cancel_var);
+                        return Some(format!("{}.cancel()", cancel_var));
                     }
                     // Fallback: abort the JoinHandle
-                    return format!("{}.abort()", v);
+                    return Some(format!("{}.abort()", v));
                 }
             }
         }
@@ -116,18 +122,26 @@ impl Transpiler {
         if method == "done" && args.is_empty() {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.task_vars.contains(v.as_str()) || self.join_handle_vars.contains(v.as_str()) {
-                    return format!(
+                    return Some(format!(
                         "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
                         v
-                    );
+                    ));
                 }
             }
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return Some(format!(
                 "tokio::time::timeout(std::time::Duration::ZERO, {}).await.is_ok()",
                 obj_s
-            );
+            ));
         }
+        None
+    }
+
+    /// Channel operations: sender `.send()` (mpsc/oneshot/watch/broadcast, each with its
+    /// own sync-vs-async and error-handling shape), `.subscribe()` on a broadcast sender,
+    /// and receiver `.recv()` (oneshot/broadcast/watch). `tx.clone()` needs no special
+    /// case — Rust's derived `Clone` handles channel senders natively.
+    fn try_emit_channel_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Channel sender: `tx.send(value)` → `tx.send(value).await.unwrap()`
         // Use emit_expr_owned so string literals are wrapped in Arc::from(...) to match the
         // channel's Arc<str> item type.
@@ -137,7 +151,7 @@ impl Transpiler {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
                     // In single-thread mode, local_channel::mpsc::send() is synchronous (not async).
                     let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    return if is_single {
+                    return Some(if is_single {
                         if self.in_throws || self.in_try_body {
                             format!("{}.send({}).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name, val)
                         } else {
@@ -147,24 +161,24 @@ impl Transpiler {
                         format!("{}.send({}).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name, val)
                     } else {
                         format!("{}.send({}).await.expect(\"channel receiver dropped\")", var_name, val)
-                    };
+                    });
                 }
                 // oneshot/watch senders: non-async, swallow error with .ok()
                 if self.oneshot_senders.contains(var_name.as_str())
                     || self.watch_senders.contains(var_name.as_str())
                 {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
-                    return format!("{}.send({}).ok()", var_name, val);
+                    return Some(format!("{}.send({}).ok()", var_name, val));
                 }
                 // broadcast sender: single-thread LocalBroadcastSender::send() returns ();
                 // multi-thread tokio::sync::broadcast::Sender::send() returns Result.
                 if self.broadcast_senders.contains(var_name.as_str()) {
                     let val = args.first().map(|a| self.emit_expr_owned(&a.value)).unwrap_or_default();
-                    return if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                    return Some(if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                         format!("{}.send({})", var_name, val)
                     } else {
                         format!("{}.send({}).ok()", var_name, val)
-                    };
+                    });
                 }
             }
         }
@@ -172,7 +186,7 @@ impl Transpiler {
         if method == "subscribe" {
             if let ExprKind::Var(var_name) = &obj.kind {
                 if self.broadcast_senders.contains(var_name.as_str()) {
-                    return format!("{}.subscribe()", var_name);
+                    return Some(format!("{}.subscribe()", var_name));
                 }
             }
         }
@@ -180,117 +194,129 @@ impl Transpiler {
         if method == "recv" {
             if let ExprKind::Var(var_name) = &obj.kind {
                 if self.oneshot_receivers.contains(var_name.as_str()) {
-                    return if self.in_throws || self.in_try_body {
+                    return Some(if self.in_throws || self.in_try_body {
                         format!("{}.await?", var_name)
                     } else {
                         format!("{}.await.expect(\"oneshot channel sender dropped\")", var_name)
-                    };
+                    });
                 }
                 // broadcast receiver: rx.recv() → rx.recv().await
                 // In single-thread mode, LocalBroadcastReceiver::recv() returns T directly (no Result).
                 if self.broadcast_receivers.contains(var_name.as_str()) {
                     if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
-                        return format!("{}.recv().await", var_name);
+                        return Some(format!("{}.recv().await", var_name));
                     }
-                    return if self.in_throws || self.in_try_body {
+                    return Some(if self.in_throws || self.in_try_body {
                         format!("{}.recv().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?", var_name)
                     } else {
                         format!("{}.recv().await.expect(\"broadcast channel error: sender dropped or lagged\")", var_name)
-                    };
+                    });
                 }
                 // watch receiver: rx.recv() → { rx.changed().await.ok(); rx.borrow().clone() }
                 if self.watch_receivers.contains(var_name.as_str()) {
-                    return format!("{{ {}.changed().await.ok(); {}.borrow().clone() }}", var_name, var_name);
+                    return Some(format!("{{ {}.changed().await.ok(); {}.borrow().clone() }}", var_name, var_name));
                 }
             }
         }
-        // Channel sender clone: `tx.clone()` is pass-through — Rust handles it natively.
+        None
+    }
 
-        // Detect `TypeName.method(args)` — type method or enum variant call.
-        if let ExprKind::Var(type_name) = &obj.kind {
-            // A known local variable that happens to start with an uppercase letter
-            // (e.g. `var Qh = []`) is still a local, not a type/module path -- must fall
-            // through to ordinary instance-method dispatch further down, not the
-            // `TypeName::method(...)` treatment below.
-            let is_type = !self.known_local_vars.contains(type_name.as_str())
-                && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-            if is_type {
-                let is_variant = method.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-                if is_variant {
-                    let key = format!("{}::{}", type_name, method);
-                    if self.enum_variant_fields.contains_key(&key) {
-                        // Enum variant: `EnumType.Variant(args)` → `EnumType::Variant(...)`
-                        // Use emit_let_value so string args are coerced to Arc<str>.
-                        let field_tys = self.enum_variant_field_types.get(&key).cloned().unwrap_or_default();
-                        let vals: Vec<String> = args.iter().enumerate().map(|(i, a)| {
-                            let ty = field_tys.get(i);
-                            let raw = self.emit_let_value(ty, &a.value);
-                            // enum variant fields are owned — strip the leading `&` that
-                            // emit_let_value adds for actor-typed function params, and add .clone()
-                            // so the original Arc<Mutex<T>> variable can still be used afterward.
-                            let raw = if matches!(ty,
-                                Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
-                            ) {
-                                if let Some(stripped) = raw.strip_prefix('&') {
-                                    format!("{}.clone()", stripped)
-                                } else {
-                                    raw
-                                }
-                            } else {
-                                raw
-                            };
-                            let rec_key = format!("{}::{}::{}", type_name, method, i);
-                            if self.recursive_fields.contains(&rec_key) {
-                                if matches!(ty, Some(Type::Optional(_))) {
-                                    format!("{}.map(Box::new)", raw)
-                                } else {
-                                    format!("Box::new({})", raw)
-                                }
-                            } else {
-                                raw
-                            }
-                        }).collect();
-                        // When the user defines their own Result<T,E> enum, Rust can't infer
-                        // both type params from one variant's args. Add turbofish to disambiguate.
-                        let type_turbofish = if self.user_defines_result && type_name == "Result" {
-                            if method == "Ok" { "::<_, ()>" } else { "::<(), _>" }
-                        } else { "" };
-                        return format!("{}{}::{}({})", type_name, type_turbofish, method, vals.join(", "));
-                    }
-                }
-                // Type method (lowercase): `Counter.zero()` → `Counter::zero()`
-                // For type set methods: `Counter.count(v)` → `Counter::set_count(v)`
-                if let Some(sigs) = self.struct_type_method_sigs.get(type_name.as_str()) {
-                    let (rust_name, is_setter) = sigs.get(method)
-                        .map(|kind| match kind {
-                            TypeMethodKind::Set => (format!("set_{}", method), true),
-                            _ => (method.to_string(), false),
-                        })
-                        .unwrap_or_else(|| (method.to_string(), false));
-                    let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                    let _ = is_setter;
-                    return format!("{}::{}({})", type_name, rust_name, vals.join(", "));
-                }
-                // Fallback for any uppercase type not registered in the transpiler
-                // (external types like Duration, File, Path, BufReader, etc.):
-                // `Duration.fromMillis(100)` (Boring camelCase) → `Duration::from_millis(100)` (Rust)
-                let rust_method = camel_to_snake(method);
-                let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-                let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
-                // Known async static methods need .await (+ ? in throws context) in async context
-                const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
-                if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
-                    let awaited = format!("{}.await", call);
-                    // In throws/try context, propagate the Result error with `?`
-                    return if self.in_throws || self.in_try_body {
-                        format!("{}?", awaited)
+    /// `TypeName.method(args)` — an enum variant constructor (`Color.Green(x, y)` →
+    /// `Color::Green(x, y)`, uppercase-first method name), a registered type/static
+    /// method (`Counter.zero()` → `Counter::zero()`), or the camelCase→snake_case
+    /// fallback for external Rust types (`Duration.fromMillis(100)`). Returns `None`
+    /// when `obj` isn't a type/module path — including a local var that happens to be
+    /// uppercase, which must fall through to ordinary instance-method dispatch.
+    fn try_emit_type_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ExprKind::Var(type_name) = &obj.kind else { return None };
+        // A known local variable that happens to start with an uppercase letter
+        // (e.g. `var Qh = []`) is still a local, not a type/module path -- must fall
+        // through to ordinary instance-method dispatch further down, not the
+        // `TypeName::method(...)` treatment below.
+        let is_type = !self.known_local_vars.contains(type_name.as_str())
+            && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        if !is_type { return None; }
+        let is_variant = method.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        if is_variant {
+            let key = format!("{}::{}", type_name, method);
+            if self.enum_variant_fields.contains_key(&key) {
+                // Enum variant: `EnumType.Variant(args)` → `EnumType::Variant(...)`
+                // Use emit_let_value so string args are coerced to Arc<str>.
+                let field_tys = self.enum_variant_field_types.get(&key).cloned().unwrap_or_default();
+                let vals: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    let ty = field_tys.get(i);
+                    let raw = self.emit_let_value(ty, &a.value);
+                    // enum variant fields are owned — strip the leading `&` that
+                    // emit_let_value adds for actor-typed function params, and add .clone()
+                    // so the original Arc<Mutex<T>> variable can still be used afterward.
+                    let raw = if matches!(ty,
+                        Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+                    ) {
+                        if let Some(stripped) = raw.strip_prefix('&') {
+                            format!("{}.clone()", stripped)
+                        } else {
+                            raw
+                        }
                     } else {
-                        awaited
+                        raw
                     };
-                }
-                return call;
+                    let rec_key = format!("{}::{}::{}", type_name, method, i);
+                    if self.recursive_fields.contains(&rec_key) {
+                        if matches!(ty, Some(Type::Optional(_))) {
+                            format!("{}.map(Box::new)", raw)
+                        } else {
+                            format!("Box::new({})", raw)
+                        }
+                    } else {
+                        raw
+                    }
+                }).collect();
+                // When the user defines their own Result<T,E> enum, Rust can't infer
+                // both type params from one variant's args. Add turbofish to disambiguate.
+                let type_turbofish = if self.user_defines_result && type_name == "Result" {
+                    if method == "Ok" { "::<_, ()>" } else { "::<(), _>" }
+                } else { "" };
+                return Some(format!("{}{}::{}({})", type_name, type_turbofish, method, vals.join(", ")));
             }
         }
+        // Type method (lowercase): `Counter.zero()` → `Counter::zero()`
+        // For type set methods: `Counter.count(v)` → `Counter::set_count(v)`
+        if let Some(sigs) = self.struct_type_method_sigs.get(type_name.as_str()) {
+            let (rust_name, is_setter) = sigs.get(method)
+                .map(|kind| match kind {
+                    TypeMethodKind::Set => (format!("set_{}", method), true),
+                    _ => (method.to_string(), false),
+                })
+                .unwrap_or_else(|| (method.to_string(), false));
+            let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            let _ = is_setter;
+            return Some(format!("{}::{}({})", type_name, rust_name, vals.join(", ")));
+        }
+        // Fallback for any uppercase type not registered in the transpiler
+        // (external types like Duration, File, Path, BufReader, etc.):
+        // `Duration.fromMillis(100)` (Boring camelCase) → `Duration::from_millis(100)` (Rust)
+        let rust_method = camel_to_snake(method);
+        let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+        let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
+        // Known async static methods need .await (+ ? in throws context) in async context
+        const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
+        if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
+            let awaited = format!("{}.await", call);
+            // In throws/try context, propagate the Result error with `?`
+            return Some(if self.in_throws || self.in_try_body {
+                format!("{}?", awaited)
+            } else {
+                awaited
+            });
+        }
+        Some(call)
+    }
+
+    /// `RwLock`-backed (`'guard`/`'guard'task`) method dispatch: a local var of type
+    /// `T'guard` or a `self.field` of that type. `req` methods take a `.read()` lock,
+    /// mutating (`def`) methods take `.write()`; `'guard'task` (tokio `RwLock`) awaits
+    /// the lock acquisition in async context.
+    fn try_emit_rwlock_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // RwLock local var method: c.method(args) → c.read/write()[.await|.unwrap()].method(args)
         // req methods use .read(), def methods use .write().
         // 'guard → std::sync::RwLock (unwrap), 'guard'task → tokio::sync::RwLock (await in async ctx).
@@ -312,11 +338,11 @@ impl Transpiler {
                 const TOKIO_ASYNC_INSTANCE: &[&str] = &["recv", "send", "write_all", "read_line", "acquire", "flush"];
                 let needs_await = self.instance_task_methods.contains(method)
                     || TOKIO_ASYNC_INSTANCE.contains(&method);
-                return if self.in_async && needs_await {
+                return Some(if self.in_async && needs_await {
                     format!("{}.await", call)
                 } else {
                     call
-                };
+                });
             }
         }
         // RwLock struct field method: self.data.method() → self.data.read/write().await.method()
@@ -340,16 +366,24 @@ impl Transpiler {
                             };
                             let call = format!("{}.{}({})", guard, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                            return if self.in_async && self.instance_task_methods.contains(method) {
+                            return Some(if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
                             } else {
                                 call
-                            };
+                            });
                         }
                     }
                 }
             }
         }
+        None
+    }
+
+    /// `Mutex`-backed (`'actor`/`'actor'task`) method dispatch: a local var or `self.field`
+    /// of that type, plus managed-mode (implicit `Arc<Mutex<T>>`/`RefCell<T>`) vars. Locks
+    /// via `.lock()`/`.borrow_mut()` (or `.borrow()` for `req` methods in single-thread
+    /// mode), awaits the lock in async 'actor'task context, and propagates `throws` errors.
+    fn try_emit_mutex_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
             if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
@@ -383,7 +417,7 @@ impl Transpiler {
                     let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                     let throws = (self.in_throws || self.in_try_body)
                         && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
-                    return if throws { format!("{}?", call) } else { call };
+                    return Some(if throws { format!("{}?", call) } else { call });
                 }
                 let guard_expr = self.mutex_var_write(v, v);
                 let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
@@ -395,11 +429,11 @@ impl Transpiler {
                 let throws = (self.in_throws || self.in_try_body)
                     && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
                 let call = if throws { format!("{}?", call) } else { call };
-                return if self.in_async && needs_await {
+                return Some(if self.in_async && needs_await {
                     format!("{}.await", call)
                 } else {
                     call
-                };
+                });
             }
         }
         // Managed-mode mutex var method: w.method(args) → w.lock().unwrap().method(args)
@@ -410,7 +444,7 @@ impl Transpiler {
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let call = format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                return call;
+                return Some(call);
             }
             // Managed-mode RefCell var method: w.method(args) → w.borrow_mut().method(args)
             if self.managed_refcell_vars.contains(v.as_str()) {
@@ -418,7 +452,7 @@ impl Transpiler {
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                return call;
+                return Some(call);
             }
         }
         // Mutex struct field method: self.worker.method(args) → self.worker.lock().await.method(args)
@@ -434,16 +468,24 @@ impl Transpiler {
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                            return if self.in_async && self.instance_task_methods.contains(method) {
+                            return Some(if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
                             } else {
                                 call
-                            };
+                            });
                         }
                     }
                 }
             }
         }
+        None
+    }
+
+    /// Actor-qualified struct-field method dispatch: `outer.actor_field.method(args)` where
+    /// `actor_field`'s declared type is `T'actor`/`T'actor'task` (either on `outer: struct`
+    /// via `self.actor_field...` / `some_struct_var.actor_field...`, or on `outer: T'actor`
+    /// itself for methods requiring write access to a nested field).
+    fn try_emit_actor_field_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Actor-typed field method call: `outer.actor_field.method(args)`.
         // When `actor_field` has type `T'actor` (Rc<RefCell<T>> in single-thread),
         // emit `outer.actor_field.borrow_mut().method(args)`.
@@ -491,7 +533,7 @@ impl Transpiler {
                             { let g = self.actor_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         };
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                        return call;
+                        return Some(call);
                     }
                 }
             }
@@ -512,11 +554,20 @@ impl Transpiler {
                         let guard = self.mutex_var_write(v, v);
                         let call = format!("{}.{}.{}({})", guard, field_name, rust_method, args_s.join(", "));
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
-                        return call;
+                        return Some(call);
                     }
                 }
             }
         }
+        None
+    }
+
+    /// Special-cased method emits that don't fit any general category: `read_line` into
+    /// a tracked mutable string var (Arc<str> is immutable, so round-trips through a
+    /// temporary `String` buffer), `.clear()` on a mutable string var, and array
+    /// `.filter(closure)` (rebinds the closure param to an owned clone, since
+    /// `Iterator::filter` passes `&Item` but Boring closures expect an owned value).
+    fn try_emit_special_case_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Special case: read_line(string_arc_var) — Arc<str> is immutable so we use a
         // temporary String buffer then assign back.
         // tokio BufReader (local var) → async (.await.unwrap_or(0))
@@ -526,7 +577,7 @@ impl Transpiler {
                 if let ExprKind::Var(v) = &arg.value.kind {
                     if self.string_arc_vars.contains(v.as_str()) {
                         let obj_s = self.emit_expr(obj);
-                        return if matches!(&obj.kind, ExprKind::Var(_)) {
+                        return Some(if matches!(&obj.kind, ExprKind::Var(_)) {
                             // async tokio reader
                             format!(
                                 "{{ let mut __boring_buf = String::new(); \
@@ -542,7 +593,7 @@ impl Transpiler {
                                  {} = Arc::from(__boring_buf); __boring_n }}",
                                 obj_s, v
                             )
-                        };
+                        });
                     }
                 }
             }
@@ -551,7 +602,7 @@ impl Transpiler {
         if method == "clear" {
             if let ExprKind::Var(v) = &obj.kind {
                 if self.string_arc_vars.contains(v.as_str()) {
-                    return format!("{} = Arc::from(\"\")", v);
+                    return Some(format!("{} = Arc::from(\"\")", v));
                 }
             }
         }
@@ -576,22 +627,87 @@ impl Transpiler {
                         };
                         let obj_s = self.emit_expr(obj);
                         let closure_s = format!("|{}| {{ let {} = {}.clone(); {} }}", pname, pname, pname, body_s);
-                        return format!("{}.iter().cloned().filter({}).collect::<Vec<_>>()", obj_s, closure_s);
+                        return Some(format!("{}.iter().cloned().filter({}).collect::<Vec<_>>()", obj_s, closure_s));
                     }
                 }
             }
         }
-        // ── New collection / string / dict / set methods ─────────────────────────
+        None
+    }
 
-        // Helper: emit a closure arg with an owned rebind for its first parameter.
-        // This is the same pattern used by filter above: the iterator passes a &T but
-        // Boring closures expect an owned value, so we insert `let pname = pname.clone();`.
-        let emit_owned_closure = |me: &Transpiler, arg: &Arg, extra_params: usize| -> Option<String> {
-            if let ExprKind::Closure(params, _, body, _, _) = &arg.value.kind {
-                if let Some(param) = params.first() {
-                    let pname = &param.name;
-                    let mut sub = me.make_sub();
-                    for p in params { sub.known_local_vars.insert(p.name.clone()); }
+    /// Emits a closure argument with its first (and optionally second) parameter rebound
+    /// to an owned clone: iterator adapters like `.filter()`/`.any()` pass `&Item` to the
+    /// predicate, but Boring closures expect an owned value. `extra_params > 0` produces a
+    /// two-param tuple-destructuring closure (dict `map`/`filter` over `(k, v)`).
+    fn emit_owned_closure(&self, arg: &Arg, extra_params: usize) -> Option<String> {
+        if let ExprKind::Closure(params, _, body, _, _) = &arg.value.kind {
+            if let Some(param) = params.first() {
+                let pname = &param.name;
+                let mut sub = self.make_sub();
+                for p in params { sub.known_local_vars.insert(p.name.clone()); }
+                let body_s = match body {
+                    ClosureBody::Expr(e) => sub.emit_expr(e),
+                    ClosureBody::Block(stmts) => {
+                        let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
+                        format!("{{ {} }}", inner.join(" "))
+                    }
+                };
+                let closure_s = if extra_params == 0 {
+                    format!("|{}| {{ let {} = {}.clone(); {} }}", pname, pname, pname, body_s)
+                } else {
+                    // two-param closure (e.g. dict map/filter with (k, v))
+                    let p2 = params.get(1).map(|p| p.name.as_str()).unwrap_or("__v");
+                    format!("|({}, {})| {{ let {} = {}.clone(); let {} = {}.clone(); {} }}", pname, p2, pname, pname, p2, p2, body_s)
+                };
+                return Some(closure_s);
+            }
+        }
+        None
+    }
+
+    /// Tuple-specific methods (`length`/`count`/`isEmpty`/`first`/`last`/`map`/`all`/`any`).
+    /// Tuples are heterogeneous, so only this limited set applies; arity is resolved from
+    /// a literal receiver or from `tuple_vars`. `map`/`all`/`any` apply the closure to each
+    /// slot independently via a scoped `let`-bind (not a single Rust closure — the slots
+    /// can have different types), joined with `,`/`&&`/`||` respectively.
+    fn try_emit_tuple_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let tuple_arity: Option<usize> = match &obj.kind {
+            ExprKind::Tuple(elems) => Some(elems.len()),
+            ExprKind::Var(v) => self.tuple_vars.get(v.as_str()).copied(),
+            _ => None,
+        };
+        let arity = tuple_arity?;
+        let obj_s = self.emit_expr(obj);
+        match method {
+            "length" | "count" if args.is_empty() => {
+                return Some(format!("{}", arity));
+            }
+            "isEmpty" if args.is_empty() => {
+                return Some(format!("{}", arity == 0));
+            }
+            "first" if args.is_empty() && arity > 0 => {
+                return Some(format!("{}.0", obj_s));
+            }
+            "last" if args.is_empty() && arity > 0 => {
+                return Some(format!("{}.{}", obj_s, arity - 1));
+            }
+            "map" if args.len() == 1 && arity > 0 => {
+                // Heterogeneous tuple map: apply the closure to each slot independently.
+                // Result is a tuple of the same arity with each element transformed.
+                // Each slot is emitted as `(|pname| body)(__boring_t.i.clone())` — a Rust
+                // closure applied immediately. This lets Rust infer a distinct result type per
+                // slot (heterogeneous-safe) and resolves `.value` / struct field accesses
+                // correctly via Rust's own type inference rather than the sub-transpiler.
+                if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
+                    let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
+                    let mut sub = self.make_sub();
+                    sub.known_local_vars.insert(pname.to_string());
+                    // Mark the closure param as a non-future local so that field accesses
+                    // like `.value` are emitted as plain field access, not `.await.unwrap()`.
+                    // An empty string as the struct type is enough to satisfy is_known_struct
+                    // without incorrectly dispatching any struct method lookups.
+                    sub.var_struct_types.insert(pname.to_string(), String::new());
+                    if *task_flag { sub.in_async = true; }
                     let body_s = match body {
                         ClosureBody::Expr(e) => sub.emit_expr(e),
                         ClosureBody::Block(stmts) => {
@@ -599,21 +715,48 @@ impl Transpiler {
                             format!("{{ {} }}", inner.join(" "))
                         }
                     };
-                    let closure_s = if extra_params == 0 {
-                        format!("|{}| {{ let {} = {}.clone(); {} }}", pname, pname, pname, body_s)
-                    } else {
-                        // two-param closure (e.g. dict map/filter with (k, v))
-                        let p2 = params.get(1).map(|p| p.name.as_str()).unwrap_or("__v");
-                        format!("|({}, {})| {{ let {} = {}.clone(); let {} = {}.clone(); {} }}", pname, p2, pname, pname, p2, p2, body_s)
-                    };
-                    return Some(closure_s);
+                    // Emit each slot as a scoped let-bind + body.
+                    // Using `let pname = t.i.clone(); body` rather than an immediately-invoked
+                    // closure so Rust can infer pname's type from the assignment RHS.
+                    let slots: Vec<String> = (0..arity)
+                        .map(|i| format!("{{ let {} = (__boring_t).{}.clone(); {} }}", pname, i, body_s))
+                        .collect();
+                    return Some(format!("{{ let __boring_t = {}; ({},) }}", obj_s, slots.join(", ")));
                 }
             }
-            None
-        };
+            "all" | "any" if args.len() == 1 && arity > 0 => {
+                if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
+                    let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
+                    let mut sub = self.make_sub();
+                    sub.known_local_vars.insert(pname.to_string());
+                    sub.var_struct_types.insert(pname.to_string(), String::new());
+                    if *task_flag { sub.in_async = true; }
+                    let body_s = match body {
+                        ClosureBody::Expr(e) => sub.emit_expr(e),
+                        ClosureBody::Block(stmts) => {
+                            let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
+                            format!("{{ {} }}", inner.join(" "))
+                        }
+                    };
+                    let op = if method == "all" { " && " } else { " || " };
+                    // Wrap each slot in parens: `{ ... } || { ... }` would be parsed by
+                    // Rust as an empty-params closure `|| { ... }` — use `({ ... })` instead.
+                    let slots: Vec<String> = (0..arity)
+                        .map(|i| format!("({{ let {} = (__boring_t).{}.clone(); {} }})", pname, i, body_s))
+                        .collect();
+                    return Some(format!("{{ let __boring_t = {}; {} }}", obj_s, slots.join(op)));
+                }
+            }
+            _ => {}
+        }
+        None
+    }
 
-        // ── Detect string receiver ────────────────────────────────────────────
-        let receiver_is_string = match &obj.kind {
+    /// Whether `obj` is confirmed to be a string receiver: in `string_vars`/`string_arc_vars`
+    /// AND not also tracked as a collection (which would be a false positive), cross-checked
+    /// against `var_types` — or a string/interpolation literal directly.
+    fn expr_is_string_receiver(&self, obj: &Expr) -> bool {
+        match &obj.kind {
             ExprKind::Var(v) => {
                 // Must be in string_vars AND confirmed NOT a collection type.
                 // string_vars can have false positives (e.g. when a var is also
@@ -632,52 +775,171 @@ impl Transpiler {
             }
             ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
             _ => false,
-        };
+        }
+    }
 
-        // ── Detect set/dict/tuple receivers (used further down too) ──────────
-        let recv_is_set = self.expr_is_set(obj);
-        let recv_is_dict = self.expr_is_dict(obj);
+    /// String-specific methods: `parseInt`/`parseFloat`, `chars`/`split` (threading-mode-aware
+    /// `Rc<str>`/`Arc<str>` element type), `indexOf`/`slice`/`startsWith`/`endsWith`/`contains`/
+    /// `replace`/`repeat`/`trim*`/`toUpper*`/`toLower*`. Coerces non-literal pattern args with
+    /// `.as_ref()` since `Rc<str>`/`Arc<str>` don't implement `Pattern` directly.
+    fn try_emit_string_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if !self.expr_is_string_receiver(obj) { return None; }
+        let obj_s = self.emit_expr(obj);
+        match method {
+            "parseInt" => {
+                return Some(format!("{}.trim().parse::<isize>().ok()", obj_s));
+            }
+            "parseFloat" => {
+                return Some(format!("{}.trim().parse::<f64>().ok()", obj_s));
+            }
+            "chars" => {
+                // Use threading-mode-aware string type (Rc<str> in single-thread, Arc<str> in multi).
+                let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
+                let vec_ty = if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" };
+                return Some(format!(
+                    "{}.chars().map(|c| {}::from(c.to_string())).collect::<Vec<{}>>()",
+                    obj_s, str_ty, vec_ty
+                ));
+            }
+            "indexOf" => {
+                let sub_s = args.first().map(|a| self.emit_expr(&a.value))
+                    .unwrap_or_else(|| "\"\"".to_string());
+                // Use &* to coerce Arc<str>/Arc<str> argument to &str for str::find.
+                return Some(format!("{}.find(&*{}).map(|i| i as isize)", obj_s, sub_s));
+            }
+            "slice" if args.len() >= 2 => {
+                let start_s = self.emit_expr(&args[0].value);
+                let end_s   = self.emit_expr(&args[1].value);
+                // Bind start to a local so it is not double-evaluated (fix #23).
+                // Wrap in Rc<str>/Arc<str> (threading-mode aware) so the result type is `string`.
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!(
+                    "{{ let __start = ({}) as usize; {}::from({}.chars().skip(__start).take(({}) as usize - __start).collect::<String>().as_str()) }}",
+                    start_s, str_ty, obj_s, end_s
+                ));
+            }
+            // Pattern methods: Rc<str>/Arc<str> doesn't implement Pattern, need .as_ref().
+            // For &str literals, no coercion needed (already &str which implements Pattern).
+            "split" => {
+                let sep_arg = args.first();
+                let needs_coerce = sep_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let sep_s = sep_arg.map(|a| self.emit_expr(&a.value))
+                    .unwrap_or_else(|| "\"\"".to_string());
+                let sep_s = if needs_coerce { format!("{}.as_ref()", sep_s) } else { sep_s };
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!(
+                    "{}.split({}).map(|p| {}::from(p.to_string())).collect::<Vec<_>>()",
+                    obj_s, sep_s, str_ty
+                ));
+            }
+            "startsWith" | "hasPrefix" => {
+                let arg = args.first();
+                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                return Some(format!("{}.starts_with({})", obj_s, arg_s));
+            }
+            "endsWith" | "hasSuffix" => {
+                let arg = args.first();
+                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                return Some(format!("{}.ends_with({})", obj_s, arg_s));
+            }
+            "contains" => {
+                let arg = args.first();
+                let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
+                return Some(format!("{}.contains({})", obj_s, arg_s));
+            }
+            "replace" | "replaceAll" => {
+                let from_arg = args.first();
+                let to_arg = args.get(1);
+                let from_needs_coerce = from_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let to_needs_coerce = to_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
+                let from_s = from_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                let to_s = to_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
+                let from_s = if from_needs_coerce { format!("{}.as_ref()", from_s) } else { from_s };
+                let to_s = if to_needs_coerce { format!("{}.as_ref()", to_s) } else { to_s };
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!(
+                    "{}::from({}.replace({}, {}).as_str())",
+                    str_ty, obj_s, from_s, to_s
+                ));
+            }
+            "repeat" if !args.is_empty() => {
+                let n_s = self.emit_expr(&args[0].value);
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!("{}::from({}.repeat(({}) as usize).as_str())", str_ty, obj_s, n_s));
+            }
+            "trim" | "trimStart" | "trimEnd" => {
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                let rust_m = match method { "trimStart" => "trim_start", "trimEnd" => "trim_end", _ => "trim" };
+                return Some(format!("{}::from({}.{}())", str_ty, obj_s, rust_m));
+            }
+            "toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper" => {
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!("{}::from({}.to_uppercase().as_str())", str_ty, obj_s));
+            }
+            "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => {
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!("{}::from({}.to_lowercase().as_str())", str_ty, obj_s));
+            }
+            _ => {}
+        }
+        None
+    }
 
-        // ── Tuple-specific methods ────────────────────────────────────────────
-        // Tuples are heterogeneous so only a limited set of methods applies.
-        // We resolve the arity either from a literal receiver or from tuple_vars.
-        let tuple_arity: Option<usize> = match &obj.kind {
-            ExprKind::Tuple(elems) => Some(elems.len()),
-            ExprKind::Var(v) => self.tuple_vars.get(v.as_str()).copied(),
-            _ => None,
-        };
-        if let Some(arity) = tuple_arity {
-            let obj_s = self.emit_expr(obj);
-            match method {
-                "length" | "count" if args.is_empty() => {
-                    return format!("{}", arity);
-                }
-                "isEmpty" if args.is_empty() => {
-                    return format!("{}", arity == 0);
-                }
-                "first" if args.is_empty() && arity > 0 => {
-                    return format!("{}.0", obj_s);
-                }
-                "last" if args.is_empty() && arity > 0 => {
-                    return format!("{}.{}", obj_s, arity - 1);
-                }
-                "map" if args.len() == 1 && arity > 0 => {
-                    // Heterogeneous tuple map: apply the closure to each slot independently.
-                    // Result is a tuple of the same arity with each element transformed.
-                    // Each slot is emitted as `(|pname| body)(__boring_t.i.clone())` — a Rust
-                    // closure applied immediately. This lets Rust infer a distinct result type per
-                    // slot (heterogeneous-safe) and resolves `.value` / struct field accesses
-                    // correctly via Rust's own type inference rather than the sub-transpiler.
-                    if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
-                        let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
+    /// Dict (`HashMap`)-specific methods: `keys`/`values`/`get`(+default)/`set`|`put`/
+    /// `contains`|`containsKey`|`has`/`remove`/`map`/`filter` (the latter two via
+    /// `emit_owned_closure` with a 2-param `(k, v)` closure).
+    fn try_emit_dict_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if !self.expr_is_dict(obj) { return None; }
+        let obj_s = self.emit_expr(obj);
+        match method {
+            "keys" => {
+                return Some(format!("{}.keys().cloned().collect::<Vec<_>>()", obj_s));
+            }
+            "values" => {
+                return Some(format!("{}.values().cloned().collect::<Vec<_>>()", obj_s));
+            }
+            "get" if args.len() >= 2 => {
+                let key_s = self.emit_dict_key_borrow(&args[0].value);
+                let def_s = self.emit_expr(&args[1].value);
+                return Some(format!("{}.get({}).cloned().unwrap_or({})", obj_s, key_s, def_s));
+            }
+            "get" if args.len() == 1 => {
+                let key_s = self.emit_dict_key_borrow(&args[0].value);
+                return Some(format!("{}.get({}).cloned()", obj_s, key_s));
+            }
+            "set" | "put" if args.len() >= 2 => {
+                let key_s = self.emit_expr_owned(&args[0].value);
+                let val_s = self.emit_expr_owned(&args[1].value);
+                return Some(format!("{}.insert({}, {})", obj_s, key_s, val_s));
+            }
+            "contains" | "containsKey" | "has" => {
+                let key_s = self.emit_dict_key_borrow(&args[0].value);
+                return Some(format!("{}.contains_key({})", obj_s, key_s));
+            }
+            "remove" if !args.is_empty() => {
+                let key_s = self.emit_dict_key_borrow(&args[0].value);
+                return Some(format!("{}.remove({})", obj_s, key_s));
+            }
+            "map" => {
+                if let Some(first_arg) = args.first() {
+                    if let ExprKind::Closure(params, _, body, _, _) = &first_arg.value.kind {
+                        let kname = params.first().map(|p| p.name.as_str()).unwrap_or("k");
+                        let vname = params.get(1).map(|p| p.name.as_str()).unwrap_or("v");
                         let mut sub = self.make_sub();
-                        sub.known_local_vars.insert(pname.to_string());
-                        // Mark the closure param as a non-future local so that field accesses
-                        // like `.value` are emitted as plain field access, not `.await.unwrap()`.
-                        // An empty string as the struct type is enough to satisfy is_known_struct
-                        // without incorrectly dispatching any struct method lookups.
-                        sub.var_struct_types.insert(pname.to_string(), String::new());
-                        if *task_flag { sub.in_async = true; }
+                        for p in params { sub.known_local_vars.insert(p.name.clone()); }
                         let body_s = match body {
                             ClosureBody::Expr(e) => sub.emit_expr(e),
                             ClosureBody::Block(stmts) => {
@@ -685,263 +947,74 @@ impl Transpiler {
                                 format!("{{ {} }}", inner.join(" "))
                             }
                         };
-                        // Emit each slot as a scoped let-bind + body.
-                        // Using `let pname = t.i.clone(); body` rather than an immediately-invoked
-                        // closure so Rust can infer pname's type from the assignment RHS.
-                        let slots: Vec<String> = (0..arity)
-                            .map(|i| format!("{{ let {} = (__boring_t).{}.clone(); {} }}", pname, i, body_s))
-                            .collect();
-                        return format!("{{ let __boring_t = {}; ({},) }}", obj_s, slots.join(", "));
+                        return Some(format!(
+                            "{}.iter().map(|({}, {})| {{ let {} = {}.clone(); let {} = {}.clone(); ({}.clone(), {}) }}).collect::<HashMap<_,_>>()",
+                            obj_s, kname, vname, kname, kname, vname, vname, kname, body_s
+                        ));
                     }
                 }
-                "all" | "any" if args.len() == 1 && arity > 0 => {
-                    if let ExprKind::Closure(params, _, body, _, task_flag) = &args[0].value.kind {
-                        let pname = params.first().map(|p| p.name.as_str()).unwrap_or("__x");
-                        let mut sub = self.make_sub();
-                        sub.known_local_vars.insert(pname.to_string());
-                        sub.var_struct_types.insert(pname.to_string(), String::new());
-                        if *task_flag { sub.in_async = true; }
-                        let body_s = match body {
-                            ClosureBody::Expr(e) => sub.emit_expr(e),
-                            ClosureBody::Block(stmts) => {
-                                let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
-                                format!("{{ {} }}", inner.join(" "))
-                            }
-                        };
-                        let op = if method == "all" { " && " } else { " || " };
-                        // Wrap each slot in parens: `{ ... } || { ... }` would be parsed by
-                        // Rust as an empty-params closure `|| { ... }` — use `({ ... })` instead.
-                        let slots: Vec<String> = (0..arity)
-                            .map(|i| format!("({{ let {} = (__boring_t).{}.clone(); {} }})", pname, i, body_s))
-                            .collect();
-                        return format!("{{ let __boring_t = {}; {} }}", obj_s, slots.join(op));
+            }
+            "filter" => {
+                if let Some(first_arg) = args.first() {
+                    if let Some(closure_s) = self.emit_owned_closure(first_arg, 1) {
+                        return Some(format!(
+                            "{}.clone().into_iter().filter({}).collect::<HashMap<_,_>>()",
+                            obj_s, closure_s
+                        ));
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
+        None
+    }
 
-        // ── String-specific methods ───────────────────────────────────────────
-        if receiver_is_string {
-            let obj_s = self.emit_expr(obj);
-            match method {
-                "parseInt" => {
-                    return format!("{}.trim().parse::<isize>().ok()", obj_s);
-                }
-                "parseFloat" => {
-                    return format!("{}.trim().parse::<f64>().ok()", obj_s);
-                }
-                "chars" => {
-                    // Use threading-mode-aware string type (Rc<str> in single-thread, Arc<str> in multi).
-                    let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };
-                    let vec_ty = if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" };
-                    return format!(
-                        "{}.chars().map(|c| {}::from(c.to_string())).collect::<Vec<{}>>()",
-                        obj_s, str_ty, vec_ty
-                    );
-                }
-                "indexOf" => {
-                    let sub_s = args.first().map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "\"\"".to_string());
-                    // Use &* to coerce Arc<str>/Arc<str> argument to &str for str::find.
-                    return format!("{}.find(&*{}).map(|i| i as isize)", obj_s, sub_s);
-                }
-                "slice" if args.len() >= 2 => {
-                    let start_s = self.emit_expr(&args[0].value);
-                    let end_s   = self.emit_expr(&args[1].value);
-                    // Bind start to a local so it is not double-evaluated (fix #23).
-                    // Wrap in Rc<str>/Arc<str> (threading-mode aware) so the result type is `string`.
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!(
-                        "{{ let __start = ({}) as usize; {}::from({}.chars().skip(__start).take(({}) as usize - __start).collect::<String>().as_str()) }}",
-                        start_s, str_ty, obj_s, end_s
-                    );
-                }
-                // Pattern methods: Rc<str>/Arc<str> doesn't implement Pattern, need .as_ref().
-                // For &str literals, no coercion needed (already &str which implements Pattern).
-                "split" => {
-                    let sep_arg = args.first();
-                    let needs_coerce = sep_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let sep_s = sep_arg.map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "\"\"".to_string());
-                    let sep_s = if needs_coerce { format!("{}.as_ref()", sep_s) } else { sep_s };
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!(
-                        "{}.split({}).map(|p| {}::from(p.to_string())).collect::<Vec<_>>()",
-                        obj_s, sep_s, str_ty
-                    );
-                }
-                "startsWith" | "hasPrefix" => {
-                    let arg = args.first();
-                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
-                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
-                    return format!("{}.starts_with({})", obj_s, arg_s);
-                }
-                "endsWith" | "hasSuffix" => {
-                    let arg = args.first();
-                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
-                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
-                    return format!("{}.ends_with({})", obj_s, arg_s);
-                }
-                "contains" => {
-                    let arg = args.first();
-                    let needs_coerce = arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let arg_s = arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
-                    let arg_s = if needs_coerce { format!("{}.as_ref()", arg_s) } else { arg_s };
-                    return format!("{}.contains({})", obj_s, arg_s);
-                }
-                "replace" | "replaceAll" => {
-                    let from_arg = args.first();
-                    let to_arg = args.get(1);
-                    let from_needs_coerce = from_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let to_needs_coerce = to_arg.map(|a| !matches!(&a.value.kind, ExprKind::Str(_))).unwrap_or(false);
-                    let from_s = from_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
-                    let to_s = to_arg.map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "\"\"".to_string());
-                    let from_s = if from_needs_coerce { format!("{}.as_ref()", from_s) } else { from_s };
-                    let to_s = if to_needs_coerce { format!("{}.as_ref()", to_s) } else { to_s };
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!(
-                        "{}::from({}.replace({}, {}).as_str())",
-                        str_ty, obj_s, from_s, to_s
-                    );
-                }
-                "repeat" if !args.is_empty() => {
-                    let n_s = self.emit_expr(&args[0].value);
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!("{}::from({}.repeat(({}) as usize).as_str())", str_ty, obj_s, n_s);
-                }
-                "trim" | "trimStart" | "trimEnd" => {
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    let rust_m = match method { "trimStart" => "trim_start", "trimEnd" => "trim_end", _ => "trim" };
-                    return format!("{}::from({}.{}())", str_ty, obj_s, rust_m);
-                }
-                "toUpperCase" | "uppercased" | "upper" | "to_upper" | "toUpper" => {
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!("{}::from({}.to_uppercase().as_str())", str_ty, obj_s);
-                }
-                "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => {
-                    let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
-                    let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
-                    return format!("{}::from({}.to_lowercase().as_str())", str_ty, obj_s);
-                }
-                _ => {}
+    /// Set (`HashSet`)-specific methods: `toArray`, `union`/`intersection`/`difference`,
+    /// `add`|`insert`, `remove`, `contains`.
+    fn try_emit_set_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        if !self.expr_is_set(obj) { return None; }
+        let obj_s = self.emit_expr(obj);
+        match method {
+            "toArray" => {
+                return Some(format!("{}.iter().cloned().collect::<Vec<_>>()", obj_s));
             }
-        }
-
-        // ── Dict-specific methods ─────────────────────────────────────────────
-        if recv_is_dict {
-            let obj_s = self.emit_expr(obj);
-            match method {
-                "keys" => {
-                    return format!("{}.keys().cloned().collect::<Vec<_>>()", obj_s);
-                }
-                "values" => {
-                    return format!("{}.values().cloned().collect::<Vec<_>>()", obj_s);
-                }
-                "get" if args.len() >= 2 => {
-                    let key_s = self.emit_dict_key_borrow(&args[0].value);
-                    let def_s = self.emit_expr(&args[1].value);
-                    return format!("{}.get({}).cloned().unwrap_or({})", obj_s, key_s, def_s);
-                }
-                "get" if args.len() == 1 => {
-                    let key_s = self.emit_dict_key_borrow(&args[0].value);
-                    return format!("{}.get({}).cloned()", obj_s, key_s);
-                }
-                "set" | "put" if args.len() >= 2 => {
-                    let key_s = self.emit_expr_owned(&args[0].value);
-                    let val_s = self.emit_expr_owned(&args[1].value);
-                    return format!("{}.insert({}, {})", obj_s, key_s, val_s);
-                }
-                "contains" | "containsKey" | "has" => {
-                    let key_s = self.emit_dict_key_borrow(&args[0].value);
-                    return format!("{}.contains_key({})", obj_s, key_s);
-                }
-                "remove" if !args.is_empty() => {
-                    let key_s = self.emit_dict_key_borrow(&args[0].value);
-                    return format!("{}.remove({})", obj_s, key_s);
-                }
-                "map" => {
-                    if let Some(first_arg) = args.first() {
-                        if let ExprKind::Closure(params, _, body, _, _) = &first_arg.value.kind {
-                            let kname = params.first().map(|p| p.name.as_str()).unwrap_or("k");
-                            let vname = params.get(1).map(|p| p.name.as_str()).unwrap_or("v");
-                            let mut sub = self.make_sub();
-                            for p in params { sub.known_local_vars.insert(p.name.clone()); }
-                            let body_s = match body {
-                                ClosureBody::Expr(e) => sub.emit_expr(e),
-                                ClosureBody::Block(stmts) => {
-                                    let inner: Vec<String> = stmts.iter().map(|s| sub.emit_stmt_inline(s)).collect();
-                                    format!("{{ {} }}", inner.join(" "))
-                                }
-                            };
-                            return format!(
-                                "{}.iter().map(|({}, {})| {{ let {} = {}.clone(); let {} = {}.clone(); ({}.clone(), {}) }}).collect::<HashMap<_,_>>()",
-                                obj_s, kname, vname, kname, kname, vname, vname, kname, body_s
-                            );
-                        }
-                    }
-                }
-                "filter" => {
-                    if let Some(first_arg) = args.first() {
-                        if let Some(closure_s) = emit_owned_closure(self, first_arg, 1) {
-                            return format!(
-                                "{}.clone().into_iter().filter({}).collect::<HashMap<_,_>>()",
-                                obj_s, closure_s
-                            );
-                        }
-                    }
-                }
-                _ => {}
+            "union" => {
+                let other_s = args.first().map(|a| self.emit_expr(&a.value))
+                    .unwrap_or_else(|| "Default::default()".to_string());
+                return Some(format!("{}.union(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s));
             }
-        }
-
-        // ── Set-specific methods ──────────────────────────────────────────────
-        if recv_is_set {
-            let obj_s = self.emit_expr(obj);
-            match method {
-                "toArray" => {
-                    return format!("{}.iter().cloned().collect::<Vec<_>>()", obj_s);
-                }
-                "union" => {
-                    let other_s = args.first().map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "Default::default()".to_string());
-                    return format!("{}.union(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s);
-                }
-                "intersection" => {
-                    let other_s = args.first().map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "Default::default()".to_string());
-                    return format!("{}.intersection(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s);
-                }
-                "difference" => {
-                    let other_s = args.first().map(|a| self.emit_expr(&a.value))
-                        .unwrap_or_else(|| "Default::default()".to_string());
-                    return format!("{}.difference(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s);
-                }
-                "add" | "insert" if !args.is_empty() => {
-                    let val_s = self.emit_expr_owned(&args[0].value);
-                    return format!("{}.insert({})", obj_s, val_s);
-                }
-                "remove" if !args.is_empty() => {
-                    let val_s = self.emit_expr_owned(&args[0].value);
-                    return format!("{}.remove(&{})", obj_s, val_s);
-                }
-                "contains" if !args.is_empty() => {
-                    let val_s = self.emit_expr_owned(&args[0].value);
-                    return format!("{}.contains(&{})", obj_s, val_s);
-                }
-                _ => {}
+            "intersection" => {
+                let other_s = args.first().map(|a| self.emit_expr(&a.value))
+                    .unwrap_or_else(|| "Default::default()".to_string());
+                return Some(format!("{}.intersection(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s));
             }
+            "difference" => {
+                let other_s = args.first().map(|a| self.emit_expr(&a.value))
+                    .unwrap_or_else(|| "Default::default()".to_string());
+                return Some(format!("{}.difference(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s));
+            }
+            "add" | "insert" if !args.is_empty() => {
+                let val_s = self.emit_expr_owned(&args[0].value);
+                return Some(format!("{}.insert({})", obj_s, val_s));
+            }
+            "remove" if !args.is_empty() => {
+                let val_s = self.emit_expr_owned(&args[0].value);
+                return Some(format!("{}.remove(&{})", obj_s, val_s));
+            }
+            "contains" if !args.is_empty() => {
+                let val_s = self.emit_expr_owned(&args[0].value);
+                return Some(format!("{}.contains(&{})", obj_s, val_s));
+            }
+            _ => {}
         }
+        None
+    }
 
-        // ── Array methods that need special emit (closures / block exprs) ─────
+    /// Array/iterator methods needing special emit beyond the generic `map_method` fallback
+    /// (closures with owned-rebind, or block-expr construction): `future.value()`/`.wait()`,
+    /// `joined`/`join`, `any`/`all`/`flatMap`/`count` (closure form), `sortBy`/`sortedBy`/
+    /// `sorted`, `flat`, `zip`, `enumerate`, `slice`/`take`/`drop`, `min`/`max`/`sum`, `indexOf`.
+    fn try_emit_array_special_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // `future.value()` and `future.wait()` — method-call syntax for task results.
         // Equivalent to the field-access forms `future.value` / `future.wait`.
         // Delegate to emit_expr for the Field variant, which has the full
@@ -957,7 +1030,7 @@ impl Transpiler {
                         kind: crate::ast::ExprKind::Field(Box::new(obj.clone()), method.to_string()),
                         line: obj.line, col: obj.col, len: 0,
                     };
-                    return self.emit_expr(&field_expr);
+                    return Some(self.emit_expr(&field_expr));
                 }
             }
         }
@@ -970,42 +1043,42 @@ impl Transpiler {
             let sep_s = args.first()
                 .map(|a| self.emit_expr_owned(&a.value))
                 .unwrap_or_else(|| self.str_from(""));
-            return format!("{}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{})", obj_s, sep_s);
+            return Some(format!("{}.iter().map(|__s| __s.as_ref()).collect::<Vec<&str>>().join(&*{})", obj_s, sep_s));
         }
 
         // `any(closure)` → iter().cloned().any(|x| { let x = x.clone(); body })
         if method == "any" {
             if let Some(first_arg) = args.first() {
-                if let Some(closure_s) = emit_owned_closure(self, first_arg, 0) {
+                if let Some(closure_s) = self.emit_owned_closure(first_arg, 0) {
                     let obj_s = self.emit_expr(obj);
-                    return format!("{}.iter().cloned().any({})", obj_s, closure_s);
+                    return Some(format!("{}.iter().cloned().any({})", obj_s, closure_s));
                 }
             }
         }
         // `all(closure)` → iter().cloned().all(...)
         if method == "all" {
             if let Some(first_arg) = args.first() {
-                if let Some(closure_s) = emit_owned_closure(self, first_arg, 0) {
+                if let Some(closure_s) = self.emit_owned_closure(first_arg, 0) {
                     let obj_s = self.emit_expr(obj);
-                    return format!("{}.iter().cloned().all({})", obj_s, closure_s);
+                    return Some(format!("{}.iter().cloned().all({})", obj_s, closure_s));
                 }
             }
         }
         // `flatMap(closure)` → iter().cloned().flat_map(...).collect::<Vec<_>>()
         if method == "flatMap" {
             if let Some(first_arg) = args.first() {
-                if let Some(closure_s) = emit_owned_closure(self, first_arg, 0) {
+                if let Some(closure_s) = self.emit_owned_closure(first_arg, 0) {
                     let obj_s = self.emit_expr(obj);
-                    return format!("{}.iter().cloned().flat_map({}).collect::<Vec<_>>()", obj_s, closure_s);
+                    return Some(format!("{}.iter().cloned().flat_map({}).collect::<Vec<_>>()", obj_s, closure_s));
                 }
             }
         }
         // `count(closure?)` → with closure: filter+count; without: len() as i64
         if method == "count" {
             if let Some(first_arg) = args.first() {
-                if let Some(closure_s) = emit_owned_closure(self, first_arg, 0) {
+                if let Some(closure_s) = self.emit_owned_closure(first_arg, 0) {
                     let obj_s = self.emit_expr(obj);
-                    return format!("{}.iter().cloned().filter({}).count() as i64", obj_s, closure_s);
+                    return Some(format!("{}.iter().cloned().filter({}).count() as i64", obj_s, closure_s));
                 }
             }
             // No closure: fallthrough to map_method which maps "count" → "len" as i64.
@@ -1027,10 +1100,10 @@ impl Transpiler {
                             }
                         };
                         let obj_s = self.emit_expr(obj);
-                        return format!(
+                        return Some(format!(
                             "{}.sort_by(|{}, __boring_b| {{ let __boring_ka = {{ let {} = {}.clone(); {} }}; let __boring_kb = {{ let {} = __boring_b.clone(); {} }}; __boring_ka.partial_cmp(&__boring_kb).unwrap_or(std::cmp::Ordering::Equal) }})",
                             obj_s, pname, pname, pname, body_s, pname, body_s
-                        );
+                        ));
                     }
                 }
             }
@@ -1052,10 +1125,10 @@ impl Transpiler {
                             }
                         };
                         let obj_s = self.emit_expr(obj);
-                        return format!(
+                        return Some(format!(
                             "{{ let mut __boring_v = {}.clone(); __boring_v.sort_by_key(|{}| {{ let {} = {}.clone(); {} }}); __boring_v.iter().cloned().collect::<Vec<_>>() }}",
                             obj_s, pname, pname, pname, body_s
-                        );
+                        ));
                     }
                 }
             }
@@ -1064,52 +1137,52 @@ impl Transpiler {
         // The collect at the end makes looks_like_collection() return true so print wraps with BoringFmt.
         if method == "sorted" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return Some(format!(
                 "{{ let mut __boring_v = {}.clone(); __boring_v.sort_by(|__a, __b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal)); __boring_v.iter().cloned().collect::<Vec<_>>() }}",
                 obj_s
-            );
+            ));
         }
         // `flat()` → into_iter().flatten().collect::<Vec<_>>()
         if method == "flat" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!("{}.into_iter().flatten().collect::<Vec<_>>()", obj_s);
+            return Some(format!("{}.into_iter().flatten().collect::<Vec<_>>()", obj_s));
         }
         // `zip(other)` → iter().cloned().zip(other.iter().cloned()).map(|(a,b)| (a,b)).collect::<Vec<_>>()
         if method == "zip" {
             if let Some(other_arg) = args.first() {
                 let obj_s   = self.emit_expr(obj);
                 let other_s = self.emit_expr(&other_arg.value);
-                return format!(
+                return Some(format!(
                     "{}.iter().cloned().zip({}.iter().cloned()).map(|(a,b)| (a,b)).collect::<Vec<_>>()",
                     obj_s, other_s
-                );
+                ));
             }
         }
         // `enumerate()` → iter().cloned().enumerate().map(|(i,x)| (i as i64,x)).collect::<Vec<_>>()
         if method == "enumerate" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return Some(format!(
                 "{}.iter().cloned().enumerate().map(|(i,x)| (i as i64,x)).collect::<Vec<_>>()",
                 obj_s
-            );
+            ));
         }
         // `slice(start, end)` on arrays → [start..end].iter().cloned().collect::<Vec<_>>()
         // Using .iter().cloned().collect instead of .to_vec() so looks_like_collection() detects it.
-        if method == "slice" && args.len() >= 2 && !receiver_is_string {
+        if method == "slice" && args.len() >= 2 && !self.expr_is_string_receiver(obj) {
             let obj_s   = self.emit_expr(obj);
             let start_s = self.emit_expr(&args[0].value);
             let end_s   = self.emit_expr(&args[1].value);
-            return format!("{}[({}) as usize..({}) as usize].iter().cloned().collect::<Vec<_>>()", obj_s, start_s, end_s);
+            return Some(format!("{}[({}) as usize..({}) as usize].iter().cloned().collect::<Vec<_>>()", obj_s, start_s, end_s));
         }
         // `take(n)` → iter().cloned().take(n as usize).collect::<Vec<_>>()
         if method == "take" {
             if let Some(n_arg) = args.first() {
                 let obj_s = self.emit_expr(obj);
                 let n_s   = self.emit_expr(&n_arg.value);
-                return format!(
+                return Some(format!(
                     "{}.iter().cloned().take(({}) as usize).collect::<Vec<_>>()",
                     obj_s, n_s
-                );
+                ));
             }
         }
         // `drop(n)` → iter().cloned().skip(n as usize).collect::<Vec<_>>()
@@ -1117,27 +1190,27 @@ impl Transpiler {
             if let Some(n_arg) = args.first() {
                 let obj_s = self.emit_expr(obj);
                 let n_s   = self.emit_expr(&n_arg.value);
-                return format!(
+                return Some(format!(
                     "{}.iter().cloned().skip(({}) as usize).collect::<Vec<_>>()",
                     obj_s, n_s
-                );
+                ));
             }
         }
         // `min()` → iter().cloned().min_by(|a,b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or_default()
         if method == "min" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return Some(format!(
                 "{}.iter().cloned().min_by(|__a,__b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or_default()",
                 obj_s
-            );
+            ));
         }
         // `max()` → iter().cloned().max_by(...)
         if method == "max" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return Some(format!(
                 "{}.iter().cloned().max_by(|__a,__b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or_default()",
                 obj_s
-            );
+            ));
         }
         // `sum()` → iter().cloned().sum::<T>() where T is the receiver's known element
         // type. A hardcoded `::<i64>()` broke summing a `[float]` (Sum<f64> isn't
@@ -1148,38 +1221,46 @@ impl Transpiler {
         if method == "sum" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
             let elem_ty = if self.expr_is_float_array(obj) { "f64" } else { "i64" };
-            return format!("{}.iter().cloned().sum::<{}>()", obj_s, elem_ty);
+            return Some(format!("{}.iter().cloned().sum::<{}>()", obj_s, elem_ty));
         }
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
         // Note: the map_method fallback maps indexOf → iter().position which returns Option<usize>;
         // we need Option<isize> to match interpreter semantics (indexOf returns `int`).
-        if method == "indexOf" && !receiver_is_string {
+        if method == "indexOf" && !self.expr_is_string_receiver(obj) {
             if let Some(val_arg) = args.first() {
                 let obj_s = self.emit_expr(obj);
                 let val_s = self.emit_expr(&val_arg.value);
-                return format!(
+                return Some(format!(
                     "{}.iter().position(|__x| __x == &({})).map(|i| i as isize)",
                     obj_s, val_s
-                );
+                ));
             }
         }
+        None
+    }
 
-        // Option-chain short-circuit: if the receiver is Option-like and the method is one
-        // that operates on Option (map, filter, or_else, etc.), emit it directly without the
-        // iter/collect wrapping that map_method would add for Vec receivers.
+    /// Option-chain short-circuit: when the receiver is `Option`-like and the method is one
+    /// that operates on `Option` directly (`map`, `filter`, `or`/`or_else`, `flatten`,
+    /// `and_then`), emit it without the `iter`/`collect` wrapping the generic fallback would
+    /// otherwise add for `Vec` receivers.
+    fn try_emit_option_chain_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         const OPTION_CHAIN_METHODS: &[&str] = &["map", "filter", "or", "or_else", "flatten", "and_then"];
-        if OPTION_CHAIN_METHODS.contains(&method) && is_option_expr(obj) {
-            let obj_s = self.emit_expr(obj);
-            let closure_args: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
-            let call = format!("{}.{}({})", obj_s, method, closure_args.join(", "));
-            return if self.in_async && self.instance_task_methods.contains(method) {
-                format!("{}.await", call)
-            } else {
-                call
-            };
-        }
-        // Float math methods: map boring method names to their Rust f64 equivalents.
-        // Only intercept when the receiver is known to be a float (primitive), not a struct.
+        if !(OPTION_CHAIN_METHODS.contains(&method) && is_option_expr(obj)) { return None; }
+        let obj_s = self.emit_expr(obj);
+        let closure_args: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+        let call = format!("{}.{}({})", obj_s, method, closure_args.join(", "));
+        Some(if self.in_async && self.instance_task_methods.contains(method) {
+            format!("{}.await", call)
+        } else {
+            call
+        })
+    }
+
+    /// Float math methods (`sqrt`/`abs`/`floor`/trig/`pow`/`log`/`atan2`/`clamp`/etc.), mapped
+    /// to their Rust `f64` equivalents. Only intercepts when the receiver is known to be a
+    /// numeric primitive (literal, tracked numeric var, or numeric cast) — not a struct, so a
+    /// user-defined method of the same name on a numeric-like struct still dispatches normally.
+    fn try_emit_float_math_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let receiver_is_float = match &obj.kind {
             ExprKind::Float(_) => true,
             ExprKind::Int(_)   => true,
@@ -1200,45 +1281,73 @@ impl Transpiler {
                 | crate::ast::Type::Uint64 | crate::ast::Type::Uint128),
             _ => false,
         };
-        if receiver_is_float {
-            const FLOAT_UNARY_METHODS: &[(&str, &str)] = &[
-                ("sqrt",  "sqrt"),  ("cbrt",   "cbrt"),  ("abs",   "abs"),
-                ("floor", "floor"), ("ceil",   "ceil"),  ("round", "round"),
-                ("exp",   "exp"),   ("exp2",   "exp2"),  ("ln",    "ln"),
-                ("log2",  "log2"),  ("log10",  "log10"),
-                ("sin",   "sin"),   ("cos",    "cos"),   ("tan",   "tan"),
-                ("asin",  "asin"),  ("acos",   "acos"),  ("atan",  "atan"),
-                ("sinh",  "sinh"),  ("cosh",   "cosh"),  ("tanh",  "tanh"),
-                ("signum","signum"),("recip",  "recip"),
-                ("toRadians","to_radians"), ("toDegrees","to_degrees"),
-            ];
-            if let Some(&(_, rust_name)) = FLOAT_UNARY_METHODS.iter().find(|&&(n, _)| n == method) {
-                let obj_s = self.emit_expr(obj);
-                return format!("({} as f64).{}()", obj_s, rust_name);
-            }
-            if method == "pow" || method == "powf" {
-                let obj_s = self.emit_expr(obj);
-                let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
-                return format!("({} as f64).powf({} as f64)", obj_s, exp);
-            }
-            if method == "log" {
-                let obj_s = self.emit_expr(obj);
-                let base = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "std::f64::consts::E".to_string());
-                return format!("({} as f64).log({} as f64)", obj_s, base);
-            }
-            if method == "atan2" {
-                let obj_s = self.emit_expr(obj);
-                let other = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0.0f64".to_string());
-                return format!("({} as f64).atan2({} as f64)", obj_s, other);
-            }
-            if method == "clamp" && args.len() >= 2 {
-                let obj_s = self.emit_expr(obj);
-                let lo = self.emit_expr(&args[0].value);
-                let hi = self.emit_expr(&args[1].value);
-                return format!("({} as f64).clamp({} as f64, {} as f64)", obj_s, lo, hi);
-            }
+        if !receiver_is_float { return None; }
+        const FLOAT_UNARY_METHODS: &[(&str, &str)] = &[
+            ("sqrt",  "sqrt"),  ("cbrt",   "cbrt"),  ("abs",   "abs"),
+            ("floor", "floor"), ("ceil",   "ceil"),  ("round", "round"),
+            ("exp",   "exp"),   ("exp2",   "exp2"),  ("ln",    "ln"),
+            ("log2",  "log2"),  ("log10",  "log10"),
+            ("sin",   "sin"),   ("cos",    "cos"),   ("tan",   "tan"),
+            ("asin",  "asin"),  ("acos",   "acos"),  ("atan",  "atan"),
+            ("sinh",  "sinh"),  ("cosh",   "cosh"),  ("tanh",  "tanh"),
+            ("signum","signum"),("recip",  "recip"),
+            ("toRadians","to_radians"), ("toDegrees","to_degrees"),
+        ];
+        if let Some(&(_, rust_name)) = FLOAT_UNARY_METHODS.iter().find(|&&(n, _)| n == method) {
+            let obj_s = self.emit_expr(obj);
+            return Some(format!("({} as f64).{}()", obj_s, rust_name));
         }
+        if method == "pow" || method == "powf" {
+            let obj_s = self.emit_expr(obj);
+            let exp = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "1.0".to_string());
+            return Some(format!("({} as f64).powf({} as f64)", obj_s, exp));
+        }
+        if method == "log" {
+            let obj_s = self.emit_expr(obj);
+            let base = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "std::f64::consts::E".to_string());
+            return Some(format!("({} as f64).log({} as f64)", obj_s, base));
+        }
+        if method == "atan2" {
+            let obj_s = self.emit_expr(obj);
+            let other = args.first().map(|a| self.emit_expr(&a.value)).unwrap_or_else(|| "0.0f64".to_string());
+            return Some(format!("({} as f64).atan2({} as f64)", obj_s, other));
+        }
+        if method == "clamp" && args.len() >= 2 {
+            let obj_s = self.emit_expr(obj);
+            let lo = self.emit_expr(&args[0].value);
+            let hi = self.emit_expr(&args[1].value);
+            return Some(format!("({} as f64).clamp({} as f64, {} as f64)", obj_s, lo, hi));
+        }
+        None
+    }
 
+    pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if let Some(r) = self.try_emit_builtin_namespace_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_clone_and_task_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_channel_method(obj, method, args) { return r; }
+
+        if let Some(r) = self.try_emit_type_method_call(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_actor_field_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_special_case_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_tuple_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_string_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_dict_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_set_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_array_special_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_option_chain_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_float_math_method(obj, method, args) { return r; }
+
+        self.emit_method_call_fallback(obj, method, args)
+    }
+
+    /// The generic method-call fallback, reached once every specialized dispatch above has
+    /// declined: path receivers (`mpsc::channel`, `tokio::time::sleep`), the immutable-param
+    /// `def`-method diagnostic, user-struct method-name/overload resolution, Boring→Rust
+    /// method-name mapping (`map_method`), arg coercion (dict keys, usize-index methods,
+    /// `Option<usize>` index-arg wrapping), and the final `.await`/`?` propagation.
+    fn emit_method_call_fallback(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
         // A method-call receiver that's an array/dict index (`arr[i].method(...)`) must
         // be a genuine place expression, not a fresh clone of the element — cloning here
         // silently drops any mutation a `def` (mutating) method makes, since it would

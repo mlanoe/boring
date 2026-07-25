@@ -33,6 +33,13 @@ pub struct WgpuOutput {
     pub kernel_names: Vec<String>,
     /// Generated Cargo.toml content (no build.rs — wgpu/naga compile WGSL at runtime).
     pub cargo_toml: String,
+    /// Errors accumulated while transpiling non-kernel code through the general pass
+    /// (see `transpile_wgpu`'s `general_out`) — e.g. an unsupported kernel constructor
+    /// call, or top-level `task`/stream usage. Callers must check this and report
+    /// instead of writing out `host_rs`/`device_wgsl`, exactly like the std target's
+    /// own `TranspileOutput::errors` (see `main.rs`'s `report_transpile_errors`) --
+    /// otherwise these errors are silently dropped instead of surfaced.
+    pub errors: Vec<crate::transpiler::TranspileError>,
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -104,7 +111,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws);
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
-    WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml }
+    WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml, errors: general_out.errors }
 }
 
 /// Clone `program`, renaming any top-level, non-method function literally named

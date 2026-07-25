@@ -12,6 +12,7 @@
 // Signal is used for interpreter control flow; boxing Value variants would add heap allocations in the hot loop
 #![allow(clippy::result_large_err)]
 
+pub mod errors;
 pub mod lexer;
 pub mod ast;
 pub mod parser;
@@ -97,22 +98,22 @@ fn report_lex_errors(path: &Path, source: &str, errors: &[lexer::LexError]) {
 
 fn report_transpile_errors(path: &Path, source: &str, errors: &[transpiler::TranspileError]) {
     for e in errors {
-        report_error(path, source, e.line, e.col, 1, &e.message);
+        report_error(path, source, e.line, e.col, e.len, &e.message);
     }
 }
 
 fn report_transpile_warnings(path: &Path, source: &str, warnings: &[transpiler::TranspileError]) {
     for w in warnings {
-        report_warning(path, source, w.line, w.col, 1, &w.message);
+        report_warning(path, source, w.line, w.col, w.len, &w.message);
     }
 }
 
 fn report_check_result(path: &Path, source: &str, result: checker::CheckResult) -> bool {
     for w in &result.warnings {
-        report_warning(path, source, w.line, w.col, 1, &w.message);
+        report_warning(path, source, w.line, w.col, w.len, &w.message);
     }
     for e in &result.errors {
-        report_error(path, source, e.line, e.col, 1, &e.message);
+        report_error(path, source, e.line, e.col, e.len, &e.message);
     }
     !result.errors.is_empty()
 }
@@ -734,7 +735,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     }
 
     if let Err(e) = interp.exec_program(&program) {
-        report_error(&path, &source, e.line, e.col, 1, &e.message);
+        report_error(&path, &source, e.line, e.col, e.len, &e.message);
         process::exit(1);
     }
 
@@ -1236,6 +1237,16 @@ fn emit_wgpu(path: &str, version: &str) {
     let project_dir = base_dir.join(format!("{}_wgpu", stem));
 
     let wgpu_out = transpiler::wgpu::transpile_wgpu(&program, &stem, version);
+    if !wgpu_out.errors.is_empty() {
+        // Best-effort source for pretty-printing (line/col + a caret under the
+        // offending text) -- accurate for errors in the entry file itself; an error
+        // originating in a `use`-imported file (parse_and_merge_program flattens
+        // several files into one Program) will show against the wrong text, but
+        // still reports the right message, line, and column.
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_errors(&path, &source, &wgpu_out.errors);
+        process::exit(1);
+    }
 
     // Create directory layout.
     let src_dir     = project_dir.join("src");
