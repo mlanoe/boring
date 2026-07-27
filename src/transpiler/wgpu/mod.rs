@@ -79,7 +79,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // program's entry point before feeding it through -- this project's own
     // `fn main()`/`async fn async_main()` (below) is the real entry point,
     // and calls the renamed function once the GPU device/queue are ready.
-    let renamed_program = rename_top_level_main(program, "boring_main");
+    let renamed_program = crate::transpiler::rename_top_level_main(program, "boring_main");
     let general_config = crate::transpiler::TranspileConfig {
         gpu_kernels: effective_kernels.clone(),
         is_gpu_target: true,
@@ -95,41 +95,14 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // above (visible as an `Item::Fn` in `renamed_program`), or because the general pass
     // synthesized one from bare top-level statements/non-const `let`s (invisible here --
     // it exists only in `general_out.code` -- so `general_out.gpu_main_emitted` is the
-    // only way to know; see `emit_program_items`).
-    let explicit_boring_main_throws = renamed_program.items.iter().find_map(|item| {
-        match item {
-            Item::Fn(f) if f.name == "boring_main" && f.qualifier.is_none() => Some(f.throws),
-            _ => None,
-        }
-    });
-    let has_boring_main = general_out.gpu_main_emitted || explicit_boring_main_throws.is_some();
-    // A synthesized `boring_main` (from bare top-level statements, no explicit user
-    // `def main():`) always returns a `Result` -- see `emit_gpu_boring_main`. An
-    // explicit user main only does when it declares `throws`.
-    let boring_main_throws = explicit_boring_main_throws.unwrap_or(true);
+    // only way to know; see `emit_program_items`). Shared with cuda/metal, which need the
+    // identical derivation -- see `crate::transpiler::detect_boring_main`.
+    let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
     let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws);
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
     WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml, errors: general_out.errors }
-}
-
-/// Clone `program`, renaming any top-level, non-method function literally named
-/// `main` to `new_name`. Used so the general transpiler doesn't try to emit its
-/// own `fn main()`/`#[tokio::main]` wrapper for a boring program's entry point
-/// when it's being embedded into a GPU target's own generated `main.rs`.
-fn rename_top_level_main(program: &Program, new_name: &str) -> Program {
-    let items = program.items.iter().map(|item| {
-        if let Item::Fn(f) = item {
-            if f.name == "main" && f.qualifier.is_none() {
-                let mut renamed = f.clone();
-                renamed.name = new_name.to_string();
-                return Item::Fn(renamed);
-            }
-        }
-        item.clone()
-    }).collect();
-    Program { items }
 }
 
 // ─── Monomorphisation ─────────────────────────────────────────────────────────

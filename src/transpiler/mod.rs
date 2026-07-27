@@ -2788,6 +2788,252 @@ impl Transpiler {
     }
 }
 
+// ─── GPU-target shared helpers (wgpu/cuda/metal) ──────────────────────────────
+//
+// These are shared by all three GPU backends' `transpile_*` entry points.
+// wgpu uses them directly (its own kernel dispatch model matches the general
+// pipeline's kernel-aware codegen in `emit_kernel.rs` exactly, so it can splice
+// the general pass's output over the WHOLE program). cuda/metal additionally
+// need `kernel_touching_fn_names`/`strip_top_level_fns` because their real
+// kernel dispatch API (fallible construction, `__boring_launch`, CUDA streams /
+// Metal command buffers) is richer than what `emit_kernel.rs` hardcodes (which
+// is wgpu-shaped: infallible `new(device, queue)`, `.dispatch(gx,gy,gz)`) — see
+// `cuda::transpile_cuda`'s doc comment for the full story of why a function
+// that directly constructs/dispatches a kernel can't be transpiled by the
+// general pipeline for those two backends, while every OTHER function can.
+
+/// Clone `program`, renaming any top-level, non-method function literally named
+/// `main` to `new_name`. Used so the general transpiler doesn't try to emit its
+/// own `fn main()`/`#[tokio::main]` wrapper for a boring program's entry point
+/// when it's being embedded into a GPU target's own generated `main.rs`.
+pub(crate) fn rename_top_level_main(program: &Program, new_name: &str) -> Program {
+    let items = program.items.iter().map(|item| {
+        if let Item::Fn(f) = item {
+            if f.name == "main" && f.qualifier.is_none() {
+                let mut renamed = f.clone();
+                renamed.name = new_name.to_string();
+                return Item::Fn(renamed);
+            }
+        }
+        item.clone()
+    }).collect();
+    Program { items }
+}
+
+/// Names of free functions whose body directly constructs a `kernel` instance
+/// (`KernelName(...)`) or contains a `kernel: ...` dispatch block. These are the
+/// only functions cuda/metal can't hand off to the general pipeline (see this
+/// section's header comment) — everything else, including functions that merely
+/// *call* one of these (e.g. a struct method that calls `linear_gpu(...)`), is
+/// unaffected and goes through the general pipeline normally.
+///
+/// Scope: only free (`Item::Fn`) functions are checked. A `kernel`-touching
+/// struct *method* is not detected here — see `strip_top_level_fns`'s doc for
+/// why that combination isn't supported and is a documented gap, not silently
+/// mishandled (callers should check for it separately if they care).
+pub(crate) fn kernel_touching_fn_names(program: &Program, kernel_names: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for item in &program.items {
+        if let Item::Fn(f) = item {
+            let param_is_kernel = f.params.iter().any(|p| matches!(&p.ty, Some(Type::Named(n)) if kernel_names.contains(n)));
+            if param_is_kernel || stmts_touch_kernel(&f.body, kernel_names) {
+                out.insert(f.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// True when any method of any `Item::Struct` in `program` is kernel-touching
+/// (see `kernel_touching_fn_names`'s doc for the definition). `cuda`/`metal`'s
+/// `transpile_*` entry points check this and, if true, do NOT attempt the
+/// splice architecture for the affected struct at all (falling back to fully
+/// custom emission for it) — routing such a struct through the general
+/// pipeline while ALSO custom-emitting it for its kernel-touching method would
+/// double-define the struct/impl block. Not exercised by this codebase's own
+/// `.br` corpus (every kernel-touching construct here is a free function), so
+/// this exists purely as a safety check, not a fully-engineered dual path.
+pub(crate) fn kernel_touching_struct_names(program: &Program, kernel_names: &std::collections::HashSet<String>) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for item in &program.items {
+        if let Item::Struct(s) = item {
+            if s.methods.iter().any(|m| stmts_touch_kernel(&m.body, kernel_names)) {
+                out.insert(s.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// True when the program's TOP-LEVEL statements/lets (as opposed to inside a
+/// named function — see `kernel_touching_fn_names`) directly construct a
+/// `kernel` instance or contain a `kernel: ...` dispatch block. Common in
+/// practice for GPU-target example programs with no `def main():` at all
+/// (e.g. `examples/vector_add_gpu.br`: `mut k = VectorAdd(...); kernel:
+/// k(block=256)`, both bare top-level statements) — cuda/metal's
+/// `transpile_*` entry points check this and, if true, keep top-level
+/// statement/let handling entirely on their own custom emitter (matching
+/// their pre-splice behavior, which already worked for this case) instead of
+/// letting the general pipeline fold it into a synthesized `boring_main` (see
+/// `TranspileConfig::gpu_top_level_handled_by_host`) — the general pipeline's
+/// kernel-aware codegen for that fold-in is wgpu-shaped and can't run with
+/// `gpu_kernels` empty (see `cuda::mod`'s doc comment for the full story).
+pub(crate) fn top_level_touches_kernel(program: &Program, kernel_names: &std::collections::HashSet<String>) -> bool {
+    for item in &program.items {
+        match item {
+            Item::Let(s) => {
+                if s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names) || expr_uses_gpu_device(v)) {
+                    return true;
+                }
+            }
+            Item::Stmt(s) => {
+                if stmt_touches_kernel(s, kernel_names) || stmt_uses_gpu_device(s) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn stmt_uses_gpu_device(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let(s) => s.value.as_ref().is_some_and(expr_uses_gpu_device),
+        Stmt::Expr(e) => expr_uses_gpu_device(e),
+        _ => false,
+    }
+}
+
+fn expr_constructs_kernel(e: &Expr, kernel_names: &std::collections::HashSet<String>) -> bool {
+    match &e.kind {
+        ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if kernel_names.contains(n.as_str())),
+        // `new(g) Scale(data)` — explicit-device kernel construction wraps the
+        // same constructor call in `ExprKind::New`.
+        ExprKind::New { ctor, .. } => expr_constructs_kernel(ctor, kernel_names),
+        _ => false,
+    }
+}
+
+/// True when `e` is a `GPU(n)`/`GPU.all()` use — cuda/metal's own custom
+/// emitters have working GPU-device-introspection codegen (`gpu_vars`/
+/// `emit_gpu_property`), but the general pipeline ALSO has its own version of
+/// this (`emit_methods.rs`'s `.name()`/`.totalMem()`/etc mapping to
+/// `__boring_gpu_name()` etc.), gated on `is_gpu_target` alone — unconditional,
+/// same as the kernel-construction/resident-return issues this module's other
+/// helpers work around — and only wgpu actually DEFINES those `__boring_gpu_*`
+/// helpers. Used alongside `expr_constructs_kernel` so top-level `GPU(...)` use
+/// also stays on cuda/metal's own custom emitter instead of the general splice.
+fn expr_uses_gpu_device(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(n) if n == "GPU"),
+        // `GPU.all()`.
+        ExprKind::MethodCall(obj, _, _) => matches!(&obj.kind, ExprKind::Var(n) if n == "GPU"),
+        _ => false,
+    }
+}
+
+fn stmts_touch_kernel(body: &[Stmt], kernel_names: &std::collections::HashSet<String>) -> bool {
+    body.iter().any(|s| stmt_touches_kernel(s, kernel_names))
+}
+
+fn stmt_touches_kernel(stmt: &Stmt, kernel_names: &std::collections::HashSet<String>) -> bool {
+    match stmt {
+        Stmt::KernelBlock(_) => true,
+        Stmt::Let(s) => s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names)),
+        Stmt::LetDestructure(s) => expr_constructs_kernel(&s.value, kernel_names),
+        Stmt::If(i) => i.branches.iter().any(|(_, b)| stmts_touch_kernel(b, kernel_names))
+            || i.else_body.as_ref().is_some_and(|b| stmts_touch_kernel(b, kernel_names)),
+        Stmt::While(w) => stmts_touch_kernel(&w.body, kernel_names),
+        Stmt::DoWhile(w) => stmts_touch_kernel(&w.body, kernel_names),
+        Stmt::For(f) => stmts_touch_kernel(&f.body, kernel_names),
+        Stmt::Loop(l) => stmts_touch_kernel(&l.body, kernel_names),
+        Stmt::Guard(g) => stmts_touch_kernel(&g.else_body, kernel_names),
+        Stmt::With(w) => stmts_touch_kernel(&w.body, kernel_names),
+        Stmt::Defer(b) => stmts_touch_kernel(b, kernel_names),
+        Stmt::Try(t) => stmts_touch_kernel(&t.body, kernel_names)
+            || t.catch_clauses.iter().any(|c| stmts_touch_kernel(&c.body, kernel_names)),
+        Stmt::Match(m) => m.arms.iter().any(|a| match &a.body {
+            MatchBody::Block(b) => stmts_touch_kernel(b, kernel_names),
+            MatchBody::Expr(e) => expr_constructs_kernel(e, kernel_names),
+        }),
+        _ => false,
+    }
+}
+
+/// Remove each top-level `pub fn {name}(...) { ... }` / `fn {name}(...) { ... }`
+/// definition (matched by brace-depth, not just text search) from `code`, for
+/// every `name` in `names`.
+///
+/// Used to discard the general pipeline's rendering of a kernel-touching
+/// function's BODY (which is necessarily wrong for cuda/metal — see this
+/// section's header comment: the pipeline emits wgpu-shaped kernel construction/
+/// dispatch calls that don't exist on cuda/metal's real kernel structs), while
+/// still routing the function through the general pipeline for the purpose of
+/// registering its signature/`throws`-ness — every OTHER (non-kernel-touching)
+/// function's calls TO `name` still went through the general pipeline's own
+/// call-site emission (by-ref array/dict/set/struct coercion, `?`-propagation,
+/// etc.), which needed `name`'s real declaration to get that right. The GPU
+/// backend's own custom emitter supplies the real (native, fallible-dispatch)
+/// replacement body for each stripped name separately, with a matching by-ref
+/// signature (see `cuda::host`'s `fn_ref_params`).
+///
+/// Assumes (true of every function this transpiler emits, checked against every
+/// sample in this codebase) that a function signature is never wrapped across
+/// multiple lines — matching is done against a single trimmed line's prefix.
+pub(crate) fn strip_top_level_fns(code: &str, names: &std::collections::HashSet<String>) -> String {
+    if names.is_empty() { return code.to_string(); }
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < code.len() {
+        let line_end = code[i..].find('\n').map(|p| i + p + 1).unwrap_or(code.len());
+        let line = &code[i..line_end];
+        let trimmed = line.trim_start();
+        let matched = names.iter().any(|n| {
+            trimmed.starts_with(&format!("fn {}(", n)) || trimmed.starts_with(&format!("pub fn {}(", n))
+        });
+        if matched {
+            let rest = &code[i..];
+            let mut depth = 0i32;
+            let mut seen_open = false;
+            let mut end_offset = rest.len();
+            for (off, ch) in rest.char_indices() {
+                if ch == '{' { depth += 1; seen_open = true; }
+                if ch == '}' {
+                    depth -= 1;
+                    if seen_open && depth == 0 {
+                        let after = &rest[off + 1..];
+                        end_offset = after.find('\n').map(|p| off + 1 + p + 1).unwrap_or(rest.len());
+                        break;
+                    }
+                }
+            }
+            i += end_offset;
+            continue;
+        }
+        out.push_str(line);
+        i = line_end;
+    }
+    out
+}
+
+/// Given the renamed program (see `rename_top_level_main`) and the general
+/// pipeline's output for it, determine whether a `boring_main` exists and
+/// whether it returns a `Result` — shared by wgpu/cuda/metal so each backend's
+/// own real `fn main()` knows whether/how to call it. See `wgpu::transpile_wgpu`
+/// for the original derivation of this logic (this is a verbatim extraction).
+pub(crate) fn detect_boring_main(renamed_program: &Program, general_out: &TranspileOutput) -> (bool, bool) {
+    let explicit_boring_main_throws = renamed_program.items.iter().find_map(|item| {
+        match item {
+            Item::Fn(f) if f.name == "boring_main" && f.qualifier.is_none() => Some(f.throws),
+            _ => None,
+        }
+    });
+    let has_boring_main = general_out.gpu_main_emitted || explicit_boring_main_throws.is_some();
+    let boring_main_throws = explicit_boring_main_throws.unwrap_or(true);
+    (has_boring_main, boring_main_throws)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

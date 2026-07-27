@@ -1128,6 +1128,11 @@ fn emit_cuda(path: &str, version: &str) {
     let project_dir = base_dir.join(format!("{}_cuda", stem));
 
     let cuda_out = transpiler::cuda::transpile_cuda(&program, &stem, version);
+    if !cuda_out.errors.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_errors(&path, &source, &cuda_out.errors);
+        process::exit(1);
+    }
 
     // Create directory layout.
     let src_dir     = project_dir.join("src");
@@ -1186,6 +1191,11 @@ fn emit_metal(path: &str, version: &str) {
     let project_dir = base_dir.join(format!("{}_metal", stem));
 
     let metal_out = transpiler::metal::transpile_metal(&program, &stem, version);
+    if !metal_out.errors.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_errors(&path, &source, &metal_out.errors);
+        process::exit(1);
+    }
 
     // Create directory layout.
     let src_dir     = project_dir.join("src");

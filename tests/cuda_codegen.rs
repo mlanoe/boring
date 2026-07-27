@@ -662,7 +662,11 @@ fn example_saxpy() {
 
     // Host struct
     assert!(rs.contains("struct Saxpy"),          "missing struct Saxpy;\ngot:\n{rs}");
-    assert!(rs.contains("alpha: CudaSlice<f64>"), "missing alpha field;\ngot:\n{rs}");
+    // A scalar `'const` field (`alpha` has no array type) is a plain kernel-launch
+    // parameter, not a device buffer -- `CudaSlice<f64>` here was a real E0308,
+    // confirmed via a `cargo check` against real cudarc 0.19.8 (the constructor
+    // assigns it a bare `f64`, not a `CudaSlice`). See `host_field_type`'s fix.
+    assert!(rs.contains("alpha: f64"),           "missing alpha field;\ngot:\n{rs}");
     assert!(rs.contains("x: CudaSlice<f64>"),    "missing x field;\ngot:\n{rs}");
     assert!(rs.contains("y: CudaSlice<f64>"),    "missing y field;\ngot:\n{rs}");
 

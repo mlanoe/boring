@@ -1785,6 +1785,38 @@ impl Transpiler {
                     i += 1;
                     continue;
                 }
+                // Interprocedural GPU residency, the materializing counterpart to the
+                // `fn_gpu_arg_params` branch above: this position does NOT want a
+                // `BoringGpuArg<T>` (checked above and not taken), but the argument
+                // itself is a bare `resident_call_vars` local (`let fc =
+                // linear_gpu(...)?`) — a real `BoringGpuArg<T>` Rust value, not the
+                // plain array the callee's signature declares. The generic by-ref
+                // coercion below has no idea this Var's actual Rust type diverges
+                // from its boring-level declared type, and would emit a bare `&fc`
+                // — a genuine E0308 confirmed via a real `cargo check` on
+                // whisper-boring's `mha_gpu` calling `attention_heads_gpu`/
+                // `linear_gpu`/`gelu_gpu` (this exact bug is also present, unfixed,
+                // in a plain `boring build`'s own output — pre-existing and
+                // target-agnostic, not introduced by any GPU-backend work).
+                // Materializes by reference (mirrors `emit_stmt.rs`'s identical
+                // by-ref materialization for a reassignment target) so `fc` itself
+                // stays usable afterward, matching boring's no-moves semantics.
+                if let ExprKind::Var(vname) = &a.value.kind {
+                    if let Some(ret_ty) = self.resident_call_vars.get(vname.as_str()).cloned() {
+                        let inner_ty = match &ret_ty {
+                            Type::Qualified(inner, _) => crate::transpiler::emit_kernel::array_inner_type(inner),
+                            other => crate::transpiler::emit_kernel::array_inner_type(other),
+                        };
+                        let host_ty = crate::transpiler::emit_kernel::kernel_host_element_type(&inner_ty);
+                        let device_ty = crate::transpiler::emit_kernel::kernel_host_scalar_type(&inner_ty);
+                        let materialized = format!(
+                            "match &{vname} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringGpuArg::Host(v) => v.clone() }}"
+                        );
+                        result.push(format!("&({})", materialized));
+                        i += 1;
+                        continue;
+                    }
+                }
                 let param_ty = sig.get(i);
                 let param_rebindable = rebindable_flags.get(i).copied().unwrap_or(false);
                 let param_mutable = mutable_flags.get(i).copied().unwrap_or(false);

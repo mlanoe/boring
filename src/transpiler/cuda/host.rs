@@ -5,9 +5,17 @@
 
 use crate::ast::*;
 
-pub(super) fn emit_host_rs(program: &Program, kernel_names: &[String]) -> String {
+pub(super) fn emit_host_rs(
+    program: &Program,
+    kernel_names: &[String],
+    kernel_touching: &std::collections::HashSet<String>,
+    general_code: &str,
+    has_boring_main: bool,
+    boring_main_throws: bool,
+    top_level_kernel_touching: bool,
+) -> String {
     let mut e = HostEmitter::new(kernel_names);
-    e.emit_program(program, kernel_names);
+    e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
     e.out
 }
 
@@ -24,6 +32,110 @@ struct HostEmitter {
     /// Variables that hold an `Arc<CudaContext>` (from `GPU(n)` or `new(g) ...`).
     /// Used to map `.name()`, `.total_mem()` etc. to cudarc 0.19 methods.
     gpu_vars: std::collections::HashSet<String>,
+    /// Local variables (by name, unscoped) whose declared type or initializer is a
+    /// `{K=V}` dict literal/type — used so `d[key]`/`d[key] = v` emit `HashMap`
+    /// `.get(&key).cloned()`/`.insert(key, v)` instead of Vec-style `[key as usize]`
+    /// indexing (see `is_dict_obj`).
+    dict_vars: std::collections::HashSet<String>,
+    /// Struct field names (flat, not namespaced by struct — this emitter has no
+    /// per-struct-type field resolution) declared with a `{K=V}` dict type, so
+    /// `self.field[key]`/`self.field[key] = v` get the same HashMap treatment as
+    /// `dict_vars`. Populated once from every `Item::Struct` in the program.
+    dict_fields: std::collections::HashSet<String>,
+    /// Names of every free (non-method) `throws` function — used so a call to one
+    /// of them, from inside another `throws` function, gets `?` appended (see
+    /// `in_throws`). Does NOT cover `throws` struct methods (`self.foo()` chains,
+    /// e.g. decoder.br/encoder.br) — resolving a method call's receiver type well
+    /// enough to know whether it throws is not implemented here; see this
+    /// module's doc comment for the reasoning and `emit_fn`'s call site.
+    fn_throws: std::collections::HashSet<String>,
+    /// True while emitting the body of a `throws` function — gates both `return
+    /// Err(...)` for `Stmt::Throw`/`Stmt::Guard` and `?`-suffixing calls to other
+    /// `fn_throws` functions.
+    in_throws: bool,
+    /// Variant name → owning enum type name (e.g. `"Tiny" -> "ModelSize"`), for
+    /// rendering a bare `Pattern::Variant` match pattern as Rust's required
+    /// path-qualified `EnumName::Variant` — flat/unscoped like `dict_fields`,
+    /// so this assumes variant names are unique across the whole program (true
+    /// for every enum this codebase's CUDA/Metal-targeted code actually matches
+    /// on). Populated once from every `Item::Enum`.
+    variant_to_enum: std::collections::HashMap<String, String>,
+    /// Free function name → per-parameter "does this position need `&`?" flags,
+    /// per boring's by-ref contract (`CLAUDE.md`: "Structs, enums, arrays, dicts,
+    /// sets — always passed by reference"). Populated once from every `Item::Fn`
+    /// in the whole (unfiltered) program — this backend only emits BODIES for
+    /// kernel-touching functions now (see `cuda::transpile_cuda`'s doc comment),
+    /// but every call site, in either emitter, must agree on every function's
+    /// signature for cross-calls between the two to type-check.
+    fn_ref_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Declared struct AND enum names (both, despite the field name) — a
+    /// `Type::Named(n)` parameter is by-ref-worthy when `n` names either.
+    struct_names: std::collections::HashSet<String>,
+    /// The CURRENTLY-being-emitted function's own by-ref-typed parameter names
+    /// (reset per `emit_fn` call). A bare read of one of these (`Stmt::For`'s
+    /// iterable, `ExprKind::Index`, or forwarding it as an argument to something
+    /// that expects an OWNED value, e.g. a kernel constructor) needs an explicit
+    /// `.clone()`/`.iter().cloned()` — indexing or iterating a `&Vec<T>` yields
+    /// `&T`, not `T`.
+    ref_params: std::collections::HashSet<String>,
+    /// True while emitting the body of a GPU-resident-returning function (see
+    /// `emit_fn`'s `resident_elem`) — gates wrapping `Stmt::Return`'s value in
+    /// `BoringGpuArg::Host(...)` to match the declared `BoringGpuArg<T>` return
+    /// type every general-spliced caller unconditionally expects.
+    in_resident_return: bool,
+    /// Free function name → per-parameter "does this position render as
+    /// `isize`/`usize`?" flags (see `narrowed_int_param_type`'s doc) — mirrors
+    /// `fn_ref_params`, needed for the SAME reason: a call from one
+    /// kernel-touching function to another (both on this emitter, e.g.
+    /// `attention_heads_gpu` calling `transpose_gpu`) must cast its `i64`/`u64`
+    /// locals to match the callee's narrowed param type, or it's a real E0308
+    /// (confirmed via `cargo check`).
+    fn_narrowed_int_params: std::collections::HashMap<String, Vec<Option<&'static str>>>,
+    /// Free function name → its `Type` when GPU-resident-returning (see
+    /// `emit_fn`'s `resident_elem`). A call from one kernel-touching function
+    /// to another that returns `BoringGpuArg<T>` (e.g. `attention_heads_gpu`
+    /// calling `transpose_gpu`) must materialize the result — this emitter has
+    /// no cross-function residency-preservation optimization of its own, unlike
+    /// the general pipeline's `resident_call_vars` (see `emit_methods.rs`'s
+    /// identical-purpose fix there).
+    fn_returns_resident: std::collections::HashMap<String, Type>,
+}
+
+/// True when `ty` is one of boring's always-by-reference parameter kinds (see
+/// `HostEmitter::fn_ref_params`'s doc comment for the exact contract this
+/// mirrors).
+fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String>) -> bool {
+    match ty {
+        Type::Array(_) | Type::ArrayN(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
+        Type::Named(n) => struct_names.contains(n),
+        _ => false,
+    }
+}
+
+/// True when `ty` is boring's plain `int`/`uint` (as opposed to an explicit
+/// fixed-width alias like `int32`). Returns `(param-position Rust type, this
+/// file's existing i64/u64-based body-codegen convention)`.
+///
+/// The general (std/wgpu-shared) pipeline's own `emit_type` (`emit_top.rs`)
+/// maps plain `int`/`uint` to Rust's `isize`/`usize` — NOT `i64`/`u64` as
+/// `CLAUDE.md`'s doc table might suggest — confirmed empirically: a general-
+/// spliced "plain" function (see `cuda::transpile_cuda`'s doc comment) calling
+/// one of THIS backend's kernel-touching functions passes an `isize` local for
+/// a plain-`int` argument position (a real E0308 otherwise). Rather than
+/// propagate `isize`/`usize` through this whole file's existing `i64`/`u64`-
+/// based expression/statement codegen (a much larger, riskier change), a
+/// plain-int/uint PARAMETER is rendered as `isize`/`usize` to match the
+/// caller, then immediately shadow-rebound to `i64`/`u64` on entry (see
+/// `emit_fn`) — a plain `let x = x as i64;` is valid Rust shadowing, so no
+/// other line of the function needs to change.
+fn narrowed_int_param_type(ty: &Type) -> Option<(&'static str, &'static str)> {
+    match ty {
+        Type::Int => Some(("isize", "i64")),
+        Type::Uint => Some(("usize", "u64")),
+        Type::Named(n) if n == "int" => Some(("isize", "i64")),
+        Type::Named(n) if n == "uint" => Some(("usize", "u64")),
+        _ => None,
+    }
 }
 
 impl HostEmitter {
@@ -35,6 +147,59 @@ impl HostEmitter {
             kernel_decls: std::collections::HashMap::new(),
             var_kernel_type: std::collections::HashMap::new(),
             gpu_vars: std::collections::HashSet::new(),
+            dict_vars: std::collections::HashSet::new(),
+            dict_fields: std::collections::HashSet::new(),
+            fn_throws: std::collections::HashSet::new(),
+            in_throws: false,
+            variant_to_enum: std::collections::HashMap::new(),
+            fn_ref_params: std::collections::HashMap::new(),
+            struct_names: std::collections::HashSet::new(),
+            ref_params: std::collections::HashSet::new(),
+            in_resident_return: false,
+            fn_narrowed_int_params: std::collections::HashMap::new(),
+            fn_returns_resident: std::collections::HashMap::new(),
+        }
+    }
+
+    /// See `is_ref_worthy_type` (module-level free fn) — bound method form for
+    /// call sites already holding `&self`.
+    fn coerce_call_arg(&mut self, arg: &Expr, callee_expects_ref: bool) -> String {
+        let is_ref_var = matches!(&arg.kind, ExprKind::Var(v) if self.ref_params.contains(v.as_str()));
+        let s = self.expr(arg);
+        match (callee_expects_ref, is_ref_var) {
+            (true, true) => s,
+            (true, false) => format!("&({})", s),
+            (false, true) => format!("({}).clone()", s),
+            (false, false) => s,
+        }
+    }
+
+    /// True when `obj` (an `Index`/`Assign` target's receiver) is known to be a
+    /// dict — either a tracked local var (`dict_vars`) or a struct field declared
+    /// with a dict type (`dict_fields`, e.g. `self.vocab`). See those fields' docs.
+    fn is_dict_obj(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Var(v) => self.dict_vars.contains(v.as_str()),
+            ExprKind::Field(_, f) => self.dict_fields.contains(f.as_str()),
+            _ => false,
+        }
+    }
+
+    /// Record `name` in `dict_vars` when its declared type or initializer marks it
+    /// as a dict — called from every `let`/`var` binding site (top-level, ordinary
+    /// statements, and kernel `init` bodies).
+    fn track_dict_var(&mut self, name: &str, ty: Option<&Type>, val: Option<&Expr>) {
+        fn ty_is_dict(ty: &Type) -> bool {
+            match ty {
+                Type::Dict(..) => true,
+                Type::Qualified(inner, _) => ty_is_dict(inner),
+                _ => false,
+            }
+        }
+        let is_dict = ty.is_some_and(ty_is_dict)
+            || matches!(val.map(|v| &v.kind), Some(ExprKind::Dict(_)));
+        if is_dict {
+            self.dict_vars.insert(name.to_string());
         }
     }
 
@@ -47,49 +212,114 @@ impl HostEmitter {
 
     fn blank(&mut self) { self.out.push('\n'); }
 
-    fn emit_program(&mut self, program: &Program, kernel_names: &[String]) {
+    fn emit_program(
+        &mut self,
+        program: &Program,
+        kernel_names: &[String],
+        kernel_touching: &std::collections::HashSet<String>,
+        general_code: &str,
+        has_boring_main: bool,
+        boring_main_throws: bool,
+        top_level_kernel_touching: bool,
+    ) {
+        // Pass 1: struct/enum names, needed below (before pass 2) to resolve
+        // whether a `Type::Named(n)` function parameter is by-ref-worthy.
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => { self.struct_names.insert(s.name.clone()); }
+                Item::Enum(e) => { self.struct_names.insert(e.name.clone()); }
+                _ => {}
+            }
+        }
+        // Pass 2: everything else.
         for item in &program.items {
             if let Item::Kernel(decl) = item {
                 self.kernel_decls.insert(decl.name.clone(), decl.clone());
+            }
+            if let Item::Struct(s) = item {
+                for f in &s.fields {
+                    if matches!(f.ty, Type::Dict(..)) {
+                        self.dict_fields.insert(f.name.clone());
+                    }
+                }
+            }
+            if let Item::Fn(f) = item {
+                if f.throws {
+                    self.fn_throws.insert(f.name.clone());
+                }
+                let ref_flags: Vec<bool> = f.params.iter()
+                    .map(|p| p.ty.as_ref().is_some_and(|ty| is_ref_worthy_type(ty, &self.struct_names)))
+                    .collect();
+                self.fn_ref_params.insert(f.name.clone(), ref_flags);
+                let narrowed_flags: Vec<Option<&'static str>> = f.params.iter()
+                    .map(|p| p.ty.as_ref().and_then(|ty| narrowed_int_param_type(ty)).map(|(narrowed, _)| narrowed))
+                    .collect();
+                self.fn_narrowed_int_params.insert(f.name.clone(), narrowed_flags);
+                if let Some(rt) = &f.return_ty {
+                    if rt.gpu_resident_qual().is_some() {
+                        self.fn_returns_resident.insert(f.name.clone(), rt.clone());
+                    }
+                }
+            }
+            if let Item::Enum(e) = item {
+                for v in &e.variants {
+                    self.variant_to_enum.insert(v.name.clone(), e.name.clone());
+                }
             }
         }
         self.line("// Generated by boring build --target cuda.");
         self.blank();
         self.emit_prelude(kernel_names);
 
-        // Non-kernel, non-stmt items.
+        // Kernel structs (unchanged, own emission) + kernel-touching function
+        // bodies (this backend's own real CUDA API -- fallible construction,
+        // `__boring_launch`, etc. -- see this module's doc comment for why the
+        // general pipeline can't render these). Every OTHER item (plain
+        // fn/struct/enum, top-level stmt/let folded into `boring_main`) is
+        // already rendered correctly in `general_code`, spliced in below.
         for item in &program.items {
             match item {
                 Item::Kernel(decl) => {
                     self.blank();
                     self.emit_kernel_struct(decl);
                 }
-                Item::Fn(f) => {
+                Item::Fn(f) if kernel_touching.contains(&f.name) => {
                     self.blank();
-                    self.emit_fn(f, None);
+                    if f.name == "main" {
+                        // The user's own kernel-touching `main` is emitted as
+                        // `boring_main` instead, so this backend's own real
+                        // `fn main()` (below) stays the sole Rust entry point
+                        // -- matching the convention a non-kernel-touching
+                        // `main` already gets from the general-pipeline splice
+                        // (see `rename_top_level_main`).
+                        let mut renamed = f.clone();
+                        renamed.name = "boring_main".to_string();
+                        self.emit_fn(&renamed, None);
+                    } else {
+                        self.emit_fn(f, None);
+                    }
                 }
-                Item::Struct(s) => {
-                    self.blank();
-                    self.emit_struct(s);
-                }
-                Item::Enum(e) => {
-                    self.blank();
-                    self.emit_enum(e);
-                }
-                Item::Stmt(_) | Item::Let(_) => {}  // handled in main()
                 _ => {}
             }
         }
 
-        // Collect top-level stmts and lets.
-        let has_stmts = program.items.iter().any(|i| matches!(i, Item::Stmt(_) | Item::Let(_)));
-        if has_stmts || !kernel_names.is_empty() {
-            self.blank();
-            self.line("fn main() -> Result<(), Box<dyn std::error::Error>> {");
-            self.indent += 1;
-            if !kernel_names.is_empty() {
-                self.line("boring_gpu_init()?;");
-            }
+        self.blank();
+        self.out.push_str(general_code);
+        self.blank();
+
+        self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        self.indent += 1;
+        if !kernel_names.is_empty() {
+            self.line("boring_gpu_init()?;");
+        }
+        if top_level_kernel_touching {
+            // Bare top-level kernel construction/dispatch — see this backend's
+            // module doc comment and `top_level_touches_kernel`'s doc for why
+            // this can't go through the general-pipeline splice (`general_code`
+            // above has none of the top-level content in this case; the general
+            // pass left it alone entirely, per `gpu_top_level_handled_by_host`).
+            // This is exactly this backend's OWN pre-splice top-level handling,
+            // reinstated only for this case.
             for item in &program.items {
                 match item {
                     Item::Let(s) => {
@@ -97,6 +327,7 @@ impl HostEmitter {
                         let ty_ann = s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default();
                         if let Some(val) = &s.value {
                             self.track_kernel_var(&s.name, val);
+                            self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                             let rhs = self.expr(val);
                             self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                         }
@@ -105,16 +336,27 @@ impl HostEmitter {
                     _ => {}
                 }
             }
-            self.line("Ok(())");
-            self.indent -= 1;
-            self.line("}");
+        } else if has_boring_main {
+            if boring_main_throws {
+                self.line("boring_main()?;");
+            } else {
+                self.line("boring_main();");
+            }
         }
+        self.line("Ok(())");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ── GPU prelude ────────────────────────────────────────────────────────────
 
     fn emit_prelude(&mut self, kernel_names: &[String]) {
-        self.line("use cudarc::driver::{CudaContext, CudaModule, CudaFunction, CudaSlice, CudaStream, LaunchConfig};");
+        // `PushKernelArg` brings `LaunchArgs::arg()` into scope -- it's a trait
+        // method (real cudarc 0.19.8: `cudarc::driver::safe::launch::PushKernelArg`,
+        // re-exported at `cudarc::driver::PushKernelArg`), not an inherent one;
+        // omitting this import is a real E0599 ("no method named `arg`"),
+        // confirmed via `cargo check`.
+        self.line("use cudarc::driver::{CudaContext, CudaModule, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};");
         self.line("use cudarc::nvrtc::Ptx;");
         self.line("use std::sync::{Arc, OnceLock};");
         self.blank();
@@ -129,11 +371,14 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        self.line("fn boring_gpu_init() -> Result<(), Box<dyn std::error::Error>> {");
+        self.line("fn boring_gpu_init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("let ctx = Arc::new(CudaContext::new(0)?);");
+        // `CudaContext::new`/`CudaContext::load_module` already return
+        // `Arc<Self>` in real cudarc 0.19.8 -- wrapping again in `Arc::new(...)`
+        // produced `Arc<Arc<_>>`, a real E0308 confirmed via `cargo check`.
+        self.line("let ctx = CudaContext::new(0)?;");
         self.line("let ptx = Ptx::from_src(BORING_PTX);");
-        self.line("let module = Arc::new(ctx.load_module(ptx)?);");
+        self.line("let module = ctx.load_module(ptx)?;");
         self.line("let _ = BORING_CTX.set(ctx);");
         self.line("let _ = BORING_MODULE.set(module);");
         self.line("Ok(())");
@@ -141,9 +386,91 @@ impl HostEmitter {
         self.line("}");
         self.blank();
         // Multi-GPU context accessor: `GPU(n)` → `boring_gpu_ctx_n(n)?`.
-        self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<CudaContext>, Box<dyn std::error::Error>> {");
+        self.line("fn boring_gpu_ctx_n(idx: usize) -> Result<Arc<CudaContext>, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("Ok(Arc::new(CudaContext::new(idx)?))");
+        // `CudaContext::new` already returns `Arc<Self>` -- see `boring_gpu_init`'s
+        // identical fix.
+        self.line("Ok(CudaContext::new(idx)?)");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // The general (std/wgpu-shared) transpiler pipeline's own pre-pass marks any
+        // function whose declared return type is `'gpu'unified`/`'gpu'global`-qualified
+        // (e.g. math_gpu.br's `transpose_gpu`/`linear_gpu`) as "GPU-resident-returning"
+        // and renders every CALLER of it (in the general-pipeline-spliced "plain" code
+        // this backend embeds -- see `cuda::transpile_cuda`'s doc comment) to expect a
+        // `BoringGpuArg<T>` value back, unconditionally -- this is NOT gated on
+        // `is_gpu_target`/`gpu_kernels` at all (confirmed by inspecting a PLAIN `boring
+        // build`, no target, whose own output references these same symbols). Only
+        // `wgpu::host` actually DEFINES `BoringGpuArg`/`__boring_gpu_device`/etc., since
+        // wgpu is the only backend with a real cross-function GPU-buffer-residency
+        // optimization built on top of the general pipeline's kernel-aware codegen.
+        // This backend has no such optimization of its own -- every kernel-touching
+        // function here (this file's own `emit_fn`, gated on `resident_elem`) always
+        // returns the `Host(...)` variant -- so the `Resident` arm below is never
+        // actually constructed, but the type still needs to exist and the match arms
+        // still need to type-check wherever the general-spliced code references them.
+        // `Resident`'s buffer is always `Vec<f32>`, NOT `Vec<T>` -- the general
+        // pipeline's own call sites that pattern-match this (`materialize_resident_call`
+        // in `emit_kernel.rs`) always call `__boring_gpu_copy_d2h::<f32>(..)` on it
+        // regardless of `T`, since a real GPU buffer is always 32-bit device-side
+        // (`kernel_host_scalar_type`'s convention, matching wgpu's actual buffers) even
+        // when `T` (the HOST element type once materialized) is `f64`. Confirmed via a
+        // real `cargo check`: this was a genuine E0308 (`&Arc<Vec<f32>>` vs
+        // `&Arc<Vec<f64>>`) before this fix -- again unreachable in practice (see this
+        // enum's doc above) but must type-check.
+        self.line("#[allow(dead_code)]");
+        self.line("enum BoringGpuArg<T> {");
+        self.indent += 1;
+        self.line("Resident(Arc<Vec<f32>>, usize),");
+        self.line("Host(Vec<T>),");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T: Clone> Clone for BoringGpuArg<T> {");
+        self.indent += 1;
+        self.line("fn clone(&self) -> Self {");
+        self.indent += 1;
+        self.line("match self {");
+        self.indent += 1;
+        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(Arc::clone(b), *n),");
+        self.line("BoringGpuArg::Host(v) => BoringGpuArg::Host(v.clone()),");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> BoringGpuArg<T> {");
+        self.indent += 1;
+        self.line("fn len(&self) -> usize {");
+        self.indent += 1;
+        self.line("match self { BoringGpuArg::Resident(_, len) => *len, BoringGpuArg::Host(v) => v.len() }");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Arc<CudaContext> { boring_gpu_ctx() }");
+        self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Arc<CudaContext> { boring_gpu_ctx() }");
+        // `T` is unused (Rust allows an unused type param on a free fn, unlike a
+        // struct) -- kept only so call sites' `::<f32>` turbofish (matching the
+        // general pipeline's own hardcoded convention, see `BoringGpuArg`'s doc)
+        // still parses; `buf`/the return type are concretely `Vec<f32>` to match
+        // `BoringGpuArg::Resident`'s buffer type above.
+        self.line("#[allow(dead_code)]");
+        self.line("fn __boring_gpu_copy_d2h<T>(_device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, buf: &Arc<Vec<f32>>) -> Vec<f32> {");
+        self.indent += 1;
+        self.line("(**buf).clone() // unreachable in practice -- see this fn's call site's doc comment");
+        self.indent -= 1;
+        self.line("}");
+        self.line("#[allow(dead_code)]");
+        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, _src: &[u8], _dst: &Arc<Vec<f32>>) {");
+        self.indent += 1;
+        self.line("unreachable!(\"cuda backend never constructs BoringGpuArg::Resident\")");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -153,7 +480,7 @@ impl HostEmitter {
         self.line("struct KernelHandle<T> { inner: T, stream: Arc<CudaStream> }");
         self.line("impl<T> KernelHandle<T> {");
         self.indent += 1;
-        self.line("fn wait(self) -> Result<T, Box<dyn std::error::Error>> {");
+        self.line("fn wait(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         self.line("self.stream.synchronize()?;");
         self.line("Ok(self.inner)");
@@ -166,15 +493,17 @@ impl HostEmitter {
         // Boring built-in Dimension type used by 2-D kernels.
         self.line(crate::transpiler::helpers::DIMENSION_STRUCT_RUST);
         self.blank();
-        // Stream priority helper: wraps cuStreamCreateWithPriority.
-        // priority 0 = normal, -1 = high, 1 = low (CUDA convention: lower int = higher priority).
-        self.line("fn boring_new_stream_with_priority(ctx: &Arc<CudaContext>, priority: i32) -> Result<Arc<CudaStream>, Box<dyn std::error::Error>> {");
+        // Stream priority helper. priority 0 = normal, -1 = high, 1 = low (CUDA
+        // convention: lower int = higher priority). Previously hand-rolled via
+        // raw `cuStreamCreateWithPriority`/`CudaStream::from_raw` FFI, neither
+        // of which exists in real cudarc 0.19.8 (`CU_STREAM_NON_BLOCKING` isn't
+        // in scope at that path and `CudaStream` has no `from_raw` — confirmed
+        // via a real `cargo check`, both real E0425/E0599, not hypothetical).
+        // cudarc 0.19.8 already has a safe equivalent directly on `CudaContext`.
+        self.line("fn boring_new_stream_with_priority(ctx: &Arc<CudaContext>, priority: i32) -> Result<Arc<CudaStream>, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         self.line("if priority == 0 { return Ok(ctx.new_stream()?); }");
-        self.line("use cudarc::driver::sys::*;");
-        self.line("let mut raw: CUstream = std::ptr::null_mut();");
-        self.line("unsafe { cuStreamCreateWithPriority(&mut raw, CU_STREAM_NON_BLOCKING, priority).result()?; }");
-        self.line("Ok(unsafe { Arc::new(CudaStream::from_raw(ctx, raw)) })");
+        self.line("Ok(ctx.new_stream_with_priority(priority)?)");
         self.indent -= 1;
         self.line("}");
         let _ = kernel_names; // used by caller for PTX loading
@@ -236,7 +565,7 @@ impl HostEmitter {
             if matches!(field.qual, GpuQual::Unified) {
                 let elem = elem_rust_type(&field.ty);
                 self.line(&format!(
-                    "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error>> {{",
+                    "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
                     field.name, elem
                 ));
                 self.indent += 1;
@@ -268,7 +597,7 @@ impl HostEmitter {
         };
 
         self.line(&format!(
-            "fn new({}) -> Result<Self, Box<dyn std::error::Error>> {{",
+            "fn new({}) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {{",
             all_params
         ));
         self.indent += 1;
@@ -323,8 +652,14 @@ impl HostEmitter {
 
         self.line(&format!("Ok({} {{", name));
         self.indent += 1;
-        self.line("__ctx,");
+        // `.default_stream()` takes `&Arc<Self>` (borrow) -- must come BEFORE
+        // the `__ctx,` shorthand below, which MOVES `__ctx` into the struct
+        // literal; Rust evaluates struct-literal field initializers in the
+        // order written, so the original order (`__ctx,` first) was a real
+        // E0382 ("value moved here" / "use of moved value"), confirmed via a
+        // real `cargo check`.
         self.line("__stream: __ctx.default_stream(),");
+        self.line("__ctx,");
         for field in fields {
             match field.qual {
                 GpuQual::Sync => {} // no host field
@@ -344,7 +679,7 @@ impl HostEmitter {
     }
 
     fn emit_kernel_new_default(&mut self, name: &str, fields: &[KernelFieldDecl]) {
-        self.line("fn new(__ctx: Arc<CudaContext>) -> Result<Self, Box<dyn std::error::Error>> {");
+        self.line("fn new(__ctx: Arc<CudaContext>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         for field in fields {
             match field.qual {
@@ -376,8 +711,14 @@ impl HostEmitter {
         }
         self.line(&format!("Ok({} {{", name));
         self.indent += 1;
-        self.line("__ctx,");
+        // `.default_stream()` takes `&Arc<Self>` (borrow) -- must come BEFORE
+        // the `__ctx,` shorthand below, which MOVES `__ctx` into the struct
+        // literal; Rust evaluates struct-literal field initializers in the
+        // order written, so the original order (`__ctx,` first) was a real
+        // E0382 ("value moved here" / "use of moved value"), confirmed via a
+        // real `cargo check`.
         self.line("__stream: __ctx.default_stream(),");
+        self.line("__ctx,");
         for field in fields {
             match field.qual {
                 GpuQual::Sync => {}
@@ -424,7 +765,25 @@ impl HostEmitter {
                                     }
                                     return;
                                 }
-                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
+                                // Scalar `'const`/`'local` field (e.g. `let int rows`) — a
+                                // plain kernel-launch parameter, no device upload at all
+                                // (passed via `launcher.arg` later, see `emit_boring_launch`).
+                                // Previously fell into the array-upload arm below
+                                // unconditionally (the match only guarded Const-as-array in
+                                // the FIRST arm, not here), producing e.g.
+                                // `let rows = __ctx.default_stream().clone_htod::<i64>(&r)?;`
+                                // for a bare `i64` init param -- a real E0277 (`i64` doesn't
+                                // implement `HostSlice<i64>`), confirmed via a real `cargo
+                                // check` against cudarc 0.19.8.
+                                GpuQual::Const | GpuQual::Local
+                                    if !matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) =>
+                                {
+                                    let ty = rust_type(&field.ty);
+                                    let rhs_s = self.expr(rhs);
+                                    self.line(&format!("let {}: {} = {};", fname, ty, rhs_s));
+                                    return;
+                                }
+                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
                                     // Check if RHS is an `ArrayFill` / `[..n]` pattern.
                                     match &rhs.kind {
                                         ExprKind::ArrayFill { value: _, count } | ExprKind::ArrayAlloc { count } => {
@@ -439,8 +798,13 @@ impl HostEmitter {
                                         ExprKind::Array(elems) => {
                                             let elem = elem_rust_type(&field.ty);
                                             let lit: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
+                                            // `clone_htod<T, Src: HostSlice<T> + ?Sized>` takes
+                                            // TWO generic params -- `_` lets `Src` (here
+                                            // `Vec<{elem}>`) infer from the argument (real
+                                            // cudarc 0.19.8 signature; confirmed via `cargo
+                                            // check`, was a real E0107 with only one supplied).
                                             self.line(&format!(
-                                                "let {} = __ctx.default_stream().clone_htod::<{}>(&vec![{}])?;",
+                                                "let {} = __ctx.default_stream().clone_htod::<{}, _>(&vec![{}])?;",
                                                 fname, elem, lit.join(", ")
                                             ));
                                             return;
@@ -450,7 +814,7 @@ impl HostEmitter {
                                             let rhs_s = self.expr(rhs);
                                             let elem = elem_rust_type(&field.ty);
                                             self.line(&format!(
-                                                "let {} = __ctx.default_stream().clone_htod::<{}>(&{})?;",
+                                                "let {} = __ctx.default_stream().clone_htod::<{}, _>(&{})?;",
                                                 fname, elem, rhs_s
                                             ));
                                             return;
@@ -495,7 +859,7 @@ impl HostEmitter {
         if let Some(field) = &auto_grid_field {
             self.line(
                 "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>], priority: i32) \
-                 -> Result<KernelHandle<Self>, Box<dyn std::error::Error>> {"
+                 -> Result<KernelHandle<Self>, Box<dyn std::error::Error + Send + Sync>> {"
             );
             self.indent += 1;
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
@@ -507,7 +871,7 @@ impl HostEmitter {
         } else {
             self.line(
                 "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: (u32,u32,u32), after: &[&Arc<CudaStream>], priority: i32) \
-                 -> Result<KernelHandle<Self>, Box<dyn std::error::Error>> {"
+                 -> Result<KernelHandle<Self>, Box<dyn std::error::Error + Send + Sync>> {"
             );
             self.indent += 1;
         }
@@ -556,12 +920,24 @@ impl HostEmitter {
                 ));
                 self.indent += 1;
                 let elem = elem_rust_type(&f.ty);
+                // Real cudarc 0.19.8 `CudaModule::get_global(name, stream)` takes the
+                // stream as a second argument and always returns an untyped
+                // `CudaViewMut<'_, u8>` (no `::<T>` turbofish on `get_global` itself) --
+                // confirmed via `cargo check` (was a real E0107/wrong-type otherwise).
+                // `.transmute_mut::<T>(len)` recovers the typed view, matching the
+                // upstream doc example. `memcpy_htod`'s real parameter order is
+                // `(src, dst)`, not `(dst, src)` as this line previously had it (a
+                // real E0308: `CudaViewMut<u8>` doesn't implement `HostSlice`).
                 self.line(&format!(
-                    "let mut __sym_{name} = BORING_MODULE.get().unwrap().get_global::<{elem}>(\"{name}\")?;",
+                    "let mut __sym_{name} = BORING_MODULE.get().unwrap().get_global(\"{name}\", &stream)?;",
+                    name = f.name
+                ));
+                self.line(&format!(
+                    "let mut __sym_{name} = unsafe {{ __sym_{name}.transmute_mut::<{elem}>(self.{name}.len()).unwrap() }};",
                     name = f.name, elem = elem
                 ));
                 self.line(&format!(
-                    "stream.memcpy_htod(&mut __sym_{name}, &self.{name})?;",
+                    "stream.memcpy_htod(&self.{name}, &mut __sym_{name})?;",
                     name = f.name
                 ));
                 self.indent -= 1;
@@ -593,7 +969,9 @@ impl HostEmitter {
         }
         self.line("unsafe { launcher.launch(cfg) }?;");
 
-        self.line("let stream = Arc::new(stream);");
+        // `stream` is already `Arc<CudaStream>` (from `boring_new_stream_with_priority`,
+        // which itself already returns that) -- re-wrapping in `Arc::new(stream)` here
+        // produced `Arc<Arc<CudaStream>>`, a real E0308 confirmed via `cargo check`.
         self.line("Ok(KernelHandle { inner: self, stream })");
         self.indent -= 1;
         self.line("}");
@@ -607,7 +985,32 @@ impl HostEmitter {
         let params: Vec<String> = f.params.iter().map(|p| {
             let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
             match &p.ty {
-                Some(ty) => format!("{}: {}", name, rust_type(ty)),
+                Some(ty) => {
+                    // Plain `int`/`uint` params render as `isize`/`usize` (see
+                    // `narrowed_int_param_type`'s doc) — matching what a general-
+                    // spliced caller actually passes; shadowed back to this file's
+                    // own `i64`/`u64` convention right after the signature (below).
+                    let base = match narrowed_int_param_type(ty) {
+                        Some((narrowed, _)) => narrowed.to_string(),
+                        None => rust_type(ty),
+                    };
+                    // Boring's by-ref contract (CLAUDE.md: "Structs, enums, arrays,
+                    // dicts, sets — always passed by reference") — this backend
+                    // used to always emit these by value, which type-checks fine
+                    // in isolation but breaks the moment the caller (now the
+                    // general-pipeline splice for every plain function, which
+                    // already follows this contract) passes `&x`, and breaks the
+                    // callee's OWN body the moment it uses the param a second time
+                    // after e.g. a `for` loop consumed it by value (confirmed via a
+                    // minimal standalone rustc repro — a real E0382/E0308, not
+                    // hypothetical).
+                    let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
+                        format!("&{}", base)
+                    } else {
+                        base
+                    };
+                    format!("{}: {}", name, rendered)
+                }
                 None => name,
             }
         }).collect();
@@ -618,7 +1021,35 @@ impl HostEmitter {
             }
             None => params.join(", "),
         };
-        let ret = f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into());
+        // A `'gpu'unified`/`'gpu'global`-qualified return type (e.g. math_gpu.br's
+        // `pub req [float]'gpu'unified transpose_gpu(...)`) makes this a GPU-resident-
+        // returning function per the general pipeline's OWN unconditional, target-
+        // agnostic convention (`transpiler::mod.rs`'s `fn_returns_resident` pre-scan —
+        // triggered purely by this return-type annotation, independent of
+        // `is_gpu_target`/`gpu_kernels`; confirmed by inspecting a PLAIN `boring build`
+        // (no target at all)'s own output for this same function, which shows the
+        // identical `Result<BoringGpuArg<f64>, _>` return type). Every "plain" (non-
+        // kernel-touching) caller of THIS function was rendered by that same general
+        // pipeline (see `cuda::transpile_cuda`'s doc comment) and unconditionally
+        // expects a `BoringGpuArg<T>` value back — this backend has no cross-function
+        // GPU-buffer-residency optimization of its own, so it always returns the
+        // `Host(...)` variant (see the module-level `BoringGpuArg` doc, `emit_prelude`).
+        let resident_elem = f.return_ty.as_ref().and_then(|t| t.gpu_resident_qual().map(|_| elem_rust_type(t)));
+        let plain_ret = match &resident_elem {
+            Some(elem) => format!("BoringGpuArg<{}>", elem),
+            None => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
+        };
+        // `throws` → `Result<T, Box<dyn std::error::Error + Send + Sync>>`, matching this backend's
+        // existing convention for fallible code (kernel constructors, `main()` — see
+        // `emit_kernel_new`/`emit_program`). Previously ignored entirely: every
+        // `throws` function was emitted with its plain (non-Result) return type, and
+        // `throw`/`guard ... else throw` inside it fell to the catch-all
+        // `/* unsupported stmt */` placeholder (see `Stmt::Throw`/`Stmt::Guard` above).
+        let ret = if f.throws {
+            format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", plain_ret)
+        } else {
+            plain_ret
+        };
         let sig = format!("{}fn {}({}) -> {}", vis, f.name, all_params, ret);
         if f.body.is_empty() {
             self.line(&format!("{} {{}}", sig));
@@ -626,48 +1057,58 @@ impl HostEmitter {
         }
         self.line(&format!("{} {{", sig));
         self.indent += 1;
-        let len = f.body.len();
-        for (i, stmt) in f.body.iter().enumerate() {
-            if i + 1 == len { self.emit_stmt_last(stmt); } else { self.emit_stmt(stmt); }
-        }
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    fn emit_struct(&mut self, s: &StructDecl) {
-        if s.is_native { return; }
-        let vis = if s.is_pub { "pub " } else { "" };
-        self.line(&format!("{}struct {} {{", vis, s.name));
-        self.indent += 1;
-        for f in &s.fields {
-            let fvis = if f.is_pub { "pub " } else { "" };
-            self.line(&format!("{}{}: {},", fvis, f.name, rust_type(&f.ty)));
-        }
-        self.indent -= 1;
-        self.line("}");
-        if !s.methods.is_empty() {
-            self.blank();
-            self.line(&format!("impl {} {{", s.name));
-            self.indent += 1;
-            for m in &s.methods { self.emit_fn(m, Some(&s.name)); self.blank(); }
-            self.indent -= 1;
-            self.line("}");
-        }
-    }
-
-    fn emit_enum(&mut self, e: &EnumDecl) {
-        if e.is_native { return; }
-        let vis = if e.is_pub { "pub " } else { "" };
-        self.line(&format!("{}enum {} {{", vis, e.name));
-        self.indent += 1;
-        for v in &e.variants {
-            if v.fields.is_empty() {
-                self.line(&format!("{},", v.name));
-            } else {
-                let fs: Vec<String> = v.fields.iter().map(|f| rust_type(&f.ty)).collect();
-                self.line(&format!("{}({}),", v.name, fs.join(", ")));
+        let outer_in_throws = self.in_throws;
+        self.in_throws = f.throws;
+        let outer_in_resident_return = self.in_resident_return;
+        self.in_resident_return = resident_elem.is_some();
+        let outer_ref_params = std::mem::take(&mut self.ref_params);
+        for p in &f.params {
+            if let Some(ty) = &p.ty {
+                if is_ref_worthy_type(ty, &self.struct_names) {
+                    self.ref_params.insert(p.name.clone());
+                }
             }
         }
+        // Shadow-rebind narrowed int/uint params back to this file's own i64/u64
+        // convention (see `narrowed_int_param_type`'s doc) — a plain `let x = x
+        // as i64;` is valid Rust shadowing, so every other line of this
+        // function's body needs no further changes.
+        for p in &f.params {
+            if let Some(ty) = &p.ty {
+                if let Some((_, existing)) = narrowed_int_param_type(ty) {
+                    self.line(&format!("let {name} = {name} as {existing};", name = p.name, existing = existing));
+                }
+            }
+        }
+        let len = f.body.len();
+        for (i, stmt) in f.body.iter().enumerate() {
+            if i + 1 == len {
+                // A throws function's tail expression is its `Ok(...)` value (any
+                // early exit already went through `Stmt::Return`/`Stmt::Throw` above).
+                // Resident-returning: wrap in `BoringGpuArg::Host(...)` too (see
+                // `resident_elem`'s doc comment above).
+                if f.throws {
+                    if let Stmt::Expr(e) = stmt {
+                        let s = self.expr(e);
+                        let wrapped = if self.in_resident_return { format!("BoringGpuArg::Host({})", s) } else { s };
+                        self.line(&format!("Ok({})", wrapped));
+                        continue;
+                    }
+                } else if self.in_resident_return {
+                    if let Stmt::Expr(e) = stmt {
+                        let s = self.expr(e);
+                        self.line(&format!("BoringGpuArg::Host({})", s));
+                        continue;
+                    }
+                }
+                self.emit_stmt_last(stmt);
+            } else {
+                self.emit_stmt(stmt);
+            }
+        }
+        self.in_throws = outer_in_throws;
+        self.in_resident_return = outer_in_resident_return;
+        self.ref_params = outer_ref_params;
         self.indent -= 1;
         self.line("}");
     }
@@ -683,15 +1124,59 @@ impl HostEmitter {
                     // Track kernel struct type for this variable so field accesses
                     // on it can be redirected to read_<field>() D2H calls.
                     self.track_kernel_var(&s.name, val);
+                    self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     let rhs = self.expr(val);
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
+                    self.track_dict_var(&s.name, s.ty.as_ref(), None);
                     self.line(&format!("{} {}{};", binding, s.name, ty_ann));
                 }
+            }
+            // `let (a, b, c) = expr` — Rust supports tuple-destructuring `let` natively,
+            // so this is a direct translation; no GPU-resident special-casing (the
+            // general transpiler's `emit_let_destructure` does more here) is needed
+            // for any call site in this codebase's CUDA/Metal-targeted functions —
+            // e.g. decoder.br's `let (sa, new_sa_k, new_sa_v) = mha_step_gpu(...)`.
+            // Was previously unhandled entirely, falling to this function's catch-all
+            // `/* unsupported stmt */` default.
+            Stmt::LetDestructure(s) => {
+                let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
+                let names: Vec<String> = s.bindings.iter().map(|b| b.name.clone()).collect();
+                let rhs = self.expr(&s.value);
+                self.line(&format!("{} ({}) = {};", binding, names.join(", "), rhs));
+            }
+            // Non-tail-position `match` — its value is discarded (see `emit_stmt_last`
+            // for the tail case, which keeps the value as the function's return).
+            Stmt::Match(m) => {
+                let s = self.emit_match_expr(m);
+                self.line(&format!("{};", s));
             }
             Stmt::Expr(e) => {
                 match &e.kind {
                     ExprKind::Assign(lhs, rhs) => {
+                        if let ExprKind::Index(obj, idx) = &lhs.kind {
+                            // `dict[key] = v` / `self.field[key] = v` → HashMap::insert,
+                            // not Vec-style `[key as usize] = v` (a real compile error for
+                            // a non-integer key, e.g. tokenizer.br's `vocab[key] = id`).
+                            if self.is_dict_obj(obj) {
+                                let obj_s = self.expr(obj);
+                                let idx_s = self.expr(idx);
+                                let rhs_s = self.expr(rhs);
+                                self.line(&format!("{}.insert(({}).clone(), ({}).clone());", obj_s, idx_s, rhs_s));
+                                return;
+                            }
+                            // Plain array index assignment (`arr[i] = v`) — built
+                            // directly rather than via `self.expr(lhs)`, which would
+                            // route through the `Index` READ case (now appending
+                            // `.clone()` for by-ref-safe reads, see that case's doc) —
+                            // an assignment TARGET needs the bare lvalue index, not a
+                            // cloned rvalue (`arr[i].clone() = v` doesn't compile).
+                            let obj_s = self.expr(obj);
+                            let idx_s = self.expr(idx);
+                            let rhs_s = self.expr(rhs);
+                            self.line(&format!("{}[({}) as usize] = {};", obj_s, idx_s, rhs_s));
+                            return;
+                        }
                         let l = self.expr(lhs);
                         let r = self.expr(rhs);
                         self.line(&format!("{} = {};", l, r));
@@ -705,9 +1190,42 @@ impl HostEmitter {
             Stmt::Return(r) => {
                 if let Some(val) = &r.value {
                     let s = self.expr(val);
-                    self.line(&format!("return {};", s));
+                    let s = if self.in_resident_return { format!("BoringGpuArg::Host({})", s) } else { s };
+                    if self.in_throws { self.line(&format!("return Ok({});", s)); }
+                    else { self.line(&format!("return {};", s)); }
+                } else if self.in_throws {
+                    self.line("return Ok(());");
                 } else {
                     self.line("return;");
+                }
+            }
+            // `guard <cond> else throw "..."` — only the `GuardCond::Expr` form is used
+            // anywhere in the real corpus this backend was built against (see
+            // `cuda::host`'s module doc); `GuardCond::Clauses` (`guard let x = ...`)
+            // falls back to the catch-all placeholder rather than silently mishandling it.
+            Stmt::Guard(g) => {
+                if let GuardCond::Expr(cond) = &g.cond {
+                    let c = self.expr(cond);
+                    self.line(&format!("if !({}) {{", c));
+                    self.indent += 1;
+                    for s in &g.else_body { self.emit_stmt(s); }
+                    self.indent -= 1;
+                    self.line("}");
+                } else {
+                    self.line("/* unsupported stmt */");
+                }
+            }
+            // `throw "msg"` — only valid inside a `throws` function (checker-enforced),
+            // so `self.in_throws` is always true here in practice; the non-throws arm is
+            // a defensive fallback (matches the general transpiler's own `panic!` choice
+            // for a throw outside a `Result`-returning function).
+            Stmt::Throw(t) => {
+                if self.in_throws {
+                    let msg = t.value.as_ref().map(|v| self.expr(v)).unwrap_or_else(|| "\"error\"".into());
+                    self.line(&format!("return Err(({}).into());", msg));
+                } else {
+                    let msg = t.value.as_ref().map(|v| self.expr(v)).unwrap_or_else(|| "\"error\"".into());
+                    self.line(&format!("panic!(\"{{}}\", {});", msg));
                 }
             }
             Stmt::If(i) => {
@@ -752,10 +1270,19 @@ impl HostEmitter {
                     }
                     _ => {
                         let iter = self.expr(&f.iterable);
+                        // `.iter().cloned()` regardless of whether `iter` is an
+                        // owned `Vec<T>` or one of this function's own by-ref
+                        // params (`&Vec<T>`, see `ref_params`) -- works uniformly
+                        // either way and produces owned `T` loop variables, matching
+                        // what a boring `for v in arr:` body expects (e.g.
+                        // `if v > mx: mx = v` needs `v: f64`, not `&f64`). Previously
+                        // a bare `for v in x { ... }` — fine for an owned `Vec`
+                        // consumed exactly once, but a real E0382/E0308 the moment
+                        // `x` is used again afterward or is itself a `&Vec<T>` param.
                         if is_enumerate {
-                            self.line(&format!("for {} in {}.iter().enumerate() {{", var, iter));
+                            self.line(&format!("for {} in {}.iter().cloned().enumerate() {{", var, iter));
                         } else {
-                            self.line(&format!("for {} in {} {{", var, iter));
+                            self.line(&format!("for {} in {}.iter().cloned() {{", var, iter));
                         }
                     }
                 }
@@ -843,14 +1370,113 @@ impl HostEmitter {
             },
         };
         // Re-assign so the moved-into-launch value is returned to the variable.
-        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.wait()"))
+        // `KernelHandle::wait(self) -> Result<T, _>` -- the trailing `?` was
+        // missing, a real E0308 ("expected `T`, found `Result<T, _>`")
+        // confirmed via `cargo check`.
+        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.wait()?"))
     }
 
     fn emit_stmt_last(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Expr(e) => { let s = self.expr(e); self.line(&s); }
+            // No trailing `;` — same as the `Stmt::Expr` tail case above, this
+            // match's value IS the function's return value (main.br's
+            // `size_from_str`, model.br's `ModelConfig::for_size`).
+            Stmt::Match(m) => { let s = self.emit_match_expr(m); self.line(&s); }
             _ => self.emit_stmt(stmt),
         }
+    }
+
+    /// `match <subject>: <arm> ...` — only the shapes this codebase's
+    /// CUDA/Metal-targeted `.br` files actually use are handled: a bare literal or
+    /// enum-variant subject with no bindings/guards (`main.br`'s `size_from_str`,
+    /// `model.br`'s `ModelConfig::for_size`). Was previously unhandled entirely,
+    /// falling to `emit_stmt`'s catch-all `/* unsupported stmt */` default.
+    fn emit_match_expr(&mut self, m: &MatchStmt) -> String {
+        // String-typed literal patterns need `.as_str()` on the subject —
+        // matching `&str` literals against a `String` value directly is a type
+        // error in Rust (deref coercion doesn't apply inside a match pattern).
+        let needs_as_str = m.arms.iter().any(|a| a.patterns.iter().any(|p| matches!(p, Pattern::Lit(LitPattern::Str(_)))));
+        let subj = self.expr(&m.subject);
+        let subj = if needs_as_str { format!("{}.as_str()", subj) } else { subj };
+        let mut out = format!("match {} {{\n", subj);
+        for arm in &m.arms {
+            let pats: Vec<String> = arm.patterns.iter().map(|p| self.emit_pattern(p)).collect();
+            let guard_s = arm.guard.as_ref().map(|g| format!(" if {}", self.expr(g))).unwrap_or_default();
+            let body_s = match &arm.body {
+                MatchBody::Expr(e) => self.expr(e),
+                MatchBody::Block(stmts) => self.emit_sub_block(stmts),
+            };
+            out.push_str(&format!("    {}{} => {{ {} }}\n", pats.join(" | "), guard_s, body_s));
+        }
+        out.push('}');
+        out
+    }
+
+    /// Render a Boring match pattern as Rust. See `emit_match_expr`'s doc for the
+    /// scope this covers (no `Pattern::Tuple`/`Pattern::Some` nesting is exercised
+    /// by any call site here, but they're implemented anyway since they're cheap
+    /// and directly analogous).
+    fn emit_pattern(&mut self, p: &Pattern) -> String {
+        match p {
+            Pattern::Wildcard => "_".into(),
+            Pattern::Bind(name) => name.clone(),
+            Pattern::Lit(lit) => match lit {
+                LitPattern::Int(n) => n.to_string(),
+                LitPattern::Float(f) => format!("{}", f),
+                LitPattern::Str(s) => format!("\"{}\"", s),
+                LitPattern::Bool(b) => b.to_string(),
+                LitPattern::Nil => "None".into(),
+            },
+            Pattern::None => "None".into(),
+            Pattern::Some(inner) => format!("Some({})", self.emit_pattern(inner)),
+            Pattern::Tuple(elems) => {
+                let s: Vec<String> = elems.iter().map(|e| self.emit_pattern(e)).collect();
+                format!("({})", s.join(", "))
+            }
+            Pattern::Variant(name, subs) => {
+                let qualified = self.variant_to_enum.get(name.as_str())
+                    .map(|e| format!("{}::{}", e, name))
+                    .unwrap_or_else(|| name.clone());
+                if subs.is_empty() {
+                    qualified
+                } else {
+                    let s: Vec<String> = subs.iter().map(|sp| self.emit_pattern(sp)).collect();
+                    format!("{}({})", qualified, s.join(", "))
+                }
+            }
+        }
+    }
+
+    /// Emit `stmts` through a fresh sub-emitter sharing this one's tracking maps,
+    /// returning the rendered body as a single Rust block-expression string
+    /// (`{ ... }`). Shared by `ExprKind::Closure`'s `ClosureBody::Block` case and
+    /// `emit_match_expr`'s `MatchBody::Block` case.
+    fn emit_sub_block(&mut self, stmts: &[Stmt]) -> String {
+        let mut sub = HostEmitter {
+            out: String::new(),
+            indent: 0,
+            kernel_names: self.kernel_names.clone(),
+            kernel_decls: self.kernel_decls.clone(),
+            var_kernel_type: self.var_kernel_type.clone(),
+            gpu_vars: self.gpu_vars.clone(),
+            dict_vars: self.dict_vars.clone(),
+            dict_fields: self.dict_fields.clone(),
+            fn_throws: self.fn_throws.clone(),
+            in_throws: self.in_throws,
+            variant_to_enum: self.variant_to_enum.clone(),
+            fn_ref_params: self.fn_ref_params.clone(),
+            struct_names: self.struct_names.clone(),
+            ref_params: self.ref_params.clone(),
+            in_resident_return: self.in_resident_return,
+            fn_narrowed_int_params: self.fn_narrowed_int_params.clone(),
+            fn_returns_resident: self.fn_returns_resident.clone(),
+        };
+        let last = stmts.len().saturating_sub(1);
+        for (i, st) in stmts.iter().enumerate() {
+            if i == last { sub.emit_stmt_last(st); } else { sub.emit_stmt(st); }
+        }
+        format!("{{ {} }}", sub.out.trim())
     }
 
     // ── Expressions ────────────────────────────────────────────────────────────
@@ -905,13 +1531,58 @@ impl HostEmitter {
                         }
                     }
                 }
-                format!("{}[{} as usize]", self.expr(arr), self.expr(idx))
+                // Dict-typed receiver (`vocab[key]`, `self.vocab[key]`) → HashMap::get,
+                // not Vec-style index. Every real use here is paired with `else <default>`
+                // (tokenizer.br), handled by the existing `Else` case below wrapping
+                // whatever this returns in `.unwrap_or(...)` -- an `Option<V>` is exactly
+                // what that expects.
+                if self.is_dict_obj(arr) {
+                    let obj_s = self.expr(arr);
+                    let key_s = self.expr(idx);
+                    return format!("{}.get(&({})).cloned()", obj_s, key_s);
+                }
+                // Slice: a[M..N] / a[..N] / a[M..] / a[..] -- a proper Rust range index
+                // returning an owned Vec (matches how a sliced array is always consumed
+                // here: bound to a `let`/`var` of array type -- e.g. math.br's
+                // layer_norm_seq). Previously fell through to the plain-index case below,
+                // which called `self.expr(idx)` on a `SliceRange` it has no case for,
+                // producing `/* expr */` (this function's catch-all default).
+                if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
+                    let obj_s = self.expr(arr);
+                    let start_s = start.as_deref().map(|e| format!("({}) as usize", self.expr(e)));
+                    let end_s   = end.as_deref().map(|e| format!("({}) as usize", self.expr(e)));
+                    let dots = if *inclusive { "..=" } else { ".." };
+                    let range_s = match (start_s, end_s) {
+                        (Some(s), Some(e)) => format!("{s}{dots}{e}"),
+                        (Some(s), None)    => format!("{s}.."),
+                        (None, Some(e))    => format!("{dots}{e}"),
+                        (None, None)       => "..".to_string(),
+                    };
+                    return format!("{}[{}].to_vec()", obj_s, range_s);
+                }
+                // Plain read: `.clone()` after indexing — needed unconditionally
+                // (matches the general pipeline's own convention) because indexing
+                // ALWAYS borrows in Rust (`Index::index` returns `&T`), whether
+                // `arr` is an owned `Vec<T>` or one of this function's own by-ref
+                // params (`&Vec<T>`, see `ref_params`). `Stmt::Expr(Assign(..))`'s
+                // handler bypasses this case entirely for an assignment TARGET
+                // (`arr[i] = v`), where a bare lvalue index — not a cloned rvalue —
+                // is required; see that handler.
+                format!("{}[{} as usize].clone()", self.expr(arr), self.expr(idx))
             }
             ExprKind::Field(obj, field) => {
                 // `k.buf` where buf is a GPU array field → `k.read_buf()?`
                 if let ExprKind::Var(obj_name) = &obj.kind {
                     if let Some(read_call) = self.try_gpu_field_read(obj_name, field) {
                         return read_call;
+                    }
+                    // `EnumName.Variant` (a fieldless-variant construction, e.g.
+                    // main.br's `ModelSize.Tiny`) → Rust's path-qualified
+                    // `EnumName::Variant`. Was previously unhandled, falling through
+                    // to the plain `{obj}.{field}` case below and emitting the
+                    // invalid `ModelSize.Tiny` verbatim.
+                    if self.variant_to_enum.get(field.as_str()) == Some(obj_name) {
+                        return format!("{}::{}", obj_name, field);
                     }
                 }
                 let o = self.expr(obj);
@@ -938,10 +1609,14 @@ impl HostEmitter {
                         }
                     }
                 }
-                let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
-                // `Scale(data)` → `Scale::new(boring_gpu_ctx(), data)?`
+                // `Scale(data)` → `Scale::new(boring_gpu_ctx(), data)?`. Kernel
+                // constructors always need OWNED args (this struct's `new()` is
+                // the existing, untouched kernel-specific emission) -- if an
+                // argument is one of THIS function's own by-ref params (see
+                // `ref_params`), clone it back to owned first.
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.kernel_names.contains(name.as_str()) {
+                        let args_s: Vec<String> = args.iter().map(|a| self.coerce_call_arg(&a.value, false)).collect();
                         let all = std::iter::once("boring_gpu_ctx()".to_string())
                             .chain(args_s)
                             .collect::<Vec<_>>();
@@ -971,8 +1646,57 @@ impl HostEmitter {
                         }
                     }
                 }
+                // Ordinary function call -- coerce each argument to match the
+                // callee's own by-ref/owned parameter convention (`fn_ref_params`,
+                // populated from every `Item::Fn` in the program, whichever
+                // emitter -- this one or the spliced general pipeline -- ends up
+                // rendering that callee's body). Boring's own by-ref contract
+                // (array/dict/set/struct/enum params always by reference) is
+                // enforced by BOTH emitters identically, so a call from a
+                // kernel-touching function (this emitter) to a plain function
+                // (the general-pipeline splice) or vice versa always lines up.
+                let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
+                let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
+                // Plain-int/uint positions on the callee also need a cast to
+                // match its narrowed `isize`/`usize` param (see
+                // `narrowed_int_param_type`'s doc) -- a call from one
+                // kernel-touching function to another (both on this emitter,
+                // e.g. `attention_heads_gpu` calling `transpose_gpu`) otherwise
+                // passes this file's own `i64`/`u64` convention straight
+                // through, a real E0308 confirmed via `cargo check`.
+                let narrow_flags = callee_name.and_then(|n| self.fn_narrowed_int_params.get(n)).cloned();
+                let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    let s = self.coerce_call_arg(&a.value, expects_ref);
+                    match narrow_flags.as_ref().and_then(|f| f.get(i).copied()).flatten() {
+                        Some(narrowed) => format!("({}) as {}", s, narrowed),
+                        None => s,
+                    }
+                }).collect();
                 let fn_s = self.expr(callee);
-                format!("{}({})", fn_s, args_s.join(", "))
+                let call = format!("{}({})", fn_s, args_s.join(", "));
+                // `?`-propagate a call to another free `throws` function (see
+                // `fn_throws`'s doc comment for what this does NOT cover: `throws`
+                // struct methods calling each other, e.g. decoder.br/encoder.br).
+                let call = if self.in_throws && callee_name.is_some_and(|n| self.fn_throws.contains(n)) {
+                    format!("{}?", call)
+                } else {
+                    call
+                };
+                // Interprocedural GPU residency: a call from one kernel-touching
+                // function to another that returns `BoringGpuArg<T>` (e.g.
+                // `attention_heads_gpu` calling `transpose_gpu`) must materialize
+                // the result -- this emitter has no cross-function residency-
+                // preservation optimization of its own (see `fn_returns_resident`'s
+                // doc). A real `?`-operator/E0308 type mismatch otherwise,
+                // confirmed via `cargo check`.
+                if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
+                    let elem = elem_rust_type(&ret_ty);
+                    return format!(
+                        "match {call} {{ BoringGpuArg::Resident(buf, _) => __boring_gpu_copy_d2h::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>(), BoringGpuArg::Host(v) => v }}"
+                    );
+                }
+                call
             }
             ExprKind::MethodCall(obj, method, args) => {
                 // `GPU.all()` → iterator over all CUDA devices.
@@ -1007,6 +1731,17 @@ impl HostEmitter {
                     "length" | "count" if args.is_empty() => format!("{}.len() as i64", o),
                     // `.add(x)` / `.insert(x)` — Vec push
                     "add" | "insert" if args.len() == 1 => format!("{}.push({})", o, args_s[0]),
+                    // `.map(closure)` on an array isn't a real `Vec` method — go through
+                    // iter/cloned/collect, matching the general (std/wgpu) transpiler's
+                    // array-method fallback. `args_s[0]` is already a rendered `|v| ...`
+                    // closure (see the `ExprKind::Closure` case below).
+                    "map" if args_s.len() == 1 && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+                        format!("{}.iter().cloned().map({}).collect::<Vec<_>>()", o, args_s[0]),
+                    // `.sum()` likewise isn't a real `Vec` method. Every call site in this
+                    // codebase sums a float array; a hardcoded `f64` turbofish would be
+                    // wrong for an int array, but no such call exists here today (see
+                    // `cuda::host`'s module doc for the same simplification on `Pipe`).
+                    "sum" if args.is_empty() => format!("{}.iter().cloned().sum::<f64>()", o),
                     _ => format!("{}.{}({})", o, method, args_s.join(", ")),
                 }
             }
@@ -1016,6 +1751,11 @@ impl HostEmitter {
                 match method.as_str() {
                     "wait" => format!("{}.wait()?", l),
                     "done" => format!("{}.done()", l),
+                    // `x |> map((v): ...)` — see the identical `MethodCall` case above.
+                    "map" if args_s.len() == 1 && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
+                        format!("{}.iter().cloned().map({}).collect::<Vec<_>>()", l, args_s[0]),
+                    // `x |> sum()` — see the identical `MethodCall` case above.
+                    "sum" if args.is_empty() => format!("{}.iter().cloned().sum::<f64>()", l),
                     _ => format!("{}.{}({})", l, method, args_s.join(", ")),
                 }
             }
@@ -1109,6 +1849,18 @@ impl HostEmitter {
             ExprKind::Tuple(elems) => {
                 let s: Vec<String> = elems.iter().map(|e| self.expr(e)).collect();
                 format!("({})", s.join(", "))
+            }
+            // A boring lambda, e.g. `(v): gelu_f(v)` — used as a `.map()`/pipe argument
+            // (see the `map`/`sum` cases above). Was previously unhandled, falling to
+            // this function's catch-all `/* expr */` default — the exact bug this fixes
+            // (`math.br`'s `gelu`/`softmax` emitted `a.map(/* expr */)`).
+            ExprKind::Closure(params, _ret_ty, body, _throws, _task) => {
+                let ps: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                let body_s = match body {
+                    ClosureBody::Expr(be) => self.expr(be),
+                    ClosureBody::Block(stmts) => self.emit_sub_block(stmts),
+                };
+                format!("|{}| {}", ps.join(", "), body_s)
             }
             ExprKind::Dict(pairs) => {
                 let s: Vec<String> = pairs.iter().map(|(k, v)| {
@@ -1264,6 +2016,16 @@ impl HostEmitter {
         // uploaded to __constant__ memory via memcpy_htod, not as CudaSlice args.
         if matches!(field.qual, GpuQual::Const) && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
             return format!("Vec<{}>", elem);
+        }
+        // A scalar `'const` field (e.g. `let int rows`) is a plain kernel-launch
+        // parameter, not a device buffer — was previously wrapped in
+        // `CudaSlice<{elem}>` unconditionally here (only the array case above was
+        // excluded), producing e.g. `rows: CudaSlice<i64>` for a struct whose
+        // constructor then assigns it a bare `i64` (see `emit_init_stmt`'s
+        // matching fix) — a real E0308 (`expected CudaSlice<i64>, found i64`),
+        // confirmed via `cargo check`.
+        if matches!(field.qual, GpuQual::Const) && !matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            return elem;
         }
         format!("CudaSlice<{}>", elem)
     }
