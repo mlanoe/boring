@@ -99,6 +99,24 @@ struct HostEmitter {
     /// the general pipeline's `resident_call_vars` (see `emit_methods.rs`'s
     /// identical-purpose fix there).
     fn_returns_resident: std::collections::HashMap<String, Type>,
+    /// Local variable names (current function only, reset per `emit_fn` call)
+    /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
+    /// type is itself `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) --
+    /// these stay `BoringGpuArg<f64>`-typed (never unwrapped to a plain
+    /// `Vec`), so a later kernel-constructor call passing one of these as an
+    /// argument can MOVE the underlying `CudaSlice` straight through instead
+    /// of reading it back to host and re-uploading. See `Stmt::Let`'s own
+    /// handling for where this is populated, and the kernel-constructor
+    /// branch of `expr()`'s `Call` case for where it's consumed.
+    resident_locals: std::collections::HashSet<String>,
+    /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
+    /// calling `self.expr(val)` for a call it has determined should stay
+    /// `BoringGpuArg`-typed (see `resident_locals`'s doc). The `Call` arm of
+    /// `expr()` takes (consumes) this flag for ITS OWN top-level call only,
+    /// before recursing into argument sub-expressions, so a resident-
+    /// preserving call passed as an argument to this outer call isn't
+    /// incorrectly also suppressed.
+    suppress_resident_materialize: bool,
 }
 
 /// True when `ty` is one of boring's always-by-reference parameter kinds (see
@@ -158,6 +176,8 @@ impl HostEmitter {
             in_resident_return: false,
             fn_narrowed_int_params: std::collections::HashMap::new(),
             fn_returns_resident: std::collections::HashMap::new(),
+            resident_locals: std::collections::HashSet::new(),
+            suppress_resident_materialize: false,
         }
     }
 
@@ -410,19 +430,28 @@ impl HostEmitter {
         // returns the `Host(...)` variant -- so the `Resident` arm below is never
         // actually constructed, but the type still needs to exist and the match arms
         // still need to type-check wherever the general-spliced code references them.
-        // `Resident`'s buffer is always `Vec<f32>`, NOT `Vec<T>` -- the general
-        // pipeline's own call sites that pattern-match this (`materialize_resident_call`
-        // in `emit_kernel.rs`) always call `__boring_gpu_copy_d2h::<f32>(..)` on it
-        // regardless of `T`, since a real GPU buffer is always 32-bit device-side
-        // (`kernel_host_scalar_type`'s convention, matching wgpu's actual buffers) even
-        // when `T` (the HOST element type once materialized) is `f64`. Confirmed via a
-        // real `cargo check`: this was a genuine E0308 (`&Arc<Vec<f32>>` vs
-        // `&Arc<Vec<f64>>`) before this fix -- again unreachable in practice (see this
-        // enum's doc above) but must type-check.
+        // `Resident`'s buffer used to be `Arc<Vec<f32>>` -- host memory, not a
+        // device buffer at all, because this backend never actually
+        // constructed the variant (see the git history of this comment for
+        // the old rationale). It now holds a real `CudaSlice<f64>` (device
+        // memory -- CUDA kernel structs store `f64` natively, unlike Metal's
+        // MSL-forced `f32`; confirmed via a real `cargo check` against a
+        // stubbed-nvcc build, an actual E0308 before this fix):
+        // `emit_fn`'s tail-expression codegen constructs this directly from
+        // a kernel struct's own output buffer, by MOVING it out (not
+        // cloning) -- safe because the only two shapes that ever reach this
+        // (a bare `k.field` tail expression, or `k.field` passed directly as
+        // another kernel constructor's argument) both mean `k` is never
+        // referenced again afterward. This matters more here than on the
+        // Metal backend: `CudaSlice::clone()` is a REAL device-to-device
+        // `memcpy` (cudarc's own `try_clone`/`clone_dtod`), unlike Metal's
+        // `Buffer::clone()` (a cheap ObjC retain) -- so the `Clone` impl
+        // below is a correctness-preserving fallback for the rare case
+        // something needs the SAME resident value twice, not the common path.
         self.line("#[allow(dead_code)]");
         self.line("enum BoringGpuArg<T> {");
         self.indent += 1;
-        self.line("Resident(Arc<Vec<f32>>, usize),");
+        self.line("Resident(CudaSlice<f64>, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
@@ -434,7 +463,7 @@ impl HostEmitter {
         self.indent += 1;
         self.line("match self {");
         self.indent += 1;
-        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(Arc::clone(b), *n),");
+        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(b.clone(), *n),");
         self.line("BoringGpuArg::Host(v) => BoringGpuArg::Host(v.clone()),");
         self.indent -= 1;
         self.line("}");
@@ -456,21 +485,31 @@ impl HostEmitter {
         self.blank();
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Arc<CudaContext> { boring_gpu_ctx() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Arc<CudaContext> { boring_gpu_ctx() }");
-        // `T` is unused (Rust allows an unused type param on a free fn, unlike a
-        // struct) -- kept only so call sites' `::<f32>` turbofish (matching the
-        // general pipeline's own hardcoded convention, see `BoringGpuArg`'s doc)
-        // still parses; `buf`/the return type are concretely `Vec<f32>` to match
-        // `BoringGpuArg::Resident`'s buffer type above.
+        // `T`/`_queue` are unused (kept only so call sites' fixed
+        // `::<f32>(&__boring_gpu_device(), &__boring_gpu_queue(), &buf)` shape,
+        // shared verbatim with the wgpu/Metal backends by the general
+        // pipeline's own call-site templates, still parses -- an unused
+        // generic type param on a free fn is legal Rust regardless of what
+        // concrete type the turbofish supplies) -- the actual D2H copy always
+        // goes through the SAME persistent, priority-0 stream every kernel
+        // dispatch shares (see `boring_new_stream_with_priority`'s doc), so a
+        // later read is correctly ordered after an earlier write with no
+        // separate stream-identity bookkeeping needed. Must stay infallible
+        // (`Vec<f64>`, not `Result<..>`) -- the call site (`emit_kernel.rs`'s
+        // shared materializing match) uses the result directly with no `?`.
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_d2h<T>(_device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, buf: &Arc<Vec<f32>>) -> Vec<f32> {");
+        self.line("fn __boring_gpu_copy_d2h<T>(device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, buf: &CudaSlice<f64>) -> Vec<f64> {");
         self.indent += 1;
-        self.line("(**buf).clone() // unreachable in practice -- see this fn's call site's doc comment");
+        self.line("let stream = boring_new_stream_with_priority(device, 0).expect(\"cuda: failed to get shared stream for D2H copy\");");
+        self.line("let v = stream.clone_dtoh(buf).expect(\"cuda: D2H copy failed\");");
+        self.line("stream.synchronize().expect(\"cuda: stream sync failed after D2H copy\");");
+        self.line("v");
         self.indent -= 1;
         self.line("}");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, _src: &[u8], _dst: &Arc<Vec<f32>>) {");
+        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Arc<CudaContext>, _queue: &Arc<CudaContext>, _src: &[u8], _dst: &CudaSlice<f64>) {");
         self.indent += 1;
-        self.line("unreachable!(\"cuda backend never constructs BoringGpuArg::Resident\")");
+        self.line("unreachable!(\"cuda backend never constructs a host-to-device upload through this path -- kernel-constructor call sites upload directly\")");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -500,10 +539,37 @@ impl HostEmitter {
         // in scope at that path and `CudaStream` has no `from_raw` — confirmed
         // via a real `cargo check`, both real E0425/E0599, not hypothetical).
         // cudarc 0.19.8 already has a safe equivalent directly on `CudaContext`.
+        //
+        // A fresh stream used to be forked on EVERY single dispatch (this
+        // function used to always allocate) -- besides losing the benefit of
+        // FIFO single-stream ordering (every dispatch synchronized against
+        // its OWN one-shot stream instead), cudarc's own `CudaContext::new_stream`
+        // internally does a full-context `synchronize()` whenever its stream
+        // count cycles 0→1 (`num_streams.fetch_add`'s guard, cudarc's
+        // `core.rs`) -- and with the old eager-`.wait()` desugar dropping
+        // each `KernelHandle` (and its sole `Arc<CudaStream>`) right after use,
+        // that count cycled 1→0→1 on literally every dispatch, silently
+        // paying a SECOND full-context blocking sync on top of the per-
+        // dispatch `.wait()`. Caching one persistent stream per priority here
+        // (an extra `Arc` keeping the count ≥1 forever after the first call)
+        // fixes both at once: dispatches on the same priority now share one
+        // real FIFO-ordered stream (matching the Metal backend's shared-
+        // command-queue fix), and the guard-resync can never re-trigger.
+        self.line("thread_local! {");
+        self.indent += 1;
+        self.line("static __BORING_CUDA_STREAMS: std::cell::RefCell<std::collections::HashMap<i32, Arc<CudaStream>>> = std::cell::RefCell::new(std::collections::HashMap::new());");
+        self.indent -= 1;
+        self.line("}");
         self.line("fn boring_new_stream_with_priority(ctx: &Arc<CudaContext>, priority: i32) -> Result<Arc<CudaStream>, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("if priority == 0 { return Ok(ctx.new_stream()?); }");
-        self.line("Ok(ctx.new_stream_with_priority(priority)?)");
+        self.line("if let Some(s) = __BORING_CUDA_STREAMS.with(|c| c.borrow().get(&priority).cloned()) {");
+        self.indent += 1;
+        self.line("return Ok(s);");
+        self.indent -= 1;
+        self.line("}");
+        self.line("let s = if priority == 0 { ctx.new_stream()? } else { ctx.new_stream_with_priority(priority)? };");
+        self.line("__BORING_CUDA_STREAMS.with(|c| c.borrow_mut().insert(priority, Arc::clone(&s)));");
+        self.line("Ok(s)");
         self.indent -= 1;
         self.line("}");
         let _ = kernel_names; // used by caller for PTX loading
@@ -569,7 +635,24 @@ impl HostEmitter {
                     field.name, elem
                 ));
                 self.indent += 1;
-                self.line(&format!("Ok(self.__stream.clone_dtoh(&self.{})?)", field.name));
+                // `clone_dtoh` issues an async `memcpy_dtoh_async` on
+                // `self.__stream` -- cudarc's own per-`CudaSlice` event
+                // tracking already GPU-side-orders this copy after whatever
+                // kernel last wrote `self.{field}` (confirmed via cudarc
+                // source: `device_ptr()` auto-waits on the slice's tracked
+                // write event), regardless of which stream did the writing.
+                // What ISN'T guaranteed by cudarc's own Rust types is that
+                // the returned host `Vec`'s memory is actually populated by
+                // the time this function returns (a plain `Vec` destination
+                // takes cudarc's synchronous-copy-into-pageable-memory
+                // assumption on faith, unlike its own `PinnedHostSlice` API,
+                // which explicitly syncs before trusting its data) -- so
+                // `self.__stream.synchronize()` afterward is cheap defense in
+                // depth: it can only wait on real, already-in-flight work on
+                // the exact stream this copy itself was issued on.
+                self.line(&format!("let v = self.__stream.clone_dtoh(&self.{})?;", field.name));
+                self.line("self.__stream.synchronize()?;");
+                self.line("Ok(v)");
                 self.indent -= 1;
                 self.line("}");
                 self.blank();
@@ -584,10 +667,19 @@ impl HostEmitter {
     }
 
     fn emit_kernel_new(&mut self, name: &str, fields: &[KernelFieldDecl], init: &InitDecl) {
-        let params: Vec<String> = init.params.iter().map(|p| {
-            let ty = p.ty.as_ref()
-                .map(|t| host_param_type(t, fields))
-                .unwrap_or_else(|| "()".into());
+        let buffer_flags = self.kernel_ctor_buffer_flags(name).unwrap_or_default();
+        let params: Vec<String> = init.params.iter().enumerate().map(|(i, p)| {
+            // A buffer-passthrough param (see `kernel_ctor_buffer_flags`) takes
+            // an already-built `CudaSlice` directly -- the call site is
+            // responsible for either MOVING a resident one through or
+            // uploading a fresh one from host data via `clone_htod`, instead
+            // of this constructor doing the upload itself (see
+            // `emit_init_stmt`'s matching change).
+            let ty = if let Some(Some(elem)) = buffer_flags.get(i) {
+                format!("CudaSlice<{}>", elem)
+            } else {
+                p.ty.as_ref().map(|t| host_param_type(t, fields)).unwrap_or_else(|| "()".into())
+            };
             format!("{}: {}", p.name, ty)
         }).collect();
         let all_params = if params.is_empty() {
@@ -810,13 +902,26 @@ impl HostEmitter {
                                             return;
                                         }
                                         _ => {
-                                            // Assume RHS is a Vec<T> param — upload to device.
-                                            let rhs_s = self.expr(rhs);
-                                            let elem = elem_rust_type(&field.ty);
-                                            self.line(&format!(
-                                                "let {} = __ctx.default_stream().clone_htod::<{}, _>(&{})?;",
-                                                fname, elem, rhs_s
-                                            ));
+                                            // A bare `field = param` assignment (this codebase's
+                                            // only real pattern here) means the constructor's
+                                            // OWN param type is already `CudaSlice<T>` -- see
+                                            // `kernel_ctor_buffer_flags`, which the call site
+                                            // consults to decide the SAME thing when building
+                                            // the argument. Anything else (a computed
+                                            // expression) falls back to the old upload-from-
+                                            // Vec behavior, matching what `kernel_ctor_buffer_flags`
+                                            // would ALSO decide (false) for a non-bare-Var RHS.
+                                            if matches!(&rhs.kind, ExprKind::Var(_)) {
+                                                let rhs_s = self.expr(rhs);
+                                                self.line(&format!("let {} = {};", fname, rhs_s));
+                                            } else {
+                                                let rhs_s = self.expr(rhs);
+                                                let elem = elem_rust_type(&field.ty);
+                                                self.line(&format!(
+                                                    "let {} = __ctx.default_stream().clone_htod::<{}, _>(&{})?;",
+                                                    fname, elem, rhs_s
+                                                ));
+                                            }
                                             return;
                                         }
                                     }
@@ -909,7 +1014,14 @@ impl HostEmitter {
             name
         ));
         self.line("let stream = boring_new_stream_with_priority(&self.__ctx, priority)?;");
-        self.line("for dep in after { dep.synchronize()?; }");
+        // GPU-side stream ordering (a `cuStreamWaitEvent`, non-blocking on the
+        // CPU) instead of `dep.synchronize()?` -- the latter is a genuine
+        // CPU-blocking `cuStreamSynchronize` per dependency, the exact same
+        // per-dispatch stall bug this file's Metal-backend sibling fixed,
+        // just via the `after=` mechanism instead of the default eager
+        // `.wait()` (see `boring_new_stream_with_priority`'s doc and the
+        // block-statement desugar, both fixed the same way).
+        self.line("for dep in after { stream.join(dep)?; }");
 
         // Upload 'const fixed-size arrays to __constant__ memory before launch.
         for f in fields {
@@ -1089,15 +1201,24 @@ impl HostEmitter {
                 // `resident_elem`'s doc comment above).
                 if f.throws {
                     if let Stmt::Expr(e) = stmt {
-                        let s = self.expr(e);
-                        let wrapped = if self.in_resident_return { format!("BoringGpuArg::Host({})", s) } else { s };
+                        let wrapped = if self.in_resident_return {
+                            self.try_resident_field_expr(e).unwrap_or_else(|| {
+                                let s = self.expr(e);
+                                format!("BoringGpuArg::Host({})", s)
+                            })
+                        } else {
+                            self.expr(e)
+                        };
                         self.line(&format!("Ok({})", wrapped));
                         continue;
                     }
                 } else if self.in_resident_return {
                     if let Stmt::Expr(e) = stmt {
-                        let s = self.expr(e);
-                        self.line(&format!("BoringGpuArg::Host({})", s));
+                        let wrapped = self.try_resident_field_expr(e).unwrap_or_else(|| {
+                            let s = self.expr(e);
+                            format!("BoringGpuArg::Host({})", s)
+                        });
+                        self.line(&wrapped);
                         continue;
                     }
                 }
@@ -1119,12 +1240,31 @@ impl HostEmitter {
         match stmt {
             Stmt::Let(s) => {
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
-                let ty_ann = s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default();
+                // A materializing call (RHS calls a `fn_returns_resident`
+                // function) whose OWN `let` is itself explicitly `'gpu'unified`
+                // (e.g. `let [float]'gpu'unified k_t = transpose_gpu(...)`)
+                // means the programmer wants this value to stay resident for
+                // a later chained kernel-touching call -- see
+                // `resident_locals`'s doc. `rust_type`'s own `Type::Qualified`
+                // case ignores the qualifier (renders the same as a plain
+                // `[float]`), so without this check the declared type here
+                // would silently disagree with what a resident RHS actually
+                // produces.
+                let is_resident_preserving = s.ty.as_ref().and_then(|t| t.gpu_resident_qual()).is_some()
+                    && matches!(&s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(callee, _))
+                        if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n.as_str())));
+                let ty_ann = if is_resident_preserving {
+                    self.resident_locals.insert(s.name.clone());
+                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", elem_rust_type(t))).unwrap_or_default()
+                } else {
+                    s.ty.as_ref().map(|t| format!(": {}", rust_type(t))).unwrap_or_default()
+                };
                 if let Some(val) = &s.value {
                     // Track kernel struct type for this variable so field accesses
                     // on it can be redirected to read_<field>() D2H calls.
                     self.track_kernel_var(&s.name, val);
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                    if is_resident_preserving { self.suppress_resident_materialize = true; }
                     let rhs = self.expr(val);
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
@@ -1189,8 +1329,14 @@ impl HostEmitter {
             }
             Stmt::Return(r) => {
                 if let Some(val) = &r.value {
-                    let s = self.expr(val);
-                    let s = if self.in_resident_return { format!("BoringGpuArg::Host({})", s) } else { s };
+                    let s = if self.in_resident_return {
+                        self.try_resident_field_expr(val).unwrap_or_else(|| {
+                            let s = self.expr(val);
+                            format!("BoringGpuArg::Host({})", s)
+                        })
+                    } else {
+                        self.expr(val)
+                    };
                     if self.in_throws { self.line(&format!("return Ok({});", s)); }
                     else { self.line(&format!("return {};", s)); }
                 } else if self.in_throws {
@@ -1370,10 +1516,19 @@ impl HostEmitter {
             },
         };
         // Re-assign so the moved-into-launch value is returned to the variable.
-        // `KernelHandle::wait(self) -> Result<T, _>` -- the trailing `?` was
-        // missing, a real E0308 ("expected `T`, found `Result<T, _>`")
-        // confirmed via `cargo check`.
-        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.wait()?"))
+        // Used to append `.wait()?` here unconditionally -- a real,
+        // synchronous, CPU-blocking `cuStreamSynchronize` after EVERY single
+        // dispatch (this is the sole reachable desugar path for `kernel:`
+        // blocks; see this file's own doc comment on `KernelHandle` and
+        // `boring_new_stream_with_priority`'s doc for the double-sync bug
+        // this used to compound). Since every dispatch now shares one
+        // persistent, FIFO-ordered stream per priority, a later dispatch on
+        // the same stream is already correctly ordered after this one with
+        // no CPU wait needed -- so this now just unwraps the `KernelHandle`
+        // via its `.inner` field directly (no sync). The actual wait is
+        // deferred to the one place it's genuinely needed: reading a field's
+        // contents back to the CPU (`read_<field>()`, `__boring_gpu_copy_d2h`).
+        Some(format!("{var_name} = {var_name}.__boring_launch({block}, {grid}, {after_arg}, {priority_arg})?.inner"))
     }
 
     fn emit_stmt_last(&mut self, stmt: &Stmt) {
@@ -1471,6 +1626,8 @@ impl HostEmitter {
             in_resident_return: self.in_resident_return,
             fn_narrowed_int_params: self.fn_narrowed_int_params.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
+            resident_locals: self.resident_locals.clone(),
+            suppress_resident_materialize: self.suppress_resident_materialize,
         };
         let last = stmts.len().saturating_sub(1);
         for (i, st) in stmts.iter().enumerate() {
@@ -1593,6 +1750,11 @@ impl HostEmitter {
                 format!("{}.{}", o, field)
             }
             ExprKind::Call(callee, args) => {
+                // Consumed for THIS call only -- taken immediately, before any
+                // nested `self.expr()` recursion into `args`, so a resident-
+                // preserving call passed as an argument to this outer call
+                // isn't incorrectly suppressed too. See its field doc.
+                let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
                 // `GPU(n)` → `boring_gpu_ctx_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "GPU" {
@@ -1616,7 +1778,45 @@ impl HostEmitter {
                 // `ref_params`), clone it back to owned first.
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.kernel_names.contains(name.as_str()) {
-                        let args_s: Vec<String> = args.iter().map(|a| self.coerce_call_arg(&a.value, false)).collect();
+                        // A buffer-passthrough param (see `kernel_ctor_buffer_flags`)
+                        // needs a real `CudaSlice` at the call site now, not a
+                        // `Vec` -- the constructor no longer uploads it internally
+                        // (see `emit_kernel_new`'s matching change). MOVE an
+                        // already-resident buffer straight through (no D2H+H2D
+                        // round trip, no D2D copy either) when the argument is a
+                        // `resident_locals`-tracked var or a `k_prev.field` read of
+                        // another kernel struct's own output (both patterns are
+                        // provably single-use in this codebase -- see
+                        // `resident_locals`'s and `try_resident_field_expr`'s docs),
+                        // else upload fresh from host data exactly as the
+                        // constructor used to.
+                        let buffer_flags = self.kernel_ctor_buffer_flags(name);
+                        let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                            let elem = buffer_flags.as_ref().and_then(|f| f.get(i).cloned()).flatten();
+                            if let Some(elem) = elem {
+                                if let ExprKind::Field(obj, field) = &a.value.kind {
+                                    if let ExprKind::Var(obj_name) = &obj.kind {
+                                        if self.var_kernel_type.contains_key(obj_name.as_str()) {
+                                            return format!("{}.{}", obj_name, field);
+                                        }
+                                    }
+                                }
+                                if let ExprKind::Var(vname) = &a.value.kind {
+                                    if self.resident_locals.contains(vname.as_str()) {
+                                        return format!(
+                                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}, _>(&v)? }})",
+                                            v = vname, elem = elem
+                                        );
+                                    }
+                                }
+                                let s = self.coerce_call_arg(&a.value, false);
+                                return format!(
+                                    "boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}, _>(&{s})?",
+                                    elem = elem, s = s
+                                );
+                            }
+                            self.coerce_call_arg(&a.value, false)
+                        }).collect();
                         let all = std::iter::once("boring_gpu_ctx()".to_string())
                             .chain(args_s)
                             .collect::<Vec<_>>();
@@ -1686,10 +1886,15 @@ impl HostEmitter {
                 // Interprocedural GPU residency: a call from one kernel-touching
                 // function to another that returns `BoringGpuArg<T>` (e.g.
                 // `attention_heads_gpu` calling `transpose_gpu`) must materialize
-                // the result -- this emitter has no cross-function residency-
-                // preservation optimization of its own (see `fn_returns_resident`'s
-                // doc). A real `?`-operator/E0308 type mismatch otherwise,
-                // confirmed via `cargo check`.
+                // the result -- UNLESS the caller explicitly asked to keep it
+                // resident (`__suppress_materialize`, set by `Stmt::Let` for a
+                // `'gpu'unified`-typed binding; see `resident_locals`'s doc), in
+                // which case the plain `call` (already typed `BoringGpuArg<T>`
+                // by `emit_fn`) is returned as-is. A real `?`-operator/E0308
+                // type mismatch otherwise, confirmed via `cargo check`.
+                if __suppress_materialize {
+                    return call;
+                }
                 if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
                     let elem = elem_rust_type(&ret_ty);
                     return format!(
@@ -1990,6 +2195,36 @@ impl HostEmitter {
 
     /// Check whether `obj.field` should be rewritten to a D2H read call.
     ///
+    /// For `kernel_name`'s `init(...)` parameter list (in order), whether each
+    /// positional param is a bare passthrough for an array-typed
+    /// `'unified`/`'global`/`'actor'global`/`'surface` field (`field = param`
+    /// in the init body, this codebase's only real pattern for such fields —
+    /// see `emit_init_stmt`'s identical check) -- these params render as
+    /// `CudaSlice<T>` (see `emit_kernel_new`) instead of a host `Vec`, and the
+    /// kernel-constructor call site (this file's `expr()`'s `Call` case) must
+    /// produce a `CudaSlice` for that argument position instead of a `Vec`.
+    /// Returns the field's element type string (`Some("f64")` etc) for a
+    /// buffer position, `None` for a scalar one. `None` for the whole `Vec`
+    /// only if the kernel/init can't be found at all -- callers treat that as
+    /// "no buffer params known" (preserves the pre-existing behavior).
+    fn kernel_ctor_buffer_flags(&self, kernel_name: &str) -> Option<Vec<Option<String>>> {
+        let decl = self.kernel_decls.get(kernel_name)?;
+        let init = decl.inits.first()?;
+        Some(init.params.iter().map(|p| {
+            init.body.iter().find_map(|stmt| {
+                let Stmt::Expr(e) = stmt else { return None; };
+                let ExprKind::Assign(lhs, rhs) = &e.kind else { return None; };
+                let ExprKind::Var(fname) = &lhs.kind else { return None; };
+                let ExprKind::Var(pname) = &rhs.kind else { return None; };
+                if pname != &p.name { return None; }
+                decl.fields.iter().find(|f| &f.name == fname)
+            }).filter(|f| {
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+            }).map(|f| elem_rust_type(&f.ty))
+        }).collect())
+    }
+
     /// Returns `Some("obj.read_field()?")` when `obj` is a tracked kernel
     /// variable and `field` is a `'unified` or `'global` array field.
     /// Returns `None` for scalars or non-GPU fields (direct field access is fine).
@@ -2006,6 +2241,38 @@ impl HostEmitter {
                     _ => None, // scalar — direct access
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// Recognizes the exact shape every kernel-touching free function's tail
+    /// expression uses in practice: a bare `k.field` read of a local kernel-
+    /// struct variable's own output array field. When matched (only called
+    /// where `in_resident_return` is true, i.e. this function's return type
+    /// is itself `'gpu'unified`), skips `try_gpu_field_read`'s materializing
+    /// `k.read_field()?` (a real D2H copy) entirely and instead MOVES the
+    /// kernel's own output `CudaSlice` out, wrapped as `BoringGpuArg::
+    /// Resident` -- `k` is never referenced again after this (its only use
+    /// in this codebase's actual shape), so the move is sound; the `let __n`
+    /// binding captures the length via a shared borrow before that move
+    /// consumes `k.field`. See `try_gpu_field_read`'s doc for why only
+    /// `GpuQual::Unified` is handled -- CUDA only emits a `read_<field>()`
+    /// accessor (hence only tracks a field as GPU-resident-capable at all)
+    /// for that qualifier, unlike Metal's broader set.
+    fn try_resident_field_expr(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Field(obj, field) = &e.kind else { return None; };
+        let ExprKind::Var(obj_name) = &obj.kind else { return None; };
+        let kernel_type = self.var_kernel_type.get(obj_name)?;
+        let decl = self.kernel_decls.get(kernel_type)?;
+        let kf = decl.fields.iter().find(|f| &f.name == field)?;
+        match kf.qual {
+            GpuQual::Unified => match &kf.ty {
+                Type::Array(_) | Type::ArrayN(_, _) => Some(format!(
+                    "{{ let __n = {obj}.{field}.len(); BoringGpuArg::Resident({obj}.{field}, __n) }}",
+                    obj = obj_name, field = field
+                )),
+                _ => None,
+            },
             _ => None,
         }
     }

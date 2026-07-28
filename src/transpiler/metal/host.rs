@@ -91,6 +91,25 @@ struct HostEmitter {
     /// explicit `f64`→`f32` cast at that specific call site (see the kernel-
     /// constructor branch of `expr()`'s `Call` case).
     f64_array_locals: std::collections::HashSet<String>,
+    /// Local variable names (current function only, reset per `emit_fn` call,
+    /// same scoping as `f64_array_locals`) bound to a call into a
+    /// `fn_returns_resident` function WHOSE OWN `let` type is itself
+    /// `'gpu'unified` (`s.ty.gpu_resident_qual().is_some()`) -- these stay
+    /// `BoringGpuArg<f64>`-typed (never unwrapped to a plain `Vec` at the
+    /// binding), so a later kernel-constructor call passing one of these as
+    /// an argument can hand the underlying `Buffer` straight through instead
+    /// of reading it back to host and re-uploading. See the kernel-
+    /// constructor branch of `expr()`'s `Call` case, and `Stmt::Let`'s own
+    /// handling for where this set is populated.
+    resident_locals: std::collections::HashSet<String>,
+    /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
+    /// calling `self.expr(val)` for a call it has determined should stay
+    /// `BoringGpuArg`-typed (see `resident_locals`'s doc). The `Call` arm of
+    /// `expr()` takes (consumes) this flag for ITS OWN top-level call only,
+    /// before recursing into argument sub-expressions, so a resident-
+    /// preserving call passed as an argument to this outer call is not
+    /// incorrectly also suppressed.
+    suppress_resident_materialize: bool,
 }
 
 /// See `cuda::host`'s identical function.
@@ -160,6 +179,8 @@ impl HostEmitter {
             fn_returns_resident: std::collections::HashMap::new(),
             fn_float_array_params: std::collections::HashMap::new(),
             f64_array_locals: std::collections::HashSet::new(),
+            resident_locals: std::collections::HashSet::new(),
+            suppress_resident_materialize: false,
         }
     }
 
@@ -503,7 +524,61 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
-        // KernelHandle — Metal is synchronous (wait_until_completed in __boring_launch).
+        // Every kernel dispatch used to `commit()` + `wait_until_completed()`
+        // synchronously inside its own `__boring_launch` -- for a model doing
+        // many small GPU calls (once per matmul per layer per token), that
+        // per-dispatch CPU-blocking wait was the dominant cost, dwarfing the
+        // actual GPU compute it was meant to measure (confirmed: real wall
+        // time was ~5x the combined user+sys CPU time on a real whisper-
+        // boring run -- the CPU was mostly just blocked waiting). All kernel
+        // structs now share ONE persistent command queue (`__boring_metal_queue`)
+        // instead of each opening its own, and `__boring_launch` only commits
+        // (no wait) -- Metal's default per-queue FIFO ordering plus automatic
+        // buffer hazard tracking (on by default; not disabled by
+        // `StorageModeShared`, an orthogonal storage-mode bit) means a LATER
+        // dispatch on the same queue correctly sees an EARLIER one's writes
+        // without any CPU-side wait between them. The wait is deferred to the
+        // one place it's actually needed: reading a buffer's contents back to
+        // the CPU (`read_<field>()`, `__boring_gpu_copy_d2h`) -- and even
+        // then, waiting on only the LATEST committed buffer suffices, since
+        // it cannot complete before everything queued ahead of it already has.
+        self.line("thread_local! {");
+        self.indent += 1;
+        self.line("static __BORING_METAL_QUEUE: std::cell::RefCell<Option<CommandQueue>> = std::cell::RefCell::new(None);");
+        self.line("static __BORING_METAL_PENDING: std::cell::RefCell<Option<CommandBuffer>> = std::cell::RefCell::new(None);");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("fn __boring_metal_queue(__device: &Device) -> CommandQueue {");
+        self.indent += 1;
+        self.line("__BORING_METAL_QUEUE.with(|c| {");
+        self.indent += 1;
+        self.line("if let Some(q) = &*c.borrow() { return q.clone(); }");
+        self.line("let q = __device.new_command_queue();");
+        self.line("*c.borrow_mut() = Some(q.clone());");
+        self.line("q");
+        self.indent -= 1;
+        self.line("})");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("fn __boring_metal_flush() {");
+        self.indent += 1;
+        self.line("__BORING_METAL_PENDING.with(|c| {");
+        self.indent += 1;
+        self.line("if let Some(buf) = c.borrow_mut().take() {");
+        self.indent += 1;
+        self.line("buf.wait_until_completed();");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("});");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // KernelHandle — `.wait()`/`.done()` don't themselves force a GPU
+        // sync; any real data read goes through `read_<field>()`/
+        // `__boring_gpu_copy_d2h`, which already flush (see above).
         self.line("struct KernelHandle<T> { inner: T }");
         self.line("impl<T> KernelHandle<T> {");
         self.indent += 1;
@@ -519,17 +594,20 @@ impl HostEmitter {
         // function whose declared return type is `'gpu'unified`/`'gpu'global`-qualified
         // as "GPU-resident-returning" and renders every CALLER of it (in the general-
         // pipeline-spliced "plain" code this backend embeds -- see `metal::mod`'s doc
-        // comment) to expect a `BoringGpuArg<T>` value back, unconditionally. Only
-        // `wgpu::host` actually DEFINES `BoringGpuArg`/`__boring_gpu_device`/etc. This
-        // backend has no cross-function GPU-buffer-residency optimization of its own
-        // -- every kernel-touching function here always returns `Host(...)` -- so the
-        // `Resident` arm below is never actually constructed, but the type still needs
-        // to exist and the match arms still need to type-check. See `cuda::host`'s
-        // identical definitions for the full rationale.
+        // comment) to expect a `BoringGpuArg<T>` value back, unconditionally.
+        // Unlike CUDA (where a genuine device-to-device buffer handoff is the only way
+        // to avoid a real `cudaMemcpy`), Metal's buffers use `StorageModeShared` --
+        // real, unified CPU/GPU memory -- so `Resident` here holds a real `metal::Buffer`
+        // handle (cheaply `Clone`-able: an ObjC retain, not a data copy -- see
+        // `foreign_obj_type!` in the `metal` crate) instead of `wgpu::host`'s
+        // `Arc<wgpu::Buffer>` convention. `emit_fn`'s tail-expression codegen
+        // constructs this variant directly from a kernel struct's own output buffer
+        // when the tail expression is a bare `k.field` read, skipping the
+        // read-to-Vec-then-reupload round trip a chained GPU call used to always pay.
         self.line("#[allow(dead_code)]");
         self.line("enum BoringGpuArg<T> {");
         self.indent += 1;
-        self.line("Resident(std::sync::Arc<Vec<f32>>, usize),");
+        self.line("Resident(Buffer, usize),");
         self.line("Host(Vec<T>),");
         self.indent -= 1;
         self.line("}");
@@ -541,7 +619,7 @@ impl HostEmitter {
         self.indent += 1;
         self.line("match self {");
         self.indent += 1;
-        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(std::sync::Arc::clone(b), *n),");
+        self.line("BoringGpuArg::Resident(b, n) => BoringGpuArg::Resident(b.clone(), *n),");
         self.line("BoringGpuArg::Host(v) => BoringGpuArg::Host(v.clone()),");
         self.indent -= 1;
         self.line("}");
@@ -564,15 +642,21 @@ impl HostEmitter {
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_d2h<T>(_device: &Device, _queue: &Device, buf: &std::sync::Arc<Vec<f32>>) -> Vec<f32> {");
+        self.line("fn __boring_gpu_copy_d2h<T>(_device: &Device, _queue: &Device, buf: &Buffer) -> Vec<f32> {");
         self.indent += 1;
-        self.line("(**buf).clone() // unreachable in practice -- see this fn's call site's doc comment");
+        // `__boring_launch` no longer waits synchronously (see the prelude's
+        // `__boring_metal_flush` doc) -- flush here before reading, exactly
+        // like `read_<field>()`.
+        self.line("__boring_metal_flush();");
+        self.line("let n = buf.length() as usize / mem::size_of::<f32>();");
+        self.line("let ptr = buf.contents() as *const f32;");
+        self.line("unsafe { std::slice::from_raw_parts(ptr, n).to_vec() }");
         self.indent -= 1;
         self.line("}");
         self.line("#[allow(dead_code)]");
-        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Device, _queue: &Device, _src: &[u8], _dst: &std::sync::Arc<Vec<f32>>) {");
+        self.line("fn __boring_gpu_copy_h2d<T>(_device: &Device, _queue: &Device, _src: &[u8], _dst: &Buffer) {");
         self.indent += 1;
-        self.line("unreachable!(\"metal backend never constructs BoringGpuArg::Resident\")");
+        self.line("unreachable!(\"metal backend never constructs a host-to-device upload through this path -- kernel-constructor call sites upload directly\")");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -931,6 +1015,10 @@ impl HostEmitter {
                             field.name, elem
                         ));
                         self.indent += 1;
+                        // Ensure every dispatch committed so far (possibly
+                        // including the one that wrote this very field) has
+                        // actually finished before reading its contents.
+                        self.line("__boring_metal_flush();");
                         self.line(&format!(
                             "let n = self.{}.length() as usize / mem::size_of::<{}>();",
                             field.name, elem
@@ -956,10 +1044,18 @@ impl HostEmitter {
     }
 
     fn emit_kernel_new(&mut self, name: &str, fields: &[KernelFieldDecl], init: &InitDecl) {
-        let params: Vec<String> = init.params.iter().map(|p| {
-            let ty = p.ty.as_ref()
-                .map(host_param_type)
-                .unwrap_or_else(|| "()".into());
+        let buffer_flags = self.kernel_ctor_buffer_flags(name).unwrap_or_default();
+        let params: Vec<String> = init.params.iter().enumerate().map(|(i, p)| {
+            // A buffer-passthrough param (see `kernel_ctor_buffer_flags`) takes
+            // an already-built `Buffer` directly -- the call site is
+            // responsible for either reusing a resident one or uploading a
+            // fresh one from host data, instead of this constructor doing the
+            // upload itself (see `emit_init_stmt`'s matching change).
+            let ty = if buffer_flags.get(i).copied().unwrap_or(false) {
+                "Buffer".to_string()
+            } else {
+                p.ty.as_ref().map(host_param_type).unwrap_or_else(|| "()".into())
+            };
             format!("{}: {}", p.name, ty)
         }).collect();
 
@@ -1016,7 +1112,7 @@ impl HostEmitter {
     }
 
     fn emit_pipeline_init(&mut self, kernel_name: &str) {
-        self.line("let __queue = __device.new_command_queue();");
+        self.line("let __queue = __boring_metal_queue(&__device);");
         self.line(&format!(
             "let __pipeline = __boring_metal_pipeline(&__device, \"{}_kernel\")?;",
             kernel_name
@@ -1161,10 +1257,23 @@ impl HostEmitter {
                                             let rhs_s = self.expr(rhs);
                                             match &field.ty {
                                                 Type::Array(_) | Type::ArrayN(_, _) => {
-                                                    let elem = elem_rust_type(&field.ty);
-                                                    self.line(&format!(
-                                                        "let {fname}: Buffer = __device.new_buffer_with_data({rhs_s}.as_ptr() as *const _, ({rhs_s}.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared);"
-                                                    ));
+                                                    // A bare `field = param` assignment (this codebase's
+                                                    // only real pattern here) means the constructor's
+                                                    // OWN param type is already `Buffer` -- see
+                                                    // `kernel_ctor_buffer_flags`, which the call site
+                                                    // consults to decide the SAME thing when building
+                                                    // the argument. Anything else (a computed
+                                                    // expression) falls back to the old upload-from-
+                                                    // Vec behavior, matching what `kernel_ctor_buffer_flags`
+                                                    // would ALSO decide (false) for a non-bare-Var RHS.
+                                                    if matches!(&rhs.kind, ExprKind::Var(_)) {
+                                                        self.line(&format!("let {fname}: Buffer = {rhs_s};"));
+                                                    } else {
+                                                        let elem = elem_rust_type(&field.ty);
+                                                        self.line(&format!(
+                                                            "let {fname}: Buffer = __device.new_buffer_with_data({rhs_s}.as_ptr() as *const _, ({rhs_s}.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared);"
+                                                        ));
+                                                    }
                                                 }
                                                 _ => {
                                                     // Scalar 'const field: store the value directly.
@@ -1344,7 +1453,7 @@ impl HostEmitter {
         self.line(");");
         self.line("__encoder.end_encoding();");
         self.line("__cmd_buf.commit();");
-        self.line("__cmd_buf.wait_until_completed();");
+        self.line("__BORING_METAL_PENDING.with(|c| *c.borrow_mut() = Some(__cmd_buf.to_owned()));");
         self.line("Ok(())");
         self.indent -= 1;
         self.line("}");
@@ -1418,6 +1527,7 @@ impl HostEmitter {
         self.in_resident_return = resident_elem.clone();
         let outer_ref_params = std::mem::take(&mut self.ref_params);
         let outer_f64_array_locals = std::mem::take(&mut self.f64_array_locals);
+        let outer_resident_locals = std::mem::take(&mut self.resident_locals);
         for p in &f.params {
             if let Some(ty) = &p.ty {
                 // A `[float]` param is declared `&Vec<f64>` (see the param-
@@ -1457,22 +1567,35 @@ impl HostEmitter {
             if i + 1 == len {
                 if f.throws {
                     if let Stmt::Expr(e) = stmt {
-                        let s = self.expr(e);
                         // Converts this backend's own native `f32` buffer element
                         // to the `f64` every general-spliced caller expects (see
                         // `general_host_elem_type`'s doc) -- a no-op cast when the
-                        // element type already matches (e.g. int arrays).
-                        let wrapped = match &self.in_resident_return {
-                            Some(elem) => format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s),
-                            None => s,
+                        // element type already matches (e.g. int arrays). Tries
+                        // `try_resident_field_expr` FIRST, before emitting the
+                        // materializing read at all -- see its doc comment.
+                        let wrapped = if self.in_resident_return.is_some() {
+                            if let Some(resident) = self.try_resident_field_expr(e) {
+                                resident
+                            } else {
+                                let s = self.expr(e);
+                                let elem = self.in_resident_return.clone().unwrap();
+                                format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                            }
+                        } else {
+                            self.expr(e)
                         };
                         self.line(&format!("Ok({})", wrapped));
                         continue;
                     }
                 } else if let Some(elem) = self.in_resident_return.clone() {
                     if let Stmt::Expr(e) = stmt {
-                        let s = self.expr(e);
-                        self.line(&format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s));
+                        let wrapped = if let Some(resident) = self.try_resident_field_expr(e) {
+                            resident
+                        } else {
+                            let s = self.expr(e);
+                            format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                        };
+                        self.line(&wrapped);
                         continue;
                     }
                 }
@@ -1485,6 +1608,7 @@ impl HostEmitter {
         self.in_resident_return = outer_in_resident_return;
         self.ref_params = outer_ref_params;
         self.f64_array_locals = outer_f64_array_locals;
+        self.resident_locals = outer_resident_locals;
         self.indent -= 1;
         self.line("}");
     }
@@ -1543,7 +1667,19 @@ impl HostEmitter {
                 // `cargo check`.
                 let is_materializing_call = matches!(&s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Call(callee, _))
                     if matches!(&callee.kind, ExprKind::Var(n) if self.fn_returns_resident.contains_key(n.as_str())));
-                let ty_ann = if is_materializing_call {
+                // A materializing call whose OWN `let` is itself explicitly
+                // `'gpu'unified` (e.g. `let [float]'gpu'unified k_t =
+                // transpose_gpu(...)`) means the programmer wants this value
+                // to stay resident for a later chained kernel-touching call --
+                // see `resident_locals`'s doc. Keep it `BoringGpuArg<f64>`-
+                // typed and suppress the eager materializing wrap this
+                // specific call would otherwise get.
+                let is_resident_preserving = is_materializing_call
+                    && s.ty.as_ref().and_then(|t| t.gpu_resident_qual()).is_some();
+                let ty_ann = if is_resident_preserving {
+                    self.resident_locals.insert(s.name.clone());
+                    s.ty.as_ref().map(|t| format!(": BoringGpuArg<{}>", general_host_elem_type(t))).unwrap_or_default()
+                } else if is_materializing_call {
                     self.f64_array_locals.insert(s.name.clone());
                     s.ty.as_ref().map(|t| format!(": Vec<{}>", general_host_elem_type(t))).unwrap_or_default()
                 } else {
@@ -1552,6 +1688,7 @@ impl HostEmitter {
                 if let Some(val) = &s.value {
                     self.track_kernel_var(&s.name, val);
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                    if is_resident_preserving { self.suppress_resident_materialize = true; }
                     let rhs = self.expr(val);
                     self.line(&format!("{} {}{} = {};", binding, s.name, ty_ann, rhs));
                 } else {
@@ -1607,10 +1744,15 @@ impl HostEmitter {
             }
             Stmt::Return(r) => {
                 if let Some(val) = &r.value {
-                    let s = self.expr(val);
                     let s = match self.in_resident_return.clone() {
-                        Some(elem) => format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s),
-                        None => s,
+                        Some(_) if self.try_resident_field_expr(val).is_some() => {
+                            self.try_resident_field_expr(val).unwrap()
+                        }
+                        Some(elem) => {
+                            let s = self.expr(val);
+                            format!("BoringGpuArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", s)
+                        }
+                        None => self.expr(val),
                     };
                     if self.in_throws { self.line(&format!("return Ok({});", s)); }
                     else { self.line(&format!("return {};", s)); }
@@ -1864,6 +2006,8 @@ impl HostEmitter {
             fn_returns_resident: self.fn_returns_resident.clone(),
             fn_float_array_params: self.fn_float_array_params.clone(),
             f64_array_locals: self.f64_array_locals.clone(),
+            resident_locals: self.resident_locals.clone(),
+            suppress_resident_materialize: self.suppress_resident_materialize,
         };
         let last = stmts.len().saturating_sub(1);
         for (i, st) in stmts.iter().enumerate() {
@@ -1974,6 +2118,11 @@ impl HostEmitter {
                 format!("{}.{}", o, field)
             }
             ExprKind::Call(callee, args) => {
+                // Consumed for THIS call only -- taken immediately, before any
+                // nested `self.expr()` recursion into `args`, so a resident-
+                // preserving call passed as an argument to this outer call
+                // isn't incorrectly suppressed too. See its field doc.
+                let __suppress_materialize = std::mem::take(&mut self.suppress_resident_materialize);
                 // `GPU(n)` → `boring_metal_device_n(n)?`
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "GPU" {
@@ -2023,13 +2172,61 @@ impl HostEmitter {
                 // (see `cuda::host`'s identical case).
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.kernel_names.contains(name.as_str()) {
-                        // A `Vec<f64>` local bound to a materializing call (see
-                        // `f64_array_locals`'s doc) needs an explicit cast back to
-                        // this backend's native `Vec<f32>` -- the kernel struct's
-                        // own (untouched) field type is always `f32`. A real
-                        // E0308 otherwise, confirmed via a real cross-compile
-                        // `cargo check`.
-                        let args_s: Vec<String> = args.iter().map(|a| {
+                        let dev = if self.screen_var.is_some() {
+                            "boring_device.clone()".to_string()
+                        } else {
+                            "boring_metal_device()".to_string()
+                        };
+                        // A buffer-passthrough param (see `kernel_ctor_buffer_flags`)
+                        // needs a real `Buffer` at the call site now, not a `Vec` --
+                        // the constructor no longer uploads it internally (see
+                        // `emit_kernel_new`'s matching change). Reuse an already-
+                        // resident buffer directly (no host round trip) when the
+                        // argument is a `resident_locals`-tracked var, else upload
+                        // fresh from host data exactly as the constructor used to.
+                        let buffer_flags = self.kernel_ctor_buffer_flags(name);
+                        let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                            let is_buffer_pos = buffer_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                            if is_buffer_pos {
+                                // `k_prev.field` passed directly as an argument (this
+                                // codebase's common inline-chaining shape, e.g.
+                                // `SoftmaxRowsKernel(k_scores.c, ...)`) -- `k_prev.field`
+                                // is ALREADY a `Buffer` (another kernel struct's own
+                                // output field), so hand it straight through (a cheap
+                                // ObjC-retain `.clone()`, not a copy) instead of routing
+                                // through `try_gpu_field_read`'s materializing
+                                // `k_prev.read_field()`.
+                                if let ExprKind::Field(obj, field) = &a.value.kind {
+                                    if let ExprKind::Var(obj_name) = &obj.kind {
+                                        if self.var_kernel_type.contains_key(obj_name.as_str()) {
+                                            return format!("{}.{}.clone()", obj_name, field);
+                                        }
+                                    }
+                                }
+                                if let ExprKind::Var(vname) = &a.value.kind {
+                                    if self.resident_locals.contains(vname.as_str()) {
+                                        return format!(
+                                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, (v.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                                            v = vname, dev = dev
+                                        );
+                                    }
+                                    if self.f64_array_locals.contains(vname.as_str()) {
+                                        return format!(
+                                            "{dev}.new_buffer_with_data(({v}.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, ({v}.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared)",
+                                            v = vname, dev = dev
+                                        );
+                                    }
+                                }
+                                let s = self.coerce_call_arg(&a.value, false);
+                                return format!(
+                                    "{dev}.new_buffer_with_data(({s}).as_ptr() as *const _, (({s}).len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared)",
+                                    dev = dev, s = s
+                                );
+                            }
+                            // Scalar position -- unchanged. A `Vec<f64>` local bound
+                            // to a materializing call (see `f64_array_locals`'s doc)
+                            // needs an explicit cast back to this backend's own
+                            // native `Vec<f32>` convention.
                             if let ExprKind::Var(vname) = &a.value.kind {
                                 if self.f64_array_locals.contains(vname.as_str()) {
                                     return format!("{}.iter().map(|&x| x as f32).collect::<Vec<f32>>()", vname);
@@ -2037,11 +2234,6 @@ impl HostEmitter {
                             }
                             self.coerce_call_arg(&a.value, false)
                         }).collect();
-                        let dev = if self.screen_var.is_some() {
-                            "boring_device.clone()".to_string()
-                        } else {
-                            "boring_metal_device()".to_string()
-                        };
                         let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
                         return format!("{}::new({})?", name, all.join(", "));
                     }
@@ -2100,7 +2292,16 @@ impl HostEmitter {
                 };
                 // Interprocedural GPU residency: a call from one kernel-touching
                 // function to another that returns `BoringGpuArg<T>` must
-                // materialize the result. See `cuda::host`'s identical case.
+                // materialize the result -- UNLESS the caller explicitly asked
+                // to keep it resident (`__suppress_materialize`, set by
+                // `Stmt::Let` for a `'gpu'unified`-typed binding; see
+                // `resident_locals`'s doc), in which case the plain `call`
+                // (already typed `BoringGpuArg<T>` by `emit_fn`) is returned
+                // as-is. See `cuda::host`'s identical case for the unconditional
+                // (non-suppressible) version of this same rule.
+                if __suppress_materialize {
+                    return call;
+                }
                 if let Some(ret_ty) = callee_name.and_then(|n| self.fn_returns_resident.get(n)).cloned() {
                     // `general_host_elem_type` (not this backend's own
                     // `elem_rust_type`) -- must match `BoringGpuArg<T>`'s actual
@@ -2411,6 +2612,34 @@ impl HostEmitter {
         }
     }
 
+    /// For `kernel_name`'s `init(...)` parameter list (in order), whether each
+    /// positional param is a bare passthrough for an array-typed
+    /// `'unified`/`'global`/`'const`/`'actor'global` field (`field = param`
+    /// in the init body, this codebase's only real pattern for such fields --
+    /// see `emit_init_stmt`'s identical check) -- these params render as
+    /// `Buffer` (see `emit_kernel_new`) instead of a host `Vec`, and the
+    /// kernel-constructor call site (this file's `expr()`'s `Call` case) must
+    /// produce a `Buffer` for that argument position instead of a `Vec`.
+    /// `None` if the kernel/init can't be found -- callers treat that as "no
+    /// buffer params known" (preserves the pre-existing behavior).
+    fn kernel_ctor_buffer_flags(&self, kernel_name: &str) -> Option<Vec<bool>> {
+        let decl = self.kernel_decls.get(kernel_name)?;
+        let init = decl.inits.first()?;
+        Some(init.params.iter().map(|p| {
+            init.body.iter().find_map(|stmt| {
+                let Stmt::Expr(e) = stmt else { return None; };
+                let ExprKind::Assign(lhs, rhs) = &e.kind else { return None; };
+                let ExprKind::Var(fname) = &lhs.kind else { return None; };
+                let ExprKind::Var(pname) = &rhs.kind else { return None; };
+                if pname != &p.name { return None; }
+                decl.fields.iter().find(|f| &f.name == fname)
+            }).map(|f| {
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const)
+                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+            }).unwrap_or(false)
+        }).collect())
+    }
+
     fn try_gpu_field_read(&self, obj: &str, field: &str) -> Option<String> {
         let kernel_type = self.var_kernel_type.get(obj)?;
         let decl = self.kernel_decls.get(kernel_type)?;
@@ -2421,6 +2650,37 @@ impl HostEmitter {
                     Type::Array(_) | Type::ArrayN(_, _) => {
                         Some(format!("{}.read_{}()", obj, field))
                     }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Recognizes the exact shape every kernel-touching free function's tail
+    /// expression uses in practice: a bare `k.field` read of a local kernel-
+    /// struct variable's own output array field. When matched (only ever
+    /// called where `in_resident_return` is `Some`, i.e. this function's
+    /// return type is itself `'gpu'unified`), skips `try_gpu_field_read`'s
+    /// materializing `k.read_field()` entirely and instead hands back the
+    /// kernel's own output `Buffer` wrapped as `BoringGpuArg::Resident` --
+    /// letting a chained GPU caller consume it without a host round trip.
+    /// Returns `None` for anything else (a more complex tail expression, or a
+    /// var this pass doesn't know is a kernel-struct instance), which keeps
+    /// the existing, always-correct materializing behavior as the fallback.
+    fn try_resident_field_expr(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Field(obj, field) = &e.kind else { return None; };
+        let ExprKind::Var(obj_name) = &obj.kind else { return None; };
+        let kernel_type = self.var_kernel_type.get(obj_name)?;
+        let decl = self.kernel_decls.get(kernel_type)?;
+        let kf = decl.fields.iter().find(|f| &f.name == field)?;
+        match kf.qual {
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+                match &kf.ty {
+                    Type::Array(_) | Type::ArrayN(_, _) => Some(format!(
+                        "BoringGpuArg::Resident({obj}.{field}.clone(), ({obj}.{field}.length() as usize) / std::mem::size_of::<f32>())",
+                        obj = obj_name, field = field
+                    )),
                     _ => None,
                 }
             }

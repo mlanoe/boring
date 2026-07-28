@@ -1,0 +1,27 @@
+#!/bin/sh
+# Stub `nvcc` for smoke-testing `boring build --target cuda`'s GENERATED RUST
+# HOST CODE on a machine with no CUDA toolkit (e.g. macOS, or any CI runner
+# without an NVIDIA GPU) — see the README in this directory for exactly what
+# this does and does not verify before relying on it.
+#
+# The generated project's build.rs invokes `nvcc --ptx -O2 --output-file
+# <path> kernels/main.cu` to compile the kernel source to PTX, then makes
+# that path available to main.rs via the BORING_PTX_PATH env var. This stub
+# never touches kernels/main.cu at all — it just finds --output-file and
+# writes an empty placeholder there, so the build.rs succeeds and cargo can
+# proceed to compile/type-check main.rs against a real cudarc.
+
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-file" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+
+if [ -n "$out" ]; then
+  : > "$out"
+fi
+
+exit 0
