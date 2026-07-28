@@ -400,6 +400,66 @@ impl HostEmitter {
         self.blank();
         self.line("const BORING_MSL: &str = include_str!(\"../kernels/main.metal\");");
         self.blank();
+        // Cache the compiled MSL library and each kernel's compute pipeline
+        // state thread-locally. Every kernel dispatch used to construct a
+        // fresh kernel struct, which used to recompile BORING_MSL from source
+        // AND rebuild the pipeline state on every single call -- for a model
+        // with any nontrivial number of GPU calls (e.g. once per matmul per
+        // layer per token) this made shader (re)compilation the dominant
+        // cost, swamping the actual GPU compute it was meant to measure.
+        // Metal's own types aren't Send/Sync (ObjC-backed), so this is a
+        // thread_local rather than a `static`/`OnceLock` -- fine since kernel
+        // dispatch here is single-threaded.
+        self.line("thread_local! {");
+        self.indent += 1;
+        self.line("static __BORING_METAL_LIBRARY: std::cell::RefCell<Option<Library>> = std::cell::RefCell::new(None);");
+        self.line("static __BORING_METAL_PIPELINES: std::cell::RefCell<std::collections::HashMap<&'static str, ComputePipelineState>> = std::cell::RefCell::new(std::collections::HashMap::new());");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("fn __boring_metal_pipeline(__device: &Device, __kernel_fn_name: &'static str) -> Result<ComputePipelineState, Box<dyn std::error::Error + Send + Sync>> {");
+        self.indent += 1;
+        self.line("if let Some(__p) = __BORING_METAL_PIPELINES.with(|c| c.borrow().get(__kernel_fn_name).cloned()) {");
+        self.indent += 1;
+        self.line("return Ok(__p);");
+        self.indent -= 1;
+        self.line("}");
+        self.line("let __library = __BORING_METAL_LIBRARY.with(|c| c.borrow().clone());");
+        self.line("let __library = match __library {");
+        self.indent += 1;
+        self.line("Some(__l) => __l,");
+        self.line("None => {");
+        self.indent += 1;
+        self.line("let __options = CompileOptions::new();");
+        // Metal's compile options default `fastMathEnabled` to `true` (Apple's
+        // own default), which permits the compiler to assume no NaN/Inf and
+        // reorder/approximate transcendental functions (exp, tanh, ...) --
+        // this silently produced actual NaN output from a provably finite,
+        // in-range input (confirmed: GeluKernel's `tanh(58.68)` produced NaN
+        // under the default with real model weights, where plain IEEE-754
+        // tanh cannot). Boring's language semantics are standard predictable
+        // float arithmetic, not opt-in fast-math, so turn it off.
+        self.line("__options.set_fast_math_enabled(false);");
+        self.line("let __l = __device.new_library_with_source(BORING_MSL, &__options)");
+        self.indent += 1;
+        self.line(".map_err(|e| format!(\"MSL compile error: {}\", e))?;");
+        self.indent -= 1;
+        self.line("__BORING_METAL_LIBRARY.with(|c| *c.borrow_mut() = Some(__l.clone()));");
+        self.line("__l");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("};");
+        self.line("let __func = __library.get_function(__kernel_fn_name, None)");
+        self.indent += 1;
+        self.line(".map_err(|e| format!(\"kernel function not found: {}\", e))?;");
+        self.indent -= 1;
+        self.line("let __pipeline = __device.new_compute_pipeline_state_with_function(&__func)?;");
+        self.line("__BORING_METAL_PIPELINES.with(|c| c.borrow_mut().insert(__kernel_fn_name, __pipeline.clone()));");
+        self.line("Ok(__pipeline)");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
         // Default device helper.
         self.line("fn boring_metal_device() -> Device {");
         self.indent += 1;
@@ -957,19 +1017,10 @@ impl HostEmitter {
 
     fn emit_pipeline_init(&mut self, kernel_name: &str) {
         self.line("let __queue = __device.new_command_queue();");
-        self.line("let __options = CompileOptions::new();");
-        self.line("let __library = __device.new_library_with_source(BORING_MSL, &__options)");
-        self.indent += 1;
-        self.line(".map_err(|e| format!(\"MSL compile error: {}\", e))?;");
-        self.indent -= 1;
         self.line(&format!(
-            "let __func = __library.get_function(\"{}_kernel\", None)",
+            "let __pipeline = __boring_metal_pipeline(&__device, \"{}_kernel\")?;",
             kernel_name
         ));
-        self.indent += 1;
-        self.line(".map_err(|e| format!(\"kernel function not found: {}\", e))?;");
-        self.indent -= 1;
-        self.line("let __pipeline = __device.new_compute_pipeline_state_with_function(&__func)?;");
     }
 
     fn emit_field_default(&mut self, field: &KernelFieldDecl) {

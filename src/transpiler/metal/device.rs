@@ -75,10 +75,22 @@ impl DeviceEmitter {
         self.line("struct Dimension { uint width; uint height; };");
         self.blank();
 
-        // Emit free functions as device helpers callable from any kernel.
+        // Emit free functions as device helpers callable from any kernel --
+        // but only those actually reachable from kernel code. Free functions
+        // are ordinary Boring functions shared with the host (CPU) build, and
+        // routinely use dynamic-array / heap constructs (`[float]` growable
+        // arrays, `.push`, etc.) that have no MSL equivalent (MSL forbids
+        // pointer params without an explicit address space and has no heap
+        // allocator in device code). Emitting every free function
+        // unconditionally — regardless of whether any kernel calls it — used
+        // to make the generated kernels/main.metal fail to compile as soon as
+        // the program had ANY host-only helper with this shape, even if no
+        // kernel ever touched it. Restrict emission to the transitive closure
+        // of functions called from kernel entry points/methods instead.
+        let reachable = reachable_free_fns(program);
         for item in &program.items {
             if let Item::Fn(decl) = item {
-                if decl.qualifier.is_none() && !decl.task {
+                if decl.qualifier.is_none() && !decl.task && reachable.contains(&decl.name) {
                     self.emit_free_device_fn(decl);
                     self.blank();
                 }
@@ -486,6 +498,10 @@ impl DeviceEmitter {
                     let mut all_args = buffer_field_arg_names(&self.current_fields);
                     all_args.extend(args_s);
                     format!("{}_{}({})", self.current_kernel, method, all_args.join(", "))
+                } else if let Some(msl) = float_unary_method_msl(method, &self.expr(obj), &args_s) {
+                    // Boring's built-in numeric methods (`x.exp()`, `x.sqrt()`, ...) map
+                    // directly onto MSL's `metal_stdlib` free functions of the same shape.
+                    msl
                 } else {
                     // Method calls on a receiver other than `self` have no MSL equivalent
                     // in this minimal device emitter — leave a visible marker rather than
@@ -516,6 +532,162 @@ impl DeviceEmitter {
             }
             _ => "/* expr */".into(),
         }
+    }
+}
+
+// ── Reachability: which free functions does device code actually call? ────────
+
+/// Names of free (top-level, non-task, unqualified) functions transitively
+/// called from any kernel's device methods/entry point. Only these get
+/// emitted into the MSL device file — see call site's doc comment.
+fn reachable_free_fns(program: &Program) -> std::collections::HashSet<String> {
+    use std::collections::HashMap;
+
+    let free_fn_bodies: HashMap<&str, &[Stmt]> = program.items.iter().filter_map(|item| {
+        if let Item::Fn(decl) = item {
+            if decl.qualifier.is_none() && !decl.task {
+                return Some((decl.name.as_str(), decl.body.as_slice()));
+            }
+        }
+        None
+    }).collect();
+
+    let mut worklist: Vec<String> = Vec::new();
+    for item in &program.items {
+        if let Item::Kernel(decl) = item {
+            for method in &decl.methods {
+                collect_called_names(&method.body, &mut worklist);
+            }
+        }
+    }
+
+    let mut reachable = std::collections::HashSet::new();
+    while let Some(name) = worklist.pop() {
+        if !reachable.insert(name.clone()) { continue; }
+        if let Some(body) = free_fn_bodies.get(name.as_str()) {
+            collect_called_names(body, &mut worklist);
+        }
+    }
+    reachable
+}
+
+fn collect_called_names(stmts: &[Stmt], out: &mut Vec<String>) {
+    for stmt in stmts { collect_called_names_stmt(stmt, out); }
+}
+
+fn collect_called_names_stmt(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { collect_called_names_expr(v, out); } }
+        Stmt::Return(r) => { if let Some(v) = &r.value { collect_called_names_expr(v, out); } }
+        Stmt::Expr(e) => collect_called_names_expr(e, out),
+        Stmt::Throw(t) => { if let Some(v) = &t.value { collect_called_names_expr(v, out); } }
+        Stmt::Break(_, v) => { if let Some(v) = v { collect_called_names_expr(v, out); } }
+        Stmt::Wait(e, _) | Stmt::Yield(e, _) => collect_called_names_expr(e, out),
+        Stmt::If(i) => {
+            for (cond, body) in &i.branches {
+                collect_called_names_expr(cond, out);
+                collect_called_names(body, out);
+            }
+            if let Some(b) = &i.else_body { collect_called_names(b, out); }
+        }
+        Stmt::While(w) => { collect_called_names_expr(&w.condition, out); collect_called_names(&w.body, out); }
+        Stmt::DoWhile(d) => { collect_called_names_expr(&d.condition, out); collect_called_names(&d.body, out); }
+        Stmt::Loop(l) => collect_called_names(&l.body, out),
+        Stmt::For(f) => { collect_called_names_expr(&f.iterable, out); collect_called_names(&f.body, out); }
+        Stmt::Try(t) => {
+            collect_called_names(&t.body, out);
+            for c in &t.catch_clauses { collect_called_names(&c.body, out); }
+        }
+        Stmt::Defer(body) => collect_called_names(body, out),
+        Stmt::Match(m) => {
+            collect_called_names_expr(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
+                    MatchBody::Block(body) => collect_called_names(body, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
+    match &expr.kind {
+        ExprKind::Call(callee, args) => {
+            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
+            collect_called_names_expr(callee, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::GenericCall(callee, _, args) => {
+            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
+            collect_called_names_expr(callee, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::Pipe(lhs, name, args) => {
+            out.push(name.clone());
+            collect_called_names_expr(lhs, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+            collect_called_names_expr(obj, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
+        | ExprKind::Index(l, r) | ExprKind::Else(l, r) => {
+            collect_called_names_expr(l, out);
+            collect_called_names_expr(r, out);
+        }
+        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) | ExprKind::Cast(e, _)
+        | ExprKind::OptionalField(e, _) => collect_called_names_expr(e, out),
+        ExprKind::If(i) => {
+            for (cond, body) in &i.branches {
+                collect_called_names_expr(cond, out);
+                collect_called_names(body, out);
+            }
+            if let Some(b) = &i.else_body { collect_called_names(b, out); }
+        }
+        ExprKind::Match(m) => {
+            collect_called_names_expr(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
+                    MatchBody::Block(body) => collect_called_names(body, out),
+                }
+            }
+        }
+        ExprKind::Block(body) | ExprKind::Do(body) => collect_called_names(body, out),
+        ExprKind::Array(items) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
+            for e in items { collect_called_names_expr(e, out); }
+        }
+        ExprKind::ArrayFill { value, count } => {
+            collect_called_names_expr(value, out);
+            collect_called_names_expr(count, out);
+        }
+        ExprKind::ArrayAlloc { count } => collect_called_names_expr(count, out),
+        ExprKind::ArrayComp { expr, count, .. } => {
+            collect_called_names_expr(expr, out);
+            collect_called_names_expr(count, out);
+        }
+        ExprKind::ArrayCompIter { expr, iter, .. } => {
+            collect_called_names_expr(expr, out);
+            collect_called_names_expr(iter, out);
+        }
+        ExprKind::Dict(pairs) => {
+            for (k, v) in pairs { collect_called_names_expr(k, out); collect_called_names_expr(v, out); }
+        }
+        ExprKind::Range { start, end, .. } => {
+            collect_called_names_expr(start, out);
+            collect_called_names_expr(end, out);
+        }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { collect_called_names_expr(s, out); }
+            if let Some(e) = end { collect_called_names_expr(e, out); }
+        }
+        ExprKind::TryElse(a, b) => { collect_called_names_expr(a, out); collect_called_names_expr(b, out); }
+        _ => {}
     }
 }
 
@@ -689,6 +861,47 @@ fn map_builtin_fn(name: &str) -> String {
         "ceil"  => "ceil".into(),
         "round" => "round".into(),
         other   => other.into(),
+    }
+}
+
+/// Maps Boring's built-in float methods (`x.exp()`, `x.sqrt()`, ...) to MSL
+/// `metal_stdlib` calls. Mirrors the Rust-target mapping in
+/// `transpiler::emit_methods`'s `FLOAT_UNARY_METHODS` (same method set, MSL
+/// names instead of Rust `f64` method names). Returns `None` for methods this
+/// device emitter doesn't recognize, so the caller can fall back to its
+/// `/* unsupported */` marker.
+fn float_unary_method_msl(method: &str, obj: &str, args: &[String]) -> Option<String> {
+    let simple = match method {
+        "sqrt" => "sqrt", "cbrt" => "cbrt", "abs" => "fabs",
+        "floor" => "floor", "ceil" => "ceil", "round" => "round",
+        "exp" => "exp", "exp2" => "exp2", "ln" => "log",
+        "log2" => "log2", "log10" => "log10",
+        "sin" => "sin", "cos" => "cos", "tan" => "tan",
+        "asin" => "asin", "acos" => "acos", "atan" => "atan",
+        "sinh" => "sinh", "cosh" => "cosh", "tanh" => "tanh",
+        _ => "",
+    };
+    if !simple.is_empty() {
+        return Some(format!("{}({})", simple, obj));
+    }
+    match method {
+        "pow" | "powf" => {
+            let exp = args.first().cloned().unwrap_or_else(|| "1.0".into());
+            Some(format!("pow({}, {})", obj, exp))
+        }
+        "log" => {
+            let base = args.first().cloned().unwrap_or_else(|| "M_E_F".into());
+            Some(format!("(log({}) / log({}))", obj, base))
+        }
+        "atan2" => {
+            let other = args.first().cloned().unwrap_or_else(|| "0.0".into());
+            Some(format!("atan2({}, {})", obj, other))
+        }
+        "signum" => Some(format!("sign({})", obj)),
+        "recip"  => Some(format!("(1.0 / {})", obj)),
+        "toRadians" => Some(format!("({} * (M_PI_F / 180.0))", obj)),
+        "toDegrees" => Some(format!("({} * (180.0 / M_PI_F))", obj)),
+        _ => None,
     }
 }
 
