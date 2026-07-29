@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — ROCm backend</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="rocm-backend">ROCm backend</h1>
+<p><code>boring build --target rocm</code> generates a Rust + HIP C++ project that runs GPU kernels on AMD GPUs using ROCm&#x27;s HIP runtime — a native alternative to <code>--target cuda</code> for AMD hardware, requiring no NVIDIA GPU or CUDA toolkit.</p>
+<p>The Boring source is identical: the same <code>kernel</code> structs, qualifiers, and <code>gpu.*</code> built-ins work unchanged across CUDA, Metal, wgpu, and ROCm targets. For the language reference, see <a href="gpu-module.html">`gpu-module.md`</a>. For the canonical qualifier model and dispatch-parameter reference, see <a href="cuda-module.html">`cuda-module.md`</a> — this document only covers what&#x27;s different about ROCm.</p>
+<hr>
+<h2 id="motivation">Motivation</h2>
+<p>CUDA requires an NVIDIA GPU and the CUDA toolkit; ROCm is AMD&#x27;s equivalent stack, and HIP (Heterogeneous-compute Interface for Portability) is deliberately designed to be a near-1:1 source-level match for CUDA C and the CUDA driver API — <code>--target rocm</code> gives AMD GPU users a native target without going through wgpu&#x27;s cross-platform (but less direct) WGSL path.</p>
+<hr>
+<h2 id="device-side-mapping">Device-side mapping</h2>
+<p>HIP C++&#x27;s kernel-side syntax is source-compatible with CUDA C by design: <code>__global__</code>/<code>__device__</code>/<code>__constant__</code>/<code>__shared__</code> qualifiers, <code>threadIdx</code>/<code>blockIdx</code>/<code>blockDim</code>/<code>gridDim</code>, <code>atomicAdd</code> and friends, <code>__syncthreads()</code>, and device-side <code>printf</code> all carry the exact same names and semantics. The device-code emitter (<code>src/transpiler/rocm/device.rs</code>) is therefore a near-verbatim clone of the CUDA one — same tables as <a href="cuda-module.html">`cuda-module.md`</a>&#x27;s &quot;CUDA C mapping&quot; section apply unchanged, with <code>#include &lt;hip/hip_runtime.h&gt;</code> in place of <code>#include &lt;cuda_runtime.h&gt;</code>.</p>
+<table><thead><tr><th>Boring</th><th>CUDA C</th><th>HIP C++</th></tr></thead><tbody><tr><td><code>gpu.thread.x</code></td><td><code>threadIdx.x</code></td><td><code>threadIdx.x</code></td></tr><tr><td><code>gpu.block.x</code></td><td><code>blockIdx.x</code></td><td><code>blockIdx.x</code></td></tr><tr><td><code>gpu.block_dim.x</code></td><td><code>blockDim.x</code></td><td><code>blockDim.x</code></td></tr><tr><td><code>gpu.grid_dim.x</code></td><td><code>gridDim.x</code></td><td><code>gridDim.x</code></td></tr><tr><td><code>sync</code></td><td><code>__syncthreads()</code></td><td><code>__syncthreads()</code></td></tr><tr><td><code>&#x27;unified</code> field</td><td><code>cudaMallocManaged</code></td><td><code>hipMalloc</code> + host-visible copy via <code>DeviceBuffer&lt;T&gt;</code> (see below — HIP has no single-call managed-memory equivalent used here)</td></tr><tr><td><code>&#x27;global</code> field</td><td><code>cudaMalloc</code></td><td><code>hipMalloc</code></td></tr><tr><td><code>&#x27;shared</code> field</td><td><code>__shared__</code></td><td><code>__shared__</code></td></tr><tr><td><code>&#x27;const</code> scalar field</td><td><code>__constant__ T name;</code></td><td><code>__constant__ T name;</code></td></tr><tr><td><code>&#x27;const</code> fixed array field (<code>[T, N]</code>)</td><td><code>__constant__ T name[N];</code></td><td><code>__constant__ T name[N];</code></td></tr><tr><td>atomic <code>[i] +=</code> on <code>&#x27;actor&#x27;global</code></td><td><code>atomicAdd</code></td><td><code>atomicAdd</code></td></tr><tr><td><code>print</code> in kernel</td><td><code>printf</code></td><td><code>printf</code></td></tr></tbody></table>
+<hr>
+<h2 id="host-side-compilation-model">Host-side compilation model</h2>
+<p>There is no mature, widely-used safe Rust crate for ROCm/HIP analogous to <code>cudarc</code> (the crate the CUDA backend&#x27;s host code is built on). Rather than depend on an unverified or unmaintained third-party binding, this backend hand-rolls a small <code>extern &quot;C&quot;</code> FFI layer directly into the generated <code>src/main.rs</code>, linked against <code>libamdhip64</code> (ROCm&#x27;s stable, documented HIP runtime C API — <code>hipModuleLoadData</code>, <code>hipModuleLaunchKernel</code>, <code>hipMemcpy*</code>, <code>hipStreamCreateWithPriority</code>, etc.), plus a safe wrapper around it that deliberately mirrors cudarc&#x27;s own shape and method names:</p>
+<table><thead><tr><th>cudarc (CUDA backend)</th><th>ROCm backend equivalent</th></tr></thead><tbody><tr><td><code>CudaContext</code></td><td><code>HipContext</code></td></tr><tr><td><code>CudaStream</code></td><td><code>HipStream</code></td></tr><tr><td><code>CudaModule</code> / <code>CudaFunction</code></td><td><code>HipModule</code> / <code>HipFunction</code></td></tr><tr><td><code>CudaSlice&lt;T&gt;</code></td><td><code>DeviceBuffer&lt;T&gt;</code></td></tr><tr><td><code>.alloc_zeros()</code> / <code>.clone_htod()</code> / <code>.clone_dtoh()</code></td><td>same names</td></tr><tr><td><code>.launch_builder()</code> / <code>.arg()</code> / <code>.launch()</code></td><td>same names — <code>.arg()</code> takes a small <code>BoringKernelArg</code> trait implemented for <code>&amp;mut DeviceBuffer&lt;T&gt;</code> (pushes the device pointer&#x27;s own address) and for scalar/<code>Dimension</code> types (pushes the value&#x27;s address directly)</td></tr><tr><td>PTX loaded via <code>nvrtc</code>/<code>Ptx::from_src</code></td><td>a precompiled HIP code object, embedded via <code>include_bytes!</code> and loaded with <code>hipModuleLoadData</code></td></tr></tbody></table>
+<p>Keeping the same method names/shapes as cudarc means the ~1300 lines of Boring-AST-to-Rust statement/expression codegen shared with the CUDA backend (<code>emit_fn</code>/<code>emit_stmt</code>/<code>expr</code>/pattern matching/dict handling/GPU-residency tracking) carry over with only mechanical type-name substitutions, instead of re-deriving that whole pipeline from scratch.</p>
+<h3 id="compilation-pipeline">Compilation pipeline</h3>
+<div class="code-block"><pre><code>kernels/main.hip  --hipcc --genco--&gt;  code object (embedded via include_bytes!)
+                                            |
+                                    hipModuleLoadData (runtime)</code></pre></div>
+<p><code>build.rs</code> invokes <code>hipcc --genco</code> (HIP&#x27;s code-object generator, the HIP analogue of <code>nvcc --ptx</code>) to compile <code>kernels/main.hip</code> into a loadable code object, and links <code>libamdhip64</code> via <code>ROCM_PATH</code> (defaults to <code>/opt/rocm</code>). Set <code>BORING_ROCM_ARCH</code> (e.g. <code>gfx1100</code>) to target a specific GPU architecture; left unset, <code>hipcc</code> uses its own default detection.</p>
+<hr>
+<h2 id="gpu-type-on-rocm"><code>GPU</code> type on ROCm</h2>
+<table><thead><tr><th>Boring method</th><th>ROCm/HIP API</th></tr></thead><tbody><tr><td><code>name()</code></td><td><code>hipDeviceGetName</code></td></tr><tr><td><code>totalMem()</code></td><td><code>hipDeviceTotalMem</code></td></tr><tr><td><code>freeMem()</code></td><td><code>hipMemGetInfo().0</code></td></tr><tr><td><code>computeCapability()</code></td><td><code>hipDeviceComputeCapability</code></td></tr><tr><td><code>warpSize()</code></td><td><code>hipDeviceGetAttribute</code> + build-time header probe — see below</td></tr><tr><td><code>maxThreads()</code></td><td><code>hipDeviceGetAttribute</code> + build-time header probe — see below</td></tr><tr><td><code>maxSharedMem()</code></td><td><code>hipDeviceGetAttribute</code> + build-time header probe — see below</td></tr><tr><td><code>index()</code></td><td>index passed to <code>GPU(i)</code></td></tr></tbody></table>
+<p><code>hipDeviceAttribute_t</code>&#x27;s numeric enum values are not guaranteed ABI-stable across ROCm releases, unlike CUDA&#x27;s driver enum (which cudarc depends on directly). Rather than hardcode an attribute ID that could silently mean something different on a different ROCm version, <code>build.rs</code> compiles and runs a tiny C probe against whatever <code>hip/hip_runtime_api.h</code> is actually installed on the build machine, reads back the real <code>hipDeviceAttributeWarpSize</code>/<code>hipDeviceAttributeMaxThreadsPerBlock</code>/<code>hipDeviceAttributeSharedMemPerBlock</code> values, and bakes them into a generated <code>OUT_DIR/boring_hip_attrs.rs</code> that the host prelude <code>include!()</code>s. <code>warpSize()</code>/<code>maxThreads()</code>/<code>maxSharedMem()</code> then call <code>hipDeviceGetAttribute</code> with those probed constants. If the probe can&#x27;t be compiled or run (e.g. no ROCm headers available at build time), the constants fall back to <code>-1</code> and the three methods report a clean runtime error instead of querying with a guessed ID.</p>
+<p><code>GPU(0)</code> → <code>hipSetDevice(0)</code> (HIP has no separate context-creation call the way the CUDA driver API does — a <code>HipContext</code> records which device ordinal every subsequent op should target). <code>GPU.all()</code> → <code>hipGetDeviceCount()</code>, indexed 0..count.</p>
+<hr>
+<h2 id="known-limitations-vs-cuda">Known limitations vs CUDA</h2>
+<table><thead><tr><th>Feature</th><th>CUDA</th><th>ROCm</th></tr></thead><tbody><tr><td><code>warpSize</code>/<code>maxThreads</code>/<code>maxSharedMem</code></td><td>full support, hardcoded CUDA driver enum</td><td>full support — via a build-time probe of the local ROCm headers instead of a hardcoded ordinal, since <code>hipDeviceAttribute_t</code> isn&#x27;t ABI-stable across ROCm versions (see above)</td></tr><tr><td>Constant-memory upload</td><td><code>get_global</code> + <code>transmute_mut</code> + <code>memcpy_htod</code> (3 cudarc calls)</td><td>single <code>HipModule::upload_constant</code> helper — same effect, one call, since this backend controls both sides of the FFI</td></tr><tr><td><code>after =</code> ordering</td><td>CUDA streams + events</td><td>HIP streams + events (<code>hipStreamWaitEvent</code>) — same GPU-side, non-blocking semantics</td></tr><tr><td>Toolchain</td><td><code>nvcc</code></td><td><code>hipcc</code></td></tr><tr><td>Verified against real hardware</td><td>—</td><td>not independently verified against a real AMD GPU/ROCm toolchain (none available in this project&#x27;s dev environment) — validated via <code>cargo check</code> against the generated Rust with a stubbed build step instead, same caveat <code>metal-backend.md</code> documents for lacking a macOS toolchain</td></tr></tbody></table>
+<hr>
+<h2 id="generated-project-layout">Generated project layout</h2>
+<div class="code-block"><pre><code>&lt;stem&gt;_rocm/
+  src/main.rs        # Rust host code (hand-rolled HIP FFI + safe wrapper, no external GPU crate)
+  kernels/main.hip   # HIP C++ device code
+  build.rs           # invokes hipcc --genco, links libamdhip64
+  Cargo.toml         # no GPU crate dependency</code></pre></div>
+<p>Requires the ROCm toolkit (<code>hipcc</code>) and an AMD GPU.</p>
+<div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring build --target rocm main.br
+cd main_rocm &amp;&amp; cargo build</code></pre></div>
+<p><strong>Multi-file projects</strong>: <code>use &lt;file&gt;.br</code> in the entry file is resolved and inlined before transpilation — first relative to the importing file&#x27;s own directory, then against each path in the <code>BORING_PATH</code> environment variable (same search order as <code>boring run</code>). Circular and duplicate imports are merged once. A <code>use</code> that doesn&#x27;t resolve to a <code>.br</code> file on disk (e.g. <code>use std.collections</code>) is left as an ordinary import for the general transpiler to handle.</p>
+<hr>
+<h2 id="implementation-notes">Implementation notes</h2>
+<ul><li><strong>Host FFI</strong>: hand-rolled <code>extern &quot;C&quot;</code> bindings to the subset of the HIP runtime API needed (module loading, buffer alloc/copy, stream/event, kernel launch) — no external crate dependency. Linked against <code>libamdhip64</code> via <code>build.rs</code>&#x27;s <code>cargo:rustc-link-lib</code>.</li><li><strong><code>DeviceBuffer&lt;T&gt;</code></strong>: wraps a raw <code>hipMalloc</code>&#x27;d pointer + length + the <code>Arc&lt;HipStream&gt;</code> it was allocated on. <code>Drop</code> calls <code>hipFree</code>. <code>Clone</code> does a real device-to-device <code>hipMemcpyDtoD</code> — a correctness-preserving fallback for the rare case a resident value is needed twice, not the common path (every real call site moves a buffer instead of cloning it), matching the CUDA backend&#x27;s identical <code>CudaSlice::clone()</code> rationale.</li><li><strong>Kernel launch</strong>: <code>hipModuleLaunchKernel</code> takes a <code>void**</code> array where each entry points to the actual parameter value — <code>LaunchBuilder::arg</code> pushes a pointer to the device-pointer field itself for buffer args, and a pointer to the scalar&#x27;s own storage for scalar/<code>Dimension</code> args. Both are valid only for the duration of the synchronous launch call, which happens while the borrows are still alive.</li><li><strong>Streams</strong>: one persistent, FIFO-ordered <code>HipStream</code> cached per dispatch priority (mirrors the CUDA backend&#x27;s identical fix) — GPU-side ordering (<code>hipStreamWaitEvent</code>) for <code>after =</code> dependencies instead of a CPU-blocking sync on every dispatch.</li><li><strong>Not independently verified against real ROCm hardware</strong> — see the &quot;Known limitations&quot; table above.</li></ul>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

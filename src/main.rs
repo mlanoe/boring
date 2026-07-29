@@ -344,6 +344,8 @@ fn print_help() {
     eprintln!("    boring build --target kernel <file.br>   Emit a kernel Cargo project from a single file");
     eprintln!("    boring build --target cuda               Emit a CUDA Cargo project from boring.toml");
     eprintln!("    boring build --target cuda <file.br>     Emit a CUDA Cargo project from a single file");
+    eprintln!("    boring build --target rocm               Emit a ROCm/HIP Cargo project from boring.toml (AMD GPUs)");
+    eprintln!("    boring build --target rocm <file.br>     Emit a ROCm/HIP Cargo project from a single file");
     eprintln!("    boring build --target metal              Emit a Metal Cargo project from boring.toml");
     eprintln!("    boring build --target metal <file.br>    Emit a Metal Cargo project from a single file");
     eprintln!("    boring build --target wgpu               Emit a wgpu Cargo project from boring.toml (Windows/Linux/macOS)");
@@ -419,6 +421,7 @@ fn parse_build_command(build_args: &[String]) {
 
     let mut target_kernel = false;
     let mut target_cuda   = false;
+    let mut target_rocm   = false;
     let mut target_metal  = false;
     let mut target_wgpu   = false;
     let mut mode = TranspileMode::Strict;
@@ -440,16 +443,17 @@ fn parse_build_command(build_args: &[String]) {
                 match build_args.get(i).map(|s| s.as_str()) {
                     Some("kernel") => target_kernel = true,
                     Some("cuda")   => target_cuda   = true,
+                    Some("rocm")   => target_rocm   = true,
                     Some("metal")  => target_metal  = true,
                     Some("wgpu")   => target_wgpu   = true,
                     Some(t) => {
                         eprintln!("error: unknown target '{}'", t);
-                        eprintln!("hint:  supported targets: kernel, cuda, metal, wgpu");
+                        eprintln!("hint:  supported targets: kernel, cuda, rocm, metal, wgpu");
                         process::exit(1);
                     }
                     None => {
                         eprintln!("error: --target requires a value");
-                        eprintln!("hint:  supported targets: kernel, cuda, metal, wgpu");
+                        eprintln!("hint:  supported targets: kernel, cuda, rocm, metal, wgpu");
                         process::exit(1);
                     }
                 }
@@ -556,6 +560,10 @@ fn parse_build_command(build_args: &[String]) {
         eprintln!("error: --threading is not available for the cuda target");
         process::exit(1);
     }
+    if target_rocm && threading != ThreadingMode::Multi {
+        eprintln!("error: --threading is not available for the rocm target");
+        process::exit(1);
+    }
     if target_metal && threading != ThreadingMode::Multi {
         eprintln!("error: --threading is not available for the metal target");
         process::exit(1);
@@ -573,6 +581,18 @@ fn parse_build_command(build_args: &[String]) {
             None => {
                 let (toml, _) = load_project_toml();
                 emit_cuda(&toml.main, &toml.version);
+                return;
+            }
+        }
+    }
+
+    // ROCm target — short-circuit before the general config path.
+    if target_rocm {
+        match file {
+            Some(path) => { emit_rocm(path, "0.1.0"); return; }
+            None => {
+                let (toml, _) = load_project_toml();
+                emit_rocm(&toml.main, &toml.version);
                 return;
             }
         }
@@ -1177,6 +1197,69 @@ fn emit_cuda(path: &str, version: &str) {
     eprintln!("  cd {} && cargo build", project_dir.display());
     if !cuda_out.kernel_names.is_empty() {
         eprintln!("  Kernels: {}", cuda_out.kernel_names.join(", "));
+    }
+}
+
+fn emit_rocm(path: &str, version: &str) {
+    let program = parse_and_merge_program(path);
+    let path = PathBuf::from(path);
+
+    let stem = path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let base_dir    = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let project_dir = base_dir.join(format!("{}_rocm", stem));
+
+    let rocm_out = transpiler::rocm::transpile_rocm(&program, &stem, version);
+    if !rocm_out.errors.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_errors(&path, &source, &rocm_out.errors);
+        process::exit(1);
+    }
+
+    // Create directory layout.
+    let src_dir     = project_dir.join("src");
+    let kernels_dir = project_dir.join("kernels");
+    for dir in [&src_dir, &kernels_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create '{}': {}", dir.display(), e);
+            process::exit(1);
+        }
+    }
+
+    // src/main.rs
+    let main_rs = src_dir.join("main.rs");
+    if let Err(e) = std::fs::write(&main_rs, &rocm_out.host_rs) {
+        eprintln!("error: cannot write '{}': {}", main_rs.display(), e);
+        process::exit(1);
+    }
+
+    // kernels/main.hip
+    let hip_file = kernels_dir.join("main.hip");
+    if let Err(e) = std::fs::write(&hip_file, &rocm_out.device_hip) {
+        eprintln!("error: cannot write '{}': {}", hip_file.display(), e);
+        process::exit(1);
+    }
+
+    // build.rs
+    let build_rs = project_dir.join("build.rs");
+    if let Err(e) = std::fs::write(&build_rs, &rocm_out.build_rs) {
+        eprintln!("error: cannot write '{}': {}", build_rs.display(), e);
+        process::exit(1);
+    }
+
+    // Cargo.toml
+    let cargo_toml = project_dir.join("Cargo.toml");
+    if let Err(e) = std::fs::write(&cargo_toml, &rocm_out.cargo_toml) {
+        eprintln!("error: cannot write '{}': {}", cargo_toml.display(), e);
+        process::exit(1);
+    }
+
+    eprintln!("Generated ROCm project at '{}'", project_dir.display());
+    eprintln!("  Requires the ROCm toolkit (hipcc) and an AMD GPU.");
+    eprintln!("  cd {} && cargo build", project_dir.display());
+    if !rocm_out.kernel_names.is_empty() {
+        eprintln!("  Kernels: {}", rocm_out.kernel_names.join(", "));
     }
 }
 

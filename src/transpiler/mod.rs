@@ -33,6 +33,7 @@ pub mod kernel;
 pub mod cuda;
 pub mod metal;
 pub mod wgpu;
+pub mod rocm;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
 

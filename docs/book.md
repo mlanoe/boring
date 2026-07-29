@@ -325,15 +325,15 @@ Casting to a narrower type checks the range and produces `nil` (or errors, depen
 
 **GPU targets.** Each GPU backend's own numeric type system limits which widths a `kernel` struct field can use:
 
-| Width | `--target wgpu` (WGSL) | `--target cuda` (CUDA C) | `--target metal` (MSL) |
-|-------|-------------------------|---------------------------|--------------------------|
-| 8-bit | not supported (compile error) | full support (`uint8_t`/`int8_t`) | full support (`uchar`/`char`) |
-| 16-bit | not supported (compile error) | full support | full support (`ushort`/`short`) |
-| 32-bit | full support (`i32`/`u32`) | full support | full support (`int`/`uint`) |
-| 64-bit | not supported (compile error) | full support | not supported (compile error) |
-| 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | not supported (compile error) |
+| Width | `--target wgpu` (WGSL) | `--target cuda` (CUDA C) | `--target rocm` (HIP C++) | `--target metal` (MSL) |
+|-------|-------------------------|---------------------------|-----------------------------|--------------------------|
+| 8-bit | not supported (compile error) | full support (`uint8_t`/`int8_t`) | full support (`uint8_t`/`int8_t`) | full support (`uchar`/`char`) |
+| 16-bit | not supported (compile error) | full support | full support | full support (`ushort`/`short`) |
+| 32-bit | full support (`i32`/`u32`) | full support | full support | full support (`int`/`uint`) |
+| 64-bit | not supported (compile error) | full support | full support | not supported (compile error) |
+| 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | supported via the non-standard `__int128` GCC/HIP-clang extension | not supported (compile error) |
 
-WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.
+WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support. Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.
 
 ### Integer literals
 
@@ -7160,6 +7160,9 @@ Complete GPU language reference: `kernel` struct syntax, const generic kernel de
 
 **[CUDA backend](cuda-module.html)**
 CUDA codegen internals: generated file layout, `cudarc` host API, PTX compilation via `build.rs`, Boring construct to CUDA C mapping, and known limitations.
+
+**[ROCm backend](rocm-backend.html)**
+AMD GPU target (`boring build --target rocm`): HIP C++ device codegen (near-identical to CUDA C), hand-rolled HIP FFI host API (no `cudarc`-equivalent crate exists for ROCm), `hipcc --genco` code-object compilation, and limitations vs CUDA.
 
 **[Metal backend](metal-backend.html)**
 macOS GPU target (`boring build --target metal`): qualifier → MSL address space mapping, built-in substitution, runtime MSL compilation via `newLibraryWithSource`, limitations vs CUDA.

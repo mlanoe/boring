@@ -5,6 +5,7 @@ Boring supports GPU computing through `kernel` structs — a dedicated declarati
 This document covers the **language syntax and semantics** shared by all backends. For backend-specific codegen details, see:
 
 - [`cuda-module.md`](cuda-module.html) — CUDA C mapping, generated project layout, `cudarc` host API, PTX compilation
+- [`rocm-backend.md`](rocm-backend.html) — HIP C++ mapping (near-identical to CUDA C), hand-rolled HIP FFI host API, AMD GPU support
 - [`metal-backend.md`](metal-backend.html) — MSL address space mapping, Metal runtime compilation
 - [`wgpu-backend.md`](wgpu-backend.html) — WGSL mapping, pipeline overrides, cross-platform GPU support
 

@@ -128,7 +128,7 @@ li { margin-bottom: 0.3rem; }
 <h1 id="gpu-computing--language-reference">GPU computing — language reference</h1>
 <p>Boring supports GPU computing through <code>kernel</code> structs — a dedicated declaration form that groups device memory fields, an <code>init</code> allocator, device-side helpers, and an anonymous entry point (<code>def ()</code>).</p>
 <p>This document covers the <strong>language syntax and semantics</strong> shared by all backends. For backend-specific codegen details, see:</p>
-<ul><li><a href="cuda-module.html">`cuda-module.md`</a> — CUDA C mapping, generated project layout, <code>cudarc</code> host API, PTX compilation</li><li><a href="metal-backend.html">`metal-backend.md`</a> — MSL address space mapping, Metal runtime compilation</li><li><a href="wgpu-backend.html">`wgpu-backend.md`</a> — WGSL mapping, pipeline overrides, cross-platform GPU support</li></ul>
+<ul><li><a href="cuda-module.html">`cuda-module.md`</a> — CUDA C mapping, generated project layout, <code>cudarc</code> host API, PTX compilation</li><li><a href="rocm-backend.html">`rocm-backend.md`</a> — HIP C++ mapping (near-identical to CUDA C), hand-rolled HIP FFI host API, AMD GPU support</li><li><a href="metal-backend.html">`metal-backend.md`</a> — MSL address space mapping, Metal runtime compilation</li><li><a href="wgpu-backend.html">`wgpu-backend.md`</a> — WGSL mapping, pipeline overrides, cross-platform GPU support</li></ul>
 <hr>
 <h2 id="quick-start">Quick start</h2>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Scale:
