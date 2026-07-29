@@ -203,6 +203,42 @@ kernel Z:
 }
 
 #[test]
+fn host_kernel_new_inlines_top_level_scalar() {
+    // A top-level scalar `let` referenced inside a kernel's `init(...)` body
+    // (here via `[0 for ..n]`) used to emit a bare `n` identifier in the
+    // generated `impl VectorAdd { fn new(...) }` -- that constructor is its
+    // own Rust fn/impl block, textually and scope-wise separate from
+    // `fn main()`, which is the only place `n` actually becomes a Rust local
+    // (see `top_level_scalars`'s doc in `cuda::host`). A real E0425
+    // ("cannot find value `n` in this scope"), confirmed via `cargo check`.
+    let (_, rs) = cuda_codegen("host_kernel_new_scalar", r#"
+let n = 1000
+
+kernel VectorAdd:
+    let [int]'global  a
+    mut [int]'unified result
+
+    init([int]'global input_a):
+        a = input_a
+        result = [0 for ..n]
+
+    def ():
+        let i = gpu.thread.x
+        result[i] = a[i]
+
+var host_a = [i for i in 0..n]
+var k = VectorAdd(host_a)
+kernel:
+    k(block = 256)
+"#);
+    assert!(rs.contains("alloc_zeros::<i64>(1000 as usize)"),
+        "expected the top-level scalar `n` inlined as its literal value inside `VectorAdd::new`;\ngot:\n{rs}");
+    let new_fn = rs.split("fn new(").nth(1).unwrap_or("");
+    assert!(!new_fn.contains("(n as usize)"),
+        "`VectorAdd::new` must not reference bare `n` -- it isn't in scope there;\ngot:\n{rs}");
+}
+
+#[test]
 fn host_shared_field_absent_from_rust_struct() {
     let (_, rs) = cuda_codegen("host_shared_absent", r#"
 kernel S:
