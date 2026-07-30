@@ -128,8 +128,8 @@ print "Hello, {name}!"
 
 | Boring | Rust |
 |---|---|
-| `int` | `i64` |
-| `uint` | `u64` |
+| `int` | `isize` |
+| `uint` | `usize` |
 | `float` | `f64` |
 | `bool` | `bool` |
 | `string` | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread) — or `&'static str` in strict mode (literals only) |

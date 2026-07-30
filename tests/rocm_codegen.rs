@@ -234,7 +234,7 @@ var k = VectorAdd(host_a)
 kernel:
     k(block = 256)
 "#);
-    assert!(rs.contains("alloc_zeros::<i64>(1000 as usize)"),
+    assert!(rs.contains("alloc_zeros::<isize>(1000 as usize)"),
         "expected the top-level scalar `n` inlined as its literal value inside `VectorAdd::new`;\ngot:\n{rs}");
     let new_fn = rs.split("fn new(").nth(1).unwrap_or("");
     assert!(!new_fn.contains("(n as usize)"),
@@ -563,6 +563,14 @@ let k = new(g0) Scale(data)
     // The arena expression (g0) must appear as the first arg to Scale::new.
     assert!(rs.contains("Scale::new(g0,") || rs.contains("Scale::new(g0 ,"),
         "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
+    // `data` is a plain host Vec<f64> at this point -- the arena-qualified
+    // constructor call must upload it via clone_htod exactly like the plain
+    // `Scale(data)` call site does (see `emit_kernel_ctor_args`), not pass it
+    // straight through as a bare Vec where Scale::new expects a
+    // DeviceBuffer<f64> (mirrors the identical bug fixed in cuda::host's
+    // `new(g) Scale(data)` handling).
+    assert!(rs.contains("clone_htod"),
+        "expected clone_htod at the new(g0) Scale(data) call site;\ngot:\n{rs}");
 }
 
 // ─── sequential kernel launches in kernel: block ───────────────────────────────

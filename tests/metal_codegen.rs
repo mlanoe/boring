@@ -351,6 +351,12 @@ kernel S:
 
 #[test]
 fn host_init_uploads_array_via_new_buffer_with_data() {
+    // The upload doesn't happen inside `Scale::new` itself -- `data`'s param
+    // is already a `Buffer` there; the upload happens at the CONSTRUCTOR
+    // CALL SITE instead (`emit_kernel_ctor_args`). A source snippet with no
+    // such call site (as this test previously had) can never emit
+    // `new_buffer_with_data` anywhere regardless of whether the codegen is
+    // correct -- this was a stale test from before that refactor.
     let (_, rs) = metal_codegen("host_htod", r#"
 kernel Scale:
     mut [float]'unified buf
@@ -359,9 +365,46 @@ kernel Scale:
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k = Scale(data)
 "#);
     assert!(rs.contains("new_buffer_with_data"),
-        "expected new_buffer_with_data for array upload;\ngot:\n{rs}");
+        "expected new_buffer_with_data at the Scale(data) constructor call site;\ngot:\n{rs}");
+    // `data` is a plain host Vec<f64> (the general pipeline's float
+    // convention) but Metal buffers are always f32 (MSL has no native f64) --
+    // missing this cast doesn't fail to compile, it silently copies half the
+    // intended bytes (mem::size_of::<f32>() against actual f64 data),
+    // confirmed by inspecting the generated Rust directly before this fix.
+    assert!(rs.contains("as f32"),
+        "expected an explicit f64->f32 cast before uploading the host array;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_new_with_arena_uploads_array_via_new_buffer_with_data() {
+    // Same upload requirement as the plain `Scale(data)` call site above,
+    // but through the arena-qualified `new(g) Scale(data)` constructor path
+    // -- this used to skip the whole buffer-upload dance and pass `data`
+    // straight through as a bare `Vec<f64>` where `Scale::new` expects a
+    // `Buffer`, a real type mismatch confirmed via cargo check (mirrors the
+    // identical bug fixed in cuda::host's `new(g) Scale(data)` handling).
+    let (_, rs) = metal_codegen("host_htod_arena", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let g0 = GPU(0)
+let data = [1.0, 2.0]
+let k = new(g0) Scale(data)
+"#);
+    assert!(rs.contains("new_buffer_with_data"),
+        "expected new_buffer_with_data at the new(g0) Scale(data) call site;\ngot:\n{rs}");
+    assert!(rs.contains("as f32"),
+        "expected an explicit f64->f32 cast before uploading the host array;\ngot:\n{rs}");
 }
 
 // ─── host — __boring_launch ───────────────────────────────────────────────────
@@ -484,6 +527,41 @@ kernel Scale:
         "expected read_buf accessor for 'unified array;\ngot:\n{rs}");
     assert!(rs.contains("from_raw_parts"),
         "expected unsafe slice in read accessor;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_gpu_failure_surfaces_as_a_real_error_not_silent_wrong_behavior() {
+    // Before this fix, `__boring_metal_flush` only called `wait_until_completed()`
+    // and never inspected the command buffer's own status -- a GPU-side failure
+    // (invalid threadgroup size, out-of-bounds access, device removal, ...)
+    // completed with `status() == Error` and nobody looked, so `read_buf()`
+    // happily read back whatever garbage/zeroed memory was left, reporting
+    // success regardless. Confirmed via a real `cargo check` against the real
+    // `metal` crate that this whole chain (flush -> read_<field> -> call site)
+    // compiles end-to-end.
+    let (_, rs) = metal_codegen("gpu_failure_surfaces", r#"
+kernel Scale:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k = Scale(data)
+kernel:
+    k(block = 2)
+print "{k.buf[0]}"
+"#);
+    assert!(rs.contains("fn __boring_metal_flush() -> Result<(), Box<dyn std::error::Error + Send + Sync>>"),
+        "expected __boring_metal_flush to return a real Result;\ngot:\n{rs}");
+    assert!(rs.contains("buf.status() == MTLCommandBufferStatus::Error"),
+        "expected __boring_metal_flush to check the command buffer's completion status;\ngot:\n{rs}");
+    assert!(rs.contains("fn read_buf(&self) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>"),
+        "expected read_buf to propagate a real Result instead of silently returning garbage on failure;\ngot:\n{rs}");
+    assert!(rs.contains("__boring_metal_flush()?;"),
+        "expected read_buf to propagate __boring_metal_flush's error via ?;\ngot:\n{rs}");
+    assert!(rs.contains("k.read_buf()?[0 as usize]"),
+        "expected the k.buf[0] read call site to propagate via ? into main()'s own Result;\ngot:\n{rs}");
 }
 
 // ─── infrastructure — Cargo.toml ─────────────────────────────────────────────

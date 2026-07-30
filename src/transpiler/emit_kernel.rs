@@ -591,7 +591,7 @@ impl Transpiler {
         } else {
             ("1".to_string(), "1".to_string(), "1".to_string())
         };
-        Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32);"))
+        Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
     }
 
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked

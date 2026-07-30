@@ -174,6 +174,15 @@ kernel Scale:
 
 #[test]
 fn host_init_uploads_unified_via_htod() {
+    // The htod upload doesn't happen inside `Scale::new` itself anymore --
+    // `Scale::new`'s `data` param is already a `CudaSlice<f64>` (see
+    // `host_unified_field_becomes_cuda_slice`); the upload happens at the
+    // CONSTRUCTOR CALL SITE instead (`emit_kernel_ctor_args`), converting the
+    // host `Vec` argument before it reaches `Scale::new`. A source snippet
+    // with no such call site (as this test previously had) can never emit
+    // `clone_htod` anywhere, regardless of whether the codegen is correct --
+    // this was a stale test from before that refactor; a real call site is
+    // needed to exercise the assertion at all.
     let (_, rs) = cuda_codegen("host_htod", r#"
 kernel Scale:
     mut [float]'unified buf
@@ -182,9 +191,12 @@ kernel Scale:
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k = Scale(data)
 "#);
     assert!(rs.contains("clone_htod"),
-        "expected htod_sync_copy in constructor;\ngot:\n{rs}");
+        "expected clone_htod at the Scale(data) constructor call site;\ngot:\n{rs}");
 }
 
 #[test]
@@ -231,7 +243,7 @@ var k = VectorAdd(host_a)
 kernel:
     k(block = 256)
 "#);
-    assert!(rs.contains("alloc_zeros::<i64>(1000 as usize)"),
+    assert!(rs.contains("alloc_zeros::<isize>(1000 as usize)"),
         "expected the top-level scalar `n` inlined as its literal value inside `VectorAdd::new`;\ngot:\n{rs}");
     let new_fn = rs.split("fn new(").nth(1).unwrap_or("");
     assert!(!new_fn.contains("(n as usize)"),
@@ -555,6 +567,16 @@ let k = new(g0) Scale(data)
     // The arena expression (g0) must appear as the first arg to Scale::new.
     assert!(rs.contains("Scale::new(g0,") || rs.contains("Scale::new(g0 ,"),
         "expected g0 as first arg to Scale::new;\ngot:\n{rs}");
+    // `data` is a plain host Vec<f64> at this point -- the arena-qualified
+    // constructor call must upload it via clone_htod exactly like the plain
+    // `Scale(data)` call site does (see `emit_kernel_ctor_args`), not pass it
+    // straight through as a bare Vec where Scale::new expects a CudaSlice<f64>.
+    // This was a real E0308 ("expected CudaSlice<f64>, found Vec<{float}>"),
+    // confirmed via cargo check against real cudarc 0.19.8, before the `New`
+    // arm of `expr()` was fixed to route through `emit_kernel_ctor_args`
+    // instead of emitting each arg raw.
+    assert!(rs.contains("clone_htod"),
+        "expected clone_htod at the new(g0) Scale(data) call site;\ngot:\n{rs}");
 }
 
 // ─── Item 4 — sequential kernel launches in kernel: block ───────────────────

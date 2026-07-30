@@ -43,6 +43,28 @@ pub fn check(program: &Program) -> CheckResult {
     CheckResult { errors: checker.errors, warnings: checker.warnings }
 }
 
+/// Runs ONLY the kernel-dispatch-qualifier check (`check_kernel_dispatch_qualifier`)
+/// -- every other check (`mut 'shared`, immutability, `lazy` misuse, GPU-resident
+/// opacity) is walked but silenced. Used by the four GPU `emit_*` targets
+/// (cuda/metal/rocm/wgpu), which never ran the full checker at all before (see
+/// `check_kernel_dispatch_qualifier`'s doc). The full `check()` isn't safe to turn
+/// on wholesale for those targets yet: `check_gpu_opacity` has a real, pre-existing
+/// false positive on the GPU-resident-tuple-return pattern
+/// (`tests/wgpu_codegen.rs`'s `test_gpu_resident_tuple_return_*` -- the transpiler's
+/// `try_emit_gpu_resident_tuple_return` supports it, the checker's opacity walk
+/// doesn't know about tail-position tuple returns) -- discovered by wiring the full
+/// checker in and watching three previously-passing wgpu tests newly fail. That gap
+/// predates and is unrelated to kernel-dispatch-qualifier rejection; fixing it is
+/// its own separate task, not silently bundled in here.
+pub fn check_kernel_dispatch_only(program: &Program) -> CheckResult {
+    let mut checker = Checker::new();
+    checker.kernel_dispatch_only = true;
+    checker.collect_signatures(program);
+    checker.collect_gpu_arg_params(program);
+    checker.check_program(program);
+    CheckResult { errors: checker.errors, warnings: checker.warnings }
+}
+
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
 /// One variable entry in the scope stack.
@@ -115,6 +137,11 @@ struct Checker {
     /// position, the same way a plain `let fc = linear_gpu(...)` infers it from the
     /// (single) return type. See `check_let_destructure`.
     fn_returns_resident_tuple: HashMap<String, Vec<bool>>,
+    /// When `true`, every check EXCEPT `check_kernel_dispatch_qualifier` is silenced
+    /// (the tree is still walked, to keep scope/binding tracking correct, but no
+    /// other error is pushed). See `check_kernel_dispatch_only`'s doc for why this
+    /// exists.
+    kernel_dispatch_only: bool,
 }
 
 impl Checker {
@@ -128,6 +155,7 @@ impl Checker {
             fn_returns_resident: HashMap::new(),
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
+            kernel_dispatch_only: false,
         }
     }
 
@@ -413,6 +441,7 @@ impl Checker {
     // ── Qualifier constraint: `mut 'shared` ───────────────────────────────────
 
     fn check_qualifier_constraint(&mut self, binding: &BindingKind, ty: &Option<Type>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
         if !matches!(binding, BindingKind::Mut) { return; }
         let Some(ty) = ty else { return };
         if self.type_has_shared(ty) {
@@ -431,6 +460,43 @@ impl Checker {
                 self.type_has_shared(inner)
             }
             _ => false,
+        }
+    }
+
+    // ── Kernel dispatch: reject a `'shared`/`'actor`/`'guard`-qualified instance ──
+
+    /// A kernel struct instance dispatched via `kernel:` is launched through
+    /// `__boring_launch(mut self, ...)` — it needs direct, exclusive ownership on
+    /// the host side. `'shared`/`'actor`(`'task`)/`'guard`(`'task`) wrap the value in
+    /// `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock`, none of which the generated dispatch
+    /// code knows how to unwrap; nothing previously rejected this combination at
+    /// compile time (see `docs/cuda-module.md`'s "Known limitations").
+    fn qualifier_name_for_kernel_dispatch(&self, ty: &Type) -> Option<&'static str> {
+        match ty {
+            Type::Qualified(_, OwnerQual::Shared)    => Some("'shared"),
+            Type::Qualified(_, OwnerQual::Actor)     => Some("'actor"),
+            Type::Qualified(_, OwnerQual::ActorTask) => Some("'actor'task"),
+            Type::Qualified(_, OwnerQual::Guard)     => Some("'guard"),
+            Type::Qualified(_, OwnerQual::GuardTask) => Some("'guard'task"),
+            Type::Qualified(inner, _) => self.qualifier_name_for_kernel_dispatch(inner),
+            _ => None,
+        }
+    }
+
+    fn check_kernel_dispatch_qualifier(&mut self, kernel: &Expr, line: usize, col: usize) {
+        let ExprKind::Var(name) = &kernel.kind else { return };
+        let Some(binding) = self.lookup(name) else { return };
+        if binding.kernel_type.is_none() { return; }
+        let Some(ty) = &binding.ty else { return };
+        if let Some(qual) = self.qualifier_name_for_kernel_dispatch(ty) {
+            self.error(
+                format!(
+                    "cannot dispatch `{name}` via `kernel:` — it is `{qual}`-qualified; \
+                     kernel dispatch needs direct, exclusive ownership, not a shared/actor/guard \
+                     wrapper, so declare `{name}` without a wrapping qualifier"
+                ),
+                line, col,
+            );
         }
     }
 
@@ -688,6 +754,17 @@ impl Checker {
             }
             ExprKind::Call(callee, args) => {
                 self.check_expr(callee);
+                // `k(block = ...)` inside a `kernel:` block is a dispatch call, not a
+                // constructor call (a constructor's callee is the kernel TYPE name,
+                // e.g. `Scale(data)`; only an actual instance VARIABLE bound to a
+                // known kernel type can reach here as `callee`) -- see
+                // `check_kernel_dispatch_qualifier`'s doc for why this needs checking.
+                // Note: `ExprKind::KernelLaunch` looks like the obvious place for this
+                // (and is also checked there, defensively), but the parser never
+                // actually constructs that node for the `kernel:` block's `k(...)`
+                // call sites -- they parse as an ordinary `Call`, confirmed by
+                // grepping every parser file for `KernelLaunch` construction (none).
+                self.check_kernel_dispatch_qualifier(callee, expr.line, expr.col);
                 // A resident value passed as a bare argument at a position the callee
                 // is known to consume residently (`fn_gpu_arg_params`, populated by
                 // `scan_fn_gpu_arg_params`) is legal without `with` first — that's the
@@ -775,6 +852,7 @@ impl Checker {
             ExprKind::JoinAll(exprs) => { for e in exprs { self.check_expr(e); } }
             ExprKind::KernelLaunch { kernel, config } => {
                 self.check_expr(kernel);
+                self.check_kernel_dispatch_qualifier(kernel, expr.line, expr.col);
                 if let Some(b) = &config.block { self.check_expr(b); }
                 if let Some(g) = &config.grid  { self.check_expr(g); }
             }
@@ -807,6 +885,7 @@ impl Checker {
     // ── Immutability check on assignment targets ───────────────────────────────
 
     fn check_assign_target(&mut self, lhs: &Expr, assign_line: usize, assign_col: usize) {
+        if self.kernel_dispatch_only { return; }
         if let ExprKind::Var(name) = &lhs.kind {
             // `_` is the discard wildcard — never an error as assignment target.
             if name == "_" { return; }
@@ -849,10 +928,12 @@ impl Checker {
         let mut newly_opened = Vec::new();
         for name in &s.names {
             if self.open_with_names.contains(name.as_str()) {
-                self.error(
-                    format!("nested `with {name}:` block on the same name is not allowed (double-acquire)"),
-                    s.line, s.col,
-                );
+                if !self.kernel_dispatch_only {
+                    self.error(
+                        format!("nested `with {name}:` block on the same name is not allowed (double-acquire)"),
+                        s.line, s.col,
+                    );
+                }
             } else {
                 self.open_with_names.insert(name.clone());
                 newly_opened.push(name.clone());
@@ -870,6 +951,7 @@ impl Checker {
     /// that is just a plain array (not sourced from a kernel field) is unrestricted —
     /// see `examples/saxpy.br`.
     fn check_gpu_opacity(&mut self, name: &str, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
         if self.open_with_names.contains(name) { return; }
         let Some(binding) = self.lookup(name) else { return };
         if !binding.resident_from_field { return; }
@@ -1075,6 +1157,36 @@ let result = k.y
 print "{result}"
 "#;
         let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    // ── Kernel dispatch qualifier rejection ────────────────────────────────────
+
+    #[test]
+    fn shared_qualified_kernel_instance_cannot_be_dispatched() {
+        let src = format!("{KERNEL_DECL}\nlet k'shared = Saxpy()\nkernel:\n    k(block = 256)\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("'shared")), "expected a qualifier-rejection error, got {errs:?}");
+    }
+
+    #[test]
+    fn actor_qualified_kernel_instance_cannot_be_dispatched() {
+        let src = format!("{KERNEL_DECL}\nlet k'actor = Saxpy()\nkernel:\n    k(block = 256)\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("'actor")), "expected a qualifier-rejection error, got {errs:?}");
+    }
+
+    #[test]
+    fn guard_qualified_kernel_instance_cannot_be_dispatched() {
+        let src = format!("{KERNEL_DECL}\nlet k'guard = Saxpy()\nkernel:\n    k(block = 256)\n");
+        let errs = errors_for(&src);
+        assert!(errs.iter().any(|e| e.contains("'guard")), "expected a qualifier-rejection error, got {errs:?}");
+    }
+
+    #[test]
+    fn unqualified_kernel_instance_dispatch_is_fine() {
+        let src = format!("{KERNEL_DECL}\nmut k = Saxpy()\nkernel:\n    k(block = 256)\n");
+        let errs = errors_for(&src);
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 }

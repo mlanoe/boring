@@ -137,19 +137,27 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 - `[T]'global` / `'unified` 1D array field → `grid = ceil(len(buf) / block)`
 - Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on 1D array inference.
 
+**Ownership qualifier restriction:** a kernel struct instance dispatched via `kernel:` must be declared with no wrapping ownership qualifier — `'shared`/`'actor`(`'task`)/`'guard`(`'task`) are rejected at compile time (semantic checker), since `kernel:` dispatch needs direct, exclusive ownership on the host side, not an `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock` handle.
+
+```boring
+let k'shared = Scale(data)   # error: cannot dispatch `k` via `kernel:` — it is `'shared`-qualified
+kernel:
+    k(block = 256)
+```
+
 ---
 
 ## `KernelHandle`
 
-`kernel(...)` returns a `KernelHandle<T>` where `T` is the kernel struct type. The handle owns the kernel object until `.wait` is called.
+`KernelHandle<T>` is a real type in the generated Rust (`__boring_launch` returns one), but it's an internal implementation detail — Boring source never names it or calls a method on it directly. A `kernel:` block's dispatch (`k(block = ...)`) desugars to launching through the handle and immediately unwrapping it back into `k` behind the scenes:
 
 ```boring
-struct KernelHandle<T>:
-    req bool done()
-    req T    wait()
+mut k = Scale(data)
+kernel:
+    k(block = 256)   # transpiles to roughly `k = k.__boring_launch(...)?.inner;`
 ```
 
-`.wait` is the only way to recover the kernel object.
+There is no Boring-level syntax for holding onto a `KernelHandle` and deciding later whether/when to wait on it — every dispatch inside a `kernel:` block is synchronized (or, on Metal, deferred to the next host-side read — see `docs/metal-backend.md`'s "Error handling") before the next statement runs.
 
 ---
 
@@ -255,7 +263,7 @@ kernel Histogram:
 | `gpu.thread.x/y/z`, `gpu.block.x/y/z`… | loop variables |
 | `sync` | no-op |
 | `'actor'global` fields | plain arithmetic (no contention) |
-| `kernel(...)` streams | no-op — single-threaded sequential |
+| `kernel:` block dispatch | no-op — single-threaded sequential |
 | `after =` | sequential execution in declaration order |
 
 Sequential simulation hides data races. A kernel correct in simulation may be incorrect on real hardware if `sync` barriers are missing.
@@ -264,44 +272,36 @@ Sequential simulation hides data races. A kernel correct in simulation may be in
 
 ## Error handling
 
-CUDA errors fall into two categories mapped to the two observation points of a `KernelHandle`.
+There is no dedicated Boring-level named error type (`GpuLaunchError`/`GpuOutOfMemory`/`GpuIllegalAccess`/`GpuStackOverflow`/`GpuTimeout`/`GpuDeviceLost`, as earlier drafts of this section described) anywhere in the codebase — see "Known limitations" below. Every kernel-dispatch error surfaces as whatever cudarc itself reports (`cudarc::driver::DriverError`), wrapped generically as `Box<dyn std::error::Error + Send + Sync>` and propagated with `?` up to `boring_main()`'s own `Result` — a plain, un-typed error, not a Boring-specific enum a `match` could branch on.
 
-### Synchronous errors — raised at `kernel(...)`
+That said, cudarc's own two observation points still apply, mirroring the two phases a real CUDA launch can fail at:
 
-Detected immediately before execution. The handle is never created.
+### Synchronous errors — raised at launch
 
-```boring
-let h = kernel(block = 99999) k    # raise GpuLaunchError
-```
-
-### Asynchronous errors — raised at `.wait`
-
-Detected only at synchronisation.
+An invalid launch config (block/grid size, etc.) is rejected by `cudaLaunchKernel` itself, before the kernel ever runs:
 
 ```boring
-let h = kernel(block = 256) k
-h.wait                              # raise GpuIllegalAccess if kernel faulted
+kernel:
+    k(block = 99999)   # a bad config surfaces via `?` right here, before k runs at all
 ```
 
-### Error types
+### Asynchronous errors — raised at synchronization
 
-| Error | Phase | Cause |
-|---|---|---|
-| `GpuLaunchError` | `kernel(...)` | invalid config — block size, grid size |
-| `GpuOutOfMemory` | `kernel(...)` | allocation failed |
-| `GpuIllegalAccess` | `.wait` | out-of-bounds, invalid pointer |
-| `GpuStackOverflow` | `.wait` | kernel recursion too deep |
-| `GpuTimeout` | `.wait` | OS watchdog killed the kernel |
-| `GpuDeviceLost` | `.wait` | device reset or crash |
+A fault during execution (out-of-bounds access, device reset, ...) is only detected when the stream is synchronized — which every dispatch inside a `kernel:` block already does before the next statement runs, so it surfaces at the same call site as a launch-config error, just one GPU round-trip later:
+
+```boring
+kernel:
+    k(block = 256)   # if k's own kernel body faults, that error also surfaces here
+```
 
 ### `after =` and error propagation
 
-If a dependency handle failed, the dependent kernel is not launched — the error propagates:
+If an earlier `kernel:` block statement's dispatch returns an error, `?` exits the enclosing function immediately — a later statement in the same block (including one depending on the failed kernel via `after =`) is simply never reached:
 
 ```boring
-let h1 = kernel(block = 256) ka
-let h2 = kernel(block = 256, after = h1) kb    # not launched if h1 failed
-h2.wait                                         # raises h1's error
+kernel:
+    ka(block = 256)                  # if this fails, execution never reaches the next line
+    kb(block = 256, after = ka)
 ```
 
 ---
@@ -315,11 +315,12 @@ let g1 = GPU(1)
 mut ka = new(g0) Scale(n)
 mut kb = new(g1) Scale(n)
 
-mut ka = kernel(block = 256) ka |> .wait
-mut kb = kernel(block = 256) kb |> .wait
+kernel:
+    ka(block = 256)
+    kb(block = 256)
 ```
 
-`after =` for cross-device ordering uses the same syntax as single-device. Same-device ordering is implemented via CUDA events.
+`after =` for cross-device ordering uses the same syntax as single-device — but note this is not actually implemented for the *cross*-device case yet (see "Known limitations" below); same-device ordering is implemented via CUDA events.
 
 ---
 
@@ -333,8 +334,6 @@ The following features are not yet implemented:
 - dtod inference (device-to-device auto copy) — `ka.output` passed to another kernel always triggers D2H + H2D
 - Cross-device `after =` (peer access) — `after =` codegen handles same-device dependencies only; no `cudaStreamWaitEvent` cross-device path, no device-mismatch detection
 - `--peer-access` CLI flag — not registered in `src/main.rs`
-- `gpu.const(...)` callable builtin — `GpuConst` is a field-qualifier enum variant only, not a callable
-- Kernel qualifier rejection (`'shared`/`'actor` binding) — `kernel(...)` does not inspect the qualifier of the kernel struct value; `'shared`/`'actor`/`'guard`-qualified instances are not rejected at compile time
 - Must-use `KernelHandle` — no `#[must_use]` attribute on the generated `KernelHandle<T>`; dropping a handle without calling `.wait` compiles silently
 - Block size validation at compile time — oversized `block` values are not checked in `src/validator/kernel.rs` or `src/interpreter/eval_gpu.rs`
 - Error types (`GpuLaunchError`, `GpuOutOfMemory`, `GpuIllegalAccess`, `GpuStackOverflow`, `GpuTimeout`, `GpuDeviceLost`) — none of these exist in the codebase

@@ -461,7 +461,14 @@ impl<'a> HostEmitter<'a> {
         let params_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
             .filter(|f| is_params_field(f)).collect();
 
-        self.line("    fn dispatch(&self, gx: u32, gy: u32, gz: u32) {");
+        self.line("    fn dispatch(&self, gx: u32, gy: u32, gz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        // Validation errors (e.g. a workgroup count/size the device rejects)
+        // are checked synchronously by `dispatch_workgroups` while the compute
+        // pass is being encoded, below -- before this scope closes. No
+        // `device.poll()` needed for this: unlike an execution-time fault
+        // (out-of-bounds access, device lost), validation is decided on the
+        // CPU side as the command buffer is built, not during GPU execution.
+        self.line("        self.device.push_error_scope(wgpu::ErrorFilter::Validation);");
 
         // Write params before dispatch.
         if !params_fields.is_empty() {
@@ -494,6 +501,10 @@ impl<'a> HostEmitter<'a> {
         self.line("        }");
         self.line("        self.queue.submit(std::iter::once(encoder.finish()));");
         // No poll here — caller (present_buffer or explicit sync) handles synchronization.
+        self.line("        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {");
+        self.line("            return Err(format!(\"wgpu: kernel dispatch rejected: {}\", err).into());");
+        self.line("        }");
+        self.line("        Ok(())");
         self.line("    }");
     }
 
@@ -1159,7 +1170,10 @@ impl<'a> HostEmitter<'a> {
         let gx = format!("({width} + {bx} - 1) / {bx}");
         let gy = format!("({height} + {by} - 1) / {by}");
         let pfx = if self.in_method { "self." } else { "" };
-        Some(format!("{pfx}{var_name}.dispatch({gx}, {gy}, 1)"))
+        // Inside the render loop's `event_loop.run(...)` closure, not a
+        // `Result`-returning context -- `.expect()`, not `?`. Matches
+        // `metal::host`'s identical carve-out for its own render-loop dispatch.
+        Some(format!("{pfx}{var_name}.dispatch({gx}, {gy}, 1).expect(\"wgpu: kernel dispatch rejected\")"))
     }
 
     fn try_emit_screen_key_if(&self, if_stmt: &IfStmt) -> Option<String> {

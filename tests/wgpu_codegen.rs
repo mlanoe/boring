@@ -92,6 +92,42 @@ kernel VecAdd:
 }
 
 #[test]
+fn test_kernel_dispatch_surfaces_validation_errors_instead_of_silent_failure() {
+    // Before this fix, `dispatch()` returned `()` and no error scope existed
+    // anywhere in the generated code -- a validation failure (e.g. a rejected
+    // workgroup count) was never observed by anything Boring generated. Confirmed
+    // via a real `cargo check` against the real `wgpu`/`pollster` crates that this
+    // whole chain (dispatch -> kernel: block call site -> boring_main()'s own
+    // Result) compiles end-to-end.
+    let src = r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k = Scale(data)
+kernel:
+    k(block = 2)
+"#;
+    let (_wgsl, rs) = wgpu_codegen("dispatch_error_scope", src);
+
+    assert!(rs.contains("fn dispatch(&self, gx: u32, gy: u32, gz: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>>"),
+        "expected dispatch() to return a real Result;\ngot:\n{rs}");
+    assert!(rs.contains("push_error_scope(wgpu::ErrorFilter::Validation)"),
+        "expected dispatch() to open a validation error scope before encoding;\ngot:\n{rs}");
+    assert!(rs.contains("pollster::block_on(self.device.pop_error_scope())"),
+        "expected dispatch() to check the error scope after submit;\ngot:\n{rs}");
+    assert!(rs.contains("k.dispatch((") && rs.contains(")?;"),
+        "expected the kernel: block's dispatch call site to propagate the error via ?;\ngot:\n{rs}");
+    assert!(rs.contains("fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>>"),
+        "expected the synthesized boring_main() to be Result-returning so dispatch()'s ? has somewhere to go;\ngot:\n{rs}");
+}
+
+#[test]
 fn test_scalar_uniform() {
     let src = r#"
 kernel Scale:

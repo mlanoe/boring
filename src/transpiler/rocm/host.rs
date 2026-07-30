@@ -404,7 +404,7 @@ macro_rules! boring_impl_scalar_kernel_arg {
         }
     )* };
 }
-boring_impl_scalar_kernel_arg!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool);
+boring_impl_scalar_kernel_arg!(i8, u8, i16, u16, i32, u32, i64, u64, isize, usize, f32, f64, bool);
 
 // `Dimension` (boring's built-in 2-D kernel-size type, see `DIMENSION_STRUCT_RUST`
 // below) is a `#[repr(C)] Copy` struct passed by value as a kernel parameter --
@@ -640,12 +640,6 @@ struct HostEmitter {
     /// `BoringGpuArg::Host(...)` to match the declared `BoringGpuArg<T>` return
     /// type every general-spliced caller unconditionally expects.
     in_resident_return: bool,
-    /// Free function name → per-parameter "does this position render as
-    /// `isize`/`usize`?" flags (see `narrowed_int_param_type`'s doc) — mirrors
-    /// `fn_ref_params`, needed for the SAME reason: a call from one
-    /// kernel-touching function to another (both on this emitter) must cast
-    /// its `i64`/`u64` locals to match the callee's narrowed param type.
-    fn_narrowed_int_params: std::collections::HashMap<String, Vec<Option<&'static str>>>,
     /// Free function name → its `Type` when GPU-resident-returning (see
     /// `emit_fn`'s `resident_elem`). A call from one kernel-touching function
     /// to another that returns `BoringGpuArg<T>` must materialize the result —
@@ -697,20 +691,6 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
     }
 }
 
-/// True when `ty` is boring's plain `int`/`uint` (as opposed to an explicit
-/// fixed-width alias like `int32`). See `cuda::host`'s identical doc comment
-/// for the full rationale (the general pipeline renders plain `int`/`uint` as
-/// `isize`/`usize`, so a kernel-touching function's own param must match).
-fn narrowed_int_param_type(ty: &Type) -> Option<(&'static str, &'static str)> {
-    match ty {
-        Type::Int => Some(("isize", "i64")),
-        Type::Uint => Some(("usize", "u64")),
-        Type::Named(n) if n == "int" => Some(("isize", "i64")),
-        Type::Named(n) if n == "uint" => Some(("usize", "u64")),
-        _ => None,
-    }
-}
-
 impl HostEmitter {
     fn new(kernel_names: &[String]) -> Self {
         Self {
@@ -729,7 +709,6 @@ impl HostEmitter {
             struct_names: std::collections::HashSet::new(),
             ref_params: std::collections::HashSet::new(),
             in_resident_return: false,
-            fn_narrowed_int_params: std::collections::HashMap::new(),
             fn_returns_resident: std::collections::HashMap::new(),
             resident_locals: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
@@ -827,10 +806,6 @@ impl HostEmitter {
                     .map(|p| p.ty.as_ref().is_some_and(|ty| is_ref_worthy_type(ty, &self.struct_names)))
                     .collect();
                 self.fn_ref_params.insert(f.name.clone(), ref_flags);
-                let narrowed_flags: Vec<Option<&'static str>> = f.params.iter()
-                    .map(|p| p.ty.as_ref().and_then(|ty| narrowed_int_param_type(ty)).map(|(narrowed, _)| narrowed))
-                    .collect();
-                self.fn_narrowed_int_params.insert(f.name.clone(), narrowed_flags);
                 if let Some(rt) = &f.return_ty {
                     if rt.gpu_resident_qual().is_some() {
                         self.fn_returns_resident.insert(f.name.clone(), rt.clone());
@@ -1408,10 +1383,7 @@ impl HostEmitter {
             let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
             match &p.ty {
                 Some(ty) => {
-                    let base = match narrowed_int_param_type(ty) {
-                        Some((narrowed, _)) => narrowed.to_string(),
-                        None => rust_type(ty),
-                    };
+                    let base = rust_type(ty);
                     let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
                         format!("&{}", base)
                     } else {
@@ -1455,15 +1427,6 @@ impl HostEmitter {
             if let Some(ty) = &p.ty {
                 if is_ref_worthy_type(ty, &self.struct_names) {
                     self.ref_params.insert(p.name.clone());
-                }
-            }
-        }
-        // Shadow-rebind narrowed int/uint params back to this file's own i64/u64
-        // convention (see `narrowed_int_param_type`'s doc).
-        for p in &f.params {
-            if let Some(ty) = &p.ty {
-                if let Some((_, existing)) = narrowed_int_param_type(ty) {
-                    self.line(&format!("let {name} = {name} as {existing};", name = p.name, existing = existing));
                 }
             }
         }
@@ -1822,7 +1785,6 @@ impl HostEmitter {
             struct_names: self.struct_names.clone(),
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return,
-            fn_narrowed_int_params: self.fn_narrowed_int_params.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
             resident_locals: self.resident_locals.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
@@ -1921,7 +1883,7 @@ impl HostEmitter {
                 }
                 let o = self.expr(obj);
                 if field == "length" || field == "count" {
-                    return format!("{}.len() as i64", o);
+                    return format!("{}.len() as isize", o);
                 }
                 format!("{}.{}", o, field)
             }
@@ -1934,45 +1896,19 @@ impl HostEmitter {
                         return format!("boring_gpu_ctx_n({} as usize)?", idx);
                     }
                 }
-                // `ord(c)` — char → i64 (Boring built-in)
+                // `ord(c)` — char → isize (Boring built-in)
                 if let ExprKind::Var(name) = &callee.kind {
                     if name == "ord" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
-                            return format!("({} as i64)", inner);
+                            return format!("({} as isize)", inner);
                         }
                     }
                 }
                 // `Scale(data)` → `Scale::new(boring_gpu_ctx(), data)?`.
                 if let ExprKind::Var(name) = &callee.kind {
                     if self.kernel_names.contains(name.as_str()) {
-                        let buffer_flags = self.kernel_ctor_buffer_flags(name);
-                        let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
-                            let elem = buffer_flags.as_ref().and_then(|f| f.get(i).cloned()).flatten();
-                            if let Some(elem) = elem {
-                                if let ExprKind::Field(obj, field) = &a.value.kind {
-                                    if let ExprKind::Var(obj_name) = &obj.kind {
-                                        if self.var_kernel_type.contains_key(obj_name.as_str()) {
-                                            return format!("{}.{}", obj_name, field);
-                                        }
-                                    }
-                                }
-                                if let ExprKind::Var(vname) = &a.value.kind {
-                                    if self.resident_locals.contains(vname.as_str()) {
-                                        return format!(
-                                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&v)? }})",
-                                            v = vname, elem = elem
-                                        );
-                                    }
-                                }
-                                let s = self.coerce_call_arg(&a.value, false);
-                                return format!(
-                                    "boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&{s})?",
-                                    elem = elem, s = s
-                                );
-                            }
-                            self.coerce_call_arg(&a.value, false)
-                        }).collect();
+                        let args_s = self.emit_kernel_ctor_args(name, args);
                         let all = std::iter::once("boring_gpu_ctx()".to_string())
                             .chain(args_s)
                             .collect::<Vec<_>>();
@@ -2004,14 +1940,9 @@ impl HostEmitter {
                 }
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
-                let narrow_flags = callee_name.and_then(|n| self.fn_narrowed_int_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
-                    let s = self.coerce_call_arg(&a.value, expects_ref);
-                    match narrow_flags.as_ref().and_then(|f| f.get(i).copied()).flatten() {
-                        Some(narrowed) => format!("({}) as {}", s, narrowed),
-                        None => s,
-                    }
+                    self.coerce_call_arg(&a.value, expects_ref)
                 }).collect();
                 let fn_s = self.expr(callee);
                 let call = format!("{}({})", fn_s, args_s.join(", "));
@@ -2057,7 +1988,7 @@ impl HostEmitter {
                     "wait" => format!("{}.wait()?", o),
                     "done" => format!("{}.done()", o),
                     "chars" if args.is_empty() => format!("{}.chars().collect::<Vec<char>>()", o),
-                    "length" | "count" if args.is_empty() => format!("{}.len() as i64", o),
+                    "length" | "count" if args.is_empty() => format!("{}.len() as isize", o),
                     "add" | "insert" if args.len() == 1 => format!("{}.push({})", o, args_s[0]),
                     "map" if args_s.len() == 1 && matches!(&args[0].value.kind, ExprKind::Closure(..)) =>
                         format!("{}.iter().cloned().map({}).collect::<Vec<_>>()", o, args_s[0]),
@@ -2118,13 +2049,15 @@ impl HostEmitter {
                 format!("{k}.__boring_launch({block}, {grid}, {after_arg})?")
             }
             ExprKind::New { arena, ctor } => {
+                // args go through the same buffer-upload handling as a plain
+                // `Scale(data)` call -- see `emit_kernel_ctor_args`'s doc.
                 if let ExprKind::Call(callee, args) = &ctor.kind {
                     if let ExprKind::Var(name) = &callee.kind {
                         if self.kernel_names.contains(name.as_str()) {
                             let dev = arena.as_ref()
                                 .map(|a| self.expr(a))
                                 .unwrap_or_else(|| "boring_gpu_ctx()".into());
-                            let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                            let args_s = self.emit_kernel_ctor_args(name, args);
                             let all = std::iter::once(dev).chain(args_s).collect::<Vec<_>>();
                             return format!("{}::new({})?", name, all.join(", "));
                         }
@@ -2149,7 +2082,7 @@ impl HostEmitter {
                 let n = self.expr(count);
                 let body = self.expr(expr);
                 format!(
-                    "(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as i64; {} }}).collect::<Vec<_>>()",
+                    "(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as isize; {} }}).collect::<Vec<_>>()",
                     n, var, body
                 )
             }
@@ -2312,6 +2245,45 @@ impl HostEmitter {
         }).collect())
     }
 
+    /// Renders `args` for a call to kernel `name`'s constructor, uploading
+    /// each buffer-passthrough argument (see `kernel_ctor_buffer_flags`) via
+    /// `clone_htod` -- or moving it directly if it's already GPU-resident --
+    /// exactly the way a plain `Scale(data)` constructor call has always
+    /// worked. Shared by both constructor call sites: plain `Scale(data)`
+    /// (`ExprKind::Call`) and arena-qualified `new(g) Scale(data)`
+    /// (`ExprKind::New`) -- see `cuda::host`'s identical fix/doc for the bug
+    /// this closes (the `New` arm used to skip this and pass `data` straight
+    /// through as a bare `Vec` where `Scale::new` expects a `DeviceBuffer`).
+    fn emit_kernel_ctor_args(&mut self, name: &str, args: &[Arg]) -> Vec<String> {
+        let buffer_flags = self.kernel_ctor_buffer_flags(name);
+        args.iter().enumerate().map(|(i, a)| {
+            let elem = buffer_flags.as_ref().and_then(|f| f.get(i).cloned()).flatten();
+            if let Some(elem) = elem {
+                if let ExprKind::Field(obj, field) = &a.value.kind {
+                    if let ExprKind::Var(obj_name) = &obj.kind {
+                        if self.var_kernel_type.contains_key(obj_name.as_str()) {
+                            return format!("{}.{}", obj_name, field);
+                        }
+                    }
+                }
+                if let ExprKind::Var(vname) = &a.value.kind {
+                    if self.resident_locals.contains(vname.as_str()) {
+                        return format!(
+                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&v)? }})",
+                            v = vname, elem = elem
+                        );
+                    }
+                }
+                let s = self.coerce_call_arg(&a.value, false);
+                return format!(
+                    "boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&{s})?",
+                    elem = elem, s = s
+                );
+            }
+            self.coerce_call_arg(&a.value, false)
+        }).collect()
+    }
+
     /// Returns `Some("obj.read_field()?")` when `obj` is a tracked kernel
     /// variable and `field` is a `'unified` or `'global` array field.
     fn try_gpu_field_read(&self, obj: &str, field: &str) -> Option<String> {
@@ -2391,8 +2363,8 @@ fn elem_rust_type(ty: &Type) -> String {
 
 fn rust_type(ty: &Type) -> String {
     match ty {
-        Type::Int            => "i64".into(),
-        Type::Uint           => "u64".into(),
+        Type::Int            => "isize".into(),
+        Type::Uint           => "usize".into(),
         Type::Uint8          => "u8".into(),
         Type::Int8            => "i8".into(),
         Type::Int16           => "i16".into(),
@@ -2422,8 +2394,10 @@ fn rust_type(ty: &Type) -> String {
         Type::Named(n) => match n.as_str() {
             "float" | "f64" => "f64",
             "f32"           => "f32",
-            "int"   | "i64" => "i64",
-            "uint"  | "u64" => "u64",
+            "int"           => "isize",
+            "uint"          => "usize",
+            "i64"           => "i64",
+            "u64"           => "u64",
             "uint8"         => "u8",
             "int8"          => "i8",
             "int16"         => "i16",

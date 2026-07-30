@@ -83,6 +83,16 @@ The generated project has no `build.rs`. Compilation happens once at app startup
 
 ---
 
+## Error handling
+
+Kernel dispatch is deferred: `__boring_launch` only commits the command buffer, and the actual `wait_until_completed()` happens lazily, at the next point host code actually reads GPU-written data back (`read_<field>()`, or the shared `__boring_gpu_copy_d2h` helper) — see the generated prelude's `__boring_metal_flush` for the full rationale (this is a real, measured performance win, not just plumbing).
+
+That flush point is also where a GPU-side failure (invalid threadgroup size, out-of-bounds buffer access, device removal, ...) actually surfaces: the command buffer's own `status()` is checked after `wait_until_completed()`, and `read_<field>()` returns `Result<Vec<T>, Box<dyn std::error::Error + Send + Sync>>` instead of the plain `Vec<T>` it used to — propagating via `?` up to `boring_main()`'s own `Result` (always present once any kernel is involved). Previously, a failed dispatch completed with `status() == Error` and nothing ever looked — `read_<field>()` read back whatever garbage or zeroed memory was left, and the Boring program reported success regardless.
+
+There is no synchronous rejection at dispatch time the way CUDA's `cuLaunchKernel` can reject an invalid config immediately — Metal's `dispatch_thread_groups` has no `Result`-returning signature at all, so an invalid config is either caught by the (async) command-buffer status above, or — if Metal's own API validation layer is active — an assertion/abort outside Boring's control.
+
+---
+
 ## Known limitations vs CUDA
 
 | Feature | CUDA | Metal |

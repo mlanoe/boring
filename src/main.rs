@@ -1141,6 +1141,17 @@ fn emit_cuda(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
+    // Kernel-dispatch-qualifier check only -- the four GPU emit_* functions used
+    // to skip the checker entirely (only `run`/plain `build` called it), so e.g. a
+    // `'shared`-qualified kernel instance dispatched via `kernel:` went unrejected
+    // on every GPU target. The FULL checker isn't safe to turn on here yet (a
+    // pre-existing, unrelated GPU-resident-tuple-return opacity false positive --
+    // see `checker::check_kernel_dispatch_only`'s doc), so only this one check runs.
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) {
+        process::exit(1);
+    }
+
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
@@ -1203,6 +1214,12 @@ fn emit_cuda(path: &str, version: &str) {
 fn emit_rocm(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+
+    // See `emit_cuda`'s identical check for why this is needed here too.
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) {
+        process::exit(1);
+    }
 
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -1267,6 +1284,12 @@ fn emit_metal(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
 
+    // See `emit_cuda`'s identical check for why this is needed here too.
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) {
+        process::exit(1);
+    }
+
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
@@ -1322,6 +1345,12 @@ fn emit_metal(path: &str, version: &str) {
 fn emit_wgpu(path: &str, version: &str) {
     let program = parse_and_merge_program(path);
     let path = PathBuf::from(path);
+
+    // See `emit_cuda`'s identical check for why this is needed here too.
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if report_check_result(&path, &source, checker::check_kernel_dispatch_only(&program)) {
+        process::exit(1);
+    }
 
     let stem = path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())

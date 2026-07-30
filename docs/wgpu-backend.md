@@ -195,6 +195,16 @@ This is not GPU-side pipelining (unlike CUDA streams), but it preserves the orde
 
 ---
 
+## Error handling
+
+Each kernel struct's `dispatch()` opens a WebGPU validation error scope (`push_error_scope(wgpu::ErrorFilter::Validation)`) before encoding, and checks it (`pop_error_scope()`, bridged to sync via the same `pollster` already used for device/adapter setup) right after submit — returning `Result<(), Box<dyn std::error::Error + Send + Sync>>` instead of `()`. A regular `kernel:` block's dispatch call propagates that error via `?` into `boring_main()`'s own `Result` (synthesized as `Result`-returning whenever any kernel is involved, even with no explicit `throws`); inside a `Screen` program's render loop (a plain closure, not a `Result`-returning context) it's `.expect(...)` instead.
+
+Previously, no error-scope/callback machinery existed at all: `dispatch()` returned `()` unconditionally and a rejected launch configuration (e.g. an invalid workgroup count) went completely unobserved.
+
+Validation is checked at command-buffer *encoding* time (synchronously, on the CPU, as `dispatch_workgroups` is called) — no `device.poll()` is needed to catch it. This does **not** cover execution-time faults (out-of-bounds access, device loss), which WebGPU instead reports via device-lost callbacks/uncaptured-error events, not scoped validation; those aren't wired up.
+
+---
+
 ## Type mapping
 
 WGSL does not support 64-bit integers. Inside a `kernel` struct and its `def` body, Boring types are narrowed as follows:
