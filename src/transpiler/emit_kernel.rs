@@ -350,7 +350,11 @@ impl Transpiler {
                 None
             };
             if let Some((src_kvar, src_field)) = resident_alias {
-                self.line(&format!("{var_name}.{field_name}_buf = std::sync::Arc::clone(&{src_kvar}.{src_field}_buf);"));
+                // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that helper's
+                // doc for why a bare `Arc::clone` here used to silently alias
+                // the same `wgpu::Buffer` between both kernel structs instead
+                // of copying it (a real device-to-device GPU copy).
+                self.line(&format!("{var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), &{src_kvar}.{src_field}_buf);"));
                 self.line(&format!("{var_name}.rebuild_bind_group();"));
                 // No Rust value exists for `param_name` to record in `param_to_arg` --
                 // record only the one thing a sibling output field's fill expression
@@ -385,7 +389,11 @@ impl Transpiler {
                 if is_gpu_arg_param {
                     self.line(&format!("match &{arg_rust} {{"));
                     self.line("    BoringGpuArg::Resident(buf, _len) => {");
-                    self.line(&format!("        {var_name}.{field_name}_buf = std::sync::Arc::clone(buf);"));
+                    // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that
+                    // helper's doc; `buf` here is `&Arc<wgpu::Buffer>` (matched
+                    // through a `&BoringGpuArg<T>`), which Rust's deref
+                    // coercion turns into `&wgpu::Buffer` at this call site.
+                    self.line(&format!("        {var_name}.{field_name}_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"));
                     self.line(&format!("        {var_name}.rebuild_bind_group();"));
                     self.line("    }");
                     self.line("    BoringGpuArg::Host(v) => {");

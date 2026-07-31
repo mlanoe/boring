@@ -205,6 +205,32 @@ Validation is checked at command-buffer *encoding* time (synchronously, on the C
 
 ---
 
+## Device-to-device chaining
+
+Feeding one kernel's output directly into another kernel's constructor (`Scale(k1.buf)`) copies the buffer via a generated `__boring_gpu_copy_d2d` helper — allocate a fresh `wgpu::Buffer` and issue a `copy_buffer_to_buffer` command on the shared queue:
+
+```rust
+fn __boring_gpu_copy_d2d(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> std::sync::Arc<wgpu::Buffer> {
+    let size = src.size();
+    let dst = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(src, 0, &dst, 0, size);
+    queue.submit(std::iter::once(encoder.finish()));
+    std::sync::Arc::new(dst)
+}
+```
+
+No manual `device.poll()`/wait is needed around the copy itself — it's a GPU command, and wgpu guarantees submission order within the same queue, so a later kernel dispatch that reads `dst` is correctly ordered after this copy completes.
+
+This is deliberately **not** `Arc::clone(&wgpu::Buffer)`: cloning the `Arc` only bumps a reference count on the same underlying `wgpu::Buffer` — it does not allocate new GPU memory or copy any bytes. Using `Arc::clone` here used to mean two kernel structs silently shared the exact same buffer; if the source kernel was ever dispatched again afterward, the "copy"'s contents changed too, with no compile error and no warning (the same class of bug as the Metal backend's `Buffer::clone()`, and worse than the CUDA/ROCm backends' bug, which at least surfaces as a real `E0382` compile error).
+
+---
+
 ## Type mapping
 
 WGSL does not support 64-bit integers. Inside a `kernel` struct and its `def` body, Boring types are narrowed as follows:

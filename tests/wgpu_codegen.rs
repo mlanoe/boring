@@ -541,7 +541,7 @@ with fc2:
     // Kernel-construction consumes `xv` via the dual-mode branch, not an
     // unconditional upload.
     assert!(rs.contains("match &xv {"), "constructor argument for `xv` should branch on BoringGpuArg:\n{rs}");
-    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "resident branch should reuse the buffer directly:\n{rs}");
+    assert!(rs.contains("k.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"), "resident branch should copy the buffer device-to-device, not alias it:\n{rs}");
     assert!(rs.contains("k.rebuild_bind_group();"), "resident branch should rebuild the bind group:\n{rs}");
 
     // Call sites: `ha` (a plain host array) is wrapped; `fc` (already resident) is
@@ -643,7 +643,7 @@ def main() throws:
     assert!(rs.contains("fn scale_gpu(x: BoringGpuArg<f64>, factor: f64) -> BoringGpuArg<f64>"),
         "x.length use should not disqualify x from the dual-typed param treatment:\n{rs}");
     assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringGpuArg:\n{rs}");
-    assert!(rs.contains("k.x_buf = std::sync::Arc::clone(buf);"), "resident branch should reuse the buffer directly:\n{rs}");
+    assert!(rs.contains("k.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), buf);"), "resident branch should copy the buffer device-to-device, not alias it:\n{rs}");
     assert!(rs.contains("(x.len()) as usize"), "x.length should compile via BoringGpuArg::len(), not a bare field access:\n{rs}");
     assert!(!rs.contains("x::length") && !rs.contains("x::count"), "x.length must not be emitted as a module path:\n{rs}");
 
@@ -719,10 +719,13 @@ def main() throws:
 "#;
     let (_wgsl, rs) = wgpu_codegen("kernel_ctor_consumes_resident_local", src);
 
-    // The second kernel reuses the first kernel's buffer directly -- no host
-    // round-trip, and no dangling reference to a `fc` Rust binding that never exists.
-    assert!(rs.contains("k2.x_buf = std::sync::Arc::clone(&k1.y_buf);"),
-        "second kernel's x field should alias the first kernel's y buffer directly:\n{rs}");
+    // The second kernel gets its own device-to-device copy of the first
+    // kernel's buffer -- no host round-trip, no dangling reference to a `fc`
+    // Rust binding that never exists, and (unlike a bare `Arc::clone`, which
+    // would silently alias the same `wgpu::Buffer` between k1 and k2) still
+    // correct if `k1` were dispatched again afterward.
+    assert!(rs.contains("k2.x_buf = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), &k1.y_buf);"),
+        "second kernel's x field should get a real device-to-device copy of the first kernel's y buffer:\n{rs}");
     assert!(rs.contains("k2.rebuild_bind_group();"), "buffer aliasing should rebuild the bind group:\n{rs}");
     assert!(!rs.contains("k2.copy_x_to_device"), "no host upload should happen for a resident-aliased argument:\n{rs}");
     assert!(!rs.contains("&fc") && !rs.contains("(fc)") && !rs.contains("fc.iter()"),

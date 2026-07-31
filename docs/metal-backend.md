@@ -93,6 +93,14 @@ There is no synchronous rejection at dispatch time the way CUDA's `cuLaunchKerne
 
 ---
 
+## Device-to-device chaining
+
+Feeding one kernel's output directly into another kernel's constructor (`Scale(k1.buf)`) copies the buffer via `__boring_metal_buffer_copy` — allocate a fresh `Buffer` and `memcpy` into it (valid since every buffer this backend allocates uses `MTLResourceOptions::StorageModeShared`, CPU+GPU unified memory), flushing first so the copy can't race a GPU write still in flight (see "Error handling" above).
+
+This is deliberately **not** `Buffer::clone()`: in the real `metal` crate, `Clone` on an Objective-C wrapper type is just an ObjC `retain` (a reference-count bump), not a content copy. Using `.clone()` here used to mean two kernel structs silently shared the exact same underlying `MTLBuffer` — if the source kernel was ever dispatched again afterward, the "copy"'s contents changed too, with no compile error and no warning (unlike the analogous bug in `cuda::host`/`rocm::host`, a real `E0382` the Rust compiler catches).
+
+---
+
 ## Known limitations vs CUDA
 
 | Feature | CUDA | Metal |

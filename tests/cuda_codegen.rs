@@ -630,16 +630,88 @@ kernel:
         "expected &[] as after arg and 0i32 priority when not specified;\ngot:\n{rs}");
 }
 
+#[test]
+fn after_dependency_references_the_real_stream_field_name() {
+    // `after = ka` used to generate `&ka.stream` -- the kernel struct's real
+    // field is `__stream` (double-underscore; `KernelHandle<T>`'s OWN field
+    // really is named `stream`, a different type entirely, which is presumably
+    // how this went unnoticed). A real E0609 ("no field `stream` on type
+    // `Scale`, did you mean `__stream`"), confirmed via `cargo check` against
+    // real cudarc 0.19.8 -- this exact combination (an `after =` dependency on
+    // another kernel struct variable) had no prior test coverage at all.
+    let (_, rs) = cuda_codegen("after_dep_stream_field", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut ka = Scale(data)
+mut kb = Scale(data)
+kernel:
+    ka(block = 2)
+    kb(block = 2, after = ka)
+"#);
+    assert!(rs.contains("&[&ka.__stream]"),
+        "expected the after = dependency to reference ka.__stream, not ka.stream;\ngot:\n{rs}");
+    assert!(!rs.contains("&ka.stream]"),
+        "must not reference the nonexistent ka.stream field;\ngot:\n{rs}");
+}
+
+#[test]
+fn multi_device_contexts_attempt_peer_access() {
+    // Cross-device `after =` needs `cuStreamWaitEvent` (what `stream.join`
+    // uses under the hood) to work across two different CUDA contexts, which
+    // itself requires peer access enabled between them first -- confirmed via
+    // NVIDIA's own docs. `boring_gpu_init`/`boring_gpu_ctx_n` now register
+    // every context they create and attempt bidirectional peer access with
+    // every other one already known, checking real hardware capability via
+    // `cuDeviceCanAccessPeer` first (skipping silently if unsupported) rather
+    // than requiring a `--peer-access` opt-in flag (see docs/cuda-module.md's
+    // "Multi-device" section).
+    let (_, rs) = cuda_codegen("multi_device_peer_access", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let g0 = GPU(0)
+let g1 = GPU(1)
+let data = [1.0, 2.0]
+mut ka = new(g0) Scale(data)
+mut kb = new(g1) Scale(data)
+kernel:
+    ka(block = 2)
+    kb(block = 2, after = ka)
+"#);
+    assert!(rs.contains("__boring_gpu_enable_peer_access(&ctx)?;"),
+        "expected boring_gpu_init/boring_gpu_ctx_n to register+enable peer access for every context;\ngot:\n{rs}");
+    assert!(rs.contains("cuDeviceCanAccessPeer"),
+        "expected a real hardware-capability check before enabling peer access;\ngot:\n{rs}");
+    assert!(rs.contains("cuCtxEnablePeerAccess"),
+        "expected the actual peer-access-enabling call;\ngot:\n{rs}");
+}
+
 // ─── Item 5 — dtod inference (analysis comment) ──────────────────────────────
 
 #[test]
 fn item5_dtod_candidate_produces_comment_or_direct_pass() {
     // When one kernel's output buffer is fed directly into another kernel
-    // as input, the transpiler should either emit a dtod-candidate comment
-    // or pass the buffer directly without a read_buf round-trip.
-    // This is a minimal test: we verify the generated code compiles and
-    // does not contain read_buf for the chained field when it is never
-    // read on the host side.
+    // as input, the transpiler passes the buffer via `.clone()` -- a real
+    // device-to-device copy (`CudaSlice::clone()`'s own `clone_dtod`,
+    // confirmed against real cudarc 0.19.8 source), NOT a host round-trip
+    // and NOT a bare move. A bare move used to be this optimization's actual
+    // behavior, but it applied unconditionally regardless of whether the
+    // source kernel variable (`k1`) is used again afterward -- a real E0382
+    // ("use of partially moved value") confirmed via `cargo check` the
+    // moment `k1` is read or dispatched again later. `.clone()` is correct
+    // in every case and still far cheaper than a full D2H+H2D round trip.
     let (_, rs) = cuda_codegen("dtod_candidate", r#"
 kernel Scale:
     mut [float]'unified buf
@@ -648,10 +720,19 @@ kernel Scale:
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k1 = Scale(data)
+kernel:
+    k1(block = 2)
+mut k2 = Scale(k1.buf)
+kernel:
+    k1(block = 2)
+    k2(block = 2)
+print "{k1.buf[0]}"
 "#);
-    // The kernel struct must be present (basic sanity check).
-    assert!(rs.contains("struct Scale"),
-        "expected Scale struct in generated code;\ngot:\n{rs}");
+    assert!(rs.contains("Scale::new(boring_gpu_ctx(), k1.buf.clone())"),
+        "expected a real device-to-device .clone(), not a bare move, so k1 stays usable afterward, and not a D2H+H2D round trip;\ngot:\n{rs}");
 }
 
 // ─── GPU device properties ────────────────────────────────────────────────────
@@ -732,4 +813,57 @@ fn example_saxpy() {
     assert!(rs.contains("println!("),                      "print not translated to println!;\ngot:\n{rs}");
     assert!(rs.contains("as f64)"),                        "float() cast not translated;\ngot:\n{rs}");
     assert!(rs.contains(".iter().enumerate()"),            "for i,v not translated to enumerate;\ngot:\n{rs}");
+}
+
+// ─── KernelHandle must_use ─────────────────────────────────────────────────────
+
+#[test]
+fn kernel_handle_is_must_use() {
+    // Dropping a `KernelHandle<T>` without `.wait`/`.inner` used to compile
+    // silently -- `#[must_use]` turns that into a compiler warning instead.
+    let (_, rs) = cuda_codegen("kernel_handle_must_use", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(
+        rs.contains("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]\nstruct KernelHandle<T>"),
+        "expected #[must_use] directly above struct KernelHandle<T>;\ngot:\n{rs}"
+    );
+}
+
+// ─── explicit `grid =` override ────────────────────────────────────────────────
+
+#[test]
+fn explicit_grid_arg_is_not_silently_dropped() {
+    // A kernel with a 1D auto-grid-capable field (`buf`) makes `grid_dim` an
+    // `Option<(u32,u32,u32)>` parameter -- but `k(block=.., grid=..)` used to
+    // ignore any explicit `grid` label entirely and always pass `None`,
+    // silently overriding the caller's 2D/3D grid with 1D-length inference
+    // (or `(1,1,1)` when the kernel has no auto-grid field at all). Confirmed
+    // via a real generated project: the emitted call dropped `grid = (4, 4, 1)`
+    // and passed `None` instead. `grid` must now be threaded through as
+    // `Some((gx, gy, gz))`, matching the Metal backend's identical handling.
+    let (_, rs) = cuda_codegen("explicit_grid", r#"
+kernel Scale2D:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0, 3.0, 4.0]
+mut k = Scale2D(data)
+kernel:
+    k(block = (16, 16, 1), grid = (4, 4, 1))
+"#);
+    assert!(
+        rs.contains("k.__boring_launch((16 as u32, 16 as u32, 1 as u32), Some((4 as u32, 4 as u32, 1 as u32)), &[], 0i32)"),
+        "explicit grid=(4,4,1) must reach __boring_launch as Some((4,4,1)), not None;\ngot:\n{rs}"
+    );
 }

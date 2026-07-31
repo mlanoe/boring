@@ -220,6 +220,25 @@ device.<span class="fn">create_compute_pipeline</span>(&amp;wgpu::<span class="k
 <p>Previously, no error-scope/callback machinery existed at all: <code>dispatch()</code> returned <code>()</code> unconditionally and a rejected launch configuration (e.g. an invalid workgroup count) went completely unobserved.</p>
 <p>Validation is checked at command-buffer <em>encoding</em> time (synchronously, on the CPU, as <code>dispatch_workgroups</code> is called) — no <code>device.poll()</code> is needed to catch it. This does <strong>not</strong> cover execution-time faults (out-of-bounds access, device loss), which WebGPU instead reports via device-lost callbacks/uncaptured-error events, not scoped validation; those aren't wired up.</p>
 <hr>
+<h2 id="device-to-device-chaining">Device-to-device chaining</h2>
+<p>Feeding one kernel's output directly into another kernel's constructor (<code>Scale(k1.buf)</code>) copies the buffer via a generated <code>__boring_gpu_copy_d2d</code> helper — allocate a fresh <code>wgpu::Buffer</code> and issue a <code>copy_buffer_to_buffer</code> command on the shared queue:</p>
+<pre><code>fn __boring_gpu_copy_d2d(device: &amp;wgpu::Device, queue: &amp;wgpu::Queue, src: &amp;wgpu::Buffer) -&gt; std::sync::Arc&lt;wgpu::Buffer&gt; {
+    let size = src.size();
+    let dst = device.create_buffer(&amp;wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&amp;wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(src, 0, &amp;dst, 0, size);
+    queue.submit(std::iter::once(encoder.finish()));
+    std::sync::Arc::new(dst)
+}
+</code></pre>
+<p>No manual <code>device.poll()</code>/wait is needed around the copy itself — it's a GPU command, and wgpu guarantees submission order within the same queue, so a later kernel dispatch that reads <code>dst</code> is correctly ordered after this copy completes.</p>
+<p>This is deliberately <strong>not</strong> <code>Arc::clone(&amp;wgpu::Buffer)</code>: cloning the <code>Arc</code> only bumps a reference count on the same underlying <code>wgpu::Buffer</code> — it does not allocate new GPU memory or copy any bytes. Using <code>Arc::clone</code> here used to mean two kernel structs silently shared the exact same buffer; if the source kernel was ever dispatched again afterward, the "copy"'s contents changed too, with no compile error and no warning (the same class of bug as the Metal backend's <code>Buffer::clone()</code>, and worse than the CUDA/ROCm backends' bug, which at least surfaces as a real <code>E0382</code> compile error).</p>
+<hr>
 <h2 id="type-mapping">Type mapping</h2>
 <p>WGSL does not support 64-bit integers. Inside a <code>kernel</code> struct and its <code>def</code> body, Boring types are narrowed as follows:</p>
 <table><thead><tr><th>Boring type</th><th>Host Rust type</th><th>WGSL kernel type</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>i64</code></td><td><code>i32</code></td></tr><tr><td><code>uint</code></td><td><code>u64</code></td><td><code>u32</code></td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td><code>f32</code></td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>u32</code> (see note)</td></tr></tbody></table>

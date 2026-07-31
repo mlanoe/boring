@@ -400,6 +400,7 @@ impl HostEmitter {
         // `Arc<Self>` in real cudarc 0.19.8 -- wrapping again in `Arc::new(...)`
         // produced `Arc<Arc<_>>`, a real E0308 confirmed via `cargo check`.
         self.line("let ctx = CudaContext::new(0)?;");
+        self.line("__boring_gpu_enable_peer_access(&ctx)?;");
         self.line("let ptx = Ptx::from_src(BORING_PTX);");
         self.line("let module = ctx.load_module(ptx)?;");
         self.line("let _ = BORING_CTX.set(ctx);");
@@ -413,7 +414,69 @@ impl HostEmitter {
         self.indent += 1;
         // `CudaContext::new` already returns `Arc<Self>` -- see `boring_gpu_init`'s
         // identical fix.
-        self.line("Ok(CudaContext::new(idx)?)");
+        self.line("let ctx = CudaContext::new(idx)?;");
+        self.line("__boring_gpu_enable_peer_access(&ctx)?;");
+        self.line("Ok(ctx)");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        self.line("thread_local! {");
+        self.indent += 1;
+        self.line("static __BORING_GPU_PEER_CTXS: std::cell::RefCell<Vec<Arc<CudaContext>>> = std::cell::RefCell::new(Vec::new());");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // Automatically enables bidirectional peer access between `ctx` and every
+        // other GPU context this program has already created, wherever the real
+        // hardware topology actually supports it (checked via
+        // `cuDeviceCanAccessPeer` first, per pair, per direction -- a grant is
+        // one-directional, confirmed against the CUDA driver API docs). This is
+        // the prerequisite `stream.join(dep)` (`cuStreamWaitEvent`) needs to
+        // work AT ALL across two different devices -- without it, a cross-
+        // device `after =` fails at runtime with a real (if generic) DriverError
+        // instead of the `cudaStreamWaitEvent` actually succeeding. A pair the
+        // topology doesn't support is silently skipped -- `after =` between
+        // that specific pair still surfaces its own real error, unchanged from
+        // before this existed; there is deliberately no user-facing flag to opt
+        // in or out (see docs/cuda-module.md's "Multi-device" section) since
+        // this is cheap and harmless to always attempt: single-GPU programs
+        // never have a second context to loop over.
+        self.line("fn __boring_gpu_enable_peer_access(ctx: &Arc<CudaContext>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        self.indent += 1;
+        self.line("__BORING_GPU_PEER_CTXS.with(|ctxs| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        self.indent += 1;
+        self.line("let mut ctxs = ctxs.borrow_mut();");
+        self.line("for other in ctxs.iter() {");
+        self.indent += 1;
+        self.line("if Arc::ptr_eq(other, ctx) { continue; }");
+        self.line("for (a, b) in [(ctx, other), (other, ctx)] {");
+        self.indent += 1;
+        self.line("let mut can_access: std::ffi::c_int = 0;");
+        self.line("unsafe {");
+        self.indent += 1;
+        self.line("cudarc::driver::sys::cuDeviceCanAccessPeer(&mut can_access, a.cu_device(), b.cu_device()).result()?;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("if can_access != 0 {");
+        self.indent += 1;
+        self.line("a.bind_to_thread()?;");
+        self.line("let code = unsafe { cudarc::driver::sys::cuCtxEnablePeerAccess(b.cu_ctx(), 0) };");
+        self.line("// Already-enabled (e.g. `a`/`b` swapped on a later call) is not an error.");
+        self.line("if code != cudarc::driver::sys::CUresult::CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED {");
+        self.indent += 1;
+        self.line("code.result()?;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("ctxs.push(Arc::clone(ctx));");
+        self.line("Ok(())");
+        self.indent -= 1;
+        self.line("})");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -519,6 +582,7 @@ impl HostEmitter {
         // Each handle owns the CUDA stream its kernel was launched on, so `.wait`
         // synchronizes only that stream (not the whole device).  `after = [..]`
         // dependencies are wired GPU-side via stream ordering, no CPU sync.
+        self.line("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]");
         self.line("struct KernelHandle<T> { inner: T, stream: Arc<CudaStream> }");
         self.line("impl<T> KernelHandle<T> {");
         self.indent += 1;
@@ -1481,14 +1545,17 @@ impl HostEmitter {
             Some(a) => match &a.value.kind {
                 ExprKind::Array(elems) => {
                     let refs: Vec<String> = elems.iter()
-                        .map(|e| format!("&{}.stream", self.expr(e)))
+                        .map(|e| format!("&{}.__stream", self.expr(e)))
                         .collect();
                     format!("&[{}]", refs.join(", "))
                 }
-                _ => { let s = self.expr(&a.value); format!("&[&{s}.stream]") }
+                _ => { let s = self.expr(&a.value); format!("&[&{s}.__stream]") }
             },
         };
-        let grid: String = if auto_grid { "None".into() } else { "(1, 1, 1)".into() };
+        let grid: String = if let Some(g) = args.iter().find(|a| a.label.as_deref() == Some("grid")) {
+            if auto_grid { format!("Some({})", self.dim3_expr(&g.value)) }
+            else { self.dim3_expr(&g.value) }
+        } else if auto_grid { "None".into() } else { "(1, 1, 1)".into() };
         let priority_arg: String = match args.iter().find(|a| a.label.as_deref() == Some("priority")) {
             None => "0i32".into(),
             Some(a) => match &a.value.kind {
@@ -1927,7 +1994,7 @@ impl HostEmitter {
                         .unwrap_or_else(|| "(1, 1, 1)".into())
                 };
                 // `after = [h1, h2]` — collect stream references from dependency handles.
-                // Each handle's `.stream` field is passed as a dependency to __boring_launch.
+                // Each kernel struct's `.__stream` field is passed as a dependency to __boring_launch.
                 let after_arg = match &config.after {
                     None => "&[]".into(),
                     Some(after_expr) => {
@@ -1935,13 +2002,13 @@ impl HostEmitter {
                         match &after_expr.kind {
                             ExprKind::Array(elems) => {
                                 let refs: Vec<String> = elems.iter()
-                                    .map(|e| format!("&{}.stream", self.expr(e)))
+                                    .map(|e| format!("&{}.__stream", self.expr(e)))
                                     .collect();
                                 format!("&[{}]", refs.join(", "))
                             }
                             _ => {
                                 let s = self.expr(after_expr);
-                                format!("&[&{}.stream]", s)
+                                format!("&[&{}.__stream]", s)
                             }
                         }
                     }
@@ -2186,14 +2253,31 @@ impl HostEmitter {
                 if let ExprKind::Field(obj, field) = &a.value.kind {
                     if let ExprKind::Var(obj_name) = &obj.kind {
                         if self.var_kernel_type.contains_key(obj_name.as_str()) {
-                            return format!("{}.{}", obj_name, field);
+                            // `.clone()` -- a real device-to-device copy
+                            // (`CudaSlice::clone()` calls `clone_dtod` under the
+                            // hood, confirmed against real cudarc 0.19.8 source),
+                            // NOT a host round-trip. A bare move here (no
+                            // `.clone()`) used to be the "dtod inference"
+                            // optimization, but it applied unconditionally
+                            // whether or not `obj_name` (e.g. `k1` in
+                            // `Scale(k1.buf)`) is used again later -- a real
+                            // E0382 ("use of partially moved value") confirmed
+                            // via `cargo check` the moment the source kernel is
+                            // dispatched or read again afterward. `.clone()` is
+                            // correct in every case and still far cheaper than
+                            // the D2H+H2D round trip this same field read would
+                            // otherwise take.
+                            return format!("{}.{}.clone()", obj_name, field);
                         }
                     }
                 }
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
+                        // Same reasoning as the `k_prev.field` case above: `.clone()`
+                        // the resident buffer (real D2D copy) instead of moving it
+                        // out of the enum, since `vname` isn't provably single-use.
                         return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}, _>(&v)? }})",
+                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf.clone(), BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}, _>(&v)? }})",
                             v = vname, elem = elem
                         );
                     }

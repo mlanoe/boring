@@ -572,6 +572,7 @@ impl HostEmitter {
         // KernelHandle — `.wait()`/`.done()` don't themselves force a GPU
         // sync; any real data read goes through `read_<field>()`/
         // `__boring_gpu_copy_d2h`, which already flush (see above).
+        self.line("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]");
         self.line("struct KernelHandle<T> { inner: T }");
         self.line("impl<T> KernelHandle<T> {");
         self.indent += 1;
@@ -655,6 +656,34 @@ impl HostEmitter {
         self.line("fn __boring_gpu_copy_h2d<T>(_device: &Device, _queue: &Device, _src: &[u8], _dst: &Buffer) {");
         self.indent += 1;
         self.line("unreachable!(\"metal backend never constructs a host-to-device upload through this path -- kernel-constructor call sites upload directly\")");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // A real device-to-device copy: allocate a fresh buffer and memcpy into
+        // it, NOT `Buffer::clone()` -- confirmed against the real `metal` crate
+        // source that `Clone` on an ObjC wrapper type (`foreign_type!`'s
+        // generated impl) is just an ObjC `retain` (reference-count bump), not a
+        // content copy. Using `.clone()` here meant two kernel structs silently
+        // shared the exact same underlying `MTLBuffer` -- if the source kernel
+        // was ever dispatched again afterward, the "copy"'s contents changed
+        // too, with no compile error and no warning (unlike cuda::host's
+        // equivalent bug, a real E0382 the compiler catches). The raw
+        // `contents()` memcpy is valid because every buffer this backend
+        // allocates uses `MTLResourceOptions::StorageModeShared` (CPU+GPU
+        // unified memory) -- flushing first (see `__boring_metal_flush`'s doc)
+        // is required since dispatch is deferred: without it, this could copy
+        // from a buffer the GPU hasn't finished writing yet.
+        self.line("fn __boring_metal_buffer_copy(dev: &Device, buf: &Buffer) -> Result<Buffer, Box<dyn std::error::Error + Send + Sync>> {");
+        self.indent += 1;
+        self.line("__boring_metal_flush()?;");
+        self.line("let len = buf.length();");
+        self.line("let new_buf = dev.new_buffer(len, MTLResourceOptions::StorageModeShared);");
+        self.line("unsafe {");
+        self.indent += 1;
+        self.line("std::ptr::copy_nonoverlapping(buf.contents() as *const u8, new_buf.contents() as *mut u8, len as usize);");
+        self.indent -= 1;
+        self.line("}");
+        self.line("Ok(new_buf)");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -2590,23 +2619,25 @@ impl HostEmitter {
             if is_buffer_pos {
                 // `k_prev.field` passed directly as an argument (this
                 // codebase's common inline-chaining shape, e.g.
-                // `SoftmaxRowsKernel(k_scores.c, ...)`) -- `k_prev.field`
-                // is ALREADY a `Buffer` (another kernel struct's own
-                // output field), so hand it straight through (a cheap
-                // ObjC-retain `.clone()`, not a copy) instead of routing
-                // through `try_gpu_field_read`'s materializing
-                // `k_prev.read_field()`.
+                // `SoftmaxRowsKernel(k_scores.c, ...)`) -- `k_prev.field` is
+                // ALREADY a `Buffer` (another kernel struct's own output
+                // field), so give the new kernel its OWN independent copy via
+                // `__boring_metal_buffer_copy` instead of routing through
+                // `try_gpu_field_read`'s materializing `k_prev.read_field()`.
+                // NOT `.clone()` -- see that helper's doc for why a bare
+                // `.clone()` here used to silently alias the same `MTLBuffer`
+                // between both kernel structs instead of copying it.
                 if let ExprKind::Field(obj, field) = &a.value.kind {
                     if let ExprKind::Var(obj_name) = &obj.kind {
                         if self.var_kernel_type.contains_key(obj_name.as_str()) {
-                            return format!("{}.{}.clone()", obj_name, field);
+                            return format!("__boring_metal_buffer_copy(&{dev}, &{obj}.{field})?", dev = dev, obj = obj_name, field = field);
                         }
                     }
                 }
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, (v.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => __boring_metal_buffer_copy(&{dev}, &buf)?, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, (v.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared) }})",
                             v = vname, dev = dev
                         );
                     }

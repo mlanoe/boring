@@ -564,6 +564,44 @@ print "{k.buf[0]}"
         "expected the k.buf[0] read call site to propagate via ? into main()'s own Result;\ngot:\n{rs}");
 }
 
+#[test]
+fn dtod_ctor_arg_uses_real_device_to_device_copy_not_an_objc_retain() {
+    // `Scale(k1.buf)` used to pass `k1.buf.clone()` straight through -- but
+    // `Buffer::clone()` in the real `metal` crate is just an ObjC `retain`
+    // (a reference-count bump, confirmed against the crate's
+    // `foreign_type!`-generated impl), NOT a content copy. k1 and k2 ended up
+    // sharing the exact same underlying `MTLBuffer`: dispatching k1 again
+    // afterward would silently change k2's "own" buffer too, with no compile
+    // error (unlike the analogous bug in cuda::host/rocm::host, a real
+    // E0382 the Rust compiler catches). `__boring_metal_buffer_copy`
+    // allocates a fresh buffer and memcpy's into it instead.
+    let (_, rs) = metal_codegen("dtod_candidate", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k1 = Scale(data)
+kernel:
+    k1(block = 2)
+mut k2 = Scale(k1.buf)
+kernel:
+    k1(block = 2)
+    k2(block = 2)
+print "{k1.buf[0]}"
+"#);
+    assert!(rs.contains("fn __boring_metal_buffer_copy(dev: &Device, buf: &Buffer) -> Result<Buffer, Box<dyn std::error::Error + Send + Sync>>"),
+        "expected a real buffer-copy helper (new buffer + memcpy);\ngot:\n{rs}");
+    assert!(rs.contains("std::ptr::copy_nonoverlapping"),
+        "expected the copy helper to actually copy buffer contents;\ngot:\n{rs}");
+    assert!(rs.contains("Scale::new(boring_metal_device(), __boring_metal_buffer_copy(&boring_metal_device(), &k1.buf)?)"),
+        "expected the k2 constructor call to use the real copy helper, not a bare Buffer::clone() retain;\ngot:\n{rs}");
+}
+
 // ─── infrastructure — Cargo.toml ─────────────────────────────────────────────
 
 #[test]
@@ -596,4 +634,25 @@ fn example_saxpy_metal() {
         "missing Buffer field in Saxpy;\ngot:\n{rs}");
     assert!(rs.contains("new_library_with_source(BORING_MSL"),
         "missing MSL compile step;\ngot:\n{rs}");
+}
+
+// ─── KernelHandle must_use ─────────────────────────────────────────────────────
+
+#[test]
+fn kernel_handle_is_must_use() {
+    // Dropping a `KernelHandle<T>` without `.wait`/`.inner` used to compile
+    // silently -- `#[must_use]` turns that into a compiler warning instead.
+    let (_, rs) = metal_codegen("kernel_handle_must_use", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(
+        rs.contains("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]\nstruct KernelHandle<T>"),
+        "expected #[must_use] directly above struct KernelHandle<T>;\ngot:\n{rs}"
+    );
 }

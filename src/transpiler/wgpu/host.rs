@@ -671,6 +671,35 @@ impl<'a> HostEmitter<'a> {
         self.line("}");
         self.blank();
 
+        // D2D helper -- a real device-to-device copy: allocate a fresh buffer
+        // and issue a `copy_buffer_to_buffer` GPU command, NOT
+        // `Arc::clone(&src)`. `Arc::clone` only bumps a reference count --
+        // both kernel structs would end up pointing at the exact same
+        // underlying `wgpu::Buffer`, so if the source kernel is ever
+        // dispatched again afterward, the "copy"'s contents silently change
+        // too, with no error (unlike cuda::host's/rocm::host's equivalent
+        // bug, a real E0382 the Rust compiler catches instead). No manual
+        // wait/poll is needed here before OR after the copy: `copy_buffer_to_buffer`
+        // is itself a GPU command, and wgpu guarantees commands submitted to
+        // the same queue execute in submission order, so it's already
+        // correctly ordered after whatever wrote the source buffer, and
+        // anything reading the new buffer later goes through the existing
+        // D2H helper above, which already polls.
+        self.line("fn __boring_gpu_copy_d2d(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> std::sync::Arc<wgpu::Buffer> {");
+        self.line("    let size = src.size();");
+        self.line("    let dst = device.create_buffer(&wgpu::BufferDescriptor {");
+        self.line("        label: None,");
+        self.line("        size,");
+        self.line("        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,");
+        self.line("        mapped_at_creation: false,");
+        self.line("    });");
+        self.line("    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });");
+        self.line("    encoder.copy_buffer_to_buffer(src, 0, &dst, 0, size);");
+        self.line("    queue.submit(std::iter::once(encoder.finish()));");
+        self.line("    std::sync::Arc::new(dst)");
+        self.line("}");
+        self.blank();
+
         if self.has_screen {
             self.emit_present_buffer_helper();
         }

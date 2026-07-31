@@ -137,6 +137,8 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 - `[T]'global` / `'unified` 1D array field → `grid = ceil(len(buf) / block)`
 - Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on 1D array inference.
 
+Passing `grid` explicitly always overrides inference, on every backend — `k(block = (16, 16, 1), grid = (4, 4, 1))` dispatches exactly the requested `(4, 4, 1)` grid, whether or not the kernel has a 1D auto-grid-capable field. (An earlier version of the CUDA/ROCm codegen silently dropped an explicit `grid` argument and always substituted the inferred/default value instead — confirmed via a real generated project, fixed by threading the caller's `grid` through to `__boring_launch` the same way `metal::host` already did.)
+
 **Ownership qualifier restriction:** a kernel struct instance dispatched via `kernel:` must be declared with no wrapping ownership qualifier — `'shared`/`'actor`(`'task`)/`'guard`(`'task`) are rejected at compile time (semantic checker), since `kernel:` dispatch needs direct, exclusive ownership on the host side, not an `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock` handle.
 
 ```boring
@@ -158,6 +160,26 @@ kernel:
 ```
 
 There is no Boring-level syntax for holding onto a `KernelHandle` and deciding later whether/when to wait on it — every dispatch inside a `kernel:` block is synchronized (or, on Metal, deferred to the next host-side read — see `docs/metal-backend.md`'s "Error handling") before the next statement runs.
+
+The generated `KernelHandle<T>` struct itself carries `#[must_use]`, so if hand-written or future-generated Rust ever drops one without calling `.wait` (or otherwise consuming `.inner`), `rustc` emits a warning instead of silently discarding it — the current transpiler never does this, but the attribute guards against a future codegen change introducing that path unnoticed.
+
+---
+
+## Device-to-device chaining
+
+Feeding one kernel's output directly into another kernel's constructor (`Scale(k1.buf)`) never round-trips through the host — the buffer is copied device-to-device via `CudaSlice::clone()` (`clone_dtod` under the hood), a real GPU-to-GPU memcpy:
+
+```boring
+mut k1 = Scale(data)
+kernel:
+    k1(block = 256)
+mut k2 = Scale(k1.buf)   # k1.buf.clone() -- a real D2D copy, not D2H+H2D
+kernel:
+    k1(block = 256)      # k1 is still independently usable
+    k2(block = 256)
+```
+
+This is a `.clone()`, not a move: `k1` stays fully usable afterward, including dispatching it again — the earlier version of this optimization moved the buffer unconditionally, which compiled fine right up until the source kernel was used again, at which point it was a real `E0382` ("use of partially moved value"). `.clone()` is correct in every case and still far cheaper than a full host round trip.
 
 ---
 
@@ -320,7 +342,9 @@ kernel:
     kb(block = 256)
 ```
 
-`after =` for cross-device ordering uses the same syntax as single-device — but note this is not actually implemented for the *cross*-device case yet (see "Known limitations" below); same-device ordering is implemented via CUDA events.
+`after =` for cross-device ordering uses the same syntax as single-device — same-device ordering is implemented via CUDA events (`stream.join`, i.e. `cuStreamWaitEvent`), which also works cross-device, but only once peer access is enabled between the two GPUs involved.
+
+There is no `--peer-access` flag to opt into this — every GPU context created via `GPU(n)`/`new(g) ...` automatically attempts bidirectional peer access with every other context the program has already created, checking real hardware capability first (`cuDeviceCanAccessPeer`) and silently skipping any pair the topology doesn't support (no NVLink/shared PCIe root, etc.) — that pair's own `after =` then surfaces its own real `DriverError` at the `cuStreamWaitEvent` call site instead of silently doing the wrong thing. This is cheap to always attempt: a single-GPU program only ever registers one context, so the check loop never runs.
 
 ---
 
@@ -331,10 +355,6 @@ The following features are not yet implemented:
 - `atomic.cas`, `atomicMin`, `atomicMax`, `atomicExch` — no `atomic` namespace or `.cas` method in lexer, parser, interpreter, or transpiler
 - `'actor'unified`, `'actor'shared` — parse error; only `'actor'global` is accepted
 - `warp.size`, `warp.lane`, `warp.sync` — no `warp` namespace inside kernel bodies
-- dtod inference (device-to-device auto copy) — `ka.output` passed to another kernel always triggers D2H + H2D
-- Cross-device `after =` (peer access) — `after =` codegen handles same-device dependencies only; no `cudaStreamWaitEvent` cross-device path, no device-mismatch detection
-- `--peer-access` CLI flag — not registered in `src/main.rs`
-- Must-use `KernelHandle` — no `#[must_use]` attribute on the generated `KernelHandle<T>`; dropping a handle without calling `.wait` compiles silently
 - Block size validation at compile time — oversized `block` values are not checked in `src/validator/kernel.rs` or `src/interpreter/eval_gpu.rs`
 - Error types (`GpuLaunchError`, `GpuOutOfMemory`, `GpuIllegalAccess`, `GpuStackOverflow`, `GpuTimeout`, `GpuDeviceLost`) — none of these exist in the codebase
 - `.shape`-based grid inference — no built-in `Image`/`Volume` types; omitting `grid` when no 1D array field is present silently defaults to `(1, 1, 1)`

@@ -448,6 +448,7 @@ impl<'a> LaunchBuilder<'a> {
 // synchronizes only that stream (not the whole device). `after = [..]`
 // dependencies are wired GPU-side via stream ordering (`HipStream::join`), no
 // CPU sync.
+#[must_use = "a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized"]
 struct KernelHandle<T> { inner: T, stream: Arc<HipStream> }
 impl<T> KernelHandle<T> {
     fn wait(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
@@ -1683,14 +1684,17 @@ impl HostEmitter {
             Some(a) => match &a.value.kind {
                 ExprKind::Array(elems) => {
                     let refs: Vec<String> = elems.iter()
-                        .map(|e| format!("&{}.stream", self.expr(e)))
+                        .map(|e| format!("&{}.__stream", self.expr(e)))
                         .collect();
                     format!("&[{}]", refs.join(", "))
                 }
-                _ => { let s = self.expr(&a.value); format!("&[&{s}.stream]") }
+                _ => { let s = self.expr(&a.value); format!("&[&{s}.__stream]") }
             },
         };
-        let grid: String = if auto_grid { "None".into() } else { "(1, 1, 1)".into() };
+        let grid: String = if let Some(g) = args.iter().find(|a| a.label.as_deref() == Some("grid")) {
+            if auto_grid { format!("Some({})", self.dim3_expr(&g.value)) }
+            else { self.dim3_expr(&g.value) }
+        } else if auto_grid { "None".into() } else { "(1, 1, 1)".into() };
         let priority_arg: String = match args.iter().find(|a| a.label.as_deref() == Some("priority")) {
             None => "0i32".into(),
             Some(a) => match &a.value.kind {
@@ -2035,13 +2039,13 @@ impl HostEmitter {
                         match &after_expr.kind {
                             ExprKind::Array(elems) => {
                                 let refs: Vec<String> = elems.iter()
-                                    .map(|e| format!("&{}.stream", self.expr(e)))
+                                    .map(|e| format!("&{}.__stream", self.expr(e)))
                                     .collect();
                                 format!("&[{}]", refs.join(", "))
                             }
                             _ => {
                                 let s = self.expr(after_expr);
-                                format!("&[&{}.stream]", s)
+                                format!("&[&{}.__stream]", s)
                             }
                         }
                     }
@@ -2262,14 +2266,24 @@ impl HostEmitter {
                 if let ExprKind::Field(obj, field) = &a.value.kind {
                     if let ExprKind::Var(obj_name) = &obj.kind {
                         if self.var_kernel_type.contains_key(obj_name.as_str()) {
-                            return format!("{}.{}", obj_name, field);
+                            // `.clone()` -- a real device-to-device copy
+                            // (`DeviceBuffer::clone()`'s own `hipMemcpyDtoDAsync`,
+                            // see its doc comment), NOT a host round-trip. A bare
+                            // move here used to be the "dtod inference"
+                            // optimization, but it applied unconditionally
+                            // whether or not `obj_name` (e.g. `k1` in
+                            // `Scale(k1.buf)`) is used again later -- mirrors the
+                            // identical E0382 ("use of partially moved value")
+                            // fixed in cuda::host, confirmed the same way there.
+                            return format!("{}.{}.clone()", obj_name, field);
                         }
                     }
                 }
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
+                        // Same reasoning as the `k_prev.field` case above.
                         return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf, BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&v)? }})",
+                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => buf.clone(), BoringGpuArg::Host(v) => boring_new_stream_with_priority(&boring_gpu_ctx(), 0)?.clone_htod::<{elem}>(&v)? }})",
                             v = vname, elem = elem
                         );
                     }

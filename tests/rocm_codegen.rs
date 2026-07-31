@@ -624,6 +624,68 @@ kernel:
         "expected &[] as after arg and 0i32 priority when not specified;\ngot:\n{rs}");
 }
 
+#[test]
+fn after_dependency_references_the_real_stream_field_name() {
+    // `after = ka` used to generate `&ka.stream` -- the kernel struct's real
+    // field is `__stream` (double-underscore; mirrors the identical bug fixed
+    // in cuda::host -- `KernelHandle<T>`'s own field really is named `stream`,
+    // a different type entirely, which is presumably how this went unnoticed).
+    // This exact combination (an `after =` dependency on another kernel struct
+    // variable) had no prior test coverage at all.
+    let (_, rs) = rocm_codegen("after_dep_stream_field", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut ka = Scale(data)
+mut kb = Scale(data)
+kernel:
+    ka(block = 2)
+    kb(block = 2, after = ka)
+"#);
+    assert!(rs.contains("&[&ka.__stream]"),
+        "expected the after = dependency to reference ka.__stream, not ka.stream;\ngot:\n{rs}");
+    assert!(!rs.contains("&ka.stream]"),
+        "must not reference the nonexistent ka.stream field;\ngot:\n{rs}");
+}
+
+#[test]
+fn dtod_ctor_arg_uses_real_device_to_device_copy_not_a_bare_move() {
+    // Mirrors the identical fix in cuda::host: `Scale(k1.buf)` used to move
+    // `k1.buf` straight into the new kernel's constructor -- correct only if
+    // `k1` is never used again, which this test deliberately violates
+    // (`k1` is dispatched again and read afterward). `.clone()` here is a
+    // real device-to-device copy (`DeviceBuffer::clone()`'s own
+    // `hipMemcpyDtoDAsync`, see that impl's doc comment), not a host round
+    // trip, so `k1` stays independently usable.
+    let (_, rs) = rocm_codegen("dtod_candidate", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0]
+mut k1 = Scale(data)
+kernel:
+    k1(block = 2)
+mut k2 = Scale(k1.buf)
+kernel:
+    k1(block = 2)
+    k2(block = 2)
+print "{k1.buf[0]}"
+"#);
+    assert!(rs.contains("Scale::new(boring_gpu_ctx(), k1.buf.clone())"),
+        "expected a real device-to-device .clone(), not a bare move, so k1 stays usable afterward, and not a D2H+H2D round trip;\ngot:\n{rs}");
+}
+
 // ─── GPU device properties ────────────────────────────────────────────────────
 
 #[test]
@@ -756,4 +818,54 @@ fn example_saxpy() {
     assert!(rs.contains("println!("),                      "print not translated to println!;\ngot:\n{rs}");
     assert!(rs.contains("as f64)"),                        "float() cast not translated;\ngot:\n{rs}");
     assert!(rs.contains(".iter().enumerate()"),            "for i,v not translated to enumerate;\ngot:\n{rs}");
+}
+
+// ─── KernelHandle must_use ─────────────────────────────────────────────────────
+
+#[test]
+fn kernel_handle_is_must_use() {
+    // Dropping a `KernelHandle<T>` without `.wait`/`.inner` used to compile
+    // silently -- `#[must_use]` turns that into a compiler warning instead.
+    let (_, rs) = rocm_codegen("kernel_handle_must_use", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(
+        rs.contains("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]\nstruct KernelHandle<T>"),
+        "expected #[must_use] directly above struct KernelHandle<T>;\ngot:\n{rs}"
+    );
+}
+
+// ─── explicit `grid =` override ────────────────────────────────────────────────
+
+#[test]
+fn explicit_grid_arg_is_not_silently_dropped() {
+    // Same bug as the identical fix in cuda::host: `k(block=.., grid=..)`
+    // ignored any explicit `grid` label and always passed `None`, silently
+    // overriding the caller's 2D/3D grid with 1D-length inference (or
+    // `(1,1,1)` with no auto-grid field). `grid` must now be threaded
+    // through as `Some((gx, gy, gz))`.
+    let (_, rs) = rocm_codegen("explicit_grid", r#"
+kernel Scale2D:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+let data = [1.0, 2.0, 3.0, 4.0]
+mut k = Scale2D(data)
+kernel:
+    k(block = (16, 16, 1), grid = (4, 4, 1))
+"#);
+    assert!(
+        rs.contains("k.__boring_launch((16 as u32, 16 as u32, 1 as u32), Some((4 as u32, 4 as u32, 1 as u32)), &[], 0i32)"),
+        "explicit grid=(4,4,1) must reach __boring_launch as Some((4,4,1)), not None;\ngot:\n{rs}"
+    );
 }
