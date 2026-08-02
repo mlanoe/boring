@@ -20,6 +20,7 @@
 // of re-deriving the whole AST→Rust pipeline from scratch.
 
 use crate::ast::*;
+use crate::transpiler::helpers::image_volume_grid_dim_expr;
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -124,9 +125,38 @@ impl HipError {
         HipError { code: code as i32, message }
     }
 }
+impl HipError {
+    // Short category prefix classified from the raw HIP error code, on top
+    // of `hipGetErrorString`'s own message (already fetched into `message`
+    // above) -- for the handful of failure classes a caller most often cares
+    // about at a glance (out of memory, illegal access, timeout, ...).
+    // These numeric codes mirror CUDA's `CUresult` values (HIP is designed
+    // as a near-1:1 source-level match for the CUDA driver API -- see
+    // `rocm-backend.md`'s own rationale for the rest of this backend), but
+    // that mirroring is NOT independently verified against a real ROCm
+    // install here (none available in this project's dev environment) --
+    // same caveat this backend's docs already carry elsewhere.
+    fn category(&self) -> &'static str {
+        match self.code {
+            // Mirrors CUDA's CUDA_ERROR_INVALID_VALUE (see the identical
+            // constant in cuda::host) -- the real rejection an oversized
+            // `block =` hits at `hipModuleLaunchKernel`. Boring deliberately
+            // does not duplicate this check at compile time or in the
+            // interpreter; it defers entirely to this real runtime rejection.
+            1   => "GPU launch configuration invalid (e.g. block size exceeds device limits)",
+            2   => "GPU out of memory",
+            700 => "GPU illegal memory access",
+            701 => "GPU launch out of resources",
+            702 => "GPU operation timed out",
+            714 => "GPU stack overflow",
+            214 | 709 => "GPU device lost",
+            _ => "GPU kernel launch failed",
+        }
+    }
+}
 impl std::fmt::Display for HipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HIP error {}: {}", self.code, self.message)
+        write!(f, "{}: HIP error {}: {}", self.category(), self.code, self.message)
     }
 }
 impl std::error::Error for HipError {}
@@ -1259,20 +1289,14 @@ impl HostEmitter {
 
     fn emit_boring_launch(&mut self, name: &str, fields: &[KernelFieldDecl]) {
         // Auto grid sizing: when the first field is a device array ('unified/'global/
-        // 'actor'global), `grid_dim` becomes optional and is derived from its length.
-        let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
-            match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
+        // 'actor'global), `grid_dim` becomes optional and is derived from its length
+        // (1D) or, for a fixed-shape Image/Volume field, from its C/R/X/Y/Z dims (2D/3D).
+        let auto_grid_field: Option<&KernelFieldDecl> = fields.iter().find(|f| {
+            matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some())
         });
 
-        if let Some(field) = &auto_grid_field {
+        if let Some(field) = auto_grid_field {
             self.line(
                 "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<HipStream>], priority: i32) \
                  -> Result<KernelHandle<Self>, Box<dyn std::error::Error + Send + Sync>> {"
@@ -1280,8 +1304,12 @@ impl HostEmitter {
             self.indent += 1;
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
-            self.line(&format!("let n = self.{}.len() as u32;", field));
-            self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");
+            if let Some((_, dims)) = field.ty.as_image_volume() {
+                self.line(&image_volume_grid_dim_expr(dims));
+            } else {
+                self.line(&format!("let n = self.{}.len() as u32;", field.name));
+                self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");
+            }
             self.indent -= 1;
             self.line("});");
         } else {
@@ -1329,9 +1357,10 @@ impl HostEmitter {
         // CPU) instead of a CPU-blocking `dep.synchronize()?`.
         self.line("for dep in after { stream.join(dep)?; }");
 
-        // Upload 'const fixed-size arrays to __constant__ memory before launch.
+        // Upload 'const fixed-size arrays (and fixed-shape Image/Volume) to
+        // __constant__ memory before launch.
         for f in fields {
-            if matches!(f.qual, GpuQual::Const) && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            if matches!(f.qual, GpuQual::Const) && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some()) {
                 self.line(&format!(
                     "if !self.{name}.is_empty() {{",
                     name = f.name
@@ -1354,14 +1383,14 @@ impl HostEmitter {
                     self.line(&format!("launcher.arg(&mut self.{});", f.name));
                 }
                 GpuQual::Const => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
                         // Scalar 'const: passed as a kernel parameter.
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
-                    // Array 'const: uploaded to __constant__ memory above, not a parameter.
+                    // Array/Image/Volume 'const: uploaded to __constant__ memory above, not a parameter.
                 }
                 GpuQual::Local => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
                 }
@@ -2340,13 +2369,15 @@ impl HostEmitter {
 
     fn host_field_type(&self, field: &KernelFieldDecl) -> String {
         let elem = elem_rust_type(&field.ty);
-        // 'const fixed-size arrays are stored as Vec<T> on the host — they are
-        // uploaded to __constant__ memory via upload_constant, not as DeviceBuffer args.
-        if matches!(field.qual, GpuQual::Const) && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+        // 'const fixed-size arrays (and fixed-shape Image/Volume) are stored as
+        // Vec<T> on the host — they are uploaded to __constant__ memory via
+        // upload_constant, not as DeviceBuffer args.
+        let is_fixed_shape = matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some();
+        if matches!(field.qual, GpuQual::Const) && is_fixed_shape {
             return format!("Vec<{}>", elem);
         }
         // A scalar `'const` field is a plain kernel-launch parameter, not a device buffer.
-        if matches!(field.qual, GpuQual::Const) && !matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+        if matches!(field.qual, GpuQual::Const) && !is_fixed_shape {
             return elem;
         }
         format!("DeviceBuffer<{}>", elem)
@@ -2371,6 +2402,7 @@ fn elem_rust_type(ty: &Type) -> String {
         Type::Array(inner)     => rust_type(inner),
         Type::ArrayN(inner, _) => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
+        Type::Generic(..) if ty.as_image_volume().is_some() => rust_type(ty.as_image_volume().unwrap().0),
         _                      => rust_type(ty),
     }
 }

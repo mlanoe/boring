@@ -155,6 +155,31 @@ kernel B:
     assert!(cu.contains("blockDim.x"),  "expected blockDim.x;\ngot:\n{cu}");
 }
 
+#[test]
+fn device_gpu_warp_builtins_map_correctly() {
+    let (cu, _) = cuda_codegen("gpu_warp_builtins", r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffle_down(buf[tid], 1)
+        let b = gpu.warp.shuffle_up(buf[tid], 1)
+        let c = gpu.warp.shuffle_xor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + lane + size
+"#);
+    assert!(cu.contains("warpSize"), "expected warpSize;\ngot:\n{cu}");
+    assert!(cu.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{cu}");
+    assert!(cu.contains("__syncwarp(0xffffffff)"), "expected __syncwarp;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_down_sync(0xffffffff,"), "expected __shfl_down_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_up_sync(0xffffffff,"), "expected __shfl_up_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_xor_sync(0xffffffff,"), "expected __shfl_xor_sync;\ngot:\n{cu}");
+    assert!(cu.contains("__shfl_sync(0xffffffff,"), "expected __shfl_sync;\ngot:\n{cu}");
+}
+
 // ─── host — struct and constructor ───────────────────────────────────────────
 
 #[test]
@@ -887,4 +912,259 @@ kernel:
         rs.contains("k.__boring_launch((16 as u32, 16 as u32, 1 as u32), Some((4 as u32, 4 as u32, 1 as u32)), &[], 0i32)"),
         "explicit grid=(4,4,1) must reach __boring_launch as Some((4,4,1)), not None;\ngot:\n{rs}"
     );
+}
+
+// ─── GPU error classification ─────────────────────────────────────────────────
+
+#[test]
+fn kernel_launch_and_sync_errors_are_classified_by_curesult() {
+    // cudarc's own `DriverError` Display already calls
+    // `cuGetErrorName`/`cuGetErrorString` (real message present already),
+    // but gave no way to tell failure classes apart at a glance. A real
+    // `catch`-by-variant isn't reachable here -- confirmed cuda::host has no
+    // `Stmt::Try` handling at all (unlike the general/wgpu-shared pipeline),
+    // the same prerequisite gap already blocking `with` there
+    // (scoped-access-blocks.md) -- so this only classifies the message via
+    // `__boring_cuda_classify_error`, applied at kernel launch and both
+    // stream-sync points. Verified to compile clean via a real `cargo check`
+    // against real cudarc 0.19.8 (with the `cuda-12080` feature, no real
+    // CUDA toolkit needed for type-checking).
+    let (_, rs) = cuda_codegen("gpu_error_classify", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("fn __boring_cuda_classify_error(e: cudarc::driver::DriverError)"),
+        "expected the __boring_cuda_classify_error helper;\ngot:\n{rs}");
+    assert!(rs.contains("CUresult::CUDA_ERROR_OUT_OF_MEMORY => \"GPU out of memory\""),
+        "expected CUDA_ERROR_OUT_OF_MEMORY classified as GPU out of memory;\ngot:\n{rs}");
+    assert!(rs.contains("unsafe { launcher.launch(cfg) }.map_err(__boring_cuda_classify_error)?;"),
+        "expected the kernel launch call to classify its error;\ngot:\n{rs}");
+    assert!(rs.contains("self.stream.synchronize().map_err(__boring_cuda_classify_error)?;"),
+        "expected KernelHandle::wait's sync call to classify its error;\ngot:\n{rs}");
+    // An oversized `block =` is the real, common case CUDA_ERROR_INVALID_VALUE
+    // covers -- `cuLaunchKernel` rejects it at the driver level. Boring
+    // deliberately does not duplicate this check in the validator or
+    // interpreter; it defers entirely to this real runtime classification.
+    assert!(rs.contains("CUresult::CUDA_ERROR_INVALID_VALUE => \"GPU launch configuration invalid (e.g. block size exceeds device limits)\""),
+        "expected CUDA_ERROR_INVALID_VALUE classified as an invalid launch config, covering an oversized block size;\ngot:\n{rs}");
+}
+
+// ─── atomic min/max/swap/cas ───────────────────────────────────────────────────
+
+#[test]
+fn device_atomic_method_calls_map_to_cuda_intrinsics() {
+    // `arr[i].min/max/swap/cas(...)` on an `'actor'global` field -- unlike
+    // `+= -= &= |= ^=` (a statement-only compound-assign desugar via
+    // try_atomic_assign), these are handled in expression position since
+    // atomicMin/Max/Exch/CAS all return the previous value in real CUDA C.
+    let (cu, _) = cuda_codegen("atomic_methods", r#"
+kernel Histogram:
+    mut [int]'actor'global counts
+    init([int]'actor'global data):
+        counts = data
+    def ():
+        let bucket = gpu.thread.x
+        counts[bucket].min(5)
+        counts[bucket].max(5)
+        let old_swap = counts[bucket].swap(0)
+        let old_cas = counts[bucket].cas(0, 1)
+"#);
+    assert!(cu.contains("atomicMin(&counts[bucket], 5);"), "expected atomicMin;\ngot:\n{cu}");
+    assert!(cu.contains("atomicMax(&counts[bucket], 5);"), "expected atomicMax;\ngot:\n{cu}");
+    assert!(cu.contains("atomicExch(&counts[bucket], 0)"), "expected atomicExch;\ngot:\n{cu}");
+    assert!(cu.contains("atomicCAS(&counts[bucket], 0, 1)"), "expected atomicCAS;\ngot:\n{cu}");
+}
+
+// ─── Image / Volume ─────────────────────────────────────────────────────────
+
+#[test]
+fn device_image_at_lowers_to_row_major_index() {
+    let (cu, _) = cuda_codegen("image_at", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(cu.contains("img[c + r * 4]"),
+        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{cu}");
+}
+
+#[test]
+fn device_image_width_height_lower_to_literals() {
+    let (cu, _) = cuda_codegen("image_width_height", r#"
+kernel Img:
+    mut Image<float, 4, 8>'unified img
+    init(Image<float, 4, 8>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        if c < img.width() and r < img.height():
+            img.at(c, r) = 0.0
+"#);
+    assert!(cu.contains("c < 4"), "expected .width() to lower to the literal 4;\ngot:\n{cu}");
+    assert!(cu.contains("r < 8"), "expected .height() to lower to the literal 8;\ngot:\n{cu}");
+}
+
+#[test]
+fn device_image_field_becomes_pointer_param() {
+    let (cu, _) = cuda_codegen("image_ptr_param", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = 0.0
+"#);
+    assert!(cu.contains("__global__ void Img_kernel(double* img)"),
+        "expected Image field to become a flat pointer param, same as [T]'unified;\ngot:\n{cu}");
+}
+
+#[test]
+fn device_volume_at_lowers_to_row_major_3d_index() {
+    let (cu, _) = cuda_codegen("volume_at", r#"
+kernel Vol:
+    mut Volume<float, 4, 4, 4>'unified vol
+    init(Volume<float, 4, 4, 4>'unified data):
+        vol = data
+    def ():
+        let x = gpu.thread.x
+        let y = gpu.thread.y
+        let z = gpu.thread.z
+        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+"#);
+    assert!(cu.contains("vol[x + y * 4 + z * 16]"),
+        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{cu}");
+}
+
+#[test]
+fn device_shared_image_becomes_fixed_shared_decl() {
+    let (cu, _) = cuda_codegen("shared_image", r#"
+kernel Tile:
+    mut [float]'unified out
+    let Image<float, 4, 4>'actor tile
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        out[0] = tile.at(c, r)
+"#);
+    assert!(cu.contains("__shared__ double tile[16];"),
+        "expected fixed __shared__ decl sized C*R, not extern __shared__;\ngot:\n{cu}");
+}
+
+#[test]
+fn kernel_field_image_actor_global_is_valid() {
+    let (cu, _) = cuda_codegen("image_actor_global", r#"
+kernel Hist:
+    mut Image<int, 4, 4>'actor'global hist
+    init(Image<int, 4, 4>'actor'global data):
+        hist = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        hist.at(c, r) = hist.at(c, r) + 1
+"#);
+    assert!(cu.contains("hist"), "expected Image'actor'global field to compile through codegen;\ngot:\n{cu}");
+}
+
+#[test]
+fn kernel_field_image_bare_unified_is_valid() {
+    // Unlike `[T,N]'unified` (rejected — size would be redundant with the fixed N),
+    // `Image`/`Volume` behave like dynamic `[T]'unified` for host representation
+    // (a CudaSlice buffer), so bare 'unified is legal — required for the
+    // TransposeKernel migration example in docs/image-volume-types.md, whose
+    // src/dst fields are exactly 'global/'unified.
+    let (cu, rs) = cuda_codegen("image_bare_unified", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(cu.contains("__global__ void Img_kernel(double* img)"),
+        "expected bare 'unified Image field to compile to a pointer param;\ngot:\n{cu}");
+    assert!(rs.contains("img: CudaSlice<f64>"),
+        "expected bare 'unified Image field to become a CudaSlice host field, same as [T]'unified;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_image_field_infers_2d_grid() {
+    let (_, rs) = cuda_codegen("image_2d_grid", r#"
+kernel Img:
+    mut Image<float, 16, 32>'unified img
+    init(Image<float, 16, 32>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
+        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
+        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_volume_field_infers_3d_grid() {
+    let (_, rs) = cuda_codegen("volume_3d_grid", r#"
+kernel Vol:
+    mut Volume<float, 8, 16, 32>'unified vol
+    init(Volume<float, 8, 16, 32>'unified data):
+        vol = data
+    def ():
+        let x = gpu.thread.x
+        let y = gpu.thread.y
+        let z = gpu.thread.z
+        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+"#);
+    assert!(rs.contains("((8 + block_dim.0 - 1) / block_dim.0)"), "expected grid.x from X=8;\ngot:\n{rs}");
+    assert!(rs.contains("((16 + block_dim.1 - 1) / block_dim.1)"), "expected grid.y from Y=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.2 - 1) / block_dim.2)"), "expected grid.z from Z=32;\ngot:\n{rs}");
+}
+
+// ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
+
+#[test]
+fn atomic_method_calls_degrade_to_plain_read_modify_write_without_actor() {
+    // `.min/.max/.swap/.cas` work on *any* indexed element, not just an
+    // `'actor'global`/`'actor'unified` one -- matching `+=`/`-=`/etc.'s
+    // existing degrade-to-plain-arithmetic behavior off a non-actor field,
+    // rather than erroring or (worse) silently doing nothing. Bridged via a
+    // GNU statement-expression (`({ ... })`) since there's no atomic
+    // intrinsic to lean on for the "return the previous value" contract.
+    let (cu, _) = cuda_codegen("plain_atomic_methods", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        let m = buf[tid].min(5)
+        let x = buf[tid].max(5)
+        let s = buf[tid].swap(0)
+        let c = buf[tid].cas(0, 1)
+"#);
+    assert!(cu.contains("({ auto __old = buf[tid]; buf[tid] = min(buf[tid], (5)); __old; })"),
+        "expected plain min via a GNU statement-expression;\ngot:\n{cu}");
+    assert!(cu.contains("({ auto __old = buf[tid]; buf[tid] = max(buf[tid], (5)); __old; })"),
+        "expected plain max via a GNU statement-expression;\ngot:\n{cu}");
+    assert!(cu.contains("({ auto __old = buf[tid]; buf[tid] = (0); __old; })"),
+        "expected plain swap via a GNU statement-expression;\ngot:\n{cu}");
+    assert!(cu.contains("({ auto __old = buf[tid]; if (__old == (0)) buf[tid] = (1); __old; })"),
+        "expected plain cas via a GNU statement-expression;\ngot:\n{cu}");
 }

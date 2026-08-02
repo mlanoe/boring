@@ -1401,7 +1401,37 @@ impl Transpiler {
              \x20       }\n\
              \x20   }\n\
              }\n\
-             impl std::error::Error for Error {}\n\n"
+             impl std::error::Error for Error {}\n\n\
+             // Boring GPU error enum — thrown by kernel dispatch on a device-side\n\
+             // failure. Always available without import. Currently wired up on the\n\
+             // wgpu target only (its host codegen shares this same general pipeline);\n\
+             // cuda/rocm/metal report GPU failures as plain string-message errors\n\
+             // instead of this typed enum -- see `docs/gpu-module.md`'s error-handling\n\
+             // notes for why (their host transpilers don't share this prelude).\n\
+             // Use `catch GpuError.OutOfMemory:` / `match err: GpuError.Timeout: ...`\n\
+             #[derive(Debug, Clone)]\n\
+             #[allow(dead_code)]\n\
+             enum GpuError {\n\
+             \x20   LaunchError,\n\
+             \x20   OutOfMemory,\n\
+             \x20   IllegalAccess,\n\
+             \x20   StackOverflow,\n\
+             \x20   Timeout,\n\
+             \x20   DeviceLost,\n\
+             }\n\
+             impl std::fmt::Display for GpuError {\n\
+             \x20   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n\
+             \x20       match self {\n\
+             \x20           GpuError::LaunchError   => write!(f, \"GPU kernel launch failed\"),\n\
+             \x20           GpuError::OutOfMemory   => write!(f, \"GPU out of memory\"),\n\
+             \x20           GpuError::IllegalAccess => write!(f, \"GPU illegal memory access\"),\n\
+             \x20           GpuError::StackOverflow => write!(f, \"GPU stack overflow\"),\n\
+             \x20           GpuError::Timeout       => write!(f, \"GPU operation timed out\"),\n\
+             \x20           GpuError::DeviceLost    => write!(f, \"GPU device lost\"),\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\
+             impl std::error::Error for GpuError {}\n\n"
         );
 
         if self.config.instrument {

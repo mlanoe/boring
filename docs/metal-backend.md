@@ -37,8 +37,33 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit — unavailable on macOS. Metal
 | `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` |
 | `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` |
 | `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` |
+| `gpu.warp.size` | `warpSize` | `threads_per_simdgroup` |
+| `gpu.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` |
+| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` |
+| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` |
+| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` |
+| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` |
+| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` |
 | bare-`'actor` auto-barrier | inserted before first loop + at top of each loop iteration accessing bare-`'actor` fields | idem |
 | atomics (`'actor'global`/`'actor'unified`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` etc. |
+| `[i].min/max/swap(v)` | `atomicMin`/`atomicMax`/`atomicExch` | `atomic_fetch_min_explicit`/`atomic_fetch_max_explicit`/`atomic_exchange_explicit` |
+| `[i].cas(expected, new)` | `atomicCAS` | `atomic_compare_exchange_weak_explicit` (bridged — see below) |
+
+`.min`/`.max`/`.swap`/`.cas` are methods on an indexed `'actor'global`/`'actor'unified` element, handled in expression position (they return the previous value, matching CUDA/HIP's real semantics) rather than as a statement-only compound-assign desugar like `+= -= &= |= ^=`. `min`/`max`/`swap` map straight onto MSL's `atomic_fetch_min/max_explicit`/`atomic_exchange_explicit`, which already return the previous value — same `(device atomic_long*)` cast already used for `+=`/`-=`/etc. (`atomic_fetch_min/max_explicit` on 64-bit `atomic_long` specifically is not independently verified against a real Metal compiler in this environment, same caveat this backend's docs already carry elsewhere for untestable-locally MSL codegen).
+
+`.cas` is a real shape mismatch: MSL's `atomic_compare_exchange_weak_explicit(object, &expected, desired, ...)` takes a *pointer* to the expected value (overwritten with the real current value on failure) and returns a `bool` — unlike CUDA/HIP's `atomicCAS`, which just returns the previous value directly. Bridged via a GNU/Clang statement-expression (`({ ... })`, supported by Metal's Clang-based compiler — `metal`'s own generated `Debug` impl already relies on the same compiler being Clang-based for other things) so the whole thing is still usable as one expression:
+
+```msl
+({ long __exp = (long)(expected); atomic_compare_exchange_weak_explicit((device atomic_long*)&x, &__exp, (long)(new), memory_order_relaxed, memory_order_relaxed); __exp; })
+```
+
+**Without `'actor'global`/`'actor'unified`**, `.min`/`.max`/`.swap`/`.cas` still work — matching `+= -= &= |= ^=`'s existing degrade-to-plain-arithmetic behavior off a non-actor field — bridged via the same GNU/Clang statement-expression, just without the atomic cast or memory order: `({ auto __old = x; x = min(x, (v)); __old; })`.
+
+`gpu.warp.size`/`.lane` are emitted as new `[[thread_index_in_simdgroup]]`/
+`[[threads_per_simdgroup]]` kernel parameters, unconditionally alongside the
+existing position parameters below — MSL SIMD-group builtins need no
+capability/enable step, unlike wgpu's subgroup builtins (see
+[warp-level primitives](warp-level-primitives.html)).
 
 ### MSL kernel signature
 
@@ -93,6 +118,12 @@ That flush point is also where a GPU-side failure (invalid threadgroup size, out
 
 There is no synchronous rejection at dispatch time the way CUDA's `cuLaunchKernel` can reject an invalid config immediately — Metal's `dispatch_thread_groups` has no `Result`-returning signature at all, so an invalid config is either caught by the (async) command-buffer status above, or — if Metal's own API validation layer is active — an assertion/abort outside Boring's control.
 
+### Classified error messages, not typed `GpuError`
+
+`status() == MTLCommandBufferStatus::Error` used to be the whole story — `{:?}` on the status enum just prints the literal word `Error`, no indication of the real cause. The `metal` crate exposes no safe `.error()` getter on `CommandBufferRef` (checked against real `metal` 0.29 source — no such method exists), but `CommandBufferRef` does implement `objc::Message`, so the real `NSError` is one `objc::msg_send![buf_ref, error]` away, classified against Apple's own `MTLCommandBufferError` codes (out of memory, page fault, timeout, device removed, ...). `objc` is now an **unconditional** dependency of every Metal-generated project (previously only added when `Screen` was present) since this flush path needs it regardless of whether the program does any display work.
+
+This is a message improvement, not a catchable [`GpuError`](gpu-module.html#gpu-error-handling) — `catch GpuError.OutOfMemory:` is not reachable here. Metal's host transpiler is its own small, kernel-only transpiler (like CUDA's and ROCm's), not the general pipeline `BoringError`/`catch`-by-variant lives in — the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`.
+
 ---
 
 ## Device-to-device chaining
@@ -125,7 +156,7 @@ the full reference. Metal-specific notes:
 - **Pixel format**: `BGRA8Unorm` — pack pixels as `0xFF000000 | (r << 16) | (g << 8) | b`.
 - **Blit**: `MTLBlitCommandEncoder` from the surface buffer to the `CAMetalDrawable` texture each frame.
 - **Drawable size**: fixed at the kernel's surface `Dimension` — not updated on window resize.
-- **2D dispatch**: when a kernel has a `'surface` field and a `Dimension` field, the grid is inferred as `(ceil(w/bx), ceil(h/by), 1)` automatically.
+- **2D dispatch**: when a kernel has a `'surface` field and a `Dimension` field, the grid is inferred as `(ceil(w/bx), ceil(h/by), 1)` automatically. An `Image<T,C,R>`/`Volume<T,X,Y,Z>` field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) gets the same treatment from its compile-time `C`/`R`/`X`/`Y`/`Z` instead — `(ceil(C/bx), ceil(R/by), 1)` for `Image`, 3D for `Volume` — independently of the `'surface`/`Dimension` case (see [`gpu-module.md`](gpu-module.html#named-shape-buffers-imagevolume)).
 - **Extra dependencies** added to `Cargo.toml` when `Screen` is present: `winit = "0.28"`, `objc = "0.2"`, `core-graphics = "0.23"`.
 
 ---

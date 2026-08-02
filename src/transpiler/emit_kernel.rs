@@ -40,6 +40,15 @@ use super::*;
 use super::Transpiler;
 use crate::ast::{Arg, GpuQual, InitDecl, KernelBlockStmt, KernelDecl, KernelFieldDecl, Stmt, Type};
 
+/// How a `'unified`/`'global` output field's initial device buffer contents are
+/// derived from its `init()`-body assignment — see `Transpiler::kernel_output_fill_map`.
+enum KernelOutputInit {
+    /// `field = [value for ..count]` — uniform fill.
+    Fill(Expr, Expr),
+    /// `field = [e0, e1, ...]` — literal elements, uploaded as-is.
+    Literal(Vec<Expr>),
+}
+
 impl Transpiler {
     /// If `s` declares a name initialized directly from a bare kernel-field read
     /// (`let py'gpu'unified = k.y`, or, with the qualifier inferred, plain
@@ -415,39 +424,62 @@ impl Transpiler {
 
         // `'unified`/`'global` array fields the loop above never touched are outputs
         // allocated in `init()` via `field = [value for ..count]` (e.g. `mel = [0.0 for
-        // ..n_mels * n_frames]`), not fed by a constructor argument. `Kernel::new()`
-        // creates every buffer at size 0 (see wgpu::host::emit_kernel_new) because it
-        // has no host-side notion of this fill expression — without this, the buffer
-        // stays 0 bytes forever and the bind group (fixed at construction) permanently
-        // references a too-small buffer, failing GPU validation the first time the
-        // kernel actually runs with a real (non-empty) size. Zero-fill it here, through
-        // the same copy_{field}_to_device the loop above already uses for inputs, which
-        // resizes the buffer to match and rebuilds the bind group (see wgpu::host).
-        for (field_name, (value, count)) in Self::kernel_output_fill_map(decl) {
+        // ..n_mels * n_frames]`) or a plain bracketed literal (e.g. `out = [0.0, 0.0,
+        // 0.0]`), not fed by a constructor argument. `Kernel::new()` creates every
+        // buffer at size 0 (see wgpu::host::emit_kernel_new) because it has no
+        // host-side notion of this init expression — without this, the buffer stays 0
+        // bytes forever and the bind group (fixed at construction) permanently
+        // references a too-small buffer, failing GPU validation (or, for the literal
+        // case, silently truncating readback since the buffer landed at the wgpu
+        // backend's own placeholder size instead) the first time the kernel actually
+        // runs. Fill it here, through the same copy_{field}_to_device the loop above
+        // already uses for inputs, which resizes the buffer to match and rebuilds the
+        // bind group (see wgpu::host).
+        for (field_name, init) in Self::kernel_output_fill_map(decl) {
             if param_to_field.values().any(|f| f == &field_name) { continue; }
             let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
             let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
-            let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
-            let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
-            self.line(&format!(
-                "{var_name}.copy_{field_name}_to_device(&vec![({value_rust}) as {inner}; ({count_rust}) as usize]);"
-            ));
+            match init {
+                KernelOutputInit::Fill(value, count) => {
+                    let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
+                    let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
+                    self.line(&format!(
+                        "{var_name}.copy_{field_name}_to_device(&vec![({value_rust}) as {inner}; ({count_rust}) as usize]);"
+                    ));
+                }
+                KernelOutputInit::Literal(elems) => {
+                    let elems_rust: Vec<String> = elems.iter()
+                        .map(|e| format!("({}) as {inner}", self.substitute_and_emit(e, &param_to_arg, &param_to_len)))
+                        .collect();
+                    self.line(&format!(
+                        "{var_name}.copy_{field_name}_to_device(&vec![{}]);",
+                        elems_rust.join(", ")
+                    ));
+                }
+            }
         }
     }
 
     /// Scan a kernel's (first) `init` body for `field = [value for ..count]`
-    /// assignments (`ExprKind::ArrayFill`) — the convention this codebase's kernels use
-    /// to zero-allocate a `'unified` output buffer to its runtime size. Returns
-    /// `field name -> (value expr, count expr)`.
-    fn kernel_output_fill_map(decl: &KernelDecl) -> std::collections::HashMap<String, (Expr, Expr)> {
+    /// (`ExprKind::ArrayFill`) or plain `field = [e0, e1, ...]` (`ExprKind::Array`)
+    /// assignments — the two conventions this codebase's kernels use to size a
+    /// `'unified` output buffer to its runtime size. Returns `field name ->
+    /// KernelOutputInit`.
+    fn kernel_output_fill_map(decl: &KernelDecl) -> std::collections::HashMap<String, KernelOutputInit> {
         let mut map = std::collections::HashMap::new();
         if let Some(init) = decl.inits.first() {
             for stmt in &init.body {
                 if let Stmt::Expr(e) = stmt {
                     if let ExprKind::Assign(lhs, rhs) = &e.kind {
                         if let ExprKind::Var(field) = &lhs.kind {
-                            if let ExprKind::ArrayFill { value, count } = &rhs.kind {
-                                map.insert(field.clone(), ((**value).clone(), (**count).clone()));
+                            match &rhs.kind {
+                                ExprKind::ArrayFill { value, count } => {
+                                    map.insert(field.clone(), KernelOutputInit::Fill((**value).clone(), (**count).clone()));
+                                }
+                                ExprKind::Array(elems) => {
+                                    map.insert(field.clone(), KernelOutputInit::Literal(elems.clone()));
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -596,10 +628,46 @@ impl Transpiler {
                 }
                 _ => (self.emit_expr(&g.value), "1".to_string(), "1".to_string()),
             }
+        } else if let Some(dims) = self.image_volume_dispatch_field_dims(var_name) {
+            // No explicit `grid=`: default from the kernel's Image/Volume field's
+            // compile-time C/R/X/Y/Z dims and the `block=` workgroup size (also a
+            // dispatch-site arg here, unlike CUDA/ROCm/Metal's runtime block_dim
+            // param) — see docs/image-volume-types.md. Missing axes default to 1,
+            // same as the explicit-`grid=`-tuple case above.
+            let (bx, by, bz) = if let Some(b) = args.iter().find(|a| a.label.as_deref() == Some("block")) {
+                match &b.value.kind {
+                    ExprKind::Tuple(elems) => {
+                        let get = |i: usize| elems.get(i).map(|e| self.emit_expr(e)).unwrap_or_else(|| "1".into());
+                        (get(0), get(1), get(2))
+                    }
+                    _ => (self.emit_expr(&b.value), "1".to_string(), "1".to_string()),
+                }
+            } else {
+                ("1".to_string(), "1".to_string(), "1".to_string())
+            };
+            let axis = |i: usize, block_expr: &str| -> String {
+                match dims.get(i) {
+                    Some(Type::ConstInt(n)) => format!("(({} + ({}) - 1) / ({}))", n, block_expr, block_expr),
+                    _ => "1".to_string(),
+                }
+            };
+            (axis(0, &bx), axis(1, &by), axis(2, &bz))
         } else {
             ("1".to_string(), "1".to_string(), "1".to_string())
         };
         Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
+    }
+
+    /// If `var_name` is a tracked kernel variable whose type has a device-resident
+    /// Image/Volume field (`'unified`/`'global`/`'actor'global`/`'actor'unified`),
+    /// return its dimension args for grid-default purposes.
+    fn image_volume_dispatch_field_dims(&self, var_name: &str) -> Option<Vec<Type>> {
+        let kname = self.kernel_vars.get(var_name)?;
+        let decl = self.kernel_decls.get(kname)?;
+        decl.fields.iter()
+            .find(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                && f.ty.as_image_volume().is_some())
+            .and_then(|f| f.ty.as_image_volume().map(|(_, dims)| dims.to_vec()))
     }
 
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked

@@ -112,6 +112,13 @@ impl KernelValidator {
                 }
             }
             Type::Qualified(inner, _) => self.check_type(inner, line),
+            Type::Generic(..) if ty.as_image_volume().is_some() => {
+                let (elem, dims) = ty.as_image_volume().unwrap();
+                if dims.iter().any(|d| !matches!(d, Type::ConstInt(_))) {
+                    self.error(line, "Image/Volume dimensions must be compile-time integer constants");
+                }
+                self.check_type(elem, line);
+            }
             Type::Generic(_, args) => {
                 for a in args {
                     self.check_type(a, line);

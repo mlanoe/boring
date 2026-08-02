@@ -208,6 +208,36 @@ kernel B:
 }
 
 #[test]
+fn device_gpu_warp_builtins_map_correctly() {
+    let (msl, _) = metal_codegen("gpu_warp_builtins", r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffle_down(buf[tid], 1)
+        let b = gpu.warp.shuffle_up(buf[tid], 1)
+        let c = gpu.warp.shuffle_xor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + lane + size
+"#);
+    assert!(msl.contains("[[thread_index_in_simdgroup]]"),
+        "expected [[thread_index_in_simdgroup]];\ngot:\n{msl}");
+    assert!(msl.contains("[[threads_per_simdgroup]]"),
+        "expected [[threads_per_simdgroup]];\ngot:\n{msl}");
+    assert!(msl.contains("__simd_lane_id"), "expected __simd_lane_id;\ngot:\n{msl}");
+    assert!(msl.contains("__simd_size"), "expected __simd_size;\ngot:\n{msl}");
+    assert!(msl.contains("simdgroup_barrier(mem_flags::mem_none)"),
+        "expected simdgroup_barrier;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_down("), "expected simd_shuffle_down;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_up("), "expected simd_shuffle_up;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle_xor("), "expected simd_shuffle_xor;\ngot:\n{msl}");
+    assert!(msl.contains("simd_shuffle("), "expected simd_shuffle;\ngot:\n{msl}");
+}
+
+#[test]
 fn device_gpu_thread_x_maps_to_thread_pos() {
     let (msl, _) = metal_codegen("gpu_thread_x", r#"
 kernel B:
@@ -676,4 +706,206 @@ kernel Scale:
         rs.contains("#[must_use = \"a KernelHandle must be waited on (.wait/.inner) or the launch may not be synchronized\"]\nstruct KernelHandle<T>"),
         "expected #[must_use] directly above struct KernelHandle<T>;\ngot:\n{rs}"
     );
+}
+
+// ─── GPU error classification ─────────────────────────────────────────────────
+
+#[test]
+fn command_buffer_failure_extracts_real_nserror_code() {
+    // Previously `status() == MTLCommandBufferStatus::Error` was the only
+    // check -- `{:?}` on the status enum just printed the literal word
+    // "Error", no indication of the actual cause. `CommandBufferRef`
+    // implements `objc::Message` (confirmed against real metal 0.29 source
+    // -- the crate's own generated Debug impl relies on this same fact to
+    // call `debugDescription`), so the real NSError and its `code` are one
+    // `msg_send![..., error]` away, classified against Apple's own
+    // MTLCommandBufferError codes. `objc` is now an unconditional
+    // dependency (previously only added when `Screen` was present) since
+    // every program's `__boring_metal_flush` needs it, not just the display
+    // path. Verified to compile clean via a real cargo check against real
+    // metal 0.29 + objc 0.2, for both a plain compute program and a real
+    // Screen-using example (`examples/plasma_metal.br`) -- confirming no
+    // duplicate `extern crate objc;`.
+    let (_, rs) = metal_codegen("metal_error_classify", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("#[macro_use] extern crate objc;"),
+        "expected objc to be an unconditional dependency, not gated on Screen;\ngot:\n{rs}");
+    assert!(rs.contains("let buf_ref: &CommandBufferRef = &buf;"),
+        "expected a &CommandBufferRef borrow for the msg_send call;\ngot:\n{rs}");
+    assert!(rs.contains("objc::msg_send![buf_ref, error]"),
+        "expected the real NSError to be fetched via msg_send![.., error];\ngot:\n{rs}");
+    assert!(rs.contains("8  => \"out of memory\","),
+        "expected MTLCommandBufferError code 8 classified as out of memory;\ngot:\n{rs}");
+    assert!(rs.contains("3  => \"page fault (illegal memory access)\","),
+        "expected MTLCommandBufferError code 3 classified as illegal memory access;\ngot:\n{rs}");
+}
+
+// ─── atomic min/max/swap/cas ───────────────────────────────────────────────────
+
+#[test]
+fn device_atomic_method_calls_map_to_msl_intrinsics() {
+    // min/max/swap map directly onto MSL's atomic_fetch_min/max_explicit and
+    // atomic_exchange_explicit, which already return the previous value like
+    // their CUDA/HIP equivalents. cas is a real shape mismatch: MSL's
+    // atomic_compare_exchange_weak_explicit takes a pointer to the expected
+    // value and returns a bool, not the previous value directly -- bridged
+    // via a GNU/Clang statement-expression (`({ ... })`, supported by
+    // Metal's Clang-based compiler) so it's still usable as one expression.
+    let (msl, _) = metal_codegen("atomic_methods", r#"
+kernel Histogram:
+    mut [int]'actor'global counts
+    init([int]'actor'global data):
+        counts = data
+    def ():
+        let bucket = gpu.thread.x
+        counts[bucket].min(5)
+        counts[bucket].max(5)
+        let old_swap = counts[bucket].swap(0)
+        let old_cas = counts[bucket].cas(0, 1)
+"#);
+    assert!(msl.contains("atomic_fetch_min_explicit((device atomic_long*)&counts[bucket], (long)(5), memory_order_relaxed)"),
+        "expected atomic_fetch_min_explicit;\ngot:\n{msl}");
+    assert!(msl.contains("atomic_fetch_max_explicit((device atomic_long*)&counts[bucket], (long)(5), memory_order_relaxed)"),
+        "expected atomic_fetch_max_explicit;\ngot:\n{msl}");
+    assert!(msl.contains("atomic_exchange_explicit((device atomic_long*)&counts[bucket], (long)(0), memory_order_relaxed)"),
+        "expected atomic_exchange_explicit;\ngot:\n{msl}");
+    assert!(msl.contains("atomic_compare_exchange_weak_explicit((device atomic_long*)&counts[bucket], &__boring_cas_exp, (long)(1), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }"),
+        "expected atomic_compare_exchange_weak_explicit bridged via a statement-expression;\ngot:\n{msl}");
+}
+
+// ─── Image / Volume ─────────────────────────────────────────────────────────
+
+#[test]
+fn device_image_at_lowers_to_row_major_index() {
+    let (msl, _) = metal_codegen("image_at", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(msl.contains("img[c + r * 4]"),
+        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{msl}");
+}
+
+#[test]
+fn device_image_field_becomes_device_buffer_param() {
+    let (msl, _) = metal_codegen("image_ptr_param", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = 0.0
+"#);
+    assert!(msl.contains("device float* img [[buffer(0)]]"),
+        "expected Image field to become a device buffer param, same as [T]'unified;\ngot:\n{msl}");
+}
+
+#[test]
+fn host_image_field_infers_2d_grid() {
+    let (_, rs) = metal_codegen("image_2d_grid", r#"
+kernel Img:
+    mut Image<float, 16, 32>'unified img
+    init(Image<float, 16, 32>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
+        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
+        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_image_field_is_metal_buffer() {
+    let (_, rs) = metal_codegen("image_buffer_field", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("img: Buffer,"),
+        "expected bare 'unified Image field to become a Buffer host field, same as [T]'unified;\ngot:\n{rs}");
+}
+
+#[test]
+fn device_volume_at_lowers_to_row_major_3d_index() {
+    let (msl, _) = metal_codegen("volume_at", r#"
+kernel Vol:
+    mut Volume<float, 4, 4, 4>'unified vol
+    init(Volume<float, 4, 4, 4>'unified data):
+        vol = data
+    def ():
+        let x = gpu.thread.x
+        let y = gpu.thread.y
+        let z = gpu.thread.z
+        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+"#);
+    assert!(msl.contains("vol[x + y * 4 + z * 16]"),
+        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{msl}");
+}
+
+#[test]
+fn device_shared_image_becomes_fixed_threadgroup_decl() {
+    let (msl, _) = metal_codegen("shared_image", r#"
+kernel Tile:
+    mut [float]'unified out
+    let Image<float, 4, 4>'actor tile
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        out[0] = tile.at(c, r)
+"#);
+    assert!(msl.contains("threadgroup float tile[16];"),
+        "expected fixed threadgroup decl sized C*R, declared in the kernel body;\ngot:\n{msl}");
+    assert!(!msl.contains("tile [[threadgroup("),
+        "static 'actor Image must not appear as a threadgroup param (that's the dynamic-array path);\ngot:\n{msl}");
+}
+
+// ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
+
+#[test]
+fn atomic_method_calls_degrade_to_plain_read_modify_write_without_actor() {
+    // Mirrors the identical CUDA/ROCm fix -- see cuda_codegen.rs's own doc.
+    // Metal's compiler is Clang-based, same GNU statement-expression support.
+    let (msl, _) = metal_codegen("plain_atomic_methods", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        let m = buf[tid].min(5)
+        let x = buf[tid].max(5)
+        let s = buf[tid].swap(0)
+        let c = buf[tid].cas(0, 1)
+"#);
+    assert!(msl.contains("({ auto __old = buf[tid]; buf[tid] = min(buf[tid], (5)); __old; })"),
+        "expected plain min via a GNU statement-expression;\ngot:\n{msl}");
+    assert!(msl.contains("({ auto __old = buf[tid]; buf[tid] = max(buf[tid], (5)); __old; })"),
+        "expected plain max via a GNU statement-expression;\ngot:\n{msl}");
+    assert!(msl.contains("({ auto __old = buf[tid]; buf[tid] = (0); __old; })"),
+        "expected plain swap via a GNU statement-expression;\ngot:\n{msl}");
+    assert!(msl.contains("({ auto __old = buf[tid]; if (__old == (0)) buf[tid] = (1); __old; })"),
+        "expected plain cas via a GNU statement-expression;\ngot:\n{msl}");
 }

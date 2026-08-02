@@ -5,6 +5,7 @@
 // Uses the `metal` crate (objc2-metal migration planned).
 
 use crate::ast::*;
+use crate::transpiler::helpers::image_volume_grid_dim_expr;
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -396,6 +397,10 @@ impl HostEmitter {
     // ── Metal prelude ──────────────────────────────────────────────────────────
 
     fn emit_prelude(&mut self) {
+        // Needed unconditionally (not just for `Screen`/display programs):
+        // `__boring_metal_flush`, below, uses `objc::msg_send!` to read the
+        // real `NSError` off a failed command buffer.
+        self.line("#[macro_use] extern crate objc;");
         self.line("use metal::*;");
         self.line("use std::mem;");
         self.blank();
@@ -558,7 +563,37 @@ impl HostEmitter {
         self.line("buf.wait_until_completed();");
         self.line("if buf.status() == MTLCommandBufferStatus::Error {");
         self.indent += 1;
-        self.line("return Err(format!(\"Metal command buffer failed: {:?}\", buf.status()).into());");
+        // `CommandBufferRef` doesn't expose a safe `.error()` getter (checked
+        // against the real `metal` 0.29 crate source -- no such method
+        // exists anywhere in it), so `status() == Error` used to be all we
+        // could report: `{:?}` on the status enum just prints the literal
+        // word "Error", with no indication of *why*. `CommandBufferRef`
+        // already implements `objc::Message` (the crate's own generated
+        // `Debug` impl relies on this same fact to call `debugDescription`),
+        // so the real `NSError` and its `code` are one `msg_send![...,
+        // error]` away -- matching Apple's own `MTLCommandBufferError` codes.
+        self.line("let __err_code: i64 = unsafe {");
+        self.indent += 1;
+        self.line("let buf_ref: &CommandBufferRef = &buf;");
+        self.line("let err_obj: *mut objc::runtime::Object = objc::msg_send![buf_ref, error];");
+        self.line("if err_obj.is_null() { -1 } else { objc::msg_send![err_obj, code] }");
+        self.indent -= 1;
+        self.line("};");
+        self.line("let __err_desc = match __err_code {");
+        self.indent += 1;
+        self.line("1  => \"internal error\",");
+        self.line("2  => \"timed out\",");
+        self.line("3  => \"page fault (illegal memory access)\",");
+        self.line("4  => \"blacklisted\",");
+        self.line("7  => \"not permitted\",");
+        self.line("8  => \"out of memory\",");
+        self.line("9  => \"invalid resource\",");
+        self.line("10 => \"memoryless resource\",");
+        self.line("11 => \"device removed\",");
+        self.line("_  => \"unknown Metal command buffer error\",");
+        self.indent -= 1;
+        self.line("};");
+        self.line("return Err(format!(\"Metal command buffer failed: {} (MTLCommandBufferError code {})\", __err_desc, __err_code).into());");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -739,8 +774,8 @@ impl HostEmitter {
     }
 
     fn emit_screen_prelude(&mut self) {
-        self.blank();
-        self.line("#[macro_use] extern crate objc;");
+        // `#[macro_use] extern crate objc;` now lives in `emit_prelude` (always
+        // emitted, not just here) -- see its own comment.
         self.blank();
         self.line("fn boring_screen_present(");
         self.indent += 1;
@@ -996,6 +1031,9 @@ impl HostEmitter {
                         Type::Array(_) | Type::ArrayN(_, _) => {
                             self.line(&format!("{}: Buffer,", field.name));
                         }
+                        ty if ty.as_image_volume().is_some() => {
+                            self.line(&format!("{}: Buffer,", field.name));
+                        }
                         _ => {
                             let ty = rust_type(&field.ty);
                             self.line(&format!("{}: {},", field.name, ty));
@@ -1008,6 +1046,7 @@ impl HostEmitter {
             if matches!(field.qual, GpuQual::Local) {
                 match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
+                    ty if ty.as_image_volume().is_some() => {}
                     _ => {
                         let ty = rust_type(&field.ty);
                         self.line(&format!("{}: {},", field.name, ty));
@@ -1035,7 +1074,7 @@ impl HostEmitter {
         for field in &decl.fields {
             match field.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some() {
                         let elem = elem_rust_type(&field.ty);
                         self.line(&format!(
                             "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
@@ -1343,12 +1382,13 @@ impl HostEmitter {
     }
 
     fn emit_boring_launch(&mut self, _name: &str, fields: &[KernelFieldDecl]) {
-        // Auto-grid when there is at least one device array field.
+        // Auto-grid when there is at least one device array (or Image/Volume) field.
         let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
+                        ty if ty.as_image_volume().is_some() => Some(f.name.clone()),
                         _ => None,
                     }
                 }
@@ -1371,7 +1411,8 @@ impl HostEmitter {
 
         // Grid sizing.
         if let Some(field) = &auto_grid_field {
-            let field_qual = fields.iter().find(|f| &f.name == field).map(|f| &f.qual).cloned();
+            let field_decl = fields.iter().find(|f| &f.name == field).unwrap();
+            let field_qual = Some(&field_decl.qual);
             let is_surface = matches!(field_qual, Some(GpuQual::Surface));
             let dim_field = if is_surface {
                 fields.iter().find(|f| matches!(&f.ty, Type::Named(n) if n == "Dimension"))
@@ -1381,7 +1422,11 @@ impl HostEmitter {
             };
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
-            if let Some(df) = dim_field {
+            if let Some((_, dims)) = field_decl.ty.as_image_volume() {
+                // Fixed-shape Image/Volume: C/R/X/Y/Z are compile-time constants,
+                // baked directly into the ceil-div grid expression.
+                self.line(&image_volume_grid_dim_expr(dims));
+            } else if let Some(df) = dim_field {
                 // 2D grid from surface Dimension field
                 self.line(&format!("let __w = self.{}.width; let __h = self.{}.height;", df, df));
                 self.line("((__w + block_dim.0 - 1) / block_dim.0, (__h + block_dim.1 - 1) / block_dim.1, 1)");
@@ -1429,7 +1474,7 @@ impl HostEmitter {
         for f in fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
                         self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                         buf_idx += 1;
                     }
@@ -1439,7 +1484,7 @@ impl HostEmitter {
         }
         for f in fields {
             if matches!(f.qual, GpuQual::Const) {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
                     self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                 } else {
                     let elem = elem_rust_type(&f.ty);
@@ -1452,7 +1497,7 @@ impl HostEmitter {
             }
         }
         for f in fields {
-            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
                 let elem = rust_type(&f.ty);
                 self.line(&format!(
                     "__encoder.set_bytes({}, mem::size_of::<{}>() as u64, &self.{} as *const _ as *const _);",
@@ -2745,6 +2790,7 @@ fn elem_rust_type(ty: &Type) -> String {
         Type::Array(inner)        => rust_type(inner),
         Type::ArrayN(inner, _)    => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
+        Type::Generic(..) if ty.as_image_volume().is_some() => rust_type(ty.as_image_volume().unwrap().0),
         _                         => rust_type(ty),
     }
 }

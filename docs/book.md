@@ -7173,6 +7173,9 @@ Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Wi
 **[GPU display](gpu-display.html)**
 Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.
 
+**[Warp-level primitives](warp-level-primitives.html)**
+`gpu.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
+
 ### Compilation targets
 
 **[Rust-for-Linux target](kernel-target.html)**

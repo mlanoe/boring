@@ -1,11 +1,15 @@
 # `gpu.warp.*` — warp/wavefront/SIMD-group primitives
 
-> **Status: Proposed.** No implementation yet — this document is the task
-> spec for that work. Scope was settled in conversation before writing this
-> up: **shuffle intrinsics are in scope**, not just the `warp.size`/
-> `warp.lane`/`warp.sync` trio `cuda-module.md`'s "Known limitations"
-> currently names — without shuffles, warp-level programming has no actual
-> data-exchange primitive, which is the main reason it's useful.
+> **Status: Implemented.** Shipped across the interpreter (`boring run`) and
+> all four transpiler backends (CUDA, ROCm, Metal, wgpu — including the
+> wgpu real-subgroup/shared-memory-emulated fallback split). Scope: **shuffle
+> intrinsics are in scope**, not just the `warp.size`/`warp.lane`/`warp.sync`
+> trio `cuda-module.md`'s "Known limitations" used to name — without
+> shuffles, warp-level programming has no actual data-exchange primitive,
+> which is the main reason it's useful. Also covered, beyond this document's
+> original scope: full `boring run` interpreter support (real per-warp
+> barriers and a shuffle scratch buffer, mirroring the existing `'actor`
+> mechanism), decided in conversation when implementation began.
 
 ## Problem Statement
 

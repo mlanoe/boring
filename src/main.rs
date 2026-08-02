@@ -1394,6 +1394,17 @@ fn emit_wgpu(path: &str, version: &str) {
         process::exit(1);
     }
 
+    // shaders/main_emulated.wgsl — only emitted when some kernel uses `gpu.warp.*`;
+    // the host chooses between this and main.wgsl at runtime based on whether the
+    // adapter has `wgpu::Features::SUBGROUP` (see transpiler::wgpu::device::WarpMode).
+    if let Some(emulated) = &wgpu_out.device_wgsl_emulated {
+        let wgsl_emulated_file = shaders_dir.join("main_emulated.wgsl");
+        if let Err(e) = std::fs::write(&wgsl_emulated_file, emulated) {
+            eprintln!("error: cannot write '{}': {}", wgsl_emulated_file.display(), e);
+            process::exit(1);
+        }
+    }
+
     // Cargo.toml
     let cargo_toml = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_toml, &wgpu_out.cargo_toml) {

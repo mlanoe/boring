@@ -1888,6 +1888,24 @@ pub struct Interpreter {
     /// calls `.wait()` on this when present instead of being a no-op — only
     /// set on kernels with `'sync` fields (see `sync_fields`).
     pub(crate) kernel_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+    /// This thread's index within its warp (`gpu.warp.lane`) — always set to
+    /// a real value inside a kernel thread (see `eval_gpu::run_one_kernel_thread`),
+    /// `0` outside kernel execution.
+    pub(crate) warp_lane: usize,
+    /// Number of lanes actually participating in this thread's warp-group
+    /// (`<= eval_gpu::WARP_SIZE`; less than `WARP_SIZE` only for a block whose
+    /// thread count isn't a multiple of `WARP_SIZE`). Used to bound
+    /// `gpu.warp.shuffle_*`'s target-lane reads to real participants.
+    pub(crate) warp_active_lanes: usize,
+    /// Barrier shared by every thread in this thread's warp-group.
+    /// `gpu.warp.sync()` waits on this; `None` outside a kernel dispatch that
+    /// actually uses `gpu.warp.*` (see `eval_gpu::stmts_use_gpu_warp`).
+    pub(crate) warp_barrier: Option<std::sync::Arc<std::sync::Barrier>>,
+    /// Shared scratch slots (one per lane, `WARP_SIZE` of them) this thread's
+    /// warp-group shuffles values through — `gpu.warp.shuffle_*` writes this
+    /// thread's value to `scratch[warp_lane]`, waits on `warp_barrier`, then
+    /// reads `scratch[target_lane]`. `None` alongside `warp_barrier`.
+    pub(crate) warp_scratch: Option<std::sync::Arc<std::sync::Mutex<Vec<eval_gpu::ThreadValue>>>>,
 }
 
 impl Interpreter {
@@ -1967,6 +1985,10 @@ impl Interpreter {
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
+            warp_lane: 0,
+            warp_active_lanes: 0,
+            warp_barrier: None,
+            warp_scratch: None,
         }
     }
 
@@ -2001,6 +2023,10 @@ impl Interpreter {
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
+            warp_lane: 0,
+            warp_active_lanes: 0,
+            warp_barrier: None,
+            warp_scratch: None,
         }
     }
 
@@ -2702,4 +2728,4 @@ impl Default for Interpreter {
 
 #[cfg(test)]
 mod tests;
-mod eval_gpu;
+pub(crate) mod eval_gpu;

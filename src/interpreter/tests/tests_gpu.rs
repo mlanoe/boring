@@ -84,6 +84,79 @@ let _result = k.buf[0]
     assert_eq!(get_var(&interp, "_result"), Value::Float(10.0));
 }
 
+// ─── atomic min/max/swap/cas — read-modify-write, returns the OLD value ──────
+
+#[test]
+fn test_kernel_atomic_method_calls_min_max_swap_cas() {
+    // `arr[i].min/max/swap/cas(...)` mirrors the atomicMin/Max/Exch/CAS
+    // intrinsics the transpiler backends emit for the same call shape on an
+    // `'actor'global`/`'actor'unified` field — the interpreter doesn't check
+    // the qualifier (same precedent as `+=`/`-=`/etc. on any array element,
+    // already correct here via ordinary compound-assign desugaring with no
+    // special-cased atomicity, ordinary sequential simulation being enough).
+    // `self.assign` (the exact write-back `+=` already relies on) does the
+    // mutation; the method call itself evaluates to the value *before* it.
+    let src = r#"
+kernel Ops:
+    mut [int]'actor'global counts
+
+    init([int]'actor'global data):
+        counts = data
+
+    def ():
+        # .min/.max/.swap/.cas all return the previous value -- the checker
+        # requires a non-void return value be explicitly bound or discarded.
+        _ = counts[0].min(3)
+        _ = counts[1].max(3)
+        _ = counts[2].swap(99)
+        _ = counts[3].cas(5, 42)
+        _ = counts[4].cas(0, 42)
+
+let data = [5, 1, 7, 5, 5]
+mut k = Ops(data)
+kernel:
+    k(block = 1)
+let _r0 = k.counts[0]
+let _r1 = k.counts[1]
+let _r2 = k.counts[2]
+let _r3 = k.counts[3]
+let _r4 = k.counts[4]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_r0"), Value::Int(3),  "min(5, 3) -> 3");
+    assert_eq!(get_var(&interp, "_r1"), Value::Int(3),  "max(1, 3) -> 3");
+    assert_eq!(get_var(&interp, "_r2"), Value::Int(99), "swap(7, 99) -> 99");
+    assert_eq!(get_var(&interp, "_r3"), Value::Int(42), "cas(5, 42) with current==5 -> 42 (succeeds)");
+    assert_eq!(get_var(&interp, "_r4"), Value::Int(5),  "cas(0, 42) with current==5 -> unchanged (fails)");
+}
+
+#[test]
+fn test_kernel_atomic_method_call_returns_old_value() {
+    let src = r#"
+kernel Ops:
+    mut [int]'actor'global counts
+
+    init([int]'actor'global data):
+        counts = data
+
+    def ():
+        let old = counts[0].swap(99)
+        counts[1] = old
+
+let data = [7, 0]
+mut k = Ops(data)
+kernel:
+    k(block = 1)
+let _r0 = k.counts[0]
+let _r1 = k.counts[1]
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    assert_eq!(get_var(&interp, "_r0"), Value::Int(99), "swapped in");
+    assert_eq!(get_var(&interp, "_r1"), Value::Int(7),  "swap() returned the OLD value (7), not the new one");
+}
+
 #[test]
 fn test_kernel_block_writeback() {
     let src = r#"
@@ -230,6 +303,121 @@ let _result = k.tids
     );
 }
 
+// ─── gpu.warp.* builtins ─────────────────────────────────────────────────────
+
+#[test]
+fn test_gpu_warp_size_lane() {
+    let src = r#"
+kernel WarpIds:
+    mut [int, 64] sizes
+    mut [int, 64] lanes
+
+    def ():
+        let i = gpu.thread.x
+        sizes[i] = gpu.warp.size
+        lanes[i] = gpu.warp.lane
+
+mut k = WarpIds()
+kernel:
+    k(block = 64)
+let _sizes = k.sizes
+let _lanes = k.lanes
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let sizes = get_var(&interp, "_sizes");
+    let lanes = get_var(&interp, "_lanes");
+    if let (Value::Array(sizes), Value::Array(lanes)) = (sizes, lanes) {
+        assert_eq!(sizes.len(), 64);
+        for s in sizes.iter() {
+            assert_eq!(*s, Value::Int(32), "gpu.warp.size should be the fixed 32-lane simulation constant");
+        }
+        for (i, l) in lanes.iter().enumerate() {
+            assert_eq!(*l, Value::Int((i % 32) as i64), "gpu.warp.lane should be thread index mod warp size");
+        }
+    } else {
+        panic!("expected arrays");
+    }
+}
+
+#[test]
+fn test_gpu_warp_sync_barrier() {
+    // A kernel using only `gpu.warp.sync()` (no `'actor` field at all) must still
+    // take the real-OS-thread barrier path — this would deadlock or panic if the
+    // interpreter incorrectly ran it on the independent-threads fast path.
+    let src = r#"
+kernel WarpSyncOnly:
+    mut [int, 32] out
+
+    def ():
+        let i = gpu.thread.x
+        gpu.warp.sync()
+        out[i] = i
+
+mut k = WarpSyncOnly()
+kernel:
+    k(block = 32)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    let expected: Vec<Value> = (0..32).map(Value::Int).collect();
+    assert_eq!(val, Value::Array(expected.into()));
+}
+
+#[test]
+fn test_gpu_warp_shuffle_down() {
+    let src = r#"
+kernel ShuffleDown:
+    mut [int, 32] out
+
+    def ():
+        let i = gpu.thread.x
+        let lane = gpu.warp.lane
+        out[i] = gpu.warp.shuffle_down(lane, 1)
+
+mut k = ShuffleDown()
+kernel:
+    k(block = 32)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    // Lane 0..30 reads lane+1 from its neighbor; the last lane (31) has no
+    // lane 32 to read from and falls back to its own value, matching real
+    // hardware `_sync` shuffle intrinsics at the warp boundary.
+    let mut expected: Vec<Value> = (1..32).map(Value::Int).collect();
+    expected.push(Value::Int(31));
+    assert_eq!(val, Value::Array(expected.into()));
+}
+
+#[test]
+fn test_gpu_warp_shuffle_xor_butterfly() {
+    let src = r#"
+kernel ShuffleXor:
+    mut [int, 8] out
+
+    def ():
+        let i = gpu.thread.x
+        let lane = gpu.warp.lane
+        out[i] = gpu.warp.shuffle_xor(lane, 1)
+
+mut k = ShuffleXor()
+kernel:
+    k(block = 8)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    // XOR-1 pairs adjacent lanes (0<->1, 2<->3, ...) — every lane reads its pair
+    // partner's lane index.
+    let expected: Vec<Value> = (0..8i64).map(|l| Value::Int(l ^ 1)).collect();
+    assert_eq!(val, Value::Array(expected.into()));
+}
+
 // ─── kernel field access after launch ────────────────────────────────────────
 
 #[test]
@@ -332,6 +520,47 @@ let _result = k.out
     assert_eq!(
         val,
         Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(3.0), Value::Float(4.0)].into())
+    );
+}
+
+// ─── Image/Volume: .at()/.width()/.height() lower to Index/Int ─────────────
+
+#[test]
+fn test_image_at_width_height_lower_correctly() {
+    // The interpreter has no runtime representation for `Image`/`Volume`
+    // beyond the flat array a plain `[T,N]'actor` field already gets — every
+    // `.at(...)`/`.width()`/`.height()` call is lowered to `Index`/`Int` before
+    // the kernel's methods ever execute (`lower_image_volume_methods`).
+    // Mirrors `test_unassigned_actor_fixed_array_defaults_to_zero`'s pattern,
+    // for the Image-typed field case.
+    let src = r#"
+kernel Tile:
+    mut [float]'unified   out
+    mut Image<float, 4, 4>'actor tile
+
+    init([float]'unified data):
+        out = data
+
+    def ():
+        tile.at(0, 0) = 1.0
+        tile.at(1, 2) = 5.0
+        out[0] = tile.at(0, 0)
+        out[1] = tile.at(1, 2)
+        out[2] = float(tile.width())
+        out[3] = float(tile.height())
+
+let data = [0.0, 0.0, 0.0, 0.0]
+mut k = Tile(data)
+kernel:
+    k(block = 1)
+let _result = k.out
+"#;
+    let (interp, result) = run(src);
+    result.expect("runtime error");
+    let val = get_var(&interp, "_result");
+    assert_eq!(
+        val,
+        Value::Array(vec![Value::Float(1.0), Value::Float(5.0), Value::Float(4.0), Value::Float(4.0)].into())
     );
 }
 

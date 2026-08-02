@@ -12,8 +12,10 @@ pub(super) fn emit_host_rs(
     general_code: &str,
     has_boring_main: bool,
     boring_main_throws: bool,
+    has_emulated_shader: bool,
 ) -> String {
     let mut e = HostEmitter::new(program, kernel_names, effective_kernels, general_code, has_boring_main, boring_main_throws);
+    e.has_emulated_shader = has_emulated_shader;
     e.emit();
     e.out
 }
@@ -41,6 +43,12 @@ struct HostEmitter<'a> {
     /// a plain statement — the two aren't interchangeable, calling a `()`-returning
     /// fn through the `Err` pattern is a real `cargo check` E0308, not just style.
     boring_main_throws: bool,
+    /// Whether a second, shared-memory-emulated WGSL module was emitted
+    /// alongside the real-subgroup one (`shaders/main_emulated.wgsl`) — only
+    /// true when some kernel uses `gpu.warp.*` (see `device::WarpMode`). Gates
+    /// the `wgpu::Features::SUBGROUP` runtime detection and dual-shader-module
+    /// dispatch in `emit_pipeline_init`/wherever the shader module is created.
+    has_emulated_shader: bool,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -64,7 +72,7 @@ impl<'a> HostEmitter<'a> {
             }
             false
         });
-        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws }
+        Self { out: String::new(), program, kernel_names, effective_kernels, has_screen, in_method: false, general_code, has_boring_main, boring_main_throws, has_emulated_shader: false }
     }
 
     fn line(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
@@ -359,10 +367,39 @@ impl<'a> HostEmitter<'a> {
         // statics' doc comment) -- every later `new()` call just clones the Arc.
         self.line(&format!("        let pipeline = {}_PIPELINE.get_or_init(|| {{", name.to_uppercase()));
         self.line("            let shader = __BORING_SHADER_MODULE.get_or_init(|| {");
-        self.line("                device.create_shader_module(wgpu::ShaderModuleDescriptor {");
-        self.line("                    label: None,");
-        self.line("                    source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
-        self.line("                })");
+        if self.has_emulated_shader {
+            // `device.features().contains(SUBGROUP)` is a necessary but not
+            // sufficient check: it reflects hardware/backend capability, but a
+            // wgpu version can advertise the feature while its bundled `naga`
+            // WGSL frontend still doesn't parse the `enable subgroups;`
+            // directive (observed in the wild — a real gap between HAL-level
+            // feature plumbing and shader-frontend language support, not a
+            // hypothetical). So: only ATTEMPT the real-subgroup module when the
+            // feature is present, and wrap that attempt in an error scope —
+            // catching a shader-compile failure and falling back to the
+            // emulated module at runtime, instead of the uncaught-validation-error
+            // panic device.create_shader_module would otherwise trigger.
+            self.line("                let __boring_try_real = device.features().contains(wgpu::Features::SUBGROUP);");
+            self.line("                let __boring_module = if __boring_try_real {");
+            self.line("                    device.push_error_scope(wgpu::ErrorFilter::Validation);");
+            self.line("                    let m = device.create_shader_module(wgpu::ShaderModuleDescriptor {");
+            self.line("                        label: None,");
+            self.line("                        source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
+            self.line("                    });");
+            self.line("                    if pollster::block_on(device.pop_error_scope()).is_some() { None } else { Some(m) }");
+            self.line("                } else {");
+            self.line("                    None");
+            self.line("                };");
+            self.line("                __boring_module.unwrap_or_else(|| device.create_shader_module(wgpu::ShaderModuleDescriptor {");
+            self.line("                    label: None,");
+            self.line("                    source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main_emulated.wgsl\").into()),");
+            self.line("                }))");
+        } else {
+            self.line("                device.create_shader_module(wgpu::ShaderModuleDescriptor {");
+            self.line("                    label: None,");
+            self.line("                    source: wgpu::ShaderSource::Wgsl(include_str!(\"../shaders/main.wgsl\").into()),");
+            self.line("                })");
+        }
         self.line("            });");
         self.line("            std::sync::Arc::new(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {");
         self.line("                label: None,");
@@ -797,12 +834,35 @@ impl<'a> HostEmitter<'a> {
             self.line("async fn async_main() {");
             self.line("    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());");
             self.line("    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await.expect(\"No GPU adapter found\");");
-            self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.expect(\"Failed to create device\");");
+            if self.has_emulated_shader {
+                // `gpu.warp.*` is used somewhere in this program — opportunistically
+                // request `Features::SUBGROUP` (only if the adapter actually supports
+                // it; `request_device` hard-fails if you require an unsupported
+                // feature) so `device.features()` at shader-creation time can pick
+                // the real-subgroup module over the shared-memory-emulated one.
+                self.line("    let __boring_use_subgroups = adapter.features().contains(wgpu::Features::SUBGROUP);");
+                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {");
+                self.line("        required_features: if __boring_use_subgroups { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
+                self.line("        ..Default::default()");
+                self.line("    }, None).await.expect(\"Failed to create device\");");
+            } else {
+                self.line("    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.expect(\"Failed to create device\");");
+            }
             // Defensive: make sure the device is fully settled before any real
             // dispatch work begins. There's nothing queued yet, so this returns
             // essentially immediately -- it's here only to rule out adapter/device
             // warm-up timing as a source of flaky early-kernel behavior.
             self.line("    device.poll(wgpu::MaintainBase::Wait);");
+            // Without this, a validation error NOT already inside an explicit
+            // push/pop_error_scope pair (e.g. pipeline creation at kernel `new()`
+            // time — see `emit_kernel_new`, no error scope wraps it there) hits
+            // wgpu's default uncaptured-error handler, which panics. Installed
+            // once here so such an error is reported and the program can
+            // continue instead of crashing outright — a later dispatch() call on
+            // a pipeline that failed to create will raise its own validation
+            // error, which dispatch's own push/pop_error_scope DOES already
+            // catch and convert to a proper GpuError::LaunchError.
+            self.line("    device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {}\", e)));");
             self.line("    let device = std::sync::Arc::new(device);");
             self.line("    let queue = std::sync::Arc::new(queue);");
             self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");
@@ -1026,12 +1086,24 @@ impl<'a> HostEmitter<'a> {
         self.line("        let adapter  = instance.request_adapter(&wgpu::RequestAdapterOptions::default())");
         self.line("            .await.expect(\"No GPU adapter found\");");
         self.line("        let (device, queue) = adapter");
-        self.line("            .request_device(&wgpu::DeviceDescriptor::default(), None)");
-        self.line("            .await.expect(\"Failed to create device\");");
+        if self.has_emulated_shader {
+            self.line("            .request_device(&wgpu::DeviceDescriptor {");
+            self.line("                required_features: if adapter.features().contains(wgpu::Features::SUBGROUP) { wgpu::Features::SUBGROUP } else { wgpu::Features::empty() },");
+            self.line("                ..Default::default()");
+            self.line("            }, None)");
+            self.line("            .await.expect(\"Failed to create device\");");
+        } else {
+            self.line("            .request_device(&wgpu::DeviceDescriptor::default(), None)");
+            self.line("            .await.expect(\"Failed to create device\");");
+        }
         self.line("        (instance, adapter, device, queue)");
         self.line("    });");
         // Defensive: see the non-Screen async_main path for why.
         self.line("    device.poll(wgpu::MaintainBase::Wait);");
+        // See the non-Screen async_main path's identical call for why: reports
+        // (instead of panicking on) a validation error not already inside an
+        // explicit error scope, e.g. pipeline creation at kernel `new()` time.
+        self.line("    device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {}\", e)));");
         self.line("    let device = std::sync::Arc::new(device);");
         self.line("    let queue  = std::sync::Arc::new(queue);");
         self.line("    let _ = __BORING_GPU_DEVICE.set(std::sync::Arc::clone(&device));");

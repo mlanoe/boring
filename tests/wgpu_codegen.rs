@@ -17,7 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn run_wgpu(test_name: &str, src: &str) -> (String, String, String) {
+fn run_wgpu(test_name: &str, src: &str) -> (String, String, String, String) {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("wgpu_codegen").join(test_name);
@@ -44,13 +44,14 @@ fn run_wgpu(test_name: &str, src: &str) -> (String, String, String) {
     let read = |rel: &str| fs::read_to_string(wgpu_dir.join(rel)).unwrap_or_default();
     (
         read("shaders/main.wgsl"),
+        read("shaders/main_emulated.wgsl"),
         read("src/main.rs"),
         read("Cargo.toml"),
     )
 }
 
 fn wgpu_codegen(test_name: &str, src: &str) -> (String, String) {
-    let (wgsl, rs, _toml) = run_wgpu(test_name, src);
+    let (wgsl, _emulated, rs, _toml) = run_wgpu(test_name, src);
     (wgsl, rs)
 }
 
@@ -252,6 +253,77 @@ kernel Builtins:
 }
 
 #[test]
+fn test_gpu_warp_builtins_real_subgroup_path() {
+    let src = r#"
+kernel WarpBuiltins:
+    mut [float]'unified buf
+
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffle_down(buf[tid], 1)
+        let b = gpu.warp.shuffle_up(buf[tid], 1)
+        let c = gpu.warp.shuffle_xor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + f32(lane) + f32(size)
+"#;
+    let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_builtins_real", src);
+
+    assert!(wgsl.contains("enable subgroups;"), "expected enable subgroups;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("@builtin(subgroup_size)"), "expected @builtin(subgroup_size);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("@builtin(subgroup_invocation_id)"), "expected @builtin(subgroup_invocation_id);\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupBarrier()"), "expected subgroupBarrier();\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleDown("), "expected subgroupShuffleDown;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleUp("), "expected subgroupShuffleUp;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffleXor("), "expected subgroupShuffleXor;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("subgroupShuffle("), "expected subgroupShuffle;\ngot:\n{wgsl}");
+
+    // The emulated fallback module must exist alongside the real one whenever
+    // `gpu.warp.*` is used, and never uses the subgroup extension.
+    assert!(!emulated.is_empty(), "expected shaders/main_emulated.wgsl to be written");
+    assert!(!emulated.contains("enable subgroups;"), "emulated module must not enable subgroups;\ngot:\n{emulated}");
+}
+
+#[test]
+fn test_gpu_warp_shuffle_emulated_fallback_shape() {
+    let src = r#"
+kernel WarpEmulated:
+    mut [float]'unified buf
+
+    def ():
+        let tid = gpu.thread.x
+        gpu.warp.sync()
+        let shuffled = gpu.warp.shuffle_down(buf[tid], 1)
+        buf[tid] = shuffled
+"#;
+    let (_wgsl, emulated, _rs, _toml) = run_wgpu("warp_shuffle_emulated", src);
+
+    assert!(emulated.contains("var<workgroup> bp_warp_scratch_f32"),
+        "expected a f32 workgroup scratch buffer;\ngot:\n{emulated}");
+    assert!(emulated.contains("workgroupBarrier()"), "expected workgroupBarrier();\ngot:\n{emulated}");
+    assert!(emulated.contains("@builtin(local_invocation_index)"),
+        "expected @builtin(local_invocation_index);\ngot:\n{emulated}");
+    assert!(emulated.contains("let bp_wsize: u32 = 32u;"), "expected fixed 32-lane fallback constant;\ngot:\n{emulated}");
+    assert!(emulated.contains("select("), "expected a select() for the warp-boundary clamp;\ngot:\n{emulated}");
+}
+
+#[test]
+fn test_gpu_warp_not_used_leaves_output_unchanged() {
+    let src = r#"
+kernel Plain:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#;
+    let (wgsl, emulated, _rs, _toml) = run_wgpu("warp_not_used", src);
+    assert!(!wgsl.contains("enable subgroups;"), "no gpu.warp.* usage should never enable subgroups;\ngot:\n{wgsl}");
+    assert!(emulated.is_empty(), "no gpu.warp.* usage should not emit an emulated shader file");
+}
+
+#[test]
 fn test_cargo_toml_deps() {
     let src = r#"
 kernel Empty:
@@ -259,7 +331,7 @@ kernel Empty:
     def ():
         data[0] = 1.0
 "#;
-    let (_wgsl, _rs, toml) = run_wgpu("cargo_toml", src);
+    let (_wgsl, _emulated, _rs, toml) = run_wgpu("cargo_toml", src);
 
     assert!(toml.contains("wgpu = \"22\""), "missing wgpu dep");
     assert!(toml.contains("bytemuck"), "missing bytemuck dep");
@@ -984,4 +1056,376 @@ for g in GPU.all():
     assert!(rs.contains("for g in vec![0usize].into_iter()"), "GPU.all() should be a single-element usize vec:\n{rs}");
     assert!(rs.contains("__boring_gpu_name()"), "loop var should get the .name() rewrite:\n{rs}");
     assert!(rs.contains("(g as i64)"), "loop var should get the .index() rewrite:\n{rs}");
+}
+
+// ─── typed GpuError ─────────────────────────────────────────────────────────
+
+#[test]
+fn dispatch_pushes_outofmemory_and_validation_scopes_and_wraps_typed_gpu_error() {
+    // Previously only `ErrorFilter::Validation` was pushed, and any error
+    // collapsed into one generic formatted-string message -- no way to tell
+    // an out-of-memory failure apart from a rejected launch config, and no
+    // way for Boring source to `catch` a specific cause at all. `wgpu`
+    // already exposes `ErrorFilter::OutOfMemory` unused (confirmed against
+    // real wgpu 22.1.0 source); this wires it up alongside Validation and
+    // classifies each into a typed `GpuError` variant wrapped in
+    // `BoringError::Other`, exactly the same mechanism `throws CalcError`
+    // already uses (`book.md`), so `catch GpuError.OutOfMemory:` genuinely
+    // dispatches -- verified end to end via a real `cargo check` against
+    // real wgpu.
+    let (_, rs) = wgpu_codegen("gpu_error_scopes", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);"),
+        "expected an OutOfMemory error scope pushed alongside Validation;\ngot:\n{rs}");
+    assert!(rs.contains("self.device.push_error_scope(wgpu::ErrorFilter::Validation);"),
+        "expected the existing Validation error scope to still be pushed;\ngot:\n{rs}");
+    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError)"),
+        "expected the Validation-scope error to classify as GpuError::LaunchError, typed via BoringError::Other;\ngot:\n{rs}");
+    assert!(rs.contains("BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory)"),
+        "expected the OutOfMemory-scope error to classify as GpuError::OutOfMemory, typed via BoringError::Other;\ngot:\n{rs}");
+    assert!(rs.contains("enum GpuError") && rs.contains("OutOfMemory,") && rs.contains("DeviceLost,"),
+        "expected the built-in GpuError enum (all 6 documented variants) in the generated prelude;\ngot:\n{rs}");
+}
+
+#[test]
+fn catch_gpu_error_by_variant_downcasts_correctly() {
+    // End-to-end: a Boring `catch GpuError.OutOfMemory:` inside a `try:`
+    // wrapping a `kernel:` dispatch must lower to a real BoringError
+    // downcast + variant match, the same codegen shape `catch CalcError.X:`
+    // already produces for a user-declared enum (book.md:6565) -- confirmed
+    // this compiles clean via a real `cargo check` against real wgpu.
+    let (_, rs) = wgpu_codegen("gpu_error_catch", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+
+def run() throws:
+    let data = [1.0, 2.0]
+    mut k = Scale(data)
+    try:
+        kernel:
+            k(block = 2)
+    catch GpuError.OutOfMemory:
+        print "out of memory"
+    catch GpuError.LaunchError:
+        print "launch error"
+"#);
+    assert!(rs.contains("__tid == std::any::TypeId::of::<GpuError>()"),
+        "expected a TypeId-gated downcast for GpuError;\ngot:\n{rs}");
+    assert!(rs.contains(".downcast_ref::<GpuError>()"),
+        "expected a downcast_ref::<GpuError> call at the catch site;\ngot:\n{rs}");
+    assert!(rs.contains("GpuError::OutOfMemory =>") && rs.contains("GpuError::LaunchError =>"),
+        "expected both catch arms to match on the specific GpuError variant;\ngot:\n{rs}");
+}
+
+#[test]
+fn test_kernel_output_field_plain_array_literal_sized_correctly() {
+    // `out`'s init-body assignment is a plain bracketed literal (`ExprKind::Array`),
+    // not the `[value for ..count]` fill (`ExprKind::ArrayFill`) that
+    // `kernel_output_fill_map` used to be the only pattern recognized for. Before the
+    // fix, this field's buffer was never covered by that map at all, so it stayed at
+    // `new()`'s placeholder size (one `f32`, `4u64` bytes -- see wgpu::host's
+    // `emit_kernel_new`) instead of the 8 elements the literal actually declares --
+    // a real "index out of bounds: the len is 1 but the index is 1" panic on readback,
+    // confirmed via a real `cargo run` against the generated project.
+    let src = r#"
+kernel PlainInit:
+    mut [float]'unified out
+    let [float]'unified vals
+    let int n
+
+    init([float]'unified data, int size):
+        vals = data
+        n    = size
+        out  = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = vals[tid] * 2.0
+
+let data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+mut k = PlainInit(data, 8)
+kernel:
+    k(block = 8)
+let result = k.out
+with result:
+    for i in 0..8:
+        print "{i}: {result[i]}"
+"#;
+    let (_wgsl, rs) = wgpu_codegen("kernel_output_field_plain_array_literal", src);
+
+    // All 8 literal elements must be uploaded verbatim -- sizing `out_buf` to 8
+    // `f32`s (32 bytes) via `copy_out_to_device`'s own `data.len()`-based resize,
+    // not left at the constructor's placeholder allocation.
+    assert!(
+        rs.contains("k.copy_out_to_device(&vec![(0) as f32, (0) as f32, (0) as f32, (0) as f32, (0) as f32, (0) as f32, (0) as f32, (0) as f32]);"),
+        "expected the 8-element literal to be uploaded verbatim via copy_out_to_device;\ngot:\n{rs}"
+    );
+}
+
+// ─── atomic pointer indexing: `u32(...)`, not `... as u32` ────────────────────
+
+#[test]
+fn atomic_pointer_index_uses_wgsl_cast_not_rust_cast() {
+    // Real, pre-existing bug, found while verifying the new atomic method
+    // calls below against real naga (not just `cargo check`, which only
+    // validates the Rust host side, never the WGSL a wgpu-target program
+    // actually runs): the atomic-pointer helper shared by `try_atomic_assign`
+    // and `try_atomic_method_call` used to emit `&buf[i as u32]` -- `as` is
+    // Rust cast syntax, not valid inside a WGSL expression at all. A real
+    // `naga::front::wgsl::parse_str` on the generated shader failed with
+    // "expected ']', found 'as'" for a plain `counts[bucket] += 1`, meaning
+    // every atomic op emitted through this path (`+= -= &= |= ^=`, and now
+    // min/max/swap/cas) was unparseable WGSL until this fix -- undetected
+    // because nothing in this test suite had run generated WGSL through a
+    // real WGSL parser before. WGSL casts are `u32(x)`, matching the
+    // (already-correct) plain `ExprKind::Index` case elsewhere in this file.
+    let (wgsl, _) = wgpu_codegen("atomic_pointer_cast", r#"
+kernel Histogram:
+    mut [int]'actor'global counts
+    init([int]'actor'global data):
+        counts = data
+    def ():
+        let bucket = gpu.thread.x
+        counts[bucket] += 1
+"#);
+    assert!(wgsl.contains("atomicAdd(&histogram_counts[u32(bucket)], 1);"),
+        "expected u32(bucket), not 'bucket as u32' (invalid WGSL);\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("as u32]"),
+        "must not contain the invalid 'expr as u32]' cast anywhere;\ngot:\n{wgsl}");
+}
+
+// ─── atomic min/max/swap/cas ───────────────────────────────────────────────────
+
+#[test]
+fn device_atomic_method_calls_map_to_wgsl_intrinsics() {
+    // min/max/swap map directly onto WGSL's atomicMin/atomicMax/atomicExchange,
+    // which already return the previous value. cas doesn't:
+    // atomicCompareExchangeWeak returns a struct ({old_value, exchanged}), not
+    // a bare value -- `.old_value` field access on the call result gives
+    // exactly the previous value, matching every other backend's contract.
+    // Verified to both parse and validate against real naga 22.1.0
+    // (naga::front::wgsl::parse_str + naga::valid::Validator).
+    let (wgsl, _) = wgpu_codegen("atomic_methods", r#"
+kernel Histogram:
+    mut [int]'actor'global counts
+    init([int]'actor'global data):
+        counts = data
+    def ():
+        let bucket = gpu.thread.x
+        counts[bucket].min(5)
+        counts[bucket].max(5)
+        let old_swap = counts[bucket].swap(0)
+        let old_cas = counts[bucket].cas(0, 1)
+"#);
+    assert!(wgsl.contains("atomicMin(&histogram_counts[u32(bucket)], 5);"), "expected atomicMin;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("atomicMax(&histogram_counts[u32(bucket)], 5);"), "expected atomicMax;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("atomicExchange(&histogram_counts[u32(bucket)], 0)"), "expected atomicExchange;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("atomicCompareExchangeWeak(&histogram_counts[u32(bucket)], 0, 1).old_value"),
+        "expected atomicCompareExchangeWeak(...).old_value;\ngot:\n{wgsl}");
+}
+
+// ─── Image / Volume ─────────────────────────────────────────────────────────
+
+#[test]
+fn device_image_at_lowers_to_row_major_index() {
+    let (wgsl, _) = wgpu_codegen("image_at", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(wgsl.contains("img_img[u32(c + r * 4)]"),
+        "expected .at(c,r) to lower to row-major c + r*C, with the u32 index cast this backend's Index already uses;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_image_width_height_lower_to_literals() {
+    let (wgsl, _) = wgpu_codegen("image_width_height", r#"
+kernel Img:
+    mut Image<float, 4, 8>'unified img
+    init(Image<float, 4, 8>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        if c < img.width() and r < img.height():
+            img.at(c, r) = 0.0
+"#);
+    assert!(wgsl.contains("c < 4"), "expected .width() to lower to the literal 4;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("r < 8"), "expected .height() to lower to the literal 8;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_image_field_becomes_storage_buffer() {
+    let (wgsl, _) = wgpu_codegen("image_storage_buffer", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = 0.0
+"#);
+    assert!(wgsl.contains("var<storage, read_write> img_img: array<f32>;"),
+        "expected Image field to become a flat storage buffer, same as [T]'unified;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn host_image_field_dispatch_infers_2d_grid() {
+    let src = r#"
+kernel Img:
+    mut Image<float, 16, 32>'unified img
+    init(Image<float, 16, 32>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+
+let data = [0.0]
+mut k = Img(data)
+kernel:
+    k(block = (8, 8, 1))
+"#;
+    let (_wgsl, rs) = wgpu_codegen("image_2d_grid", src);
+    assert!(rs.contains("k.dispatch((((16 + (8) - 1) / (8))) as u32, (((32 + (8) - 1) / (8))) as u32, (1) as u32)?;"),
+        "expected the kernel: block with no explicit grid= to default gx/gy from Image's C/R and the block= size;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_device_installs_on_uncaptured_error_handler() {
+    // Pipeline creation (`emit_kernel_new`, inside a `PIPELINE.get_or_init` closure
+    // that can't itself return a Result) isn't wrapped in an explicit error scope,
+    // unlike dispatch() and shader-module creation -- an oversized fixed-'actor
+    // Image/Volume field would otherwise panic via wgpu's default uncaptured-error
+    // handler instead of being reported. Fixed by installing a non-panicking
+    // handler once at device-creation time.
+    let (_wgsl, rs) = wgpu_codegen("uncaptured_error_handler", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("device.on_uncaptured_error(Box::new(|e| eprintln!(\"boring: uncaptured GPU error: {}\", e)));"),
+        "expected a non-panicking on_uncaptured_error handler installed at device-creation time;\ngot:\n{rs}");
+}
+
+#[test]
+fn device_shared_image_becomes_workgroup_decl() {
+    let (wgsl, _) = wgpu_codegen("shared_image", r#"
+kernel Tile:
+    mut [float]'unified out
+    let Image<float, 4, 4>'actor tile
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        out[0] = tile.at(c, r)
+"#);
+    assert!(wgsl.contains("var<workgroup> tile: array<f32, 16>;"),
+        "expected a module-scope var<workgroup> declaration sized C*R;\ngot:\n{wgsl}");
+}
+
+// ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
+
+#[test]
+fn atomic_method_calls_degrade_to_plain_two_statement_form_without_actor() {
+    // WGSL has no statement-expression (unlike CUDA/HIP/Metal's `({ ... })`),
+    // so the plain (non-atomic) fallback needs two real statements: bind the
+    // let-name to the current value, then perform the update -- rather than
+    // erroring or silently doing nothing off a non-actor field, matching
+    // `+=`/`-=`/etc.'s existing degrade-to-plain-arithmetic behavior.
+    // Verified to both parse and validate against real naga 22.1.0.
+    let (wgsl, _) = wgpu_codegen("plain_atomic_methods", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        let m = buf[tid].min(5)
+        let x = buf[tid].max(5)
+        let s = buf[tid].swap(0)
+        let c = buf[tid].cas(0, 1)
+"#);
+    assert!(wgsl.contains("let m = scale_buf[u32(tid)];\n    scale_buf[u32(tid)] = min(m, 5);"),
+        "expected plain min as two WGSL statements;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let x = scale_buf[u32(tid)];\n    scale_buf[u32(tid)] = max(x, 5);"),
+        "expected plain max as two WGSL statements;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let s = scale_buf[u32(tid)];\n    scale_buf[u32(tid)] = 0;"),
+        "expected plain swap as two WGSL statements;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let c = scale_buf[u32(tid)];\n    if (c == 0) {\n        scale_buf[u32(tid)] = 1;\n    }"),
+        "expected plain cas as an if-guarded WGSL statement;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn atomic_method_call_discarded_uses_synthetic_name_not_reserved_underscore() {
+    // Two real bugs found while verifying this against real WGSL, neither
+    // just "unverified" but genuinely wrong: (1) `_ = buf[i].min(v)` used to
+    // try reading `_` back to compute the update -- WGSL's `_` is a
+    // write-only phony discard target, confirmed via a real naga parse
+    // ("no definition in scope for identifier: '_'") when read; (2) the
+    // first synthetic name tried (`__boring_discard_0`) hit WGSL's reserved
+    // `__` identifier prefix (naga: "Identifier starts with a reserved
+    // prefix"), the same constraint this project already documents
+    // elsewhere for `__params`. Fixed by declaring a fresh `bp_discard_N`
+    // `let` (matching the existing shuffle-hoist temp-naming convention)
+    // instead of assigning to `_` directly. Verified to both parse and
+    // validate against real naga 22.1.0.
+    let (wgsl, _) = wgpu_codegen("plain_atomic_discard", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        _ = buf[tid].min(9)
+"#);
+    assert!(!wgsl.contains("_ ="), "must never assign to or read back WGSL's phony `_` target;\ngot:\n{wgsl}");
+    assert!(!wgsl.contains("__boring"), "must never use a WGSL-reserved `__` identifier prefix;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("let bp_discard_0 = scale_buf[u32(tid)];\n    scale_buf[u32(tid)] = min(bp_discard_0, 9);"),
+        "expected a synthetic bp_discard_N temp instead of `_`;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn atomic_method_call_in_nested_position_is_a_visible_marker_not_silent_wrong_wgsl() {
+    // Non-atomic min/max/swap/cas only has a real (correct) codegen path when
+    // the whole call is the direct RHS of a `let`/assignment -- WGSL can't
+    // express "read old, mutate, yield old" as a single expression. Buried
+    // inside a larger expression, this used to either silently fall through
+    // to the *unrelated* pre-existing scalar `.min`/`.max` builtin (a pure,
+    // non-mutating comparison -- never touches the buffer) or, for
+    // `.swap`/`.cas`, emit genuinely invalid WGSL (confirmed via a real naga
+    // parse: "no definition in scope for identifier: 'swap'"). Now emits a
+    // visible, unambiguous marker instead of guessing.
+    let (wgsl, _) = wgpu_codegen("plain_atomic_nested", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        let x = buf[tid].min(5) + 1
+"#);
+    assert!(wgsl.contains("/* unsupported here:") && wgsl.contains(".min(...) needs 'actor'global/'actor'unified"),
+        "expected a visible unsupported-position marker, not silently wrong WGSL;\ngot:\n{wgsl}");
 }

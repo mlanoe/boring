@@ -1141,6 +1141,10 @@ impl Type {
             // All other qualifiers give copy/shared semantics
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased
+            Type::Generic(..) if self.as_image_volume().is_some() => {
+                let (elem, dims) = self.as_image_volume().unwrap();
+                elem.is_copy() && dims.iter().all(|d| matches!(d, Type::ConstInt(_)))
+            }
             Type::Generic(_, _) => false, // heap type
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_copy(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
@@ -1177,6 +1181,10 @@ impl Type {
             Type::Qualified(_, OwnerQual::BorrowMut)    => false, // &mut T — conservative (target unknown)
             Type::Qualified(inner, OwnerQual::Union(_)) => inner.is_task_safe(), // union: delegate to inner
             Type::TypeParam(_) => true,
+            Type::Generic(..) if self.as_image_volume().is_some() => {
+                let (elem, dims) = self.as_image_volume().unwrap();
+                elem.is_task_safe() && dims.iter().all(|d| matches!(d, Type::ConstInt(_)))
+            }
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
@@ -1195,6 +1203,32 @@ impl Type {
             Type::Qualified(_, q @ (OwnerQual::GpuUnified | OwnerQual::GpuGlobal)) => Some(q),
             _ => None,
         }
+    }
+
+    /// If this is a built-in `Image<T, C, R>` / `Volume<T, X, Y, Z>` generic, returns
+    /// the element type and the dimension args. The single recognition point for these
+    /// two built-in names — every other layer (parser qualifier legality, per-backend
+    /// codegen, grid inference) should go through this instead of matching the name
+    /// "Image"/"Volume" independently. See docs/image-volume-types.md.
+    pub fn as_image_volume(&self) -> Option<(&Type, &[Type])> {
+        match self {
+            Type::Generic(name, args) if name == "Image" || name == "Volume" => {
+                args.split_first().map(|(t, dims)| (t, dims))
+            }
+            _ => None,
+        }
+    }
+
+    /// Total element count (`C*R` / `X*Y*Z`) for a fixed-shape `Image`/`Volume`, if
+    /// every dimension arg is a compile-time integer constant (the only case v1
+    /// supports — see `docs/image-volume-types.md`, Open Question 1).
+    pub fn image_volume_len(&self) -> Option<i64> {
+        self.as_image_volume().and_then(|(_, dims)| {
+            dims.iter().try_fold(1i64, |acc, d| match d {
+                Type::ConstInt(n) => Some(acc * n),
+                _ => None,
+            })
+        })
     }
 }
 

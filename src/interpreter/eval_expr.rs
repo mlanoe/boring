@@ -283,6 +283,53 @@ impl Interpreter {
         })())
     }
 
+    /// `arr[i].min/max/swap/cas(...)` on an indexed element — see the call
+    /// site's own doc comment for the full rationale. Returns `None` (not
+    /// this method) for any other method name, so the caller falls through
+    /// to ordinary method dispatch.
+    fn try_index_atomic_method_call(
+        &mut self,
+        obj_expr: &Expr,
+        method: &str,
+        args: &[Arg],
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Eval> {
+        if !matches!(method, "min" | "max" | "swap" | "cas") {
+            return None;
+        }
+        Some((|| {
+            let old = self.eval_expr(obj_expr, Rc::clone(env))?;
+            let new_val = match method {
+                "min" => {
+                    let v = self.eval_expr(&args[0].value, Rc::clone(env))?;
+                    if self.compare_values(old.clone(), v.clone(), |o| o != std::cmp::Ordering::Greater, line, 0)? == Value::Bool(true) {
+                        old.clone()
+                    } else {
+                        v
+                    }
+                }
+                "max" => {
+                    let v = self.eval_expr(&args[0].value, Rc::clone(env))?;
+                    if self.compare_values(old.clone(), v.clone(), |o| o != std::cmp::Ordering::Less, line, 0)? == Value::Bool(true) {
+                        old.clone()
+                    } else {
+                        v
+                    }
+                }
+                "swap" => self.eval_expr(&args[0].value, Rc::clone(env))?,
+                "cas" => {
+                    let expected = self.eval_expr(&args[0].value, Rc::clone(env))?;
+                    let new = self.eval_expr(&args[1].value, Rc::clone(env))?;
+                    if Self::values_equal(&old, &expected) { new } else { old.clone() }
+                }
+                _ => unreachable!(),
+            };
+            self.assign(obj_expr, new_val, Rc::clone(env), line)?;
+            Ok(old)
+        })())
+    }
+
     /// `callee(args)` — built-in namespace calls (`channel`/`timeout`/`json`/`Dimension`/
     /// `Screen`/`GPU`/print-family), the implicit-`self` fallback (`foo(args)` inside a
     /// method resolves to `self.foo(args)` when `foo` isn't otherwise in scope), the
@@ -500,6 +547,36 @@ impl Interpreter {
     /// property mocks, the immutable-`let`-binding mutating-method diagnostic, and an
     /// ordinary struct method call with its modified-`self`/owned-param write-back.
     fn eval_expr_method_call(&mut self, obj_expr: &Expr, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        // `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — matched
+        // purely on the receiver's AST shape (`gpu.warp` is never evaluated as a
+        // real value; only `.size`/`.lane` field access goes through the `GpuWarp`
+        // object `run_one_kernel_thread` injects), same style as the `fs` namespace
+        // check just below.
+        if let ExprKind::Field(inner, ns) = &obj_expr.kind {
+            if ns == "warp" {
+                if let ExprKind::Var(g) = &inner.kind {
+                    if g == "gpu" {
+                        return self.eval_gpu_warp_method(method, args, env, line);
+                    }
+                }
+            }
+        }
+        // `arr[i].min/max/swap/cas(...)` — read-modify-write on an indexed
+        // element, returning the OLD value. Matches the atomic
+        // atomicMin/Max/Exch/CAS intrinsics the transpiler backends emit for
+        // the identical call shape on an `'actor'global`/`'actor'unified`
+        // kernel field, but the interpreter doesn't check the qualifier
+        // here — same precedent as `+=`/`-=`/etc. on any array element,
+        // which already works via ordinary compound-assign desugaring
+        // (`Assign(target, BinOp(op, target, value))`) with no special-cased
+        // atomicity anywhere in this single-logical-thread-per-kernel-instance
+        // simulation. `self.assign` is the exact same write-back that
+        // desugared compound-assign already relies on.
+        if matches!(&obj_expr.kind, ExprKind::Index(..)) {
+            if let Some(result) = self.try_index_atomic_method_call(obj_expr, method, args, &env, line) {
+                return result;
+            }
+        }
         // Built-in `fs` module namespace — intercept before evaluating the receiver
         // so that `fs` does not need to be defined as a variable.
         if let ExprKind::Var(v) = &obj_expr.kind {

@@ -23,12 +23,23 @@ HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__glob
 | `gpu.block_dim.x` | `blockDim.x` | `blockDim.x` |
 | `gpu.grid_dim.x` | `gridDim.x` | `gridDim.x` |
 | `sync` | `__syncthreads()` | `__syncthreads()` |
+| `gpu.warp.size` | `warpSize` | `warpSize` (device built-in variable, but a *runtime* value on HIP — 32 or 64, RDNA vs CDNA — unlike CUDA's compile-time constant) |
+| `gpu.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` | same |
+| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `__syncwarp(0xffffffff)` |
+| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | same |
+| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | same |
+| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | same |
+| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | same |
 | `'unified` field | `cudaMallocManaged` | `hipMalloc` + host-visible copy via `DeviceBuffer<T>` (see below — HIP has no single-call managed-memory equivalent used here) |
 | `'global` field | `cudaMalloc` | `hipMalloc` |
 | bare `'actor` field | `__shared__` | `__shared__` |
 | `'const` scalar field | `__constant__ T name;` | `__constant__ T name;` |
 | `'const` fixed array field (`[T, N]`) | `__constant__ T name[N];` | `__constant__ T name[N];` |
 | atomic `[i] +=` on `'actor'global`/`'actor'unified` | `atomicAdd` | `atomicAdd` |
+| `[i].min(v)` on `'actor'global`/`'actor'unified` | `atomicMin(&x, v)` | `atomicMin(&x, v)` |
+| `[i].max(v)` on `'actor'global`/`'actor'unified` | `atomicMax(&x, v)` | `atomicMax(&x, v)` |
+| `[i].swap(v)` on `'actor'global`/`'actor'unified` | `atomicExch(&x, v)` | `atomicExch(&x, v)` |
+| `[i].cas(expected, new)` on `'actor'global`/`'actor'unified` | `atomicCAS(&x, expected, new)` | `atomicCAS(&x, expected, new)` |
 | `print` in kernel | `printf` | `printf` |
 
 ---
@@ -126,4 +137,5 @@ transpiler to handle.
 - **`DeviceBuffer<T>`**: wraps a raw `hipMalloc`'d pointer + length + the `Arc<HipStream>` it was allocated on. `Drop` calls `hipFree`. `Clone` does a real device-to-device `hipMemcpyDtoD` — every kernel-chaining call site (`Scale(k1.buf)`) uses it, matching the CUDA backend's identical `CudaSlice::clone()` behavior. A bare move used to be the actual codegen here, but it applied unconditionally regardless of whether the source kernel variable is used again afterward — a real `E0382` ("use of partially moved value") the moment it was. `.clone()` is correct in every case and still far cheaper than a host round trip.
 - **Kernel launch**: `hipModuleLaunchKernel` takes a `void**` array where each entry points to the actual parameter value — `LaunchBuilder::arg` pushes a pointer to the device-pointer field itself for buffer args, and a pointer to the scalar's own storage for scalar/`Dimension` args. Both are valid only for the duration of the synchronous launch call, which happens while the borrows are still alive.
 - **Streams**: one persistent, FIFO-ordered `HipStream` cached per dispatch priority (mirrors the CUDA backend's identical fix) — GPU-side ordering (`hipStreamWaitEvent`) for `after =` dependencies instead of a CPU-blocking sync on every dispatch.
+- **Error handling**: same story as CUDA's — see [`cuda-module.md`](cuda-module.html#error-handling). The built-in [`GpuError`](gpu-module.html#gpu-error-handling) enum is not catchable by variant here either (this backend's own small host transpiler doesn't share the general pipeline `BoringError`/`catch`-by-variant lives in). `HipError`'s `Display` now prefixes its existing `hipGetErrorString` message with a classified category (out of memory, illegal access, timeout, ...), using numeric codes assumed to mirror CUDA's `CUresult` values one-for-one (HIP is designed as a near-1:1 match for the CUDA driver API) — **not independently verified against a real ROCm install**, same caveat as the line below.
 - **Not independently verified against real ROCm hardware** — see the "Known limitations" table above.

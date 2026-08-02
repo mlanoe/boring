@@ -45,8 +45,94 @@ On Windows, wgpu uses DirectX 12 by default and falls back to Vulkan if DX12 is 
 | `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` | `@builtin(local_invocation_size).x/y/z` |
 | `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` | `@builtin(num_workgroups).x/y/z` |
 | `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` | `workgroupBarrier()` |
+| `gpu.warp.size` | `warpSize` | `threads_per_simdgroup` | `@builtin(subgroup_size)` (real) / fixed `32u` (emulated) |
+| `gpu.warp.lane` | linearized `threadIdx`, `% warpSize` | `thread_index_in_simdgroup` | `@builtin(subgroup_invocation_id)` (real) / `local_invocation_index % 32u` (emulated) |
+| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` | `simdgroup_barrier(mem_flags::mem_none)` | `subgroupBarrier()` (real) / `workgroupBarrier()` (emulated) |
+| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` | `simd_shuffle_down(v, delta)` | `subgroupShuffleDown(v, delta)` (real) / workgroup-scratch emulation (see below) |
+| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` | `simd_shuffle_up(v, delta)` | `subgroupShuffleUp(v, delta)` (real) / emulated |
+| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` | `simd_shuffle_xor(v, mask)` | `subgroupShuffleXor(v, mask)` (real) / emulated |
+| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` | `simd_shuffle(v, lane)` | `subgroupShuffle(v, lane)` (real) / emulated |
 | bare-`'actor` auto-barrier | inserted before first loop + at top of each loop iteration | idem | idem |
 | atomics (`'actor'global`/`'actor'unified`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomicAdd` / `atomicSub` / `atomicOr` / `atomicAnd` / `atomicXor` |
+| `[i].min/max/swap(v)` | `atomicMin`/`atomicMax`/`atomicExch` | `atomic_fetch_min/max_explicit` / `atomic_exchange_explicit` | `atomicMin` / `atomicMax` / `atomicExchange` |
+| `[i].cas(expected, new)` | `atomicCAS` | `atomic_compare_exchange_weak_explicit` (bridged — see below) | `atomicCompareExchangeWeak(...).old_value` |
+
+`.min`/`.max`/`.swap`/`.cas` are methods on an indexed `'actor'global`/`'actor'unified` element (not compound-assign operators — there's no natural infix form for min/max/exchange/compare-and-swap), and unlike `+= -= &= |= ^=` they're handled in expression position: all four return the previous value, matching `atomicMin`/`atomicMax`/`atomicExch`/`atomicCAS`'s real CUDA/HIP semantics on every backend. WGSL's `atomicCompareExchangeWeak` returns a struct (`{old_value, exchanged}`, not a bare value) — `.old_value` field access on the call result gives exactly the previous value. Metal's `atomic_compare_exchange_weak_explicit` is a bigger shape mismatch (takes a pointer to the expected value, returns a `bool`) — see `metal-backend.md` for how that's bridged.
+
+**Real bug found and fixed while verifying this against real WGSL** (not just `cargo check`, which only validates the Rust host side): the atomic-pointer helper shared by the compound-assign path and the new methods used to emit `&buf[i as u32]` — `as` is Rust cast syntax, invalid inside a WGSL index expression at all. A real `naga::front::wgsl::parse_str` on a plain `counts[bucket] += 1` failed with `expected ']', found 'as'`, meaning **every** atomic op emitted through this path — `+= -= &= |= ^=`, and now `.min`/`.max`/`.swap`/`.cas` — was unparseable WGSL until this fix, undetected because nothing in the test suite had run generated WGSL through a real WGSL parser before. Fixed to `u32(i)` (WGSL's real cast syntax — a function-call form, matching the plain array-index case elsewhere in this backend, which already got this right).
+
+### `.min`/`.max`/`.swap`/`.cas` without `'actor` — two WGSL statements, not one
+
+These four methods also work on a plain, non-`'actor'` field (matching `+= -= &= |= ^=`'s existing degrade-to-plain-arithmetic behavior), but WGSL has no statement-expression the way CUDA/HIP/Metal do (`({ ... })`) — "read old, mutate, yield old" can't be a single WGSL expression. The plain fallback only works when the call is the **entire right-hand side** of a `let`/assignment statement:
+
+```wgsl
+let old = scale_buf[u32(i)];   // capture the current value
+scale_buf[u32(i)] = min(old, v);   // plain, non-atomic update
+```
+
+Anywhere else — nested inside a larger expression — this genuinely isn't representable in WGSL as one unit; the generated shader carries a visible `/* unsupported here: ... */` marker at that spot instead of silently falling back to the *unrelated* pre-existing scalar `.min`/`.max` builtin (a pure comparison that never touches the buffer at all) or emitting genuinely invalid WGSL for `.swap`/`.cas` (confirmed via a real naga parse: `no definition in scope for identifier: 'swap'`, before this fix existed).
+
+Two more real bugs found and fixed while verifying the discard case (`_ = buf[i].min(v)`) against real naga, neither just "unverified" but genuinely wrong:
+
+1. WGSL's `_` is a **write-only** phony discard target — it can never be read back. The plain min/max/cas codegen needs to read the captured old value, so assigning to `_` and then reading `_` failed with a real naga parse error: `no definition in scope for identifier: '_'`.
+2. The first fix (a synthetic name) tried `__boring_discard_0` — WGSL reserves identifiers starting with `__`, confirmed via naga: `Identifier starts with a reserved prefix`, the same constraint already noted elsewhere in this document for `__params`.
+
+Fixed by declaring a fresh `bp_discard_N` `let` (matching the existing shuffle-hoist temp-naming convention, single underscore) instead of touching `_` at all.
+
+### `gpu.warp.*` — real subgroup support vs. shared-memory emulation
+
+WGSL subgroup builtins (`subgroup_size`, `subgroup_invocation_id`,
+`subgroupShuffle*`, `subgroupBarrier`) need an explicit `enable subgroups;`
+module directive and are only valid when the adapter has
+`wgpu::Features::SUBGROUP` — support is real in wgpu/naga but **not
+universally available** (gated behind an adapter feature, not guaranteed
+present on every backend/GPU combination).
+
+Whenever a program uses `gpu.warp.*`, `boring build --target wgpu` emits
+**two** WGSL modules:
+
+- `shaders/main.wgsl` — the real-subgroup mapping (table above), gated by
+  `enable subgroups;`.
+- `shaders/main_emulated.wgsl` — a shared-memory emulation: `shuffle_down(v,
+  delta)` becomes "write `v` to a workgroup-shared scratch array indexed by
+  `local_invocation_index`, `workgroupBarrier()`, read back the target lane's
+  slot (clamped to the caller's own value at the simulated warp's boundary —
+  same convention as the real `_sync` shuffle intrinsics), `workgroupBarrier()`
+  again". The simulated warp size is a fixed, documented `32` — there's no
+  real subgroup to query a size from on this path.
+
+The generated host code queries `adapter.features().contains(wgpu::Features::SUBGROUP)`
+before `request_device` and requests the feature only if actually supported.
+That check alone isn't sufficient, though — confirmed against a real `wgpu
+22` install: the HAL/backend layer can report `Features::SUBGROUP` as present
+(true for Metal-backed adapters, whose native SIMD-group support predates
+`naga`'s WGSL frontend catching up to the syntax) while `naga` still can't
+parse the `enable subgroups;` directive at all, which would otherwise be an
+uncaught-validation-error panic at shader-module creation. So shader-module
+creation additionally wraps the real-module attempt in a
+`push_error_scope(wgpu::ErrorFilter::Validation)` / `pop_error_scope()` pair
+and falls back to the emulated module if that scope reports an error —
+catching exactly this HAL-vs-shader-frontend gap at runtime instead of
+crashing. Both paths give correct results — the emulated path just costs a
+real shared-memory round trip and full barrier per shuffle instead of a
+near-free register-to-register exchange, so the performance case for
+`gpu.warp.*` over bare `'actor` disappears (but correctness doesn't) when the
+real path isn't usable.
+
+The emulated path only supports `gpu.warp.shuffle_*` inside the value of a
+`let` statement or the right-hand side of an assignment (`let x =
+gpu.warp.shuffle_down(v, n)`, or the more common reduction idiom `v = v +
+gpu.warp.shuffle_xor(v, mask)`) — reachable through arithmetic/index/cast/call
+nesting. Each shuffle call found is hoisted into its own preceding
+write/barrier/read/barrier sequence assigning a fresh temp variable, which is
+then substituted back into the original expression — WGSL has no
+side-effecting expressions, so a shuffle can't stay inline the way a real
+`subgroupShuffle*` call can. A shuffle call outside a `let`/assignment
+(nested in a condition, a function argument to something other than a
+recognized numeric builtin, etc.) emits a visible `/* unsupported ... */`
+marker rather than silently wrong WGSL.
+
+See [warp-level primitives](warp-level-primitives.html) for the full design.
 
 ### WGSL shader signature
 
@@ -97,6 +183,24 @@ device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
 ```
 
 This means a single WGSL shader covers all block sizes — no shader duplication.
+
+---
+
+## Grid inference
+
+Unlike CUDA/ROCm/Metal (where the kernel struct's own `__boring_launch`/`dispatch`
+method computes `grid_dim`), wgpu's dispatch call-site codegen lives in the
+shared `src/transpiler/emit_kernel.rs` (`try_emit_kernel_dispatch`), since
+`.dispatch(gx, gy, gz)` is a plain three-`u32` method with no computation of
+its own. When a `kernel:` block omits `grid =`:
+
+- An `Image<T,C,R>`/`Volume<T,X,Y,Z>` field (`'unified`/`'global`/`'actor'global`/
+  `'actor'unified`) defaults `(gx, gy, gz)` from its compile-time `C`/`R`/`X`/`Y`/`Z`
+  and the dispatch site's own `block =` argument — `gx = ceil(C/bx)`, `gy = ceil(R/by)`,
+  `gz = 1` for `Image`; all three axes for `Volume`.
+- Otherwise, `(gx, gy, gz)` defaults to `(1, 1, 1)` — this includes plain `[T]'unified`/
+  `'global` array fields, which get no 1D auto-grid inference here (a pre-existing gap,
+  not something Image/Volume introduces) — always pass `grid =` explicitly for those.
 
 ---
 
@@ -211,11 +315,28 @@ This is not GPU-side pipelining (unlike CUDA streams), but it preserves the orde
 
 ## Error handling
 
-Each kernel struct's `dispatch()` opens a WebGPU validation error scope (`push_error_scope(wgpu::ErrorFilter::Validation)`) before encoding, and checks it (`pop_error_scope()`, bridged to sync via the same `pollster` already used for device/adapter setup) right after submit — returning `Result<(), Box<dyn std::error::Error + Send + Sync>>` instead of `()`. A regular `kernel:` block's dispatch call propagates that error via `?` into `boring_main()`'s own `Result` (synthesized as `Result`-returning whenever any kernel is involved, even with no explicit `throws`); inside a `Screen` program's render loop (a plain closure, not a `Result`-returning context) it's `.expect(...)` instead.
+Each kernel struct's `dispatch()` opens **two** WebGPU error scopes before encoding — `push_error_scope(wgpu::ErrorFilter::OutOfMemory)`, then `push_error_scope(wgpu::ErrorFilter::Validation)` — and checks both (`pop_error_scope()`, bridged to sync via the same `pollster` already used for device/adapter setup) right after submit, popping in reverse order (Validation first, then OutOfMemory) — returning `Result<(), Box<dyn std::error::Error + Send + Sync>>` instead of `()`. A regular `kernel:` block's dispatch call propagates that error via `?` into `boring_main()`'s own `Result` (synthesized as `Result`-returning whenever any kernel is involved, even with no explicit `throws`); inside a `Screen` program's render loop (a plain closure, not a `Result`-returning context) it's `.expect(...)` instead.
 
 Previously, no error-scope/callback machinery existed at all: `dispatch()` returned `()` unconditionally and a rejected launch configuration (e.g. an invalid workgroup count) went completely unobserved.
 
 Validation is checked at command-buffer *encoding* time (synchronously, on the CPU, as `dispatch_workgroups` is called) — no `device.poll()` is needed to catch it. This does **not** cover execution-time faults (out-of-bounds access, device loss), which WebGPU instead reports via device-lost callbacks/uncaptured-error events, not scoped validation; those aren't wired up.
+
+Pipeline creation (`create_compute_pipeline`, inside the per-kernel `PIPELINE.get_or_init` cache in `emit_kernel_new` — see `Workgroup size and pipeline overrides` above) is **not** wrapped in an error scope either, unlike shader-module creation and `dispatch()`: `OnceLock::get_or_init`'s closure can't itself return a `Result`, and `new()` returns bare `Self`. A validation error here (e.g. an oversized fixed-shape bare-`'actor` `Image`/`Volume` field exceeding `.maxSharedMem()`) would otherwise hit wgpu's default uncaptured-error handler, which panics. Fixed by installing a non-panicking `device.on_uncaptured_error(...)` handler once at device-creation time (`async_main`/`emit_screen_main`'s `main()`) — the error is reported instead of crashing the process, and a subsequent `dispatch()` call against the resulting (unusable) pipeline raises its own validation error, which the existing per-dispatch error scope above *does* catch and convert to `GpuError::LaunchError`.
+
+### Typed `GpuError`
+
+Each popped scope's error is classified into the built-in [`GpuError`](gpu-module.html#gpu-error-handling) enum and wrapped in `BoringError::Other` — the Validation scope maps to `GpuError::LaunchError`, the OutOfMemory scope to `GpuError::OutOfMemory` — instead of the single generic formatted-string error this used to return. Because wgpu's host codegen shares the same general transpiler pipeline `BoringError`/`catch`-by-variant already lives in (unlike CUDA/ROCm/Metal — see below), this is the one backend where `catch GpuError.OutOfMemory:` genuinely dispatches on the real cause:
+
+```boring
+mut k = Scale(data)
+try:
+    kernel:
+        k(block = 256)
+catch GpuError.OutOfMemory:
+    print "GPU ran out of memory"
+```
+
+Verified end to end via a real `cargo check` against real wgpu 22.1.0: the generated downcast/match codegen for `catch GpuError.OutOfMemory:` is identical in shape to what a user-declared `throws CalcError` enum already produces (`book.md`).
 
 ---
 

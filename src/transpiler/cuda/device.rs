@@ -4,6 +4,7 @@
 // CUDA C device code emitter.
 
 use crate::ast::*;
+use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal};
 
 pub(super) fn emit_device_cu(program: &Program) -> String {
     let mut e = DeviceEmitter::new();
@@ -90,6 +91,9 @@ impl DeviceEmitter {
                 if let Type::ArrayN(inner, n) = &field.ty {
                     let elem = elem_c_type(inner);
                     self.line(&format!("__constant__ {} {}[{}];", elem, field.name, n));
+                } else if let Some((elem, _)) = field.ty.as_image_volume() {
+                    let len = field.ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    self.line(&format!("__constant__ {} {}[{}];", c_type(elem), field.name, len));
                 }
             }
         }
@@ -136,6 +140,11 @@ impl DeviceEmitter {
                     Type::ArrayN(inner, n) => {
                         self.line(&format!("__shared__ {} {}[{}];", c_type(inner), field.name, n));
                     }
+                    ty if ty.as_image_volume().is_some() => {
+                        let (elem, _) = ty.as_image_volume().unwrap();
+                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                        self.line(&format!("__shared__ {} {}[{}];", c_type(elem), field.name, len));
+                    }
                     _ => {
                         let elem = elem_c_type(&field.ty);
                         self.line(&format!("extern __shared__ {} {}[];", elem, field.name));
@@ -152,6 +161,11 @@ impl DeviceEmitter {
                     }
                     Type::Array(_) => {
                         // Unsized local array — not representable; skip.
+                    }
+                    ty if ty.as_image_volume().is_some() => {
+                        let (elem, _) = ty.as_image_volume().unwrap();
+                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                        self.line(&format!("{} {}[{}];", c_type(elem), field.name, len));
                     }
                     _ => {
                         // Scalar 'local — declare a zero-initialised register.
@@ -319,6 +333,70 @@ impl DeviceEmitter {
         Some(format!("{}(&{}, {});", intrinsic, target, v))
     }
 
+    /// Detect `arr[i].min/max/swap/cas(...)`. Unlike `try_atomic_assign` (a
+    /// statement-only compound-assign desugar with no return value), these
+    /// return the previous value — `atomicMin`/`atomicMax`/`atomicExch`/
+    /// `atomicCAS` all do the same in real CUDA C — so this is handled in
+    /// expression position (`let old = counts[i].cas(0, 1)` binds `old` to
+    /// the intrinsic's own return value), not as a statement special case.
+    ///
+    /// `arr` doesn't have to be an `'actor'global`/`'actor'unified` field —
+    /// these methods work on *any* indexed element, atomic or not (matching
+    /// `+=`/`-=`/etc., which already degrade to plain, non-atomic arithmetic
+    /// off an actor-qualified field rather than erroring). When `arr` isn't
+    /// atomic, there's no intrinsic to lean on for the "return the previous
+    /// value" contract, so it's bridged the same way Metal's `.cas` already
+    /// is: a GNU/Clang statement-expression (`({ ... })` — nvcc's device-code
+    /// compiler accepts this GNU C extension) that reads the old value,
+    /// performs the plain update, and yields the old value.
+    fn try_atomic_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+        let ExprKind::Index(arr, _idx) = &obj.kind else { return None; };
+        let arr_name = match &arr.kind {
+            ExprKind::Var(n) => n.clone(),
+            _ => return None,
+        };
+        if !matches!(method, "min" | "max" | "swap" | "cas") { return None; }
+        let target = self.expr(obj);
+        if self.is_atomic_field(&arr_name) {
+            match (method, args_s) {
+                ("min", [v]) => Some(format!("atomicMin(&{}, {})", target, v)),
+                ("max", [v]) => Some(format!("atomicMax(&{}, {})", target, v)),
+                ("swap", [v]) => Some(format!("atomicExch(&{}, {})", target, v)),
+                ("cas", [expected, new]) => Some(format!("atomicCAS(&{}, {}, {})", target, expected, new)),
+                _ => None,
+            }
+        } else {
+            match (method, args_s) {
+                ("min", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = min({t}, ({v})); __old; }})", t = target, v = v)),
+                ("max", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = max({t}, ({v})); __old; }})", t = target, v = v)),
+                ("swap", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = ({v}); __old; }})", t = target, v = v)),
+                ("cas", [expected, new]) => Some(format!(
+                    "({{ auto __old = {t}; if (__old == ({e})) {t} = ({n}); __old; }})",
+                    t = target, e = expected, n = new)),
+                _ => None,
+            }
+        }
+    }
+
+    /// Precabled `Image`/`Volume` methods: `.at(c,r)`/`.at(x,y,z)` lowers to
+    /// row-major flat-index arithmetic; `.width()`/`.height()`/`.depth()` lower to
+    /// the dimension's compile-time literal. See docs/image-volume-types.md.
+    fn try_image_volume_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+        let ExprKind::Var(name) = &obj.kind else { return None; };
+        let field = self.current_fields.iter().find(|f| &f.name == name)?;
+        let (_, dims) = field.ty.as_image_volume()?;
+        match method {
+            "at" => Some(format!("{}[{}]", name, image_volume_at_index(dims, args_s))),
+            "width"  => image_volume_dim_literal(dims, 0),
+            "height" => image_volume_dim_literal(dims, 1),
+            "depth"  => image_volume_dim_literal(dims, 2),
+            _ => None,
+        }
+    }
+
     /// Emit a `print "..."` statement as a CUDA `printf(...)` call.
     fn emit_printf(&mut self, args: &[Arg]) {
         let Some(first) = args.first() else {
@@ -424,6 +502,17 @@ impl DeviceEmitter {
             }
             ExprKind::MethodCall(obj, method, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                if is_gpu_warp_receiver(obj) {
+                    if let Some(call) = gpu_warp_method_call(method, &args_s) {
+                        return call;
+                    }
+                }
+                if let Some(call) = self.try_atomic_method_call(obj, method, &args_s) {
+                    return call;
+                }
+                if let Some(call) = self.try_image_volume_method_call(obj, method, &args_s) {
+                    return call;
+                }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
                     // `self.method(args)` → the sibling device function this method was
                     // emitted as (see `emit_device_fn`): `KernelName_method(fields..., args)`.
@@ -476,7 +565,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(format!("{}{}* {}", constness, base, f.name))
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
                     None  // __constant__ arrays are file-scope globals, not parameters
                 } else {
                     let base = elem_c_type(&f.ty);
@@ -494,6 +583,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                 GpuQual::Local => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => None,
+                        ty if ty.as_image_volume().is_some() => None,
                         _ => Some(format!("{} {}", c_type(&f.ty), f.name)),
                     }
                 }
@@ -513,7 +603,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(f.name.clone())
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
                     None  // __constant__ arrays accessed via file-scope global, not as args
                 } else {
                     Some(f.name.clone())
@@ -526,6 +616,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                 GpuQual::Local => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => None,
+                        ty if ty.as_image_volume().is_some() => None,
                         _ => Some(f.name.clone()),
                     }
                 }
@@ -558,6 +649,9 @@ fn c_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", c_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", c_type(inner), n),
+        Type::Generic(..) if ty.as_image_volume().is_some() => {
+            format!("{}*", c_type(ty.as_image_volume().unwrap().0))
+        }
         // Named primitives — the kernel field parser may store raw keyword strings.
         Type::Named(n) => match n.as_str() {
             "float" | "f64" | "f32" => "double".to_string(),
@@ -588,6 +682,7 @@ fn elem_c_type(ty: &Type) -> String {
         Type::Array(inner)     => c_type(inner),
         Type::ArrayN(inner, _) => c_type(inner),
         Type::Qualified(inner, _) => elem_c_type(inner),
+        Type::Generic(..) if ty.as_image_volume().is_some() => c_type(ty.as_image_volume().unwrap().0),
         _                      => c_type(ty),
     }
 }
@@ -632,8 +727,33 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
         ("gridDim",   "x")   => "gridDim.x".into(),
         ("gridDim",   "y")   => "gridDim.y".into(),
         ("gridDim",   "z")   => "gridDim.z".into(),
+        ("gpu", "warp")      => "__warp".into(),
+        ("__warp", "size")   => "warpSize".into(),
+        ("__warp", "lane")   =>
+            "((threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y) % warpSize)".into(),
         _                    => format!("{}.{}", obj, field),
     }
+}
+
+/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — CUDA's
+/// `_sync` intrinsics (post-Volta) require an explicit active-lane mask;
+/// Boring always passes the full mask (`0xffffffff`) rather than exposing one
+/// in source, so these are only as safe as that mask is under thread
+/// divergence (see docs/warp-level-primitives.md's divergent-branch caveat).
+fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
+    match method {
+        "sync"         => Some("__syncwarp(0xffffffff)".into()),
+        "shuffle_down" => Some(format!("__shfl_down_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_up"   => Some(format!("__shfl_up_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle_xor"  => Some(format!("__shfl_xor_sync(0xffffffff, {}, {})", args[0], args[1])),
+        "shuffle"      => Some(format!("__shfl_sync(0xffffffff, {}, {})", args[0], args[1])),
+        _ => None,
+    }
+}
+
+fn is_gpu_warp_receiver(obj: &Expr) -> bool {
+    matches!(&obj.kind, ExprKind::Field(inner, name) if name == "warp"
+        && matches!(&inner.kind, ExprKind::Var(v) if v == "gpu"))
 }
 
 fn map_builtin_fn(name: &str) -> String {

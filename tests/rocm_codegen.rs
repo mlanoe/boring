@@ -161,6 +161,31 @@ kernel B:
     assert!(hip.contains("blockDim.x"),  "expected blockDim.x;\ngot:\n{hip}");
 }
 
+#[test]
+fn device_gpu_warp_builtins_map_correctly() {
+    let (hip, _) = rocm_codegen("gpu_warp_builtins", r#"
+kernel W:
+    mut [float]'unified buf
+    def ():
+        let tid = gpu.thread.x
+        let lane = gpu.warp.lane
+        let size = gpu.warp.size
+        gpu.warp.sync()
+        let a = gpu.warp.shuffle_down(buf[tid], 1)
+        let b = gpu.warp.shuffle_up(buf[tid], 1)
+        let c = gpu.warp.shuffle_xor(buf[tid], 1)
+        let d = gpu.warp.shuffle(buf[tid], 0)
+        buf[tid] = a + b + c + d + lane + size
+"#);
+    assert!(hip.contains("warpSize"), "expected warpSize;\ngot:\n{hip}");
+    assert!(hip.contains("% warpSize"), "expected lane linearization mod warpSize;\ngot:\n{hip}");
+    assert!(hip.contains("__syncwarp(0xffffffff)"), "expected __syncwarp;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_down_sync(0xffffffff,"), "expected __shfl_down_sync;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_up_sync(0xffffffff,"), "expected __shfl_up_sync;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_xor_sync(0xffffffff,"), "expected __shfl_xor_sync;\ngot:\n{hip}");
+    assert!(hip.contains("__shfl_sync(0xffffffff,"), "expected __shfl_sync;\ngot:\n{hip}");
+}
+
 // ─── host — struct and constructor ───────────────────────────────────────────
 
 #[test]
@@ -887,4 +912,181 @@ kernel:
         rs.contains("k.__boring_launch((16 as u32, 16 as u32, 1 as u32), Some((4 as u32, 4 as u32, 1 as u32)), &[], 0i32)"),
         "explicit grid=(4,4,1) must reach __boring_launch as Some((4,4,1)), not None;\ngot:\n{rs}"
     );
+}
+
+// ─── GPU error classification ─────────────────────────────────────────────────
+
+#[test]
+fn hip_error_display_includes_classified_category() {
+    // Same rationale as the identical CUDA fix: HipError::from_code already
+    // calls hipGetErrorString (a real message), but gave no way to tell
+    // failure classes apart at a glance, and a real catch-by-variant isn't
+    // reachable on this backend (no Stmt::Try support, same gap as `with`).
+    // Improves HipError's own Display directly instead of touching every
+    // call site -- the numeric codes mirror CUDA's CUresult values (HIP
+    // mirrors the CUDA driver API by design), NOT independently verified
+    // against a real ROCm install (none available in this dev environment)
+    // -- same caveat this backend's docs already carry elsewhere. Verified
+    // to compile clean via a real cargo check with a stubbed build step.
+    let (_, rs) = rocm_codegen("hip_error_classify", r#"
+kernel Scale:
+    mut [float]'unified buf
+    init([float]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        buf[tid] = buf[tid] * 2.0
+"#);
+    assert!(rs.contains("fn category(&self) -> &'static str"),
+        "expected HipError::category();\ngot:\n{rs}");
+    assert!(rs.contains("2   => \"GPU out of memory\","),
+        "expected HIP code 2 classified as GPU out of memory;\ngot:\n{rs}");
+    assert!(rs.contains("write!(f, \"{}: HIP error {}: {}\", self.category(), self.code, self.message)"),
+        "expected Display to prefix the existing message with the classified category;\ngot:\n{rs}");
+    // Mirrors the identical CUDA_ERROR_INVALID_VALUE case -- the real
+    // rejection an oversized `block =` hits at `hipModuleLaunchKernel`.
+    // Boring deliberately does not duplicate this check in the validator
+    // or interpreter; it defers entirely to this real runtime classification.
+    assert!(rs.contains("1   => \"GPU launch configuration invalid (e.g. block size exceeds device limits)\","),
+        "expected HIP code 1 classified as an invalid launch config, covering an oversized block size;\ngot:\n{rs}");
+}
+
+// ─── atomic min/max/swap/cas ───────────────────────────────────────────────────
+
+#[test]
+fn device_atomic_method_calls_map_to_hip_intrinsics() {
+    // Mirrors the identical CUDA fix -- HIP's atomicMin/Max/Exch/CAS have the
+    // same names and signatures (HIP is designed as a near-1:1 source-level
+    // match for the CUDA driver API).
+    let (hip, _) = rocm_codegen("atomic_methods", r#"
+kernel Histogram:
+    mut [int]'actor'global counts
+    init([int]'actor'global data):
+        counts = data
+    def ():
+        let bucket = gpu.thread.x
+        counts[bucket].min(5)
+        counts[bucket].max(5)
+        let old_swap = counts[bucket].swap(0)
+        let old_cas = counts[bucket].cas(0, 1)
+"#);
+    assert!(hip.contains("atomicMin(&counts[bucket], 5);"), "expected atomicMin;\ngot:\n{hip}");
+    assert!(hip.contains("atomicMax(&counts[bucket], 5);"), "expected atomicMax;\ngot:\n{hip}");
+    assert!(hip.contains("atomicExch(&counts[bucket], 0)"), "expected atomicExch;\ngot:\n{hip}");
+    assert!(hip.contains("atomicCAS(&counts[bucket], 0, 1)"), "expected atomicCAS;\ngot:\n{hip}");
+}
+
+// ─── Image / Volume ─────────────────────────────────────────────────────────
+
+#[test]
+fn device_image_at_lowers_to_row_major_index() {
+    let (hip, _) = rocm_codegen("image_at", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(hip.contains("img[c + r * 4]"),
+        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{hip}");
+}
+
+#[test]
+fn host_image_field_infers_2d_grid() {
+    let (_, rs) = rocm_codegen("image_2d_grid", r#"
+kernel Img:
+    mut Image<float, 16, 32>'unified img
+    init(Image<float, 16, 32>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
+        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
+        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
+}
+
+#[test]
+fn kernel_field_image_bare_unified_is_valid() {
+    // Unlike `[T,N]'unified`, Image/Volume behave like dynamic `[T]'unified`
+    // for host representation (a DeviceBuffer), so bare 'unified is legal.
+    let (hip, rs) = rocm_codegen("image_bare_unified", r#"
+kernel Img:
+    mut Image<float, 4, 4>'unified img
+    init(Image<float, 4, 4>'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(hip.contains("__global__ void Img_kernel(double* img)"),
+        "expected bare 'unified Image field to compile to a pointer param;\ngot:\n{hip}");
+    assert!(rs.contains("img: DeviceBuffer<f64>"),
+        "expected bare 'unified Image field to become a DeviceBuffer host field, same as [T]'unified;\ngot:\n{rs}");
+}
+
+#[test]
+fn device_volume_at_lowers_to_row_major_3d_index() {
+    let (hip, _) = rocm_codegen("volume_at", r#"
+kernel Vol:
+    mut Volume<float, 4, 4, 4>'unified vol
+    init(Volume<float, 4, 4, 4>'unified data):
+        vol = data
+    def ():
+        let x = gpu.thread.x
+        let y = gpu.thread.y
+        let z = gpu.thread.z
+        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+"#);
+    assert!(hip.contains("vol[x + y * 4 + z * 16]"),
+        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{hip}");
+}
+
+#[test]
+fn device_shared_image_becomes_fixed_shared_decl() {
+    let (hip, _) = rocm_codegen("shared_image", r#"
+kernel Tile:
+    mut [float]'unified out
+    let Image<float, 4, 4>'actor tile
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        out[0] = tile.at(c, r)
+"#);
+    assert!(hip.contains("__shared__ double tile[16];"),
+        "expected fixed __shared__ decl sized C*R, not extern __shared__;\ngot:\n{hip}");
+}
+
+// ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
+
+#[test]
+fn atomic_method_calls_degrade_to_plain_read_modify_write_without_actor() {
+    // Mirrors the identical CUDA fix -- see that test's own doc.
+    let (hip, _) = rocm_codegen("plain_atomic_methods", r#"
+kernel Scale:
+    mut [int]'unified buf
+    init([int]'unified data):
+        buf = data
+    def ():
+        let tid = gpu.thread.x
+        let m = buf[tid].min(5)
+        let x = buf[tid].max(5)
+        let s = buf[tid].swap(0)
+        let c = buf[tid].cas(0, 1)
+"#);
+    assert!(hip.contains("({ auto __old = buf[tid]; buf[tid] = min(buf[tid], (5)); __old; })"),
+        "expected plain min via a GNU statement-expression;\ngot:\n{hip}");
+    assert!(hip.contains("({ auto __old = buf[tid]; buf[tid] = max(buf[tid], (5)); __old; })"),
+        "expected plain max via a GNU statement-expression;\ngot:\n{hip}");
+    assert!(hip.contains("({ auto __old = buf[tid]; buf[tid] = (0); __old; })"),
+        "expected plain swap via a GNU statement-expression;\ngot:\n{hip}");
+    assert!(hip.contains("({ auto __old = buf[tid]; if (__old == (0)) buf[tid] = (1); __old; })"),
+        "expected plain cas via a GNU statement-expression;\ngot:\n{hip}");
 }

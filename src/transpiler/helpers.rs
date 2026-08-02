@@ -9,6 +9,55 @@ pub(crate) const DIMENSION_STRUCT_RUST: &str =
      #[allow(non_snake_case)]\n\
      fn Dimension(width: u32, height: u32) -> Dimension { Dimension { width, height } }";
 
+/// Row-major flat-buffer index for `Image<T,C,R>`/`Volume<T,X,Y,Z>` `.at(...)` —
+/// see docs/image-volume-types.md. `dims` are the type's `ConstInt` dimension
+/// args (already validator-checked); `args` are the already-lowered index
+/// expression strings, in the same order (`c,r` or `x,y,z`).
+/// Row-major: `idx = a0 + a1*d0 + a2*(d0*d1) + ...`.
+pub(crate) fn image_volume_at_index(dims: &[Type], args: &[String]) -> String {
+    let mut terms: Vec<String> = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        if i == 0 {
+            terms.push(a.clone());
+        } else {
+            let stride: i64 = dims[..i].iter().map(|d| match d {
+                Type::ConstInt(n) => *n,
+                _ => 1,
+            }).product();
+            terms.push(format!("{} * {}", a, stride));
+        }
+    }
+    terms.join(" + ")
+}
+
+/// Literal value of an `Image`/`Volume` dimension arg at `idx` (0=width/C/X,
+/// 1=height/R/Y, 2=depth/Z), for `.width()`/`.height()`/`.depth()` lowering.
+/// `None` if `idx` is out of range (e.g. `.depth()` on an `Image`).
+pub(crate) fn image_volume_dim_literal(dims: &[Type], idx: usize) -> Option<String> {
+    dims.get(idx).and_then(|d| match d {
+        Type::ConstInt(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
+/// Ceil-div grid-dim tuple expression for an `Image`/`Volume`-typed field,
+/// e.g. `(((256 + block_dim.0 - 1) / block_dim.0), ((256 + block_dim.1 - 1) / block_dim.1), 1)`.
+/// Reused by the CUDA/ROCm/Metal host emitters — all three represent
+/// `grid_dim`/`block_dim` as a `(u32,u32,u32)` tuple with the same `.0`/`.1`/`.2`
+/// convention (see e.g. `cuda/host.rs`'s existing 1D `auto_grid_field` and
+/// Metal's existing 2D `Dimension`/`'surface` grid inference). Missing axes
+/// (an `Image`'s absent Z) default to `1`, same as the existing 1D case.
+pub(crate) fn image_volume_grid_dim_expr(dims: &[Type]) -> String {
+    let block_axis = |i: usize| match i { 0 => "block_dim.0", 1 => "block_dim.1", _ => "block_dim.2" };
+    let axis_expr = |i: usize| -> String {
+        match dims.get(i) {
+            Some(Type::ConstInt(n)) => format!("(({} + {ax} - 1) / {ax})", n, ax = block_axis(i)),
+            _ => "1".to_string(),
+        }
+    };
+    format!("({}, {}, {})", axis_expr(0), axis_expr(1), axis_expr(2))
+}
+
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
     // Subscript access on a collection yields an element, not a collection.
     // E.g. `arr.collect::<Vec<_>>()[0].clone()` is a scalar, not a Vec.

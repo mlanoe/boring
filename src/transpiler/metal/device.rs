@@ -4,6 +4,7 @@
 // MSL (Metal Shading Language) device code emitter.
 
 use crate::ast::*;
+use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal};
 
 pub(super) fn emit_device_msl(program: &Program) -> String {
     let mut e = DeviceEmitter::new();
@@ -161,19 +162,21 @@ impl DeviceEmitter {
         let mut tg_idx: u32 = 0;
         let mut params: Vec<String> = Vec::new();
 
-        // 1. 'unified / 'global / 'actor'global / 'actor'unified array fields → device T* [[buffer(N)]]
+        // 1. 'unified / 'global / 'actor'global / 'actor'unified array (and Image/Volume) fields → device T* [[buffer(N)]]
         for f in &decl.fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
-                    match &f.ty {
-                        Type::Array(inner) | Type::ArrayN(inner, _) => {
-                            let elem = elem_msl_type(inner);
-                            let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
-                            params.push(format!("device {}{}* {} [[buffer({})]]",
-                                constness, elem, f.name, buf_idx));
-                            buf_idx += 1;
-                        }
-                        _ => {}
+                    let elem_ty: Option<&Type> = match &f.ty {
+                        Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
+                        ty if ty.as_image_volume().is_some() => Some(ty.as_image_volume().unwrap().0),
+                        _ => None,
+                    };
+                    if let Some(inner) = elem_ty {
+                        let elem = elem_msl_type(inner);
+                        let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
+                        params.push(format!("device {}{}* {} [[buffer({})]]",
+                            constness, elem, f.name, buf_idx));
+                        buf_idx += 1;
                     }
                 }
                 // 'surface pixel buffers use 32-bit uint (BGRA8Unorm = 4 bytes/pixel)
@@ -201,6 +204,10 @@ impl DeviceEmitter {
                         // Array: use the field name directly — accessed as name[i] in the kernel body.
                         params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
                     }
+                    ty if ty.as_image_volume().is_some() => {
+                        // Image/Volume: same direct-pointer treatment as a fixed array.
+                        params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
+                    }
                     _ => {
                         // Scalar: param named __name, dereferenced into a local below.
                         params.push(format!("constant {}* __{} [[buffer({})]]", elem, f.name, buf_idx));
@@ -213,7 +220,8 @@ impl DeviceEmitter {
         // 3. Scalar 'local fields → constant T* [[buffer(N)]] (passed from host as scalar)
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Local)
-                && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+                && f.ty.as_image_volume().is_none() {
                     let ty = msl_type(&f.ty);
                     params.push(format!("constant {}* __{}_init [[buffer({})]]", ty, f.name, buf_idx));
                     buf_idx += 1;
@@ -235,6 +243,13 @@ impl DeviceEmitter {
         params.push("uint3 __block_pos [[threadgroup_position_in_grid]]".into());
         params.push("uint3 __block_dim [[threads_per_threadgroup]]".into());
         params.push("uint3 __grid_dim [[threadgroups_per_grid]]".into());
+        // SIMD-group (warp) built-ins — scalars, unlike the vec3 params above.
+        // Unconditional, same as the other built-in position params: MSL
+        // SIMD-group builtins need no capability/enable step, so there's no
+        // cost to always accepting them even on kernels that don't use
+        // `gpu.warp.*`.
+        params.push("uint __simd_lane_id [[thread_index_in_simdgroup]]".into());
+        params.push("uint __simd_size [[threads_per_simdgroup]]".into());
 
         self.line(&format!("kernel void {}(", fn_name));
         self.indent += 1;
@@ -252,18 +267,22 @@ impl DeviceEmitter {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     let elem = elem_msl_type(inner);
                     self.line(&format!("threadgroup {} {}[{}];", elem, f.name, n));
+                } else if let Some((elem, _)) = f.ty.as_image_volume() {
+                    let len = f.ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    self.line(&format!("threadgroup {} {}[{}];", elem_msl_type(elem), f.name, len));
                 }
             }
         }
 
         // Declare 'const scalars: deref the constant buffer pointer into a local.
-        // Arrays are passed directly as `constant T* name` and need no deref.
+        // Arrays (and Image/Volume) are passed directly as `constant T* name` and need no deref.
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Const) {
                 match &f.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {
                         // Array: accessed directly via name[i] — no deref needed.
                     }
+                    ty if ty.as_image_volume().is_some() => {}
                     _ => {
                         let ty = msl_type(&f.ty);
                         self.line(&format!("const {} {} = *__{};", ty, f.name, f.name));
@@ -281,6 +300,11 @@ impl DeviceEmitter {
                         self.line(&format!("{} {}[{}];", elem, f.name, n));
                     }
                     Type::Array(_) => {}
+                    ty if ty.as_image_volume().is_some() => {
+                        let (elem, _) = ty.as_image_volume().unwrap();
+                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                        self.line(&format!("{} {}[{}];", elem_msl_type(elem), f.name, len));
+                    }
                     _ => {
                         // Scalar 'local: initialize from the constant buffer parameter.
                         let ty = msl_type(&f.ty);
@@ -450,6 +474,92 @@ impl DeviceEmitter {
         Some(format!("{};", intrinsic))
     }
 
+    /// Detect `arr[i].min/max/swap/cas(...)` where `arr` is an
+    /// `'actor'global`/`'actor'unified` field and emit the corresponding MSL
+    /// atomic intrinsic. Handled in expression position — unlike
+    /// `try_atomic_assign`'s statement-only compound-assign desugar, these
+    /// return the previous value.
+    ///
+    /// `min`/`max`/`swap` map directly onto MSL's
+    /// `atomic_fetch_min_explicit`/`atomic_fetch_max_explicit`/
+    /// `atomic_exchange_explicit`, which already return the previous value
+    /// like their CUDA/HIP equivalents — same `(device atomic_long*)` cast
+    /// pattern already used for `+=`/`-=`/etc. above (`atomic_fetch_min/max_explicit`
+    /// on 64-bit `atomic_long` specifically is not independently verified
+    /// against a real Metal compiler in this environment — same caveat this
+    /// backend's docs already carry elsewhere for untestable-locally MSL
+    /// codegen).
+    ///
+    /// `cas` is a real shape mismatch: MSL's
+    /// `atomic_compare_exchange_weak_explicit(object, &expected, desired, ...)`
+    /// takes a *pointer* to the expected value (overwritten with the real
+    /// current value on failure) and returns a `bool`, not the previous
+    /// value directly — unlike CUDA/HIP's `atomicCAS`, which just returns
+    /// it. Bridged via a GNU/Clang statement-expression (`({ ... })`,
+    /// supported by Metal's Clang-based compiler) so the whole thing is
+    /// still usable as a single expression: bind `expected` into a local,
+    /// call compare-exchange (ignoring the bool — the local now holds
+    /// whichever value actually ends up correct: unchanged if it succeeded,
+    /// the real current value if it didn't), and yield that local.
+    fn try_atomic_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+        let ExprKind::Index(arr, _idx) = &obj.kind else { return None; };
+        let arr_name = match &arr.kind {
+            ExprKind::Var(n) => n.clone(),
+            _ => return None,
+        };
+        if !matches!(method, "min" | "max" | "swap" | "cas") { return None; }
+        let target = self.expr(obj);
+        if self.is_atomic_field(&arr_name) {
+            match (method, args_s) {
+                ("min", [v]) => Some(format!(
+                    "atomic_fetch_min_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                ("max", [v]) => Some(format!(
+                    "atomic_fetch_max_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                ("swap", [v]) => Some(format!(
+                    "atomic_exchange_explicit((device atomic_long*)&{}, (long)({}), memory_order_relaxed)", target, v)),
+                ("cas", [expected, new]) => Some(format!(
+                    "({{ long __boring_cas_exp = (long)({}); atomic_compare_exchange_weak_explicit((device atomic_long*)&{}, &__boring_cas_exp, (long)({}), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }})",
+                    expected, target, new
+                )),
+                _ => None,
+            }
+        } else {
+            // Not atomic-qualified -- plain read-modify-write, no atomic cast
+            // or memory-order needed. Bridged via the same GNU/Clang
+            // statement-expression as the atomic `.cas` case above (Metal's
+            // compiler is Clang-based) since there's no intrinsic call to
+            // lean on for the "return the previous value" contract here.
+            match (method, args_s) {
+                ("min", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = min({t}, ({v})); __old; }})", t = target, v = v)),
+                ("max", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = max({t}, ({v})); __old; }})", t = target, v = v)),
+                ("swap", [v]) => Some(format!(
+                    "({{ auto __old = {t}; {t} = ({v}); __old; }})", t = target, v = v)),
+                ("cas", [expected, new]) => Some(format!(
+                    "({{ auto __old = {t}; if (__old == ({e})) {t} = ({n}); __old; }})",
+                    t = target, e = expected, n = new)),
+                _ => None,
+            }
+        }
+    }
+
+    /// Precabled `Image`/`Volume` methods: `.at(c,r)`/`.at(x,y,z)` lowers to
+    /// row-major flat-index arithmetic; `.width()`/`.height()`/`.depth()` lower to
+    /// the dimension's compile-time literal. See docs/image-volume-types.md.
+    fn try_image_volume_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+        let ExprKind::Var(name) = &obj.kind else { return None; };
+        let field = self.current_fields.iter().find(|f| &f.name == name)?;
+        let (_, dims) = field.ty.as_image_volume()?;
+        match method {
+            "at" => Some(format!("{}[{}]", name, image_volume_at_index(dims, args_s))),
+            "width"  => image_volume_dim_literal(dims, 0),
+            "height" => image_volume_dim_literal(dims, 1),
+            "depth"  => image_volume_dim_literal(dims, 2),
+            _ => None,
+        }
+    }
+
     // ── Expressions ───────────────────────────────────────────────────────────
 
     fn expr(&mut self, e: &Expr) -> String {
@@ -496,6 +606,17 @@ impl DeviceEmitter {
             }
             ExprKind::MethodCall(obj, method, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                if is_gpu_warp_receiver(obj) {
+                    if let Some(msl) = gpu_warp_method_call(method, &args_s) {
+                        return msl;
+                    }
+                }
+                if let Some(msl) = self.try_atomic_method_call(obj, method, &args_s) {
+                    return msl;
+                }
+                if let Some(msl) = self.try_image_volume_method_call(obj, method, &args_s) {
+                    return msl;
+                }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
                     // `self.method(args)` → the sibling device function this method was
                     // emitted as (see `emit_device_fn`): `KernelName_method(fields..., args)`.
@@ -714,6 +835,9 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                         // Array: direct pointer, no deref — same as in the entry point.
                         Some(format!("constant {}* {}", elem, f.name))
                     }
+                    ty if ty.as_image_volume().is_some() => {
+                        Some(format!("constant {}* {}", elem, f.name))
+                    }
                     _ => {
                         // Scalar: passed as __name pointer so helper can access it.
                         Some(format!("constant {}* __{}", elem, f.name))
@@ -765,6 +889,9 @@ fn msl_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", msl_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", msl_type(inner), n),
+        Type::Generic(..) if ty.as_image_volume().is_some() => {
+            format!("{}*", msl_type(ty.as_image_volume().unwrap().0))
+        }
         Type::Named(n) => match n.as_str() {
             "float" | "f64" | "f32" => "float".to_string(),
             "int"                   => "int64_t".to_string(),
@@ -794,6 +921,7 @@ fn elem_msl_type(ty: &Type) -> String {
         Type::Array(inner)        => msl_type(inner),
         Type::ArrayN(inner, _)    => msl_type(inner),
         Type::Qualified(inner, _) => elem_msl_type(inner),
+        Type::Generic(..) if ty.as_image_volume().is_some() => msl_type(ty.as_image_volume().unwrap().0),
         _                         => msl_type(ty),
     }
 }
@@ -840,8 +968,30 @@ fn map_gpu_field(obj: &str, field: &str) -> String {
         ("__grid_dim",   "x") => "(int64_t)__grid_dim.x".into(),
         ("__grid_dim",   "y") => "(int64_t)__grid_dim.y".into(),
         ("__grid_dim",   "z") => "(int64_t)__grid_dim.z".into(),
+        ("gpu", "warp")       => "__warp".into(),
+        ("__warp", "size")    => "(int64_t)__simd_size".into(),
+        ("__warp", "lane")    => "(int64_t)__simd_lane_id".into(),
         _                    => format!("{}.{}", obj, field),
     }
+}
+
+/// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — MSL
+/// SIMD-group intrinsics need no capability/mask handling (unlike CUDA's
+/// `_sync` mask), so these map straight across.
+fn gpu_warp_method_call(method: &str, args: &[String]) -> Option<String> {
+    match method {
+        "sync"         => Some("simdgroup_barrier(mem_flags::mem_none)".into()),
+        "shuffle_down" => Some(format!("simd_shuffle_down({}, {})", args[0], args[1])),
+        "shuffle_up"   => Some(format!("simd_shuffle_up({}, {})", args[0], args[1])),
+        "shuffle_xor"  => Some(format!("simd_shuffle_xor({}, {})", args[0], args[1])),
+        "shuffle"      => Some(format!("simd_shuffle({}, {})", args[0], args[1])),
+        _ => None,
+    }
+}
+
+fn is_gpu_warp_receiver(obj: &Expr) -> bool {
+    matches!(&obj.kind, ExprKind::Field(inner, name) if name == "warp"
+        && matches!(&inner.kind, ExprKind::Var(v) if v == "gpu"))
 }
 
 fn map_builtin_fn(name: &str) -> String {

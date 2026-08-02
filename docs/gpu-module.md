@@ -172,9 +172,12 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 |---|---|---|---|---|---|
 | `[T]` dynamic | explicit | explicit | explicit | error | error |
 | `[T, N]` fixed | error | error | explicit | inferred (`mut`/`var`) | inferred (`let`) |
+| `Image<T,C,R>` / `Volume<T,X,Y,Z>` | explicit | explicit | explicit | inferred (`mut`/`var`) | inferred (`let`) |
 | scalar | — | — | — | inferred (`mut`/`var`) | inferred (`let`) |
 
 > `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and bare `'actor` are always explicit.
+
+> **`Image`/`Volume` vs `[T, N]` fixed — the one place they differ**: `[T, N]'unified`/`[T, N]'global` are errors ("size is implicit from the init parameter"), but `Image<T,C,R>'unified`/`'global` (and `Volume`) are valid. The reason: `[T, N]`'s host-side representation is a true fixed-size Rust array, which conflicts with `'unified`/`'global`'s always-dynamic host buffer (`Vec`/`CudaSlice`/`DeviceBuffer`/`Buffer`, sized at runtime from the constructor's argument). `Image`/`Volume` don't have that conflict — their host representation *is* the same dynamic buffer type as `[T]`; `C`/`R`/`X`/`Y`/`Z` are compile-time shape metadata used for `.at(...)` indexing and grid inference, not a competing fixed length. See [`image-volume-types.md`](image-volume-types.html). `'actor'global`/`'actor'unified` compose with `Image`/`Volume` the same as with `[T]`/`[T,N]` — e.g. `mut Image<int,256,256>'actor'global histogram` is valid.
 
 ---
 
@@ -188,6 +191,45 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 `'const` (like bare `'actor` and `'local`) has no host-context form — it has no host access at
 all (see the table above), so a host-side binding could never be read from or written to.
 It's only meaningful as a field qualifier inside a `kernel` struct.
+
+---
+
+## Named-shape buffers — `Image`/`Volume`
+
+`Image<T, C, R>` and `Volume<T, X, Y, Z>` are built-in generic types for 2D/3D
+compute buffers — replacing the pattern of a flat `[T]` field plus separate
+plain-`int` `rows`/`cols` fields and hand-rolled linear-index math. `C`/`R`
+(and `X`/`Y`/`Z`) are compile-time integer constants, not runtime values:
+
+```boring
+kernel Transpose:
+    let Image<float, C, R>'global src
+    mut Image<float, R, C>'unified dst
+
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        dst.at(r, c) = src.at(c, r)
+```
+
+- **Methods**: `.width()`, `.height()`, `.depth()` (`Volume` only) return the
+  dimension as a compile-time literal; `.at(c, r)` (`Image`) / `.at(x, y, z)`
+  (`Volume`) index into the buffer.
+- **Layout**: row-major — `.at(c, r)` lowers to flat index `c + r*C`; `.at(x, y, z)`
+  lowers to `x + y*X + z*(X*Y)`.
+- **Qualifiers**: same set as `[T]`/`[T, N]` combined (see the matrix above) —
+  `'unified`, `'global`, bare `'actor`, `'actor'global`, `'actor'unified`, `'const`,
+  `'local` are all valid; `'surface` is not (see below).
+- **Grid inference**: a `kernel:` block with no explicit `grid=` defaults the grid
+  from an `Image`/`Volume` field's `C`/`R`/`X`/`Y`/`Z` instead of falling back to
+  the 1D `ceil(len/block)` used for flat arrays — see each backend doc's own
+  grid-inference section (`cuda-module.md`, `rocm-backend.md`, `metal-backend.md`,
+  `wgpu-backend.md`).
+
+`Image`/`Volume` are for compute buffers — they do **not** replace `'surface`,
+which encodes a presentation-path constraint (how a pixel buffer reaches the
+screen), not just a 2D shape. See [`image-volume-types.md`](image-volume-types.html)
+for the full design rationale.
 
 ---
 
@@ -269,6 +311,21 @@ Inside `def ()` and device helpers, `gpu` is available:
 | `gpu.block_dim.x/y/z` | threads per block |
 | `gpu.grid_dim.x/y/z` | blocks per grid |
 | `sync` | explicit block-level barrier (manual mode — see bare `'actor`) |
+| `gpu.warp.size` | threads per warp/wavefront/SIMD-group/subgroup |
+| `gpu.warp.lane` | this thread's index within its warp, `0..gpu.warp.size` |
+| `gpu.warp.sync()` | warp-local barrier — cheaper than `sync` (block-wide) |
+| `gpu.warp.shuffle_down(v, delta)` | read `v` from the lane `delta` above this one |
+| `gpu.warp.shuffle_up(v, delta)` | read `v` from the lane `delta` below this one |
+| `gpu.warp.shuffle_xor(v, mask)` | read `v` from lane `this_lane XOR mask` (butterfly pattern — reductions) |
+| `gpu.warp.shuffle(v, src_lane)` | broadcast/read `v` from an arbitrary lane |
+
+`gpu.warp.*` is device-side, current-thread state — not to be confused with
+the host-side `GPU(0).warpSize()` below, which queries a device by index from
+ordinary (non-kernel) code. Same hardware concept, unrelated call sites.
+
+See [warp-level primitives](warp-level-primitives.html) for the full design
+(per-backend mapping, the wgpu real-subgroup/emulated-fallback split, and the
+divergent-branch caveat).
 
 ---
 
@@ -454,7 +511,82 @@ kernel Histogram:
 Bare `'actor` is a different qualifier entirely (block-shared memory — see above) and is
 **not** an alias for either atomic form; both must be spelled out in full.
 
-Supported atomic operations: `+= -= &= |= ^=`.
+Supported compound-assign atomic operations: `+= -= &= |= ^=`.
+
+### `.min` / `.max` / `.swap` / `.cas`
+
+Four more atomic operations are available as **methods** on an indexed element of an `'actor'global`/`'actor'unified` field, rather than an operator — `min`/`max`/`exchange`/`compare-and-swap` have no natural infix operator the way add/sub/or/and/xor do. No `atomic` prefix on the method names either: the qualifier already establishes that every access to this field is atomic, so repeating it in each method name would be redundant.
+
+```boring
+kernel Histogram:
+    mut [int]'actor'global counts = [0, 0, 0, 0]
+
+    def ():
+        _ = counts[bucket].min(v)             # atomicMin — new value is min(old, v)
+        _ = counts[bucket].max(v)             # atomicMax — new value is max(old, v)
+        _ = counts[bucket].swap(v)            # atomicExch — unconditional exchange
+        _ = counts[bucket].cas(expected, new) # compare-and-swap
+```
+
+All four **return the previous value** — matching CUDA/HIP's real `atomicMin`/`atomicMax`/`atomicExch`/`atomicCAS` semantics exactly, on every backend. For `.cas`, the caller compares the returned value against `expected` to tell whether the swap actually happened:
+
+```boring
+let old = counts[bucket].cas(0, 1)
+if old == 0:
+    print "claimed it"
+else:
+    print "someone else got there first, current value was {old}"
+```
+
+Like any other call whose return value is used as a bare statement, the checker requires the result to be explicitly bound (`let old = ...`) or discarded (`_ = ...`) — silently dropping it is a compile error, not a warning.
+
+### `.min`/`.max`/`.swap`/`.cas` without `'actor`
+
+These four methods work on **any** indexed element, not only an `'actor'global`/`'actor'unified` one — matching `+= -= &= |= ^=`'s existing behavior, which already degrades to plain (non-atomic) arithmetic off a non-actor field instead of erroring:
+
+```boring
+kernel Scale:
+    mut [int]'unified buf   # plain, not 'actor'global/'actor'unified
+
+    def ():
+        let old = buf[i].min(v)   # plain read-modify-write, not atomicMin — no
+                                   # cross-thread protection, same as buf[i] += v
+                                   # would give on this same field
+```
+
+The mechanism differs by backend, since only CUDA/HIP/Metal can express "read the old value, mutate, yield the old value" as a single expression (a GNU/Clang statement-expression, `({ ... })`) — WGSL has nothing equivalent. On wgpu, the plain fallback only works when the call is the **entire right-hand side** of a `let`/assignment statement (`let old = buf[i].min(v)`, or `_ = buf[i].min(v)` to discard); anywhere else — nested inside a larger expression — it isn't representable in WGSL as a single unit, and the generated shader carries a visible, unmistakable marker at that spot rather than silently computing something else or emitting invalid WGSL.
+
+---
+
+## GPU error handling
+
+`GpuError` is a built-in enum, always available without import — the same mechanism as the built-in `Error` enum ([`book.md`](book.html), "Error Handling"):
+
+```boring
+enum GpuError:
+    LaunchError
+    OutOfMemory
+    IllegalAccess
+    StackOverflow
+    Timeout
+    DeviceLost
+```
+
+```boring
+mut k = Scale(data)
+try:
+    kernel:
+        k(block = 256)
+catch GpuError.OutOfMemory:
+    print "ran out of GPU memory"
+catch GpuError.LaunchError:
+    print "kernel launch was rejected"
+```
+
+**Only genuinely catchable on `--target wgpu`.** `catch GpuError.Variant:` desugars to a `BoringError` downcast — the exact mechanism `throws CalcError`/`catch CalcError.Variant:` already uses for a user-declared enum (`book.md`). wgpu's host codegen shares the same general transpiler pipeline that mechanism lives in; CUDA, ROCm, and Metal each have their own smaller, kernel-only host transpiler that doesn't (the same prerequisite gap already documented for `with` in `scoped-access-blocks.md`). On those three backends, a GPU failure is still reported as a `Box<dyn Error>` with a classified message (e.g. `"GPU out of memory: ..."`) — informative, but not something a Boring `catch GpuError.OutOfMemory:` block will match. See each backend's own doc for exactly what's classified:
+
+- [`wgpu-backend.md`](wgpu-backend.html) — full typed `GpuError`, catchable
+- [`cuda-module.md`](cuda-module.html), [`rocm-backend.md`](rocm-backend.html), [`metal-backend.md`](metal-backend.html) — classified message only
 
 ---
 

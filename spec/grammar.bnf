@@ -355,6 +355,13 @@ ext_member      ::= "pub"? fn_decl
 #   sync                         — explicit barrier (manual mode): wait for all threads in the block.
 #                                  If `sync` appears in a `def`, auto-insertion is disabled for that
 #                                  `def` and the developer owns all barrier placement.
+#   gpu.warp.size               — threads per warp/wavefront/SIMD-group/subgroup
+#   gpu.warp.lane               — this thread's index within its warp, 0..gpu.warp.size
+#   gpu.warp.sync()             — warp-local barrier, cheaper than `sync` (block-wide)
+#   gpu.warp.shuffle_down(v, delta) — read `v` from the lane `delta` above this one
+#   gpu.warp.shuffle_up(v, delta)   — read `v` from the lane `delta` below this one
+#   gpu.warp.shuffle_xor(v, mask)   — read `v` from lane `this_lane XOR mask`
+#   gpu.warp.shuffle(v, src_lane)   — broadcast/read `v` from an arbitrary lane
 #
 # GPU memory qualifiers (kernel-context only — replace standard ownership qualifiers):
 #

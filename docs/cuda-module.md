@@ -88,13 +88,31 @@ kernel-struct field qualifier.
 | `gpu.block_dim.x` | `blockDim.x` |
 | `gpu.grid_dim.x` | `gridDim.x` |
 | `sync` | `__syncthreads()` |
+| `gpu.warp.size` | `warpSize` |
+| `gpu.warp.lane` | `threadIdx.x/y/z` linearized, `% warpSize` |
+| `gpu.warp.sync()` | `__syncwarp(0xffffffff)` |
+| `gpu.warp.shuffle_down(v, delta)` | `__shfl_down_sync(0xffffffff, v, delta)` |
+| `gpu.warp.shuffle_up(v, delta)` | `__shfl_up_sync(0xffffffff, v, delta)` |
+| `gpu.warp.shuffle_xor(v, mask)` | `__shfl_xor_sync(0xffffffff, v, mask)` |
+| `gpu.warp.shuffle(v, lane)` | `__shfl_sync(0xffffffff, v, lane)` |
 | `'unified` field | `cudaMallocManaged` |
 | `'global` field | `cudaMalloc` |
 | bare `'actor` field | `__shared__` |
 | `'const` scalar field | `__constant__ T name;` (file scope) |
 | `'const` fixed array field (`[T, N]`) | `__constant__ T name[N];` (file scope) |
 | atomic `[i] +=` on `'actor'global`/`'actor'unified` | `atomicAdd` |
+| `[i].min(v)` on `'actor'global`/`'actor'unified` | `atomicMin(&x, v)` |
+| `[i].max(v)` on `'actor'global`/`'actor'unified` | `atomicMax(&x, v)` |
+| `[i].swap(v)` on `'actor'global`/`'actor'unified` | `atomicExch(&x, v)` |
+| `[i].cas(expected, new)` on `'actor'global`/`'actor'unified` | `atomicCAS(&x, expected, new)` |
 | `print` in kernel | `printf` |
+
+`gpu.warp.*`'s `_sync` intrinsics always pass the full `0xffffffff` active-lane
+mask — Boring doesn't expose a mask parameter in source. This means
+`gpu.warp.*` inside a divergent branch (an `if` not every lane in the warp
+takes) is only as safe as passing a full mask to CUDA's `_sync` intrinsics
+actually is: correct for reconverged/uniform control flow, undefined behavior
+otherwise. See [warp-level primitives](warp-level-primitives.html).
 
 ### `[T, N]'const` codegen detail
 
@@ -139,7 +157,9 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 **Grid inference rules (current implementation):**
 
 - `[T]'global` / `'unified` 1D array field → `grid = ceil(len(buf) / block)`
-- Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on 1D array inference.
+- `Image<T,C,R>` field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) → `grid = (ceil(C/block.x), ceil(R/block.y), 1)`
+- `Volume<T,X,Y,Z>` field → `grid = (ceil(X/block.x), ceil(Y/block.y), ceil(Z/block.z))`
+- Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on array/Image/Volume inference.
 
 Passing `grid` explicitly always overrides inference, on every backend — `k(block = (16, 16, 1), grid = (4, 4, 1))` dispatches exactly the requested `(4, 4, 1)` grid, whether or not the kernel has a 1D auto-grid-capable field. (An earlier version of the CUDA/ROCm codegen silently dropped an explicit `grid` argument and always substituted the inferred/default value instead — confirmed via a real generated project, fixed by threading the caller's `grid` through to `__boring_launch` the same way `metal::host` already did.)
 
@@ -260,10 +280,23 @@ not an alias for either.
 | `x \|= v` | `atomicOr(&x, v)` |
 | `x &= v` | `atomicAnd(&x, v)` |
 | `x ^= v` | `atomicXor(&x, v)` |
+| `x.min(v)` | `atomicMin(&x, v)` |
+| `x.max(v)` | `atomicMax(&x, v)` |
+| `x.swap(v)` | `atomicExch(&x, v)` |
+| `x.cas(expected, new)` | `atomicCAS(&x, expected, new)` |
 
 `atomicAdd` etc. take a plain pointer of the base type — no special "atomic" type
 exists in CUDA C, so the same intrinsics apply unconditionally whether the pointer
 came from `cudaMalloc` (`'actor'global`) or `cudaMallocManaged` (`'actor'unified`).
+
+`min`/`max`/`swap`/`cas` are **methods**, not compound-assign operators — min/max/
+exchange/compare-and-swap have no natural infix operator the way add/sub/or/and/xor
+do — and unlike the operators above, they're handled in **expression** position
+(they return the previous value, matching `atomicMin`/`atomicMax`/`atomicExch`/
+`atomicCAS`'s own real CUDA semantics) rather than as a statement-only
+compound-assign desugar. The checker requires that return value be explicitly bound
+or discarded (`_ = bins[bucket].swap(0)`), same as any other non-void call used as a
+bare statement.
 
 ```boring
 kernel Histogram:
@@ -274,11 +307,29 @@ kernel Histogram:
         let i = gpu.thread.x + gpu.block.x * gpu.block_dim.x
         if i < len(input):
             let bucket = int(input[i] * 10.0)
-            bins[bucket] += 1    # → atomicAdd
+            bins[bucket] += 1              # → atomicAdd
+            _ = bins[bucket].min(100)      # → atomicMin
+            let old = bins[bucket].cas(0, 1)  # → atomicCAS, old holds the previous value
 ```
 
 `'actor'unified` is identical except `bins` is also directly readable from the host
 (no `gpu.copy()` needed) via the generated `read_bins()` accessor.
+
+**`.min`/`.max`/`.swap`/`.cas` also work on a plain, non-`'actor'` field** — matching
+`+= -= &= |= ^=`, which already degrade to ordinary (non-atomic) arithmetic off a
+non-actor field rather than erroring. There's no intrinsic to lean on for the
+"return the previous value" contract in that case, so it's bridged via a GNU/Clang
+statement-expression (`({ ... })` — `nvcc`'s device-code compiler accepts this GNU C
+extension):
+
+```boring
+kernel Scale:
+    mut [int]'unified buf   # plain, not 'actor'global/'actor'unified
+
+    def ():
+        let old = buf[i].min(v)   # ({ auto __old = buf[i]; buf[i] = min(buf[i], v); __old; })
+                                   # plain read-modify-write, no cross-thread protection
+```
 
 ---
 
@@ -307,7 +358,9 @@ Sequential simulation hides data races. A kernel correct in simulation may be in
 
 ## Error handling
 
-There is no dedicated Boring-level named error type (`GpuLaunchError`/`GpuOutOfMemory`/`GpuIllegalAccess`/`GpuStackOverflow`/`GpuTimeout`/`GpuDeviceLost`, as earlier drafts of this section described) anywhere in the codebase — see "Known limitations" below. Every kernel-dispatch error surfaces as whatever cudarc itself reports (`cudarc::driver::DriverError`), wrapped generically as `Box<dyn std::error::Error + Send + Sync>` and propagated with `?` up to `boring_main()`'s own `Result` — a plain, un-typed error, not a Boring-specific enum a `match` could branch on.
+The built-in [`GpuError`](gpu-module.html#gpu-error-handling) enum exists (`LaunchError`/`OutOfMemory`/`IllegalAccess`/`StackOverflow`/`Timeout`/`DeviceLost`), but **isn't catchable by variant on this backend** — `catch GpuError.OutOfMemory:` needs the `BoringError`-downcast machinery, which lives in the general transpiler pipeline this backend's own small, kernel-only host transpiler doesn't share (same prerequisite gap `scoped-access-blocks.md` documents for `with`). What CUDA does do: `__boring_cuda_classify_error` inspects the real `cudarc::driver::DriverError`'s underlying `CUresult` code at kernel launch and both stream-sync points, and prefixes cudarc's own message (already real — it calls `cuGetErrorName`/`cuGetErrorString` internally) with a short classified category (`"GPU out of memory: ..."`, `"GPU illegal memory access: ..."`, etc.) — still a plain `Box<dyn std::error::Error + Send + Sync>`, not a `GpuError` a `catch`/`match` could branch on, just a more informative message than the bare cudarc error used to be on its own.
+
+**Block size is validated here, at runtime, by design — not at compile time.** An oversized `block =` (exceeding the device's, or this specific kernel's, max threads per block) makes `cuLaunchKernel` itself reject the launch with `CUDA_ERROR_INVALID_VALUE`, classified as `"GPU launch configuration invalid (e.g. block size exceeds device limits)"`. Neither `src/validator/kernel.rs` nor the interpreter (`src/interpreter/eval_gpu.rs`) duplicates that check — there's no hardcoded "max threads per block" constant to keep in sync with real hardware (which varies by compute capability) or to silently drift out of date; the real launch call is always the ground truth, and now surfaces a real, classified error instead of the caller needing to guess why a dispatch failed.
 
 That said, cudarc's own two observation points still apply, mirroring the two phases a real CUDA launch can fail at:
 
@@ -365,9 +418,5 @@ There is no `--peer-access` flag to opt into this — every GPU context created 
 
 The following features are not yet implemented:
 
-- `atomic.cas`, `atomicMin`, `atomicMax`, `atomicExch` — no `atomic` namespace or `.cas` method in lexer, parser, interpreter, or transpiler
-- `'actor'unified`, `'actor'shared` — parse error; only `'actor'global` is accepted
-- `warp.size`, `warp.lane`, `warp.sync` — no `warp` namespace inside kernel bodies
-- Block size validation at compile time — oversized `block` values are not checked in `src/validator/kernel.rs` or `src/interpreter/eval_gpu.rs`
-- Error types (`GpuLaunchError`, `GpuOutOfMemory`, `GpuIllegalAccess`, `GpuStackOverflow`, `GpuTimeout`, `GpuDeviceLost`) — none of these exist in the codebase
-- `.shape`-based grid inference — no built-in `Image`/`Volume` types; omitting `grid` when no 1D array field is present silently defaults to `(1, 1, 1)`
+- `'actor'shared` — parse error; only `'actor'global`/`'actor'unified` (or bare `'actor` for block-shared memory) are accepted
+- Omitting `grid` when no 1D array field, `Image`, or `Volume` field is present silently defaults to `(1, 1, 1)` — see the grid-inference rules above for what fields DO get 2D/3D inference

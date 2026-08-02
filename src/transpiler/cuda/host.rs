@@ -4,6 +4,7 @@
 // Rust host-side code emitter for the CUDA backend.
 
 use crate::ast::*;
+use crate::transpiler::helpers::image_volume_grid_dim_expr;
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -588,11 +589,44 @@ impl HostEmitter {
         self.indent += 1;
         self.line("fn wait(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
-        self.line("self.stream.synchronize()?;");
+        self.line("self.stream.synchronize().map_err(__boring_cuda_classify_error)?;");
         self.line("Ok(self.inner)");
         self.indent -= 1;
         self.line("}");
         self.line("fn done(&self) -> bool { true }");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
+        // cudarc's own `DriverError` Display already calls
+        // `cuGetErrorName`/`cuGetErrorString` (confirmed against real cudarc
+        // 0.19.8 source), so this doesn't replace that message -- it adds a
+        // short category prefix classified from the real `CUresult` code,
+        // for the handful of failure classes a caller most often cares about
+        // at a glance (out of memory, illegal access, timeout, ...), applied
+        // at kernel launch -- the one place a dispatch can actually fail.
+        self.line("fn __boring_cuda_classify_error(e: cudarc::driver::DriverError) -> Box<dyn std::error::Error + Send + Sync> {");
+        self.indent += 1;
+        self.line("use cudarc::driver::sys::CUresult;");
+        self.line("let category = match e.0 {");
+        self.indent += 1;
+        self.line("CUresult::CUDA_ERROR_OUT_OF_MEMORY => \"GPU out of memory\",");
+        self.line("CUresult::CUDA_ERROR_ILLEGAL_ADDRESS => \"GPU illegal memory access\",");
+        // The real, CUDA-driver-side rejection an oversized `block =` hits:
+        // `cuLaunchKernel` returns CUDA_ERROR_INVALID_VALUE when the requested
+        // block dimensions exceed the device's (or this specific kernel's)
+        // max threads per block -- Boring deliberately does not duplicate
+        // that check at compile time or in the interpreter (no validator/
+        // eval_gpu check exists, and this doesn't add one); it defers
+        // entirely to this real, already-classified runtime rejection.
+        self.line("CUresult::CUDA_ERROR_INVALID_VALUE => \"GPU launch configuration invalid (e.g. block size exceeds device limits)\",");
+        self.line("CUresult::CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES => \"GPU launch out of resources\",");
+        self.line("CUresult::CUDA_ERROR_LAUNCH_TIMEOUT => \"GPU operation timed out\",");
+        self.line("CUresult::CUDA_ERROR_HARDWARE_STACK_ERROR => \"GPU stack overflow\",");
+        self.line("CUresult::CUDA_ERROR_ECC_UNCORRECTABLE | CUresult::CUDA_ERROR_CONTEXT_IS_DESTROYED => \"GPU device lost\",");
+        self.line("_ => \"GPU kernel launch failed\",");
+        self.indent -= 1;
+        self.line("};");
+        self.line("format!(\"{}: {}\", category, e).into()");
         self.indent -= 1;
         self.line("}");
         self.blank();
@@ -717,8 +751,8 @@ impl HostEmitter {
                 // `self.__stream.synchronize()` afterward is cheap defense in
                 // depth: it can only wait on real, already-in-flight work on
                 // the exact stream this copy itself was issued on.
-                self.line(&format!("let v = self.__stream.clone_dtoh(&self.{})?;", field.name));
-                self.line("self.__stream.synchronize()?;");
+                self.line(&format!("let v = self.__stream.clone_dtoh(&self.{}).map_err(__boring_cuda_classify_error)?;", field.name));
+                self.line("self.__stream.synchronize().map_err(__boring_cuda_classify_error)?;");
                 self.line("Ok(v)");
                 self.indent -= 1;
                 self.line("}");
@@ -1015,20 +1049,14 @@ impl HostEmitter {
 
     fn emit_boring_launch(&mut self, name: &str, fields: &[KernelFieldDecl]) {
         // Auto grid sizing: when the first field is a device array ('unified/'global/
-        // 'actor'global), `grid_dim` becomes optional and is derived from its length.
-        let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
-            match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
+        // 'actor'global), `grid_dim` becomes optional and is derived from its length
+        // (1D) or, for a fixed-shape Image/Volume field, from its C/R/X/Y/Z dims (2D/3D).
+        let auto_grid_field: Option<&KernelFieldDecl> = fields.iter().find(|f| {
+            matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some())
         });
 
-        if let Some(field) = &auto_grid_field {
+        if let Some(field) = auto_grid_field {
             self.line(
                 "fn __boring_launch(mut self, block_dim: (u32,u32,u32), grid_dim: Option<(u32,u32,u32)>, after: &[&Arc<CudaStream>], priority: i32) \
                  -> Result<KernelHandle<Self>, Box<dyn std::error::Error + Send + Sync>> {"
@@ -1036,8 +1064,12 @@ impl HostEmitter {
             self.indent += 1;
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
-            self.line(&format!("let n = self.{}.len() as u32;", field));
-            self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");
+            if let Some((_, dims)) = field.ty.as_image_volume() {
+                self.line(&image_volume_grid_dim_expr(dims));
+            } else {
+                self.line(&format!("let n = self.{}.len() as u32;", field.name));
+                self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");
+            }
             self.indent -= 1;
             self.line("});");
         } else {
@@ -1090,9 +1122,10 @@ impl HostEmitter {
         // block-statement desugar, both fixed the same way).
         self.line("for dep in after { stream.join(dep)?; }");
 
-        // Upload 'const fixed-size arrays to __constant__ memory before launch.
+        // Upload 'const fixed-size arrays (and fixed-shape Image/Volume) to
+        // __constant__ memory before launch.
         for f in fields {
-            if matches!(f.qual, GpuQual::Const) && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            if matches!(f.qual, GpuQual::Const) && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some()) {
                 self.line(&format!(
                     "if !self.{name}.is_empty() {{",
                     name = f.name
@@ -1132,21 +1165,21 @@ impl HostEmitter {
                     self.line(&format!("launcher.arg(&mut self.{});", f.name));
                 }
                 GpuQual::Const => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
                         // Scalar 'const: passed as a kernel parameter.
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
-                    // Array 'const: uploaded to __constant__ memory above, not a parameter.
+                    // Array/Image/Volume 'const: uploaded to __constant__ memory above, not a parameter.
                 }
                 GpuQual::Local => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
                 }
                 GpuQual::Actor => {}
             }
         }
-        self.line("unsafe { launcher.launch(cfg) }?;");
+        self.line("unsafe { launcher.launch(cfg) }.map_err(__boring_cuda_classify_error)?;");
 
         // `stream` is already `Arc<CudaStream>` (from `boring_new_stream_with_priority`,
         // which itself already returns that) -- re-wrapping in `Arc::new(stream)` here
@@ -2346,9 +2379,11 @@ impl HostEmitter {
 
     fn host_field_type(&self, field: &KernelFieldDecl) -> String {
         let elem = elem_rust_type(&field.ty);
-        // 'const fixed-size arrays are stored as Vec<T> on the host — they are
-        // uploaded to __constant__ memory via memcpy_htod, not as CudaSlice args.
-        if matches!(field.qual, GpuQual::Const) && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+        // 'const fixed-size arrays (and fixed-shape Image/Volume) are stored as
+        // Vec<T> on the host — they are uploaded to __constant__ memory via
+        // memcpy_htod, not as CudaSlice args.
+        let is_fixed_shape = matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some();
+        if matches!(field.qual, GpuQual::Const) && is_fixed_shape {
             return format!("Vec<{}>", elem);
         }
         // A scalar `'const` field (e.g. `let int rows`) is a plain kernel-launch
@@ -2358,7 +2393,7 @@ impl HostEmitter {
         // constructor then assigns it a bare `i64` (see `emit_init_stmt`'s
         // matching fix) — a real E0308 (`expected CudaSlice<i64>, found i64`),
         // confirmed via `cargo check`.
-        if matches!(field.qual, GpuQual::Const) && !matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+        if matches!(field.qual, GpuQual::Const) && !is_fixed_shape {
             return elem;
         }
         format!("CudaSlice<{}>", elem)
@@ -2383,6 +2418,7 @@ fn elem_rust_type(ty: &Type) -> String {
         Type::Array(inner)     => rust_type(inner),
         Type::ArrayN(inner, _) => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
+        Type::Generic(..) if ty.as_image_volume().is_some() => rust_type(ty.as_image_volume().unwrap().0),
         _                      => rust_type(ty),
     }
 }

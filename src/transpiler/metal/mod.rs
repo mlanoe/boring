@@ -129,10 +129,14 @@ pub fn transpile_metal(program: &Program, stem: &str, version: &str) -> MetalOut
 fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
     // No build.rs needed: MSL is compiled at runtime via newLibraryWithSource.
     // The Metal compiler is built into macOS — no external toolchain required.
+    // `objc` is unconditional (not just when `Screen` is present): every
+    // program's `__boring_metal_flush` reads the real `NSError` off a failed
+    // command buffer via `objc::msg_send!` to classify the failure, not just
+    // the display path.
     let extra_deps = if has_screen {
         "winit = \"0.28\"\nobjc = \"0.2\"\ncore-graphics = \"0.23\"\n"
     } else {
-        ""
+        "objc = \"0.2\"\n"
     };
     format!(
         r#"[package]

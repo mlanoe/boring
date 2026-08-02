@@ -27,6 +27,171 @@ use crate::ast::{GpuQual, TraitDecl, EnumDecl, FnDecl, Stmt, Type};
 pub(crate) type SyncFieldsMap = HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>;
 type SyncCtx<'a> = (&'a SyncFieldsMap, &'a Arc<Barrier>);
 
+// Fixed warp/wavefront/SIMD-group/subgroup size for the CPU simulation. Real
+// hardware varies (32 on NVIDIA and RDNA AMD, 64 on CDNA AMD, adapter-reported
+// on wgpu) — 32 is the common case and matches the same fallback constant
+// already used for the unrelated host-side `GPU().warpSize()` introspection
+// mock (`src/transpiler/wgpu/host.rs`'s `__boring_gpu_warp_size`).
+pub(crate) const WARP_SIZE: usize = 32;
+
+// One warp-group's coordination state within a block: the barrier every
+// participating lane waits on, and the shared scratch slots `gpu.warp.shuffle_*`
+// reads/writes through (always `WARP_SIZE` slots regardless of how many lanes
+// actually participate — a block smaller than `WARP_SIZE` just leaves the
+// unused tail unused, same as real hardware's inactive lanes in a partial warp).
+pub(crate) type WarpGroup = (Arc<Barrier>, Arc<Mutex<Vec<ThreadValue>>>);
+
+/// Does this expression contain a `gpu.warp.*` field access or method call
+/// anywhere in its tree? Used to decide whether a kernel dispatch needs the
+/// real-OS-thread, barrier-synchronized execution path (see
+/// `run_kernel_parallel`) even when the kernel declares no `'actor` field —
+/// `gpu.warp.sync()`/`shuffle_*()` need genuine cross-thread coordination
+/// just like a `'actor` field's barrier does, so a kernel that only uses
+/// `gpu.warp.*` (no `'actor` fields at all) must still take that path rather
+/// than the independent-threads fast path.
+fn is_gpu_warp_receiver(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Field(inner, name) if name == "warp"
+        && matches!(&inner.kind, ExprKind::Var(v) if v == "gpu"))
+}
+
+fn expr_uses_gpu_warp(e: &Expr) -> bool {
+    if is_gpu_warp_receiver(e) {
+        return true;
+    }
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_) | ExprKind::DotIdent(_) => false,
+        ExprKind::StringInterp(segs) => segs.iter().any(|s| match s {
+            StringSegment::Lit(_) => false,
+            StringSegment::Expr(e) => expr_uses_gpu_warp(e),
+            StringSegment::FormattedExpr(e, _) => expr_uses_gpu_warp(e),
+        }),
+        ExprKind::BinOp(_, l, r) => expr_uses_gpu_warp(l) || expr_uses_gpu_warp(r),
+        ExprKind::UnaryOp(_, x) => expr_uses_gpu_warp(x),
+        ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r) =>
+            expr_uses_gpu_warp(l) || expr_uses_gpu_warp(r),
+        ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => expr_uses_gpu_warp(obj),
+        ExprKind::Index(a, i) => expr_uses_gpu_warp(a) || expr_uses_gpu_warp(i),
+        ExprKind::Call(callee, args) =>
+            expr_uses_gpu_warp(callee) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
+        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) =>
+            expr_uses_gpu_warp(obj) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
+        ExprKind::GenericCall(callee, _, args) =>
+            expr_uses_gpu_warp(callee) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
+        ExprKind::Pipe(lhs, _, args) =>
+            expr_uses_gpu_warp(lhs) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
+        ExprKind::New { arena, ctor } =>
+            arena.as_ref().map(|a| expr_uses_gpu_warp(a)).unwrap_or(false) || expr_uses_gpu_warp(ctor),
+        ExprKind::KernelLaunch { config, kernel } =>
+            expr_uses_gpu_warp(kernel)
+                || config.block.as_ref().map(expr_uses_gpu_warp).unwrap_or(false)
+                || config.grid.as_ref().map(expr_uses_gpu_warp).unwrap_or(false)
+                || config.after.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
+        ExprKind::TryElse(a, b) => expr_uses_gpu_warp(a) || expr_uses_gpu_warp(b),
+        ExprKind::TryElseBlock(body, else_body) =>
+            stmts_use_gpu_warp(body) || stmts_use_gpu_warp(else_body),
+        ExprKind::Array(items) | ExprKind::Tuple(items) | ExprKind::Set(items) =>
+            items.iter().any(expr_uses_gpu_warp),
+        ExprKind::ArrayFill { value, count } =>
+            expr_uses_gpu_warp(value) || expr_uses_gpu_warp(count),
+        ExprKind::ArrayAlloc { count } => expr_uses_gpu_warp(count),
+        ExprKind::ArrayComp { expr, count, .. } =>
+            expr_uses_gpu_warp(expr) || expr_uses_gpu_warp(count),
+        ExprKind::ArrayCompIter { expr, iter, .. } =>
+            expr_uses_gpu_warp(expr) || expr_uses_gpu_warp(iter),
+        ExprKind::Dict(pairs) =>
+            pairs.iter().any(|(k, v)| expr_uses_gpu_warp(k) || expr_uses_gpu_warp(v)),
+        ExprKind::Range { start, end, .. } => expr_uses_gpu_warp(start) || expr_uses_gpu_warp(end),
+        ExprKind::SliceRange { start, end, .. } =>
+            start.as_ref().map(|s| expr_uses_gpu_warp(s)).unwrap_or(false)
+                || end.as_ref().map(|e| expr_uses_gpu_warp(e)).unwrap_or(false),
+        ExprKind::Cast(x, _) => expr_uses_gpu_warp(x),
+        ExprKind::Else(a, b) => expr_uses_gpu_warp(a) || expr_uses_gpu_warp(b),
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(e) => expr_uses_gpu_warp(e),
+            ClosureBody::Block(stmts) => stmts_use_gpu_warp(stmts),
+        },
+        ExprKind::If(s) => if_stmt_uses_gpu_warp(s),
+        ExprKind::Match(s) => match_stmt_uses_gpu_warp(s),
+        ExprKind::Block(stmts) | ExprKind::Do(stmts) => stmts_use_gpu_warp(stmts),
+        ExprKind::Loop(s) => stmts_use_gpu_warp(&s.body),
+        ExprKind::Task(x) => expr_uses_gpu_warp(x),
+        ExprKind::TaskWithTimeout(a, b) => expr_uses_gpu_warp(a) || expr_uses_gpu_warp(b),
+        ExprKind::JoinAll(items) => items.iter().any(expr_uses_gpu_warp),
+        ExprKind::MacroCall { args, .. } => args.iter().any(expr_uses_gpu_warp),
+    }
+}
+
+fn if_stmt_uses_gpu_warp(s: &crate::ast::IfStmt) -> bool {
+    s.branches.iter().any(|(c, b)| expr_uses_gpu_warp(c) || stmts_use_gpu_warp(b))
+        || s.else_body.as_ref().map(|b| stmts_use_gpu_warp(b)).unwrap_or(false)
+}
+
+fn match_stmt_uses_gpu_warp(s: &crate::ast::MatchStmt) -> bool {
+    expr_uses_gpu_warp(&s.subject) || s.arms.iter().any(|a| {
+        a.guard.as_ref().map(expr_uses_gpu_warp).unwrap_or(false) || match &a.body {
+            MatchBody::Expr(e) => expr_uses_gpu_warp(e),
+            MatchBody::Block(b) => stmts_use_gpu_warp(b),
+        }
+    })
+}
+
+fn cond_clauses_use_gpu_warp(clauses: &[CondClause]) -> bool {
+    clauses.iter().any(|c| match c {
+        CondClause::Let(_, e) => expr_uses_gpu_warp(e),
+        CondClause::LetPat(_, e) => expr_uses_gpu_warp(e),
+        CondClause::Expr(e) => expr_uses_gpu_warp(e),
+    })
+}
+
+/// Does any statement in `stmts` contain a `gpu.warp.*` field access or method
+/// call anywhere in its tree? Shared with the wgpu transpiler backend (see
+/// `crate::transpiler::wgpu::kernel_uses_gpu_warp`), which needs the same
+/// detection to decide whether to emit the `enable subgroups;` WGSL directive
+/// and the SIMD-group builtin kernel parameters for a given kernel.
+pub(crate) fn stmts_use_gpu_warp(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_uses_gpu_warp)
+}
+
+fn stmt_uses_gpu_warp(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let(s) => s.value.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
+        Stmt::LetDestructure(s) => expr_uses_gpu_warp(&s.value),
+        Stmt::Return(s) => s.value.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
+        Stmt::Break(_, v) => v.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
+        Stmt::Continue(_) => false,
+        Stmt::Throw(s) => s.value.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
+        Stmt::If(s) => if_stmt_uses_gpu_warp(s),
+        Stmt::IfLet(s) =>
+            cond_clauses_use_gpu_warp(&s.clauses) || stmts_use_gpu_warp(&s.then_body)
+                || s.elif_branches.iter().any(|b| cond_clauses_use_gpu_warp(&b.clauses) || stmts_use_gpu_warp(&b.body))
+                || s.else_body.as_ref().map(|b| stmts_use_gpu_warp(b)).unwrap_or(false),
+        Stmt::Match(s) => match_stmt_uses_gpu_warp(s),
+        Stmt::While(s) => expr_uses_gpu_warp(&s.condition) || stmts_use_gpu_warp(&s.body),
+        Stmt::WhileLet(s) => expr_uses_gpu_warp(&s.value) || stmts_use_gpu_warp(&s.body),
+        Stmt::DoWhile(s) => stmts_use_gpu_warp(&s.body) || expr_uses_gpu_warp(&s.condition),
+        Stmt::Loop(s) => stmts_use_gpu_warp(&s.body),
+        Stmt::Wait(e, _) => expr_uses_gpu_warp(e),
+        Stmt::For(s) => expr_uses_gpu_warp(&s.iterable) || stmts_use_gpu_warp(&s.body),
+        Stmt::Guard(s) => {
+            let cond_uses = match &s.cond {
+                GuardCond::Expr(e) => expr_uses_gpu_warp(e),
+                GuardCond::Clauses(cs) => cond_clauses_use_gpu_warp(cs),
+            };
+            cond_uses || stmts_use_gpu_warp(&s.else_body)
+        }
+        Stmt::Try(s) => stmts_use_gpu_warp(&s.body) || s.catch_clauses.iter().any(|c| stmts_use_gpu_warp(&c.body)),
+        Stmt::Defer(body) => stmts_use_gpu_warp(body),
+        Stmt::Expr(e) => expr_uses_gpu_warp(e),
+        Stmt::Fn(f) => stmts_use_gpu_warp(&f.body),
+        Stmt::Struct(_) | Stmt::Enum(_) | Stmt::Mod(_) | Stmt::Alias(_) => false,
+        Stmt::Yield(e, _) => expr_uses_gpu_warp(e),
+        Stmt::Comment(_) => false,
+        Stmt::KernelBlock(s) => stmts_use_gpu_warp(&s.body),
+        Stmt::With(s) => stmts_use_gpu_warp(&s.body),
+    }
+}
+
 // Thread pool with an enlarged stack (64 MB) for the recursive tree-walk interpreter.
 static KERNEL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
@@ -272,9 +437,20 @@ fn run_kernel_parallel(
     let sync_field_specs: Vec<(String, crate::ast::Type, usize)> = decl_fields.iter()
         .filter_map(|f| match (&f.qual, &f.ty) {
             (GpuQual::Actor, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
+            (GpuQual::Actor, ty) if ty.as_image_volume().is_some() => {
+                let (elem, _) = ty.as_image_volume().unwrap();
+                let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                Some((f.name.clone(), elem.clone(), len as usize))
+            }
             _ => None,
         })
         .collect();
+
+    // `gpu.warp.sync()`/`gpu.warp.shuffle_*()` need genuine cross-thread
+    // coordination within a block, exactly like a `'actor` field's barrier —
+    // so a kernel using them must take the real-OS-thread path below even
+    // when it declares no `'actor` field at all.
+    let uses_gpu_warp = stmts_use_gpu_warp(&entry.body);
 
     #[allow(clippy::too_many_arguments)]
     fn run_one_kernel_thread(
@@ -293,6 +469,7 @@ fn run_kernel_parallel(
         block_idx_x: usize, block_idx_y: usize, block_idx_z: usize,
         thread_in_x: usize, thread_in_y: usize, thread_in_z: usize,
         sync_ctx: Option<SyncCtx>,
+        warp_ctx: Option<(usize, &Arc<Barrier>, &Arc<Mutex<Vec<ThreadValue>>>)>,
     ) -> Result<ThreadResult, String> {
         // Build a fresh interpreter for this thread.
         let mut ti = Interpreter::new_for_kernel(
@@ -304,6 +481,17 @@ fn run_kernel_parallel(
         if let Some((sync_fields, barrier)) = sync_ctx {
             ti.sync_fields = sync_fields.clone();
             ti.kernel_barrier = Some(Arc::clone(barrier));
+        }
+        // This thread's lane within its warp — always computed (cheap, pure
+        // arithmetic), regardless of whether the kernel actually uses
+        // `gpu.warp.*` (see `WARP_SIZE`'s doc comment for the linearization
+        // formula, matching the one CUDA/ROCm codegen emits device-side).
+        let flat_thread_for_lane = thread_in_x + thread_in_y * block_x + thread_in_z * block_x * block_y;
+        ti.warp_lane = flat_thread_for_lane % WARP_SIZE;
+        if let Some((active_lanes, barrier, scratch)) = warp_ctx {
+            ti.warp_active_lanes = active_lanes;
+            ti.warp_barrier = Some(Arc::clone(barrier));
+            ti.warp_scratch = Some(Arc::clone(scratch));
         }
 
         // Reconstruct the captured env as a child of the fresh global.
@@ -362,11 +550,16 @@ fn run_kernel_parallel(
             ("y".into(), Value::Int(grid_y as i64)),
             ("z".into(), Value::Int(grid_z as i64)),
         ]);
+        let gpu_warp = make_object("GpuWarp".into(), vec![
+            ("size".into(), Value::Int(WARP_SIZE as i64)),
+            ("lane".into(), Value::Int(ti.warp_lane as i64)),
+        ]);
         thread_env.borrow_mut().define("gpu", make_object("Gpu".into(), vec![
             ("thread".into(),    gpu_thread),
             ("block".into(),     gpu_block),
             ("block_dim".into(), gpu_block_dim),
             ("grid_dim".into(),  gpu_grid_dim),
+            ("warp".into(),      gpu_warp),
         ]));
 
         // Inject kernel methods.
@@ -407,7 +600,7 @@ fn run_kernel_parallel(
         Ok(ThreadResult { fields: changed })
     }
 
-    let thread_results: Vec<Result<ThreadResult, String>> = if sync_field_specs.is_empty() {
+    let thread_results: Vec<Result<ThreadResult, String>> = if sync_field_specs.is_empty() && !uses_gpu_warp {
         // Fast path — no `'sync` fields, every thread is independent. Unchanged
         // from before except block/thread z-indices are now real (previously
         // hardcoded to 0/1); existing kernels never dispatch with block_z/grid_z
@@ -433,6 +626,7 @@ fn run_kernel_parallel(
                     block_x, block_y, block_z, grid_x, grid_y, grid_z,
                     block_idx_x, block_idx_y, block_idx_z,
                     thread_in_x, thread_in_y, thread_in_z,
+                    None,
                     None,
                 )
             })
@@ -505,6 +699,20 @@ fn run_kernel_parallel(
                     .collect();
                 let barrier = Arc::new(Barrier::new(threads_per_block.max(1)));
 
+                // One warp-group per `WARP_SIZE`-sized (or smaller, for the
+                // block's last partial warp) slice of this block's threads —
+                // built unconditionally whenever this (real-OS-thread) path
+                // runs, even for kernels that only need it for `'actor`
+                // fields, since it's cheap relative to the thread spawns below.
+                let n_warp_groups = threads_per_block.div_ceil(WARP_SIZE).max(1);
+                let warp_groups: Vec<WarpGroup> = (0..n_warp_groups).map(|w| {
+                    let active = threads_per_block.saturating_sub(w * WARP_SIZE).min(WARP_SIZE);
+                    (
+                        Arc::new(Barrier::new(active.max(1))),
+                        Arc::new(Mutex::new(vec![ThreadValue::Nil; WARP_SIZE])),
+                    )
+                }).collect();
+
                 std::thread::scope(|scope| {
                     let handles: Vec<_> = (0..threads_per_block).map(|flat_thread| {
                         let thread_in_x = flat_thread % block_x;
@@ -512,6 +720,9 @@ fn run_kernel_parallel(
                         let thread_in_z = flat_thread / (block_x * block_y);
                         let sync_fields = &sync_fields;
                         let barrier = &barrier;
+                        let warp_id = flat_thread / WARP_SIZE;
+                        let (warp_barrier, warp_scratch) = &warp_groups[warp_id];
+                        let warp_active = threads_per_block.saturating_sub(warp_id * WARP_SIZE).min(WARP_SIZE);
                         // Enlarged (but not `kernel_pool()`-sized) stack — this
                         // tree-walking interpreter's recursion can blow the
                         // OS-default stack size (see that pool's own doc
@@ -534,6 +745,7 @@ fn run_kernel_parallel(
                                     block_idx_x, block_idx_y, block_idx_z,
                                     thread_in_x, thread_in_y, thread_in_z,
                                     Some((sync_fields, barrier)),
+                                    Some((warp_active, warp_barrier, warp_scratch)),
                                 )
                             })
                             .expect("failed to spawn kernel simulation thread")
@@ -628,8 +840,77 @@ fn run_kernel_parallel(
 // ─── Interpreter impl ─────────────────────────────────────────────────────────
 
 impl Interpreter {
+    /// `gpu.warp.sync()` / `gpu.warp.shuffle_down/up/xor/shuffle(...)` — intercepted
+    /// syntactically in `eval_expr_method_call` before generic method dispatch (the
+    /// receiver `gpu.warp` is never a real bound value, only `gpu.warp.size`/`.lane`
+    /// are, via the `GpuWarp` object `run_one_kernel_thread` injects).
+    pub(crate) fn eval_gpu_warp_method(&mut self, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        match method {
+            "sync" => {
+                if let Some(barrier) = &self.warp_barrier {
+                    barrier.wait();
+                }
+                Ok(Value::Void)
+            }
+            "shuffle_down" | "shuffle_up" | "shuffle_xor" | "shuffle" => {
+                if args.len() != 2 {
+                    return Err(err(format!("gpu.warp.{} expects 2 arguments", method), line));
+                }
+                let v = self.eval_expr(&args[0].value, Rc::clone(&env))?;
+                let other = self.eval_expr(&args[1].value, Rc::clone(&env))?;
+                let operand = match other {
+                    Value::Int(n) => n,
+                    Value::Uint(n) => n as i64,
+                    _ => return Err(err(
+                        format!("gpu.warp.{}'s second argument must be an integer", method), line,
+                    )),
+                };
+                let lane = self.warp_lane as i64;
+                let target_lane: i64 = match method {
+                    "shuffle_down" => lane + operand,
+                    "shuffle_up"   => lane - operand,
+                    "shuffle_xor"  => lane ^ operand,
+                    "shuffle"      => operand,
+                    _ => unreachable!(),
+                };
+                let (barrier, scratch) = match (&self.warp_barrier, &self.warp_scratch) {
+                    (Some(b), Some(s)) => (Arc::clone(b), Arc::clone(s)),
+                    // Not running under a warp-synchronized kernel dispatch — shouldn't
+                    // happen (`stmts_use_gpu_warp` forces that path for any kernel that
+                    // reaches this call), but degrade to "read your own value" rather
+                    // than panicking if it ever does.
+                    _ => return Ok(v),
+                };
+                let tv = to_thread_value(&v).ok_or_else(|| err(
+                    format!("gpu.warp.{}'s value argument isn't a shareable kernel type", method), line,
+                ))?;
+                {
+                    let mut slots = scratch.lock().unwrap();
+                    slots[self.warp_lane] = tv;
+                }
+                barrier.wait();
+                let result_tv = {
+                    let slots = scratch.lock().unwrap();
+                    if target_lane >= 0 && (target_lane as usize) < self.warp_active_lanes {
+                        slots[target_lane as usize].clone()
+                    } else {
+                        // Out-of-range lane: matches real hardware's `_sync` shuffle
+                        // intrinsics returning the caller's own value at the warp's
+                        // boundary rather than reading a nonexistent/inactive lane.
+                        slots[self.warp_lane].clone()
+                    }
+                };
+                barrier.wait();
+                Ok(from_thread_value(result_tv, &env))
+            }
+            other => Err(err(format!("gpu.warp has no method '{}'", other), line)),
+        }
+    }
+
     /// Register a `kernel Name:` declaration in the environment.
     pub(crate) fn exec_kernel_decl(&mut self, decl: &crate::ast::KernelDecl, env: EnvRef) -> Result<(), Signal> {
+        let decl = lower_image_volume_methods(decl);
+        let decl = &decl;
         let val = Value::KernelStruct { decl: decl.clone(), captured: Rc::clone(&env) };
         env.borrow_mut().define(&decl.name, val.clone());
         if !Rc::ptr_eq(&env, &self.global) {
@@ -869,6 +1150,14 @@ impl Interpreter {
             if matches!(val, Value::Nil) {
                 if let crate::ast::Type::ArrayN(inner, n) = &field_decl.ty {
                     *val = Value::Array(vec![zero_value(inner); *n].into());
+                } else if let Some((elem, _)) = field_decl.ty.as_image_volume() {
+                    // Image/Volume fields are represented the same as a flat
+                    // ArrayN of the same total length — `.at(...)` has already
+                    // been lowered to a plain `Index` into this same flat array
+                    // (see `lower_image_volume_methods`), so no separate shape
+                    // tracking is needed at runtime.
+                    let len = field_decl.ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    *val = Value::Array(vec![zero_value(elem); len as usize].into());
                 }
             }
         }
@@ -918,6 +1207,266 @@ impl Interpreter {
         }
         Ok(())
     }
+}
+
+/// Lower `.at(c,r)`/`.at(x,y,z)`/`.width()`/`.height()`/`.depth()` calls on
+/// `Image`/`Volume`-typed kernel fields into plain `Index`/`Int` expressions.
+///
+/// The interpreter has no runtime representation for `Image`/`Volume` beyond
+/// the flat array their field already gets (see the zero-init fallback in
+/// `instantiate_kernel_struct`) — every `.at(...)`/`.width()`/`.height()`/
+/// `.depth()` call must be resolved away before a kernel's methods ever
+/// execute, since `call_method`/`assign` (`methods.rs`) don't know these
+/// method names. Purely lexical: `C`/`R`/`X`/`Y`/`Z` are compile-time
+/// constants already known from the field's own declared type (validated as
+/// `Type::ConstInt` — see `validator/kernel.rs`), so no runtime type tracking
+/// is needed. Mirrors `Type::ArrayNExpr`'s "monomorphised before codegen"
+/// precedent (`ast/mod.rs`) — this is that same idea for the interpreter path
+/// specifically; the transpiler backends lower `.at()` directly at codegen
+/// time instead (`transpiler::helpers::image_volume_at_index`).
+///
+/// Scope: covers every statement/expression form realistic inside a `kernel`
+/// method body (numeric-only, GPU-restricted code) — not the full language
+/// grammar. `GuardCond`, `Match`-as-expr, `Block`/`Do` exprs, and closures are
+/// left unrewritten (returned as-is): none of these are meaningful inside a
+/// kernel body today, and if one contained `.at(...)` it would fail the same
+/// "no method 'at' on ..." way it already does without this pass — no worse
+/// than before, just not newly fixed.
+pub(crate) fn lower_image_volume_methods(decl: &crate::ast::KernelDecl) -> crate::ast::KernelDecl {
+    let image_fields: HashMap<String, Vec<crate::ast::Type>> = decl.fields.iter()
+        .filter_map(|f| f.ty.as_image_volume().map(|(_, dims)| (f.name.clone(), dims.to_vec())))
+        .collect();
+    if image_fields.is_empty() {
+        return decl.clone();
+    }
+    let mut lowered = decl.clone();
+    for method in lowered.methods.iter_mut() {
+        method.body = lower_stmts(&method.body, &image_fields);
+    }
+    for init in lowered.inits.iter_mut() {
+        init.body = lower_stmts(&init.body, &image_fields);
+    }
+    lowered
+}
+
+type ImageFieldDims = HashMap<String, Vec<crate::ast::Type>>;
+
+fn lower_stmts(stmts: &[Stmt], fields: &ImageFieldDims) -> Vec<Stmt> {
+    stmts.iter().map(|s| lower_stmt(s, fields)).collect()
+}
+
+fn lower_stmt(stmt: &Stmt, fields: &ImageFieldDims) -> Stmt {
+    use crate::ast::MatchBody;
+    match stmt {
+        Stmt::Let(s) => {
+            let mut s = s.clone();
+            s.value = s.value.as_ref().map(|v| lower_expr(v, fields));
+            Stmt::Let(s)
+        }
+        Stmt::LetDestructure(s) => {
+            let mut s = s.clone();
+            s.value = lower_expr(&s.value, fields);
+            Stmt::LetDestructure(s)
+        }
+        Stmt::Return(r) => {
+            let mut r = r.clone();
+            r.value = r.value.as_ref().map(|v| lower_expr(v, fields));
+            Stmt::Return(r)
+        }
+        Stmt::Break(line, val) => Stmt::Break(*line, val.as_ref().map(|v| lower_expr(v, fields))),
+        Stmt::Throw(t) => {
+            let mut t = t.clone();
+            t.value = t.value.as_ref().map(|v| lower_expr(v, fields));
+            Stmt::Throw(t)
+        }
+        Stmt::If(i) => {
+            let mut i = i.clone();
+            i.branches = i.branches.iter().map(|(c, b)| (lower_expr(c, fields), lower_stmts(b, fields))).collect();
+            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            Stmt::If(i)
+        }
+        Stmt::IfLet(i) => {
+            let mut i = i.clone();
+            i.clauses = i.clauses.iter().map(|c| lower_cond_clause(c, fields)).collect();
+            i.then_body = lower_stmts(&i.then_body, fields);
+            i.elif_branches = i.elif_branches.iter().map(|b| {
+                let mut b = b.clone();
+                b.clauses = b.clauses.iter().map(|c| lower_cond_clause(c, fields)).collect();
+                b.body = lower_stmts(&b.body, fields);
+                b
+            }).collect();
+            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            Stmt::IfLet(i)
+        }
+        Stmt::Match(m) => {
+            let mut m = m.clone();
+            m.subject = lower_expr(&m.subject, fields);
+            m.arms = m.arms.iter().map(|arm| {
+                let mut arm = arm.clone();
+                arm.guard = arm.guard.as_ref().map(|g| lower_expr(g, fields));
+                arm.body = match &arm.body {
+                    MatchBody::Expr(e) => MatchBody::Expr(lower_expr(e, fields)),
+                    MatchBody::Block(b) => MatchBody::Block(lower_stmts(b, fields)),
+                };
+                arm
+            }).collect();
+            Stmt::Match(m)
+        }
+        Stmt::While(w) => {
+            let mut w = w.clone();
+            w.condition = lower_expr(&w.condition, fields);
+            w.body = lower_stmts(&w.body, fields);
+            Stmt::While(w)
+        }
+        Stmt::WhileLet(w) => {
+            let mut w = w.clone();
+            w.body = lower_stmts(&w.body, fields);
+            Stmt::WhileLet(w)
+        }
+        Stmt::DoWhile(d) => {
+            let mut d = d.clone();
+            d.body = lower_stmts(&d.body, fields);
+            d.condition = lower_expr(&d.condition, fields);
+            Stmt::DoWhile(d)
+        }
+        Stmt::Loop(l) => {
+            let mut l = l.clone();
+            l.body = lower_stmts(&l.body, fields);
+            Stmt::Loop(l)
+        }
+        Stmt::Wait(e, line) => Stmt::Wait(lower_expr(e, fields), *line),
+        Stmt::For(f) => {
+            let mut f = f.clone();
+            f.iterable = lower_expr(&f.iterable, fields);
+            f.body = lower_stmts(&f.body, fields);
+            Stmt::For(f)
+        }
+        Stmt::Guard(g) => {
+            let mut g = g.clone();
+            g.else_body = lower_stmts(&g.else_body, fields);
+            Stmt::Guard(g)
+        }
+        Stmt::Try(t) => {
+            let mut t = t.clone();
+            t.body = lower_stmts(&t.body, fields);
+            t.catch_clauses = t.catch_clauses.iter().map(|c| {
+                let mut c = c.clone();
+                c.body = lower_stmts(&c.body, fields);
+                c
+            }).collect();
+            Stmt::Try(t)
+        }
+        Stmt::Defer(body) => Stmt::Defer(lower_stmts(body, fields)),
+        Stmt::Expr(e) => Stmt::Expr(lower_expr(e, fields)),
+        Stmt::Yield(e, line) => Stmt::Yield(lower_expr(e, fields), *line),
+        // Fn/Struct/Enum/Mod/Alias/Comment/KernelBlock/With/Continue — no
+        // sub-expressions relevant to `.at(...)` rewriting; left unchanged.
+        other => other.clone(),
+    }
+}
+
+fn lower_cond_clause(c: &crate::ast::CondClause, fields: &ImageFieldDims) -> crate::ast::CondClause {
+    use crate::ast::CondClause;
+    match c {
+        CondClause::Let(name, e) => CondClause::Let(name.clone(), lower_expr(e, fields)),
+        CondClause::LetPat(p, e) => CondClause::LetPat(p.clone(), lower_expr(e, fields)),
+        CondClause::Expr(e) => CondClause::Expr(lower_expr(e, fields)),
+    }
+}
+
+fn lower_arg(a: &Arg, fields: &ImageFieldDims) -> Arg {
+    let mut a = a.clone();
+    a.value = lower_expr(&a.value, fields);
+    a
+}
+
+fn lower_expr(e: &Expr, fields: &ImageFieldDims) -> Expr {
+    use crate::ast::ExprKind;
+    let kind = match &e.kind {
+        ExprKind::MethodCall(obj, method, args) => {
+            if let ExprKind::Var(name) = &obj.kind {
+                if let Some(dims) = fields.get(name) {
+                    if let Some(rewritten) = rewrite_image_volume_call(obj, method, args, dims, fields, e.line, e.col, e.len) {
+                        return rewritten;
+                    }
+                }
+            }
+            ExprKind::MethodCall(Box::new(lower_expr(obj, fields)), method.clone(),
+                args.iter().map(|a| lower_arg(a, fields)).collect())
+        }
+        ExprKind::BinOp(op, l, r) => ExprKind::BinOp(op.clone(), Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
+        ExprKind::UnaryOp(op, v) => ExprKind::UnaryOp(op.clone(), Box::new(lower_expr(v, fields))),
+        ExprKind::Assign(l, r) => ExprKind::Assign(Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
+        ExprKind::QuestionAssign(l, r) => ExprKind::QuestionAssign(Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
+        ExprKind::Field(o, name) => ExprKind::Field(Box::new(lower_expr(o, fields)), name.clone()),
+        ExprKind::Index(a, i) => ExprKind::Index(Box::new(lower_expr(a, fields)), Box::new(lower_expr(i, fields))),
+        ExprKind::Call(callee, args) => ExprKind::Call(Box::new(lower_expr(callee, fields)), args.iter().map(|a| lower_arg(a, fields)).collect()),
+        ExprKind::GenericCall(callee, tys, args) => ExprKind::GenericCall(Box::new(lower_expr(callee, fields)), tys.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
+        ExprKind::Pipe(l, name, args) => ExprKind::Pipe(Box::new(lower_expr(l, fields)), name.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
+        ExprKind::TryElse(a, b) => ExprKind::TryElse(Box::new(lower_expr(a, fields)), Box::new(lower_expr(b, fields))),
+        ExprKind::Array(elems) => ExprKind::Array(elems.iter().map(|x| lower_expr(x, fields)).collect()),
+        ExprKind::ArrayFill { value, count } => ExprKind::ArrayFill { value: Box::new(lower_expr(value, fields)), count: Box::new(lower_expr(count, fields)) },
+        ExprKind::ArrayAlloc { count } => ExprKind::ArrayAlloc { count: Box::new(lower_expr(count, fields)) },
+        ExprKind::ArrayComp { expr, var, count } => ExprKind::ArrayComp { expr: Box::new(lower_expr(expr, fields)), var: var.clone(), count: Box::new(lower_expr(count, fields)) },
+        ExprKind::ArrayCompIter { expr, var, iter } => ExprKind::ArrayCompIter { expr: Box::new(lower_expr(expr, fields)), var: var.clone(), iter: Box::new(lower_expr(iter, fields)) },
+        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| lower_expr(x, fields)).collect()),
+        ExprKind::Range { start, end, inclusive } => ExprKind::Range { start: Box::new(lower_expr(start, fields)), end: Box::new(lower_expr(end, fields)), inclusive: *inclusive },
+        ExprKind::Cast(inner, ty) => ExprKind::Cast(Box::new(lower_expr(inner, fields)), ty.clone()),
+        ExprKind::Else(a, b) => ExprKind::Else(Box::new(lower_expr(a, fields)), Box::new(lower_expr(b, fields))),
+        ExprKind::OptionalField(o, name) => ExprKind::OptionalField(Box::new(lower_expr(o, fields)), name.clone()),
+        ExprKind::OptionalMethodCall(o, name, args) => ExprKind::OptionalMethodCall(Box::new(lower_expr(o, fields)), name.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
+        ExprKind::If(i) => {
+            let mut i = i.clone();
+            i.branches = i.branches.iter().map(|(c, b)| (lower_expr(c, fields), lower_stmts(b, fields))).collect();
+            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            ExprKind::If(i)
+        }
+        // TryElseBlock/Match/Block/Do/Closure/New/KernelLaunch/Dict/Set/
+        // StringInterp/SliceRange/DotIdent — not realistic inside a kernel
+        // body's numeric hot path (see this pass's top-level doc comment).
+        other => other.clone(),
+    };
+    Expr { kind, line: e.line, col: e.col, len: e.len }
+}
+
+/// If `method` is `.at`/`.width`/`.height`/`.depth` on an `Image`/`Volume`
+/// field (`dims` = the field's compile-time dimension constants), returns
+/// the lowered `Index`/`Int` expression. Otherwise `None` — caller falls
+/// back to generic recursion, keeping the original `MethodCall`.
+fn rewrite_image_volume_call(
+    obj: &Expr, method: &str, args: &[Arg], dims: &[crate::ast::Type], fields: &ImageFieldDims,
+    line: usize, col: usize, len: usize,
+) -> Option<Expr> {
+    use crate::ast::{Type, ExprKind, BinOp};
+    let dim_at = |i: usize| -> Option<i64> {
+        match dims.get(i) { Some(Type::ConstInt(n)) => Some(*n), _ => None }
+    };
+    let int_expr = |n: i64| Expr { kind: ExprKind::Int(n), line, col, len };
+    match method {
+        "width"  => return dim_at(0).map(int_expr),
+        "height" => return dim_at(1).map(int_expr),
+        "depth"  => return dim_at(2).map(int_expr),
+        "at" => {}
+        _ => return None,
+    }
+    // .at(a0, a1, ...) → a0 + a1*dims[0] + a2*(dims[0]*dims[1]) + ... — row-major,
+    // same formula as transpiler::helpers::image_volume_at_index.
+    let arg_exprs: Vec<Expr> = args.iter().map(|a| lower_expr(&a.value, fields)).collect();
+    let mut flat: Option<Expr> = None;
+    for (i, a) in arg_exprs.into_iter().enumerate() {
+        let term = if i == 0 {
+            a
+        } else {
+            let stride: i64 = (0..i).map(|j| dim_at(j).unwrap_or(1)).product();
+            Expr { kind: ExprKind::BinOp(BinOp::Mul, Box::new(a), Box::new(int_expr(stride))), line, col, len }
+        };
+        flat = Some(match flat {
+            None => term,
+            Some(prev) => Expr { kind: ExprKind::BinOp(BinOp::Add, Box::new(prev), Box::new(term)), line, col, len },
+        });
+    }
+    let flat = flat?;
+    Some(Expr { kind: ExprKind::Index(Box::new(obj.clone()), Box::new(flat)), line, col, len })
 }
 
 /// Zero value for a kernel field's scalar element type — used to default

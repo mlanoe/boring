@@ -27,8 +27,15 @@ mod host;
 pub struct WgpuOutput {
     /// Rust host source (src/main.rs).
     pub host_rs: String,
-    /// WGSL device source (shaders/main.wgsl).
+    /// WGSL device source (shaders/main.wgsl). Uses the real-subgroup
+    /// `gpu.warp.*` mapping when any kernel uses it (see `device::WarpMode`);
+    /// identical to any prior single-module output otherwise.
     pub device_wgsl: String,
+    /// Second WGSL module (shaders/main_emulated.wgsl) using the
+    /// shared-memory-emulated `gpu.warp.*` mapping, for adapters lacking
+    /// `wgpu::Features::SUBGROUP`. `Some(..)` only when some kernel uses
+    /// `gpu.warp.*`; `None` otherwise (no second file is written).
+    pub device_wgsl_emulated: Option<String>,
     /// Names of all `kernel` struct declarations found in the program.
     pub kernel_names: Vec<String>,
     /// Generated Cargo.toml content (no build.rs — wgpu/naga compile WGSL at runtime).
@@ -67,7 +74,7 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
         false
     });
 
-    let device_wgsl = device::emit_device_wgsl(program, &effective_kernels);
+    let (device_wgsl, device_wgsl_emulated) = device::emit_device_wgsl(program, &effective_kernels);
 
     // Non-kernel code (regular fn/struct/enum/dict logic, including the user's own
     // `def main()`, if any) is transpiled by the SAME general pipeline the std/Rust
@@ -99,10 +106,23 @@ pub fn transpile_wgpu(program: &Program, stem: &str, version: &str) -> WgpuOutpu
     // identical derivation -- see `crate::transpiler::detect_boring_main`.
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
-    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws);
+    let host_rs = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some());
     let cargo_toml  = emit_cargo_toml(stem, version, has_screen);
 
-    WgpuOutput { host_rs, device_wgsl, kernel_names, cargo_toml, errors: general_out.errors }
+    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, errors: general_out.errors }
+}
+
+/// Does this kernel's body use `gpu.warp.*` anywhere? WGSL subgroup builtins
+/// need an explicit `enable subgroups;` module directive and are only valid
+/// when the adapter has `wgpu::Features::SUBGROUP` — unlike CUDA/Metal, that
+/// makes their kernel-parameter/directive emission conditional rather than
+/// unconditional (see `device::emit_device_wgsl` and `host::emit_host_rs`).
+/// Reuses the interpreter's own AST walker (`stmts_use_gpu_warp`), which needs
+/// the identical detection to decide when a kernel dispatch requires the
+/// real-OS-thread barrier path — rather than re-implementing the same
+/// exhaustive `Stmt`/`ExprKind` walk a second time here.
+pub(super) fn kernel_uses_gpu_warp(decl: &KernelDecl) -> bool {
+    decl.methods.iter().any(|m| crate::interpreter::eval_gpu::stmts_use_gpu_warp(&m.body))
 }
 
 // ─── Monomorphisation ─────────────────────────────────────────────────────────
