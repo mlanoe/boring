@@ -141,7 +141,7 @@ impl DeviceEmitter {
         self.indent += 1;
         // Declare shared-memory fields.
         for field in &decl.fields {
-            if matches!(field.qual, GpuQual::Sync) {
+            if matches!(field.qual, GpuQual::Actor) {
                 match &field.ty {
                     Type::ArrayN(inner, n) => {
                         self.line(&format!("__shared__ {} {}[{}];", c_type(inner), field.name, n));
@@ -170,7 +170,7 @@ impl DeviceEmitter {
                 }
             }
         }
-        let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Sync));
+        let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Actor));
         self.auto_sync = has_sync_fields && !body_has_explicit_sync(&entry.body);
         if self.auto_sync {
             let split = first_loop_index(&entry.body);
@@ -296,22 +296,24 @@ impl DeviceEmitter {
         }
     }
 
-    /// True if `name` is a field with the `'actor'global` qualifier.
-    fn is_actor_global_field(&self, name: &str) -> bool {
+    /// True if `name` is a field with the `'actor'global` or `'actor'unified` qualifier —
+    /// HIP's atomic intrinsics mirror CUDA's (plain pointer of the base type), so the
+    /// same ops apply unconditionally regardless of which allocator backs it.
+    fn is_atomic_field(&self, name: &str) -> bool {
         self.current_fields.iter().any(|f|
-            f.name == name && matches!(f.qual, GpuQual::ActorGlobal))
+            f.name == name && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified))
     }
 
-    /// Detect `arr[i] OP= v` where `arr` is an `'actor'global` field and emit the
-    /// corresponding atomic intrinsic.  Returns `Some(line)` if handled.
+    /// Detect `arr[i] OP= v` where `arr` is an `'actor'global`/`'actor'unified` field and
+    /// emit the corresponding atomic intrinsic.  Returns `Some(line)` if handled.
     fn try_atomic_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
-        // LHS must index an 'actor'global array field.
+        // LHS must index an atomic array field.
         let ExprKind::Index(arr, _idx) = &lhs.kind else { return None; };
         let arr_name = match &arr.kind {
             ExprKind::Var(n) => n.clone(),
             _ => return None,
         };
-        if !self.is_actor_global_field(&arr_name) { return None; }
+        if !self.is_atomic_field(&arr_name) { return None; }
         // RHS must be the desugared compound assign: BinOp(op, lhs, value).
         let ExprKind::BinOp(op, _lhs_copy, value) = &rhs.kind else { return None; };
         let intrinsic = match op {
@@ -477,8 +479,8 @@ impl DeviceEmitter {
 fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 let base = elem_c_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
                 Some(format!("{}{}* {}", constness, base, f.name))
@@ -516,8 +518,8 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
 fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 Some(f.name.clone())
             }
             GpuQual::Const => {
@@ -683,7 +685,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
 
 fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
     let sync_names: Vec<&str> = fields.iter()
-        .filter(|f| matches!(f.qual, GpuQual::Sync))
+        .filter(|f| matches!(f.qual, GpuQual::Actor))
         .map(|f| f.name.as_str())
         .collect();
     if sync_names.is_empty() { return false; }

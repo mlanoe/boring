@@ -161,10 +161,10 @@ impl DeviceEmitter {
         let mut tg_idx: u32 = 0;
         let mut params: Vec<String> = Vec::new();
 
-        // 1. 'unified / 'global / 'actor'global array fields → device T* [[buffer(N)]]
+        // 1. 'unified / 'global / 'actor'global / 'actor'unified array fields → device T* [[buffer(N)]]
         for f in &decl.fields {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
                     match &f.ty {
                         Type::Array(inner) | Type::ArrayN(inner, _) => {
                             let elem = elem_msl_type(inner);
@@ -222,7 +222,7 @@ impl DeviceEmitter {
 
         // 4. Dynamic 'shared array fields → threadgroup T* [[threadgroup(N)]]
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync)
+            if matches!(f.qual, GpuQual::Actor)
                 && matches!(f.ty, Type::Array(_)) {
                     let elem = elem_msl_type(&f.ty);
                     params.push(format!("threadgroup {}* {} [[threadgroup({})]]", elem, f.name, tg_idx));
@@ -248,7 +248,7 @@ impl DeviceEmitter {
 
         // Declare static 'shared arrays inside the kernel body.
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync) {
+            if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     let elem = elem_msl_type(inner);
                     self.line(&format!("threadgroup {} {}[{}];", elem, f.name, n));
@@ -290,7 +290,7 @@ impl DeviceEmitter {
             }
         }
 
-        let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Sync));
+        let has_sync_fields = self.current_fields.iter().any(|f| matches!(f.qual, GpuQual::Actor));
         self.auto_sync = has_sync_fields && !body_has_explicit_sync(&entry.body);
         if self.auto_sync {
             // Emit initial write-phase barrier after the first block of statements that
@@ -416,19 +416,23 @@ impl DeviceEmitter {
         }
     }
 
-    fn is_actor_global_field(&self, name: &str) -> bool {
+    /// `'actor'global` or `'actor'unified` — MSL's atomic cast at the call site doesn't
+    /// care which `MTLResourceOptions` backs the buffer, only that it's `device` address
+    /// space, so both qualifiers take the identical atomic codegen path.
+    fn is_atomic_field(&self, name: &str) -> bool {
         self.current_fields.iter().any(|f|
-            f.name == name && matches!(f.qual, GpuQual::ActorGlobal))
+            f.name == name && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified))
     }
 
-    /// Detect `arr[i] OP= v` on an `'actor'global` field and emit Metal atomic intrinsic.
+    /// Detect `arr[i] OP= v` on an `'actor'global`/`'actor'unified` field and emit Metal
+    /// atomic intrinsic.
     fn try_atomic_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
         let ExprKind::Index(arr, _idx) = &lhs.kind else { return None; };
         let arr_name = match &arr.kind {
             ExprKind::Var(n) => n.clone(),
             _ => return None,
         };
-        if !self.is_actor_global_field(&arr_name) { return None; }
+        if !self.is_atomic_field(&arr_name) { return None; }
         let ExprKind::BinOp(op, _lhs_copy, value) = &rhs.kind else { return None; };
 
         let target = self.expr(lhs);
@@ -697,8 +701,8 @@ fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
 fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 let elem = elem_msl_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
                 Some(format!("device {}{}* {}", constness, elem, f.name))
@@ -725,8 +729,8 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
 fn buffer_field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Sync | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
+            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                 Some(f.name.clone())
             }
         }
@@ -922,7 +926,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
 /// Returns true if the body references any field declared with `'sync`.
 fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
     let sync_names: Vec<&str> = fields.iter()
-        .filter(|f| matches!(f.qual, GpuQual::Sync))
+        .filter(|f| matches!(f.qual, GpuQual::Actor))
         .map(|f| f.name.as_str())
         .collect();
     if sync_names.is_empty() { return false; }

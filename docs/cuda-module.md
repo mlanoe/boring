@@ -32,7 +32,7 @@ transpiler to handle.
 GPU qualifiers appear in two contexts with different syntax:
 
 - **Host context** — allocations and bindings outside a `kernel` struct. Full `'gpu'..` prefix is mandatory.
-- **Kernel context** — fields inside a `kernel` struct. The `'gpu` prefix is dropped; short forms `'unified`, `'global`, `'shared`, `'local`, `'const` are used.
+- **Kernel context** — fields inside a `kernel` struct. The `'gpu` prefix is dropped; short forms `'unified`, `'global`, bare `'actor`, `'local`, `'const` are used.
 
 ### Host-context qualifiers
 
@@ -50,10 +50,12 @@ kernel-struct field qualifier.
 | Qualifier | CUDA memory space | Host access | Default |
 |---|---|---|---|
 | `'local` | registers / thread-local memory | no | yes — may be omitted |
-| `'shared` | block SRAM (`__shared__`) | no | no |
+| bare `'actor` | block SRAM (`__shared__`) | no | no |
 | `'global` | device-only DRAM | via `gpu.copy()` | no |
 | `'unified` | unified DRAM (`cudaMallocManaged`) | direct | no |
 | `'const` | constant cache | no | implicit via `let` |
+| `'actor'global` | device-only DRAM, atomic access | via `gpu.copy()` | no |
+| `'actor'unified` | unified DRAM (`cudaMallocManaged`), atomic access | direct | no |
 
 ---
 
@@ -66,12 +68,14 @@ kernel-struct field qualifier.
 | `let [float]'global input` | device-only DRAM, device read-only | via `gpu.copy()` | `const float* const input` |
 | `mut [float]'global output` | device-only DRAM, device writable | via `gpu.copy()` | `float* const output` |
 | `var [float]'global buf` | device-only DRAM, ptr + data mutable | via `gpu.copy()` | `float* buf` |
-| `mut [float, N]'shared tile` | block SRAM, static | no | `__shared__ float tile[N]` |
-| `mut [float]'shared tile` | block SRAM, dynamic | no | `extern __shared__ float tile[]` |
+| `mut [float, N]'actor tile` | block SRAM, static | no | `__shared__ float tile[N]` |
+| `mut [float]'actor tile` | block SRAM, dynamic | no | `extern __shared__ float tile[]` |
 | `let float sigma` | `'const` implicit — scalar | no | `const float sigma` |
 | `var int i` | `'local` implicit — register | no | `int i` |
 | `mut [float, N] tile` | `'local` implicit — thread-local | no | `float tile[N]` |
-| CPU qualifiers (`'heap`, `'actor`…) | — | — | compile-time error |
+| `mut [int]'actor'global bins` | device DRAM, atomic access | via `gpu.copy()` | `int64_t* bins` |
+| `mut [int]'actor'unified bins` | unified DRAM, atomic access | direct | `int64_t* bins` |
+| CPU qualifiers (`'heap`, `'shared`…) | — | — | compile-time error |
 
 ---
 
@@ -86,10 +90,10 @@ kernel-struct field qualifier.
 | `sync` | `__syncthreads()` |
 | `'unified` field | `cudaMallocManaged` |
 | `'global` field | `cudaMalloc` |
-| `'shared` field | `__shared__` |
+| bare `'actor` field | `__shared__` |
 | `'const` scalar field | `__constant__ T name;` (file scope) |
 | `'const` fixed array field (`[T, N]`) | `__constant__ T name[N];` (file scope) |
-| atomic `[i] +=` on `'actor'global` | `atomicAdd` |
+| atomic `[i] +=` on `'actor'global`/`'actor'unified` | `atomicAdd` |
 | `print` in kernel | `printf` |
 
 ### `[T, N]'const` codegen detail
@@ -183,17 +187,17 @@ This is a `.clone()`, not a move: `k1` stays fully usable afterward, including d
 
 ---
 
-## `'sync` — block SRAM
+## Bare `'actor` — block SRAM
 
-`'sync` fields are allocated in per-block shared memory (`__shared__` in CUDA C). The transpiler computes `shared_mem_bytes` automatically from the block dimension and element size — no `smem =` dispatch parameter needed.
+Bare `'actor` fields (formerly spelled `'sync`) are allocated in per-block shared memory (`__shared__` in CUDA C). The transpiler computes `shared_mem_bytes` automatically from the block dimension and element size — no `smem =` dispatch parameter needed.
 
-### Fixed size — `[T, N]'sync`
+### Fixed size — `[T, N]'actor`
 
 ```boring
 kernel Reduce:
     let [float]'unified      input
     mut [float]'unified      output
-    mut [float, 256]'sync    tile
+    mut [float, 256]'actor   tile
 
     init(int n):
         input  = [..n]
@@ -210,7 +214,7 @@ kernel:
     k(block = 256)
 ```
 
-### Dynamic size — `[T]'sync`
+### Dynamic size — `[T]'actor`
 
 The size is `block_dim.x * sizeof(T)` — one element per thread in the block. Declare the field without a size; the transpiler passes `block_dim.0 * sizeof(T)` as `shared_mem_bytes`.
 
@@ -218,7 +222,7 @@ The size is `block_dim.x * sizeof(T)` — one element per thread in the block. D
 kernel Reduce:
     let [float]'unified  input
     mut [float]'unified  output
-    mut [float]'sync     tile
+    mut [float]'actor    tile
 
     init(int n):
         input  = [..n]
@@ -237,15 +241,17 @@ kernel:
 
 ---
 
-## Atomics — `'actor` on kernel fields
+## Atomics — `'actor'global`/`'actor'unified` on kernel fields
 
-Only `'actor'global` is implemented. `'actor'unified` and `'actor'shared` are not yet supported (parse error on those suffixes).
+Both are implemented. Bare `'actor` (block SRAM, above) is a separate qualifier and is
+not an alias for either.
 
 | Qualifier | Location | Atomic scope |
 |---|---|---|
 | `mut [int]'actor'global bins` | device DRAM | all threads, all blocks |
+| `mut [int]'actor'unified bins` | unified DRAM (host + device) | all threads, all blocks |
 
-**Operations transpiled automatically on `'actor'global` fields:**
+**Operations transpiled automatically on `'actor'global`/`'actor'unified` fields:**
 
 | Boring | CUDA |
 |---|---|
@@ -254,6 +260,10 @@ Only `'actor'global` is implemented. `'actor'unified` and `'actor'shared` are no
 | `x \|= v` | `atomicOr(&x, v)` |
 | `x &= v` | `atomicAnd(&x, v)` |
 | `x ^= v` | `atomicXor(&x, v)` |
+
+`atomicAdd` etc. take a plain pointer of the base type — no special "atomic" type
+exists in CUDA C, so the same intrinsics apply unconditionally whether the pointer
+came from `cudaMalloc` (`'actor'global`) or `cudaMallocManaged` (`'actor'unified`).
 
 ```boring
 kernel Histogram:
@@ -267,6 +277,9 @@ kernel Histogram:
             bins[bucket] += 1    # → atomicAdd
 ```
 
+`'actor'unified` is identical except `bins` is also directly readable from the host
+(no `gpu.copy()` needed) via the generated `read_bins()` accessor.
+
 ---
 
 ## CPU simulation — substitution table
@@ -278,13 +291,13 @@ kernel Histogram:
 | `'unified` fields (kernel) | heap allocation (`Vec<T>`) |
 | `'global` fields (kernel) | heap allocation (`Vec<T>`) |
 | `init` allocation | `Vec<T>::with_capacity(n)` |
-| `'shared` (block SRAM) | local array (stack or heap) |
+| bare `'actor` (block SRAM) | local array (stack or heap) |
 | `'local` (register) | local variable |
 | `'const` (kernel) | `let` binding |
 | kernel launch | sequential loop over all threads |
 | `gpu.thread.x/y/z`, `gpu.block.x/y/z`… | loop variables |
 | `sync` | no-op |
-| `'actor'global` fields | plain arithmetic (no contention) |
+| `'actor'global`/`'actor'unified` fields | plain arithmetic (no contention) |
 | `kernel:` block dispatch | no-op — single-threaded sequential |
 | `after =` | sequential execution in declaration order |
 

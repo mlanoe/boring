@@ -143,16 +143,16 @@ fn device_shared_dynamic_becomes_threadgroup_ptr() {
     let (msl, _) = metal_codegen("shared_dynamic", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(msl.contains("threadgroup float* scratch [[threadgroup(0)]]"),
-        "expected threadgroup pointer param for dynamic 'sync;\ngot:\n{msl}");
-    // dynamic 'sync must NOT appear as a device buffer param
+        "expected threadgroup pointer param for dynamic 'actor;\ngot:\n{msl}");
+    // dynamic 'actor must NOT appear as a device buffer param
     assert!(!msl.contains("device float* scratch"),
-        "dynamic 'sync must not appear as device buffer;\ngot:\n{msl}");
+        "dynamic 'actor must not appear as device buffer;\ngot:\n{msl}");
 }
 
 #[test]
@@ -160,16 +160,16 @@ fn device_shared_static_declared_in_body() {
     let (msl, _) = metal_codegen("shared_static", r#"
 kernel S:
     mut [float]'unified out
-    let [float, 32]'sync tile
+    let [float, 32]'actor tile
     def ():
         let tid = gpu.thread.x
         out[tid] = tile[0]
 "#);
     assert!(msl.contains("threadgroup float tile[32];"),
-        "expected threadgroup T name[N] for static 'sync;\ngot:\n{msl}");
-    // static 'sync must not appear as a threadgroup param
+        "expected threadgroup T name[N] for static 'actor;\ngot:\n{msl}");
+    // static 'actor must not appear as a threadgroup param
     assert!(!msl.contains("tile [[threadgroup("),
-        "static 'sync must not appear as threadgroup param;\ngot:\n{msl}");
+        "static 'actor must not appear as threadgroup param;\ngot:\n{msl}");
 }
 
 #[test]
@@ -267,6 +267,27 @@ kernel A:
         "expected device int64_t* counts [[buffer(0)]] for 'actor'global;\ngot:\n{msl}");
 }
 
+// ─── device/host — 'actor'unified atomics on host+device DRAM ───────────────
+
+#[test]
+fn device_actor_unified_compound_assign_uses_atomic_fetch_add() {
+    let (msl, rs) = metal_codegen("actor_unified_add", r#"
+kernel A:
+    mut [int]'actor'unified counts
+    def ():
+        let tid = gpu.thread.x
+        counts[0] += tid
+"#);
+    assert!(msl.contains("atomic_fetch_add_explicit"),
+        "expected atomic_fetch_add_explicit for 'actor'unified += ;\ngot:\n{msl}");
+    assert!(msl.contains("device int64_t* counts [[buffer(0)]]"),
+        "expected device int64_t* counts [[buffer(0)]] for 'actor'unified;\ngot:\n{msl}");
+    // Unlike 'actor'global, 'actor'unified is host-visible — it must get the same
+    // D2H read accessor 'unified fields get.
+    assert!(rs.contains("fn read_counts(&self)"),
+        "expected a host-side read_counts() accessor for 'actor'unified;\ngot:\n{rs}");
+}
+
 // ─── device — sync barrier ────────────────────────────────────────────────────
 
 #[test]
@@ -340,13 +361,13 @@ fn host_shared_field_absent_from_rust_struct() {
     let (_, rs) = metal_codegen("host_shared_absent", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(!rs.contains("scratch: Buffer"),
-        "'sync field must not appear as Buffer in Rust struct;\ngot:\n{rs}");
+        "'actor field must not appear as Buffer in Rust struct;\ngot:\n{rs}");
 }
 
 #[test]
@@ -474,13 +495,13 @@ fn host_dynamic_shared_sets_threadgroup_memory_length() {
     let (_, rs) = metal_codegen("threadgroup_mem", r#"
 kernel D:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(rs.contains("set_threadgroup_memory_length("),
-        "expected set_threadgroup_memory_length for dynamic 'sync;\ngot:\n{rs}");
+        "expected set_threadgroup_memory_length for dynamic 'actor;\ngot:\n{rs}");
 }
 
 #[test]

@@ -115,12 +115,12 @@ kernel C:
 
 #[test]
 fn device_shared_static_becomes_shared_decl_not_param() {
-    // 'sync with a fixed-size literal init — device emitter declares __shared__
+    // 'actor with a fixed-size literal init — device emitter declares __shared__
     // inside the kernel body rather than as a pointer parameter.
     let (hip, _) = rocm_codegen("shared_static", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'sync scratch
+    let [float]'actor scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[tid]
@@ -136,15 +136,15 @@ fn device_shared_dynamic_becomes_extern_shared() {
     let (hip, _) = rocm_codegen("shared_dynamic", r#"
 kernel D:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(hip.contains("extern __shared__"),
-        "expected extern __shared__ for dynamic 'sync Array;\ngot:\n{hip}");
+        "expected extern __shared__ for dynamic 'actor Array;\ngot:\n{hip}");
     assert!(!hip.contains("scratch* scratch"),
-        "dynamic 'sync must not appear as a kernel parameter;\ngot:\n{hip}");
+        "dynamic 'actor must not appear as a kernel parameter;\ngot:\n{hip}");
 }
 
 #[test]
@@ -246,13 +246,13 @@ fn host_shared_field_absent_from_rust_struct() {
     let (_, rs) = rocm_codegen("host_shared_absent", r#"
 kernel S:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(!rs.contains("scratch: DeviceBuffer"),
-        "'sync field must not appear as DeviceBuffer in Rust struct;\ngot:\n{rs}");
+        "'actor field must not appear as DeviceBuffer in Rust struct;\ngot:\n{rs}");
 }
 
 // ─── host — __boring_launch ───────────────────────────────────────────────────
@@ -293,13 +293,13 @@ fn host_dynamic_shared_smem_uses_block_x_times_elem_size() {
     let (_, rs) = rocm_codegen("smem_dynamic", r#"
 kernel D:
     mut [float]'unified out
-    let [float]'sync  scratch
+    let [float]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
 "#);
     assert!(rs.contains("block_dim.0 as usize * 8"),
-        "expected block_dim.0 * sizeof(f64)=8 for dynamic 'sync;\ngot:\n{rs}");
+        "expected block_dim.0 * sizeof(f64)=8 for dynamic 'actor;\ngot:\n{rs}");
 }
 
 #[test]
@@ -490,6 +490,25 @@ kernel A:
         "expected atomicAdd for 'actor'global compound assign;\ngot:\n{hip}");
     assert!(hip.contains("int64_t* counts"),
         "expected 'actor'global field as pointer param;\ngot:\n{hip}");
+}
+
+// ─── 'actor'unified — atomics on host+device DRAM ──────────────────────────────
+
+#[test]
+fn device_actor_unified_uses_atomic_add() {
+    let (hip, rs) = rocm_codegen("actor_unified_add", r#"
+kernel A:
+    mut [int]'actor'unified counts
+    def ():
+        let tid = gpu.thread.x
+        counts[0] += tid
+"#);
+    assert!(hip.contains("atomicAdd(&counts[0]"),
+        "expected atomicAdd for 'actor'unified compound assign;\ngot:\n{hip}");
+    assert!(hip.contains("int64_t* counts"),
+        "expected 'actor'unified field as pointer param;\ngot:\n{hip}");
+    assert!(rs.contains("fn read_counts(&self)"),
+        "expected a host-side read_counts() accessor for 'actor'unified;\ngot:\n{rs}");
 }
 
 // ─── print in kernel → printf ───────────────────────────────────────────────────

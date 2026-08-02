@@ -2436,8 +2436,8 @@ impl Transpiler {
                 // docs/scoped-access-blocks.md) — still placeholders if ever annotated
                 // on an ordinary host variable, which is not a legal/meaningful thing
                 // to do in the first place.
-                OwnerQual::GpuActorGlobal => format!("*mut {}", self.emit_type(inner)),
-                OwnerQual::GpuSync    => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuActorGlobal  => format!("*mut {}", self.emit_type(inner)),
+                OwnerQual::GpuActorUnified => format!("*mut {}", self.emit_type(inner)),
                 OwnerQual::GpuLocal   => self.emit_type(inner), // local = stack in Rust
                 OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),
                 OwnerQual::GpuSurface => format!("*mut {}", self.emit_type(inner)),

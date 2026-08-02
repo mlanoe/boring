@@ -206,7 +206,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    bind_group: wgpu::BindGroup,");
         for f in &decl.fields {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
                     if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
                         // Arc-wrapped so a `'unified`/`'global` value returned across a
                         // function-call boundary can hand its buffer directly to the next
@@ -214,8 +214,8 @@ impl<'a> HostEmitter<'a> {
                         // producing kernel instance itself needing to stay alive — see
                         // docs/scoped-access-blocks.md's interprocedural residency case.
                         self.line(&format!("    {}_buf: std::sync::Arc<wgpu::Buffer>,", f.name));
-                        // Keep Vec mirror for 'unified fields accessible from host.
-                        if matches!(f.qual, GpuQual::Unified | GpuQual::Surface) {
+                        // Keep Vec mirror for host-visible fields ('unified/'actor'unified).
+                        if matches!(f.qual, GpuQual::Unified | GpuQual::Surface | GpuQual::ActorUnified) {
                             let inner_ty = array_inner(&f.ty);
                             self.line(&format!("    {}: Vec<{}>,", f.name, host_scalar_type(&inner_ty)));
                         }
@@ -241,7 +241,7 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("    {}: {},", f.name, host_scalar_type(&f.ty)));
                     }
                 }
-                GpuQual::Sync => {
+                GpuQual::Actor => {
                     // workgroup memory, no host side.
                 }
             }
@@ -301,7 +301,7 @@ impl<'a> HostEmitter<'a> {
 
         // Collect buffer fields.
         let buf_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
-            .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal)
+            .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
                      && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
             .collect();
         let params_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
@@ -409,7 +409,7 @@ impl<'a> HostEmitter<'a> {
         self.line("            bind_group,");
         for f in &buf_fields {
             self.line(&format!("            {}_buf,", f.name));
-            if matches!(f.qual, GpuQual::Unified | GpuQual::Surface) {
+            if matches!(f.qual, GpuQual::Unified | GpuQual::Surface | GpuQual::ActorUnified) {
                 let inner_ty = array_inner(&f.ty);
                 let n = match &f.ty {
                     Type::ArrayN(_, n) => *n,
@@ -468,6 +468,12 @@ impl<'a> HostEmitter<'a> {
         // `device.poll()` needed for this: unlike an execution-time fault
         // (out-of-bounds access, device lost), validation is decided on the
         // CPU side as the command buffer is built, not during GPU execution.
+        //
+        // Two nested scopes -- OutOfMemory pushed first (outer), Validation
+        // second (inner) -- so a GpuError::OutOfMemory and a
+        // GpuError::LaunchError can be told apart instead of collapsing into
+        // one generic "kernel dispatch rejected" string, as this used to.
+        self.line("        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);");
         self.line("        self.device.push_error_scope(wgpu::ErrorFilter::Validation);");
 
         // Write params before dispatch.
@@ -501,8 +507,19 @@ impl<'a> HostEmitter<'a> {
         self.line("        }");
         self.line("        self.queue.submit(std::iter::once(encoder.finish()));");
         // No poll here — caller (present_buffer or explicit sync) handles synchronization.
-        self.line("        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {");
-        self.line("            return Err(format!(\"wgpu: kernel dispatch rejected: {}\", err).into());");
+        //
+        // Pop order mirrors push order in reverse: Validation (pushed last)
+        // comes off first, OutOfMemory (pushed first) comes off second. Each
+        // popped error is classified into a typed `GpuError` and wrapped in
+        // `BoringError::Other` so `catch GpuError.OutOfMemory:` / `catch
+        // GpuError.LaunchError:` can dispatch on it in Boring source, instead
+        // of the single opaque formatted-string error this used to return.
+        self.line("        if pollster::block_on(self.device.pop_error_scope()).is_some() {");
+        self.line("            let _ = pollster::block_on(self.device.pop_error_scope());");
+        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::LaunchError) as Box<dyn BoringVal + Send + Sync>)));");
+        self.line("        }");
+        self.line("        if pollster::block_on(self.device.pop_error_scope()).is_some() {");
+        self.line("            return Err(Box::new(BoringError::Other(std::any::TypeId::of::<GpuError>(), Box::new(GpuError::OutOfMemory) as Box<dyn BoringVal + Send + Sync>)));");
         self.line("        }");
         self.line("        Ok(())");
         self.line("    }");
@@ -510,7 +527,7 @@ impl<'a> HostEmitter<'a> {
 
     fn emit_kernel_rebuild_bind_group(&mut self, decl: &KernelDecl) {
         let buf_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
-            .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal)
+            .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
                      && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
             .collect();
         let has_params = decl.fields.iter().any(is_params_field);
@@ -543,7 +560,10 @@ impl<'a> HostEmitter<'a> {
             // kernel-written outputs (e.g. StftPower's `power`) but are just as much a
             // Vec<T> mirror on the host struct (see the field-emission loop above) and
             // need the same read-back/upload accessors to actually be usable from host code.
-            if matches!(f.qual, GpuQual::Global | GpuQual::Unified) && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            // 'actor'unified needs the same accessors for the same reason (host-visible),
+            // plus `kernel_output_fill_map`'s unconditional `copy_{field}_to_device` call
+            // for any `field = [value for ..count]` init — see `emit_kernel.rs`.
+            if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
                 let inner_ty = array_inner(&f.ty);
                 let host_ty = host_scalar_type(&inner_ty);
                 // D2H.
@@ -1283,7 +1303,7 @@ impl<'a> HostEmitter<'a> {
                         if let Some(target_decl) = self.find_kernel_decl_for_var(obj_name) {
                             let pfx = if self.in_method { "self." } else { "" };
                             let buf_fields: Vec<&KernelFieldDecl> = target_decl.fields.iter()
-                                .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal)
+                                .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
                                          && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
                                 .collect();
                             let params_fields: Vec<&KernelFieldDecl> = target_decl.fields.iter()
@@ -1435,7 +1455,7 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
         GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
         _ => {
             matches!(&f.ty, Type::Named(n) if n != "Dimension")
-                && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
         }
     }
 }
@@ -1506,6 +1526,12 @@ fn buffer_usages(f: &KernelFieldDecl) -> String {
         GpuQual::Surface => "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST".into(),
         GpuQual::Global  => "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST".into(),
         GpuQual::ActorGlobal => "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST".into(),
+        // Same storage-only usage as 'unified — host access goes through the same
+        // staging-buffer copy path (see `emit_read_field`/upload), never a direct
+        // MAP_READ/MAP_WRITE on the atomic<T> storage buffer itself. This is what
+        // sidesteps the open question of whether WGSL allows atomic<T> storage to
+        // also carry MAP_READ/MAP_WRITE — it never needs to.
+        GpuQual::ActorUnified => "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST".into(),
         _ => "wgpu::BufferUsages::STORAGE".into(),
     }
 }

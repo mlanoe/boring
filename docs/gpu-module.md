@@ -62,7 +62,7 @@ kernel Name:
         <body>
 ```
 
-`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, `'sync`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see [Qualifier inference](#qualifier-inference) below).
+`let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, bare `'actor`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see [Qualifier inference](#qualifier-inference) below).
 
 ---
 
@@ -125,16 +125,22 @@ Multiple instantiations of the same generic kernel generate **distinct** code ob
 | `'unified` | unified DRAM (host + device) | direct |
 | `'global` | device-only DRAM | via `gpu.copy()` |
 | `'surface` | unified DRAM, 32-bit pixels | direct (CUDA); blit-only (Metal / wgpu) — use `screen.present()` |
-| `'sync` | block SRAM (`__shared__` / `threadgroup` / `var<workgroup>`) | no |
+| bare `'actor` | block SRAM (`__shared__` / `threadgroup` / `var<workgroup>`) | no |
 | `'local` | registers / thread-local | no — default |
 | `'const` | constant cache | no |
-| `'actor'global` (or bare `'actor`) | device-only DRAM, atomic access | via `gpu.copy()` — see [Atomics](#atomics) |
+| `'actor'global` | device-only DRAM, atomic access | via `gpu.copy()` — see [Atomics](#atomics) |
+| `'actor'unified` | unified DRAM (host + device), atomic access | direct — see [Atomics](#atomics) |
 
 `'surface` is restricted to `[uint]` fields and is intended for pixel buffers
 presented to a `Screen`. See [`gpu-display.md`](gpu-display.html).
 
-`'actor` alone is an alias for `'actor'global` — atomics are only implemented for
-device-global memory, so there's no other qualifier it could mean.
+Bare `'actor` inside a `kernel` struct means block-shared memory with an
+auto-inserted barrier — this used to be spelled `'sync`; the rename reuses the
+same "compiler automatically wraps every access with the protection this data
+needs" meaning `'actor` already has outside kernel context (`Rc<RefCell<T>>`/
+`Arc<Mutex<T>>`). Atomics on device-only or unified DRAM must be spelled out in
+full (`'actor'global` / `'actor'unified`) — bare `'actor` is no longer an alias
+for either.
 
 ### Qualifier inference
 
@@ -162,13 +168,13 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 
 **Valid qualifier × field-type matrix:**
 
-| | `'unified` | `'global` | `'sync` | `'local` | `'const` |
+| | `'unified` | `'global` | bare `'actor` | `'local` | `'const` |
 |---|---|---|---|---|---|
 | `[T]` dynamic | explicit | explicit | explicit | error | error |
 | `[T, N]` fixed | error | error | explicit | inferred (`mut`/`var`) | inferred (`let`) |
 | scalar | — | — | — | inferred (`mut`/`var`) | inferred (`let`) |
 
-> `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and `'sync` are always explicit.
+> `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and bare `'actor` are always explicit.
 
 ---
 
@@ -179,7 +185,7 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 | `'gpu'unified` | unified host + device DRAM |
 | `'gpu'global` | device-only DRAM |
 
-`'const` (like `'sync` and `'local`) has no host-context form — it has no host access at
+`'const` (like bare `'actor` and `'local`) has no host-context form — it has no host access at
 all (see the table above), so a host-side binding could never be read from or written to.
 It's only meaningful as a field qualifier inside a `kernel` struct.
 
@@ -262,7 +268,7 @@ Inside `def ()` and device helpers, `gpu` is available:
 | `gpu.block.x/y/z` | block index within grid |
 | `gpu.block_dim.x/y/z` | threads per block |
 | `gpu.grid_dim.x/y/z` | blocks per grid |
-| `sync` | explicit block-level barrier (manual mode — see `'sync`) |
+| `sync` | explicit block-level barrier (manual mode — see bare `'actor`) |
 
 ---
 
@@ -308,11 +314,11 @@ gpu.copy(host_buf, k.input)     # H2D
 
 The copy mechanism is backend-specific (staging buffers on wgpu, `cudarc` transfers on CUDA, blit on Metal) but the Boring source is identical across targets.
 
-### `'sync` — block SRAM
+### Bare `'actor` — block SRAM
 
-`'sync` fields are allocated in per-block shared memory. The transpiler inserts thread-group barriers automatically — no explicit `sync` statement needed.
+Bare `'actor` fields (formerly spelled `'sync`) are allocated in per-block shared memory. The transpiler inserts thread-group barriers automatically — no explicit `sync` statement needed.
 
-#### Fixed size — `[T, N]'sync`
+#### Fixed size — `[T, N]'actor`
 
 The size is baked into the kernel declaration. No `init()` assignment needed — the field exists for all threads in the block.
 
@@ -320,7 +326,7 @@ The size is baked into the kernel declaration. No `init()` assignment needed —
 kernel Reduce:
     mut [float]'unified      input
     mut float'unified        result
-    mut [float, 256]'sync    tile   # 256 floats, fixed at compile time
+    mut [float, 256]'actor   tile   # 256 floats, fixed at compile time
 
     init([float]'unified data):
         input = data
@@ -336,17 +342,17 @@ kernel Reduce:
             result = sum
 ```
 
-#### Dynamic size — `[T]'sync`
+#### Dynamic size — `[T]'actor`
 
 When the tile size must match the block dimension at runtime, declare the field without a size and allocate it in `init()` using `[..n]`. The transpiler passes `block_dim.x * sizeof(T)` as the dynamic shared memory size automatically.
 
-> **wgpu limitation**: dynamic `[T]'sync` is not supported in WGSL — use `[T, N]'sync` with a const generic param instead.
+> **wgpu limitation**: dynamic `[T]'actor` is not supported in WGSL — use `[T, N]'actor` with a const generic param instead.
 
 ```boring
 kernel Reduce:
     mut [float]'unified  input
     mut float'unified    result
-    mut [float]'sync     tile   # one float per thread in the block
+    mut [float]'actor    tile   # one float per thread in the block
 
     init([float]'unified data, int block_size):
         input = data
@@ -367,7 +373,7 @@ kernel Reduce:
 The transpiler operates in **auto mode** when a kernel `def` has no explicit `sync` statement:
 
 1. A barrier is inserted before the first loop in the body (write-phase → loop-phase boundary).
-2. A barrier is inserted at the top of each loop iteration that accesses a `'sync` field.
+2. A barrier is inserted at the top of each loop iteration that accesses a bare-`'actor` field.
 
 #### Manual mode
 
@@ -384,15 +390,15 @@ If the developer writes at least one explicit `sync` in the `def` body, the tran
             stride = stride / 2
 ```
 
-### `'sync` field rules
+### Bare `'actor` field rules
 
-`'sync` fields cannot escape the kernel body. The compiler rejects:
+Bare-`'actor` fields cannot escape the kernel body. The compiler rejects:
 
-- returning a `'sync` value from a kernel
-- storing a `'sync` value in a field accessible from the host
-- passing a `'sync` reference outside the kernel invocation scope
+- returning a bare-`'actor` value from a kernel
+- storing a bare-`'actor` value in a field accessible from the host
+- passing a bare-`'actor` reference outside the kernel invocation scope
 
-### Struct `'sync` — compound state
+### Struct bare `'actor` — compound state
 
 ```boring
 struct Stats:
@@ -401,7 +407,7 @@ struct Stats:
 
 kernel BlockStats:
     let [float]'global    data
-    mut [Stats]'sync      acc
+    mut [Stats]'actor     acc
     mut [float]'unified   result
 
     def ():
@@ -423,7 +429,8 @@ kernel BlockStats:
 
 ## Atomics
 
-Tag a field with `'actor'global` to enable atomic operations on indexed access:
+Tag a field with `'actor'global` (device-only DRAM) or `'actor'unified` (host + device
+DRAM) to enable atomic operations on indexed access:
 
 ```boring
 kernel Histogram:
@@ -433,14 +440,19 @@ kernel Histogram:
         counts[bucket] += 1     # compiled to atomicAdd
 ```
 
-`'actor` alone is an alias for `'actor'global` — atomics are only meaningful (and only
-implemented) for device-global memory here, so there's no other qualifier `'actor` could
-mean:
+`'actor'unified` behaves identically for the atomic op itself — the only difference is
+memory placement, exactly like plain `'global` vs. `'unified`:
 
 ```boring
 kernel Histogram:
-    mut [int]'actor counts = [0, 0, 0, 0]   # same as 'actor'global
+    mut [int]'actor'unified counts = [0, 0, 0, 0]
+
+    def ():
+        counts[bucket] += 1     # compiled to atomicAdd; counts is host-readable directly
 ```
+
+Bare `'actor` is a different qualifier entirely (block-shared memory — see above) and is
+**not** an alias for either atomic form; both must be spelled out in full.
 
 Supported atomic operations: `+= -= &= |= ^=`.
 

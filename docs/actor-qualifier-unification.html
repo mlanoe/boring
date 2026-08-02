@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Unifying `'actor` across GPU memory qualifiers</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="unifying-actor-across-gpu-memory-qualifiers">Unifying <code>&#x27;actor</code> across GPU memory qualifiers</h1>
+<blockquote><strong>Status: Implemented.</strong> The rename (design points 1–2) and <code>&#x27;actor&#x27;unified</code> (design point 3) have both landed, across the parser/AST, all four backends (CUDA, ROCm, Metal, wgpu), the interpreter, <code>whisper-boring/src/math_gpu.br</code>, and this file&#x27;s own cross-referenced docs (<code>gpu-module.md</code>, <code>cuda-module.md</code>, <code>rocm-backend.md</code>, <code>metal-backend.md</code>, <code>wgpu-backend.md</code>, <code>scoped-access-blocks.md</code>). See &quot;Open Questions&quot; below — both were resolved during implementation, not left open. Original problem-statement analysis retained below for context.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>Boring&#x27;s GPU memory qualifiers currently name the <em>protection mechanism</em> inconsistently:</p>
+<table><thead><tr><th>Qualifier</th><th>Memory</th><th>GPU-side protection</th><th>Name says</th></tr></thead><tbody><tr><td><code>&#x27;sync</code></td><td>block-shared (<code>__shared__</code>/<code>threadgroup</code>/<code>var&lt;workgroup&gt;</code>)</td><td>auto-inserted barrier before the first loop + at the top of every loop iteration touching a <code>&#x27;sync</code> field</td><td><em>when</em> it&#x27;s safe (in sync with other threads) — not <em>how</em></td></tr><tr><td><code>&#x27;actor&#x27;global</code></td><td>device-only DRAM</td><td>atomics (<code>atomicAdd</code> etc.)</td><td>explicit</td></tr><tr><td>bare <code>&#x27;actor</code></td><td>—</td><td>alias for <code>&#x27;actor&#x27;global</code></td><td>reuses the name for one specific case only</td></tr><tr><td><code>&#x27;unified</code></td><td>host+device DRAM</td><td><strong>none</strong> — concurrent writers race exactly like plain <code>&#x27;global</code></td><td>n/a</td></tr></tbody></table>
+<p>Outside kernel structs, <code>&#x27;actor</code> already means one specific thing, consistently: <em>&quot;the compiler automatically wraps every access with the protection this data needs&quot;</em> — <code>Rc&lt;RefCell&lt;T&gt;&gt;</code>/<code>Arc&lt;Mutex&lt;T&gt;&gt;</code>, chosen once at the qualifier, vs. <code>&#x27;guard</code>&#x27;s explicit manual lock. <code>&#x27;sync</code>&#x27;s auto-barrier is the exact same idea (automatic, compiler-inserted protection) applied to GPU block-shared memory — it just has a different name today for historical reasons (organically grew from the CUDA <code>__shared__</code> mapping before the CPU-side <code>&#x27;actor</code>/<code>&#x27;guard</code> distinction existed).</p>
+<p>Separately: <code>&#x27;actor&#x27;global</code> and <code>&#x27;unified</code> today differ in <strong>two</strong> independent ways — protection (atomics vs. none) and host-visibility (device-only vs. host+device). There&#x27;s no way to get atomic protection on host-visible memory (<code>&#x27;actor&#x27;unified</code> doesn&#x27;t exist), which is a real gap, not a design choice — nothing in any of the four backends (CUDA, ROCm, Metal, wgpu) requires atomics and host-visibility to be mutually exclusive.</p>
+<h2 id="proposed-design">Proposed Design</h2>
+<ol><li><strong><code>&#x27;sync</code> is renamed to bare <code>&#x27;actor</code>.</strong> Same memory space, same</li></ol>
+<p>   auto-barrier semantics, same restriction to fixed-size arrays and    kernel-struct context — pure rename, no behavior change. This is the    <em>kernel-context</em> meaning of <code>&#x27;actor</code>, exactly as <code>&#x27;unified</code>/<code>&#x27;global</code>/    <code>&#x27;const</code>/<code>&#x27;local</code>/<code>&#x27;sync</code> today only exist inside a <code>kernel struct</code> and    already replace the ordinary (non-kernel) meaning of whatever token they    use (<code>gpu-module.md</code>: &quot;GPU memory qualifiers ... replace the usual    ownership qualifiers inside a <code>kernel</code> struct&quot;) — reusing <code>&#x27;actor</code> this    way is the same kind of context-dependent meaning the language already    has, not a new category of ambiguity.</p>
+<ol><li><strong>The bare-<code>&#x27;actor</code>-as-alias-for-<code>&#x27;actor&#x27;global</code> shortcut is dropped.</strong></li></ol>
+<p>   Forced by (1): bare <code>&#x27;actor</code> inside a kernel struct now means    block-shared memory. Atomics on device-only DRAM must be spelled out in    full: <code>&#x27;actor&#x27;global</code>. (This is a real ergonomics regression for the    single most common atomics pattern — histogram/counter kernels — that    the rename accepts as its cost.)</p>
+<ol><li><strong><code>&#x27;actor&#x27;unified</code> is added</strong> — atomics on host+device DRAM. New</li></ol>
+<p>   capability, not currently implemented in any backend.</p>
+<ol><li><strong>Consequence, not a separate change</strong>: once atomics work uniformly</li></ol>
+<p>   across <code>&#x27;global</code> and <code>&#x27;unified</code>, and non-atomic <code>&#x27;global</code>/<code>&#x27;unified</code>    already share an identical protection story (<code>with</code> block for host    access, <code>after =</code> for cross-dispatch ordering — see <code>scoped-access-blocks.md</code>&#x27;s    Typing Rules table), the <em>only</em> remaining difference between <code>&#x27;global</code>    and <code>&#x27;unified</code> is whether the backend can elide the host↔device copy.    That&#x27;s a real, verified-against-current-docs claim (<code>scoped-access-blocks.md</code>:    &quot;<code>&#x27;unified</code> — ... close to free ... <code>&#x27;global</code> — ... a real transfer,    unconditionally&quot;) — not a new simplification being introduced here, just    one made airtight once (3) removes the last independent axis of    difference between the two.</p>
+<h3 id="final-qualifier-table-kernel-context">Final qualifier table (kernel-context)</h3>
+<table><thead><tr><th>Qualifier</th><th>Memory</th><th>GPU-side protection</th></tr></thead><tbody><tr><td><code>&#x27;const</code></td><td>constant cache</td><td>none needed — read-only during kernel execution</td></tr><tr><td><code>&#x27;local</code></td><td>registers</td><td>none needed — thread-private</td></tr><tr><td><code>&#x27;actor</code> (bare)</td><td>block-shared</td><td>auto-barrier (was <code>&#x27;sync</code>)</td></tr><tr><td><code>&#x27;actor&#x27;global</code></td><td>device-only DRAM</td><td>atomics</td></tr><tr><td><code>&#x27;actor&#x27;unified</code></td><td>host+device DRAM</td><td>atomics <em>(new)</em></td></tr><tr><td><code>&#x27;global</code></td><td>device-only DRAM</td><td>none (plain, no protection)</td></tr><tr><td><code>&#x27;unified</code></td><td>host+device DRAM</td><td>none (plain, no protection)</td></tr><tr><td><code>&#x27;surface</code></td><td>host+device DRAM, 32-bit pixels</td><td>none (special-cased for <code>Screen</code>)</td></tr></tbody></table>
+<h2 id="scope-of-impact">Scope of impact</h2>
+<p>This is a rename + new capability across the whole pipeline, not a docs-only change:</p>
+<ul><li><strong>Lexer/parser</strong> (<code>src/parser/parse_type.rs</code>): <code>TokenKind::Sync</code> and its</li></ul>
+<p>  dedicated <code>&#x27;sync</code> grammar production go away; <code>&quot;actor&quot;</code>&#x27;s branch   (currently <code>line 349-358</code>, only accepting <code>&#x27;task</code>/<code>&#x27;global</code> after   <code>&#x27;actor&#x27;</code>) gains a bare-in-kernel-context form and a <code>&#x27;unified</code> arm, and   loses the &quot;bare <code>&#x27;actor&#x27;</code> = <code>GpuActorGlobal</code>&quot; shortcut <em>outside</em> that   context change. Needs care: <code>&#x27;actor&#x27;task</code> (CPU-side, <code>Arc&lt;Mutex&gt;</code> for   async) must keep working unchanged — only the <em>kernel-context</em> meaning of   bare <code>&#x27;actor</code> is new.</p>
+<ul><li><strong>AST</strong> (<code>src/ast/mod.rs</code>): <code>GpuQual</code>/<code>OwnerQual</code> enums — rename</li></ul>
+<p>  <code>Sync</code>/<code>GpuSync</code> variants (or keep the variant name and just change what   parses into it — either is fine, but pick one and update every match arm   across the codebase consistently), add <code>GpuActorUnified</code> (or equivalent)   for the new combination.</p>
+<ul><li><strong>Checker</strong> (<code>src/checker/*</code>, <code>src/validator/kernel.rs</code>): field-type</li></ul>
+<p>  validation matrix (<code>gpu-module.md</code>&#x27;s &quot;Valid qualifier × field-type   matrix&quot;) needs a row for the renamed qualifier and the new combination.</p>
+<ul><li><strong>Device-side codegen</strong> (per backend, <code>device.rs</code>): the four</li></ul>
+<p>  <code>is_actor_global_field</code>-style atomic-detection functions (<code>cuda/device.rs</code>,   <code>rocm/device.rs</code>, <code>metal/device.rs</code>, <code>wgpu/device.rs</code>&#x27;s equivalent) need   a parallel path for <code>&#x27;actor&#x27;unified</code>, and the auto-barrier insertion logic   needs its qualifier check updated from <code>GpuQual::Sync</code> to whatever the   renamed variant ends up being.</p>
+<ul><li><strong>Host-side codegen</strong> (per backend, <code>host.rs</code>): buffer-allocation flags</li></ul>
+<p>  differ by backend for <code>&#x27;actor&#x27;unified</code> specifically — this is where the   real new work is (see &quot;Per-backend feasibility&quot; below).</p>
+<ul><li><strong>Docs</strong>: <code>gpu-module.md</code> (qualifier tables, Atomics section),</li></ul>
+<p>  <code>cuda-module.md</code>, <code>rocm-backend.md</code>, <code>metal-backend.md</code>, <code>wgpu-backend.md</code>   (qualifier-mapping tables each maintains), <code>book.md</code> (language reference   chapter), <code>scoped-access-blocks.md</code> (its own &quot;<code>&#x27;sync</code>/<code>&#x27;local</code> ... out of   scope&quot; note needs updating now that <code>&#x27;sync</code> no longer exists under that   name) — <code>.md</code> <strong>and</strong> <code>.html</code> mirrors for all of them, per this repo&#x27;s   established convention.</p>
+<ul><li><strong>Tests</strong>: every codegen test asserting literal <code>&#x27;sync</code>/<code>GpuQual::Sync</code>/</li></ul>
+<p>  bare-<code>&#x27;actor</code>-means-<code>&#x27;actor&#x27;global</code> text (<code>tests/cuda_codegen.rs</code>,   <code>tests/rocm_codegen.rs</code>, <code>tests/metal_codegen.rs</code>, <code>tests/wgpu_codegen.rs</code>)   needs updating, plus new regression tests for <code>&#x27;actor&#x27;unified</code> per   backend.</p>
+<ul><li><strong>Examples</strong>: grep the repo&#x27;s own <code>examples/*.br</code> for <code>&#x27;sync</code> before</li></ul>
+<p>  starting — any that use it need the rename applied too.</p>
+<h2 id="compatibility">Compatibility</h2>
+<p>No real Boring programs exist yet except <strong>whisper-boring</strong>, which the user develops separately. Checked directly rather than assumed: <code>whisper-boring/src/math_gpu.br</code> uses <code>&#x27;sync</code> <strong>4 times</strong> (two 16×16 tile-shared-memory pairs, one per kernel, in what looks like a tiled matmul (<code>LinearKernel</code>) and a tiled attention kernel — <code>tile_x</code>/<code>tile_w</code> and <code>tile_q</code>/<code>tile_k</code>) and <strong>no</strong> <code>&#x27;actor</code> usage at all today. This is the one real migration site: the rename must be applied there too as part of this task (not a follow-up), since it&#x27;s the only real consumer of the qualifier being renamed.</p>
+<h2 id="per-backend-feasibility-for-actorunified-new-work-not-a-rename">Per-backend feasibility for <code>&#x27;actor&#x27;unified</code> (new work, not a rename)</h2>
+<ul><li><strong>CUDA</strong>: low risk. <code>atomicAdd(&amp;ptr, v)</code> etc. take a plain pointer of the</li></ul>
+<p>  base type — no special &quot;atomic&quot; type exists in CUDA C, so an atomic op on   <code>cudaMallocManaged</code> memory is exactly as valid as on <code>cudaMalloc</code> memory.   Should be close to a copy-paste of the existing <code>&#x27;actor&#x27;global</code> codegen   path with the allocation call swapped.</p>
+<ul><li><strong>ROCm</strong>: same reasoning as CUDA (HIP&#x27;s atomic intrinsics mirror CUDA&#x27;s</li></ul>
+<p>  exactly, confirmed already for <code>&#x27;actor&#x27;global</code> — see <code>rocm-backend.md</code>).</p>
+<ul><li><strong>Metal</strong>: needs verification, not assumed. MSL requires atomic ops to</li></ul>
+<p>  target <code>atomic_int</code>/<code>atomic_uint</code>-typed pointers, but that&#x27;s a <em>type</em>   constraint on the kernel-parameter declaration, independent of the   buffer&#x27;s <code>MTLResourceOptions</code> (<code>StorageModeShared</code> for unified vs.   whatever <code>&#x27;global</code> uses today) — should compose, but this needs an actual   <code>cargo check</code>/build-level confirmation before relying on it, matching this   project&#x27;s established verify-before-documenting standard.</p>
+<ul><li><strong>wgpu — real open risk, not just unverified.</strong> WGSL requires</li></ul>
+<p>  <code>atomic&lt;i32&gt;</code>/<code>atomic&lt;u32&gt;</code> as the <em>storage type itself</em> — this is   already how <code>&#x27;actor&#x27;global</code> works today (<code>wgpu-backend.md</code>: <code>&#x27;actor&#x27;global</code>   fields are <code>array&lt;atomic&lt;i32&gt;&gt;</code> in <code>storage</code>). The question for   <code>&#x27;actor&#x27;unified</code> is whether a WGSL <code>atomic&lt;T&gt;</code> buffer can also carry   <code>MAP_READ</code>/<code>MAP_WRITE</code> usage flags for direct host mapping. <strong>This needs   checking against the real WebGPU/wgpu validation rules before any codegen   is written</strong> — worth noting that <code>wgpu-backend.md</code>&#x27;s current documented</p>
+<p>  <code>&#x27;unified</code> flags (<code>STORAGE | MAP_READ | MAP_WRITE | COPY_SRC | COPY_DST</code>)   are themselves worth re-verifying against real wgpu independently of this   task (WebGPU&#x27;s buffer-usage validation rules restrict what <code>MAP_READ</code>/   <code>MAP_WRITE</code> may combine with) — if that combination turns out to already   be invalid, <code>&#x27;actor&#x27;unified</code> inherits the same problem and the fix likely   has to happen in <code>&#x27;unified</code> first.</p>
+<h2 id="actual-implementation-order">Actual implementation order</h2>
+<p>The suggested order below split the rename (step 2) from dropping the old alias (step 4), as if they were independently landable. They aren&#x27;t: design points 1 and 2 are the same change (point 2 is explicitly &quot;forced by&quot; point 1) — the moment bare <code>&#x27;actor</code> means block-shared in kernel-struct context, the old &quot;bare <code>&#x27;actor&#x27;</code> = <code>&#x27;actor&#x27;global</code>&quot; alias <em>must</em> go in the same change, or bare <code>&#x27;actor</code> would ambiguously mean two things at once at the exact same parse site. Steps 2–4 landed as one atomic change instead. Steps 5 (CUDA/ROCm/Metal/wgpu) and 6–7 (docs, tests) proceeded roughly as suggested, with Metal and wgpu both turning out lower-risk than the feasibility analysis worried:</p>
+<ul><li><strong>Metal</strong>: the existing <code>&#x27;actor&#x27;global</code> codegen already casts the buffer</li></ul>
+<p>  pointer to <code>atomic_long*</code> <em>at the atomic-op call site</em>, rather than   declaring the buffer parameter itself as an atomic-typed pointer — so the   MSL type-system question the feasibility analysis raised never actually   applies to this codegen&#x27;s shape. <code>&#x27;actor&#x27;unified</code> reuses the identical   cast, with <code>MTLStorageMode.shared</code> (which every buffer on this backend   already uses uniformly, including plain <code>&#x27;global</code>). Verified with a real   <code>cargo build</code> of a generated <code>--target metal</code> project.</p>
+<ul><li><strong>wgpu</strong>: see &quot;Open Questions&quot; above — the real implementation never</li></ul>
+<p>  combines <code>atomic&lt;T&gt;</code> storage with <code>MAP_READ</code>/<code>MAP_WRITE</code> for <code>&#x27;unified</code>   today, so <code>&#x27;actor&#x27;unified</code> inherits nothing to be gated on.</p>
+<p>One real implementation-time bug, not anticipated by this spec: the <code>&#x27;unified</code>-only accessor-generation gates in each backend&#x27;s <code>host.rs</code> (the <code>read_&lt;field&gt;()</code>/<code>copy_&lt;field&gt;_to_host</code>/<code>copy_&lt;field&gt;_to_device</code> methods that make a field host-readable) needed <code>GpuQual::ActorUnified</code> added explicitly — missing it compiled <code>boring</code> itself cleanly (these are <code>matches!()</code> boolean checks, not exhaustive <code>match</code>es, so the compiler can&#x27;t catch an omission) but produced <em>generated</em> Rust that failed to build, caught only by actually building a generated wgpu project end-to-end.</p>
+<h2 id="open-questions--resolved-during-implementation">Open Questions — resolved during implementation</h2>
+<ol><li><em></em>Does wgpu allow <code>atomic&lt;T&gt;</code> storage combined with <code>MAP_READ</code>/<code>MAP_WRITE</code></li></ol>
+<p>   usage?<em></em> Moot — the real wgpu host codegen (<code>src/transpiler/wgpu/host.rs</code>)    never attempts that combination for <code>&#x27;unified</code> in the first place. Its</p>
+<p>   <code>buffer_usages()</code> returns <code>STORAGE | COPY_SRC | COPY_DST</code> for <code>&#x27;unified</code>    (no <code>MAP_READ</code>/<code>MAP_WRITE</code>); host reads/writes go through a <em>separate</em></p>
+<p>   staging buffer (<code>MAP_READ | COPY_DST</code> for D2H, <code>MAP_WRITE | COPY_SRC</code> for    H2D — see <code>gpu.copy()</code>&#x27;s staging-buffer pattern), copied via    <code>copy_buffer_to_buffer</code>. <code>&#x27;actor&#x27;unified</code> reuses this exact same path — its    <code>atomic&lt;i32&gt;</code>/<code>atomic&lt;u32&gt;</code> storage buffer gets the identical</p>
+<p>   <code>STORAGE | COPY_SRC | COPY_DST</code> usage, never combined with a map flag.    Confirmed by a real <code>cargo build</code> of a generated <code>--target wgpu</code> project    using an <code>&#x27;actor&#x27;unified</code> field (clean compile). 2. <em></em>Is the documented <code>&#x27;unified</code> wgpu buffer-usage-flag combination</p>
+<p>   (<code>STORAGE | MAP_READ | MAP_WRITE | COPY_SRC | COPY_DST</code>) actually valid    against real wgpu today?<strong> No — that combination was never what the actual    implementation does (see Q1); the documented flags in <code>wgpu-backend.md</code>    were simply wrong, independent of this task, and have been corrected as    part of this doc sync. 3. </strong>Naming for the renamed <code>GpuQual</code>/<code>OwnerQual</code> enum variants<em></em> — renamed    (<code>GpuQual::Sync</code> → <code>GpuQual::Actor</code>, plus the new <code>GpuQual::ActorUnified</code>    and <code>OwnerQual::GpuActorUnified</code>), applied uniformly across every match    site. <code>OwnerQual::GpuSync</code> was removed outright rather than kept as a dead    variant, since the parser never produces it.</p>
+<h3 id="one-thing-the-original-spec-missed">One thing the original spec missed</h3>
+<p><code>TokenKind::Sync</code> is not exclusively the <code>&#x27;sync</code> qualifier — it is also the lexer token for the unrelated <code>sync</code> <em>statement</em> keyword (explicit thread-group barrier inside a kernel <code>def</code> body, <code>parser/parse_stmt.rs</code>). The rename only removes <code>&#x27;sync</code>&#x27;s <em>qualifier</em> grammar production (<code>parser/parse_type.rs</code>); the <code>TokenKind::Sync</code> lexer token itself, and the <code>sync:</code> statement it still spells, are untouched and unaffected by this task.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

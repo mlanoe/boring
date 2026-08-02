@@ -271,7 +271,7 @@ fn run_kernel_parallel(
     // rest of this function's "run every thread independently, merge afterward" model.
     let sync_field_specs: Vec<(String, crate::ast::Type, usize)> = decl_fields.iter()
         .filter_map(|f| match (&f.qual, &f.ty) {
-            (GpuQual::Sync, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
+            (GpuQual::Actor, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
             _ => None,
         })
         .collect();

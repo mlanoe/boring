@@ -24,14 +24,15 @@ On Windows, wgpu uses DirectX 12 by default and falls back to Vulkan if DX12 is 
 
 | Boring qualifier | CUDA C | MSL address space | **WGSL / wgpu** |
 |---|---|---|---|
-| `'unified` | `cudaMallocManaged` | `device` + `MTLStorageMode.shared` | `storage` buffer, `MAP_READ \| MAP_WRITE` (host-visible) |
+| `'unified` | `cudaMallocManaged` | `device` + `MTLStorageMode.shared` | `storage` buffer, `STORAGE \| COPY_SRC \| COPY_DST` — host-visible via a staging-buffer copy, **not** `MAP_READ`/`MAP_WRITE` on this buffer directly (see "Host access" below) |
 | `'global` | `cudaMalloc` | `device` | `storage` buffer, GPU-only |
 | `'surface` | `cudaMallocManaged` (u32) | `device uint*` | `storage` buffer of `u32`, host-visible — same layout as `'unified` |
-| `'sync` | `__shared__` | `threadgroup` | `var<workgroup>` |
+| bare `'actor` | `__shared__` | `threadgroup` | `var<workgroup>` |
 | `'local` | registers | thread-private | `var<function>` |
 | `'const` scalar | `__constant__ T name;` | `constant T* [[buffer(N)]]` | `var<uniform>` in a dedicated uniform buffer |
 | `'const` fixed array (`[T, N]`) | `__constant__ T name[N];` | `constant T* [[buffer(N)]]` | `var<uniform>` array in a dedicated uniform buffer |
-| `'actor'global` | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomic<i32>` / `atomic<u32>` fields in `storage` buffer |
+| `'actor'global` | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomic<i32>` / `atomic<u32>` fields in `storage` buffer, `STORAGE \| COPY_SRC \| COPY_DST` |
+| `'actor'unified` | `atomicAdd` etc. | `atomic_fetch_add_explicit` | same `atomic<i32>`/`atomic<u32>` storage buffer as `'actor'global` — host-visible via the same staging-buffer copy path as `'unified` |
 
 ---
 
@@ -44,8 +45,8 @@ On Windows, wgpu uses DirectX 12 by default and falls back to Vulkan if DX12 is 
 | `gpu.block_dim.x/y/z` | `blockDim.x/y/z` | `threads_per_threadgroup.x/y/z` | `@builtin(local_invocation_size).x/y/z` |
 | `gpu.grid_dim.x/y/z` | `gridDim.x/y/z` | `threadgroups_per_grid.x/y/z` | `@builtin(num_workgroups).x/y/z` |
 | `sync` (manual) | `__syncthreads()` | `threadgroup_barrier(mem_flags::mem_threadgroup)` | `workgroupBarrier()` |
-| `'sync` auto-barrier | inserted before first loop + at top of each loop iteration | idem | idem |
-| atomics (`'actor'global`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomicAdd` / `atomicSub` / `atomicOr` / `atomicAnd` / `atomicXor` |
+| bare-`'actor` auto-barrier | inserted before first loop + at top of each loop iteration | idem | idem |
+| atomics (`'actor'global`/`'actor'unified`) | `atomicAdd` etc. | `atomic_fetch_add_explicit` | `atomicAdd` / `atomicSub` / `atomicOr` / `atomicAnd` / `atomicXor` |
 
 ### WGSL shader signature
 
@@ -121,7 +122,7 @@ struct KernelParams {
 @group(0) @binding(N) var<uniform> params: KernelParams;
 ```
 
-The binding index `N` follows all `'unified`, `'global`, and `'actor'global` array bindings. The Rust host writes the struct before every dispatch via `queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params))`.
+The binding index `N` follows all `'unified`, `'global`, `'actor'global`, and `'actor'unified` array bindings. The Rust host writes the struct before every dispatch via `queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params))`.
 
 Push constants are not used — they require the `PUSH_CONSTANTS` feature flag (off by default in wgpu) and are limited to 128 bytes on DX12/Vulkan, which conflicts with the goal of zero-configuration portability.
 
@@ -159,10 +160,23 @@ wgpu buffers are not implicitly host-visible. The transpiler uses different wgpu
 
 | Qualifier | `BufferUsages` | Host read/write |
 |---|---|---|
-| `'unified` | `STORAGE \| MAP_READ \| MAP_WRITE \| COPY_SRC \| COPY_DST` | direct via `map_async` |
+| `'unified` | `STORAGE \| COPY_SRC \| COPY_DST` | `copy_{field}_to_host`/`copy_{field}_to_device`, via a staging buffer (see "`gpu.copy()`" above) |
 | `'global` | `STORAGE \| COPY_DST` | via `gpu.copy()` (staging buffer) |
+| `'actor'global` | `STORAGE \| COPY_SRC \| COPY_DST` | via `gpu.copy()` (staging buffer) — device-only |
+| `'actor'unified` | `STORAGE \| COPY_SRC \| COPY_DST` | `copy_{field}_to_host`/`copy_{field}_to_device`, same staging-buffer path as `'unified` |
 
-`MAP_READ` and `MAP_WRITE` on the same buffer are valid in wgpu but require explicit `map_async` / `unmap` calls around host access. The Boring runtime wraps these transparently — host reads after a `kernel:` block are safe without explicit copy.
+`'unified`'s own storage buffer never carries `MAP_READ`/`MAP_WRITE` — host access
+always goes through a separate staging buffer (`MAP_READ | COPY_DST` for reads,
+`MAP_WRITE | COPY_SRC` for writes — see "`gpu.copy()`" above), copied to/from the
+real storage buffer with `copy_buffer_to_buffer`. This is deliberate, not an
+implementation gap: WebGPU's buffer-usage validation restricts `MAP_READ` to pairing
+only with `COPY_DST` and `MAP_WRITE` only with `COPY_SRC`, so a single buffer
+carrying `STORAGE | MAP_READ | MAP_WRITE` together (an earlier draft of this table
+claimed exactly that combination) would not validate — the two-buffer staging design
+avoids the question entirely rather than relying on an unverified combination.
+`'actor'unified` reuses the identical staging-buffer path, which is also why it
+doesn't inherit any WGSL `atomic<T>` + direct-mapping risk: the `atomic<i32>`/
+`atomic<u32>` storage buffer is never itself asked to carry `MAP_READ`/`MAP_WRITE`.
 
 ---
 
@@ -253,7 +267,7 @@ Arithmetic overflow in WGSL wraps silently (two's complement). This matches CUDA
 
 ### `bool` in storage buffers
 
-WGSL forbids `bool` inside `storage` and `uniform` buffers (`array<bool>` is invalid). The transpiler maps `bool` fields and `bool` array elements to `u32` in all GPU memory contexts (`'unified`, `'global`, `'sync`, struct fields). `true` → `1u`, `false` → `0u`. Comparisons and conditionals that receive a `u32` from a GPU field coerce back to WGSL `bool` via `!= 0u` automatically.
+WGSL forbids `bool` inside `storage` and `uniform` buffers (`array<bool>` is invalid). The transpiler maps `bool` fields and `bool` array elements to `u32` in all GPU memory contexts (`'unified`, `'global`, bare `'actor`, struct fields). `true` → `1u`, `false` → `0u`. Comparisons and conditionals that receive a `u32` from a GPU field coerce back to WGSL `bool` via `!= 0u` automatically.
 
 ---
 
@@ -284,7 +298,7 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 
 ### Restrictions
 
-- `[T]'sync` (dynamic workgroup memory) is not supported in WGSL — use `[T, N]'sync` with a const generic param instead.
+- `[T]'actor` (dynamic workgroup memory) is not supported in WGSL — use `[T, N]'actor` with a const generic param instead.
 - A generic kernel with no instantiations in the program emits no WGSL (no code is generated for unused generics).
 
 ---
@@ -346,9 +360,9 @@ transpiler to handle.
 ## Implementation notes
 
 - **Host crate**: `wgpu` v22.
-- **Binding index ordering**: `'unified` and `'global` arrays first (in declaration order), then `'const` fields as uniform buffers, then `'actor'global` arrays. The same order is used in the WGSL `@group(0) @binding(N)` annotations and the Rust `BindGroupLayoutEntry` list.
+- **Binding index ordering**: `'unified`, `'global`, `'actor'global`, `'actor'unified`, and `'surface` arrays first (in declaration order), then the `'const`/scalar-`'local` params struct as a single uniform buffer with the next binding index. The same order is used in the WGSL `@group(0) @binding(N)` annotations and the Rust `BindGroupLayoutEntry` list.
 - **Workgroup size**: encoded via WGSL pipeline overrides (`override block_x: u32`); set at pipeline-creation time from the `block =` dispatch argument.
 - **Dispatch**: the Rust host calls `encoder.dispatch_workgroups(gx, gy, gz)` and submits immediately. The `kernel:` block calls `queue.submit(...)` followed by `device.poll(wgpu::MaintainBase::Wait)` to ensure completion before the next host line.
-- **`'sync` (workgroup memory)**: fixed-size `[T, N]'sync` fields are emitted as `var<workgroup> tile: array<T, N>`. Dynamic `[T]'sync` fields are not supported in WGSL — the transpiler rejects them with a compile-time error and suggests using `[T, N]'sync` instead.
-- **Atomics**: `'actor'global` fields are emitted as `array<atomic<i32>>` (or `atomic<u32>` for `uint`). All five compound-assignment operations (`+= -= &= |= ^=`) map to the corresponding WGSL `atomicAdd` / `atomicSub` / `atomicAnd` / `atomicOr` / `atomicXor`.
+- **Bare `'actor` (workgroup memory)**: fixed-size `[T, N]'actor` fields are emitted as `var<workgroup> tile: array<T, N>`. Dynamic `[T]'actor` fields are not supported in WGSL — the transpiler rejects them with a compile-time error and suggests using `[T, N]'actor` instead.
+- **Atomics**: `'actor'global`/`'actor'unified` fields are emitted as `array<atomic<i32>>` (or `atomic<u32>` for `uint`). All five compound-assignment operations (`+= -= &= |= ^=`) map to the corresponding WGSL `atomicAdd` / `atomicSub` / `atomicAnd` / `atomicOr` / `atomicXor`.
 - **`atomicSub`**: WGSL has a native `atomicSub` — no negation workaround needed (unlike the Metal backend).

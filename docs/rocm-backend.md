@@ -25,10 +25,10 @@ HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__glob
 | `sync` | `__syncthreads()` | `__syncthreads()` |
 | `'unified` field | `cudaMallocManaged` | `hipMalloc` + host-visible copy via `DeviceBuffer<T>` (see below — HIP has no single-call managed-memory equivalent used here) |
 | `'global` field | `cudaMalloc` | `hipMalloc` |
-| `'shared` field | `__shared__` | `__shared__` |
+| bare `'actor` field | `__shared__` | `__shared__` |
 | `'const` scalar field | `__constant__ T name;` | `__constant__ T name;` |
 | `'const` fixed array field (`[T, N]`) | `__constant__ T name[N];` | `__constant__ T name[N];` |
-| atomic `[i] +=` on `'actor'global` | `atomicAdd` | `atomicAdd` |
+| atomic `[i] +=` on `'actor'global`/`'actor'unified` | `atomicAdd` | `atomicAdd` |
 | `print` in kernel | `printf` | `printf` |
 
 ---

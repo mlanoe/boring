@@ -654,10 +654,10 @@ impl HostEmitter {
         self.line("__stream: Arc<CudaStream>,");
         for field in &decl.fields {
             match field.qual {
-                GpuQual::Sync | GpuQual::Local => {
+                GpuQual::Actor | GpuQual::Local => {
                     // Block SRAM / registers — no host-side storage.
                 }
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                     let ty = self.host_field_type(field);
                     self.line(&format!("{}: {},", field.name, ty));
                 }
@@ -693,9 +693,9 @@ impl HostEmitter {
             self.blank();
         }
 
-        // Accessors for 'unified fields (D2H).
+        // Accessors for 'unified/'actor'unified fields (D2H) — both are host-visible.
         for field in &decl.fields {
-            if matches!(field.qual, GpuQual::Unified) {
+            if matches!(field.qual, GpuQual::Unified | GpuQual::ActorUnified) {
                 let elem = elem_rust_type(&field.ty);
                 self.line(&format!(
                     "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
@@ -786,14 +786,14 @@ impl HostEmitter {
                         let elem = elem_rust_type(&field.ty);
                         self.line(&format!("let {}: Vec<{}> = Vec::new();", field.name, elem));
                     }
-                    GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
+                    GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                         let elem = elem_rust_type(&field.ty);
                         self.line(&format!(
                             "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
                             field.name, elem
                         ));
                     }
-                    GpuQual::Sync | GpuQual::Local => {
+                    GpuQual::Actor | GpuQual::Local => {
                         match &field.ty {
                             Type::Array(_) | Type::ArrayN(_, _) => {}
                             _ => {
@@ -821,7 +821,7 @@ impl HostEmitter {
         self.line("__ctx,");
         for field in fields {
             match field.qual {
-                GpuQual::Sync => {} // no host field
+                GpuQual::Actor => {} // no host field
                 GpuQual::Local => {
                     match &field.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => {}
@@ -846,14 +846,14 @@ impl HostEmitter {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!("let {}: Vec<{}> = Vec::new();", field.name, elem));
                 }
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Const | GpuQual::Surface => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!(
                         "let {} = __ctx.default_stream().alloc_zeros::<{}>(1)?;",
                         field.name, elem
                     ));
                 }
-                GpuQual::Sync => {}
+                GpuQual::Actor => {}
                 GpuQual::Local => {
                     match &field.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => {}
@@ -880,7 +880,7 @@ impl HostEmitter {
         self.line("__ctx,");
         for field in fields {
             match field.qual {
-                GpuQual::Sync => {}
+                GpuQual::Actor => {}
                 GpuQual::Local => match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
                     _ => self.line(&format!("{},", field.name)),
@@ -942,7 +942,7 @@ impl HostEmitter {
                                     self.line(&format!("let {}: {} = {};", fname, ty, rhs_s));
                                     return;
                                 }
-                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+                                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                                     // Check if RHS is an `ArrayFill` / `[..n]` pattern.
                                     match &rhs.kind {
                                         ExprKind::ArrayFill { value: _, count } | ExprKind::ArrayAlloc { count } => {
@@ -1018,7 +1018,7 @@ impl HostEmitter {
         // 'actor'global), `grid_dim` becomes optional and is derived from its length.
         let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
                         _ => None,
@@ -1051,7 +1051,7 @@ impl HostEmitter {
         // Statically-sized 'shared ArrayN fields embed their size in the kernel declaration
         // and do not contribute to smem_bytes.
         let dyn_shared_terms: Vec<String> = fields.iter()
-            .filter(|f| matches!(f.qual, GpuQual::Sync))
+            .filter(|f| matches!(f.qual, GpuQual::Actor))
             .filter_map(|f| {
                 if let Type::Array(inner) = &f.ty {
                     let sz = elem_size_bytes(inner);
@@ -1128,7 +1128,7 @@ impl HostEmitter {
         self.line("let mut launcher = stream.launch_builder(&func);");
         for f in fields {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                     self.line(&format!("launcher.arg(&mut self.{});", f.name));
                 }
                 GpuQual::Const => {
@@ -1143,7 +1143,7 @@ impl HostEmitter {
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
                 }
-                GpuQual::Sync => {}
+                GpuQual::Actor => {}
             }
         }
         self.line("unsafe { launcher.launch(cfg) }?;");
@@ -1534,7 +1534,7 @@ impl HostEmitter {
             .as_ref()
             .and_then(|t| self.kernel_decls.get(t))
             .map(|decl| decl.fields.iter().any(|f|
-                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
                 && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
             .unwrap_or(false);
         let block = args.iter().find(|a| a.label.as_deref() == Some("block"))
@@ -1976,7 +1976,7 @@ impl HostEmitter {
                 let auto_grid = self.resolve_kernel_type(kernel)
                     .and_then(|t| self.kernel_decls.get(&t))
                     .map(|decl| decl.fields.iter().any(|f|
-                        matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                        matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
                         && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
                     .unwrap_or(false);
                 let k = self.expr(kernel);
@@ -2228,7 +2228,7 @@ impl HostEmitter {
                 if pname != &p.name { return None; }
                 decl.fields.iter().find(|f| &f.name == fname)
             }).filter(|f| {
-                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
                     && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
             }).map(|f| elem_rust_type(&f.ty))
         }).collect())
@@ -2300,7 +2300,7 @@ impl HostEmitter {
         let decl = self.kernel_decls.get(kernel_type)?;
         let kf = decl.fields.iter().find(|f| f.name == field)?;
         match kf.qual {
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 match &kf.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {
                         Some(format!("{}.read_{}()?", obj, field))

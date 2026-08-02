@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — `gpu.warp.*` — warp/wavefront/SIMD-group primitives</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="gpuwarp--warpwavefrontsimd-group-primitives"><code>gpu.warp.*</code> — warp/wavefront/SIMD-group primitives</h1>
+<blockquote><strong>Status: Proposed.</strong> No implementation yet — this document is the task spec for that work. Scope was settled in conversation before writing this up: <strong>shuffle intrinsics are in scope</strong>, not just the <code>warp.size</code>/ <code>warp.lane</code>/<code>warp.sync</code> trio <code>cuda-module.md</code>&#x27;s &quot;Known limitations&quot; currently names — without shuffles, warp-level programming has no actual data-exchange primitive, which is the main reason it&#x27;s useful.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>A <strong>warp</strong> (CUDA), <strong>wavefront</strong> (AMD/HIP — 32 or 64 threads depending on architecture, RDNA vs CDNA), <strong>SIMD-group</strong> (Metal), or <strong>subgroup</strong> (WGSL) is a hardware-level grouping of threads below the thread-block level that execute in lockstep. Boring today has no way to express warp-level algorithms at all — <code>gpu.thread</code>/<code>gpu.block</code> (block-level indexing) and bare <code>&#x27;actor</code> (block-shared memory + full-block barrier) are the only synchronization primitives available. This means every intra-block reduction pays for a full block-wide barrier (<code>__syncthreads()</code>/ <code>threadgroup_barrier</code>/<code>workgroupBarrier()</code>) even for the portion of the reduction that&#x27;s actually confined to a single warp, where threads are <em>already</em> synchronous by construction and a much cheaper warp-local barrier (or no barrier at all, via register-to-register shuffle) would do.</p>
+<p><strong>Real motivating pattern, checked directly</strong>: <code>whisper-boring/src/math_gpu.br</code>&#x27;s tiled matmul kernels (<code>LinearKernel</code>, <code>AttentionKernel</code>) already reason about this in a comment — &quot;consecutive GPU threads (same warp/wavefront, same reduction step <code>p</code>)&quot; (line 54) — and use plain <code>sync</code> (full block barrier) at every tile step (lines 158/161/244/247) because that&#x27;s the only tool available today. A warp-level shuffle-based reduction would let the portion of the reduction confined to one warp skip the shared-memory round-trip and block barrier entirely.</p>
+<h2 id="proposed-design">Proposed Design</h2>
+<p>New built-ins, nested under the existing <code>gpu</code> namespace (consistent with <code>gpu.thread</code>/<code>gpu.block</code>, not a sibling top-level <code>warp</code> namespace as the current &quot;Known limitations&quot; wording might suggest):</p>
+<table><thead><tr><th>Built-in</th><th>Meaning</th></tr></thead><tbody><tr><td><code>gpu.warp.size</code></td><td>threads per warp (32 on NVIDIA; 32 or 64 on AMD; SIMD-group/subgroup size elsewhere)</td></tr><tr><td><code>gpu.warp.lane</code></td><td>this thread&#x27;s index within its warp, <code>0..gpu.warp.size</code></td></tr><tr><td><code>gpu.warp.sync()</code></td><td>warp-local barrier — cheaper than <code>sync</code> (block-wide)</td></tr><tr><td><code>gpu.warp.shuffle_down(v, delta)</code></td><td>read <code>v</code> from the lane <code>delta</code> above this one</td></tr><tr><td><code>gpu.warp.shuffle_up(v, delta)</code></td><td>read <code>v</code> from the lane <code>delta</code> below this one</td></tr><tr><td><code>gpu.warp.shuffle_xor(v, mask)</code></td><td>read <code>v</code> from lane <code>this_lane XOR mask</code> (butterfly pattern — reductions)</td></tr><tr><td><code>gpu.warp.shuffle(v, src_lane)</code></td><td>broadcast/read <code>v</code> from an arbitrary lane</td></tr></tbody></table>
+<h3 id="per-backend-mapping">Per-backend mapping</h3>
+<table><thead><tr><th>Boring</th><th>CUDA</th><th>HIP (ROCm)</th><th>MSL (Metal)</th><th>WGSL (wgpu)</th></tr></thead><tbody><tr><td><code>gpu.warp.size</code></td><td><code>warpSize</code> (built-in var)</td><td><code>warpSize</code> (built-in var, 32 or 64)</td><td><code>[[threads_per_simdgroup]]</code> param attribute</td><td><code>subgroup_size</code> builtin</td></tr><tr><td><code>gpu.warp.lane</code></td><td><code>threadIdx.x % warpSize</code> (linearized for 2D/3D — see below)</td><td>same as CUDA</td><td><code>[[thread_index_in_simdgroup]]</code> param attribute</td><td><code>subgroup_invocation_id</code> builtin</td></tr><tr><td><code>gpu.warp.sync()</code></td><td><code>__syncwarp(mask)</code></td><td><code>__syncwarp</code> equivalent (HIP mirrors CUDA&#x27;s name)</td><td><code>simdgroup_barrier(mem_flags::mem_none)</code></td><td><code>subgroupBarrier()</code></td></tr><tr><td><code>gpu.warp.shuffle_down/up/xor</code></td><td><code>__shfl_down_sync</code>/<code>__shfl_up_sync</code>/<code>__shfl_xor_sync</code></td><td>same names (HIP mirrors CUDA)</td><td><code>simd_shuffle_down</code>/<code>simd_shuffle_up</code>/<code>simd_shuffle_xor</code></td><td><code>subgroupShuffleDown</code>/<code>subgroupShuffleUp</code>/<code>subgroupShuffleXor</code></td></tr><tr><td><code>gpu.warp.shuffle(v, lane)</code></td><td><code>__shfl_sync</code></td><td>same</td><td><code>simd_shuffle</code></td><td><code>subgroupShuffle</code></td></tr></tbody></table>
+<p><strong>Mask handling (CUDA/ROCm), decided here rather than left open</strong>: CUDA&#x27;s <code>_sync</code> shuffle/barrier intrinsics (post-Volta) require an explicit 32-bit active-lane mask, needed for correctness under thread divergence. Boring hides this: every <code>gpu.warp.*</code> call emits the full mask (<code>0xffffffff</code>) rather than exposing a mask parameter in Boring source — consistent with the language&#x27;s level of abstraction elsewhere (Boring doesn&#x27;t expose raw CUDA streams either, for example). <strong>Caveat to document alongside the feature, not solve here</strong>: this means <code>gpu.warp.*</code> inside a divergent branch (an <code>if</code> that not all lanes in the warp take) is only as safe as passing <code>0xffffffff</code> to CUDA&#x27;s <code>_sync</code> intrinsics actually is — correct for reconverged/uniform control flow, undefined behavior otherwise. This is an inherent constraint of warp-level programming, not something Boring can fully paper over.</p>
+<p><strong>Lane linearization for CUDA/ROCm 2D/3D blocks</strong>: <code>warpSize</code> divides a <em>linear</em> thread index, but Boring kernel blocks can be 2D/3D (<code>gpu.thread.x/y/z</code>). <code>gpu.warp.lane</code> linearizes first: <code>tid = thread.x + thread.y * block_dim.x + thread.z * block_dim.x * block_dim.y</code>, then <code>lane = tid % warpSize</code> — the same linearization CUDA programmers do by hand today, just generated once instead of at every call site.</p>
+<h3 id="wgpu-fallback-decided-in-conversation-not-left-as-an-open-question">wgpu fallback (decided in conversation, not left as an open question)</h3>
+<p>Subgroup support in wgpu/naga is real but <strong>not universally available</strong> — verified via a live check (not assumed): subgroup operations landed in wgpu (tracked in <a href="https://github.com/gfx-rs/wgpu/issues/5555">gfx-rs/wgpu#5555</a>), naga implements essentially the full builtin set except <code>subgroupElect()</code> (<a href="https://github.com/gfx-rs/wgpu/issues/7396">gfx-rs/wgpu#7396</a>), and the WebGPU spec itself only reached Candidate Recommendation for subgroups in January 2025 — meaning it&#x27;s recent, and gated behind a <code>wgpu::Features::SUBGROUP</code> adapter feature that must be queried and is not guaranteed present on every backend/GPU combination (DX12 vs Vulkan vs Metal-via-wgpu).</p>
+<p>Decision: <strong>when <code>Features::SUBGROUP</code> is unavailable at runtime, <code>gpu.warp.*</code> falls back to an emulation over bare-<code>&#x27;actor</code>-equivalent (workgroup) memory</strong> — <code>shuffle_down(v, delta)</code> becomes &quot;write <code>v</code> to a workgroup-shared array indexed by <code>local_invocation_id</code>, <code>workgroupBarrier()</code>, read back index <code>lane + delta</code>, <code>workgroupBarrier()</code>&quot; — rather than a hard runtime error. This is real additional implementation work (a second codegen path per <code>gpu.warp.*</code> built-in, active only on wgpu, selected by a runtime feature check at pipeline-creation time) and a real semantic caveat to document: the fallback emulates the <em>API</em>, not the <em>hardware lockstep guarantee</em> — it costs a real shared-memory round trip and full barrier per shuffle, not the register-to-register, near-free operation a true subgroup shuffle is. Callers get correct results either way; only the performance justification for using <code>gpu.warp.*</code> over bare <code>&#x27;actor</code> disappears on hardware that lacks subgroup support.</p>
+<p><strong>Open sub-question</strong>: what &quot;warp size&quot; does the wgpu fallback use for <code>gpu.warp.size</code>/lane arithmetic, given there&#x27;s no real subgroup to query? Likely a fixed, documented constant (e.g. 32, matching the common case) — needs to be picked and clearly called out as <em>not</em> a real hardware value on this fallback path specifically.</p>
+<h2 id="scope-of-impact">Scope of impact</h2>
+<ul><li><strong>Lexer/parser</strong>: <code>gpu.warp</code> as a new nested namespace under the</li></ul>
+<p>  existing <code>gpu</code> built-in — parsed the same way <code>gpu.thread</code>/<code>gpu.block</code>   already are, not a new grammar production.</p>
+<ul><li><strong>Device-side codegen</strong> (per backend <code>device.rs</code>): new kernel-parameter</li></ul>
+<p>  attributes for Metal (<code>threads_per_simdgroup</code>, <code>thread_index_in_simdgroup</code>   — same mechanism as existing <code>thread_position_in_threadgroup</code> etc.), new   builtin params for WGSL (<code>subgroup_size</code>, <code>subgroup_invocation_id</code>, plus   an <code>enable subgroups;</code> directive when any kernel uses <code>gpu.warp.*</code>), and   straightforward intrinsic-call emission for CUDA/ROCm (already-existing   builtin variable, no new parameter plumbing needed there).</p>
+<ul><li><strong>wgpu-specific</strong>: runtime feature detection (<code>adapter.features().contains(wgpu::Features::SUBGROUP)</code>)</li></ul>
+<p>  at pipeline-creation time, branching codegen or runtime dispatch between   the real-subgroup path and the shared-memory emulation path described   above.</p>
+<ul><li><strong>Docs</strong>: <code>gpu-module.md</code> (new built-ins section), <code>cuda-module.md</code>/</li></ul>
+<p>  <code>rocm-backend.md</code>/<code>metal-backend.md</code>/<code>wgpu-backend.md</code> (each maintains a   built-in mapping table — add <code>gpu.warp.*</code> rows), <code>book.md</code>. Remove the   &quot;Known limitations&quot; bullet in <code>cuda-module.md</code> once shipped. <code>.md</code> + <code>.html</code>   mirrors throughout.</p>
+<ul><li><strong>Tests</strong>: per-backend codegen tests for each <code>gpu.warp.*</code> built-in,</li></ul>
+<p>  including a wgpu-specific test asserting the emulation path&#x27;s exact   codegen shape when the feature is unavailable (can&#x27;t easily test the   real-subgroup path without real hardware exposing that feature — same   caveat this project already documents for CUDA/Metal/ROCm hardware   verification elsewhere).</p>
+<h2 id="compatibility">Compatibility</h2>
+<p>No real Boring programs exist yet except <strong>whisper-boring</strong>. Its tiled matmul/attention kernels (<code>math_gpu.br</code>, quoted above) are the motivating example, not a migration requirement — they keep working unchanged with plain <code>sync</code>; adopting <code>gpu.warp.*</code> for their reduction step is a natural, separate follow-up once this lands, expected to reduce full-block barriers in the tiled-reduction inner loop.</p>
+<h2 id="open-questions">Open Questions</h2>
+<ol><li><strong>Fallback warp size constant on wgpu</strong> (see above) — needs a specific</li></ol>
+<p>   documented value, not left implicit. 2. <strong>Divergent-branch safety</strong> — document, not solve: <code>gpu.warp.*</code> inside    non-uniform control flow is only as safe as the underlying <code>_sync</code>    intrinsics with a full mask; Boring doesn&#x27;t detect or warn about this    today. 3. <strong>Should the checker warn (not error) when <code>gpu.warp.*</code> is used inside    an <code>if</code>/<code>while</code> that isn&#x27;t provably warp-uniform?</strong> A static analysis    nicety, not required for a first version — flagged here so it isn&#x27;t    forgotten, not because it blocks shipping without it.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

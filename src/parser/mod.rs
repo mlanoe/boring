@@ -1235,7 +1235,7 @@ impl Parser {
         Ok(KernelDecl { name, is_pub, fields, inits, methods, type_params, where_clause, line, col })
     }
 
-    /// Parse a kernel field: `let [float]'unified input` or `mut [float]'shared tile`
+    /// Parse a kernel field: `let [float]'unified input` or `mut [float, 256]'actor tile`
     ///
     /// The `parse_type()` call consumes the tick `'` but leaves the qualifier ident
     /// unconsumed (because `"unified"` etc. are not in the standard qualifier table).
@@ -1258,7 +1258,7 @@ impl Parser {
 
         // Extract the GPU qualifier and base type.
         // Note: `'shared` maps to OwnerQual::Shared (Arc/Rc) in the global qualifier table;
-        // in kernel context it means block SRAM — we accept both spellings.
+        // in kernel context bare `'actor` takes over that role for block SRAM instead.
         let (qual, base_ty) = match parsed_ty {
             Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) => {
                 return Err(ParseError::Generic {
@@ -1268,10 +1268,9 @@ impl Parser {
             }
             Type::Qualified(inner, OwnerQual::GpuUnified) => (GpuQual::Unified, *inner),
             Type::Qualified(inner, OwnerQual::GpuGlobal)  => (GpuQual::Global,  *inner),
-            Type::Qualified(inner, OwnerQual::GpuSync)    => (GpuQual::Sync,    *inner),
             Type::Qualified(_inner, OwnerQual::Shared) => {
                 return Err(ParseError::Generic {
-                    msg: "'shared is not valid inside a kernel — use 'sync for block SRAM (auto-barrier) or 'global/'unified for device memory".into(),
+                    msg: "'shared is not valid inside a kernel — use bare 'actor for block SRAM (auto-barrier) or 'global/'unified for device memory".into(),
                     line, col, len: 1,
                 });
             }
@@ -1292,13 +1291,13 @@ impl Parser {
                 });
             }
             Type::Qualified(inner, OwnerQual::GpuConst)   => (GpuQual::Const,   *inner),
-            // `'actor` alone is an alias for `'actor'global` inside a kernel: atomics are
-            // only meaningful (and only implemented) for device-global memory here, so
-            // there's no ambiguity to preserve by requiring the explicit two-qualifier
-            // spelling. Falling through this match without a dedicated arm used to
-            // silently misclassify the field as an unqualified scalar (binding-inferred
-            // 'const/'local) instead of raising a clear error or doing the right thing.
-            Type::Qualified(inner, OwnerQual::GpuActorGlobal | OwnerQual::Actor) => (GpuQual::ActorGlobal, *inner),
+            // Bare `'actor` inside a kernel struct means block-shared memory with an
+            // auto-inserted barrier (formerly spelled `'sync`) — not an alias for
+            // `'actor'global` anymore. Atomics on device-only DRAM must now be spelled
+            // out in full as `'actor'global`.
+            Type::Qualified(inner, OwnerQual::Actor) => (GpuQual::Actor, *inner),
+            Type::Qualified(inner, OwnerQual::GpuActorGlobal) => (GpuQual::ActorGlobal, *inner),
+            Type::Qualified(inner, OwnerQual::GpuActorUnified) => (GpuQual::ActorUnified, *inner),
             Type::Qualified(inner, OwnerQual::GpuSurface) => {
                 // `'surface` is only valid on `[uint]` — pixel buffer.
                 if !matches!(*inner, Type::Named(ref n) if n == "uint")

@@ -183,7 +183,7 @@ impl DeviceEmitter {
 
         // Validate: reject dynamic 'sync fields ([T]'sync without size).
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync)
+            if matches!(f.qual, GpuQual::Actor)
                 && matches!(f.ty, Type::Array(_)) {
                     self.errors.push(format!(
                         "kernel {}: dynamic '[T]'sync field '{}' is not supported on --target wgpu — \
@@ -222,7 +222,7 @@ impl DeviceEmitter {
         // 3. Workgroup ('sync fixed arrays) — must be module-scope `var<workgroup>`
         // declarations in WGSL, not statements inside the function body.
         for f in &decl.fields {
-            if matches!(f.qual, GpuQual::Sync) {
+            if matches!(f.qual, GpuQual::Actor) {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
                         f.name, wgsl_scalar(inner), n));
@@ -353,7 +353,7 @@ impl DeviceEmitter {
             }
         }
 
-        let has_sync_fields = decl.fields.iter().any(|f| matches!(f.qual, GpuQual::Sync));
+        let has_sync_fields = decl.fields.iter().any(|f| matches!(f.qual, GpuQual::Actor));
         self.auto_sync = has_sync_fields && !body_has_explicit_sync(&entry.body);
 
         if self.auto_sync {
@@ -515,19 +515,22 @@ impl DeviceEmitter {
         }
     }
 
-    fn is_actor_global_field(&self, name: &str) -> bool {
+    /// `'actor'global` or `'actor'unified` — both are `atomic<T>` storage buffers in
+    /// WGSL (see `wgsl_buffer_type`); only the buffer-usage flags differ (host.rs).
+    fn is_atomic_field(&self, name: &str) -> bool {
         self.current_fields.iter().any(|f|
-            f.name == name && matches!(f.qual, GpuQual::ActorGlobal))
+            f.name == name && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified))
     }
 
-    /// Detect `arr[i] OP= v` on an `'actor'global` field → WGSL atomic intrinsic.
+    /// Detect `arr[i] OP= v` on an `'actor'global`/`'actor'unified` field → WGSL atomic
+    /// intrinsic.
     fn try_atomic_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<String> {
         let ExprKind::Index(arr, idx) = &lhs.kind else { return None; };
         let arr_name = match &arr.kind {
             ExprKind::Var(n) => n.clone(),
             _ => return None,
         };
-        if !self.is_actor_global_field(&arr_name) { return None; }
+        if !self.is_atomic_field(&arr_name) { return None; }
         let ExprKind::BinOp(op, _lhs_copy, value) = &rhs.kind else { return None; };
 
         let i = self.expr(idx);
@@ -675,7 +678,7 @@ fn collect_called_fn_names(body: &[Stmt], out: &mut Vec<String>) {
 /// Returns true if the field goes into a storage buffer binding.
 fn is_buffer_field(f: &KernelFieldDecl) -> bool {
     match f.qual {
-        GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface => {
+        GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
             matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
         }
         _ => false,
@@ -690,7 +693,7 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
         _ => {
             // Named struct types (e.g. Dimension) in non-buffer fields go into params.
             matches!(&f.ty, Type::Named(_))
-                && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::Surface)
+                && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
         }
     }
 }
@@ -698,12 +701,12 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
 /// Returns the WGSL storage access modifier and array type for a buffer field.
 fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let access = match f.qual {
-        GpuQual::ActorGlobal => "read_write", // atomics need read_write
+        GpuQual::ActorGlobal | GpuQual::ActorUnified => "read_write", // atomics need read_write
         _ => if matches!(f.binding, FieldBinding::Let) { "read" } else { "read_write" },
     };
     let elem = match &f.ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => {
-            if matches!(f.qual, GpuQual::ActorGlobal) {
+            if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                 // atomic<i32> for int, atomic<u32> for uint
                 match inner.as_ref() {
                     Type::Int => "atomic<i32>".into(),
@@ -884,7 +887,7 @@ fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
 
 fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
     let sync_names: Vec<&str> = fields.iter()
-        .filter(|f| matches!(f.qual, GpuQual::Sync))
+        .filter(|f| matches!(f.qual, GpuQual::Actor))
         .map(|f| f.name.as_str())
         .collect();
     if sync_names.is_empty() { return false; }

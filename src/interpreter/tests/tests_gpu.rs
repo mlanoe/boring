@@ -296,11 +296,11 @@ let _result = k.buf
     );
 }
 
-// ─── unassigned fixed-size 'sync fields default to zero, not Nil ────────────
+// ─── unassigned fixed-size 'actor fields default to zero, not Nil ───────────
 
 #[test]
-fn test_unassigned_sync_fixed_array_defaults_to_zero() {
-    // Per gpu-module.md's "no init() assignment needed": a `[T, N]'sync` field
+fn test_unassigned_actor_fixed_array_defaults_to_zero() {
+    // Per gpu-module.md's "no init() assignment needed": a `[T, N]'actor` field
     // the kernel's `init()` never touches must still be a real (zero-filled)
     // array inside the kernel body, matching what every real GPU target does
     // (WGSL `var<workgroup>` / CUDA `__shared__` are hardware zero-initialized)
@@ -309,7 +309,7 @@ fn test_unassigned_sync_fixed_array_defaults_to_zero() {
 kernel Tile:
     mut [float]'unified   input
     mut [float]'unified   out
-    mut [float, 4]'sync   tile
+    mut [float, 4]'actor  tile
 
     init([float]'unified data):
         input = data
@@ -335,9 +335,9 @@ let _result = k.out
     );
 }
 
-// ─── sync is a no-op (for kernels with no `'sync` field) ────────────────────
+// ─── sync is a no-op (for kernels with no `'actor` field) ───────────────────
 //
-// `sync` is a REAL cross-thread barrier when the kernel has a `'sync` field
+// `sync` is a REAL cross-thread barrier when the kernel has an `'actor` field
 // (see `test_sync_barrier_cross_thread_visibility` below) — `kernel_barrier`
 // is only populated on kernels that declare one. A kernel with none, like
 // this one, never gets a barrier at all, so `sync` really is still a no-op
@@ -374,7 +374,7 @@ let _result = k.buf
     );
 }
 
-// ─── real cross-thread `'sync` barrier visibility ───────────────────────────
+// ─── real cross-thread `'actor` barrier visibility ──────────────────────────
 
 #[test]
 fn test_sync_barrier_cross_thread_visibility() {
@@ -384,8 +384,8 @@ fn test_sync_barrier_cross_thread_visibility() {
     // `tile` reads observe the shared (not per-thread-private) backing array.
     let src = r#"
 kernel Broadcast:
-    mut [float]'unified   out
-    mut [float, 256]'sync tile
+    mut [float]'unified    out
+    mut [float, 256]'actor tile
 
     init([float]'unified o):
         out = o
@@ -610,9 +610,9 @@ fn test_gpu_shared_qualifier() {
     let src = r#"
 kernel SharedWeight:
     mut [float]'unified  out
-    let [float]'sync     weights
+    let [float]'actor    weights
 
-    init([float]'unified data, [float]'sync w):
+    init([float]'unified data, [float]'actor w):
         out     = data
         weights = w
 

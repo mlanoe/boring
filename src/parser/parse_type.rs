@@ -315,7 +315,6 @@ impl Parser {
                 // GPU memory qualifiers (kernel-context and host-context).
                 "unified" => { self.advance(); OwnerQual::GpuUnified }
                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
-                "sync"    => { self.advance(); OwnerQual::GpuSync }
                 "local"   => { self.advance(); OwnerQual::GpuLocal }
                 "const"   => { self.advance(); OwnerQual::GpuConst }
                 "gpu"    => {
@@ -348,11 +347,15 @@ impl Parser {
                 "surface" => { self.advance(); OwnerQual::GpuSurface }
                 "actor"  => {
                     self.advance();
-                    // `T'actor'task` → ActorTask  /  `T'actor'global` → GpuActorGlobal
+                    // `T'actor'task` → ActorTask  /  `T'actor'global` → GpuActorGlobal  /
+                    // `T'actor'unified` → GpuActorUnified  /  bare `T'actor` → Actor (CPU-side;
+                    // in kernel-struct field position this is reinterpreted as block-shared
+                    // memory by parse_kernel_field, replacing the old 'sync spelling).
                     if self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
-                        else { return Err(ParseError::Generic { msg: "expected 'task or 'global after 'actor'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
+                        else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "unified") { self.advance(); OwnerQual::GpuActorUnified }
+                        else { return Err(ParseError::Generic { msg: "expected 'task, 'global, or 'unified after 'actor'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
                     } else {
                         OwnerQual::Actor
                     }
@@ -364,8 +367,6 @@ impl Parser {
                 "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
                 _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
             },
-            // `T'sync` — `sync` is a keyword, not an ident: block SRAM with auto-barrier
-            TokenKind::Sync => { self.advance(); OwnerQual::GpuSync }
             // `T'new` — `new` is a keyword, not an ident: pseudo-qualifier "infer excluding 'stack"
             TokenKind::New => { self.advance(); OwnerQual::New }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>

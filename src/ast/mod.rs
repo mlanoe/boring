@@ -245,14 +245,22 @@ pub struct FieldDecl {
 pub enum GpuQual {
     Unified,
     Global,
-    /// `'sync` — block SRAM (threadgroup memory). Barriers are inserted automatically
-    /// unless the kernel `def` contains at least one explicit `sync` statement (manual mode).
-    Sync,
+    /// Bare `'actor` (kernel-context) — block SRAM (threadgroup memory), formerly spelled
+    /// `'sync`. Barriers are inserted automatically unless the kernel `def` contains at
+    /// least one explicit `sync` statement (manual mode) — that statement keyword is
+    /// unrelated to this qualifier and is unaffected by the rename.
+    Actor,
     Local,
     Const,
     /// `'actor'global` — device DRAM accessed via atomics on device.
     /// Behaves like `Global` for memory placement; compound assigns become atomic ops.
     ActorGlobal,
+    /// `'actor'unified` — host+device DRAM accessed via atomics on device.
+    /// Behaves like `Unified` for memory placement (host-visible, gets a `read_<field>()`
+    /// accessor where the backend supports one); compound assigns become atomic ops
+    /// exactly like `ActorGlobal`. CUDA/ROCm implement this; Metal/wgpu reject it for
+    /// now with a target-specific error (see each backend's `device.rs`).
+    ActorUnified,
     /// `'surface` — pixel buffer with backend-appropriate placement.
     /// Metal: `MTLStorageModePrivate` (GPU-only); CUDA: `cudaMallocManaged`; simulation: `Vec<u32>`.
     Surface,
@@ -1008,14 +1016,17 @@ pub enum OwnerQual {
     /// GPU memory qualifiers.
     /// Host-side: `T'gpu'unified`, `T'gpu'global`. `'const` has no host-side form — it has
     /// no host access (like `'local`), so it can only appear inside a `kernel` struct.
-    /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'sync`, `T'local`, `T'const`.
+    /// Kernel-side (no 'gpu prefix): `T'unified`, `T'global`, `T'local`, `T'const`.
+    /// Block-shared memory (formerly `T'sync`) is now bare `T'actor` in kernel-struct field
+    /// position — see `OwnerQual::Actor`, reinterpreted by `parse_kernel_field`.
     GpuUnified,
     GpuGlobal,
-    GpuSync,
     GpuLocal,
     GpuConst,
     /// `T'actor'global` — device DRAM with atomic access (kernel-side).
     GpuActorGlobal,
+    /// `T'actor'unified` — host+device DRAM with atomic access (kernel-side).
+    GpuActorUnified,
     /// `T'surface` — pixel buffer with backend-differentiated placement.
     GpuSurface,
     /// Qualifier union: `T'stack|heap|actor` — restricts which qualifiers callers may provide.
@@ -1171,7 +1182,7 @@ impl Type {
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
             Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
-            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuSync | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal | OwnerQual::GpuSurface) => false,
+            Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal | OwnerQual::GpuActorUnified | OwnerQual::GpuSurface) => false,
         }
     }
 

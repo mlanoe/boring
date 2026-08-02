@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — `Image<C, R>` / `Volume<X, Y, Z>` — named-shape buffer types</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="imagec-r--volumex-y-z--named-shape-buffer-types"><code>Image&lt;C, R&gt;</code> / <code>Volume&lt;X, Y, Z&gt;</code> — named-shape buffer types</h1>
+<blockquote><strong>Status: Proposed.</strong> No implementation yet — this document is the task spec for that work. Companion to <a href="actor-qualifier-unification.html">`actor-qualifier-unification.md`</a> (in progress in a parallel session) — see &quot;Interaction with the <code>&#x27;actor</code> qualifier rename&quot; below; the two should land compatible with each other, not necessarily in the same change.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>Two related gaps, discussed leading up to this document:</p>
+<ol><li><strong>No 2D/3D grid inference for <code>&#x27;unified</code>/<code>&#x27;global</code> fields.</strong> Grid</li></ol>
+<p>   inference (<code>cuda-module.md</code>, &quot;Dispatch parameters&quot;) only handles the 1D    case: <code>grid = ceil(len(buf) / block)</code> from a flat array field&#x27;s length.    A 2D/3D kernel (image processing, tiled matmul, convolution) gets no    inference at all — omitting <code>grid</code> silently defaults to <code>(1, 1, 1)</code>,    dispatching a single block over what the author likely meant as a whole    image or volume.</p>
+<ol><li><strong>Real code already hand-rolls 2D indexing on flat buffers, error-prone.</strong></li></ol>
+<p>   Checked directly rather than assumed: <code>whisper-boring/src/math_gpu.br</code>&#x27;s    <code>TransposeKernel</code> (lines 61-82) takes <code>rows</code>/<code>cols</code> as separate <code>int</code>    fields alongside a flat <code>[float]&#x27;global src</code>/<code>[float]&#x27;unified dst</code>, and    manually derives 2D position from a linear thread index:    <code></code><code>boring    let i = cell / cols    let j = cell % cols    dst[j * rows + i] = src[cell]    </code><code></code>    This is exactly the shape every 2D kernel in this codebase needs today —    width/height carried as separate plain <code>int</code> fields, with every    loop/kernel re-deriving row/column from a linear index by hand. Nothing    type-level ties the flat buffer&#x27;s declared length to <code>rows * cols</code>, or    validates that <code>dst</code>&#x27;s length actually matches <code>rows * cols</code> at    construction time.</p>
+<p>An earlier direction considered fixing (1) alone by allowing <strong>nested fixed arrays</strong> (<code>[[T, N1], N2]</code>, which already parse and run correctly outside kernel context — verified directly) on <code>&#x27;unified</code>/<code>&#x27;global</code> fields, and teaching grid inference to read the nested shape. Rejected: nesting order is purely positional (does <code>[[T, N1], N2]</code> mean <code>N1</code> columns × <code>N2</code> rows, or the reverse?) — there is no way to make that unambiguous from array syntax alone without imposing an arbitrary row/column convention on every kernel author. Named dimensions avoid the question entirely.</p>
+<h2 id="proposed-design">Proposed Design</h2>
+<p>Two new built-in generic types:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Image&lt;<span class="kt">int</span> C, <span class="kt">int</span> R&gt;          <span class="co"># C columns, R rows</span>
+Volume&lt;<span class="kt">int</span> X, <span class="kt">int</span> Y, <span class="kt">int</span> Z&gt;</code></pre></div>
+<ul><li>Backed internally by nested multidimensional arrays (<code>[[T, C], R]</code> for</li></ul>
+<p>  <code>Image</code>, three levels for <code>Volume</code>) — no new runtime representation   invented, this reuses the nesting that already parses and runs correctly   today, just wrapped in a named type instead of exposed as raw positional   nesting.</p>
+<ul><li>Element type <code>T</code> and the dimensions are both generic:</li></ul>
+<p>  <code>Image&lt;T, int C, int R&gt;</code> (parameter order to be settled — see &quot;Open   Questions&quot;).</p>
+<ul><li><strong>Precabled methods</strong>, replacing the hand-rolled index math seen in</li></ul>
+<p>  <code>TransposeKernel</code> above: <code>.width()</code>/<code>.height()</code> (<code>Image</code>), <code>.depth()</code>   (<code>Volume</code> also gets these two plus depth), <code>.at(c, r)</code>/<code>.at(x, y, z)</code> for   named-axis indexing instead of manually reconstructing <code>j * rows + i</code>.   Exact method surface is part of the implementation work, not fixed here.</p>
+<ul><li><em></em>Grid inference reads <code>C</code>/<code>R</code> (or <code>X</code>/<code>Y</code>/<code>Z</code>) directly off the field&#x27;s</li></ul>
+<p>  declared type<em></em>: <code>grid = (ceil(C/bx), ceil(R/by), 1)</code> for <code>Image</code>,   <code>(ceil(X/bx), ceil(Y/by), ceil(Z/bz))</code> for <code>Volume</code> — no separate   <code>Dimension</code> field to keep in sync, no manual <code>rows</code>/<code>cols</code> <code>int</code> fields,   no risk of the buffer&#x27;s actual length silently disagreeing with the   dimensions used to compute grid size.</p>
+<h3 id="relationship-to-surface">Relationship to <code>&#x27;surface</code></h3>
+<p><code>&#x27;surface</code> stays <strong>entirely separate, unchanged</strong> — it encodes a presentation-path constraint (how a pixel buffer reaches the screen, which differs by backend: direct on CUDA, blit-only on Metal/wgpu — see <code>gpu-display.md</code>), not just a 2D shape. <code>Image</code>/<code>Volume</code> are for compute buffers; they do not replace or subsume <code>&#x27;surface</code> in any way. A kernel that both computes into an <code>Image</code> and presents pixels would still use <code>&#x27;surface</code> + <code>screen.present()</code> for the presentation half, separately.</p>
+<h3 id="interaction-with-the-actor-qualifier-rename">Interaction with the <code>&#x27;actor</code> qualifier rename</h3>
+<p><code>actor-qualifier-unification.md</code>&#x27;s rename has already landed: <code>&#x27;sync</code> is now bare <code>&#x27;actor</code>, and <code>&#x27;actor&#x27;unified</code> exists alongside <code>&#x27;actor&#x27;global</code>. <code>Image&lt;C, R&gt;</code>/<code>Volume&lt;X, Y, Z&gt;</code> (still proposed, not implemented) need to compose with <strong>every</strong> qualifier a flat <code>[T]</code> field can carry today, including bare <code>&#x27;actor</code> (block-shared — only meaningful for <code>Image</code>/<code>Volume</code> fields sized to fit block-shared memory, likely a narrower case), <code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;const</code>, <code>&#x27;actor&#x27;unified</code>, and <code>&#x27;actor&#x27;global</code>. Concretely: <code>mut Image&lt;256, 256&gt;&#x27;actor&#x27;global histogram</code> should be as valid as today&#x27;s <code>mut [int]&#x27;actor&#x27;global counts</code>. Since this document doesn&#x27;t touch qualifier <em>semantics</em> (only field <em>shape</em>), the qualifier × field-type validation matrix (<code>gpu-module.md</code>) needs a final pass once <code>Image</code>/<code>Volume</code> land, to add them as a third field-shape category alongside today&#x27;s <code>[T]</code> dynamic and <code>[T, N]</code> fixed rows.</p>
+<h2 id="scope-of-impact">Scope of impact</h2>
+<ul><li><strong>Grammar/parser</strong>: <code>Image</code>/<code>Volume</code> as new recognized generic type</li></ul>
+<p>  names, parsed like any other built-in generic (<code>Type::Generic</code>), not a   new dedicated grammar production — closer to how <code>Dimension</code> is already   a plain named struct type than to a new syntax form.</p>
+<ul><li><strong>AST/checker</strong>: field-type validation matrix gains <code>Image</code>/<code>Volume</code> rows</li></ul>
+<p>  (per qualifier: which are legal, same shape as today&#x27;s <code>[T]</code>/<code>[T, N]</code>   rows in <code>gpu-module.md</code>).</p>
+<ul><li><strong>Device-side codegen</strong> (per backend <code>device.rs</code>): index-generation for</li></ul>
+<p>  <code>.at(c, r)</code>-style access needs to lower to the same flat-buffer address   arithmetic (<code>c + r * C</code>, row-major, or the equivalent for <code>Volume</code>) every   backend&#x27;s device code already does by hand today — this is mostly a   codegen convenience, not new addressing capability.</p>
+<ul><li><strong>Host-side codegen</strong> (per backend <code>host.rs</code>): grid-inference logic</li></ul>
+<p>  (<code>auto_grid_field</code>-equivalent, currently 1D-array-only — see   <code>cuda/host.rs:emit_boring_launch</code>) gains an <code>Image</code>/<code>Volume</code>-typed-field   branch computing a 2D/3D grid instead of the existing 1D   <code>ceil(n/block)</code>.</p>
+<ul><li><strong>Docs</strong>: <code>gpu-module.md</code> (new type section, qualifier matrix update),</li></ul>
+<p>  <code>cuda-module.md</code>/<code>rocm-backend.md</code>/<code>metal-backend.md</code>/<code>wgpu-backend.md</code>   (grid-inference rules section each maintains), <code>book.md</code>. <code>.md</code> + <code>.html</code>   mirrors throughout, per this repo&#x27;s convention.</p>
+<ul><li><strong>Tests</strong>: new codegen tests per backend for <code>Image</code>/<code>Volume</code>-typed</li></ul>
+<p>  fields (grid inference shape, method codegen), plus the qualifier-matrix   validation cases (legal/illegal combinations).</p>
+<h2 id="compatibility">Compatibility</h2>
+<p>Same situation as <code>actor-qualifier-unification.md</code>: no real Boring programs exist yet except <strong>whisper-boring</strong>. <code>math_gpu.br</code>&#x27;s <code>TransposeKernel</code> (<code>src=rows×cols</code> flat, <code>dst=cols×rows</code> flat, manual <code>i</code>/<code>j</code> derivation) is the concrete migration candidate and motivating example quoted above — not a blocker, since the flat-array form keeps working unchanged; migrating it to <code>Image&lt;C, R&gt;</code> is a natural follow-up once this lands, not a requirement to ship it.</p>
+<h2 id="open-questions">Open Questions</h2>
+<ol><li><strong>Generic parameter order</strong>: <code>Image&lt;T, C, R&gt;</code> vs <code>Image&lt;C, R, T&gt;</code> vs</li></ol>
+<p>   inferring <code>T</code> from the <code>init(...)</code> argument the way kernel struct fields    already do for plain arrays (<code>gpu-module.md</code>&#x27;s qualifier-inference    table) — needs a decision before implementation, not fixed here. 2. <strong>Row-major vs column-major storage</strong>: <code>Image</code>/<code>Volume</code> remove the    <em>naming</em> ambiguity nested arrays had, but the actual flat-buffer layout    (row-major assumed above) still needs to be picked and documented    explicitly — every backend&#x27;s device-code address arithmetic must agree. 3. <strong><code>&#x27;actor</code> (bare, block-shared) on <code>Image</code>/<code>Volume</code></strong>: block-shared    memory is small (<code>maxSharedMem()</code>, a few KB to tens of KB per block) —    does an <code>Image</code>/<code>Volume</code>-shaped <code>&#x27;actor</code> field need a compile-time check    that <code>C*R*sizeof(T)</code> (or <code>X*Y*Z*sizeof(T)</code>) actually fits, the same kind    of validation already missing for plain bare-<code>&#x27;actor</code> fields (see the    &quot;Block size validation at compile time&quot; known limitation in    <code>cuda-module.md</code>)? Worth deciding alongside that existing gap rather    than inventing a separate check. 4. <strong>Method surface</strong>: exact list of precabled methods beyond    <code>.width()</code>/<code>.height()</code>/<code>.depth()</code>/<code>.at(...)</code> — deferred to    implementation, not blocking the type/grid-inference design above.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

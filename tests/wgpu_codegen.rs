@@ -152,7 +152,7 @@ kernel Scale:
 fn test_sync_barrier_fixed_array() {
     let src = r#"
 kernel Tile:
-    let [float, 256]'sync tile
+    let [float, 256]'actor tile
     mut [float]'unified data
 
     def ():
@@ -196,6 +196,38 @@ kernel Histogram:
     assert!(wgsl.contains("atomic<i32>"), "missing atomic type in WGSL");
     assert!(wgsl.contains("atomicAdd"), "missing atomicAdd");
     assert!(rs.contains("COPY_SRC"), "actor global should have COPY_SRC");
+}
+
+#[test]
+fn test_actor_unified_atomic() {
+    let src = r#"
+kernel Histogram:
+    mut [int]'actor'unified counts
+    mut [int]'unified       data
+
+    def ():
+        let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
+        counts[data[i]] += 1
+"#;
+    let (wgsl, rs) = wgpu_codegen("actor_unified", src);
+
+    assert!(wgsl.contains("atomic<i32>"), "missing atomic type in WGSL");
+    assert!(wgsl.contains("atomicAdd"), "missing atomicAdd");
+    // Same storage-only usage as 'actor'global/'unified — MAP_READ/MAP_WRITE is
+    // never combined with the atomic<T> storage buffer itself; host access goes
+    // through the staging-buffer copy path instead (see
+    // `copy_counts_to_host`/`copy_counts_to_device`), which is what sidesteps the
+    // open question of whether WGSL even allows that combination.
+    let usage_line = "wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,";
+    assert!(rs.contains(usage_line),
+        "expected counts_buf's own creation to request only STORAGE|COPY_SRC|COPY_DST \
+         (no MAP_READ/MAP_WRITE on the atomic<T> buffer itself);\ngot:\n{rs}");
+    // Unlike 'actor'global, 'actor'unified is host-visible — it must get the
+    // same read-back/upload accessors 'unified fields get.
+    assert!(rs.contains("fn copy_counts_to_host"),
+        "expected a host-side copy_counts_to_host() accessor for 'actor'unified;\ngot:\n{rs}");
+    assert!(rs.contains("fn copy_counts_to_device"),
+        "expected a host-side copy_counts_to_device() accessor for 'actor'unified;\ngot:\n{rs}");
 }
 
 #[test]
