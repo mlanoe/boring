@@ -9,6 +9,8 @@ This document covers the **language syntax and semantics** shared by all backend
 - [`metal-backend.md`](metal-backend.html) — MSL address space mapping, Metal runtime compilation
 - [`wgpu-backend.md`](wgpu-backend.html) — WGSL mapping, pipeline overrides, cross-platform GPU support
 
+A `kernel` struct requires one of the four GPU targets above. The default `boring build` (`std` target) has no GPU backend at all: it emits a warning and drops the struct — along with its device code and any `k(...)`/`kernel:` dispatch that referenced it — instead of transpiling it. `boring build --target kernel` (Rust-for-Linux) rejects it outright as an error, since that target has no host/device split either.
+
 ---
 
 ## Quick start

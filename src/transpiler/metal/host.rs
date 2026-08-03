@@ -277,11 +277,7 @@ impl HostEmitter {
         for item in &program.items {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
-                    let is_scalar = matches!(val.kind,
-                        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
-                    ) || s.ty.as_ref().map(|t| matches!(t,
-                        Type::Int | Type::Uint | Type::Float | Type::Bool
-                    )).unwrap_or(false);
+                    let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                     if is_scalar {
                         let rhs = self.expr(val);
                         self.top_level_scalars.insert(s.name.clone(), rhs);
@@ -366,11 +362,7 @@ impl HostEmitter {
                                 self.track_kernel_var(&s.name, val);
                                 self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                                 let rhs = self.expr(val);
-                                let is_scalar = matches!(val.kind,
-                                    ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
-                                ) || s.ty.as_ref().map(|t| matches!(t,
-                                    Type::Int | Type::Uint | Type::Float | Type::Bool
-                                )).unwrap_or(false);
+                                let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                                 if is_scalar {
                                     self.top_level_scalars.insert(s.name.clone(), rhs.clone());
                                 }

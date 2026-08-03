@@ -4,7 +4,7 @@
 // MSL (Metal Shading Language) device code emitter.
 
 use crate::ast::*;
-use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal};
+use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal, reachable_free_fns};
 
 pub(super) fn emit_device_msl(program: &Program) -> String {
     let mut e = DeviceEmitter::new();
@@ -50,11 +50,7 @@ impl DeviceEmitter {
         for item in &program.items {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
-                    let is_scalar = matches!(val.kind,
-                        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
-                    ) || s.ty.as_ref().map(|t| matches!(t,
-                        Type::Int | Type::Uint | Type::Float | Type::Bool
-                    )).unwrap_or(false);
+                    let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                     if is_scalar {
                         let rhs = self.expr(val);
                         self.top_level_scalars.insert(s.name.clone(), rhs);
@@ -574,7 +570,19 @@ impl DeviceEmitter {
             ExprKind::Nil      => "0".into(),
             ExprKind::Void     => "".into(),
             ExprKind::Var(name) => {
-                self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                // A kernel field of the same name shadows the top-level scalar
+                // (e.g. `kernel Saxpy: let float alpha` vs. top-level `let alpha = 2.0`
+                // in examples/saxpy.br) -- the field is a real local/parameter in the
+                // generated device function, so it must win, not the outer literal.
+                // Previously unguarded: silently miscompiled `alpha * x[i] + y[i]` to
+                // always use the top-level literal instead of the runtime parameter --
+                // no compile error, just a wrong-value bug (confirmed via
+                // `boring build --target metal examples/saxpy.br`).
+                if self.current_fields.iter().any(|f| f.name == *name) {
+                    name.clone()
+                } else {
+                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
+                }
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
@@ -660,161 +668,6 @@ impl DeviceEmitter {
     }
 }
 
-// ── Reachability: which free functions does device code actually call? ────────
-
-/// Names of free (top-level, non-task, unqualified) functions transitively
-/// called from any kernel's device methods/entry point. Only these get
-/// emitted into the MSL device file — see call site's doc comment.
-fn reachable_free_fns(program: &Program) -> std::collections::HashSet<String> {
-    use std::collections::HashMap;
-
-    let free_fn_bodies: HashMap<&str, &[Stmt]> = program.items.iter().filter_map(|item| {
-        if let Item::Fn(decl) = item {
-            if decl.qualifier.is_none() && !decl.task {
-                return Some((decl.name.as_str(), decl.body.as_slice()));
-            }
-        }
-        None
-    }).collect();
-
-    let mut worklist: Vec<String> = Vec::new();
-    for item in &program.items {
-        if let Item::Kernel(decl) = item {
-            for method in &decl.methods {
-                collect_called_names(&method.body, &mut worklist);
-            }
-        }
-    }
-
-    let mut reachable = std::collections::HashSet::new();
-    while let Some(name) = worklist.pop() {
-        if !reachable.insert(name.clone()) { continue; }
-        if let Some(body) = free_fn_bodies.get(name.as_str()) {
-            collect_called_names(body, &mut worklist);
-        }
-    }
-    reachable
-}
-
-fn collect_called_names(stmts: &[Stmt], out: &mut Vec<String>) {
-    for stmt in stmts { collect_called_names_stmt(stmt, out); }
-}
-
-fn collect_called_names_stmt(stmt: &Stmt, out: &mut Vec<String>) {
-    match stmt {
-        Stmt::Let(s) => { if let Some(v) = &s.value { collect_called_names_expr(v, out); } }
-        Stmt::Return(r) => { if let Some(v) = &r.value { collect_called_names_expr(v, out); } }
-        Stmt::Expr(e) => collect_called_names_expr(e, out),
-        Stmt::Throw(t) => { if let Some(v) = &t.value { collect_called_names_expr(v, out); } }
-        Stmt::Break(_, v) => { if let Some(v) = v { collect_called_names_expr(v, out); } }
-        Stmt::Wait(e, _) | Stmt::Yield(e, _) => collect_called_names_expr(e, out),
-        Stmt::If(i) => {
-            for (cond, body) in &i.branches {
-                collect_called_names_expr(cond, out);
-                collect_called_names(body, out);
-            }
-            if let Some(b) = &i.else_body { collect_called_names(b, out); }
-        }
-        Stmt::While(w) => { collect_called_names_expr(&w.condition, out); collect_called_names(&w.body, out); }
-        Stmt::DoWhile(d) => { collect_called_names_expr(&d.condition, out); collect_called_names(&d.body, out); }
-        Stmt::Loop(l) => collect_called_names(&l.body, out),
-        Stmt::For(f) => { collect_called_names_expr(&f.iterable, out); collect_called_names(&f.body, out); }
-        Stmt::Try(t) => {
-            collect_called_names(&t.body, out);
-            for c in &t.catch_clauses { collect_called_names(&c.body, out); }
-        }
-        Stmt::Defer(body) => collect_called_names(body, out),
-        Stmt::Match(m) => {
-            collect_called_names_expr(&m.subject, out);
-            for arm in &m.arms {
-                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
-                match &arm.body {
-                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
-                    MatchBody::Block(body) => collect_called_names(body, out),
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
-    match &expr.kind {
-        ExprKind::Call(callee, args) => {
-            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
-            collect_called_names_expr(callee, out);
-            for a in args { collect_called_names_expr(&a.value, out); }
-        }
-        ExprKind::GenericCall(callee, _, args) => {
-            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
-            collect_called_names_expr(callee, out);
-            for a in args { collect_called_names_expr(&a.value, out); }
-        }
-        ExprKind::Pipe(lhs, name, args) => {
-            out.push(name.clone());
-            collect_called_names_expr(lhs, out);
-            for a in args { collect_called_names_expr(&a.value, out); }
-        }
-        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
-            collect_called_names_expr(obj, out);
-            for a in args { collect_called_names_expr(&a.value, out); }
-        }
-        ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
-        | ExprKind::Index(l, r) | ExprKind::Else(l, r) => {
-            collect_called_names_expr(l, out);
-            collect_called_names_expr(r, out);
-        }
-        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) | ExprKind::Cast(e, _)
-        | ExprKind::OptionalField(e, _) => collect_called_names_expr(e, out),
-        ExprKind::If(i) => {
-            for (cond, body) in &i.branches {
-                collect_called_names_expr(cond, out);
-                collect_called_names(body, out);
-            }
-            if let Some(b) = &i.else_body { collect_called_names(b, out); }
-        }
-        ExprKind::Match(m) => {
-            collect_called_names_expr(&m.subject, out);
-            for arm in &m.arms {
-                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
-                match &arm.body {
-                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
-                    MatchBody::Block(body) => collect_called_names(body, out),
-                }
-            }
-        }
-        ExprKind::Block(body) | ExprKind::Do(body) => collect_called_names(body, out),
-        ExprKind::Array(items) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
-            for e in items { collect_called_names_expr(e, out); }
-        }
-        ExprKind::ArrayFill { value, count } => {
-            collect_called_names_expr(value, out);
-            collect_called_names_expr(count, out);
-        }
-        ExprKind::ArrayAlloc { count } => collect_called_names_expr(count, out),
-        ExprKind::ArrayComp { expr, count, .. } => {
-            collect_called_names_expr(expr, out);
-            collect_called_names_expr(count, out);
-        }
-        ExprKind::ArrayCompIter { expr, iter, .. } => {
-            collect_called_names_expr(expr, out);
-            collect_called_names_expr(iter, out);
-        }
-        ExprKind::Dict(pairs) => {
-            for (k, v) in pairs { collect_called_names_expr(k, out); collect_called_names_expr(v, out); }
-        }
-        ExprKind::Range { start, end, .. } => {
-            collect_called_names_expr(start, out);
-            collect_called_names_expr(end, out);
-        }
-        ExprKind::SliceRange { start, end, .. } => {
-            if let Some(s) = start { collect_called_names_expr(s, out); }
-            if let Some(e) = end { collect_called_names_expr(e, out); }
-        }
-        ExprKind::TryElse(a, b) => { collect_called_names_expr(a, out); collect_called_names_expr(b, out); }
-        _ => {}
-    }
-}
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 

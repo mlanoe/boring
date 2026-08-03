@@ -110,11 +110,7 @@ impl DeviceEmitter {
         for item in &program.items {
             if let Item::Let(s) = item {
                 if let Some(val) = &s.value {
-                    let is_scalar = matches!(val.kind,
-                        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)
-                    ) || s.ty.as_ref().map(|t| matches!(t,
-                        Type::Int | Type::Uint | Type::Float | Type::Bool
-                    )).unwrap_or(false);
+                    let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                     if is_scalar {
                         let rhs = self.expr(val);
                         self.top_level_scalars.insert(s.name.clone(), rhs);
@@ -952,6 +948,17 @@ impl DeviceEmitter {
                 // matching the params-uniform variable's existing `{kernel}_params` naming.
                 if let Some(prefixed) = self.current_buffer_renames.get(name) {
                     prefixed.clone()
+                } else if self.current_fields.iter().any(|f| f.name == *name) {
+                    // A kernel field of the same name shadows the top-level scalar
+                    // (e.g. `kernel Saxpy: let float alpha` vs. top-level `let alpha
+                    // = 2.0` in examples/saxpy.br) -- the field is unpacked into a
+                    // real local (`let alpha: f32 = params.alpha;`) above, so it must
+                    // win, not the outer literal. Previously unguarded: silently
+                    // miscompiled `alpha * x[i] + y[i]` to always use the top-level
+                    // literal instead of the runtime parameter -- no compile error,
+                    // just a wrong-value bug (confirmed via `boring build --target
+                    // wgpu examples/saxpy.br`).
+                    name.clone()
                 } else {
                     self.top_level_scalars.get(name).cloned().unwrap_or_else(|| name.clone())
                 }

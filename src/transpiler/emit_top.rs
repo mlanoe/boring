@@ -69,7 +69,23 @@ impl Transpiler {
                 }
             }
             Item::Stmt(s)   => self.emit_stmt(s, false),
-            Item::Kernel(_) => { /* GPU kernel transpilation — not yet implemented */ }
+            // Real GPU targets (cuda/metal/wgpu/rocm) never reach this arm for their
+            // kernels: `is_gpu_target` configs emit device code through their own
+            // separate pipeline (see e.g. `transpiler::wgpu::transpile_wgpu`) and only
+            // splice this transpiler's *host* Rust in around it. Reaching here with
+            // `is_gpu_target` false means the `std` target -- which has no GPU backend
+            // at all -- silently dropped the whole kernel struct, along with its device
+            // code and any `k(...)`/`kernel:` dispatch that referenced it.
+            Item::Kernel(k) => {
+                if !self.is_gpu_target {
+                    self.push_warning(k.line, k.col, format!(
+                        "GPU kernel '{}' has no effect under the 'std' transpile target and is dropped \
+                         entirely -- build with `--target cuda`, `--target metal`, `--target wgpu`, or \
+                         `--target rocm` to emit its device code",
+                        k.name
+                    ));
+                }
+            }
         }
     }
 

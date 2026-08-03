@@ -531,7 +531,37 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// Unary (`-`/`!`/`~`) binds tighter than range (`..`/`..=`), matching Rust:
+    /// `-1..2` is `(-1)..2`, not `-(1..2)`. So parse the full unary chain first
+    /// via `parse_unary_no_range`, then attach a trailing range at this level —
+    /// one layer above unary, below `parse_mul`.
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let line = self.line();
+        let col = self.col();
+        let start = self.parse_unary_no_range()?;
+        match self.peek() {
+            TokenKind::DotDot | TokenKind::DotDotEq => {
+                let inclusive = self.peek() == &TokenKind::DotDotEq;
+                self.advance();
+                // `M..` inside `[M..]` — open-ended slice (next token is `]`)
+                if self.check(&TokenKind::RBracket) {
+                    Ok(Expr {
+                        kind: ExprKind::SliceRange { start: Some(Box::new(start)), end: None, inclusive },
+                        line, col, len: self.tok_len(),
+                    })
+                } else {
+                    let end = self.parse_unary_no_range()?;
+                    Ok(Expr {
+                        kind: ExprKind::Range { start: Box::new(start), end: Box::new(end), inclusive },
+                        line, col, len: self.tok_len(),
+                    })
+                }
+            }
+            _ => Ok(start),
+        }
+    }
+
+    fn parse_unary_no_range(&mut self) -> Result<Expr, ParseError> {
         let line = self.line();
         let col = self.col();
         match self.peek().clone() {
@@ -552,7 +582,7 @@ impl Parser {
                         msg: format!("expression nested too deeply (limit: {})", crate::parser::MAX_EXPR_DEPTH), len: self.tok_len(),
                     });
                 }
-                let expr = self.parse_unary();
+                let expr = self.parse_unary_no_range();
                 self.depth -= 1;
                 Ok(Expr { kind: ExprKind::UnaryOp(op, Box::new(expr?)), line, col, len: self.tok_len()})
             }
@@ -731,30 +761,6 @@ impl Parser {
                     self.advance();
                     let ty = self.parse_type()?;
                     expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line, col, len: self.tok_len()};
-                }
-                TokenKind::DotDot | TokenKind::DotDotEq => {
-                    let inclusive = self.peek() == &TokenKind::DotDotEq;
-                    self.advance();
-                    // `M..` inside `[M..]` — open-ended slice (next token is `]`)
-                    if self.check(&TokenKind::RBracket) {
-                        expr = Expr {
-                            kind: ExprKind::SliceRange {
-                                start: Some(Box::new(expr)),
-                                end: None,
-                                inclusive,
-                            },
-                            line, col, len: self.tok_len(),
-                        };
-                    } else {
-                        let end = self.parse_postfix_inner(false)?;
-                        expr = Expr {
-                            kind: ExprKind::Range {
-                                start: Box::new(expr),
-                                end: Box::new(end),
-                                inclusive,
-                            },
-                            line, col, len: self.tok_len(), };
-                    }
                 }
                 TokenKind::Ident(_) if self.peek_is_trailing_closure_no_paren() => {
                     // `expr x: body` — single-param trailing closure without parens

@@ -1,5 +1,78 @@
 use super::*;
 
+/// Boring's built-in numeric methods (`x.exp()`, `x.sqrt()`, `x.tanh()`, ...) as
+/// CUDA C / HIP C++ device code -- both toolchains expose the same standard C
+/// math library function names in device code (`sqrt`, `exp`, `tanh`, etc.), so
+/// this is shared verbatim between the two backends. Mirrors `metal::device`'s
+/// `float_unary_method_msl`, adapted to C names (`fabs` not `abs`, no Metal-only
+/// `M_PI_F`/`M_E_F` macros -- literal constants instead, portable across both).
+/// Returns `None` for anything that isn't one of Boring's built-in float methods,
+/// so callers can fall through to their own "unsupported method" marker.
+///
+/// Without this, `(v + 1e-5).sqrt()`-style method-call syntax (as opposed to the
+/// free-function form `sqrt(v + 1e-5)`, already handled by `map_builtin_fn`) fell
+/// through to the generic "no C equivalent" marker, which -- unlike a marker on a
+/// full statement -- silently produced a syntactically invalid *expression*
+/// (`const auto e = /* unsupported: ... */;`, missing a value between `=` and
+/// `;`). Confirmed via whisper-boring's `src/math_gpu.br` (softmax's `.exp()`,
+/// layernorm's `.sqrt()`, gelu's `.tanh()`) targeting `--target cuda`.
+pub(crate) fn float_unary_method_c(method: &str, obj: &str, args: &[String]) -> Option<String> {
+    let simple = match method {
+        "sqrt" => "sqrt", "cbrt" => "cbrt", "abs" => "fabs",
+        "floor" => "floor", "ceil" => "ceil", "round" => "round",
+        "exp" => "exp", "exp2" => "exp2", "ln" => "log",
+        "log2" => "log2", "log10" => "log10",
+        "sin" => "sin", "cos" => "cos", "tan" => "tan",
+        "asin" => "asin", "acos" => "acos", "atan" => "atan",
+        "sinh" => "sinh", "cosh" => "cosh", "tanh" => "tanh",
+        _ => "",
+    };
+    if !simple.is_empty() {
+        return Some(format!("{}({})", simple, obj));
+    }
+    match method {
+        "pow" | "powf" => {
+            let exp = args.first().cloned().unwrap_or_else(|| "1.0".into());
+            Some(format!("pow({}, {})", obj, exp))
+        }
+        "log" => {
+            let base = args.first().cloned().unwrap_or_else(|| "2.718281828459045".into());
+            Some(format!("(log({}) / log({}))", obj, base))
+        }
+        "atan2" => {
+            let other = args.first().cloned().unwrap_or_else(|| "0.0".into());
+            Some(format!("atan2({}, {})", obj, other))
+        }
+        "signum" => Some(format!("copysign(1.0, {})", obj)),
+        "recip"  => Some(format!("(1.0 / {})", obj)),
+        "toRadians" => Some(format!("({} * (3.14159265358979323846 / 180.0))", obj)),
+        "toDegrees" => Some(format!("({} * (180.0 / 3.14159265358979323846))", obj)),
+        _ => None,
+    }
+}
+
+/// True when the RHS of a top-level `let name = val` (with optional type
+/// annotation `ty`) is a scalar constant suitable for inlining into GPU device/host
+/// code as a `top_level_scalars` entry (see that field's doc across the
+/// cuda/rocm/metal/wgpu backends' host.rs/device.rs). Handles unary-negated literals
+/// (`let x_min = -2.0`) -- a bare `Int(_)|Float(_)|Bool(_)` check on `val.kind` misses
+/// these, since unary minus wraps the literal in `UnaryOp(Neg, ...)`, not a literal
+/// itself. Confirmed via examples/mandelbrot_gpu.br's `let x_min = -2.0` / `let y_min
+/// = -1.5`: silently failed to inline, reaching generated CUDA device code as
+/// undefined identifiers (`x_min`, `y_min`) while the positive constants on the same
+/// lines (`x_max`, `y_max`, `width`, `height`) inlined fine.
+pub(crate) fn is_scalar_let_value(val: &Expr, ty: Option<&Type>) -> bool {
+    fn is_scalar_literal(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => is_scalar_literal(inner),
+            _ => false,
+        }
+    }
+    is_scalar_literal(val)
+        || ty.map(|t| matches!(t, Type::Int | Type::Uint | Type::Float | Type::Bool)).unwrap_or(false)
+}
+
 /// Rust source for boring's built-in `Dimension` type, used by 2-D kernels.
 /// Emitted verbatim by both the cuda and metal host backends.
 pub(crate) const DIMENSION_STRUCT_RUST: &str =
@@ -1551,5 +1624,172 @@ fn strip_qual_helper(ty: &Type) -> &Type {
     match ty {
         Type::Qualified(inner, _) => strip_qual_helper(inner),
         other => other,
+    }
+}
+
+// ── Reachability: which free functions does device code actually call? ────────
+//
+// Shared by cuda/rocm/metal's device emitters. Free functions are ordinary
+// Boring functions shared with the host (CPU) build, and routinely use
+// dynamic-array / heap constructs (`[float]` growable arrays, `.push`, string
+// formatting, etc.) that have no device-C equivalent. Emitting every free
+// function unconditionally -- regardless of whether any kernel calls it --
+// makes the generated device file fail to compile as soon as the program has
+// ANY host-only helper with this shape, even if no kernel ever touches it
+// (confirmed for a plain CLI example with zero kernels at all). Restrict
+// emission to the transitive closure of functions called from kernel entry
+// points/methods instead.
+
+/// Names of free (top-level, non-task, unqualified) functions transitively
+/// called from any kernel's device methods/entry point. Only these should be
+/// emitted into the device file.
+pub(crate) fn reachable_free_fns(program: &Program) -> std::collections::HashSet<String> {
+    use std::collections::HashMap;
+
+    let free_fn_bodies: HashMap<&str, &[Stmt]> = program.items.iter().filter_map(|item| {
+        if let Item::Fn(decl) = item {
+            if decl.qualifier.is_none() && !decl.task {
+                return Some((decl.name.as_str(), decl.body.as_slice()));
+            }
+        }
+        None
+    }).collect();
+
+    let mut worklist: Vec<String> = Vec::new();
+    for item in &program.items {
+        if let Item::Kernel(decl) = item {
+            for method in &decl.methods {
+                collect_called_names(&method.body, &mut worklist);
+            }
+        }
+    }
+
+    let mut reachable = std::collections::HashSet::new();
+    while let Some(name) = worklist.pop() {
+        if !reachable.insert(name.clone()) { continue; }
+        if let Some(body) = free_fn_bodies.get(name.as_str()) {
+            collect_called_names(body, &mut worklist);
+        }
+    }
+    reachable
+}
+
+fn collect_called_names(stmts: &[Stmt], out: &mut Vec<String>) {
+    for stmt in stmts { collect_called_names_stmt(stmt, out); }
+}
+
+fn collect_called_names_stmt(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Let(s) => { if let Some(v) = &s.value { collect_called_names_expr(v, out); } }
+        Stmt::Return(r) => { if let Some(v) = &r.value { collect_called_names_expr(v, out); } }
+        Stmt::Expr(e) => collect_called_names_expr(e, out),
+        Stmt::Throw(t) => { if let Some(v) = &t.value { collect_called_names_expr(v, out); } }
+        Stmt::Break(_label, v) => { if let Some(v) = v { collect_called_names_expr(v, out); } }
+        Stmt::Wait(e, _) | Stmt::Yield(e, _) => collect_called_names_expr(e, out),
+        Stmt::If(i) => {
+            for (cond, body) in &i.branches {
+                collect_called_names_expr(cond, out);
+                collect_called_names(body, out);
+            }
+            if let Some(b) = &i.else_body { collect_called_names(b, out); }
+        }
+        Stmt::While(w) => { collect_called_names_expr(&w.condition, out); collect_called_names(&w.body, out); }
+        Stmt::DoWhile(d) => { collect_called_names_expr(&d.condition, out); collect_called_names(&d.body, out); }
+        Stmt::Loop(l) => collect_called_names(&l.body, out),
+        Stmt::For(f) => { collect_called_names_expr(&f.iterable, out); collect_called_names(&f.body, out); }
+        Stmt::Try(t) => {
+            collect_called_names(&t.body, out);
+            for c in &t.catch_clauses { collect_called_names(&c.body, out); }
+        }
+        Stmt::Defer(body) => collect_called_names(body, out),
+        Stmt::Match(m) => {
+            collect_called_names_expr(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
+                    MatchBody::Block(body) => collect_called_names(body, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
+    match &expr.kind {
+        ExprKind::Call(callee, args) => {
+            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
+            collect_called_names_expr(callee, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::GenericCall(callee, _, args) => {
+            if let ExprKind::Var(name) = &callee.kind { out.push(name.clone()); }
+            collect_called_names_expr(callee, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::Pipe(lhs, name, args) => {
+            out.push(name.clone());
+            collect_called_names_expr(lhs, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+            collect_called_names_expr(obj, out);
+            for a in args { collect_called_names_expr(&a.value, out); }
+        }
+        ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
+        | ExprKind::Index(l, r) | ExprKind::Else(l, r) => {
+            collect_called_names_expr(l, out);
+            collect_called_names_expr(r, out);
+        }
+        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) | ExprKind::Cast(e, _)
+        | ExprKind::OptionalField(e, _) => collect_called_names_expr(e, out),
+        ExprKind::If(i) => {
+            for (cond, body) in &i.branches {
+                collect_called_names_expr(cond, out);
+                collect_called_names(body, out);
+            }
+            if let Some(b) = &i.else_body { collect_called_names(b, out); }
+        }
+        ExprKind::Match(m) => {
+            collect_called_names_expr(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { collect_called_names_expr(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => collect_called_names_expr(e, out),
+                    MatchBody::Block(body) => collect_called_names(body, out),
+                }
+            }
+        }
+        ExprKind::Block(body) | ExprKind::Do(body) => collect_called_names(body, out),
+        ExprKind::Array(items) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
+            for e in items { collect_called_names_expr(e, out); }
+        }
+        ExprKind::ArrayFill { value, count } => {
+            collect_called_names_expr(value, out);
+            collect_called_names_expr(count, out);
+        }
+        ExprKind::ArrayAlloc { count } => collect_called_names_expr(count, out),
+        ExprKind::ArrayComp { expr, count, .. } => {
+            collect_called_names_expr(expr, out);
+            collect_called_names_expr(count, out);
+        }
+        ExprKind::ArrayCompIter { expr, iter, .. } => {
+            collect_called_names_expr(expr, out);
+            collect_called_names_expr(iter, out);
+        }
+        ExprKind::Dict(pairs) => {
+            for (k, v) in pairs { collect_called_names_expr(k, out); collect_called_names_expr(v, out); }
+        }
+        ExprKind::Range { start, end, .. } => {
+            collect_called_names_expr(start, out);
+            collect_called_names_expr(end, out);
+        }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { collect_called_names_expr(s, out); }
+            if let Some(e) = end { collect_called_names_expr(e, out); }
+        }
+        ExprKind::TryElse(a, b) => { collect_called_names_expr(a, out); collect_called_names_expr(b, out); }
+        _ => {}
     }
 }

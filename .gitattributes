@@ -2,3 +2,10 @@
 # Boring is inspired by Swift and Python; Swift gives the best keyword coverage
 # (let, var, guard, struct, throws, defer, nil, etc.).
 *.br linguist-language=Swift
+
+# Shell scripts must stay LF -- a `#!/usr/bin/env bash` shebang breaks
+# ("bash\r: No such file or directory") the moment CRLF reaches a Linux
+# container (e.g. tools/docker-nvcc-check mounts the repo straight into
+# a Docker Linux image). Without this, Windows' core.autocrlf=true keeps
+# re-introducing CRLF on every checkout, silently undoing any one-off fix.
+*.sh text eol=lf

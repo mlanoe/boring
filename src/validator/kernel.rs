@@ -853,7 +853,24 @@ impl KernelValidator {
             Item::Alias(a) => self.check_alias(a),
             Item::Stmt(s) => self.check_stmt(s),
             Item::Use(_) => {}
-            Item::Kernel(k) => self.check_kernel(k),
+            Item::Kernel(k) => {
+                // GPU kernels have no meaning under the Rust-for-Linux target: there is no
+                // host/device split here (unlike cuda/metal/wgpu/rocm, which emit device
+                // code through a completely separate pipeline and never reach the kernel
+                // transpiler's `Item::Kernel` arm at all). The kernel transpiler silently
+                // drops the struct (see `transpiler::kernel::emit_top::emit_item`), so
+                // without this check a program with a `kernel Foo:` block would transpile
+                // and build cleanly while losing the kernel and any `k(...)`/`kernel:`
+                // dispatch that referenced it -- surfacing only as a broken Rust reference,
+                // if at all, once the generated crate is compiled.
+                self.error(k.line, format!(
+                    "GPU kernel '{}' is not supported on the Rust-for-Linux kernel target -- \
+                     GPU kernels require `boring build --target cuda`, `--target metal`, \
+                     `--target wgpu`, or `--target rocm`",
+                    k.name
+                ));
+                self.check_kernel(k);
+            }
         }
     }
 

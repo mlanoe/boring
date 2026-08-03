@@ -307,6 +307,7 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 | `float`, floating-point math | FPU disabled |
 | `panic(…)` | kernel oops/crash — use `throws` / `Result` |
 | `task def` on `self` with `T&`, `T&mut`, `T'` | lifetime incompatible with a work item |
+| `kernel Foo: ...` (GPU kernel struct) | no host/device split under `no_std` — GPU kernels require `--target cuda`, `--target metal`, `--target wgpu`, or `--target rocm` |
 
 **Warnings** — emitted, but explicit specification is recommended:
 
