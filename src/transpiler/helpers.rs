@@ -131,6 +131,65 @@ pub(crate) fn image_volume_grid_dim_expr(dims: &[Type]) -> String {
     format!("({}, {}, {})", axis_expr(0), axis_expr(1), axis_expr(2))
 }
 
+/// Phase 6 of docs/image-volume-types.md's dynamic-shape extension: grid
+/// inference for a *desugared* dynamic-shape `Image<T>`/`Volume<T>` field.
+///
+/// By the time any backend's codegen runs, `desugar::desugar_image_volume`
+/// has already rewritten a dynamic-shape field into a plain buffer field plus
+/// `__{field}_w`/`_h`[/`_d`] shadow fields (see that module's doc comment) —
+/// so there is no `Type::Generic("Image"|"Volume", _)` left to recognize via
+/// `as_image_volume` here. This function detects the desugaring's naming
+/// convention instead: if `all_fields` contains siblings named
+/// `__{field_name}_w` and `__{field_name}_h` (and optionally `_d`), returns
+/// their names in `[w, h[, d]]` order — the caller then knows to build a
+/// runtime 2D/3D grid expression instead of falling back to the plain 1D
+/// `self.{field}.len()`-based inference every dynamic `[T]` field otherwise
+/// gets (see `cuda/host.rs`'s `auto_grid_field`). `None` for a genuinely
+/// plain dynamic array with no such shadow siblings.
+pub(crate) fn desugared_image_volume_shadow_fields(field_name: &str, all_fields: &[KernelFieldDecl]) -> Option<Vec<String>> {
+    let shadow = |suffix: &str| -> Option<String> {
+        let name = format!("__{field_name}_{suffix}");
+        all_fields.iter().any(|f| f.name == name).then_some(name)
+    };
+    let w = shadow("w")?;
+    let h = shadow("h")?;
+    let mut out = vec![w, h];
+    if let Some(d) = shadow("d") {
+        out.push(d);
+    }
+    Some(out)
+}
+
+/// The three ceil-div grid-axis expressions for a desugared dynamic-shape
+/// field's shadow fields (see `desugared_image_volume_shadow_fields`),
+/// reading each shadow's *runtime* value through `{receiver}.{shadow}`
+/// instead of a `ConstInt` literal — the one real difference from
+/// `image_volume_grid_dim_expr`'s fixed-shape formula, which this otherwise
+/// mirrors exactly (same ceil-div shape, same "missing axis defaults to 1").
+///
+/// `receiver` is `"self"` for CUDA/ROCm/Metal's `__boring_launch` method
+/// context (reading a sibling field on the same struct) or a kernel-instance
+/// variable name for wgpu's dispatch-call-site context (`transpiler::
+/// emit_kernel`'s `try_emit_kernel_dispatch`, which computes the grid at the
+/// `kernel: k(...)` call site itself, not inside a method on `k`'s type) —
+/// see that module for why wgpu's shape differs from the other three.
+/// `block_axes` are the three block-dim expressions to ceil-divide against,
+/// in `[x, y, z]` order (`["block_dim.0", "block_dim.1", "block_dim.2"]` for
+/// CUDA/ROCm/Metal's `(u32,u32,u32)` struct field; the dispatch call's own
+/// per-axis `block=` arg expressions for wgpu).
+pub(crate) fn shadow_grid_axes(receiver: &str, shadows: &[String], block_axes: [&str; 3]) -> (String, String, String) {
+    let axis_expr = |i: usize| -> String {
+        match shadows.get(i) {
+            Some(s) => {
+                let ax = block_axes[i];
+                format!("((({receiver}.{s}) as u32 + ({ax}) - 1) / ({ax}))")
+            }
+            None => "1".to_string(),
+        }
+    };
+    (axis_expr(0), axis_expr(1), axis_expr(2))
+}
+
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
     // Subscript access on a collection yields an element, not a collection.
     // E.g. `arr.collect::<Vec<_>>()[0].clone()` is a scalar, not a Vec.

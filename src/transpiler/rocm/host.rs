@@ -20,7 +20,7 @@
 // of re-deriving the whole AST→Rust pipeline from scratch.
 
 use crate::ast::*;
-use crate::transpiler::helpers::image_volume_grid_dim_expr;
+use crate::transpiler::helpers::{image_volume_grid_dim_expr, desugared_image_volume_shadow_fields, shadow_grid_axes};
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -1299,6 +1299,9 @@ impl HostEmitter {
             self.indent += 1;
             if let Some((_, dims)) = field.ty.as_image_volume() {
                 self.line(&image_volume_grid_dim_expr(dims));
+            } else if let Some(shadows) = desugared_image_volume_shadow_fields(&field.name, fields) {
+                let (gx, gy, gz) = shadow_grid_axes("self", &shadows, ["block_dim.0", "block_dim.1", "block_dim.2"]);
+                self.line(&format!("({gx}, {gy}, {gz})"));
             } else {
                 self.line(&format!("let n = self.{}.len() as u32;", field.name));
                 self.line("((n + block_dim.0 - 1) / block_dim.0, 1, 1)");

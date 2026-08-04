@@ -652,6 +652,26 @@ impl Transpiler {
                 }
             };
             (axis(0, &bx), axis(1, &by), axis(2, &bz))
+        } else if let Some(shadows) = self.image_volume_dispatch_field_shadows(var_name) {
+            // Desugared dynamic-shape Image/Volume: shadow fields carry
+            // width/height(/depth) at runtime — see
+            // docs/image-volume-types.md's Phase 6. Same `block=` extraction
+            // as the fixed-shape branch above (wgpu computes the grid at this
+            // dispatch call site, not inside a method on the kernel type, so
+            // there's no `self.field` context to read the shadow through —
+            // `shadow_grid_axes` reads it via the kernel variable instead).
+            let (bx, by, bz) = if let Some(b) = args.iter().find(|a| a.label.as_deref() == Some("block")) {
+                match &b.value.kind {
+                    ExprKind::Tuple(elems) => {
+                        let get = |i: usize| elems.get(i).map(|e| self.emit_expr(e)).unwrap_or_else(|| "1".into());
+                        (get(0), get(1), get(2))
+                    }
+                    _ => (self.emit_expr(&b.value), "1".to_string(), "1".to_string()),
+                }
+            } else {
+                ("1".to_string(), "1".to_string(), "1".to_string())
+            };
+            shadow_grid_axes(var_name, &shadows, [bx.as_str(), by.as_str(), bz.as_str()])
         } else {
             ("1".to_string(), "1".to_string(), "1".to_string())
         };
@@ -668,6 +688,23 @@ impl Transpiler {
             .find(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
                 && f.ty.as_image_volume().is_some())
             .and_then(|f| f.ty.as_image_volume().map(|(_, dims)| dims.to_vec()))
+    }
+
+    /// Sibling of `image_volume_dispatch_field_dims` for the *desugared*
+    /// dynamic-shape case (see docs/image-volume-types.md's Phase 6 and
+    /// `transpiler::helpers::desugared_image_volume_shadow_fields`'s doc
+    /// comment) — by the time this runs, a dynamic-shape field is just a
+    /// plain buffer field plus `__{field}_w`/`_h`[/`_d`] shadow fields, so
+    /// this detects the naming convention on a `'unified`/`'global`/
+    /// `'actor'global`/`'actor'unified` array field instead of matching
+    /// `as_image_volume` (which no longer recognizes it post-desugar).
+    fn image_volume_dispatch_field_shadows(&self, var_name: &str) -> Option<Vec<String>> {
+        let kname = self.kernel_vars.get(var_name)?;
+        let decl = self.kernel_decls.get(kname)?;
+        decl.fields.iter()
+            .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+            .find_map(|f| crate::transpiler::helpers::desugared_image_volume_shadow_fields(&f.name, &decl.fields))
     }
 
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked

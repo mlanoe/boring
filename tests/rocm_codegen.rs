@@ -1012,6 +1012,26 @@ kernel Img:
         "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
 }
 
+// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
+// docs/image-volume-types.md) ────────────────────────────────────────────────
+
+#[test]
+fn host_dynamic_image_field_infers_2d_grid_from_shadow_fields() {
+    let (_, rs) = rocm_codegen("dynamic_image_2d_grid", r#"
+kernel Img:
+    mut Image<float>'unified img
+    init([float]'unified data, int w, int h):
+        img = Image(data, w, h)
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("self.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
+    assert!(!rs.contains("self.img.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
+}
+
 #[test]
 fn kernel_field_image_bare_unified_is_valid() {
     // Unlike `[T,N]'unified`, Image/Volume behave like dynamic `[T]'unified`

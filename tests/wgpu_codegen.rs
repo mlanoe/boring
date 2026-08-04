@@ -1309,6 +1309,36 @@ kernel:
         "expected the kernel: block with no explicit grid= to default gx/gy from Image's C/R and the block= size;\ngot:\n{rs}");
 }
 
+// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
+// docs/image-volume-types.md) ────────────────────────────────────────────────
+//
+// Unlike CUDA/ROCm/Metal (grid computed inside a method on the kernel type,
+// reading a sibling field via `self.`), wgpu computes the grid at the
+// `kernel: k(...)` dispatch call site itself — so the shadow field is read
+// through the kernel *variable* (`k.__img_w`), not `self.__img_w`.
+
+#[test]
+fn host_dynamic_image_field_dispatch_infers_2d_grid_from_shadow_fields() {
+    let src = r#"
+kernel Img:
+    mut Image<float>'unified img
+    init([float]'unified data, int w, int h):
+        img = Image(data, w, h)
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+
+let data = [0.0]
+mut k = Img(data, 16, 32)
+kernel:
+    k(block = (8, 8, 1))
+"#;
+    let (_wgsl, rs) = wgpu_codegen("dynamic_image_2d_grid", src);
+    assert!(rs.contains("k.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("k.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
+}
+
 #[test]
 fn host_device_installs_on_uncaptured_error_handler() {
     // Pipeline creation (`emit_kernel_new`, inside a `PIPELINE.get_or_init` closure

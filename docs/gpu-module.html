@@ -210,12 +210,33 @@ print k.buf[<span class="nb">0</span>]</code></pre></div>
 <p><strong>Invalid combinations</strong> — parse errors:</p>
 <table><thead><tr><th>Combination</th><th>Error</th></tr></thead><tbody><tr><td><code>[T]&#x27;local</code></td><td>Dynamic arrays cannot be thread-local on GPU</td></tr><tr><td><code>[T]&#x27;const</code></td><td>Constant cache requires a compile-time size — use <code>[T, N]</code></td></tr><tr><td><code>[T, N]&#x27;unified</code></td><td>Fixed arrays cannot use <code>&#x27;unified</code></td></tr><tr><td><code>[T, N]&#x27;global</code></td><td>Fixed arrays cannot use <code>&#x27;global</code></td></tr></tbody></table>
 <p><strong>Valid qualifier × field-type matrix:</strong></p>
-<table><thead><tr><th></th><th><code>&#x27;unified</code></th><th><code>&#x27;global</code></th><th>bare <code>&#x27;actor</code></th><th><code>&#x27;local</code></th><th><code>&#x27;const</code></th></tr></thead><tbody><tr><td><code>[T]</code> dynamic</td><td>explicit</td><td>explicit</td><td>explicit</td><td>error</td><td>error</td></tr><tr><td><code>[T, N]</code> fixed</td><td>error</td><td>error</td><td>explicit</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr><tr><td>scalar</td><td>—</td><td>—</td><td>—</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr></tbody></table>
+<table><thead><tr><th></th><th><code>&#x27;unified</code></th><th><code>&#x27;global</code></th><th>bare <code>&#x27;actor</code></th><th><code>&#x27;local</code></th><th><code>&#x27;const</code></th></tr></thead><tbody><tr><td><code>[T]</code> dynamic</td><td>explicit</td><td>explicit</td><td>explicit</td><td>error</td><td>error</td></tr><tr><td><code>[T, N]</code> fixed</td><td>error</td><td>error</td><td>explicit</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr><tr><td><code>Image&lt;T,C,R&gt;</code> / <code>Volume&lt;T,X,Y,Z&gt;</code></td><td>explicit</td><td>explicit</td><td>explicit</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr><tr><td>scalar</td><td>—</td><td>—</td><td>—</td><td>inferred (<code>mut</code>/<code>var</code>)</td><td>inferred (<code>let</code>)</td></tr></tbody></table>
 <blockquote><code>&#x27;const</code> and <code>&#x27;local</code> are always inferred and rarely written explicitly. <code>&#x27;unified</code>, <code>&#x27;global</code>, and bare <code>&#x27;actor</code> are always explicit.</blockquote>
+<blockquote><strong><code>Image</code>/<code>Volume</code> vs <code>[T, N]</code> fixed — the one place they differ</strong>: <code>[T, N]&#x27;unified</code>/<code>[T, N]&#x27;global</code> are errors (&quot;size is implicit from the init parameter&quot;), but <code>Image&lt;T,C,R&gt;&#x27;unified</code>/<code>&#x27;global</code> (and <code>Volume</code>) are valid. The reason: <code>[T, N]</code>&#x27;s host-side representation is a true fixed-size Rust array, which conflicts with <code>&#x27;unified</code>/<code>&#x27;global</code>&#x27;s always-dynamic host buffer (<code>Vec</code>/<code>CudaSlice</code>/<code>DeviceBuffer</code>/<code>Buffer</code>, sized at runtime from the constructor&#x27;s argument). <code>Image</code>/<code>Volume</code> don&#x27;t have that conflict — their host representation <em>is</em> the same dynamic buffer type as <code>[T]</code>; <code>C</code>/<code>R</code>/<code>X</code>/<code>Y</code>/<code>Z</code> are compile-time shape metadata used for <code>.at(...)</code> indexing and grid inference, not a competing fixed length. See <a href="image-volume-types.html">`image-volume-types.md`</a>. <code>&#x27;actor&#x27;global</code>/<code>&#x27;actor&#x27;unified</code> compose with <code>Image</code>/<code>Volume</code> the same as with <code>[T]</code>/<code>[T,N]</code> — e.g. <code>mut Image&lt;int,256,256&gt;&#x27;actor&#x27;global histogram</code> is valid.</blockquote>
 <hr>
 <p><strong>Host-context</strong> (bindings outside <code>kernel</code> struct):</p>
 <table><thead><tr><th>Qualifier</th><th>Location</th></tr></thead><tbody><tr><td><code>&#x27;gpu&#x27;unified</code></td><td>unified host + device DRAM</td></tr><tr><td><code>&#x27;gpu&#x27;global</code></td><td>device-only DRAM</td></tr></tbody></table>
 <p><code>&#x27;const</code> (like bare <code>&#x27;actor</code> and <code>&#x27;local</code>) has no host-context form — it has no host access at all (see the table above), so a host-side binding could never be read from or written to. It&#x27;s only meaningful as a field qualifier inside a <code>kernel</code> struct.</p>
+<hr>
+<h2 id="named-shape-buffers--imagevolume">Named-shape buffers — <code>Image</code>/<code>Volume</code></h2>
+<p><code>Image&lt;T, C, R&gt;</code> and <code>Volume&lt;T, X, Y, Z&gt;</code> are built-in generic types for 2D/3D compute buffers — replacing the pattern of a flat <code>[T]</code> field plus separate plain-<code>int</code> <code>rows</code>/<code>cols</code> fields and hand-rolled linear-index math. <code>C</code>/<code>R</code> (and <code>X</code>/<code>Y</code>/<code>Z</code>) are compile-time integer constants, not runtime values:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Transpose:
+    <span class="kw">let</span> Image&lt;<span class="kt">float</span>, C, R&gt;<span class="lf">&#x27;global</span> src
+    <span class="kw">mut</span> Image&lt;<span class="kt">float</span>, R, C&gt;<span class="lf">&#x27;unified</span> dst
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> c = gpu.thread.x
+        <span class="kw">let</span> r = gpu.thread.y
+        dst.<span class="fn">at</span>(r, c) = src.<span class="fn">at</span>(c, r)</code></pre></div>
+<ul><li><strong>Methods</strong>: <code>.width()</code>, <code>.height()</code>, <code>.depth()</code> (<code>Volume</code> only) return the</li></ul>
+<p>  dimension as a compile-time literal; <code>.at(c, r)</code> (<code>Image</code>) / <code>.at(x, y, z)</code>   (<code>Volume</code>) index into the buffer.</p>
+<ul><li><strong>Layout</strong>: row-major — <code>.at(c, r)</code> lowers to flat index <code>c + r*C</code>; <code>.at(x, y, z)</code></li></ul>
+<p>  lowers to <code>x + y*X + z*(X*Y)</code>.</p>
+<ul><li><strong>Qualifiers</strong>: same set as <code>[T]</code>/<code>[T, N]</code> combined (see the matrix above) —</li></ul>
+<p>  <code>&#x27;unified</code>, <code>&#x27;global</code>, bare <code>&#x27;actor</code>, <code>&#x27;actor&#x27;global</code>, <code>&#x27;actor&#x27;unified</code>, <code>&#x27;const</code>,   <code>&#x27;local</code> are all valid; <code>&#x27;surface</code> is not (see below).</p>
+<ul><li><strong>Grid inference</strong>: a <code>kernel:</code> block with no explicit <code>grid=</code> defaults the grid</li></ul>
+<p>  from an <code>Image</code>/<code>Volume</code> field&#x27;s <code>C</code>/<code>R</code>/<code>X</code>/<code>Y</code>/<code>Z</code> instead of falling back to   the 1D <code>ceil(len/block)</code> used for flat arrays — see each backend doc&#x27;s own   grid-inference section (<code>cuda-module.md</code>, <code>rocm-backend.md</code>, <code>metal-backend.md</code>,   <code>wgpu-backend.md</code>).</p>
+<p><code>Image</code>/<code>Volume</code> are for compute buffers — they do <strong>not</strong> replace <code>&#x27;surface</code>, which encodes a presentation-path constraint (how a pixel buffer reaches the screen), not just a 2D shape. See <a href="image-volume-types.html">`image-volume-types.md`</a> for the full design rationale.</p>
 <hr>
 <h2 id="kernel-block"><code>kernel:</code> block</h2>
 <p>GPU kernels are dispatched inside a <code>kernel:</code> block. The block is <strong>synchronous</strong> — execution resumes after the closing line, and all kernel fields are accessible directly.</p>
@@ -375,27 +396,27 @@ gpu.<span class="fn">copy</span>(host_buf, k.input)     <span class="co"># H2D</
     <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">&#x27;actor</span><span class="lf">&#x27;global</span> counts = [<span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>, <span class="nb">0</span>]
 
     <span class="kw">def</span> ():
-        _ = counts[bucket].min(v)             <span class="co"># atomicMin — new value is min(old, v)</span>
-        _ = counts[bucket].max(v)             <span class="co"># atomicMax — new value is max(old, v)</span>
-        _ = counts[bucket].swap(v)            <span class="co"># atomicExch — unconditional exchange</span>
-        _ = counts[bucket].cas(expected, new) <span class="co"># compare-and-swap</span></code></pre></div>
-<p>All four <strong>return the previous value</strong> — matching CUDA/HIP's real <code>atomicMin</code>/<code>atomicMax</code>/<code>atomicExch</code>/<code>atomicCAS</code> semantics exactly, on every backend. For <code>.cas</code>, the caller compares the returned value against <code>expected</code> to tell whether the swap actually happened:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> old = counts[bucket].cas(expected, new)
+        _ = counts[bucket].<span class="fn">min</span>(v)             <span class="co"># atomicMin — new value is min(old, v)</span>
+        _ = counts[bucket].<span class="fn">max</span>(v)             <span class="co"># atomicMax — new value is max(old, v)</span>
+        _ = counts[bucket].<span class="fn">swap</span>(v)            <span class="co"># atomicExch — unconditional exchange</span>
+        _ = counts[bucket].<span class="fn">cas</span>(expected, <span class="kw">new</span>) <span class="co"># compare-and-swap</span></code></pre></div>
+<p>All four <strong>return the previous value</strong> — matching CUDA/HIP&#x27;s real <code>atomicMin</code>/<code>atomicMax</code>/<code>atomicExch</code>/<code>atomicCAS</code> semantics exactly, on every backend. For <code>.cas</code>, the caller compares the returned value against <code>expected</code> to tell whether the swap actually happened:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> old = counts[bucket].<span class="fn">cas</span>(<span class="nb">0</span>, <span class="nb">1</span>)
 <span class="kw">if</span> old == <span class="nb">0</span>:
-    <span class="kw">print</span> <span class="s">"claimed it"</span>
+    print <span class="s">"claimed it"</span>
 <span class="kw">else</span>:
-    <span class="kw">print</span> <span class="s">"someone else got there first, current value was {old}"</span></code></pre></div>
+    print <span class="s">"someone else got there first, current value was <span class="si">{old}</span>"</span></code></pre></div>
 <p>Like any other call whose return value is used as a bare statement, the checker requires the result to be explicitly bound (<code>let old = ...</code>) or discarded (<code>_ = ...</code>) — silently dropping it is a compile error, not a warning.</p>
-<h3 id="min-max-swap-cas-without-actor"><code>.min</code>/<code>.max</code>/<code>.swap</code>/<code>.cas</code> without <code>'actor</code></h3>
-<p>These four methods work on <strong>any</strong> indexed element, not only an <code>'actor'global</code>/<code>'actor'unified</code> one — matching <code>+= -= &amp;= |= ^=</code>'s existing behavior, which already degrades to plain (non-atomic) arithmetic off a non-actor field instead of erroring:</p>
+<h3 id="minmaxswapcas-without-actor"><code>.min</code>/<code>.max</code>/<code>.swap</code>/<code>.cas</code> without <code>&#x27;actor</code></h3>
+<p>These four methods work on <strong>any</strong> indexed element, not only an <code>&#x27;actor&#x27;global</code>/<code>&#x27;actor&#x27;unified</code> one — matching <code>+= -= &amp;= |= ^=</code>&#x27;s existing behavior, which already degrades to plain (non-atomic) arithmetic off a non-actor field instead of erroring:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Scale:
-    <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">&#x27;unified</span> buf   <span class="co"># plain, not 'actor'global/'actor'unified</span>
+    <span class="kw">mut</span> [<span class="kt">int</span>]<span class="lf">&#x27;unified</span> buf   <span class="co"># plain, not &#x27;actor&#x27;global/&#x27;actor&#x27;unified</span>
 
     <span class="kw">def</span> ():
-        <span class="kw">let</span> old = buf[i].min(v)   <span class="co"># plain read-modify-write, not atomicMin — no</span>
+        <span class="kw">let</span> old = buf[i].<span class="fn">min</span>(v)   <span class="co"># plain read-modify-write, not atomicMin — no</span>
                                    <span class="co"># cross-thread protection, same as buf[i] += v</span>
                                    <span class="co"># would give on this same field</span></code></pre></div>
-<p>The mechanism differs by backend, since only CUDA/HIP/Metal can express "read the old value, mutate, yield the old value" as a single expression (a GNU/Clang statement-expression, <code>({ ... })</code>) — WGSL has nothing equivalent. On wgpu, the plain fallback only works when the call is the <strong>entire right-hand side</strong> of a <code>let</code>/assignment statement (<code>let old = buf[i].min(v)</code>, or <code>_ = buf[i].min(v)</code> to discard); anywhere else — nested inside a larger expression — it isn't representable in WGSL as a single unit, and the generated shader carries a visible, unmistakable marker at that spot rather than silently computing something else or emitting invalid WGSL.</p>
+<p>The mechanism differs by backend, since only CUDA/HIP/Metal can express &quot;read the old value, mutate, yield the old value&quot; as a single expression (a GNU/Clang statement-expression, <code>({ ... })</code>) — WGSL has nothing equivalent. On wgpu, the plain fallback only works when the call is the <strong>entire right-hand side</strong> of a <code>let</code>/assignment statement (<code>let old = buf[i].min(v)</code>, or <code>_ = buf[i].min(v)</code> to discard); anywhere else — nested inside a larger expression — it isn&#x27;t representable in WGSL as a single unit, and the generated shader carries a visible, unmistakable marker at that spot rather than silently computing something else or emitting invalid WGSL.</p>
 <hr>
 <h2 id="gpu-error-handling">GPU error handling</h2>
 <p><code>GpuError</code> is a built-in enum, always available without import — the same mechanism as the built-in <code>Error</code> enum (<a href="book.html">`book.md`</a>, &quot;Error Handling&quot;):</p>

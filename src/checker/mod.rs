@@ -515,7 +515,28 @@ impl Checker {
             Item::Ext(e)    => self.check_ext(e),
             Item::Mod(m)    => { for i in &m.items { self.check_item(i); } }
             Item::Stmt(s)   => self.check_stmt(s),
-            Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Kernel(_) => {}
+            Item::Kernel(k) => self.check_kernel_decl(k),
+            Item::Use(_) | Item::Alias(_) | Item::Trait(_) => {}
+        }
+    }
+
+    // ── Kernel field types: `Image`/`Volume` shape ──────────────────────────────
+    //
+    // Deliberately narrow: only `Type::image_volume_shape_error` on each field's
+    // declared type. Not gated behind `kernel_dispatch_only` — this must fire for
+    // every real target (`boring run`, `boring build`, and `--target
+    // cuda`/`rocm`/`metal`/`wgpu` via `check_kernel_dispatch_only`), unlike this
+    // checker's other rules, which are `boring run`/`boring build`-only. See
+    // `Type::image_volume_shape_error`'s doc comment for why this needed to be
+    // added here at all rather than just relaxed. Kernel bodies (methods/inits)
+    // are intentionally not walked here — that's unrelated, pre-existing scope
+    // this pass has never covered, and adding it isn't this check's job.
+
+    fn check_kernel_decl(&mut self, k: &KernelDecl) {
+        for field in &k.fields {
+            if let Some(msg) = field.ty.image_volume_shape_error() {
+                self.error(msg, field.line, field.col);
+            }
         }
     }
 
@@ -1188,5 +1209,106 @@ print "{result}"
         let src = format!("{KERNEL_DECL}\nmut k = Saxpy()\nkernel:\n    k(block = 256)\n");
         let errs = errors_for(&src);
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    // ── Image/Volume shape (docs/image-volume-types.md, Phase 2) ────────────────
+    //
+    // `check_kernel_decl` is the new target-agnostic entry point — these tests go
+    // through both `check` (boring run / boring build) and
+    // `check_kernel_dispatch_only` (the four real GPU backends), since Phase 2's
+    // whole point was that the latter had no such check at all before.
+
+    fn dispatch_only_errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check_kernel_dispatch_only(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    #[test]
+    fn fixed_shape_image_field_is_accepted() {
+        let src = r#"
+kernel Tile:
+    mut Image<float, 16, 16>'actor tile
+    def ():
+        tile.at(0, 0) = 1.0
+"#;
+        assert!(errors_for(src).is_empty(), "expected no errors, got {:?}", errors_for(src));
+        assert!(dispatch_only_errors_for(src).is_empty());
+    }
+
+    #[test]
+    fn dynamic_shape_image_field_is_rejected() {
+        let src = r#"
+kernel Tile:
+    mut Image<float>'unified img
+    def ():
+        img[0] = 1.0
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("dynamic shape") && e.contains("not yet supported")),
+            "expected a dynamic-shape rejection, got {errs:?}");
+        // Phase 2's whole point: this must ALSO be rejected for the four real GPU
+        // backends, not just `boring run`/`boring build` — before Phase 2,
+        // `check_kernel_dispatch_only` had no Image/Volume check whatsoever.
+        let dispatch_errs = dispatch_only_errors_for(src);
+        assert!(dispatch_errs.iter().any(|e| e.contains("dynamic shape")),
+            "expected the dynamic-shape rejection under check_kernel_dispatch_only too, got {dispatch_errs:?}");
+    }
+
+    #[test]
+    fn dynamic_shape_volume_field_is_rejected() {
+        let src = r#"
+kernel Cube:
+    mut Volume<float>'unified vol
+    def ():
+        vol[0] = 1.0
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("Volume<T>") && e.contains("not yet supported")),
+            "expected a dynamic-shape rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn wrong_arity_image_field_is_rejected() {
+        // `Image<T, C, R>` takes exactly 2 dimension args — 1 is neither the
+        // fixed form nor the dynamic form.
+        let src = r#"
+kernel Tile:
+    mut Image<float, 16>'actor tile
+    def ():
+        tile.at(0, 0) = 1.0
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("expects 2 dimension")),
+            "expected an arity-rejection error, got {errs:?}");
+    }
+
+    #[test]
+    fn wrong_arity_volume_field_is_rejected() {
+        let src = r#"
+kernel Cube:
+    mut Volume<float, 4, 4>'actor vol
+    def ():
+        vol.at(0, 0, 0) = 1.0
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("expects 3 dimension")),
+            "expected an arity-rejection error, got {errs:?}");
+    }
+
+    #[test]
+    fn non_const_int_dimension_is_rejected() {
+        // `N` (uppercase single letter) parses as a `Type::TypeParam`, not a
+        // `Type::ConstInt` — same pre-existing check as before Phase 2, now
+        // reachable from every real target instead of only `--target kernel`.
+        let src = r#"
+kernel Tile:
+    mut Image<float, N, 16>'actor tile
+    def ():
+        tile.at(0, 0) = 1.0
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("compile-time integer constants")),
+            "expected a ConstInt-rejection error, got {errs:?}");
     }
 }

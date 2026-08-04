@@ -11,19 +11,17 @@ let y_max         =  1.5
 let max_iter      = 100
 
 kernel Mandelbrot:
-    mut [float]'unified image
-    let Dimension dim
+    mut Image<float>'unified image
 
-    init(Dimension d):
-        image = [0.0 for ..d.width * d.height]
-        dim   = d
+    init(int w, int h):
+        image = Image(w, h)
 
     def ():
         let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
         let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
-        if col < width and row < height:
-            let x0 = x_min + float(col) * (x_max - x_min) / float(width)
-            let y0 = y_min + float(row) * (y_max - y_min) / float(height)
+        if col < image.width() and row < image.height():
+            let x0 = x_min + float(col) * (x_max - x_min) / float(image.width())
+            let y0 = y_min + float(row) * (y_max - y_min) / float(image.height())
             var float cx = 0.0
             var float cy = 0.0
             var int   it = 0
@@ -33,11 +31,17 @@ kernel Mandelbrot:
                 cx = xtemp
                 it += 1
             let value = if it == max_iter: 1.0 else: float(it) / float(max_iter)
-            image[row * width + col] = value
+            image.at(col, row) = value
 
-var k = Mandelbrot(Dimension(width, height))
+var k = Mandelbrot(width, height)
 kernel:
-    k(block = (16, 16))
+    # `grid=` is passed explicitly, sized from width/height so it stays correct
+    # if you change them — `boring run`'s interpreter simulation doesn't yet
+    # read a dynamic-shape `Image` field's runtime width/height when `grid=`
+    # is omitted (a known interpreter limitation; `boring build`'s real
+    # generated code infers it correctly). See docs/image-volume-types.md's
+    # "Dispatch and grid sizing" section.
+    k(block = (16, 16), grid = ((width + 15) / 16, (height + 15) / 16))
 
 # Color palette: deep blue → cyan → white for points outside the set
 # Points inside the set (value == 1.0) remain black
@@ -55,8 +59,7 @@ def [int] colorize(float t):
         let r = int((v - 2.0) * 255.0)
         return [r, 255, 255]
     else:
-        let w = int((v - 3.0) * 255.0)
-        return [255, 255, 255 - w + 255]
+        return [255, 255, 255]
 
 # PPM P6 encoding (ASCII header + binary RGB pixels)
 let header      = "P6\n{width} {height}\n255\n"
@@ -72,8 +75,8 @@ for i in 0..total_pixels:
 
 var [int] ppm_data = []
 for b in header_bytes:
-    ppm_data.add(b)
+    ppm_data.push(b)
 for b in pixels:
-    ppm_data.add(b)
-fs.writeBytes("mandelbrot.ppm", ppm_data)
+    ppm_data.push(b)
+fs.writeBytes("mandelbrot.ppm", [uint8(b) for b in ppm_data])
 print "Image saved as 'mandelbrot.ppm'"

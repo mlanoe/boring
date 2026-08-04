@@ -2188,6 +2188,15 @@ impl Interpreter {
         let program = crate::parser::parse(tokens).map_err(|e| {
             err(format!("parse error in '{}': {}", canonical.display(), e), decl.line)
         })?;
+        // Every other entry point (`run_file`, `parse_and_merge_program`, the
+        // transpile/build paths) runs `desugar_image_volume` on a program right
+        // after parsing, before anything else sees it — this runtime `use`
+        // loader is the interpreter's own separate parse path for imported
+        // modules and was missing that step, so dynamic-shape `Image<T>`/
+        // `Volume<T>` kernels defined in a `use`-imported module (as opposed to
+        // the entry file itself) reached `exec_item` still holding the raw
+        // `Image(...)`/`Volume(...)` sugar, which then failed at eval time.
+        let program = crate::desugar::desugar_image_volume(program);
 
         let module_env = Env::child(Rc::clone(&env));
         for item in &program.items {

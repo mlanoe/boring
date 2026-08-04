@@ -1,186 +1,224 @@
-# `Image<T, C, R>` / `Volume<T, X, Y, Z>` — named-shape buffer types
+# `Image` / `Volume` — named-shape GPU buffer types
 
-> **Status: Implemented.** Parser/AST, checker/validator, all four GPU backends
-> (device + host codegen), and docs are done — see the resolved "Open Questions"
-> section below for the decisions made. The `TransposeKernel` migration in
-> whisper-boring (mentioned under "Compatibility" below) remains a follow-up,
-> not required to ship this.
+`Image` and `Volume` are built-in generic types for GPU kernel fields that
+need a 2D (`Image`) or 3D (`Volume`) shape — an image, a tile, a voxel grid —
+instead of a flat 1D buffer. They replace the pattern of carrying `width`/
+`height` as separate `int` fields and manually computing `row * width + col`
+everywhere: with `Image`/`Volume`, the shape lives on the field itself, index
+math is a method call (`.at(...)`), and the kernel's dispatch grid is sized
+automatically.
 
-## Problem Statement
+Two forms are available, for two different situations:
 
-Two related gaps, discussed leading up to this document:
+| | `Image<T, C, R>` / `Volume<T, X, Y, Z>` | `Image<T>` / `Volume<T>` |
+|---|---|---|
+| Shape known | at compile time | only at construction time (runtime) |
+| Typical use | fixed-size tiles, block-shared memory | buffers whose size depends on caller-provided data |
+| Example | a 16×16 GEMM tile | a runtime-sized image loaded from a file |
 
-1. **No 2D/3D grid inference for `'unified`/`'global` fields.** Grid
-   inference (`cuda-module.md`, "Dispatch parameters") only handles the 1D
-   case: `grid = ceil(len(buf) / block)` from a flat array field's length.
-   A 2D/3D kernel (image processing, tiled matmul, convolution) gets no
-   inference at all — omitting `grid` silently defaults to `(1, 1, 1)`,
-   dispatching a single block over what the author likely meant as a whole
-   image or volume.
+Both forms share the same method surface (`.at()`, `.width()`, `.height()`,
+`.depth()`) and the same automatic grid dispatch — pick whichever matches
+whether the shape is known when you write the kernel or only when you
+construct it.
 
-2. **Real code already hand-rolls 2D indexing on flat buffers, error-prone.**
-   Checked directly rather than assumed: `whisper-boring/src/math_gpu.br`'s
-   `TransposeKernel` (lines 61-82) takes `rows`/`cols` as separate `int`
-   fields alongside a flat `[float]'global src`/`[float]'unified dst`, and
-   manually derives 2D position from a linear thread index:
-   ```boring
-   let i = cell / cols
-   let j = cell % cols
-   dst[j * rows + i] = src[cell]
-   ```
-   This is exactly the shape every 2D kernel in this codebase needs today —
-   width/height carried as separate plain `int` fields, with every
-   loop/kernel re-deriving row/column from a linear index by hand. Nothing
-   type-level ties the flat buffer's declared length to `rows * cols`, or
-   validates that `dst`'s length actually matches `rows * cols` at
-   construction time.
+## Fixed shape: `Image<T, C, R>` / `Volume<T, X, Y, Z>`
 
-An earlier direction considered fixing (1) alone by allowing **nested fixed
-arrays** (`[[T, N1], N2]`, which already parse and run correctly outside
-kernel context — verified directly) on `'unified`/`'global` fields, and
-teaching grid inference to read the nested shape. Rejected: nesting order
-is purely positional (does `[[T, N1], N2]` mean `N1` columns × `N2` rows, or
-the reverse?) — there is no way to make that unambiguous from array syntax
-alone without imposing an arbitrary row/column convention on every kernel
-author. Named dimensions avoid the question entirely.
-
-## Proposed Design
-
-Two new built-in generic types:
+`T` is the element type; `C`/`R` (columns/rows) or `X`/`Y`/`Z` are
+compile-time integer constants:
 
 ```boring
-Image<T, C, R>          # T = element type, C columns, R rows
-Volume<T, X, Y, Z>
+kernel Tile:
+    let  Image<float, 16, 16>'global   src
+    mut  Image<float, 16, 16>'unified  dst
+
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        dst.at(c, r) = src.at(c, r) * 2.0
 ```
 
-- Backed by a flat buffer of `T` (`Vec<T>`/`CudaSlice<T>`/`DeviceBuffer<T>`/
-  `Buffer` depending on qualifier and backend — the same host representation
-  dynamic `[T]` already uses) rather than the nested-multidimensional-array
-  representation this design originally sketched — see "Open Questions" §1-2
-  for why. `C`/`R`/`X`/`Y`/`Z` are compile-time integer constants (`Type::ConstInt`
-  in the AST, the same mechanism `GameOfLife<64, 64>`-style const generics
-  already use), carried as type-level shape metadata for `.at(...)` addressing
-  and grid inference, not a competing runtime length.
-- Element type `T` comes first: `Image<T, C, R>` — consistent with every other
-  generic in the language (`Dict<K, V>`, `Future<T>`).
-- **Precabled methods**, replacing the hand-rolled index math seen in
-  `TransposeKernel` above: `.width()`/`.height()` (`Image`), `.depth()`
-  (`Volume` also gets these two plus depth), `.at(c, r)`/`.at(x, y, z)` for
-  named-axis indexing instead of manually reconstructing `j * rows + i`.
-- **Grid inference reads `C`/`R` (or `X`/`Y`/`Z`) directly off the field's
-  declared type**: `grid = (ceil(C/bx), ceil(R/by), 1)` for `Image`,
-  `(ceil(X/bx), ceil(Y/by), ceil(Z/bz))` for `Volume` — no separate
-  `Dimension` field to keep in sync, no manual `rows`/`cols` `int` fields,
-  no risk of the buffer's actual length silently disagreeing with the
-  dimensions used to compute grid size.
+A fixed-shape field needs no `init()` assignment for the pattern above — it's
+zero-initialized automatically, the same as a fixed-size `[T, N]` field.
+Passing one into `init()` works exactly like a regular typed parameter:
 
-### Relationship to `'surface`
+```boring
+init(Image<float, 16, 16>'global input):
+    src = input
+```
 
-`'surface` stays **entirely separate, unchanged** — it encodes a
-presentation-path constraint (how a pixel buffer reaches the screen, which
-differs by backend: direct on CUDA, blit-only on Metal/wgpu — see
-`gpu-display.md`), not just a 2D shape. `Image`/`Volume` are for compute
-buffers; they do not replace or subsume `'surface` in any way. A kernel
-that both computes into an `Image` and presents pixels would still use
-`'surface` + `screen.present()` for the presentation half, separately.
+This form is the right choice for block-shared tiles (`'actor`), where the
+size has to be known to allocate the memory — see `LinearKernel`'s
+`tile_x`/`tile_w` in `whisper-boring/src/math_gpu.br` for a real 16×16-tiled
+GEMM using it.
 
-### Interaction with the `'actor` qualifier rename
+## Dynamic shape: `Image<T>` / `Volume<T>`
 
-`actor-qualifier-unification.md`'s rename has already landed: `'sync` is now
-bare `'actor`, and `'actor'unified` exists alongside `'actor'global`.
-`Image<T,C,R>`/`Volume<T,X,Y,Z>` compose with **every** qualifier a flat `[T]`
-field can carry today, including bare `'actor` (block-shared — only
-meaningful for `Image`/`Volume` fields sized to fit block-shared memory, a
-narrower case), `'unified`, `'global`, `'const`, `'actor'unified`, and
-`'actor'global` — implemented in `parser/mod.rs`'s `parse_kernel_field`
-(the single qualifier-legality choke point, not `gpu-module.md`'s validation
-matrix — that doc is descriptive, not enforcing). Concretely:
-`mut Image<int,256,256>'actor'global histogram` is as valid as today's
-`mut [int]'actor'global counts`. The qualifier × field-type matrix in
-`gpu-module.md` has been updated with `Image`/`Volume` as a third field-shape
-row alongside `[T]` dynamic and `[T, N]` fixed — see that doc for the one
-place `Image`/`Volume` legality actually *differs* from `[T, N]` (bare
-`'unified`/`'global` are valid for `Image`/`Volume`, unlike `[T, N]`).
+One type argument — the element type only. The shape is determined at
+construction time, from whatever the caller passes to `init()`:
 
-## Scope of impact
+```boring
+kernel Fill:
+    mut Image<float>'unified img
 
-- **Grammar/parser**: `Image`/`Volume` as new recognized generic type
-  names, parsed like any other built-in generic (`Type::Generic`), not a
-  new dedicated grammar production — closer to how `Dimension` is already
-  a plain named struct type than to a new syntax form.
-- **AST/checker**: field-type validation matrix gains `Image`/`Volume` rows
-  (per qualifier: which are legal, same shape as today's `[T]`/`[T, N]`
-  rows in `gpu-module.md`).
-- **Device-side codegen** (per backend `device.rs`): index-generation for
-  `.at(c, r)`-style access needs to lower to the same flat-buffer address
-  arithmetic (`c + r * C`, row-major, or the equivalent for `Volume`) every
-  backend's device code already does by hand today — this is mostly a
-  codegen convenience, not new addressing capability.
-- **Host-side codegen** (per backend `host.rs`): grid-inference logic
-  (`auto_grid_field`-equivalent, currently 1D-array-only — see
-  `cuda/host.rs:emit_boring_launch`) gains an `Image`/`Volume`-typed-field
-  branch computing a 2D/3D grid instead of the existing 1D
-  `ceil(n/block)`.
-- **Docs**: `gpu-module.md` (new type section, qualifier matrix update),
-  `cuda-module.md`/`rocm-backend.md`/`metal-backend.md`/`wgpu-backend.md`
-  (grid-inference rules section each maintains), `book.md`. `.md` + `.html`
-  mirrors throughout, per this repo's convention.
-- **Tests**: new codegen tests per backend for `Image`/`Volume`-typed
-  fields (grid inference shape, method codegen), plus the qualifier-matrix
-  validation cases (legal/illegal combinations).
+    init(int w, int h):
+        img = Image(w, h)
 
-**Where the actual implementation deviated from this section's plan:**
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        if c < img.width() and r < img.height():
+            img.at(c, r) = img.at(c, r) + 1.0
+```
 
-- Qualifier legality lives entirely in `parser/mod.rs`'s `parse_kernel_field`
-  (a single choke point), not split across checker/validator — `gpu-module.md`'s
-  matrix is descriptive documentation of that function's behavior, not a
-  separate enforcement layer.
-- `Image`/`Volume` are backed by the same flat/dynamic buffer representation
-  as `[T]` (not nested arrays) — see "Proposed Design" above; this is *why*
-  bare `'unified`/`'global` are valid for `Image`/`Volume` but not `[T, N]`.
-- wgpu's grid inference doesn't live in a per-backend `host.rs` — it's in the
-  shared `src/transpiler/emit_kernel.rs` (`try_emit_kernel_dispatch`), since
-  wgpu dispatch call sites desugar through that shared code instead of a
-  per-backend `__boring_launch` method. See `wgpu-backend.md`'s "Grid inference"
-  section.
-- `book.md` was **not** touched — kernel-specific built-ins (this includes the
-  precedent `Dimension`, which also isn't in `book.md`) are documented in
-  `gpu-module.md` only.
-- One unrelated bug found and fixed alongside this work: wgpu's pipeline
-  creation (`create_compute_pipeline`) wasn't wrapped in an error scope,
-  unlike shader-module creation and `dispatch()` — an oversized fixed-`'actor`
-  field would panic via wgpu's default uncaptured-error handler instead of
-  being reported. See `wgpu-backend.md`'s "Error handling" section.
+Construct and dispatch it like any other kernel — no `Dimension` field, no
+manual `rows`/`cols` bookkeeping:
 
-## Compatibility
+```boring
+mut k = Fill(64, 64)
+kernel:
+    k(block = (16, 16))
+```
 
-Same situation as `actor-qualifier-unification.md`: no real Boring programs
-exist yet except **whisper-boring**. `math_gpu.br`'s `TransposeKernel`
-(`src=rows×cols` flat, `dst=cols×rows` flat, manual `i`/`j` derivation) is
-the concrete migration candidate and motivating example quoted above — not
-a blocker, since the flat-array form keeps working unchanged; migrating it
-to `Image<C, R>` is a natural follow-up once this lands, not a requirement
-to ship it.
+This form is the right choice whenever the shape comes from the data itself
+— a loaded image, a caller-provided grid size — rather than from the kernel
+author.
 
-## Open Questions — resolved
+### Construction forms
 
-1. **Generic parameter order**: settled as `Image<T, C, R>` / `Volume<T, X, Y, Z>`
-   — `T` first, consistent with every other generic in the language
-   (`Dict<K,V>`, `Future<T>`). Inferring `T` from `init(...)` (like plain array
-   fields do) was considered and rejected as unnecessarily implicit for a
-   type that already needs `C`/`R` spelled out explicitly.
-2. **Row-major vs column-major storage**: row-major — `.at(c, r)` lowers to
-   flat index `c + r*C`; `.at(x, y, z)` lowers to `x + y*X + z*(X*Y)` (the
-   natural generalization of the 2D formula to a third axis). Matches every
-   example in this document and the `TransposeKernel` migration target's own
-   `j*rows+i` convention. Implemented once, shared across all four backends,
-   in `transpiler::helpers::image_volume_at_index`.
-3. **`'actor` (bare, block-shared) on `Image`/`Volume`**: no new compile-time
-   size check added — matches the existing gap for plain bare-`'actor` fields
-   (see cuda-module.md's "Grid inference rules"/error-handling section: block
-   size, and by the same reasoning shared-memory size, is validated at
-   runtime by the real launch call, not statically). Revisit both together
-   if that gap is ever closed.
-4. **Method surface**: `.width()`/`.height()`/`.depth()`/`.at(...)` only, for
-   v1 — no `.len()`, no `.set(...)`. Smallest surface that unblocks the
-   `TransposeKernel` migration; can grow later without a breaking change.
+Three forms of `Image(...)`/`Volume(...)`, used inside `init()` to assign a
+dynamic-shape field — pick whichever matches what you already have:
+
+| Form | When to use |
+|---|---|
+| `Image(data, w, h)` | you already have a buffer (loaded from a file, computed elsewhere) |
+| `Image(w, h)` | you don't — allocate a new, zero-filled buffer of size `w * h` |
+| `Image(w, h, fill = v)` | same allocation, filled with `v` instead of `0` |
+
+```boring
+img = Image(data, w, h)          # wrap an existing buffer
+img = Image(w, h)                # allocate, zero-filled
+img = Image(w, h, fill = 1.0)    # allocate, filled with 1.0
+```
+
+`Volume` follows the same three forms with one more axis:
+`Volume(data, x, y, z)` / `Volume(x, y, z)` / `Volume(x, y, z, fill = v)`.
+
+Passing your own `data` (first form) makes you responsible for its length
+actually matching `w * h` (`* depth` for `Volume`) — nothing checks this
+automatically today. The other two forms don't have this risk, since the
+buffer is allocated to the right size here.
+
+## Accessing elements
+
+Both forms share the same four methods:
+
+| Method | Returns |
+|---|---|
+| `.at(c, r)` (`Image`) / `.at(x, y, z)` (`Volume`) | the element at that position — usable for both reads and writes: `img.at(c, r) = v` |
+| `.width()` | the size along the first axis |
+| `.height()` | the size along the second axis |
+| `.depth()` | the size along the third axis (`Volume` only) |
+
+Storage is row-major: `.at(c, r)` addresses `c + r * width`, and
+`.at(x, y, z)` addresses `x + y * width + z * (width * height)` — the
+natural generalization to a third axis.
+
+There's no `.len()` or `.set(...)` — `.at(...)` covers both reading and
+writing, and `.width()`/`.height()`/`.depth()` cover shape queries.
+
+## Qualifiers
+
+`Image`/`Volume` fields accept the same GPU memory qualifiers a flat `[T]`
+field does: `'unified`, `'global`, `'const`, bare `'actor` (block-shared),
+`'actor'unified`, `'actor'global`. A kernel can freely mix fixed-shape and
+dynamic-shape `Image`/`Volume` fields, and plain `[T]`/`[T, N]` fields,
+side by side.
+
+## Dispatch and grid sizing
+
+Omitting `grid = (...)` at dispatch infers a 2D (`Image`) or 3D (`Volume`)
+grid automatically, from the field's shape and the `block = (...)` size —
+whether the shape is a compile-time constant or was only known at
+construction time:
+
+```boring
+kernel:
+    k(block = (16, 16))   # grid inferred from img's width/height — no grid= needed
+```
+
+Pass `grid = (...)` explicitly if you need a different dispatch size than
+the field's own shape implies.
+
+> **`boring run` caveat:** the auto-inference above is fully correct in the
+> real code `boring build` generates for every GPU target. The interpreter's
+> own simulation (`boring run`), used for fast local iteration without a GPU,
+> doesn't yet read an `Image`/`Volume` field's shape when `grid =` is
+> omitted — it falls back to a cruder heuristic that can under-cover the
+> grid once the shape needs more than one block along an axis, silently
+> leaving part of the buffer unwritten. Until that's fixed, pass `grid =`
+> explicitly when running such a kernel through `boring run`:
+> `grid = ((width + 15) / 16, (height + 15) / 16)` for a `block = (16, 16)`
+> dispatch, for example.
+
+## A migration example
+
+`whisper-boring`'s `TransposeKernel` (`src/math_gpu.br`) is the pattern this
+feature replaces — `rows`/`cols` as separate `int` fields, with every index
+computed by hand:
+
+```boring
+# Before
+kernel TransposeKernel:
+    let [float]'global   src
+    mut [float]'unified  dst
+    let int              rows
+    let int              cols
+
+    init([float]'global s, int r, int c):
+        src  = s
+        rows = r
+        cols = c
+        dst  = [0.0 for ..r * c]
+
+    def ():
+        let cell = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if cell < rows * cols:
+            let i = cell / cols
+            let j = cell % cols
+            dst[j * rows + i] = src[cell]
+```
+
+```boring
+# After
+kernel TransposeKernel:
+    let Image<float>'global   src
+    mut Image<float>'unified  dst
+
+    init([float]'global s, int rows, int cols):
+        src = Image(s, cols, rows)
+        dst = Image(rows, cols)
+
+    def ():
+        let cell = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        if cell < src.width() * src.height():
+            let i = cell / src.width()
+            let j = cell % src.width()
+            dst.at(i, j) = src.at(j, i)
+```
+
+(`whisper-boring` itself hasn't been migrated yet — that's tracked
+separately.)
+
+## Notes
+
+- Field names starting with `__` are reserved for the compiler's own use —
+  avoid them for your own kernel fields.
+- `Volume` follows `Image` exactly, one axis further: `Image<T,C,R>` ↔
+  `Volume<T,X,Y,Z>`, `Image<T>` ↔ `Volume<T>`, `.at(c,r)` ↔ `.at(x,y,z)`.
+- `'surface` (pixel buffers presented to the screen) is unrelated to
+  `Image`/`Volume` and doesn't compose with them — see `gpu-display.md`.
+
+## See also
+
+- `examples/matrix_mul_gpu.br` — the fixed-shape form (`Image<float,32,32>`).
+- `examples/mandelbrot_gpu.br` — the dynamic-shape form (`Image<float>`).

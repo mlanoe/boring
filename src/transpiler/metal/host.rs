@@ -5,7 +5,7 @@
 // Uses the `metal` crate (objc2-metal migration planned).
 
 use crate::ast::*;
-use crate::transpiler::helpers::image_volume_grid_dim_expr;
+use crate::transpiler::helpers::{image_volume_grid_dim_expr, desugared_image_volume_shadow_fields, shadow_grid_axes};
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -1419,6 +1419,12 @@ impl HostEmitter {
                 // Fixed-shape Image/Volume: C/R/X/Y/Z are compile-time constants,
                 // baked directly into the ceil-div grid expression.
                 self.line(&image_volume_grid_dim_expr(dims));
+            } else if let Some(shadows) = desugared_image_volume_shadow_fields(&field_decl.name, fields) {
+                // Desugared dynamic-shape Image/Volume: shadow fields carry
+                // width/height(/depth) at runtime — see
+                // docs/image-volume-types.md's Phase 6.
+                let (gx, gy, gz) = shadow_grid_axes("self", &shadows, ["block_dim.0", "block_dim.1", "block_dim.2"]);
+                self.line(&format!("({gx}, {gy}, {gz})"));
             } else if let Some(df) = dim_field {
                 // 2D grid from surface Dimension field
                 self.line(&format!("let __w = self.{}.width; let __h = self.{}.height;", df, df));

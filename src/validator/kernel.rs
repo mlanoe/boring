@@ -112,10 +112,17 @@ impl KernelValidator {
                 }
             }
             Type::Qualified(inner, _) => self.check_type(inner, line),
+            // Delegates to the shared, target-agnostic `image_volume_shape_error`
+            // (see its doc comment in `ast/mod.rs`) instead of hand-rolling the
+            // `ConstInt` check here — this used to be the *only* place any of this
+            // was enforced at all; it no longer is (the checker's
+            // `check_kernel_decl` now covers every other target), but this pass
+            // still needs its own call so `--target kernel` keeps rejecting
+            // malformed/dynamic-shape `Image`/`Volume` fields too.
             Type::Generic(..) if ty.as_image_volume().is_some() => {
-                let (elem, dims) = ty.as_image_volume().unwrap();
-                if dims.iter().any(|d| !matches!(d, Type::ConstInt(_))) {
-                    self.error(line, "Image/Volume dimensions must be compile-time integer constants");
+                let (elem, _) = ty.as_image_volume().unwrap();
+                if let Some(msg) = ty.image_volume_shape_error() {
+                    self.error(line, msg);
                 }
                 self.check_type(elem, line);
             }

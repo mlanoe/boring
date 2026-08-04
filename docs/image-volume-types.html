@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boring — `Image<C, R>` / `Volume<X, Y, Z>` — named-shape buffer types</title>
+<title>Boring — `Image` / `Volume` — named-shape GPU buffer types</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -125,49 +125,110 @@ li { margin-bottom: 0.3rem; }
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-<h1 id="imagec-r--volumex-y-z--named-shape-buffer-types"><code>Image&lt;C, R&gt;</code> / <code>Volume&lt;X, Y, Z&gt;</code> — named-shape buffer types</h1>
-<blockquote><strong>Status: Proposed.</strong> No implementation yet — this document is the task spec for that work. Companion to <a href="actor-qualifier-unification.html">`actor-qualifier-unification.md`</a> (in progress in a parallel session) — see &quot;Interaction with the <code>&#x27;actor</code> qualifier rename&quot; below; the two should land compatible with each other, not necessarily in the same change.</blockquote>
-<h2 id="problem-statement">Problem Statement</h2>
-<p>Two related gaps, discussed leading up to this document:</p>
-<ol><li><strong>No 2D/3D grid inference for <code>&#x27;unified</code>/<code>&#x27;global</code> fields.</strong> Grid</li></ol>
-<p>   inference (<code>cuda-module.md</code>, &quot;Dispatch parameters&quot;) only handles the 1D    case: <code>grid = ceil(len(buf) / block)</code> from a flat array field&#x27;s length.    A 2D/3D kernel (image processing, tiled matmul, convolution) gets no    inference at all — omitting <code>grid</code> silently defaults to <code>(1, 1, 1)</code>,    dispatching a single block over what the author likely meant as a whole    image or volume.</p>
-<ol><li><strong>Real code already hand-rolls 2D indexing on flat buffers, error-prone.</strong></li></ol>
-<p>   Checked directly rather than assumed: <code>whisper-boring/src/math_gpu.br</code>&#x27;s    <code>TransposeKernel</code> (lines 61-82) takes <code>rows</code>/<code>cols</code> as separate <code>int</code>    fields alongside a flat <code>[float]&#x27;global src</code>/<code>[float]&#x27;unified dst</code>, and    manually derives 2D position from a linear thread index:    <code></code><code>boring    let i = cell / cols    let j = cell % cols    dst[j * rows + i] = src[cell]    </code><code></code>    This is exactly the shape every 2D kernel in this codebase needs today —    width/height carried as separate plain <code>int</code> fields, with every    loop/kernel re-deriving row/column from a linear index by hand. Nothing    type-level ties the flat buffer&#x27;s declared length to <code>rows * cols</code>, or    validates that <code>dst</code>&#x27;s length actually matches <code>rows * cols</code> at    construction time.</p>
-<p>An earlier direction considered fixing (1) alone by allowing <strong>nested fixed arrays</strong> (<code>[[T, N1], N2]</code>, which already parse and run correctly outside kernel context — verified directly) on <code>&#x27;unified</code>/<code>&#x27;global</code> fields, and teaching grid inference to read the nested shape. Rejected: nesting order is purely positional (does <code>[[T, N1], N2]</code> mean <code>N1</code> columns × <code>N2</code> rows, or the reverse?) — there is no way to make that unambiguous from array syntax alone without imposing an arbitrary row/column convention on every kernel author. Named dimensions avoid the question entirely.</p>
-<h2 id="proposed-design">Proposed Design</h2>
-<p>Two new built-in generic types:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>Image&lt;<span class="kt">int</span> C, <span class="kt">int</span> R&gt;          <span class="co"># C columns, R rows</span>
-Volume&lt;<span class="kt">int</span> X, <span class="kt">int</span> Y, <span class="kt">int</span> Z&gt;</code></pre></div>
-<ul><li>Backed internally by nested multidimensional arrays (<code>[[T, C], R]</code> for</li></ul>
-<p>  <code>Image</code>, three levels for <code>Volume</code>) — no new runtime representation   invented, this reuses the nesting that already parses and runs correctly   today, just wrapped in a named type instead of exposed as raw positional   nesting.</p>
-<ul><li>Element type <code>T</code> and the dimensions are both generic:</li></ul>
-<p>  <code>Image&lt;T, int C, int R&gt;</code> (parameter order to be settled — see &quot;Open   Questions&quot;).</p>
-<ul><li><strong>Precabled methods</strong>, replacing the hand-rolled index math seen in</li></ul>
-<p>  <code>TransposeKernel</code> above: <code>.width()</code>/<code>.height()</code> (<code>Image</code>), <code>.depth()</code>   (<code>Volume</code> also gets these two plus depth), <code>.at(c, r)</code>/<code>.at(x, y, z)</code> for   named-axis indexing instead of manually reconstructing <code>j * rows + i</code>.   Exact method surface is part of the implementation work, not fixed here.</p>
-<ul><li><em></em>Grid inference reads <code>C</code>/<code>R</code> (or <code>X</code>/<code>Y</code>/<code>Z</code>) directly off the field&#x27;s</li></ul>
-<p>  declared type<em></em>: <code>grid = (ceil(C/bx), ceil(R/by), 1)</code> for <code>Image</code>,   <code>(ceil(X/bx), ceil(Y/by), ceil(Z/bz))</code> for <code>Volume</code> — no separate   <code>Dimension</code> field to keep in sync, no manual <code>rows</code>/<code>cols</code> <code>int</code> fields,   no risk of the buffer&#x27;s actual length silently disagreeing with the   dimensions used to compute grid size.</p>
-<h3 id="relationship-to-surface">Relationship to <code>&#x27;surface</code></h3>
-<p><code>&#x27;surface</code> stays <strong>entirely separate, unchanged</strong> — it encodes a presentation-path constraint (how a pixel buffer reaches the screen, which differs by backend: direct on CUDA, blit-only on Metal/wgpu — see <code>gpu-display.md</code>), not just a 2D shape. <code>Image</code>/<code>Volume</code> are for compute buffers; they do not replace or subsume <code>&#x27;surface</code> in any way. A kernel that both computes into an <code>Image</code> and presents pixels would still use <code>&#x27;surface</code> + <code>screen.present()</code> for the presentation half, separately.</p>
-<h3 id="interaction-with-the-actor-qualifier-rename">Interaction with the <code>&#x27;actor</code> qualifier rename</h3>
-<p><code>actor-qualifier-unification.md</code>&#x27;s rename has already landed: <code>&#x27;sync</code> is now bare <code>&#x27;actor</code>, and <code>&#x27;actor&#x27;unified</code> exists alongside <code>&#x27;actor&#x27;global</code>. <code>Image&lt;C, R&gt;</code>/<code>Volume&lt;X, Y, Z&gt;</code> (still proposed, not implemented) need to compose with <strong>every</strong> qualifier a flat <code>[T]</code> field can carry today, including bare <code>&#x27;actor</code> (block-shared — only meaningful for <code>Image</code>/<code>Volume</code> fields sized to fit block-shared memory, likely a narrower case), <code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;const</code>, <code>&#x27;actor&#x27;unified</code>, and <code>&#x27;actor&#x27;global</code>. Concretely: <code>mut Image&lt;256, 256&gt;&#x27;actor&#x27;global histogram</code> should be as valid as today&#x27;s <code>mut [int]&#x27;actor&#x27;global counts</code>. Since this document doesn&#x27;t touch qualifier <em>semantics</em> (only field <em>shape</em>), the qualifier × field-type validation matrix (<code>gpu-module.md</code>) needs a final pass once <code>Image</code>/<code>Volume</code> land, to add them as a third field-shape category alongside today&#x27;s <code>[T]</code> dynamic and <code>[T, N]</code> fixed rows.</p>
-<h2 id="scope-of-impact">Scope of impact</h2>
-<ul><li><strong>Grammar/parser</strong>: <code>Image</code>/<code>Volume</code> as new recognized generic type</li></ul>
-<p>  names, parsed like any other built-in generic (<code>Type::Generic</code>), not a   new dedicated grammar production — closer to how <code>Dimension</code> is already   a plain named struct type than to a new syntax form.</p>
-<ul><li><strong>AST/checker</strong>: field-type validation matrix gains <code>Image</code>/<code>Volume</code> rows</li></ul>
-<p>  (per qualifier: which are legal, same shape as today&#x27;s <code>[T]</code>/<code>[T, N]</code>   rows in <code>gpu-module.md</code>).</p>
-<ul><li><strong>Device-side codegen</strong> (per backend <code>device.rs</code>): index-generation for</li></ul>
-<p>  <code>.at(c, r)</code>-style access needs to lower to the same flat-buffer address   arithmetic (<code>c + r * C</code>, row-major, or the equivalent for <code>Volume</code>) every   backend&#x27;s device code already does by hand today — this is mostly a   codegen convenience, not new addressing capability.</p>
-<ul><li><strong>Host-side codegen</strong> (per backend <code>host.rs</code>): grid-inference logic</li></ul>
-<p>  (<code>auto_grid_field</code>-equivalent, currently 1D-array-only — see   <code>cuda/host.rs:emit_boring_launch</code>) gains an <code>Image</code>/<code>Volume</code>-typed-field   branch computing a 2D/3D grid instead of the existing 1D   <code>ceil(n/block)</code>.</p>
-<ul><li><strong>Docs</strong>: <code>gpu-module.md</code> (new type section, qualifier matrix update),</li></ul>
-<p>  <code>cuda-module.md</code>/<code>rocm-backend.md</code>/<code>metal-backend.md</code>/<code>wgpu-backend.md</code>   (grid-inference rules section each maintains), <code>book.md</code>. <code>.md</code> + <code>.html</code>   mirrors throughout, per this repo&#x27;s convention.</p>
-<ul><li><strong>Tests</strong>: new codegen tests per backend for <code>Image</code>/<code>Volume</code>-typed</li></ul>
-<p>  fields (grid inference shape, method codegen), plus the qualifier-matrix   validation cases (legal/illegal combinations).</p>
-<h2 id="compatibility">Compatibility</h2>
-<p>Same situation as <code>actor-qualifier-unification.md</code>: no real Boring programs exist yet except <strong>whisper-boring</strong>. <code>math_gpu.br</code>&#x27;s <code>TransposeKernel</code> (<code>src=rows×cols</code> flat, <code>dst=cols×rows</code> flat, manual <code>i</code>/<code>j</code> derivation) is the concrete migration candidate and motivating example quoted above — not a blocker, since the flat-array form keeps working unchanged; migrating it to <code>Image&lt;C, R&gt;</code> is a natural follow-up once this lands, not a requirement to ship it.</p>
-<h2 id="open-questions">Open Questions</h2>
-<ol><li><strong>Generic parameter order</strong>: <code>Image&lt;T, C, R&gt;</code> vs <code>Image&lt;C, R, T&gt;</code> vs</li></ol>
-<p>   inferring <code>T</code> from the <code>init(...)</code> argument the way kernel struct fields    already do for plain arrays (<code>gpu-module.md</code>&#x27;s qualifier-inference    table) — needs a decision before implementation, not fixed here. 2. <strong>Row-major vs column-major storage</strong>: <code>Image</code>/<code>Volume</code> remove the    <em>naming</em> ambiguity nested arrays had, but the actual flat-buffer layout    (row-major assumed above) still needs to be picked and documented    explicitly — every backend&#x27;s device-code address arithmetic must agree. 3. <strong><code>&#x27;actor</code> (bare, block-shared) on <code>Image</code>/<code>Volume</code></strong>: block-shared    memory is small (<code>maxSharedMem()</code>, a few KB to tens of KB per block) —    does an <code>Image</code>/<code>Volume</code>-shaped <code>&#x27;actor</code> field need a compile-time check    that <code>C*R*sizeof(T)</code> (or <code>X*Y*Z*sizeof(T)</code>) actually fits, the same kind    of validation already missing for plain bare-<code>&#x27;actor</code> fields (see the    &quot;Block size validation at compile time&quot; known limitation in    <code>cuda-module.md</code>)? Worth deciding alongside that existing gap rather    than inventing a separate check. 4. <strong>Method surface</strong>: exact list of precabled methods beyond    <code>.width()</code>/<code>.height()</code>/<code>.depth()</code>/<code>.at(...)</code> — deferred to    implementation, not blocking the type/grid-inference design above.</p>
+<h1 id="image--volume--named-shape-gpu-buffer-types"><code>Image</code> / <code>Volume</code> — named-shape GPU buffer types</h1>
+<p><code>Image</code> and <code>Volume</code> are built-in generic types for GPU kernel fields that need a 2D (<code>Image</code>) or 3D (<code>Volume</code>) shape — an image, a tile, a voxel grid — instead of a flat 1D buffer. They replace the pattern of carrying <code>width</code>/ <code>height</code> as separate <code>int</code> fields and manually computing <code>row * width + col</code> everywhere: with <code>Image</code>/<code>Volume</code>, the shape lives on the field itself, index math is a method call (<code>.at(...)</code>), and the kernel&#x27;s dispatch grid is sized automatically.</p>
+<p>Two forms are available, for two different situations:</p>
+<table><thead><tr><th></th><th><code>Image&lt;T, C, R&gt;</code> / <code>Volume&lt;T, X, Y, Z&gt;</code></th><th><code>Image&lt;T&gt;</code> / <code>Volume&lt;T&gt;</code></th></tr></thead><tbody><tr><td>Shape known</td><td>at compile time</td><td>only at construction time (runtime)</td></tr><tr><td>Typical use</td><td>fixed-size tiles, block-shared memory</td><td>buffers whose size depends on caller-provided data</td></tr><tr><td>Example</td><td>a 16×16 GEMM tile</td><td>a runtime-sized image loaded from a file</td></tr></tbody></table>
+<p>Both forms share the same method surface (<code>.at()</code>, <code>.width()</code>, <code>.height()</code>, <code>.depth()</code>) and the same automatic grid dispatch — pick whichever matches whether the shape is known when you write the kernel or only when you construct it.</p>
+<h2 id="fixed-shape-imaget-c-r--volumet-x-y-z">Fixed shape: <code>Image&lt;T, C, R&gt;</code> / <code>Volume&lt;T, X, Y, Z&gt;</code></h2>
+<p><code>T</code> is the element type; <code>C</code>/<code>R</code> (columns/rows) or <code>X</code>/<code>Y</code>/<code>Z</code> are compile-time integer constants:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Tile:
+    <span class="kw">let</span>  Image&lt;<span class="kt">float</span>, <span class="nb">16</span>, <span class="nb">16</span>&gt;<span class="lf">&#x27;global</span>   src
+    <span class="kw">mut</span>  Image&lt;<span class="kt">float</span>, <span class="nb">16</span>, <span class="nb">16</span>&gt;<span class="lf">&#x27;unified</span>  dst
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> c = gpu.thread.x
+        <span class="kw">let</span> r = gpu.thread.y
+        dst.<span class="fn">at</span>(c, r) = src.<span class="fn">at</span>(c, r) * <span class="nb">2.0</span></code></pre></div>
+<p>A fixed-shape field needs no <code>init()</code> assignment for the pattern above — it&#x27;s zero-initialized automatically, the same as a fixed-size <code>[T, N]</code> field. Passing one into <code>init()</code> works exactly like a regular typed parameter:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">init</span>(Image&lt;<span class="kt">float</span>, <span class="nb">16</span>, <span class="nb">16</span>&gt;<span class="lf">&#x27;global</span> input):
+    src = input</code></pre></div>
+<p>This form is the right choice for block-shared tiles (<code>&#x27;actor</code>), where the size has to be known to allocate the memory — see <code>LinearKernel</code>&#x27;s <code>tile_x</code>/<code>tile_w</code> in <code>whisper-boring/src/math_gpu.br</code> for a real 16×16-tiled GEMM using it.</p>
+<h2 id="dynamic-shape-imaget--volumet">Dynamic shape: <code>Image&lt;T&gt;</code> / <code>Volume&lt;T&gt;</code></h2>
+<p>One type argument — the element type only. The shape is determined at construction time, from whatever the caller passes to <code>init()</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Fill:
+    <span class="kw">mut</span> Image&lt;<span class="kt">float</span>&gt;<span class="lf">&#x27;unified</span> img
+
+    <span class="kw">init</span>(<span class="kt">int</span> w, <span class="kt">int</span> h):
+        img = <span class="fn">Image</span>(w, h)
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> c = gpu.thread.x
+        <span class="kw">let</span> r = gpu.thread.y
+        <span class="kw">if</span> c &lt; img.<span class="fn">width</span>() <span class="kw">and</span> r &lt; img.<span class="fn">height</span>():
+            img.<span class="fn">at</span>(c, r) = img.<span class="fn">at</span>(c, r) + <span class="nb">1.0</span></code></pre></div>
+<p>Construct and dispatch it like any other kernel — no <code>Dimension</code> field, no manual <code>rows</code>/<code>cols</code> bookkeeping:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> k = <span class="fn">Fill</span>(<span class="nb">64</span>, <span class="nb">64</span>)
+<span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))</code></pre></div>
+<p>This form is the right choice whenever the shape comes from the data itself — a loaded image, a caller-provided grid size — rather than from the kernel author.</p>
+<h3 id="construction-forms">Construction forms</h3>
+<p>Three forms of <code>Image(...)</code>/<code>Volume(...)</code>, used inside <code>init()</code> to assign a dynamic-shape field — pick whichever matches what you already have:</p>
+<table><thead><tr><th>Form</th><th>When to use</th></tr></thead><tbody><tr><td><code>Image(data, w, h)</code></td><td>you already have a buffer (loaded from a file, computed elsewhere)</td></tr><tr><td><code>Image(w, h)</code></td><td>you don&#x27;t — allocate a new, zero-filled buffer of size <code>w * h</code></td></tr><tr><td><code>Image(w, h, fill = v)</code></td><td>same allocation, filled with <code>v</code> instead of <code>0</code></td></tr></tbody></table>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>img = <span class="fn">Image</span>(data, w, h)          <span class="co"># wrap an existing buffer</span>
+img = <span class="fn">Image</span>(w, h)                <span class="co"># allocate, zero-filled</span>
+img = <span class="fn">Image</span>(w, h, fill = <span class="nb">1.0</span>)    <span class="co"># allocate, filled with 1.0</span></code></pre></div>
+<p><code>Volume</code> follows the same three forms with one more axis: <code>Volume(data, x, y, z)</code> / <code>Volume(x, y, z)</code> / <code>Volume(x, y, z, fill = v)</code>.</p>
+<p>Passing your own <code>data</code> (first form) makes you responsible for its length actually matching <code>w * h</code> (<code>* depth</code> for <code>Volume</code>) — nothing checks this automatically today. The other two forms don&#x27;t have this risk, since the buffer is allocated to the right size here.</p>
+<h2 id="accessing-elements">Accessing elements</h2>
+<p>Both forms share the same four methods:</p>
+<table><thead><tr><th>Method</th><th>Returns</th></tr></thead><tbody><tr><td><code>.at(c, r)</code> (<code>Image</code>) / <code>.at(x, y, z)</code> (<code>Volume</code>)</td><td>the element at that position — usable for both reads and writes: <code>img.at(c, r) = v</code></td></tr><tr><td><code>.width()</code></td><td>the size along the first axis</td></tr><tr><td><code>.height()</code></td><td>the size along the second axis</td></tr><tr><td><code>.depth()</code></td><td>the size along the third axis (<code>Volume</code> only)</td></tr></tbody></table>
+<p>Storage is row-major: <code>.at(c, r)</code> addresses <code>c + r * width</code>, and <code>.at(x, y, z)</code> addresses <code>x + y * width + z * (width * height)</code> — the natural generalization to a third axis.</p>
+<p>There&#x27;s no <code>.len()</code> or <code>.set(...)</code> — <code>.at(...)</code> covers both reading and writing, and <code>.width()</code>/<code>.height()</code>/<code>.depth()</code> cover shape queries.</p>
+<h2 id="qualifiers">Qualifiers</h2>
+<p><code>Image</code>/<code>Volume</code> fields accept the same GPU memory qualifiers a flat <code>[T]</code> field does: <code>&#x27;unified</code>, <code>&#x27;global</code>, <code>&#x27;const</code>, bare <code>&#x27;actor</code> (block-shared), <code>&#x27;actor&#x27;unified</code>, <code>&#x27;actor&#x27;global</code>. A kernel can freely mix fixed-shape and dynamic-shape <code>Image</code>/<code>Volume</code> fields, and plain <code>[T]</code>/<code>[T, N]</code> fields, side by side.</p>
+<h2 id="dispatch-and-grid-sizing">Dispatch and grid sizing</h2>
+<p>Omitting <code>grid = (...)</code> at dispatch infers a 2D (<code>Image</code>) or 3D (<code>Volume</code>) grid automatically, from the field&#x27;s shape and the <code>block = (...)</code> size — whether the shape is a compile-time constant or was only known at construction time:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>:
+    <span class="fn">k</span>(block = (<span class="nb">16</span>, <span class="nb">16</span>))   <span class="co"># grid inferred from img&#x27;s width/height — no grid= needed</span></code></pre></div>
+<p>Pass <code>grid = (...)</code> explicitly if you need a different dispatch size than the field&#x27;s own shape implies.</p>
+<blockquote><strong><code>boring run</code> caveat:</strong> the auto-inference above is fully correct in the real code <code>boring build</code> generates for every GPU target. The interpreter&#x27;s own simulation (<code>boring run</code>), used for fast local iteration without a GPU, doesn&#x27;t yet read an <code>Image</code>/<code>Volume</code> field&#x27;s shape when <code>grid =</code> is omitted — it falls back to a cruder heuristic that can under-cover the grid once the shape needs more than one block along an axis, silently leaving part of the buffer unwritten. Until that&#x27;s fixed, pass <code>grid =</code> explicitly when running such a kernel through <code>boring run</code>: <code>grid = ((width + 15) / 16, (height + 15) / 16)</code> for a <code>block = (16, 16)</code> dispatch, for example.</blockquote>
+<h2 id="a-migration-example">A migration example</h2>
+<p><code>whisper-boring</code>&#x27;s <code>TransposeKernel</code> (<code>src/math_gpu.br</code>) is the pattern this feature replaces — <code>rows</code>/<code>cols</code> as separate <code>int</code> fields, with every index computed by hand:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Before</span>
+<span class="kw">kernel</span> TransposeKernel:
+    <span class="kw">let</span> [<span class="kt">float</span>]<span class="lf">&#x27;global</span>   src
+    <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span>  dst
+    <span class="kw">let</span> <span class="kt">int</span>              rows
+    <span class="kw">let</span> <span class="kt">int</span>              cols
+
+    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;global</span> s, <span class="kt">int</span> r, <span class="kt">int</span> c):
+        src  = s
+        rows = r
+        cols = c
+        dst  = [<span class="nb">0.0</span> <span class="kw">for</span> ..r * c]
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> cell = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        <span class="kw">if</span> cell &lt; rows * cols:
+            <span class="kw">let</span> i = cell / cols
+            <span class="kw">let</span> j = cell % cols
+            dst[j * rows + i] = src[cell]</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># After</span>
+<span class="kw">kernel</span> TransposeKernel:
+    <span class="kw">let</span> Image&lt;<span class="kt">float</span>&gt;<span class="lf">&#x27;global</span>   src
+    <span class="kw">mut</span> Image&lt;<span class="kt">float</span>&gt;<span class="lf">&#x27;unified</span>  dst
+
+    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;global</span> s, <span class="kt">int</span> rows, <span class="kt">int</span> cols):
+        src = <span class="fn">Image</span>(s, cols, rows)
+        dst = <span class="fn">Image</span>(rows, cols)
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> cell = gpu.thread.x + gpu.block.x * gpu.block_dim.x
+        <span class="kw">if</span> cell &lt; src.<span class="fn">width</span>() * src.<span class="fn">height</span>():
+            <span class="kw">let</span> i = cell / src.<span class="fn">width</span>()
+            <span class="kw">let</span> j = cell % src.<span class="fn">width</span>()
+            dst.<span class="fn">at</span>(i, j) = src.<span class="fn">at</span>(j, i)</code></pre></div>
+<p>(<code>whisper-boring</code> itself hasn&#x27;t been migrated yet — that&#x27;s tracked separately.)</p>
+<h2 id="notes">Notes</h2>
+<ul><li>Field names starting with <code>__</code> are reserved for the compiler&#x27;s own use —</li></ul>
+<p>  avoid them for your own kernel fields.</p>
+<ul><li><code>Volume</code> follows <code>Image</code> exactly, one axis further: <code>Image&lt;T,C,R&gt;</code> ↔</li></ul>
+<p>  <code>Volume&lt;T,X,Y,Z&gt;</code>, <code>Image&lt;T&gt;</code> ↔ <code>Volume&lt;T&gt;</code>, <code>.at(c,r)</code> ↔ <code>.at(x,y,z)</code>.</p>
+<ul><li><code>&#x27;surface</code> (pixel buffers presented to the screen) is unrelated to</li></ul>
+<p>  <code>Image</code>/<code>Volume</code> and doesn&#x27;t compose with them — see <code>gpu-display.md</code>.</p>
+<h2 id="see-also">See also</h2>
+<ul><li><code>examples/matrix_mul_gpu.br</code> — the fixed-shape form (<code>Image&lt;float,32,32&gt;</code>).</li><li><code>examples/mandelbrot_gpu.br</code> — the dynamic-shape form (<code>Image&lt;float&gt;</code>).</li></ul>
 </main>
 <script>
 // Build TOC from headings

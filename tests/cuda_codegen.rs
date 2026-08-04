@@ -1137,6 +1137,47 @@ kernel Vol:
     assert!(rs.contains("((32 + block_dim.2 - 1) / block_dim.2)"), "expected grid.z from Z=32;\ngot:\n{rs}");
 }
 
+// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
+// docs/image-volume-types.md) ────────────────────────────────────────────────
+
+#[test]
+fn host_dynamic_image_field_infers_2d_grid_from_shadow_fields() {
+    let (_, rs) = cuda_codegen("dynamic_image_2d_grid", r#"
+kernel Img:
+    mut Image<float>'unified img
+    init([float]'unified data, int w, int h):
+        img = Image(data, w, h)
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img.at(c, r) = img.at(c, r) * 2.0
+"#);
+    assert!(rs.contains("self.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
+    // Must NOT fall back to the plain 1D length-based inference every other
+    // dynamic `[T]'unified` field gets.
+    assert!(!rs.contains("self.img.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_dynamic_volume_field_infers_3d_grid_from_shadow_fields() {
+    let (_, rs) = cuda_codegen("dynamic_volume_3d_grid", r#"
+kernel Vol:
+    mut Volume<float>'unified vol
+    init([float]'unified data, int x, int y, int z):
+        vol = Volume(data, x, y, z)
+    def ():
+        let i = gpu.thread.x
+        let j = gpu.thread.y
+        let k = gpu.thread.z
+        vol.at(i, j, k) = vol.at(i, j, k) * 2.0
+"#);
+    assert!(rs.contains("self.__vol_w"), "expected grid.x from the __vol_w shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__vol_h"), "expected grid.y from the __vol_h shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__vol_d"), "expected grid.z from the __vol_d shadow field;\ngot:\n{rs}");
+    assert!(!rs.contains("self.vol.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
+}
+
 // ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────
 
 #[test]

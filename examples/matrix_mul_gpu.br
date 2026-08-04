@@ -1,36 +1,38 @@
 # GPU matrix multiplication — Boring with CUDA/Metal backend
-# width=32 for simulation; increase to 1024 for boring build --target cuda
-
-let width = 32
+# 32x32 for simulation; increase to 1024x1024 for boring build --target cuda
 
 kernel MatrixMul:
-    let [float]'global  a
-    let [float]'global  b
-    mut [float]'unified c
-    let Dimension dim
+    let  Image<float, 32, 32>'global   a
+    let  Image<float, 32, 32>'global   b
+    mut  Image<float, 32, 32>'unified  c
 
-    init([float]'global input_a, [float]'global input_b, Dimension d):
-        a   = input_a
-        b   = input_b
-        c   = [0.0 for ..d.width * d.height]
-        dim = d
+    init(Image<float, 32, 32>'global input_a, Image<float, 32, 32>'global input_b):
+        a = input_a
+        b = input_b
+        # c is zero-initialized automatically — no assignment needed.
 
     def ():
         let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
         let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        if row < width and col < width:
+        if row < a.height() and col < a.width():
             var float sum = 0.0
-            for k in 0..width:
-                sum += a[row * width + k] * b[k * width + col]
-            c[row * width + col] = sum
+            for i in 0..a.width():
+                sum += a.at(i, row) * b.at(col, i)
+            c.at(col, row) = sum
 
+let width = 32
 let size = width * width
 var [float] host_a = [float(i % 100) / 100.0 for i in 0..size]
 var [float] host_b = [float(i % 50)  / 50.0  for i in 0..size]
 
-var k = MatrixMul(host_a, host_b, Dimension(width, width))
+var k = MatrixMul(host_a, host_b)
 kernel:
-    k(block = (16, 16))
+    # `grid=` is passed explicitly here rather than relying on auto-inference —
+    # `boring run`'s interpreter simulation doesn't yet read a 2D `Image`
+    # field's shape when `grid=` is omitted (a known interpreter limitation;
+    # `boring build`'s real generated code infers it correctly). See
+    # docs/image-volume-types.md's "Dispatch and grid sizing" section.
+    k(block = (16, 16), grid = (2, 2))
 
 # `k.c[...]` alone would read the whole result buffer back from the GPU on every
 # one of these 100 accesses. Binding it through an alias and reading it inside a

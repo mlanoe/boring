@@ -564,6 +564,46 @@ let _result = k.out
     );
 }
 
+// ─── Image/Volume: dynamic-shape form (`Image<T>`/`Volume<T>`, dims-less) ───
+//
+// Phase 1 of docs/image-volume-types.md's dynamic-shape extension: recognizing
+// `Image<T>`/`Volume<T>` (element type only, no `C`/`R`/`X`/`Y`/`Z`) via
+// `as_image_volume()`'s existing single chokepoint (an empty `dims` slice),
+// and fixing `image_volume_len()`'s empty-slice landmine — it used to fold to
+// `Some(1)` (the empty-product identity) instead of `None`, which would have
+// made `Image<T>` silently read as "a fixed shape of total length 1" instead
+// of "no compile-time length at all". No validator/interpreter/transpiler
+// support for actually constructing/using a dynamic-shape kernel field exists
+// yet (see the doc's Phase 2+) — this only covers the AST-level recognition.
+
+#[test]
+fn test_image_volume_dynamic_form_recognized_with_no_dims() {
+    use crate::ast::Type;
+
+    let dynamic_image = Type::Generic("Image".into(), vec![Type::Float]);
+    let (elem, dims) = dynamic_image.as_image_volume().expect("Image<T> should be recognized");
+    assert_eq!(elem, &Type::Float);
+    assert!(dims.is_empty(), "Image<T> (element type only) must carry no dimension args");
+
+    let dynamic_volume = Type::Generic("Volume".into(), vec![Type::Int]);
+    assert!(dynamic_volume.as_image_volume().is_some());
+}
+
+#[test]
+fn test_image_volume_len_none_for_dynamic_form() {
+    use crate::ast::Type;
+
+    // Dynamic form: no dims → no compile-time length (previously the buggy
+    // `Some(1)`, the empty-product identity — see this test's module doc).
+    let dynamic_image = Type::Generic("Image".into(), vec![Type::Float]);
+    assert_eq!(dynamic_image.image_volume_len(), None);
+
+    // Regression: the fixed-shape form is unaffected — still folds dims to a
+    // real compile-time length.
+    let fixed_image = Type::Generic("Image".into(), vec![Type::Float, Type::ConstInt(16), Type::ConstInt(16)]);
+    assert_eq!(fixed_image.image_volume_len(), Some(256));
+}
+
 // ─── sync is a no-op (for kernels with no `'actor` field) ───────────────────
 //
 // `sync` is a REAL cross-thread barrier when the kernel has an `'actor` field

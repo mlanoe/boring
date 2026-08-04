@@ -1210,6 +1210,19 @@ impl Type {
     /// two built-in names — every other layer (parser qualifier legality, per-backend
     /// codegen, grid inference) should go through this instead of matching the name
     /// "Image"/"Volume" independently. See docs/image-volume-types.md.
+    ///
+    /// An empty `dims` slice — i.e. `Image<T>` / `Volume<T>`, element type only, no
+    /// dimension args — is the **dynamic-shape** form (see
+    /// docs/image-volume-types.md, "Extension: dynamic-shape `Image<T>`/`Volume<T>`":
+    /// proposed, not yet implemented beyond this recognition point and the
+    /// `image_volume_len` fix below). Every existing caller that only checks
+    /// `.is_some()` or discards `dims` via `_` already treats a dynamic-shape value
+    /// correctly by construction — it's specifically callers that read `dims`'
+    /// *contents* (arity, `ConstInt`-ness) that need to know about this distinction,
+    /// and none do yet: no validator currently rejects `Image<T>`/`Volume<T>` before
+    /// it would reach the interpreter's/transpiler's fixed-shape-only lowering (a real
+    /// gap, not a hypothetical one — see the `image_volume_len` fix below and
+    /// docs/image-volume-types.md's Phase 2 notes).
     pub fn as_image_volume(&self) -> Option<(&Type, &[Type])> {
         match self {
             Type::Generic(name, args) if name == "Image" || name == "Volume" => {
@@ -1222,13 +1235,80 @@ impl Type {
     /// Total element count (`C*R` / `X*Y*Z`) for a fixed-shape `Image`/`Volume`, if
     /// every dimension arg is a compile-time integer constant (the only case v1
     /// supports — see `docs/image-volume-types.md`, Open Question 1).
+    ///
+    /// `None` for the dynamic-shape form (`dims` empty — see `as_image_volume`'s doc
+    /// comment) rather than `Some(1)`. `dims.iter().try_fold(1i64, ...)` folds to `1`
+    /// over an empty slice — the empty-product identity — which would otherwise make
+    /// `Image<T>`/`Volume<T>` silently read as "a fixed shape of total length 1"
+    /// instead of "no compile-time shape at all", the exact wrong answer for a type
+    /// that hasn't been given any dimensions to have a compile-time length in the
+    /// first place.
     pub fn image_volume_len(&self) -> Option<i64> {
         self.as_image_volume().and_then(|(_, dims)| {
+            if dims.is_empty() {
+                return None;
+            }
             dims.iter().try_fold(1i64, |acc, d| match d {
                 Type::ConstInt(n) => Some(acc * n),
                 _ => None,
             })
         })
+    }
+
+    /// Validates an `Image<...>`/`Volume<...>` type's shape and returns a
+    /// human-readable error message if it's invalid or not (yet) supported;
+    /// `None` if `self` isn't an `Image`/`Volume` at all, or is a valid
+    /// (currently-supported) fixed shape.
+    ///
+    /// Checks, in order:
+    ///   1. dynamic shape (`Image<T>`/`Volume<T>`, no dimension args) — not yet
+    ///      implemented (see docs/image-volume-types.md's "Extension" section);
+    ///      rejected explicitly rather than silently mis-measured (the
+    ///      `image_volume_len` fix above prevents the silent-`Some(1)` case, but
+    ///      does nothing to stop a caller from reaching that `None` where a
+    ///      `ConstInt` length was assumed — this is that stop).
+    ///   2. wrong arity (`Image` needs exactly 2 dims, `Volume` exactly 3) —
+    ///      never enforced anywhere before this function existed.
+    ///   3. a non-`ConstInt` dimension arg (the only pre-existing check,
+    ///      previously only reachable via `validator::kernel`'s `--target
+    ///      kernel`-scoped pass — see below).
+    ///
+    /// This is the one target-agnostic entry point for these checks — call it
+    /// from every real pipeline (interpreter, checker, all four GPU backends),
+    /// not just `validator::kernel`'s `--target kernel` (Rust-for-Linux) pass,
+    /// which is the *only* place any of this was enforced before Phase 2 of
+    /// docs/image-volume-types.md: `validate_kernel` runs exclusively inside
+    /// `main::emit_kernel_with_version`, so `boring run` and `boring build`
+    /// (default, and `--target cuda`/`rocm`/`metal`/`wgpu`) previously had no
+    /// arity or `ConstInt` check at all, despite `eval_gpu.rs`'s
+    /// `.expect("validator guarantees ConstInt dims")` comment describing a
+    /// guarantee that, until now, only actually held for the one target this
+    /// feature isn't primarily about.
+    pub fn image_volume_shape_error(&self) -> Option<String> {
+        let (_, dims) = self.as_image_volume()?;
+        let name = match self {
+            Type::Generic(n, _) => n.as_str(),
+            _ => unreachable!("as_image_volume just matched a Type::Generic"),
+        };
+        if dims.is_empty() {
+            let example = if name == "Image" { "16, 16" } else { "4, 4, 4" };
+            return Some(format!(
+                "{name}<T> (dynamic shape) is not yet supported — declare explicit \
+                 dimensions, e.g. {name}<T, {example}> (see docs/image-volume-types.md)"
+            ));
+        }
+        let (expected, axes) = if name == "Image" { (2, "C, R") } else { (3, "X, Y, Z") };
+        if dims.len() != expected {
+            return Some(format!(
+                "{name}<T, {axes}> expects {expected} dimension argument{} ({axes}), got {}",
+                if expected == 1 { "" } else { "s" },
+                dims.len(),
+            ));
+        }
+        if dims.iter().any(|d| !matches!(d, Type::ConstInt(_))) {
+            return Some("Image/Volume dimensions must be compile-time integer constants".to_string());
+        }
+        None
     }
 }
 
