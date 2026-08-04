@@ -75,6 +75,8 @@ fn expr_uses_gpu_warp(e: &Expr) -> bool {
             expr_uses_gpu_warp(l) || expr_uses_gpu_warp(r),
         ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => expr_uses_gpu_warp(obj),
         ExprKind::Index(a, i) => expr_uses_gpu_warp(a) || expr_uses_gpu_warp(i),
+        ExprKind::LabeledIndex(a, args) =>
+            expr_uses_gpu_warp(a) || args.iter().any(|arg| expr_uses_gpu_warp(&arg.value)),
         ExprKind::Call(callee, args) =>
             expr_uses_gpu_warp(callee) || args.iter().any(|a| expr_uses_gpu_warp(&a.value)),
         ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) =>
@@ -102,6 +104,9 @@ fn expr_uses_gpu_warp(e: &Expr) -> bool {
             expr_uses_gpu_warp(expr) || expr_uses_gpu_warp(count),
         ExprKind::ArrayCompIter { expr, iter, .. } =>
             expr_uses_gpu_warp(expr) || expr_uses_gpu_warp(iter),
+        ExprKind::LabeledArrayComp { expr, clauses } =>
+            expr_uses_gpu_warp(expr) || clauses.iter().any(|(_, count)| expr_uses_gpu_warp(count)),
+        ExprKind::RelabelCast(x, _) => expr_uses_gpu_warp(x),
         ExprKind::Dict(pairs) =>
             pairs.iter().any(|(k, v)| expr_uses_gpu_warp(k) || expr_uses_gpu_warp(v)),
         ExprKind::Range { start, end, .. } => expr_uses_gpu_warp(start) || expr_uses_gpu_warp(end),
@@ -440,9 +445,16 @@ fn run_kernel_parallel(
     let sync_field_specs: Vec<(String, crate::ast::Type, usize)> = decl_fields.iter()
         .filter_map(|f| match (&f.qual, &f.ty) {
             (GpuQual::Actor, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
-            (GpuQual::Actor, ty) if ty.as_image_volume().is_some() => {
-                let (elem, _) = ty.as_image_volume().unwrap();
-                let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+            // An 'actor-qualified `[T, width=16, height=16]` tile field
+            // (LinearKernel/MatMulBTHeadsKernel's shared-memory tiles) needs
+            // real cross-thread barrier visibility, or each thread silently
+            // gets its own independent copy of the tile instead of seeing
+            // what its block-mates cooperatively wrote — found via
+            // whisper-boring's math_gpu.br migration producing wrong (but not
+            // crashing) GEMM results.
+            (GpuQual::Actor, ty) if ty.as_labeled_array().is_some() => {
+                let (elem, _) = ty.as_labeled_array().unwrap();
+                let len = ty.labeled_array_len().expect("checker guarantees fixed-shape literal axes on an 'actor field");
                 Some((f.name.clone(), elem.clone(), len as usize))
             }
             _ => None,
@@ -912,7 +924,7 @@ impl Interpreter {
 
     /// Register a `kernel Name:` declaration in the environment.
     pub(crate) fn exec_kernel_decl(&mut self, decl: &crate::ast::KernelDecl, env: EnvRef) -> Result<(), Signal> {
-        let decl = lower_image_volume_methods(decl);
+        let decl = lower_labeled_array_methods(decl);
         let decl = &decl;
         let val = Value::KernelStruct { decl: decl.clone(), captured: Rc::clone(&env) };
         env.borrow_mut().define(&decl.name, val.clone());
@@ -1153,14 +1165,22 @@ impl Interpreter {
             if matches!(val, Value::Nil) {
                 if let crate::ast::Type::ArrayN(inner, n) = &field_decl.ty {
                     *val = Value::Array(vec![zero_value(inner); *n].into());
-                } else if let Some((elem, _)) = field_decl.ty.as_image_volume() {
-                    // Image/Volume fields are represented the same as a flat
-                    // ArrayN of the same total length — `.at(...)` has already
-                    // been lowered to a plain `Index` into this same flat array
-                    // (see `lower_image_volume_methods`), so no separate shape
-                    // tracking is needed at runtime.
-                    let len = field_decl.ty.image_volume_len().expect("validator guarantees ConstInt dims");
-                    *val = Value::Array(vec![zero_value(elem); len as usize].into());
+                } else if let Some((elem, _)) = field_decl.ty.as_labeled_array() {
+                    // A fixed-shape LabeledArray field is represented the same
+                    // as a flat ArrayN of the same total length — `LabeledIndex`/
+                    // `.size(.axis)` have already been lowered to a plain
+                    // `Index` into this same flat array (see
+                    // `lower_labeled_array_methods`), so no separate shape
+                    // tracking is needed at runtime. Only when every axis size
+                    // is a literal int — a LabeledArray axis may be an
+                    // arbitrary const-generic expression (`width = W`), which
+                    // `labeled_array_len()` can't fold without a subst-map
+                    // evaluation context this loop doesn't have. Left `Nil` in
+                    // that case — not yet exercised by any real kernel (every
+                    // real .br fixed-shape tile uses literal sizes).
+                    if let Some(len) = field_decl.ty.labeled_array_len() {
+                        *val = Value::Array(vec![zero_value(elem); len as usize].into());
+                    }
                 }
             }
         }
@@ -1212,104 +1232,94 @@ impl Interpreter {
     }
 }
 
-/// Lower `.at(c,r)`/`.at(x,y,z)`/`.width()`/`.height()`/`.depth()` calls on
-/// `Image`/`Volume`-typed kernel fields into plain `Index`/`Int` expressions.
-///
-/// The interpreter has no runtime representation for `Image`/`Volume` beyond
-/// the flat array their field already gets (see the zero-init fallback in
-/// `instantiate_kernel_struct`) — every `.at(...)`/`.width()`/`.height()`/
-/// `.depth()` call must be resolved away before a kernel's methods ever
-/// execute, since `call_method`/`assign` (`methods.rs`) don't know these
-/// method names. Purely lexical: `C`/`R`/`X`/`Y`/`Z` are compile-time
-/// constants already known from the field's own declared type (validated as
-/// `Type::ConstInt` — see `validator/kernel.rs`), so no runtime type tracking
-/// is needed. Mirrors `Type::ArrayNExpr`'s "monomorphised before codegen"
-/// precedent (`ast/mod.rs`) — this is that same idea for the interpreter path
-/// specifically; the transpiler backends lower `.at()` directly at codegen
-/// time instead (`transpiler::helpers::image_volume_at_index`).
-///
-/// Scope: covers every statement/expression form realistic inside a `kernel`
-/// method body (numeric-only, GPU-restricted code) — not the full language
-/// grammar. `GuardCond`, `Match`-as-expr, `Block`/`Do` exprs, and closures are
-/// left unrewritten (returned as-is): none of these are meaningful inside a
-/// kernel body today, and if one contained `.at(...)` it would fail the same
-/// "no method 'at' on ..." way it already does without this pass — no worse
-/// than before, just not newly fixed.
-pub(crate) fn lower_image_volume_methods(decl: &crate::ast::KernelDecl) -> crate::ast::KernelDecl {
-    let image_fields: HashMap<String, Vec<crate::ast::Type>> = decl.fields.iter()
-        .filter_map(|f| f.ty.as_image_volume().map(|(_, dims)| (f.name.clone(), dims.to_vec())))
+// ─── Labeled multi-dim array lowering (fixed-shape kernel fields only) ─────
+//
+// Lowers `.at`-equivalent `LabeledIndex`/`.size(.axis)` calls on
+// `Type::LabeledArray` kernel fields (docs/array-multidim-types.md). By the
+// time this runs, any *dynamic*-shape LabeledArray field has already been
+// rewritten away by `desugar_labeled_array` (a whole-program pre-pass, run
+// once before the program is ever interpreted) into a plain buffer field +
+// shadow `uint` fields — so `as_labeled_array()` here only ever sees a fixed
+// shape (every axis a compile-time size). TryElseBlock/Match/Block/Do/
+// Closure/New/KernelLaunch/Dict/Set/StringInterp/SliceRange/DotIdent aren't
+// realistic inside a kernel body's numeric hot path, so they're left
+// unrewritten (falls through to `other => other.clone()`).
+
+pub(crate) fn lower_labeled_array_methods(decl: &crate::ast::KernelDecl) -> crate::ast::KernelDecl {
+    let labeled_fields: LabeledArrayFieldAxes = decl.fields.iter()
+        .filter_map(|f| f.ty.as_labeled_array().map(|(_, axes)| (f.name.clone(), axes.to_vec())))
         .collect();
-    if image_fields.is_empty() {
+    if labeled_fields.is_empty() {
         return decl.clone();
     }
     let mut lowered = decl.clone();
     for method in lowered.methods.iter_mut() {
-        method.body = lower_stmts(&method.body, &image_fields);
+        method.body = lower_labeled_stmts(&method.body, &labeled_fields);
     }
     for init in lowered.inits.iter_mut() {
-        init.body = lower_stmts(&init.body, &image_fields);
+        init.body = lower_labeled_stmts(&init.body, &labeled_fields);
     }
     lowered
 }
 
-type ImageFieldDims = HashMap<String, Vec<crate::ast::Type>>;
+type LabeledArrayFieldAxes = HashMap<String, Vec<crate::ast::LabeledAxis>>;
 
-fn lower_stmts(stmts: &[Stmt], fields: &ImageFieldDims) -> Vec<Stmt> {
-    stmts.iter().map(|s| lower_stmt(s, fields)).collect()
+fn lower_labeled_stmts(stmts: &[Stmt], fields: &LabeledArrayFieldAxes) -> Vec<Stmt> {
+    stmts.iter().map(|s| lower_labeled_stmt(s, fields)).collect()
 }
 
-fn lower_stmt(stmt: &Stmt, fields: &ImageFieldDims) -> Stmt {
+fn lower_labeled_stmt(stmt: &Stmt, fields: &LabeledArrayFieldAxes) -> Stmt {
     use crate::ast::MatchBody;
     match stmt {
         Stmt::Let(s) => {
             let mut s = s.clone();
-            s.value = s.value.as_ref().map(|v| lower_expr(v, fields));
+            s.value = s.value.as_ref().map(|v| lower_labeled_expr(v, fields));
             Stmt::Let(s)
         }
         Stmt::LetDestructure(s) => {
             let mut s = s.clone();
-            s.value = lower_expr(&s.value, fields);
+            s.value = lower_labeled_expr(&s.value, fields);
             Stmt::LetDestructure(s)
         }
         Stmt::Return(r) => {
             let mut r = r.clone();
-            r.value = r.value.as_ref().map(|v| lower_expr(v, fields));
+            r.value = r.value.as_ref().map(|v| lower_labeled_expr(v, fields));
             Stmt::Return(r)
         }
-        Stmt::Break(line, val) => Stmt::Break(*line, val.as_ref().map(|v| lower_expr(v, fields))),
+        Stmt::Break(line, val) => Stmt::Break(*line, val.as_ref().map(|v| lower_labeled_expr(v, fields))),
         Stmt::Throw(t) => {
             let mut t = t.clone();
-            t.value = t.value.as_ref().map(|v| lower_expr(v, fields));
+            t.value = t.value.as_ref().map(|v| lower_labeled_expr(v, fields));
             Stmt::Throw(t)
         }
         Stmt::If(i) => {
             let mut i = i.clone();
-            i.branches = i.branches.iter().map(|(c, b)| (lower_expr(c, fields), lower_stmts(b, fields))).collect();
-            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            i.branches = i.branches.iter().map(|(c, b)| (lower_labeled_expr(c, fields), lower_labeled_stmts(b, fields))).collect();
+            i.else_body = i.else_body.as_ref().map(|b| lower_labeled_stmts(b, fields));
             Stmt::If(i)
         }
         Stmt::IfLet(i) => {
             let mut i = i.clone();
-            i.clauses = i.clauses.iter().map(|c| lower_cond_clause(c, fields)).collect();
-            i.then_body = lower_stmts(&i.then_body, fields);
+            i.clauses = i.clauses.iter().map(|c| lower_labeled_cond_clause(c, fields)).collect();
+            i.then_body = lower_labeled_stmts(&i.then_body, fields);
             i.elif_branches = i.elif_branches.iter().map(|b| {
                 let mut b = b.clone();
-                b.clauses = b.clauses.iter().map(|c| lower_cond_clause(c, fields)).collect();
-                b.body = lower_stmts(&b.body, fields);
+                b.clauses = b.clauses.iter().map(|c| lower_labeled_cond_clause(c, fields)).collect();
+                b.body = lower_labeled_stmts(&b.body, fields);
                 b
             }).collect();
-            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            i.else_body = i.else_body.as_ref().map(|b| lower_labeled_stmts(b, fields));
             Stmt::IfLet(i)
         }
         Stmt::Match(m) => {
             let mut m = m.clone();
-            m.subject = lower_expr(&m.subject, fields);
+            m.subject = lower_labeled_expr(&m.subject, fields);
             m.arms = m.arms.iter().map(|arm| {
                 let mut arm = arm.clone();
-                arm.guard = arm.guard.as_ref().map(|g| lower_expr(g, fields));
+                arm.guard = arm.guard.as_ref().map(|g| lower_labeled_expr(g, fields));
                 arm.body = match &arm.body {
-                    MatchBody::Expr(e) => MatchBody::Expr(lower_expr(e, fields)),
-                    MatchBody::Block(b) => MatchBody::Block(lower_stmts(b, fields)),
+                    MatchBody::Expr(e) => MatchBody::Expr(lower_labeled_expr(e, fields)),
+                    MatchBody::Block(b) => MatchBody::Block(lower_labeled_stmts(b, fields)),
                 };
                 arm
             }).collect();
@@ -1317,160 +1327,184 @@ fn lower_stmt(stmt: &Stmt, fields: &ImageFieldDims) -> Stmt {
         }
         Stmt::While(w) => {
             let mut w = w.clone();
-            w.condition = lower_expr(&w.condition, fields);
-            w.body = lower_stmts(&w.body, fields);
+            w.condition = lower_labeled_expr(&w.condition, fields);
+            w.body = lower_labeled_stmts(&w.body, fields);
             Stmt::While(w)
         }
         Stmt::WhileLet(w) => {
             let mut w = w.clone();
-            w.body = lower_stmts(&w.body, fields);
+            w.body = lower_labeled_stmts(&w.body, fields);
             Stmt::WhileLet(w)
         }
         Stmt::DoWhile(d) => {
             let mut d = d.clone();
-            d.body = lower_stmts(&d.body, fields);
-            d.condition = lower_expr(&d.condition, fields);
+            d.body = lower_labeled_stmts(&d.body, fields);
+            d.condition = lower_labeled_expr(&d.condition, fields);
             Stmt::DoWhile(d)
         }
         Stmt::Loop(l) => {
             let mut l = l.clone();
-            l.body = lower_stmts(&l.body, fields);
+            l.body = lower_labeled_stmts(&l.body, fields);
             Stmt::Loop(l)
         }
-        Stmt::Wait(e, line) => Stmt::Wait(lower_expr(e, fields), *line),
+        Stmt::Wait(e, line) => Stmt::Wait(lower_labeled_expr(e, fields), *line),
         Stmt::For(f) => {
             let mut f = f.clone();
-            f.iterable = lower_expr(&f.iterable, fields);
-            f.body = lower_stmts(&f.body, fields);
+            f.iterable = lower_labeled_expr(&f.iterable, fields);
+            f.body = lower_labeled_stmts(&f.body, fields);
             Stmt::For(f)
         }
         Stmt::Guard(g) => {
             let mut g = g.clone();
-            g.else_body = lower_stmts(&g.else_body, fields);
+            g.else_body = lower_labeled_stmts(&g.else_body, fields);
             Stmt::Guard(g)
         }
         Stmt::Try(t) => {
             let mut t = t.clone();
-            t.body = lower_stmts(&t.body, fields);
+            t.body = lower_labeled_stmts(&t.body, fields);
             t.catch_clauses = t.catch_clauses.iter().map(|c| {
                 let mut c = c.clone();
-                c.body = lower_stmts(&c.body, fields);
+                c.body = lower_labeled_stmts(&c.body, fields);
                 c
             }).collect();
             Stmt::Try(t)
         }
-        Stmt::Defer(body) => Stmt::Defer(lower_stmts(body, fields)),
-        Stmt::Expr(e) => Stmt::Expr(lower_expr(e, fields)),
-        Stmt::Yield(e, line) => Stmt::Yield(lower_expr(e, fields), *line),
-        // Fn/Struct/Enum/Mod/Alias/Comment/KernelBlock/With/Continue — no
-        // sub-expressions relevant to `.at(...)` rewriting; left unchanged.
+        Stmt::Defer(body) => Stmt::Defer(lower_labeled_stmts(body, fields)),
+        Stmt::Expr(e) => Stmt::Expr(lower_labeled_expr(e, fields)),
+        Stmt::Yield(e, line) => Stmt::Yield(lower_labeled_expr(e, fields), *line),
         other => other.clone(),
     }
 }
 
-fn lower_cond_clause(c: &crate::ast::CondClause, fields: &ImageFieldDims) -> crate::ast::CondClause {
+fn lower_labeled_cond_clause(c: &crate::ast::CondClause, fields: &LabeledArrayFieldAxes) -> crate::ast::CondClause {
     use crate::ast::CondClause;
     match c {
-        CondClause::Let(name, e) => CondClause::Let(name.clone(), lower_expr(e, fields)),
-        CondClause::LetPat(p, e) => CondClause::LetPat(p.clone(), lower_expr(e, fields)),
-        CondClause::Expr(e) => CondClause::Expr(lower_expr(e, fields)),
+        CondClause::Let(name, e) => CondClause::Let(name.clone(), lower_labeled_expr(e, fields)),
+        CondClause::LetPat(p, e) => CondClause::LetPat(p.clone(), lower_labeled_expr(e, fields)),
+        CondClause::Expr(e) => CondClause::Expr(lower_labeled_expr(e, fields)),
     }
 }
 
-fn lower_arg(a: &Arg, fields: &ImageFieldDims) -> Arg {
+fn lower_labeled_arg(a: &Arg, fields: &LabeledArrayFieldAxes) -> Arg {
     let mut a = a.clone();
-    a.value = lower_expr(&a.value, fields);
+    a.value = lower_labeled_expr(&a.value, fields);
     a
 }
 
-fn lower_expr(e: &Expr, fields: &ImageFieldDims) -> Expr {
+fn lower_labeled_expr(e: &Expr, fields: &LabeledArrayFieldAxes) -> Expr {
     use crate::ast::ExprKind;
     let kind = match &e.kind {
-        ExprKind::MethodCall(obj, method, args) => {
+        ExprKind::LabeledIndex(obj, args) => {
             if let ExprKind::Var(name) = &obj.kind {
-                if let Some(dims) = fields.get(name) {
-                    if let Some(rewritten) = rewrite_image_volume_call(obj, method, args, dims, fields, e.line, e.col, e.len) {
-                        return rewritten;
+                if let Some(axes) = fields.get(name) {
+                    if let Some(offset) = labeled_index_offset(args, axes, fields, e.line, e.col) {
+                        return Expr {
+                            kind: ExprKind::Index(Box::new(lower_labeled_expr(obj, fields)), Box::new(offset)),
+                            line: e.line, col: e.col, len: e.len,
+                        };
                     }
                 }
             }
-            ExprKind::MethodCall(Box::new(lower_expr(obj, fields)), method.clone(),
-                args.iter().map(|a| lower_arg(a, fields)).collect())
+            ExprKind::LabeledIndex(
+                Box::new(lower_labeled_expr(obj, fields)),
+                args.iter().map(|a| lower_labeled_arg(a, fields)).collect(),
+            )
         }
-        ExprKind::BinOp(op, l, r) => ExprKind::BinOp(op.clone(), Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
-        ExprKind::UnaryOp(op, v) => ExprKind::UnaryOp(op.clone(), Box::new(lower_expr(v, fields))),
-        ExprKind::Assign(l, r) => ExprKind::Assign(Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
-        ExprKind::QuestionAssign(l, r) => ExprKind::QuestionAssign(Box::new(lower_expr(l, fields)), Box::new(lower_expr(r, fields))),
-        ExprKind::Field(o, name) => ExprKind::Field(Box::new(lower_expr(o, fields)), name.clone()),
-        ExprKind::Index(a, i) => ExprKind::Index(Box::new(lower_expr(a, fields)), Box::new(lower_expr(i, fields))),
-        ExprKind::Call(callee, args) => ExprKind::Call(Box::new(lower_expr(callee, fields)), args.iter().map(|a| lower_arg(a, fields)).collect()),
-        ExprKind::GenericCall(callee, tys, args) => ExprKind::GenericCall(Box::new(lower_expr(callee, fields)), tys.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
-        ExprKind::Pipe(l, name, args) => ExprKind::Pipe(Box::new(lower_expr(l, fields)), name.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
-        ExprKind::TryElse(a, b) => ExprKind::TryElse(Box::new(lower_expr(a, fields)), Box::new(lower_expr(b, fields))),
-        ExprKind::Array(elems) => ExprKind::Array(elems.iter().map(|x| lower_expr(x, fields)).collect()),
-        ExprKind::ArrayFill { value, count } => ExprKind::ArrayFill { value: Box::new(lower_expr(value, fields)), count: Box::new(lower_expr(count, fields)) },
-        ExprKind::ArrayAlloc { count } => ExprKind::ArrayAlloc { count: Box::new(lower_expr(count, fields)) },
-        ExprKind::ArrayComp { expr, var, count } => ExprKind::ArrayComp { expr: Box::new(lower_expr(expr, fields)), var: var.clone(), count: Box::new(lower_expr(count, fields)) },
-        ExprKind::ArrayCompIter { expr, var, iter } => ExprKind::ArrayCompIter { expr: Box::new(lower_expr(expr, fields)), var: var.clone(), iter: Box::new(lower_expr(iter, fields)) },
-        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| lower_expr(x, fields)).collect()),
-        ExprKind::Range { start, end, inclusive } => ExprKind::Range { start: Box::new(lower_expr(start, fields)), end: Box::new(lower_expr(end, fields)), inclusive: *inclusive },
-        ExprKind::Cast(inner, ty) => ExprKind::Cast(Box::new(lower_expr(inner, fields)), ty.clone()),
-        ExprKind::Else(a, b) => ExprKind::Else(Box::new(lower_expr(a, fields)), Box::new(lower_expr(b, fields))),
-        ExprKind::OptionalField(o, name) => ExprKind::OptionalField(Box::new(lower_expr(o, fields)), name.clone()),
-        ExprKind::OptionalMethodCall(o, name, args) => ExprKind::OptionalMethodCall(Box::new(lower_expr(o, fields)), name.clone(), args.iter().map(|a| lower_arg(a, fields)).collect()),
+        ExprKind::MethodCall(obj, method, args) => {
+            if method == "size" {
+                if let ExprKind::Var(name) = &obj.kind {
+                    if let Some(axes) = fields.get(name) {
+                        if let [arg] = args.as_slice() {
+                            if let ExprKind::DotIdent(axis) = &arg.value.kind {
+                                if let Some(resolved) = resolve_labeled_size_call(axes, axis) {
+                                    return resolved;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::MethodCall(Box::new(lower_labeled_expr(obj, fields)), method.clone(),
+                args.iter().map(|a| lower_labeled_arg(a, fields)).collect())
+        }
+        ExprKind::BinOp(op, l, r) => ExprKind::BinOp(op.clone(), Box::new(lower_labeled_expr(l, fields)), Box::new(lower_labeled_expr(r, fields))),
+        ExprKind::UnaryOp(op, v) => ExprKind::UnaryOp(op.clone(), Box::new(lower_labeled_expr(v, fields))),
+        ExprKind::Assign(l, r) => ExprKind::Assign(Box::new(lower_labeled_expr(l, fields)), Box::new(lower_labeled_expr(r, fields))),
+        ExprKind::QuestionAssign(l, r) => ExprKind::QuestionAssign(Box::new(lower_labeled_expr(l, fields)), Box::new(lower_labeled_expr(r, fields))),
+        ExprKind::Field(o, name) => ExprKind::Field(Box::new(lower_labeled_expr(o, fields)), name.clone()),
+        ExprKind::Index(a, i) => ExprKind::Index(Box::new(lower_labeled_expr(a, fields)), Box::new(lower_labeled_expr(i, fields))),
+        ExprKind::Call(callee, args) => ExprKind::Call(Box::new(lower_labeled_expr(callee, fields)), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
+        ExprKind::GenericCall(callee, tys, args) => ExprKind::GenericCall(Box::new(lower_labeled_expr(callee, fields)), tys.clone(), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
+        ExprKind::Pipe(l, name, args) => ExprKind::Pipe(Box::new(lower_labeled_expr(l, fields)), name.clone(), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
+        ExprKind::TryElse(a, b) => ExprKind::TryElse(Box::new(lower_labeled_expr(a, fields)), Box::new(lower_labeled_expr(b, fields))),
+        ExprKind::Array(elems) => ExprKind::Array(elems.iter().map(|x| lower_labeled_expr(x, fields)).collect()),
+        ExprKind::ArrayFill { value, count } => ExprKind::ArrayFill { value: Box::new(lower_labeled_expr(value, fields)), count: Box::new(lower_labeled_expr(count, fields)) },
+        ExprKind::ArrayAlloc { count } => ExprKind::ArrayAlloc { count: Box::new(lower_labeled_expr(count, fields)) },
+        ExprKind::ArrayComp { expr, var, count } => ExprKind::ArrayComp { expr: Box::new(lower_labeled_expr(expr, fields)), var: var.clone(), count: Box::new(lower_labeled_expr(count, fields)) },
+        ExprKind::ArrayCompIter { expr, var, iter } => ExprKind::ArrayCompIter { expr: Box::new(lower_labeled_expr(expr, fields)), var: var.clone(), iter: Box::new(lower_labeled_expr(iter, fields)) },
+        ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| lower_labeled_expr(x, fields)).collect()),
+        ExprKind::Range { start, end, inclusive } => ExprKind::Range { start: Box::new(lower_labeled_expr(start, fields)), end: Box::new(lower_labeled_expr(end, fields)), inclusive: *inclusive },
+        ExprKind::Cast(inner, ty) => ExprKind::Cast(Box::new(lower_labeled_expr(inner, fields)), ty.clone()),
+        ExprKind::Else(a, b) => ExprKind::Else(Box::new(lower_labeled_expr(a, fields)), Box::new(lower_labeled_expr(b, fields))),
+        ExprKind::OptionalField(o, name) => ExprKind::OptionalField(Box::new(lower_labeled_expr(o, fields)), name.clone()),
+        ExprKind::OptionalMethodCall(o, name, args) => ExprKind::OptionalMethodCall(Box::new(lower_labeled_expr(o, fields)), name.clone(), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
         ExprKind::If(i) => {
             let mut i = i.clone();
-            i.branches = i.branches.iter().map(|(c, b)| (lower_expr(c, fields), lower_stmts(b, fields))).collect();
-            i.else_body = i.else_body.as_ref().map(|b| lower_stmts(b, fields));
+            i.branches = i.branches.iter().map(|(c, b)| (lower_labeled_expr(c, fields), lower_labeled_stmts(b, fields))).collect();
+            i.else_body = i.else_body.as_ref().map(|b| lower_labeled_stmts(b, fields));
             ExprKind::If(i)
         }
         // TryElseBlock/Match/Block/Do/Closure/New/KernelLaunch/Dict/Set/
         // StringInterp/SliceRange/DotIdent — not realistic inside a kernel
-        // body's numeric hot path (see this pass's top-level doc comment).
+        // body's numeric hot path (see this section's top comment).
         other => other.clone(),
     };
     Expr { kind, line: e.line, col: e.col, len: e.len }
 }
 
-/// If `method` is `.at`/`.width`/`.height`/`.depth` on an `Image`/`Volume`
-/// field (`dims` = the field's compile-time dimension constants), returns
-/// the lowered `Index`/`Int` expression. Otherwise `None` — caller falls
-/// back to generic recursion, keeping the original `MethodCall`.
-#[allow(clippy::too_many_arguments)]
-fn rewrite_image_volume_call(
-    obj: &Expr, method: &str, args: &[Arg], dims: &[crate::ast::Type], fields: &ImageFieldDims,
-    line: usize, col: usize, len: usize,
-) -> Option<Expr> {
-    use crate::ast::{Type, ExprKind, BinOp};
-    let dim_at = |i: usize| -> Option<i64> {
-        match dims.get(i) { Some(Type::ConstInt(n)) => Some(*n), _ => None }
+/// Row-major flat offset for `args` (a `LabeledIndex`'s labeled arguments)
+/// into `axes` — every axis's size is a compile-time `ConstExpr` here (only
+/// fixed-shape LabeledArray fields reach this function; see this section's
+/// top comment), spliced into the offset expression as-is rather than
+/// folded to a literal, since it may reference a kernel const-generic param
+/// (`width = W`) resolved normally when the offset is later evaluated, not
+/// by this lowering pass. `None` if any label in `args` doesn't match one of
+/// `axes` — left unresolved rather than guessed.
+fn labeled_index_offset(args: &[Arg], axes: &[crate::ast::LabeledAxis], fields: &LabeledArrayFieldAxes, line: usize, col: usize) -> Option<Expr> {
+    use crate::ast::{ExprKind, BinOp, ConstExpr};
+    let axis_size_expr = |i: usize| -> Expr {
+        let ConstExpr(boxed) = axes[i].size.as_ref()
+            .expect("fixed-shape kernel field: every axis has Some(size) by construction");
+        (**boxed).clone()
     };
-    let int_expr = |n: i64| Expr { kind: ExprKind::Int(n), line, col, len };
-    match method {
-        "width"  => return dim_at(0).map(int_expr),
-        "height" => return dim_at(1).map(int_expr),
-        "depth"  => return dim_at(2).map(int_expr),
-        "at" => {}
-        _ => return None,
-    }
-    // .at(a0, a1, ...) → a0 + a1*dims[0] + a2*(dims[0]*dims[1]) + ... — row-major,
-    // same formula as transpiler::helpers::image_volume_at_index.
-    let arg_exprs: Vec<Expr> = args.iter().map(|a| lower_expr(&a.value, fields)).collect();
     let mut flat: Option<Expr> = None;
-    for (i, a) in arg_exprs.into_iter().enumerate() {
+    for (i, axis) in axes.iter().enumerate() {
+        let arg = args.iter().find(|a| a.label.as_deref() == Some(axis.label.as_str()))?;
+        let idx_expr = lower_labeled_expr(&arg.value, fields);
         let term = if i == 0 {
-            a
+            idx_expr
         } else {
-            let stride: i64 = (0..i).map(|j| dim_at(j).unwrap_or(1)).product();
-            Expr { kind: ExprKind::BinOp(BinOp::Mul, Box::new(a), Box::new(int_expr(stride))), line, col, len }
+            let stride = (0..i).map(axis_size_expr)
+                .reduce(|acc, v| Expr { kind: ExprKind::BinOp(BinOp::Mul, Box::new(acc), Box::new(v)), line, col, len: 0 })
+                .expect("i >= 1 implies a non-empty stride range");
+            Expr { kind: ExprKind::BinOp(BinOp::Mul, Box::new(idx_expr), Box::new(stride)), line, col, len: 0 }
         };
         flat = Some(match flat {
             None => term,
-            Some(prev) => Expr { kind: ExprKind::BinOp(BinOp::Add, Box::new(prev), Box::new(term)), line, col, len },
+            Some(prev) => Expr { kind: ExprKind::BinOp(BinOp::Add, Box::new(prev), Box::new(term)), line, col, len: 0 },
         });
     }
-    let flat = flat?;
-    Some(Expr { kind: ExprKind::Index(Box::new(obj.clone()), Box::new(flat)), line, col, len })
+    flat
+}
+
+/// `.size(.axis)`'s resolved value for a fixed-shape field — its axis's
+/// literal/const-generic-expression size, cloned as-is. `None` if
+/// `axis_label` doesn't match any of `axes`.
+fn resolve_labeled_size_call(axes: &[crate::ast::LabeledAxis], axis_label: &str) -> Option<Expr> {
+    use crate::ast::ConstExpr;
+    let axis = axes.iter().find(|a| a.label == axis_label)?;
+    let ConstExpr(boxed) = axis.size.as_ref()?;
+    Some((**boxed).clone())
 }
 
 /// Zero value for a kernel field's scalar element type — used to default

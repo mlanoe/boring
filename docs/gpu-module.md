@@ -174,12 +174,13 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 |---|---|---|---|---|---|
 | `[T]` dynamic | explicit | explicit | explicit | error | error |
 | `[T, N]` fixed | error | error | explicit | inferred (`mut`/`var`) | inferred (`let`) |
-| `Image<T,C,R>` / `Volume<T,X,Y,Z>` | explicit | explicit | explicit | inferred (`mut`/`var`) | inferred (`let`) |
+| `[T, width, height]` labeled (dynamic) | explicit | explicit | explicit | error | error |
+| `[T, width=W, height=H]` labeled (fixed) | explicit | explicit | explicit | inferred (`mut`/`var`) | inferred (`let`) |
 | scalar | — | — | — | inferred (`mut`/`var`) | inferred (`let`) |
 
 > `'const` and `'local` are always inferred and rarely written explicitly. `'unified`, `'global`, and bare `'actor` are always explicit.
 
-> **`Image`/`Volume` vs `[T, N]` fixed — the one place they differ**: `[T, N]'unified`/`[T, N]'global` are errors ("size is implicit from the init parameter"), but `Image<T,C,R>'unified`/`'global` (and `Volume`) are valid. The reason: `[T, N]`'s host-side representation is a true fixed-size Rust array, which conflicts with `'unified`/`'global`'s always-dynamic host buffer (`Vec`/`CudaSlice`/`DeviceBuffer`/`Buffer`, sized at runtime from the constructor's argument). `Image`/`Volume` don't have that conflict — their host representation *is* the same dynamic buffer type as `[T]`; `C`/`R`/`X`/`Y`/`Z` are compile-time shape metadata used for `.at(...)` indexing and grid inference, not a competing fixed length. See [`image-volume-types.md`](image-volume-types.html). `'actor'global`/`'actor'unified` compose with `Image`/`Volume` the same as with `[T]`/`[T,N]` — e.g. `mut Image<int,256,256>'actor'global histogram` is valid.
+> **Labeled arrays vs `[T, N]` fixed — the one place they differ**: `[T, N]'unified`/`[T, N]'global` are errors ("size is implicit from the init parameter"), but `[T, width=W, height=H]'unified`/`'global` are valid. The reason: `[T, N]`'s host-side representation is a true fixed-size Rust array, which conflicts with `'unified`/`'global`'s always-dynamic host buffer (`Vec`/`CudaSlice`/`DeviceBuffer`/`Buffer`, sized at runtime from the constructor's argument). A fixed-shape labeled array doesn't have that conflict — its host representation *is* the same dynamic buffer type as `[T]`; the axis sizes are compile-time shape metadata used for indexing and grid inference, not a competing fixed length. See [`array-multidim-types.md`](array-multidim-types.html). `'actor'global`/`'actor'unified` compose with labeled arrays the same as with `[T]`/`[T,N]` — e.g. `mut [int, width=256, height=256]'actor'global histogram` is valid.
 
 ---
 
@@ -196,42 +197,52 @@ It's only meaningful as a field qualifier inside a `kernel` struct.
 
 ---
 
-## Named-shape buffers — `Image`/`Volume`
+## Labeled multi-dimensional arrays — `[T, width, height]`
 
-`Image<T, C, R>` and `Volume<T, X, Y, Z>` are built-in generic types for 2D/3D
-compute buffers — replacing the pattern of a flat `[T]` field plus separate
-plain-`int` `rows`/`cols` fields and hand-rolled linear-index math. `C`/`R`
-(and `X`/`Y`/`Z`) are compile-time integer constants, not runtime values:
+`[T, width, height]` / `[T, width = W, height = H]` are built-in named-axis
+types for 2D/3D compute buffers — replacing the pattern of a flat `[T]` field
+plus separate plain-`int` `rows`/`cols` fields and hand-rolled linear-index
+math. Every index and every axis size is spelled out by label instead of by
+argument position:
 
 ```boring
 kernel Transpose:
-    let Image<float, C, R>'global src
-    mut Image<float, R, C>'unified dst
+    let [float, width = C, height = R]'global src
+    mut [float, width = R, height = C]'unified dst
 
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        dst.at(r, c) = src.at(c, r)
+        dst[width = r, height = c] = src[width = c, height = r]
 ```
 
-- **Methods**: `.width()`, `.height()`, `.depth()` (`Volume` only) return the
-  dimension as a compile-time literal; `.at(c, r)` (`Image`) / `.at(x, y, z)`
-  (`Volume`) index into the buffer.
-- **Layout**: row-major — `.at(c, r)` lowers to flat index `c + r*C`; `.at(x, y, z)`
-  lowers to `x + y*X + z*(X*Y)`.
-- **Qualifiers**: same set as `[T]`/`[T, N]` combined (see the matrix above) —
-  `'unified`, `'global`, bare `'actor`, `'actor'global`, `'actor'unified`, `'const`,
-  `'local` are all valid; `'surface` is not (see below).
-- **Grid inference**: a `kernel:` block with no explicit `grid=` defaults the grid
-  from an `Image`/`Volume` field's `C`/`R`/`X`/`Y`/`Z` instead of falling back to
-  the 1D `ceil(len/block)` used for flat arrays — see each backend doc's own
-  grid-inference section (`cuda-module.md`, `rocm-backend.md`, `metal-backend.md`,
-  `wgpu-backend.md`).
+- **Indexing**: `a[width = w, height = h]` — no `.at(...)` method call; labels
+  are mandatory for 2+ axes and order-free at the use site
+  (`a[height=h, width=w]` is identical to `a[width=w, height=h]`).
+- **Shape queries**: `a.size(.width)` / `a.size(.height)` / `a.size(.depth)` —
+  one method, an axis-selector enum synthesized per array type instead of a
+  separate method name per axis.
+- **Layout**: row-major — the *first declared label* is the fastest-varying
+  axis (`a[width=w, height=h]` lowers to flat index `w + h*width_size`),
+  regardless of what the labels are named.
+- **Qualifiers**: same set as `[T]`/`[T, N]` combined (see the matrix above)
+  — `'unified`, `'global`, bare `'actor`, `'actor'global`, `'actor'unified`,
+  `'const`, `'local` are all valid; `'surface` is not (see below). Always
+  placed after the closing bracket, e.g. `[float, width=16, height=16]'actor`,
+  never inside it.
+- **Grid inference**: a `kernel:` block with no explicit `grid=` defaults
+  from the field's fixed axis sizes (or, for a dynamic-shape field, from the
+  shape it was constructed with) instead of falling back to the 1D
+  `ceil(len/block)` used for flat arrays — see each backend doc's own
+  grid-inference section (`cuda-module.md`, `rocm-backend.md`,
+  `metal-backend.md`, `wgpu-backend.md`).
+- **No `.at(...)` positional form** — this is deliberate, not a gap: the
+  whole point is that swapping which argument means which axis is a parse
+  error, not a silent bug.
 
-`Image`/`Volume` are for compute buffers — they do **not** replace `'surface`,
-which encodes a presentation-path constraint (how a pixel buffer reaches the
-screen), not just a 2D shape. See [`image-volume-types.md`](image-volume-types.html)
-for the full design rationale.
+Full design rationale, the fill-shorthand construction forms
+(`[value for width=w, height=h]`), `.reshape()`/`.flatten()`, and the
+cross-label safety rule: [`array-multidim-types.md`](array-multidim-types.html).
 
 ---
 

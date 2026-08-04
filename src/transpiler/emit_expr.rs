@@ -502,6 +502,12 @@ impl Transpiler {
             ExprKind::SliceRange { .. } => {
                 panic!("SliceRange cannot appear outside an index expression")
             }
+            // Lowered away by the labeled-array desugar pass before codegen ever runs
+            // (see docs/array-multidim-proposal.md) — reaching one here means that
+            // pass was skipped, an internal compiler bug.
+            ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
+                panic!("labeled multi-dim array expression reached codegen without being desugared first")
+            }
         }
     }
 

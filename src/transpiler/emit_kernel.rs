@@ -596,8 +596,26 @@ impl Transpiler {
             for stmt in &init.body {
                 if let Stmt::Expr(e) = stmt {
                     if let ExprKind::Assign(lhs, rhs) = &e.kind {
-                        if let (ExprKind::Var(field), ExprKind::Var(param)) = (&lhs.kind, &rhs.kind) {
-                            map.insert(param.clone(), field.clone());
+                        if let ExprKind::Var(field) = &lhs.kind {
+                            // A bare `field = param`, or `field = param as
+                            // int` — desugar_labeled_array wraps a dynamic-
+                            // shape LabeledArray field's shadow-axis
+                            // assignment in an explicit `as int` cast (the
+                            // source init param's own type isn't
+                            // guaranteed), so the forwarded parameter is
+                            // the Cast's inner Var, not the (nonexistent)
+                            // bare one.
+                            let param = match &rhs.kind {
+                                ExprKind::Var(p) => Some(p),
+                                ExprKind::Cast(inner, _) => match &inner.kind {
+                                    ExprKind::Var(p) => Some(p),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            if let Some(param) = param {
+                                map.insert(param.clone(), field.clone());
+                            }
                         }
                     }
                 }
@@ -628,12 +646,15 @@ impl Transpiler {
                 }
                 _ => (self.emit_expr(&g.value), "1".to_string(), "1".to_string()),
             }
-        } else if let Some(dims) = self.image_volume_dispatch_field_dims(var_name) {
-            // No explicit `grid=`: default from the kernel's Image/Volume field's
-            // compile-time C/R/X/Y/Z dims and the `block=` workgroup size (also a
-            // dispatch-site arg here, unlike CUDA/ROCm/Metal's runtime block_dim
-            // param) — see docs/image-volume-types.md. Missing axes default to 1,
-            // same as the explicit-`grid=`-tuple case above.
+        } else if let Some(axes) = self.labeled_array_dispatch_field_dims(var_name) {
+            // No explicit `grid=`: default from the kernel's fixed-shape
+            // LabeledArray field's compile-time axis sizes and the `block=`
+            // workgroup size (also a dispatch-site arg here, unlike
+            // CUDA/ROCm/Metal's runtime block_dim param) — see
+            // docs/array-multidim-types.md. Missing axes default to 1, same
+            // as the explicit-`grid=`-tuple case above. Generalized to N axes
+            // and to an arbitrary const-generic axis-size expression (not
+            // just a literal `ConstInt`).
             let (bx, by, bz) = if let Some(b) = args.iter().find(|a| a.label.as_deref() == Some("block")) {
                 match &b.value.kind {
                     ExprKind::Tuple(elems) => {
@@ -646,17 +667,20 @@ impl Transpiler {
                 ("1".to_string(), "1".to_string(), "1".to_string())
             };
             let axis = |i: usize, block_expr: &str| -> String {
-                match dims.get(i) {
-                    Some(Type::ConstInt(n)) => format!("(({} + ({}) - 1) / ({}))", n, block_expr, block_expr),
-                    _ => "1".to_string(),
+                match axes.get(i).and_then(|a| a.size.as_ref()) {
+                    Some(crate::ast::ConstExpr(boxed)) => {
+                        let n = crate::transpiler::helpers::const_expr_to_c_like(boxed);
+                        format!("(({} + ({}) - 1) / ({}))", n, block_expr, block_expr)
+                    }
+                    None => "1".to_string(),
                 }
             };
             (axis(0, &bx), axis(1, &by), axis(2, &bz))
-        } else if let Some(shadows) = self.image_volume_dispatch_field_shadows(var_name) {
-            // Desugared dynamic-shape Image/Volume: shadow fields carry
-            // width/height(/depth) at runtime — see
-            // docs/image-volume-types.md's Phase 6. Same `block=` extraction
-            // as the fixed-shape branch above (wgpu computes the grid at this
+        } else if let Some(shadows) = self.labeled_array_dispatch_field_shadows(var_name) {
+            // Desugared dynamic-shape LabeledArray: shadow fields carry each
+            // axis's size at runtime — see docs/array-multidim-types.md.
+            // Same `block=` extraction as the fixed-shape branch above (wgpu
+            // computes the grid at this
             // dispatch call site, not inside a method on the kernel type, so
             // there's no `self.field` context to read the shadow through —
             // `shadow_grid_axes` reads it via the kernel variable instead).
@@ -678,33 +702,29 @@ impl Transpiler {
         Some(format!("{var_name}.dispatch(({gx}) as u32, ({gy}) as u32, ({gz}) as u32)?;"))
     }
 
-    /// If `var_name` is a tracked kernel variable whose type has a device-resident
-    /// Image/Volume field (`'unified`/`'global`/`'actor'global`/`'actor'unified`),
-    /// return its dimension args for grid-default purposes.
-    fn image_volume_dispatch_field_dims(&self, var_name: &str) -> Option<Vec<Type>> {
+    /// If `var_name` is a tracked kernel variable whose type has a
+    /// device-resident fixed-shape LabeledArray field (`'unified`/`'global`/
+    /// `'actor'global`/`'actor'unified`), return its axis list for
+    /// grid-default purposes.
+    fn labeled_array_dispatch_field_dims(&self, var_name: &str) -> Option<Vec<crate::ast::LabeledAxis>> {
         let kname = self.kernel_vars.get(var_name)?;
         let decl = self.kernel_decls.get(kname)?;
         decl.fields.iter()
             .find(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
-                && f.ty.as_image_volume().is_some())
-            .and_then(|f| f.ty.as_image_volume().map(|(_, dims)| dims.to_vec()))
+                && f.ty.as_labeled_array().is_some())
+            .and_then(|f| f.ty.as_labeled_array().map(|(_, axes)| axes.to_vec()))
     }
 
-    /// Sibling of `image_volume_dispatch_field_dims` for the *desugared*
-    /// dynamic-shape case (see docs/image-volume-types.md's Phase 6 and
-    /// `transpiler::helpers::desugared_image_volume_shadow_fields`'s doc
-    /// comment) — by the time this runs, a dynamic-shape field is just a
-    /// plain buffer field plus `__{field}_w`/`_h`[/`_d`] shadow fields, so
-    /// this detects the naming convention on a `'unified`/`'global`/
-    /// `'actor'global`/`'actor'unified` array field instead of matching
-    /// `as_image_volume` (which no longer recognizes it post-desugar).
-    fn image_volume_dispatch_field_shadows(&self, var_name: &str) -> Option<Vec<String>> {
+    /// Sibling of `labeled_array_dispatch_field_dims` for the *desugared*
+    /// dynamic-shape case — see
+    /// `transpiler::helpers::desugared_labeled_array_shadow_fields`'s doc.
+    fn labeled_array_dispatch_field_shadows(&self, var_name: &str) -> Option<Vec<String>> {
         let kname = self.kernel_vars.get(var_name)?;
         let decl = self.kernel_decls.get(kname)?;
         decl.fields.iter()
             .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified)
                 && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
-            .find_map(|f| crate::transpiler::helpers::desugared_image_volume_shadow_fields(&f.name, &decl.fields))
+            .find_map(|f| crate::transpiler::helpers::desugared_labeled_array_shadow_fields(&f.name, &decl.fields))
     }
 
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked

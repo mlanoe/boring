@@ -17,7 +17,7 @@
 //         Cargo.toml
 
 use std::collections::HashMap;
-use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKind, BinOp, UnaryOp};
+use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKind, BinOp, UnaryOp, ConstExpr, LabeledAxis};
 
 mod device;
 mod host;
@@ -230,6 +230,21 @@ fn monomorphise_type(ty: &Type, subst: &HashMap<String, i64>) -> Type {
         }
         Type::Array(inner) => Type::Array(Box::new(monomorphise_type(inner, subst))),
         Type::ArrayN(inner, n) => Type::ArrayN(Box::new(monomorphise_type(inner, subst)), *n),
+        // LabeledArray sibling: substitute each fixed axis's const-generic
+        // expression down to a literal ConstInt-equivalent, same as
+        // ArrayNExpr -> ArrayN above (docs/array-multidim-proposal.md).
+        // Dynamic axes (`size: None`) pass through unchanged — nothing to
+        // substitute.
+        Type::LabeledArray(inner, axes) => {
+            let new_axes = axes.iter().map(|a| {
+                let new_size = a.size.as_ref().map(|ConstExpr(boxed)| {
+                    let n = eval_const_expr(boxed, subst).unwrap_or(0);
+                    ConstExpr(Box::new(Expr { kind: ExprKind::Int(n), line: 0, col: 0, len: 0 }))
+                });
+                LabeledAxis { label: a.label.clone(), size: new_size }
+            }).collect();
+            Type::LabeledArray(Box::new(monomorphise_type(inner, subst)), new_axes)
+        }
         other => other.clone(),
     }
 }

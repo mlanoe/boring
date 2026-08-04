@@ -1,4 +1,4 @@
-error: array comprehension range must start at 0 — use `..n` or `0..n`
+error: array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`
  --> <file>:2:17
   |
 2 | let [int] bad = [0 for 1..n]

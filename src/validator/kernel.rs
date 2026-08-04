@@ -112,16 +112,19 @@ impl KernelValidator {
                 }
             }
             Type::Qualified(inner, _) => self.check_type(inner, line),
-            // Delegates to the shared, target-agnostic `image_volume_shape_error`
-            // (see its doc comment in `ast/mod.rs`) instead of hand-rolling the
-            // `ConstInt` check here — this used to be the *only* place any of this
-            // was enforced at all; it no longer is (the checker's
-            // `check_kernel_decl` now covers every other target), but this pass
-            // still needs its own call so `--target kernel` keeps rejecting
-            // malformed/dynamic-shape `Image`/`Volume` fields too.
-            Type::Generic(..) if ty.as_image_volume().is_some() => {
-                let (elem, _) = ty.as_image_volume().unwrap();
-                if let Some(msg) = ty.image_volume_shape_error() {
+            // Labeled multi-dim array (docs/array-multidim-types.md) —
+            // delegates to the shared, target-agnostic
+            // `labeled_array_shape_error` (see its doc comment in
+            // `ast/mod.rs`) instead of hand-rolling the check here — the
+            // checker's `check_kernel_decl` covers every other target, but
+            // this pass still needs its own call so `--target kernel` keeps
+            // rejecting malformed labeled-array fields too. No 3-axis cap
+            // here: that restriction is GPU-`kernel`-struct-specific
+            // (thread.x/y/z), not applicable to this pass (`--target kernel`
+            // = Rust-for-Linux no_std, an entirely different "kernel" from a
+            // GPU `kernel Name:`).
+            Type::LabeledArray(elem, _) => {
+                if let Some(msg) = ty.labeled_array_shape_error() {
                     self.error(line, msg);
                 }
                 self.check_type(elem, line);
@@ -242,6 +245,10 @@ impl KernelValidator {
                 self.check_expr(obj);
                 self.check_expr(idx);
             }
+            ExprKind::LabeledIndex(obj, args) => {
+                self.check_expr(obj);
+                for a in args { self.check_expr(&a.value); }
+            }
             ExprKind::OptionalMethodCall(receiver, _, args) => {
                 self.check_expr(receiver);
                 for arg in args {
@@ -281,6 +288,11 @@ impl KernelValidator {
             ExprKind::ArrayCompIter { expr, iter, .. } => {
                 self.check_expr(expr); self.check_expr(iter);
             }
+            ExprKind::LabeledArrayComp { expr, clauses } => {
+                for (_, count) in clauses { self.check_expr(count); }
+                self.check_expr(expr);
+            }
+            ExprKind::RelabelCast(e, _) => self.check_expr(e),
             ExprKind::Dict(pairs) => {
                 for (k, v) in pairs {
                     self.check_expr(k);

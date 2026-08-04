@@ -824,6 +824,12 @@ pub enum ExprKind {
     // Access
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
+    /// `a[width = w, height = h, ...]` — mandatory-labeled indexing into a
+    /// `Type::LabeledArray` (2+ dims only; 1D arrays keep using plain `Index`).
+    /// Order-free at the use site — reuses `Arg` (label + value), the same
+    /// shape already used for labeled call arguments. See
+    /// docs/array-multidim-proposal.md, "Indexing".
+    LabeledIndex(Box<Expr>, Vec<Arg>),
 
     // Calls
     Call(Box<Expr>, Vec<Arg>),
@@ -862,6 +868,19 @@ pub enum ExprKind {
     ArrayComp { expr: Box<Expr>, var: String, count: Box<Expr> },
     /// `[f(x) for x in collection]` — map over an existing collection
     ArrayCompIter { expr: Box<Expr>, var: String, iter: Box<Expr> },
+    /// `[f(w, h) for w in ..W for h in ..H]` — chained comprehension for a
+    /// labeled multi-dim array (2+ `for` clauses; a single clause keeps using
+    /// `ArrayComp` unchanged). `clauses[0]` is axis 1 — the **declaration**
+    /// order of axes, i.e. the fastest-varying index in row-major storage —
+    /// NOT the syntactic nesting order. The desugared fill loop always
+    /// iterates axis 1 innermost regardless of which `for` was written first,
+    /// so `a[width=w, height=h]` addresses the same element the comprehension
+    /// produced at `w + h*W`. Each clause is `(var, count)`, count always the
+    /// `..N` range-count expression (only the range form is chainable — a
+    /// collection-iteration clause stays a single-axis `ArrayCompIter`). See
+    /// docs/array-multidim-proposal.md's "Rejected shorthand" section for why
+    /// this is a chained `for...for...`, not a comma-separated clause list.
+    LabeledArrayComp { expr: Box<Expr>, clauses: Vec<(String, Box<Expr>)> },
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
@@ -877,6 +896,16 @@ pub enum ExprKind {
 
     // Cast
     Cast(Box<Expr>, Type),
+    /// `img as [line = width, column = height]` — explicit cross-label mapping
+    /// between two `Type::LabeledArray`s at a function/assignment boundary.
+    /// A distinct variant from `Cast`, not a `Type`-directed cast: the RHS is a
+    /// `target_label = source_label` mapping table (`parse_type()` cannot
+    /// parse this — `line` alone parses as `Type::Named("line")`, then hits
+    /// `=` and fails). The mapping must be a bijection over the source's axis
+    /// labels (every source axis named exactly once as some pair's RHS) —
+    /// enforced by the checker, not here. See docs/array-multidim-proposal.md,
+    /// "Cross-label compatibility between same-shape types".
+    RelabelCast(Box<Expr>, Vec<(String, String)>),
 
     // nil-coalescing: `expr else default`
     Else(Box<Expr>, Box<Expr>),
@@ -1048,6 +1077,27 @@ impl PartialEq for ConstExpr {
     fn eq(&self, _other: &Self) -> bool { false }
 }
 
+/// One axis of a labeled multi-dimensional array type (`[T, width, height]` /
+/// `[T, width = W, height = H]`). `size: None` means a dynamic axis (shape known
+/// only at construction); `size: Some(_)` means a compile-time-fixed axis, reusing
+/// the same `ConstExpr` machinery as `ArrayNExpr` (arithmetic over const generic
+/// params, e.g. `width = W * 2` is exactly as legal as `[T, W * 2]` today).
+///
+/// Per axis order is significant and permanent for the type: `axes[0]` is axis 1
+/// (the fastest-varying index in row-major storage, and — for kernel fields —
+/// the axis mapped to `gpu.thread.x`), `axes[1]` is axis 2 (`gpu.thread.y`), etc.
+/// `[T, width, height]` and `[T, height, width]` are different (transposed) types.
+/// See docs/array-multidim-proposal.md, "Axis order is fixed at declaration".
+///
+/// Within one declaration, axes are all-dynamic or all-fixed, never mixed —
+/// enforced at parse time, checked again defensively in
+/// `Type::labeled_array_shape_error`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabeledAxis {
+    pub label: String,
+    pub size: Option<ConstExpr>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     /// Bare `int` — maps to Rust `isize`.
@@ -1084,6 +1134,13 @@ pub enum Type {
     /// E.g. `[bool, W * H]` where W and H are const params declared on the kernel.
     /// Monomorphised to `ArrayN` before code generation (concrete values substituted).
     ArrayNExpr(Box<Type>, ConstExpr),
+    /// Labeled multi-dimensional array: `[T, width, height]` (all-dynamic axes)
+    /// or `[T, width = W, height = H]` (all-fixed axes) — replaces `Image`/`Volume`.
+    /// Never produced for a single bare identifier after the comma — that keeps
+    /// meaning "reference to an existing const generic param" (`[T, N]`,
+    /// `ArrayNExpr`), unchanged; this variant only ever has 2+ axes.
+    /// See docs/array-multidim-proposal.md and `LabeledAxis`.
+    LabeledArray(Box<Type>, Vec<LabeledAxis>),
     /// Integer literal in type-argument position: `GameOfLife<64, 64>`.
     ConstInt(i64),
     Tuple(Vec<Type>),
@@ -1141,11 +1198,10 @@ impl Type {
             // All other qualifiers give copy/shared semantics
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased
-            Type::Generic(..) if self.as_image_volume().is_some() => {
-                let (elem, dims) = self.as_image_volume().unwrap();
-                elem.is_copy() && dims.iter().all(|d| matches!(d, Type::ConstInt(_)))
-            }
             Type::Generic(_, _) => false, // heap type
+            // Same shape (flat buffer) as Array/ArrayN — never Copy, regardless
+            // of fixed vs dynamic axes.
+            Type::LabeledArray(_, _) => false,
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_copy(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
@@ -1181,11 +1237,9 @@ impl Type {
             Type::Qualified(_, OwnerQual::BorrowMut)    => false, // &mut T — conservative (target unknown)
             Type::Qualified(inner, OwnerQual::Union(_)) => inner.is_task_safe(), // union: delegate to inner
             Type::TypeParam(_) => true,
-            Type::Generic(..) if self.as_image_volume().is_some() => {
-                let (elem, dims) = self.as_image_volume().unwrap();
-                elem.is_task_safe() && dims.iter().all(|d| matches!(d, Type::ConstInt(_)))
-            }
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
+            // Unqualified, like Array/ArrayN — sharing semantics undefined without a qualifier.
+            Type::LabeledArray(_, _) => false,
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
@@ -1205,108 +1259,73 @@ impl Type {
         }
     }
 
-    /// If this is a built-in `Image<T, C, R>` / `Volume<T, X, Y, Z>` generic, returns
-    /// the element type and the dimension args. The single recognition point for these
-    /// two built-in names — every other layer (parser qualifier legality, per-backend
-    /// codegen, grid inference) should go through this instead of matching the name
-    /// "Image"/"Volume" independently. See docs/image-volume-types.md.
-    ///
-    /// An empty `dims` slice — i.e. `Image<T>` / `Volume<T>`, element type only, no
-    /// dimension args — is the **dynamic-shape** form (see
-    /// docs/image-volume-types.md, "Extension: dynamic-shape `Image<T>`/`Volume<T>`":
-    /// proposed, not yet implemented beyond this recognition point and the
-    /// `image_volume_len` fix below). Every existing caller that only checks
-    /// `.is_some()` or discards `dims` via `_` already treats a dynamic-shape value
-    /// correctly by construction — it's specifically callers that read `dims`'
-    /// *contents* (arity, `ConstInt`-ness) that need to know about this distinction,
-    /// and none do yet: no validator currently rejects `Image<T>`/`Volume<T>` before
-    /// it would reach the interpreter's/transpiler's fixed-shape-only lowering (a real
-    /// gap, not a hypothetical one — see the `image_volume_len` fix below and
-    /// docs/image-volume-types.md's Phase 2 notes).
-    pub fn as_image_volume(&self) -> Option<(&Type, &[Type])> {
+    /// If this is a `Type::LabeledArray`, returns the element type and its axis
+    /// list. The single recognition point for the labeled multi-dim array
+    /// type. See docs/array-multidim-types.md.
+    pub fn as_labeled_array(&self) -> Option<(&Type, &[LabeledAxis])> {
         match self {
-            Type::Generic(name, args) if name == "Image" || name == "Volume" => {
-                args.split_first()
-            }
+            Type::LabeledArray(elem, axes) => Some((elem, axes)),
             _ => None,
         }
     }
 
-    /// Total element count (`C*R` / `X*Y*Z`) for a fixed-shape `Image`/`Volume`, if
-    /// every dimension arg is a compile-time integer constant (the only case v1
-    /// supports — see `docs/image-volume-types.md`, Open Question 1).
-    ///
-    /// `None` for the dynamic-shape form (`dims` empty — see `as_image_volume`'s doc
-    /// comment) rather than `Some(1)`. `dims.iter().try_fold(1i64, ...)` folds to `1`
-    /// over an empty slice — the empty-product identity — which would otherwise make
-    /// `Image<T>`/`Volume<T>` silently read as "a fixed shape of total length 1"
-    /// instead of "no compile-time shape at all", the exact wrong answer for a type
-    /// that hasn't been given any dimensions to have a compile-time length in the
-    /// first place.
-    pub fn image_volume_len(&self) -> Option<i64> {
-        self.as_image_volume().and_then(|(_, dims)| {
-            if dims.is_empty() {
-                return None;
-            }
-            dims.iter().try_fold(1i64, |acc, d| match d {
-                Type::ConstInt(n) => Some(acc * n),
-                _ => None,
-            })
+    /// Total element count for a fully-fixed-shape `LabeledArray`, when every
+    /// axis's size is directly an integer literal (`width = 16`, not
+    /// `width = W` or `width = W * 2`). `None` for a dynamic-shape array (any
+    /// axis has `size: None`) *and* for a fixed-shape array whose sizes involve
+    /// a const generic reference or arithmetic expression — those need a
+    /// subst-map evaluation context to resolve (see `eval_const_expr` in
+    /// `transpiler/wgpu/mod.rs`, the same machinery `ArrayNExpr` already relies
+    /// on), which this `&self`-only method has no access to. Returns `None`
+    /// rather than a silently-wrong `Some` whenever the length can't be
+    /// resolved from the type alone.
+    pub fn labeled_array_len(&self) -> Option<i64> {
+        let (_, axes) = self.as_labeled_array()?;
+        if axes.is_empty() || axes.iter().any(|a| a.size.is_none()) {
+            return None;
+        }
+        axes.iter().try_fold(1i64, |acc, a| match &a.size.as_ref().unwrap().0.kind {
+            ExprKind::Int(n) => Some(acc * n),
+            _ => None,
         })
     }
 
-    /// Validates an `Image<...>`/`Volume<...>` type's shape and returns a
-    /// human-readable error message if it's invalid or not (yet) supported;
-    /// `None` if `self` isn't an `Image`/`Volume` at all, or is a valid
-    /// (currently-supported) fixed shape.
+    /// Validates a `Type::LabeledArray`'s axis list and returns a human-readable
+    /// error message if malformed; `None` if `self` isn't a `LabeledArray` at
+    /// all, or is well-formed. Checks (defense in depth — the parser already
+    /// enforces most of this at parse time, see `docs/array-multidim-proposal.md`):
+    ///   1. arity — at least 2 axes (a single label never reaches this variant,
+    ///      see `LabeledArray`'s doc comment, but guard against a malformed AST
+    ///      built by anything other than the parser, e.g. a future desugar pass);
+    ///   2. duplicate axis labels;
+    ///   3. mixed fixed/dynamic axes within one declaration (D1: all-or-nothing).
     ///
-    /// Checks, in order:
-    ///   1. dynamic shape (`Image<T>`/`Volume<T>`, no dimension args) — not yet
-    ///      implemented (see docs/image-volume-types.md's "Extension" section);
-    ///      rejected explicitly rather than silently mis-measured (the
-    ///      `image_volume_len` fix above prevents the silent-`Some(1)` case, but
-    ///      does nothing to stop a caller from reaching that `None` where a
-    ///      `ConstInt` length was assumed — this is that stop).
-    ///   2. wrong arity (`Image` needs exactly 2 dims, `Volume` exactly 3) —
-    ///      never enforced anywhere before this function existed.
-    ///   3. a non-`ConstInt` dimension arg (the only pre-existing check,
-    ///      previously only reachable via `validator::kernel`'s `--target
-    ///      kernel`-scoped pass — see below).
-    ///
-    /// This is the one target-agnostic entry point for these checks — call it
-    /// from every real pipeline (interpreter, checker, all four GPU backends),
-    /// not just `validator::kernel`'s `--target kernel` (Rust-for-Linux) pass,
-    /// which is the *only* place any of this was enforced before Phase 2 of
-    /// docs/image-volume-types.md: `validate_kernel` runs exclusively inside
-    /// `main::emit_kernel_with_version`, so `boring run` and `boring build`
-    /// (default, and `--target cuda`/`rocm`/`metal`/`wgpu`) previously had no
-    /// arity or `ConstInt` check at all, despite `eval_gpu.rs`'s
-    /// `.expect("validator guarantees ConstInt dims")` comment describing a
-    /// guarantee that, until now, only actually held for the one target this
-    /// feature isn't primarily about.
-    pub fn image_volume_shape_error(&self) -> Option<String> {
-        let (_, dims) = self.as_image_volume()?;
-        let name = match self {
-            Type::Generic(n, _) => n.as_str(),
-            _ => unreachable!("as_image_volume just matched a Type::Generic"),
-        };
-        if dims.is_empty() {
-            let example = if name == "Image" { "16, 16" } else { "4, 4, 4" };
-            return Some(format!(
-                "{name}<T> (dynamic shape) is not yet supported — declare explicit \
-                 dimensions, e.g. {name}<T, {example}> (see docs/image-volume-types.md)"
-            ));
+    /// Does **not** enforce a 3-axis cap — that's a GPU-kernel-field-specific
+    /// restriction (thread.x/y/z), not a property of the type itself; CPU-side
+    /// labeled arrays are unbounded. Callers checking a kernel field must apply
+    /// that cap themselves alongside this function (see `check_kernel_decl`).
+    pub fn labeled_array_shape_error(&self) -> Option<String> {
+        let (_, axes) = self.as_labeled_array()?;
+        if axes.len() < 2 {
+            return Some(
+                "labeled array types need at least 2 axes — a single axis has no \
+                 ambiguity to resolve and should be written as a plain [T] / [T, N]"
+                    .to_string(),
+            );
         }
-        let (expected, axes) = if name == "Image" { (2, "C, R") } else { (3, "X, Y, Z") };
-        if dims.len() != expected {
-            return Some(format!(
-                "{name}<T, {axes}> expects {expected} dimension argument{} ({axes}), got {}",
-                if expected == 1 { "" } else { "s" },
-                dims.len(),
-            ));
+        let mut seen = std::collections::HashSet::new();
+        for axis in axes {
+            if !seen.insert(axis.label.as_str()) {
+                return Some(format!("duplicate axis label '{}'", axis.label));
+            }
         }
-        if dims.iter().any(|d| !matches!(d, Type::ConstInt(_))) {
-            return Some("Image/Volume dimensions must be compile-time integer constants".to_string());
+        let fixed = axes.iter().filter(|a| a.size.is_some()).count();
+        if fixed != 0 && fixed != axes.len() {
+            return Some(
+                "labeled array axes must be all dynamic or all fixed — mixing \
+                 e.g. [T, width, height = H] is not supported"
+                    .to_string(),
+            );
         }
         None
     }
@@ -1568,6 +1587,7 @@ fn scan_expr_var_arg(
         }
         ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e!(ex),
         ExprKind::Index(obj, idx) => { e!(obj); e!(idx); }
+        ExprKind::LabeledIndex(obj, args) => { e!(obj); for a in args { e!(&a.value); } }
         ExprKind::Else(ex, d) | ExprKind::TryElse(ex, d) => { e!(ex); e!(d); }
         ExprKind::TryElseBlock(body, els) => { b!(body); b!(els); }
         ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => { for ex in elems { e!(ex); } }
@@ -1575,6 +1595,8 @@ fn scan_expr_var_arg(
         ExprKind::ArrayAlloc { count } => e!(count),
         ExprKind::ArrayComp { expr: ex, count, .. } => { e!(count); e!(ex); }
         ExprKind::ArrayCompIter { expr: ex, iter, .. } => { e!(iter); e!(ex); }
+        ExprKind::LabeledArrayComp { expr: ex, clauses } => { for (_, count) in clauses { e!(count); } e!(ex); }
+        ExprKind::RelabelCast(ex, _) => e!(ex),
         ExprKind::Dict(pairs) => { for (k, v) in pairs { e!(k); e!(v); } }
         ExprKind::Range { start, end, .. } => { e!(start); e!(end); }
         ExprKind::SliceRange { start, end, .. } => {
@@ -1653,7 +1675,8 @@ fn with_expr_mutates(
         ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => {
             let target_hit = match &lhs.kind {
                 ExprKind::Var(v) => v == name,
-                ExprKind::Index(obj, _) | ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) => {
+                ExprKind::Index(obj, _) | ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _)
+                | ExprKind::LabeledIndex(obj, _) => {
                     matches!(&obj.kind, ExprKind::Var(v) if v == name)
                 }
                 _ => false,
@@ -1685,6 +1708,7 @@ fn with_expr_mutates(
         ExprKind::UnaryOp(_, ex) | ExprKind::Cast(ex, _) => e(ex, ivp, imm),
         ExprKind::Field(ex, _) | ExprKind::OptionalField(ex, _) => e(ex, ivp, imm),
         ExprKind::Index(obj, idx) => e(obj, ivp, imm) || e(idx, ivp, imm),
+        ExprKind::LabeledIndex(obj, args) => e(obj, ivp, imm) || args.iter().any(|a| e(&a.value, ivp, imm)),
         ExprKind::Else(ex, d) | ExprKind::TryElse(ex, d) => e(ex, ivp, imm) || e(d, ivp, imm),
         ExprKind::TryElseBlock(body, els) => b(body, ivp, imm) || b(els, ivp, imm),
         ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => elems.iter().any(|ex| e(ex, ivp, imm)),
@@ -1692,6 +1716,10 @@ fn with_expr_mutates(
         ExprKind::ArrayAlloc { count } => e(count, ivp, imm),
         ExprKind::ArrayComp { expr: ex, count, .. } => e(count, ivp, imm) || e(ex, ivp, imm),
         ExprKind::ArrayCompIter { expr: ex, iter, .. } => e(iter, ivp, imm) || e(ex, ivp, imm),
+        ExprKind::LabeledArrayComp { expr: ex, clauses } => {
+            clauses.iter().any(|(_, count)| e(count, ivp, imm)) || e(ex, ivp, imm)
+        }
+        ExprKind::RelabelCast(ex, _) => e(ex, ivp, imm),
         ExprKind::Dict(pairs) => pairs.iter().any(|(k, v)| e(k, ivp, imm) || e(v, ivp, imm)),
         ExprKind::Range { start, end, .. } => e(start, ivp, imm) || e(end, ivp, imm),
         ExprKind::SliceRange { start, end, .. } => {

@@ -1260,14 +1260,6 @@ impl Parser {
         // Note: `'shared` maps to OwnerQual::Shared (Arc/Rc) in the global qualifier table;
         // in kernel context bare `'actor` takes over that role for block SRAM instead.
         let (qual, base_ty) = match parsed_ty {
-            // Note: `Image`/`Volume` are NOT included in this restriction, unlike
-            // `ArrayN`/`ArrayNExpr` — their host-side representation is a dynamic
-            // CudaSlice/Vec buffer (see per-backend `c_type`/`elem_c_type`), same as
-            // dynamic `[T]`, so there's no size-redundancy conflict with 'unified/
-            // 'global; C/R are compile-time shape metadata for `.at()`/grid inference,
-            // not a competing "true fixed array" length. This is required for the
-            // TransposeKernel migration example in docs/image-volume-types.md, whose
-            // `src`/`dst` fields are exactly `'global`/`'unified`.
             Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal) if matches!(*inner, Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) => {
                 return Err(ParseError::Generic {
                     msg: "fixed-size arrays cannot use 'unified or 'global — the size is implicit from the init parameter; use '[T]'unified or '[T]'global instead".into(),
@@ -1318,10 +1310,15 @@ impl Parser {
                     // Allow [uint] (Type::Array(Box<Type::Named("uint")>)) too
                 (GpuQual::Surface, *inner)
             }
-            // Unqualified fixed-shape Image/Volume: infer from binding, same as [T, N] below.
-            // Must be checked before the scalar arm — Image/Volume is a buffer shape
-            // (Type::Generic), not a scalar, even though it isn't Array/ArrayN/ArrayNExpr.
-            unqualified if unqualified.as_image_volume().is_some() => {
+            // Unqualified labeled multi-dim array (docs/array-multidim-types.md):
+            // infer from binding, same as [T, N] below. Must be checked before
+            // the scalar arm — a labeled array is a buffer shape
+            // (Type::LabeledArray), not a scalar, even though it isn't
+            // Array/ArrayN/ArrayNExpr. Fixed-shape axes are compile-time shape
+            // metadata for `.size(.axis)`/GPU dispatch, not a competing
+            // fixed-array length, and dynamic-shape axes desugar to a plain
+            // buffer + shadow fields — neither conflicts with 'unified/'global.
+            unqualified if unqualified.as_labeled_array().is_some() => {
                 let qual = match binding {
                     FieldBinding::Let => GpuQual::Const,
                     FieldBinding::Mut | FieldBinding::Var => GpuQual::Local,
@@ -1359,7 +1356,8 @@ impl Parser {
         let default = if self.eat(&TokenKind::Eq) {
             let expr = self.parse_expr()?;
             // Validate: defaults only allowed on scalar fields, not buffers.
-            if matches!(base_ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || base_ty.as_image_volume().is_some() {
+            if matches!(base_ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
+                || base_ty.as_labeled_array().is_some() {
                 return Err(ParseError::Generic {
                     msg: "kernel array fields cannot have a default value — buffer size must come from the constructor".into(),
                     line, col, len: 1,
@@ -2045,3 +2043,5 @@ pub(crate) fn collect_const_params_from_type(ty: &crate::ast::Type, type_params:
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_labeled_array;

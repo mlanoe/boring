@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Labeled multi-dimensional arrays</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="labeled-multi-dimensional-arrays">Labeled multi-dimensional arrays</h1>
+<p><strong>Status:</strong> implemented — parser, checker, interpreter, and all 4 GPU transpiler backends (cuda/rocm/metal/wgpu) support the syntax below. This feature replaced the older <code>Image&lt;T,C,R&gt;</code>/<code>Volume&lt;T,X,Y,Z&gt;</code> types, deleted once <code>whisper-boring</code> (the one real consumer of either) migrated off them.</p>
+<p>Labeled multi-dimensional arrays fix the readability problems <code>Image&lt;T,C,R&gt;</code> / <code>Volume&lt;T,X,Y,Z&gt;</code> had: unclear qualifier placement, and index arguments (<code>.at(c, r)</code>, <code>.at(x, y, z)</code>) whose meaning depends on remembering a fixed argument position rather than being spelled out at the call site.</p>
+<p>The guiding principle behind every choice below: <strong>readability wins over flexibility.</strong> Where a choice would make some code shorter but ambiguous, the more verbose, unambiguous option was taken instead.</p>
+<p>Boring&#x27;s 1D arrays are unaffected by any of this:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> [<span class="kw">type</span>] a = [ <span class="fn">f</span>(x) <span class="kw">for</span> x <span class="kw">in</span> ..N ]
+<span class="kw">let</span> [<span class="kw">type</span>, N] a
+<span class="kw">let</span> v = a[x]</code></pre></div>
+<h2 id="type-syntax">Type syntax</h2>
+<h3 id="declaring-a-labeled-array-type">Declaring a labeled array type</h3>
+<p>The existing fixed-size array grammar is <code>[T, N]</code> — type, comma, a compile-time size. Labeled arrays generalize the <em>slot after the comma</em> from a single unlabeled size into a comma-separated list of <strong>labels</strong>, each either bare (dynamic axis) or <code>label = value</code> (compile-time-fixed axis):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Dynamic shape — size known only at construction (replaces Image&lt;T&gt; / Volume&lt;T&gt;)</span>
+<span class="kw">let</span> [<span class="kw">type</span>, width, height] a
+<span class="kw">let</span> [<span class="kw">type</span>, width, height, depth] a
+
+<span class="co"># Fixed shape — compile-time constants (replaces Image&lt;T,C,R&gt; / Volume&lt;T,X,Y,Z&gt;)</span>
+<span class="kw">let</span> [<span class="kw">type</span>, width = W, height = H] a
+<span class="kw">let</span> [<span class="kw">type</span>, width = W, height = H, depth = D] a</code></pre></div>
+<p>This form (over the alternative <code>[type width, height]</code>, label attached directly to the type with no comma) is a direct, minimal generalization of the grammar rule <code>[T, N]</code> already used (<code>&quot;[&quot; type &quot;,&quot; const_expr &quot;]&quot;</code>, <code>spec/grammar.bnf</code>) — one production extended, not a second parallel form with an inconsistent comma rule between the first and later labels.</p>
+<blockquote><strong>Grammar note — disambiguating from <code>[T, N]</code>.</strong> A single bare identifier after the comma already means something: a reference to an existing const-generic parameter (<code>spec/grammar.bnf</code>&#x27;s <code>const_expr</code>, e.g. <code>[T, N]</code> where <code>N</code> was declared elsewhere as <code>&lt;uint N&gt;</code>). That meaning is unchanged. Two or more comma-separated bare identifiers is the labeled form: a declaration of that many labeled, dynamically-sized axes. The two forms are disambiguated purely by arity (1 vs 2+), which is backward compatible since the 1-identifier case never changes meaning.</blockquote>
+<h3 id="axis-order-is-fixed-at-declaration">Axis order is fixed at declaration</h3>
+<p>Order is fixed in the <em>type declaration</em> itself:</p>
+<ul><li>The first label declared is axis 1, the second is axis 2, the third is</li></ul>
+<p>  axis 3 — permanently, for that type. <code>[T, width, height]</code> and   <code>[T, height, width]</code> are different (transposed) types.</p>
+<ul><li>This order determines:</li></ul>
+<p>  - <strong>Storage layout</strong> — the natural generalization of <code>Image</code>&#x27;s row-major     layout (<code>.at(c, r)</code> addresses <code>c + r * width</code>): axis 1 is the     fastest-varying index.   - <strong>GPU dispatch axis mapping</strong> — axis 1 ↔ <code>gpu.thread.x</code>, axis 2 ↔     <code>gpu.thread.y</code>, axis 3 ↔ <code>gpu.thread.z</code>, independent of the label names     chosen. This is what lets automatic grid-size inference at kernel     dispatch keep working the same way it did for <code>Image</code>/<code>Volume</code>.</p>
+<p>Without pinning this down explicitly, the &quot;which index means which axis&quot; confusion would just relocate from numeric argument positions to label declaration order, solving nothing.</p>
+<h2 id="qualifiers">Qualifiers</h2>
+<p>Qualifier placement follows the existing convention for flat arrays — <strong>after the closing bracket</strong>, never inside it. This is already how <code>[float]&#x27;unified</code>, <code>[float, W * H]&#x27;const</code> etc. are written (<code>examples/saxpy.br</code>, <code>linguist/samples/gpu.br</code>):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span>  [<span class="kt">float</span>, width, height]<span class="lf">&#x27;global</span>   src
+<span class="kw">mut</span>  [<span class="kt">float</span>, width, height]<span class="lf">&#x27;unified</span>  dst</code></pre></div>
+<p>Never <code>[float&#x27;global, width, height]</code> or <code>[float, width&#x27;global, height]</code>.</p>
+<h2 id="construction">Construction</h2>
+<h3 id="comprehension">Comprehension</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = [ <span class="fn">f</span>(width, height) <span class="kw">for</span> width <span class="kw">in</span> ..W <span class="kw">for</span> height <span class="kw">in</span> ..H ]
+<span class="kw">let</span> a = [ <span class="fn">f</span>(width, height, depth) <span class="kw">for</span> width <span class="kw">in</span> ..W <span class="kw">for</span> height <span class="kw">in</span> ..H <span class="kw">for</span> depth <span class="kw">in</span> ..D ]</code></pre></div>
+<p>Type inference works exactly as it does for 1D comprehensions (<code>let squares = [i * i for i in ..5]</code> already infers <code>[int]</code>) — the labeled multi-dim type, including its label names, is inferred from the chained <code>for</code> clauses.</p>
+<p><strong>Why not <code>for width, height in (..W, ..H)</code>?</strong> That form reuses the existing destructuring grammar <code>for IDENT (&quot;,&quot; IDENT)* &quot;in&quot; expr</code>, whose natural meaning — destructuring pairs out of one iterable — is a <strong>zip</strong> (pairwise, truncated to <code>min(W, H)</code>), not a cartesian product. It would look interchangeable with the chained form for <code>W == H</code> and silently produce a <code>min(W, H)</code>-sized result instead of <code>W * H</code> the moment they differ. One canonical form (the chained <code>for</code>) avoids that trap.</p>
+<h3 id="fill-shorthand-no-bound-variable">Fill shorthand (no bound variable)</h3>
+<p>For filling every element with the same constant, two terser forms sit alongside the chained-<code>for</code> comprehension:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = [ <span class="nb">0.0</span> <span class="kw">for</span> n ]                          <span class="co"># 1D — no label needed</span>
+<span class="kw">let</span> a = [ <span class="nb">0.0</span> <span class="kw">for</span> width = w, height = h ]      <span class="co"># 2+ axes — labels required</span></code></pre></div>
+<p>Both are pure surface sugar over the same AST nodes the comprehension form above already uses:</p>
+<ul><li><code>[value for n]</code> (no <code>..</code> required, unlike the range form — there&#x27;s no</li></ul>
+<p>  loop variable here to justify demanding explicit range syntax) is   identical to <code>[value for ..n]</code>.</p>
+<ul><li><code>[value for width = w, height = h]</code> uses each label directly as that</li></ul>
+<p>  axis&#x27;s loop variable name in the exact same construct the chained-<code>for</code>   comprehension produces — just with variable names nobody intends to   reference.</p>
+<p><strong>The labels are deliberately not bound as usable variables in <code>value</code>.</strong> <code>width</code>/<code>height</code> here are purely descriptive of shape, not loop variables — letting <code>value</code> reference them would make this a second way to write the same general per-position comprehension the chained <code>for...for...</code> form already covers (rejected above for the same reason <code>for a, b in (..W, ..H)</code> was). Keeping this form fill-only means it and the chained form serve genuinely different, non-overlapping purposes: constant fill vs. position-dependent computation. Referencing <code>width</code> inside <code>value</code> here simply fails as an undefined variable — an explicit error, not a silent miscompile.</p>
+<p><strong>Why not <code>[0.0, n]</code> / <code>[0.0, width = w, height = h]</code> (comma instead of <code>for</code>)?</strong> The 1D form collides with the already-existing 2-element array literal — <code>[a, b]</code> already means &quot;an array containing exactly these two elements&quot;, so <code>[0.0, n]</code> is indistinguishable from a literal 2-element array at the token level. <code>for</code> sidesteps this entirely: it&#x27;s a reserved keyword, never a value, so <code>[0.0 for n]</code> can never be confused with a literal, and it reuses the exact dispatch point the parser already has for <code>for</code> right after the first bracket element.</p>
+<h2 id="indexing">Indexing</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> v = a[width = w, height = h]
+<span class="kw">let</span> v = a[width = w, height = h, depth = d]</code></pre></div>
+<ul><li><strong>Labels are mandatory</strong> for 2+ dimensions. There is no positional</li></ul>
+<p>  fallback (<code>a[w, h]</code>) — the point of this syntax is that an index&#x27;s axis   is always readable at the call site, and a positional shorthand would   immediately start eroding that.</p>
+<ul><li><strong>Order is free at the use site.</strong> <code>a[height = h, width = w]</code> is exactly</li></ul>
+<p>  as valid as <code>a[width = w, height = h]</code> — since the names disambiguate,   forcing a specific order in addition to requiring the names would combine   the verbosity of labels with the rigidity of positions, without gaining   the benefit of either. This mirrors how named function arguments and   <code>fill = v</code>-style keyword args already behave elsewhere in the language.</p>
+<h2 id="shape-queries-sizeaxis">Shape queries: <code>.size(.axis)</code></h2>
+<p>A single method replaces <code>.width()</code> / <code>.height()</code> / <code>.depth()</code>, taking a compiler-synthesized enum of that array type&#x27;s axis labels:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>a.<span class="fn">size</span>(.width)
+a.<span class="fn">size</span>(.height)</code></pre></div>
+<p>This needs no new language feature. Boring already supports leading-dot shorthand for enum variants and static methods, resolved from the expected type at the call site (<code>spec/grammar.bnf</code>, <code>docs/book.md</code>, e.g. <code>.North</code> resolving to <code>Direction.North</code>, <code>.fromSecs(5)</code> resolving to <code>Duration.fromSecs(5)</code>). Declaring <code>[T, width, height]</code> synthesizes an axis-selector enum whose variants are the declared labels; <code>.size(...)</code>&#x27;s parameter type supplies the inference context exactly like <code>Duration.fromSecs</code> does for <code>wait(.fromSecs(5))</code>.</p>
+<p><code>.size(...)</code> is kept separate from indexing — indexing always uses bare labels (<code>a[width = w, ...]</code>), never the dot form (<code>a[.width = w, ...]</code>) — so a given label has exactly one lexical form per role (bare identifier for values/positions, dot-prefixed for the shape-selector enum), rather than two competing spellings for &quot;the same&quot; label.</p>
+<h2 id="converting-to-and-from-a-1d-buffer">Converting to and from a 1D buffer</h2>
+<p>Conversion between a 1D array and a labeled multi-dim array is <strong>not</strong> allowed implicitly (see the next section for why). But wrapping an existing flat buffer under a shape is a real use case — mainly loading external data (files, network) without a copy — and has an explicit equivalent, plus its symmetric inverse:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> flat = [<span class="fn">f</span>(i) <span class="kw">for</span> i <span class="kw">in</span> ..(W * H)]
+<span class="kw">let</span> a    = flat.<span class="fn">reshape</span>(width = W, height = H)   <span class="co"># [T] → [T, width, height]</span>
+<span class="kw">let</span> back = a.<span class="fn">flatten</span>()                           <span class="co"># [T, width, height] → [T]</span></code></pre></div>
+<p><code>.reshape(...)</code>:</p>
+<ul><li>checks <code>flat.len() == W * H</code> (compile-time error if both sizes are known</li></ul>
+<p>  constants and mismatched, otherwise a runtime check);</p>
+<ul><li><strong>moves</strong> the flat buffer rather than copying it, matching <code>Image</code>&#x27;s</li></ul>
+<p>  zero-copy semantics — important for large GPU-resident buffers;</p>
+<ul><li>is an explicit, named operation, not an implicit conversion — consistent</li></ul>
+<p>  with the rest of the language never doing implicit conversions (e.g. no   <code>string(x)</code>, only interpolation).</p>
+<p><code>.flatten()</code> is the exact symmetric inverse:</p>
+<ul><li>takes no arguments — the target length (<code>W * H</code>, <code>W * H * D</code>, …) and the</li></ul>
+<p>  element order are already fully determined by the array&#x27;s own shape and   its fixed axis order (&quot;Axis order is fixed at declaration&quot; above), so   there is nothing left to specify;</p>
+<ul><li><strong>moves</strong> the underlying buffer out (zero-copy), same direction as</li></ul>
+<p>  <code>.reshape()</code>;</p>
+<ul><li>preserves whatever ownership qualifier the array had (<code>&#x27;unified</code>,</li></ul>
+<p>  <code>&#x27;global</code>, …) on the returned <code>[T]</code>.</p>
+<p>Because storage order is canonical (axis 1 fastest-varying, matching <code>Image</code>&#x27;s <code>c + r * width</code> layout), the round trip is exact: <code>flat.reshape(width = W, height = H).flatten()</code> always yields back the same buffer, element for element, as <code>flat</code> — reshape/flatten never reorders data, only attaches or drops the shape.</p>
+<h2 id="no-1d--multi-d-conversion">No 1D ↔ multi-D conversion</h2>
+<p>Reinterpreting a flat array as a multi-dim one (or vice versa) implicitly is disallowed. <code>Image(data, w, h)</code> (the old, now-deleted constructor) placed the entire responsibility for <code>data.len() == w * h</code> on the caller with no check — <code>.reshape()</code> above closes that hole by making the check explicit instead of a bare type-punning constructor.</p>
+<h2 id="cross-label-compatibility-between-same-shape-types">Cross-label compatibility between same-shape types</h2>
+<p>Two array types with the same dimensionality and the same per-axis compile-time sizes (if any), but <strong>different label names</strong>, are structurally the same type — labels are local aliases for readability, not part of the type&#x27;s identity. A function parameter can use its own label vocabulary independent of what the caller&#x27;s variable is labeled:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">sum2d</span>([<span class="kt">float</span> w, h] grid): ...   <span class="co"># fine to call with an array labeled (width, height)</span></code></pre></div>
+<p><strong>This is not, however, a blanket &quot;any relabeling is safe&quot; rule.</strong> Some label vocabularies encode <em>conflicting axis-order conventions</em>, and the type system has no way to tell a harmless rename from a dangerous one — both look identical (same arity, same per-axis sizes) to the compiler.</p>
+<p>Concrete counter-example: <code>width, height</code> conventionally means horizontal-then-vertical (axis 1 = columns, matching <code>Image.at(c, r)</code>). <code>line, column</code> conventionally means vertical-then-horizontal (axis 1 = rows) — the <strong>opposite</strong> order. Passing a <code>[float, width = 800, height = 600]</code> value into a <code>[float, line, column]</code> parameter under a purely positional, implicit relabeling rule would silently bind <code>line = 800</code> — reading the width as a row count. For any non-square shape this is a silent transpose bug, indistinguishable at compile time from a safe rename like <code>width, height</code> → <code>w, h</code>.</p>
+<p>Cross-label passing across a function/assignment boundary therefore requires an <strong>explicit per-axis mapping</strong> whenever label names differ, rather than an implicit pass-through based on arity alone:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">f</span>([<span class="kt">float</span> line, column] grid): ...
+
+<span class="kw">let</span> img = [<span class="kt">float</span>, width = <span class="nb">800</span>, height = <span class="nb">600</span>](...)
+
+<span class="fn">f</span>(img)                                     <span class="co"># error: label sets (width,height) ≠ (line,column)</span>
+<span class="fn">f</span>(img <span class="kw">as</span> [line = width, column = height])  <span class="co"># explicit — the mismatch, if any, is visible here</span></code></pre></div>
+<p>This costs nothing in the safe case (<code>width, height</code> → <code>w, h</code> is a trivial, obviously-correct line to write) and forces the dangerous case into the open, where a reviewer has a chance to notice the axes don&#x27;t actually correspond — rather than letting the compiler wave it through because the shapes happen to match numerically.</p>
+<h2 id="notes">Notes</h2>
+<ul><li><strong>Vocabulary consistency</strong> (<code>width/height</code> vs <code>line/column</code>, etc.) is a</li></ul>
+<p>  convention, not something the type system enforces project-wide. The   cross-label rule above is the actual enforcement mechanism in practice —   any place two vocabularies meet is forced into an explicit <code>as [...]</code>,   visible to a reviewer. The recommended default vocabulary for Boring code   is <code>width, height, depth</code> for axis 1/2/3, matching the axis order   <code>Image</code>&#x27;s <code>.at(c, r)</code> already used.</p>
+<ul><li><em></em>Parity with <code>Image</code>/<code>Volume</code>&#x27;s <code>&#x27;actor</code> (block-shared) fixed-shape</li></ul>
+<p>  tiles<em></em>: <code>[T, width = W, height = H]</code> is the generalization of <code>[T, N]</code>,   and <code>[T, N]</code> field declarations are already zero-initialized automatically   with no <code>init()</code> needed. The same rule extends unchanged to the   multi-axis form: total element count <code>W * H</code> (or <code>W * H * D</code>),   zero-initialized, no special-casing required. Example (16×16 GEMM tiles   in shared memory, <code>whisper-boring/src/math_gpu.br</code>):</p>
+<p>  <code></code>`boring   # Image   mut Image&lt;float, 16, 16&gt;&#x27;actor tile_x  # tile of x   mut Image&lt;float, 16, 16&gt;&#x27;actor tile_w  # tile of w</p>
+<p>  # Labeled array   mut [float, width = 16, height = 16]&#x27;actor tile_x  # tile of x   mut [float, width = 16, height = 16]&#x27;actor tile_w  # tile of w   <code></code>`</p>
+<p>  Qualifier placement is unchanged from the general rule above (after the   closing bracket), so stacked forms like <code>&#x27;actor&#x27;unified</code> carry over   exactly as they work on flat <code>[T]</code> fields.</p>
+<ul><li><strong>Beyond 3 axes</strong>: CPU-side arrays have no limit — the label list, the</li></ul>
+<p>  fixed declaration order, the <code>.size(.axis)</code> enum, and <code>.reshape()</code> /   <code>.flatten()</code> all generalize to any number of axes without change. A 4D   <code>[T, batch, channel, width, height]</code> is exactly as well-formed as a 2D   one. GPU-side kernel fields are capped at 3, same as <code>Volume&lt;T,X,Y,Z&gt;</code>   always was — CUDA/Metal/wgpu thread and block indices only go up to   <code>x</code>/<code>y</code>/<code>z</code>, and automatic grid-size inference at dispatch has nowhere to   put a 4th axis. For GPU-resident data with more than 3 logical axes, the   pattern is to manually collapse the extra axes into one of the three GPU   axes (e.g. fold <code>channel</code> into <code>height</code> at construction time) and recover   the individual indices inside the kernel body.</p>
+<ul><li><strong><code>.size(.axis)</code>&#x27;s leading-dot shorthand</strong> is not a new language feature —</li></ul>
+<p>  it&#x27;s the existing leading-dot enum/static-method shorthand   (<code>spec/grammar.bnf</code>, <code>docs/book.md</code>), applied to a compiler-synthesized   per-array-type enum. Nothing here depends on that shorthand being   extended or documented any further as a general-purpose feature.</p>
+<h2 id="see-also">See also</h2>
+<ul><li><code>Image&lt;T,C,R&gt;</code>/<code>Volume&lt;T,X,Y,Z&gt;</code> — the types this feature replaced.</li></ul>
+<p>  Deleted once <code>whisper-boring</code>, the one real consumer, migrated off them.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

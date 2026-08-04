@@ -707,6 +707,25 @@ impl Parser {
                 }
                 TokenKind::LBracket => {
                     self.advance();
+                    // Labeled multi-dim indexing: a[width = w, height = h, ...] —
+                    // mandatory labels, order-free at the use site (see
+                    // docs/array-multidim-proposal.md, "Indexing"). Same `Ident`
+                    // followed by `=` (not `==`) lookahead already used to detect
+                    // labeled call arguments in `parse_arg`, so `a[i]`/`a[i == j]`/
+                    // `a[..n]` etc. are never misdetected as this form.
+                    let is_labeled_index = matches!(self.peek(), TokenKind::Ident(_))
+                        && self.check2(&TokenKind::Eq)
+                        && !matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Eq));
+                    if is_labeled_index {
+                        let mut args = vec![self.parse_arg()?];
+                        while self.eat(&TokenKind::Comma) {
+                            if self.check(&TokenKind::RBracket) { break; } // trailing comma
+                            args.push(self.parse_arg()?);
+                        }
+                        self.expect(&TokenKind::RBracket)?;
+                        expr = Expr { kind: ExprKind::LabeledIndex(Box::new(expr), args), line, col, len: self.tok_len() };
+                        continue;
+                    }
                     // Slice with no start: `a[..N]`, `a[..=N]`, `a[..]`
                     let idx = if self.check(&TokenKind::DotDot) || self.check(&TokenKind::DotDotEq) {
                         let inclusive = self.peek() == &TokenKind::DotDotEq;
@@ -759,8 +778,30 @@ impl Parser {
                 }
                 TokenKind::As => {
                     self.advance();
-                    let ty = self.parse_type()?;
-                    expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line, col, len: self.tok_len()};
+                    // Cross-label array mapping: `img as [line = width, column = height]`
+                    // (docs/array-multidim-proposal.md, "Cross-label compatibility") — the
+                    // bracket contents are a `target_label = source_label` mapping table,
+                    // not a type (`parse_type()` can't parse this: `line` alone parses as
+                    // `Type::Named("line")`, then hits `=` and fails) — so it needs its own
+                    // lookahead and its own node, not `Cast`. A real cast to a labeled-array
+                    // type (`x as [float, width, height]`) starts with a *type* token
+                    // (`float`, not `label =`), so this never misfires on that.
+                    let is_relabel = self.check(&TokenKind::LBracket)
+                        && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                        && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Eq));
+                    if is_relabel {
+                        self.advance(); // consume `[`
+                        let mut pairs = vec![self.parse_relabel_pair()?];
+                        while self.eat(&TokenKind::Comma) {
+                            if self.check(&TokenKind::RBracket) { break; } // trailing comma
+                            pairs.push(self.parse_relabel_pair()?);
+                        }
+                        self.expect(&TokenKind::RBracket)?;
+                        expr = Expr { kind: ExprKind::RelabelCast(Box::new(expr), pairs), line, col, len: self.tok_len() };
+                    } else {
+                        let ty = self.parse_type()?;
+                        expr = Expr { kind: ExprKind::Cast(Box::new(expr), ty), line, col, len: self.tok_len()};
+                    }
                 }
                 TokenKind::Ident(_) if self.peek_is_trailing_closure_no_paren() => {
                     // `expr x: body` — single-param trailing closure without parens
@@ -1189,6 +1230,15 @@ impl Parser {
         Ok(args)
     }
 
+    /// One `target_label = source_label` pair inside `as [...]` (cross-label
+    /// array mapping). See the `TokenKind::As` postfix arm above.
+    fn parse_relabel_pair(&mut self) -> Result<(String, String), ParseError> {
+        let target = self.expect_ident()?;
+        self.expect(&TokenKind::Eq)?;
+        let source = self.expect_ident()?;
+        Ok((target, source))
+    }
+
     pub(crate) fn parse_arg(&mut self) -> Result<Arg, ParseError> {
         // Spread arg: `..expr` — copy all fields from the given struct value.
         if self.eat(&TokenKind::DotDot) {
@@ -1456,6 +1506,33 @@ impl Parser {
                     // Parse first expression (value or computed expr)
                     let first = self.parse_expr()?;
                     if self.eat(&TokenKind::For) {
+                        // `[value for width = w, height = h]` — labeled shape-only fill
+                        // (docs/array-multidim-proposal.md). Checked FIRST, before the
+                        // `IDENT in ...` comprehension case below: distinguished from it
+                        // by `=` immediately following the identifier instead of `in`.
+                        // The labels are NOT bound as usable variables in `value` — purely
+                        // descriptive of shape, unlike the bound chained-for comprehension.
+                        // Desugars identically to `[value for width in ..w for height in
+                        // ..h]` by construction (same `LabeledArrayComp` node, using the
+                        // label text directly as the loop variable name) — keeps this a
+                        // pure parser-level convenience, no new desugar/interpreter/
+                        // transpiler work: a name that's never referenced in `value` is
+                        // simply never looked up.
+                        if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::Eq) {
+                            let mut clauses = Vec::new();
+                            loop {
+                                let label = self.expect_ident()?;
+                                self.expect(&TokenKind::Eq)?;
+                                let count = Box::new(self.parse_or()?);
+                                clauses.push((label, count));
+                                if !self.eat(&TokenKind::Comma) { break; }
+                                self.skip_newlines_and_indent();
+                            }
+                            self.skip_newlines_and_indent();
+                            self.expect(&TokenKind::RBracket)?;
+                            let kind = ExprKind::LabeledArrayComp { expr: Box::new(first), clauses };
+                            return Ok(Expr { kind, line, col, len: self.tok_len() });
+                        }
                         // `[v for i in ..n]` or `[f(x) for x in collection]` — computed form
                         let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
                             let var = self.expect_ident()?;
@@ -1493,10 +1570,37 @@ impl Parser {
                                 }
                             }
                         } else {
-                            // `[v for ..n]` — fill form
-                            let count = self.parse_comprehension_count(line, col)?;
+                            // `[v for ..n]` or `[v for n]` — fill form. Unlike the bound
+                            // comprehension above, a bare count with no `..`/`0..` wrapper
+                            // is also accepted here — there's no loop variable to justify
+                            // requiring explicit range syntax (see `parse_fill_count`'s doc).
+                            let count = self.parse_fill_count(line, col)?;
                             ExprKind::ArrayFill { value: Box::new(first), count: Box::new(count) }
                         };
+                        // Chained `for`: [f(w,h) for w in ..W for h in ..H] — a labeled
+                        // multi-dim comprehension (docs/array-multidim-proposal.md). Only
+                        // the range form (`ArrayComp`) chains; a collection-iteration or
+                        // fill clause stays single-axis, unchanged. `clauses[0]` is axis 1
+                        // (fastest-varying in storage) — declaration order, NOT syntactic
+                        // nesting order (see LabeledArrayComp's doc comment, D2).
+                        if let ExprKind::ArrayComp { expr: comp_expr, var: first_var, count: first_count } = kind {
+                            let mut clauses = vec![(first_var, first_count)];
+                            while self.eat(&TokenKind::For) {
+                                let var = self.expect_ident()?;
+                                self.expect(&TokenKind::In)?;
+                                let count = Box::new(self.parse_comprehension_count(line, col)?);
+                                clauses.push((var, count));
+                            }
+                            self.skip_newlines_and_indent();
+                            self.expect(&TokenKind::RBracket)?;
+                            let kind = if clauses.len() == 1 {
+                                let (var, count) = clauses.into_iter().next().unwrap();
+                                ExprKind::ArrayComp { expr: comp_expr, var, count }
+                            } else {
+                                ExprKind::LabeledArrayComp { expr: comp_expr, clauses }
+                            };
+                            return Ok(Expr { kind, line, col, len: self.tok_len() });
+                        }
                         self.skip_newlines_and_indent();
                         self.expect(&TokenKind::RBracket)?;
                         return Ok(Expr { kind, line, col, len: self.tok_len()});
@@ -1831,6 +1935,38 @@ impl Parser {
                 msg: "expected `..n` or `0..n` in array comprehension".to_string(),
                 line, col, len: self.tok_len(),
             }),
+        }
+    }
+
+    /// Count for the two "no bound variable" fill forms
+    /// (docs/array-multidim-proposal.md): `[value for n]` and, via the
+    /// labeled shape branch above, `label = n`. Mirrors
+    /// `parse_comprehension_count` (`..n` / `0..n`) but additionally accepts
+    /// a bare expression with no range wrapper at all — unlike the bound
+    /// comprehension forms, there's no loop variable here to justify
+    /// requiring explicit range syntax; `[0.0 for n]` and `[0.0 for ..n]`
+    /// both mean "fill n elements with 0.0".
+    fn parse_fill_count(&mut self, line: usize, col: usize) -> Result<Expr, ParseError> {
+        if self.eat(&TokenKind::DotDot) {
+            return self.parse_or();
+        }
+        let expr = self.parse_or()?;
+        match expr.kind {
+            ExprKind::Range { ref start, ref end, inclusive: false } => {
+                if matches!(start.kind, ExprKind::Int(0)) {
+                    Ok(*end.clone())
+                } else {
+                    Err(ParseError::Generic {
+                        msg: "array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`".to_string(),
+                        line, col, len: self.tok_len(),
+                    })
+                }
+            }
+            ExprKind::Range { inclusive: true, .. } => Err(ParseError::Generic {
+                msg: "array fill does not accept inclusive range (`..=`)".to_string(),
+                line, col, len: self.tok_len(),
+            }),
+            _ => Ok(expr),
         }
     }
 }

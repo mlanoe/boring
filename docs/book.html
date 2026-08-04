@@ -1003,6 +1003,26 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> v: [f64; <span class="nb">4</span>] = [<span class="nb">1.0</span>, <span class="nb">2.0</span>, <span class="nb">3.0</span>, <span class="nb">4.0</span>];
 <span class="kw">let</span> z: [isize; <span class="nb">3</span>] = [<span class="nb">0i</span>size; <span class="nb">3</span>];</code></pre></div>
 <p><code>N</code> must be a non-negative integer literal — it cannot be a runtime variable. Use <code>[T]</code> (<code>Vec&lt;T&gt;</code>) when the size is dynamic.</p>
+<h4 id="labeled-multi-dimensional-arrays--t-width-height">Labeled multi-dimensional arrays — <code>[T, width, height]</code></h4>
+<p>For 2 or more dimensions, <code>[T, N]</code>&#x27;s comma-separated slot generalizes into a list of <strong>labels</strong> — every index and every axis size is then read by name, not by position, so it&#x27;s never ambiguous which one means rows and which means columns:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> [<span class="kt">float</span>, width, height] a = [ <span class="nb">0.0</span> <span class="kw">for</span> width = <span class="nb">3</span>, height = <span class="nb">4</span> ]  <span class="co"># dynamic shape</span>
+<span class="kw">let</span> [<span class="kt">float</span>, width = <span class="nb">3</span>, height = <span class="nb">4</span>] b                              <span class="co"># fixed shape</span>
+
+<span class="kw">let</span> v = a[width = <span class="nb">1</span>, height = <span class="nb">2</span>]   <span class="co"># order-free — a[height = 2, width = 1] is identical</span>
+<span class="kw">let</span> w = a.<span class="fn">size</span>(.width)             <span class="co"># 3</span></code></pre></div>
+<ul><li><code>[T, width, height]</code> (no <code>=</code>) — dynamic shape, sized at construction.</li><li><code>[T, width = W, height = H]</code> — fixed shape, compile-time sizes (<code>W</code>/<code>H</code> may</li></ul>
+<p>  be integer literals or const-generic expressions).</p>
+<ul><li>The <strong>first label declared is the fastest-varying axis</strong> in memory</li></ul>
+<p>  (row-major storage) — <code>[T, width, height]</code> and <code>[T, height, width]</code> are   different (transposed) types.</p>
+<ul><li><code>a[label = value, ...]</code> indexing requires every axis to be labeled — there</li></ul>
+<p>  is no positional form — and reads correctly regardless of the order the   labels are written in.</p>
+<ul><li><code>a.size(.label)</code> replaces a family of per-axis accessor methods with one</li></ul>
+<p>  method plus a compiler-synthesized selector per array type.</p>
+<ul><li><code>flat.reshape(width = W, height = H)</code> / <code>a.flatten()</code> convert to and from</li></ul>
+<p>  a plain <code>[T]</code> explicitly — never implicitly.</p>
+<p>Chained <code>for</code> clauses build one directly, one clause per axis:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> grid = [ <span class="fn">f</span>(width, height) <span class="kw">for</span> width <span class="kw">in</span> ..W <span class="kw">for</span> height <span class="kw">in</span> ..H ]</code></pre></div>
+<p>Full reference — the fill shorthand (<code>[0.0 for width = w, height = h]</code>), <code>.reshape()</code>/<code>.flatten()</code>, and the cross-label safety rule for passing arrays between differently-labeled parameters: <a href="array-multidim-types.html">`array-multidim-types.md`</a>. GPU-kernel-specific behavior (qualifiers, grid inference): <a href="gpu-module.html">`gpu-module.md`</a>.</p>
 <h4 id="array-slicing">Array slicing</h4>
 <p>A sub-array can be extracted with slice syntax. The result is a new <code>[T]</code> containing a copy of the selected elements.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = [<span class="nb">10</span>, <span class="nb">20</span>, <span class="nb">30</span>, <span class="nb">40</span>, <span class="nb">50</span>]

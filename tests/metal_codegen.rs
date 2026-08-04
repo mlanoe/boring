@@ -780,130 +780,124 @@ kernel Histogram:
         "expected atomic_compare_exchange_weak_explicit bridged via a statement-expression;\ngot:\n{msl}");
 }
 
-// ─── Image / Volume ─────────────────────────────────────────────────────────
+// ─── Labeled multi-dimensional arrays (docs/array-multidim-types.md) ───────
 
 #[test]
-fn device_image_at_lowers_to_row_major_index() {
-    let (msl, _) = metal_codegen("image_at", r#"
+fn device_labeled_index_lowers_to_row_major_index() {
+    let (msl, _) = metal_codegen("labeled_at", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(msl.contains("img[c + r * 4]"),
-        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{msl}");
+        "expected [width=c,height=r] to lower to row-major c + r*width;\ngot:\n{msl}");
 }
 
 #[test]
-fn device_image_field_becomes_device_buffer_param() {
-    let (msl, _) = metal_codegen("image_ptr_param", r#"
+fn device_labeled_array_field_becomes_device_buffer_param() {
+    let (msl, _) = metal_codegen("labeled_ptr_param", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = 0.0
+        img[width = c, height = r] = 0.0
 "#);
     assert!(msl.contains("device float* img [[buffer(0)]]"),
-        "expected Image field to become a device buffer param, same as [T]'unified;\ngot:\n{msl}");
+        "expected a LabeledArray field to become a device buffer param, same as [T]'unified;\ngot:\n{msl}");
 }
 
 #[test]
-fn host_image_field_infers_2d_grid() {
-    let (_, rs) = metal_codegen("image_2d_grid", r#"
+fn host_labeled_array_field_infers_2d_grid() {
+    let (_, rs) = metal_codegen("labeled_2d_grid", r#"
 kernel Img:
-    mut Image<float, 16, 32>'unified img
-    init(Image<float, 16, 32>'unified data):
+    mut [float, width = 16, height = 32]'unified img
+    init([float, width = 16, height = 32]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
-        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
+        "expected grid.x inferred from width=16;\ngot:\n{rs}");
     assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
-        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
+        "expected grid.y inferred from height=32;\ngot:\n{rs}");
 }
 
-// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
-// docs/image-volume-types.md) ────────────────────────────────────────────────
-
 #[test]
-fn host_dynamic_image_field_infers_2d_grid_from_shadow_fields() {
-    let (_, rs) = metal_codegen("dynamic_image_2d_grid", r#"
+fn host_dynamic_labeled_array_field_infers_2d_grid_from_shadow_fields() {
+    let (_, rs) = metal_codegen("dynamic_labeled_2d_grid", r#"
 kernel Img:
-    mut Image<float>'unified img
-    init([float]'unified data, int w, int h):
-        img = Image(data, w, h)
+    mut [float, width, height]'unified img
+    init([float]'unified data, uint w, uint h):
+        img = data.reshape(width = w, height = h)
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
-    assert!(rs.contains("self.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("self.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
-    // No negative "doesn't fall back to 1D" assertion here (unlike the
-    // CUDA/ROCm siblings of this test): `self.img.length()` legitimately
-    // appears elsewhere in Metal's output (the `read_img()` accessor's own,
-    // unrelated element-count computation), so it isn't a reliable signal of
-    // whether *grid inference specifically* fell back.
+    assert!(rs.contains("self.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__img_axis1"), "expected grid.y inferred from the __img_axis1 shadow field;\ngot:\n{rs}");
+    // No negative "doesn't fall back to 1D" assertion: `self.img.length()`
+    // legitimately appears elsewhere, in the `read_img()` accessor.
 }
 
 #[test]
-fn host_image_field_is_metal_buffer() {
-    let (_, rs) = metal_codegen("image_buffer_field", r#"
+fn host_labeled_array_field_is_metal_buffer() {
+    let (_, rs) = metal_codegen("labeled_buffer_field", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("img: Buffer,"),
-        "expected bare 'unified Image field to become a Buffer host field, same as [T]'unified;\ngot:\n{rs}");
+        "expected bare 'unified LabeledArray field to become a Buffer host field, same as [T]'unified;\ngot:\n{rs}");
 }
 
 #[test]
-fn device_volume_at_lowers_to_row_major_3d_index() {
-    let (msl, _) = metal_codegen("volume_at", r#"
+fn device_labeled_array_3_axis_lowers_to_row_major_index() {
+    let (msl, _) = metal_codegen("labeled_3_axis", r#"
 kernel Vol:
-    mut Volume<float, 4, 4, 4>'unified vol
-    init(Volume<float, 4, 4, 4>'unified data):
+    mut [float, x = 4, y = 4, z = 4]'unified vol
+    init([float, x = 4, y = 4, z = 4]'unified data):
         vol = data
     def ():
-        let x = gpu.thread.x
-        let y = gpu.thread.y
-        let z = gpu.thread.z
-        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+        let tx = gpu.thread.x
+        let ty = gpu.thread.y
+        let tz = gpu.thread.z
+        vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
-    assert!(msl.contains("vol[x + y * 4 + z * 16]"),
-        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{msl}");
+    assert!(msl.contains("vol[tx + ty * 4 + tz * 16]"),
+        "expected [x,y,z] to lower to row-major x + y*4 + z*(4*4);\ngot:\n{msl}");
 }
 
 #[test]
-fn device_shared_image_becomes_fixed_threadgroup_decl() {
-    let (msl, _) = metal_codegen("shared_image", r#"
+fn device_shared_labeled_array_becomes_fixed_threadgroup_decl() {
+    let (msl, _) = metal_codegen("shared_labeled", r#"
 kernel Tile:
     mut [float]'unified out
-    let Image<float, 4, 4>'actor tile
+    let [float, width = 4, height = 4]'actor tile
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        out[0] = tile.at(c, r)
+        out[0] = tile[width = c, height = r]
 "#);
     assert!(msl.contains("threadgroup float tile[16];"),
-        "expected fixed threadgroup decl sized C*R, declared in the kernel body;\ngot:\n{msl}");
+        "expected fixed threadgroup decl sized width*height, declared in the kernel body;\ngot:\n{msl}");
     assert!(!msl.contains("tile [[threadgroup("),
-        "static 'actor Image must not appear as a threadgroup param (that's the dynamic-array path);\ngot:\n{msl}");
+        "static 'actor LabeledArray must not appear as a threadgroup param (that's the dynamic-array path);\ngot:\n{msl}");
 }
 
 // ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────

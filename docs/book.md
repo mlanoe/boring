@@ -1599,6 +1599,47 @@ let z: [isize; 3] = [0isize; 3];
 
 `N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
 
+#### Labeled multi-dimensional arrays — `[T, width, height]`
+
+For 2 or more dimensions, `[T, N]`'s comma-separated slot generalizes into a
+list of **labels** — every index and every axis size is then read by name,
+not by position, so it's never ambiguous which one means rows and which
+means columns:
+
+```boring
+let [float, width, height] a = [ 0.0 for width = 3, height = 4 ]  # dynamic shape
+let [float, width = 3, height = 4] b                              # fixed shape
+
+let v = a[width = 1, height = 2]   # order-free — a[height = 2, width = 1] is identical
+let w = a.size(.width)             # 3
+```
+
+- `[T, width, height]` (no `=`) — dynamic shape, sized at construction.
+- `[T, width = W, height = H]` — fixed shape, compile-time sizes (`W`/`H` may
+  be integer literals or const-generic expressions).
+- The **first label declared is the fastest-varying axis** in memory
+  (row-major storage) — `[T, width, height]` and `[T, height, width]` are
+  different (transposed) types.
+- `a[label = value, ...]` indexing requires every axis to be labeled — there
+  is no positional form — and reads correctly regardless of the order the
+  labels are written in.
+- `a.size(.label)` replaces a family of per-axis accessor methods with one
+  method plus a compiler-synthesized selector per array type.
+- `flat.reshape(width = W, height = H)` / `a.flatten()` convert to and from
+  a plain `[T]` explicitly — never implicitly.
+
+Chained `for` clauses build one directly, one clause per axis:
+
+```boring
+let grid = [ f(width, height) for width in ..W for height in ..H ]
+```
+
+Full reference — the fill shorthand (`[0.0 for width = w, height = h]`),
+`.reshape()`/`.flatten()`, and the cross-label safety rule for passing
+arrays between differently-labeled parameters:
+[`array-multidim-types.md`](array-multidim-types.html). GPU-kernel-specific
+behavior (qualifiers, grid inference): [`gpu-module.md`](gpu-module.html).
+
 #### Array slicing
 
 A sub-array can be extracted with slice syntax. The result is a new `[T]` containing a copy of the selected elements.

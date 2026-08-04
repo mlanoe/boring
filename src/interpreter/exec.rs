@@ -775,6 +775,9 @@ impl Interpreter {
             Type::Optional(inner) => Type::Optional(Box::new(self.resolve_type(inner))),
             Type::Array(elem) => Type::Array(Box::new(self.resolve_type(elem))),
             Type::ArrayN(elem, n) => Type::ArrayN(Box::new(self.resolve_type(elem)), *n),
+            // Resolve the element type (e.g. `Named("float")` -> its alias)
+            // the same way Array/ArrayN do — axes carry no type to resolve.
+            Type::LabeledArray(elem, axes) => Type::LabeledArray(Box::new(self.resolve_type(elem)), axes.clone()),
             Type::Set(elem) => Type::Set(Box::new(self.resolve_type(elem))),
             Type::Dict(k, v) => Type::Dict(
                 Box::new(self.resolve_type(k)),
@@ -835,6 +838,7 @@ impl Interpreter {
             Type::Named(s) if s == "_" => true,
             Type::Qualified(inner, _) => Self::is_inferred_type(inner),
             Type::Optional(inner) => Self::is_inferred_type(inner),
+            Type::LabeledArray(inner, _) => Self::is_inferred_type(inner),
             _ => false,
         }
     }
@@ -945,6 +949,13 @@ impl Interpreter {
             Type::Array(e) => format!("[{}]", Self::display_type(e)),
             Type::ArrayN(e, n) => format!("[{}, {}]", Self::display_type(e), n),
             Type::ArrayNExpr(e, _) => format!("[{}, <expr>]", Self::display_type(e)),
+            Type::LabeledArray(e, axes) => {
+                let axes_str = axes.iter()
+                    .map(|a| if a.size.is_some() { format!("{} = <expr>", a.label) } else { a.label.clone() })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{}, {}]", Self::display_type(e), axes_str)
+            }
             Type::ConstInt(n) => n.to_string(),
             Type::Tuple(ts) => {
                 let inner = ts.iter().map(Self::display_type).collect::<Vec<_>>().join(", ");
@@ -1086,6 +1097,17 @@ impl Interpreter {
             },
             Type::ArrayN(elem_ty, n) => match val {
                 Value::Array(elems) => elems.len() == *n && elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                _ => false,
+            },
+            // Runtime values carry no shape/label metadata (flat Value::Array, same as
+            // Array/ArrayN) — check total length when it's a resolvable compile-time
+            // constant (fixed-shape, mirrors ArrayN), otherwise permissive elementwise
+            // check (dynamic-shape, mirrors Array). See docs/array-multidim-proposal.md.
+            Type::LabeledArray(elem_ty, _) => match val {
+                Value::Array(elems) => match ty.labeled_array_len() {
+                    Some(n) => elems.len() as i64 == n && elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                    None => elems.is_empty() || elems.iter().all(|e| self.value_matches_type(e, elem_ty)),
+                },
                 _ => false,
             },
             Type::Set(elem_ty) => match val {

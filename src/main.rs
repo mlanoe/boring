@@ -16,7 +16,7 @@ pub mod errors;
 pub mod lexer;
 pub mod ast;
 pub mod parser;
-pub mod desugar;
+pub mod desugar_labeled_array;
 pub mod interpreter;
 pub mod checker;
 pub mod transpiler;
@@ -714,7 +714,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
             process::exit(1);
         }
     };
-    let program = desugar::desugar_image_volume(program);
+    let program = desugar_labeled_array::desugar_labeled_array(program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -815,7 +815,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         Ok(p) => p,
         Err(e) => { report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg()); process::exit(1); }
     };
-    let program = desugar::desugar_image_volume(program);
+    let program = desugar_labeled_array::desugar_labeled_array(program);
     if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
     let out = transpiler::transpile_with_config(&program, config);
     report_transpile_warnings(&path, &source, &out.warnings);
@@ -873,7 +873,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
             process::exit(1);
         }
     };
-    let program = desugar::desugar_image_volume(program);
+    let program = desugar_labeled_array::desugar_labeled_array(program);
 
     if report_check_result(&path, &source, checker::check(&program)) {
         process::exit(1);
@@ -1076,7 +1076,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
         search_paths.extend(std::env::split_paths(&env_path));
     }
     merge_into(&path, &mut visited, &mut items, &search_paths);
-    desugar::desugar_image_volume(ast::Program { items })
+    desugar_labeled_array::desugar_labeled_array(ast::Program { items })
 }
 
 fn merge_into(
@@ -1453,7 +1453,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
             process::exit(1);
         }
     };
-    let program = desugar::desugar_image_volume(program);
+    let program = desugar_labeled_array::desugar_labeled_array(program);
 
     // Validate for kernel-mode compatibility.
     let diags = validator::validate_kernel(&program);

@@ -2096,6 +2096,7 @@ impl Interpreter {
 
             // Collection element / key / value types
             Type::Array(elem) | Type::ArrayN(elem, _) | Type::ArrayNExpr(elem, _) | Type::Set(elem) => self.check_resolved_qualifier(elem, line),
+            Type::LabeledArray(elem, _) => self.check_resolved_qualifier(elem, line),
             Type::ConstInt(_) => Ok(()),
             Type::Dict(k, v) => {
                 self.check_resolved_qualifier(k, line)?;

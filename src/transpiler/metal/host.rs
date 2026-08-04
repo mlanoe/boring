@@ -5,7 +5,10 @@
 // Uses the `metal` crate (objc2-metal migration planned).
 
 use crate::ast::*;
-use crate::transpiler::helpers::{image_volume_grid_dim_expr, desugared_image_volume_shadow_fields, shadow_grid_axes};
+use crate::transpiler::helpers::{
+    shadow_grid_axes,
+    labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
+};
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -1024,7 +1027,7 @@ impl HostEmitter {
                         Type::Array(_) | Type::ArrayN(_, _) => {
                             self.line(&format!("{}: Buffer,", field.name));
                         }
-                        ty if ty.as_image_volume().is_some() => {
+                        ty if ty.as_labeled_array().is_some() => {
                             self.line(&format!("{}: Buffer,", field.name));
                         }
                         _ => {
@@ -1039,7 +1042,7 @@ impl HostEmitter {
             if matches!(field.qual, GpuQual::Local) {
                 match &field.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {}
-                    ty if ty.as_image_volume().is_some() => {}
+                    ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         let ty = rust_type(&field.ty);
                         self.line(&format!("{}: {},", field.name, ty));
@@ -1067,7 +1070,7 @@ impl HostEmitter {
         for field in &decl.fields {
             match field.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
-                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some() =>
+                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some() =>
                 {
                     let elem = elem_rust_type(&field.ty);
                     self.line(&format!(
@@ -1375,13 +1378,13 @@ impl HostEmitter {
     }
 
     fn emit_boring_launch(&mut self, _name: &str, fields: &[KernelFieldDecl]) {
-        // Auto-grid when there is at least one device array (or Image/Volume) field.
+        // Auto-grid when there is at least one device array (or LabeledArray) field.
         let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => Some(f.name.clone()),
-                        ty if ty.as_image_volume().is_some() => Some(f.name.clone()),
+                        ty if ty.as_labeled_array().is_some() => Some(f.name.clone()),
                         _ => None,
                     }
                 }
@@ -1415,14 +1418,13 @@ impl HostEmitter {
             };
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
-            if let Some((_, dims)) = field_decl.ty.as_image_volume() {
-                // Fixed-shape Image/Volume: C/R/X/Y/Z are compile-time constants,
-                // baked directly into the ceil-div grid expression.
-                self.line(&image_volume_grid_dim_expr(dims));
-            } else if let Some(shadows) = desugared_image_volume_shadow_fields(&field_decl.name, fields) {
-                // Desugared dynamic-shape Image/Volume: shadow fields carry
-                // width/height(/depth) at runtime — see
-                // docs/image-volume-types.md's Phase 6.
+            if let Some((_, axes)) = field_decl.ty.as_labeled_array() {
+                // Fixed-shape LabeledArray: axis sizes are compile-time
+                // constants, baked directly into the ceil-div grid expression.
+                self.line(&labeled_array_grid_dim_expr(axes));
+            } else if let Some(shadows) = desugared_labeled_array_shadow_fields(&field_decl.name, fields) {
+                // Desugared dynamic-shape LabeledArray: shadow fields carry
+                // each axis's size at runtime — see docs/array-multidim-types.md.
                 let (gx, gy, gz) = shadow_grid_axes("self", &shadows, ["block_dim.0", "block_dim.1", "block_dim.2"]);
                 self.line(&format!("({gx}, {gy}, {gz})"));
             } else if let Some(df) = dim_field {
@@ -1473,7 +1475,7 @@ impl HostEmitter {
         for f in fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
-                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() =>
+                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() =>
                 {
                     self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                     buf_idx += 1;
@@ -1483,7 +1485,7 @@ impl HostEmitter {
         }
         for f in fields {
             if matches!(f.qual, GpuQual::Const) {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
                     self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
                 } else {
                     let elem = elem_rust_type(&f.ty);
@@ -1496,7 +1498,7 @@ impl HostEmitter {
             }
         }
         for f in fields {
-            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
+            if matches!(f.qual, GpuQual::Local) && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_labeled_array().is_none() {
                 let elem = rust_type(&f.ty);
                 self.line(&format!(
                     "__encoder.set_bytes({}, mem::size_of::<{}>() as u64, &self.{} as *const _ as *const _);",
@@ -2789,7 +2791,7 @@ fn elem_rust_type(ty: &Type) -> String {
         Type::Array(inner)        => rust_type(inner),
         Type::ArrayN(inner, _)    => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
-        Type::Generic(..) if ty.as_image_volume().is_some() => rust_type(ty.as_image_volume().unwrap().0),
+        Type::LabeledArray(inner, _) => rust_type(inner),
         _                         => rust_type(ty),
     }
 }
@@ -2807,6 +2809,7 @@ fn elem_rust_type(ty: &Type) -> String {
 fn general_host_elem_type(ty: &Type) -> String {
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => general_host_elem_type(inner),
+        Type::LabeledArray(inner, _) => general_host_elem_type(inner),
         Type::Qualified(inner, _) => general_host_elem_type(inner),
         Type::Float => "f64".into(),
         Type::Named(n) if n == "float" || n == "f32" || n == "f64" => "f64".into(),
@@ -2836,6 +2839,7 @@ fn rust_type(ty: &Type) -> String {
         Type::Never          => "!".into(),
         Type::Array(inner)   => format!("Vec<{}>", rust_type(inner)),
         Type::ArrayN(inner, n) => format!("[{}; {}]", rust_type(inner), n),
+        Type::LabeledArray(inner, _) => format!("Vec<{}>", rust_type(inner)),
         // `{K=V}` dict type — was previously falling to this function's `_ => "()"`
         // default (the exact bug this fixes: tokenizer.br's `{string=int} vocab`
         // struct field / `var {string=int} vocab = {=}` local emitted as `()`).

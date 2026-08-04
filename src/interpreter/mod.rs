@@ -2189,14 +2189,17 @@ impl Interpreter {
             err(format!("parse error in '{}': {}", canonical.display(), e), decl.line)
         })?;
         // Every other entry point (`run_file`, `parse_and_merge_program`, the
-        // transpile/build paths) runs `desugar_image_volume` on a program right
-        // after parsing, before anything else sees it — this runtime `use`
-        // loader is the interpreter's own separate parse path for imported
-        // modules and was missing that step, so dynamic-shape `Image<T>`/
-        // `Volume<T>` kernels defined in a `use`-imported module (as opposed to
-        // the entry file itself) reached `exec_item` still holding the raw
-        // `Image(...)`/`Volume(...)` sugar, which then failed at eval time.
-        let program = crate::desugar::desugar_image_volume(program);
+        // transpile/build paths) runs `desugar_labeled_array` on a program
+        // right after parsing, before anything else sees it — this runtime
+        // `use` loader is the interpreter's own separate parse path for
+        // imported modules and was missing that step, so a dynamic-shape
+        // `[T, width, height]` kernel field defined in a `use`-imported module
+        // (as opposed to the entry file itself) reached `exec_item` still
+        // holding an un-desugared `Type::LabeledArray`, which then failed at
+        // eval time (confirmed via a real crash migrating whisper-boring's
+        // audio_gpu.br — see `dynamic_shape_kernel_field_in_a_use_imported_
+        // module_works` in `tests_labeled_array.rs`).
+        let program = crate::desugar_labeled_array::desugar_labeled_array(program);
 
         let module_env = Env::child(Rc::clone(&env));
         for item in &program.items {

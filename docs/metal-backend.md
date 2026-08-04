@@ -156,7 +156,7 @@ the full reference. Metal-specific notes:
 - **Pixel format**: `BGRA8Unorm` — pack pixels as `0xFF000000 | (r << 16) | (g << 8) | b`.
 - **Blit**: `MTLBlitCommandEncoder` from the surface buffer to the `CAMetalDrawable` texture each frame.
 - **Drawable size**: fixed at the kernel's surface `Dimension` — not updated on window resize.
-- **2D dispatch**: when a kernel has a `'surface` field and a `Dimension` field, the grid is inferred as `(ceil(w/bx), ceil(h/by), 1)` automatically. An `Image<T,C,R>`/`Volume<T,X,Y,Z>` field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) gets the same treatment from its compile-time `C`/`R`/`X`/`Y`/`Z` instead — `(ceil(C/bx), ceil(R/by), 1)` for `Image`, 3D for `Volume` — independently of the `'surface`/`Dimension` case (see [`gpu-module.md`](gpu-module.html#named-shape-buffers-imagevolume)).
+- **2D dispatch**: when a kernel has a `'surface` field and a `Dimension` field, the grid is inferred as `(ceil(w/bx), ceil(h/by), 1)` automatically. A fixed-shape `[T, width=W, height=H]` labeled-array field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) gets the same treatment from its compile-time axis sizes instead — `(ceil(W/bx), ceil(H/by), 1)`, generalized to 3 axes — independently of the `'surface`/`Dimension` case (see [`gpu-module.md`](gpu-module.html)).
 - **Extra dependencies** added to `Cargo.toml` when `Screen` is present: `winit = "0.28"`, `objc = "0.2"`, `core-graphics = "0.23"`.
 
 ---

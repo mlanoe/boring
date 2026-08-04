@@ -2278,6 +2278,10 @@ impl Transpiler {
             Type::Array(inner)    => format!("Vec<{}>", self.emit_type(inner)),
             Type::ArrayN(inner, n) => format!("[{}; {}]", self.emit_type(inner), n),
             Type::ArrayNExpr(inner, _) => format!("[{}; _]", self.emit_type(inner)), // resolved during monomorphisation
+            // Always a flat contiguous buffer at runtime, fixed or dynamic shape alike
+            // (see docs/array-multidim-proposal.md) — Vec<T> is correct here regardless
+            // of whether the labeled-array desugar pass already ran on this field.
+            Type::LabeledArray(inner, _) => format!("Vec<{}>", self.emit_type(inner)),
             Type::ConstInt(n) => n.to_string(),
             Type::Dict(k, v)      => format!("HashMap<{}, {}>", self.emit_type(k), self.emit_type(v)),
             Type::Set(inner)      => format!("HashSet<{}>", self.emit_type(inner)),

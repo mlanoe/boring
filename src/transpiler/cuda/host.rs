@@ -4,7 +4,10 @@
 // Rust host-side code emitter for the CUDA backend.
 
 use crate::ast::*;
-use crate::transpiler::helpers::{image_volume_grid_dim_expr, desugared_image_volume_shadow_fields, shadow_grid_axes};
+use crate::transpiler::helpers::{
+    shadow_grid_axes,
+    labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
+};
 
 pub(super) fn emit_host_rs(
     program: &Program,
@@ -1043,10 +1046,10 @@ impl HostEmitter {
     fn emit_boring_launch(&mut self, name: &str, fields: &[KernelFieldDecl]) {
         // Auto grid sizing: when the first field is a device array ('unified/'global/
         // 'actor'global), `grid_dim` becomes optional and is derived from its length
-        // (1D) or, for a fixed-shape Image/Volume field, from its C/R/X/Y/Z dims (2D/3D).
+        // (1D) or, for a fixed-shape LabeledArray field, from its axis sizes (2D/3D).
         let auto_grid_field: Option<&KernelFieldDecl> = fields.iter().find(|f| {
             matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some())
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())
         });
 
         if let Some(field) = auto_grid_field {
@@ -1057,9 +1060,9 @@ impl HostEmitter {
             self.indent += 1;
             self.line("let grid_dim = grid_dim.unwrap_or_else(|| {");
             self.indent += 1;
-            if let Some((_, dims)) = field.ty.as_image_volume() {
-                self.line(&image_volume_grid_dim_expr(dims));
-            } else if let Some(shadows) = desugared_image_volume_shadow_fields(&field.name, fields) {
+            if let Some((_, axes)) = field.ty.as_labeled_array() {
+                self.line(&labeled_array_grid_dim_expr(axes));
+            } else if let Some(shadows) = desugared_labeled_array_shadow_fields(&field.name, fields) {
                 let (gx, gy, gz) = shadow_grid_axes("self", &shadows, ["block_dim.0", "block_dim.1", "block_dim.2"]);
                 self.line(&format!("({gx}, {gy}, {gz})"));
             } else {
@@ -1121,7 +1124,7 @@ impl HostEmitter {
         // Upload 'const fixed-size arrays (and fixed-shape Image/Volume) to
         // __constant__ memory before launch.
         for f in fields {
-            if matches!(f.qual, GpuQual::Const) && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some()) {
+            if matches!(f.qual, GpuQual::Const) && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some()) {
                 self.line(&format!(
                     "if !self.{name}.is_empty() {{",
                     name = f.name
@@ -1161,14 +1164,14 @@ impl HostEmitter {
                     self.line(&format!("launcher.arg(&mut self.{});", f.name));
                 }
                 GpuQual::Const => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_labeled_array().is_none() {
                         // Scalar 'const: passed as a kernel parameter.
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
-                    // Array/Image/Volume 'const: uploaded to __constant__ memory above, not a parameter.
+                    // Array/LabeledArray 'const: uploaded to __constant__ memory above, not a parameter.
                 }
                 GpuQual::Local => {
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_image_volume().is_none() {
+                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) && f.ty.as_labeled_array().is_none() {
                         self.line(&format!("launcher.arg(&self.{});", f.name));
                     }
                 }
@@ -2378,7 +2381,7 @@ impl HostEmitter {
         // 'const fixed-size arrays (and fixed-shape Image/Volume) are stored as
         // Vec<T> on the host — they are uploaded to __constant__ memory via
         // memcpy_htod, not as CudaSlice args.
-        let is_fixed_shape = matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some();
+        let is_fixed_shape = matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_labeled_array().is_some();
         if matches!(field.qual, GpuQual::Const) && is_fixed_shape {
             return format!("Vec<{}>", elem);
         }
@@ -2414,7 +2417,7 @@ fn elem_rust_type(ty: &Type) -> String {
         Type::Array(inner)     => rust_type(inner),
         Type::ArrayN(inner, _) => rust_type(inner),
         Type::Qualified(inner, _) => elem_rust_type(inner),
-        Type::Generic(..) if ty.as_image_volume().is_some() => rust_type(ty.as_image_volume().unwrap().0),
+        Type::LabeledArray(inner, _) => rust_type(inner),
         _                      => rust_type(ty),
     }
 }
@@ -2441,6 +2444,7 @@ fn rust_type(ty: &Type) -> String {
         Type::Never          => "!".into(),
         Type::Array(inner)   => format!("Vec<{}>", rust_type(inner)),
         Type::ArrayN(inner, n) => format!("[{}; {}]", rust_type(inner), n),
+        Type::LabeledArray(inner, _) => format!("Vec<{}>", rust_type(inner)),
         Type::Tuple(ts) => {
             let s: Vec<String> = ts.iter().map(rust_type).collect();
             format!("({})", s.join(", "))

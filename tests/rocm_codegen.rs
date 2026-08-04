@@ -976,112 +976,126 @@ kernel Histogram:
     assert!(hip.contains("atomicCAS(&counts[bucket], 0, 1)"), "expected atomicCAS;\ngot:\n{hip}");
 }
 
-// ─── Image / Volume ─────────────────────────────────────────────────────────
+// ─── Labeled multi-dimensional arrays (docs/array-multidim-types.md) ───────
+// Mirrors tests/cuda_codegen.rs's own LabeledArray section exactly, with
+// `DeviceBuffer<T>` in place of `CudaSlice<T>` for host field types.
 
 #[test]
-fn device_image_at_lowers_to_row_major_index() {
-    let (hip, _) = rocm_codegen("image_at", r#"
+fn device_labeled_index_lowers_to_row_major_index() {
+    let (hip, _) = rocm_codegen("labeled_at", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(hip.contains("img[c + r * 4]"),
-        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{hip}");
+        "expected [width=c,height=r] to lower to row-major c + r*width;\ngot:\n{hip}");
 }
 
 #[test]
-fn host_image_field_infers_2d_grid() {
-    let (_, rs) = rocm_codegen("image_2d_grid", r#"
+fn device_labeled_size_lowers_to_literals() {
+    let (hip, _) = rocm_codegen("labeled_width_height", r#"
 kernel Img:
-    mut Image<float, 16, 32>'unified img
-    init(Image<float, 16, 32>'unified data):
+    mut [float, width = 4, height = 8]'unified img
+    init([float, width = 4, height = 8]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        if c < img.size(.width) and r < img.size(.height):
+            img[width = c, height = r] = 0.0
 "#);
-    assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
-        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
-    assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
-        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
-}
-
-// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
-// docs/image-volume-types.md) ────────────────────────────────────────────────
-
-#[test]
-fn host_dynamic_image_field_infers_2d_grid_from_shadow_fields() {
-    let (_, rs) = rocm_codegen("dynamic_image_2d_grid", r#"
-kernel Img:
-    mut Image<float>'unified img
-    init([float]'unified data, int w, int h):
-        img = Image(data, w, h)
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
-"#);
-    assert!(rs.contains("self.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("self.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
-    assert!(!rs.contains("self.img.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
+    assert!(hip.contains("c < 4"), "expected .size(.width) to lower to the literal 4;\ngot:\n{hip}");
+    assert!(hip.contains("r < 8"), "expected .size(.height) to lower to the literal 8;\ngot:\n{hip}");
 }
 
 #[test]
-fn kernel_field_image_bare_unified_is_valid() {
-    // Unlike `[T,N]'unified`, Image/Volume behave like dynamic `[T]'unified`
-    // for host representation (a DeviceBuffer), so bare 'unified is legal.
-    let (hip, rs) = rocm_codegen("image_bare_unified", r#"
-kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
-        img = data
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
-"#);
-    assert!(hip.contains("__global__ void Img_kernel(double* img)"),
-        "expected bare 'unified Image field to compile to a pointer param;\ngot:\n{hip}");
-    assert!(rs.contains("img: DeviceBuffer<f64>"),
-        "expected bare 'unified Image field to become a DeviceBuffer host field, same as [T]'unified;\ngot:\n{rs}");
-}
-
-#[test]
-fn device_volume_at_lowers_to_row_major_3d_index() {
-    let (hip, _) = rocm_codegen("volume_at", r#"
+fn device_labeled_array_3_axis_lowers_to_row_major_index() {
+    let (hip, _) = rocm_codegen("labeled_3_axis", r#"
 kernel Vol:
-    mut Volume<float, 4, 4, 4>'unified vol
-    init(Volume<float, 4, 4, 4>'unified data):
+    mut [float, x = 4, y = 4, z = 4]'unified vol
+    init([float, x = 4, y = 4, z = 4]'unified data):
         vol = data
     def ():
-        let x = gpu.thread.x
-        let y = gpu.thread.y
-        let z = gpu.thread.z
-        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+        let tx = gpu.thread.x
+        let ty = gpu.thread.y
+        let tz = gpu.thread.z
+        vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
-    assert!(hip.contains("vol[x + y * 4 + z * 16]"),
-        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{hip}");
+    assert!(hip.contains("vol[tx + ty * 4 + tz * 16]"),
+        "expected [x,y,z] to lower to row-major x + y*4 + z*(4*4);\ngot:\n{hip}");
 }
 
 #[test]
-fn device_shared_image_becomes_fixed_shared_decl() {
-    let (hip, _) = rocm_codegen("shared_image", r#"
+fn device_shared_labeled_array_becomes_fixed_shared_decl() {
+    let (hip, _) = rocm_codegen("shared_labeled", r#"
 kernel Tile:
     mut [float]'unified out
-    let Image<float, 4, 4>'actor tile
+    let [float, width = 4, height = 4]'actor tile
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        out[0] = tile.at(c, r)
+        out[0] = tile[width = c, height = r]
 "#);
     assert!(hip.contains("__shared__ double tile[16];"),
-        "expected fixed __shared__ decl sized C*R, not extern __shared__;\ngot:\n{hip}");
+        "expected fixed __shared__ decl sized width*height, not extern __shared__;\ngot:\n{hip}");
+}
+
+#[test]
+fn kernel_field_labeled_array_bare_unified_is_valid() {
+    let (hip, rs) = rocm_codegen("labeled_bare_unified", r#"
+kernel Img:
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+"#);
+    assert!(hip.contains("__global__ void Img_kernel(double* img)"),
+        "expected bare 'unified LabeledArray field to compile to a pointer param;\ngot:\n{hip}");
+    assert!(rs.contains("img: DeviceBuffer<f64>"),
+        "expected bare 'unified LabeledArray field to become a DeviceBuffer host field, same as [T]'unified;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_labeled_array_field_infers_2d_grid() {
+    let (_, rs) = rocm_codegen("labeled_2d_grid", r#"
+kernel Img:
+    mut [float, width = 16, height = 32]'unified img
+    init([float, width = 16, height = 32]'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+"#);
+    assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
+        "expected grid.x inferred from width=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
+        "expected grid.y inferred from height=32;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_dynamic_labeled_array_field_infers_2d_grid_from_shadow_fields() {
+    let (_, rs) = rocm_codegen("dynamic_labeled_2d_grid", r#"
+kernel Img:
+    mut [float, width, height]'unified img
+    init([float]'unified data, uint w, uint h):
+        img = data.reshape(width = w, height = h)
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+"#);
+    assert!(rs.contains("self.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__img_axis1"), "expected grid.y inferred from the __img_axis1 shadow field;\ngot:\n{rs}");
+    assert!(!rs.contains("self.img.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
 }
 
 // ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────

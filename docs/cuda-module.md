@@ -157,9 +157,8 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 **Grid inference rules (current implementation):**
 
 - `[T]'global` / `'unified` 1D array field → `grid = ceil(len(buf) / block)`
-- `Image<T,C,R>` field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) → `grid = (ceil(C/block.x), ceil(R/block.y), 1)`
-- `Volume<T,X,Y,Z>` field → `grid = (ceil(X/block.x), ceil(Y/block.y), ceil(Z/block.z))`
-- Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on array/Image/Volume inference.
+- Fixed-shape `[T, width=W, height=H]` labeled-array field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) → `grid = (ceil(W/block.x), ceil(H/block.y), 1)`, generalized to 3 axes
+- Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on array/labeled-array inference.
 
 Passing `grid` explicitly always overrides inference, on every backend — `k(block = (16, 16, 1), grid = (4, 4, 1))` dispatches exactly the requested `(4, 4, 1)` grid, whether or not the kernel has a 1D auto-grid-capable field. (An earlier version of the CUDA/ROCm codegen silently dropped an explicit `grid` argument and always substituted the inferred/default value instead — confirmed via a real generated project, fixed by threading the caller's `grid` through to `__boring_launch` the same way `metal::host` already did.)
 

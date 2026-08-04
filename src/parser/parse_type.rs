@@ -99,6 +99,97 @@ impl Parser {
         }
     }
 
+    /// Speculatively parses a comma-separated labeled-axis list for the new
+    /// `[T, width, height]` / `[T, width = W, height = H]` form
+    /// (docs/array-multidim-proposal.md), called with `self.pos` right at the
+    /// first token after the comma following the array's element type.
+    ///
+    /// `Ok(None)` means "not this form after all" — `self.pos` is restored to
+    /// where it started, so the caller's existing `[T, N]` (int literal) /
+    /// `[T, <expr>]` (`ArrayNExpr`) parsing runs completely unchanged. This
+    /// happens when the first item is a lone identifier immediately followed
+    /// by `]` (the pre-existing meaning of a bare `[T, N]` — a reference to a
+    /// const generic param, unchanged) or by anything other than `=`/`,`
+    /// (the start of a larger arithmetic expression, e.g. `[T, N + 1]`).
+    ///
+    /// Once a second comma-separated item or an `=` is seen, the input is
+    /// unambiguously the new form — from that point on, a malformed list
+    /// (fewer than 2 axes, or mixing fixed and dynamic axes — D1) is reported
+    /// as a hard parse error rather than rolled back, since falling through to
+    /// `parse_expr()` on e.g. `width = 16` would risk silently parsing it as
+    /// an assignment expression instead of failing loudly.
+    fn try_parse_labeled_axes(&mut self) -> Result<Option<Vec<LabeledAxis>>, ParseError> {
+        let saved = self.pos;
+        let first_label = match self.peek().clone() {
+            TokenKind::Ident(s) => s,
+            _ => return Ok(None),
+        };
+        self.advance(); // consume the identifier
+
+        if self.eat(&TokenKind::Eq) {
+            let size_expr = self.parse_expr()?;
+            let mut axes = vec![LabeledAxis { label: first_label, size: Some(ConstExpr(Box::new(size_expr))) }];
+            if self.check(&TokenKind::RBracket) {
+                return Err(ParseError::Generic {
+                    line: self.line(), col: self.col(),
+                    msg: "labeled array types need at least 2 axes — add another \
+                          `label = size`, or remove the label to use a plain [T, N] array"
+                        .to_string(),
+                    len: self.tok_len(),
+                });
+            }
+            self.expect(&TokenKind::Comma)?;
+            self.parse_labeled_axes_rest(&mut axes, true)?;
+            Ok(Some(axes))
+        } else if self.check(&TokenKind::Comma) {
+            self.advance(); // consume comma
+            if self.check(&TokenKind::RBracket) {
+                return Err(ParseError::Generic {
+                    line: self.line(), col: self.col(),
+                    msg: "labeled array types need at least 2 axes — add another axis \
+                          label, or remove the trailing comma to use a plain [T, N] array"
+                        .to_string(),
+                    len: self.tok_len(),
+                });
+            }
+            let mut axes = vec![LabeledAxis { label: first_label, size: None }];
+            self.parse_labeled_axes_rest(&mut axes, false)?;
+            Ok(Some(axes))
+        } else {
+            // Lone identifier followed by `]` (legacy const-generic reference) or by
+            // an operator (start of a larger legacy expression) — roll back.
+            self.pos = saved;
+            Ok(None)
+        }
+    }
+
+    /// Parses the remaining comma-separated axis entries after the first one
+    /// (already pushed by the caller), up to (not including) the closing `]`.
+    /// `expect_fixed` pins whether every remaining entry must have `= expr`
+    /// (fixed-shape list) or must not (dynamic-shape list) — D1: an axis list
+    /// is never a mix of the two, checked entry by entry as they're parsed.
+    /// A single trailing comma before `]` is allowed, matching `arg_list`.
+    fn parse_labeled_axes_rest(&mut self, axes: &mut Vec<LabeledAxis>, expect_fixed: bool) -> Result<(), ParseError> {
+        loop {
+            let label = self.expect_ident()?;
+            let has_eq = self.eat(&TokenKind::Eq);
+            if has_eq != expect_fixed {
+                return Err(ParseError::Generic {
+                    line: self.line(), col: self.col(),
+                    msg: "labeled array axes must be all dynamic ([T, a, b]) or all \
+                          fixed ([T, a = A, b = B]) — mixing the two is not supported"
+                        .to_string(),
+                    len: self.tok_len(),
+                });
+            }
+            let size = if has_eq { Some(ConstExpr(Box::new(self.parse_expr()?))) } else { None };
+            axes.push(LabeledAxis { label, size });
+            if !self.eat(&TokenKind::Comma) { break; }
+            if self.check(&TokenKind::RBracket) { break; } // trailing comma
+        }
+        Ok(())
+    }
+
     pub(crate) fn parse_type_base(&mut self, line: usize) -> Result<Type, ParseError> {
         // `<Trait>` — impl Trait shorthand (static dispatch).
         if self.check(&TokenKind::Lt) {
@@ -191,6 +282,19 @@ impl Parser {
                 let inner = self.parse_type()?;
                 let inner = self.parse_type_qualifier(inner)?;
                 if self.eat(&TokenKind::Comma) {
+                    // New labeled multi-dim form: [T, width, height] / [T, width=W, height=H]
+                    // (docs/array-multidim-proposal.md). Only attempted when the next token
+                    // is a bare identifier — try_parse_labeled_axes itself rolls back
+                    // (returns Ok(None)) and leaves `self.pos` unchanged whenever the input
+                    // turns out to be the legacy single-item form after all (`[T, N]` /
+                    // `[T, N + 1]`), so the Int-literal and parse_expr() fallbacks below run
+                    // completely unchanged in that case.
+                    if matches!(self.peek(), TokenKind::Ident(_)) {
+                        if let Some(axes) = self.try_parse_labeled_axes()? {
+                            self.expect(&TokenKind::RBracket)?;
+                            return Ok(Type::LabeledArray(Box::new(inner), axes));
+                        }
+                    }
                     // Size can be an integer literal OR an expression over const generic params.
                     if let TokenKind::Int(n) = self.peek().clone() {
                         // Peek ahead: if the next token after the int is `]`, it's a plain literal.

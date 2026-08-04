@@ -1231,6 +1231,17 @@ impl Interpreter {
                 Ok(Value::Array(vals.into()))
             }
 
+            // Labeled multi-dim array nodes are lowered away before evaluation ever
+            // sees them: `desugar_labeled_array` rewrites LabeledIndex/RelabelCast to
+            // plain Index/passthrough and LabeledArrayComp to ArrayAlloc + nested for
+            // loops for CPU-side code; `lower_labeled_array_methods` (eval_gpu.rs)
+            // does the fixed-shape kernel-field equivalent. Reaching one of these here
+            // means a desugar/lowering pass was skipped — an internal compiler bug,
+            // not a user-facing error. See docs/array-multidim-proposal.md.
+            ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
+                Err(err("internal error: labeled multi-dim array expression reached the evaluator without being desugared first", expr.line))
+            }
+
             ExprKind::Tuple(elems) => {
                 let mut vals = Vec::new();
                 for e in elems {

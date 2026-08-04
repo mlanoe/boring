@@ -2012,3 +2012,4 @@ let _result = d.label
 mod tests_part2;
 mod tests_part3;
 mod tests_gpu;
+mod tests_labeled_array;

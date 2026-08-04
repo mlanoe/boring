@@ -980,201 +980,193 @@ kernel Histogram:
     assert!(cu.contains("atomicCAS(&counts[bucket], 0, 1)"), "expected atomicCAS;\ngot:\n{cu}");
 }
 
-// ─── Image / Volume ─────────────────────────────────────────────────────────
+// ─── Labeled multi-dimensional arrays (docs/array-multidim-types.md) ───────
 
 #[test]
-fn device_image_at_lowers_to_row_major_index() {
-    let (cu, _) = cuda_codegen("image_at", r#"
+fn device_labeled_index_lowers_to_row_major_index() {
+    let (cu, _) = cuda_codegen("labeled_at", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(cu.contains("img[c + r * 4]"),
-        "expected .at(c,r) to lower to row-major c + r*C;\ngot:\n{cu}");
+        "expected [width=c,height=r] to lower to row-major c + r*width;\ngot:\n{cu}");
 }
 
 #[test]
-fn device_image_width_height_lower_to_literals() {
-    let (cu, _) = cuda_codegen("image_width_height", r#"
+fn device_labeled_size_lowers_to_literals() {
+    let (cu, _) = cuda_codegen("labeled_width_height", r#"
 kernel Img:
-    mut Image<float, 4, 8>'unified img
-    init(Image<float, 4, 8>'unified data):
+    mut [float, width = 4, height = 8]'unified img
+    init([float, width = 4, height = 8]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        if c < img.width() and r < img.height():
-            img.at(c, r) = 0.0
+        if c < img.size(.width) and r < img.size(.height):
+            img[width = c, height = r] = 0.0
 "#);
-    assert!(cu.contains("c < 4"), "expected .width() to lower to the literal 4;\ngot:\n{cu}");
-    assert!(cu.contains("r < 8"), "expected .height() to lower to the literal 8;\ngot:\n{cu}");
+    assert!(cu.contains("c < 4"), "expected .size(.width) to lower to the literal 4;\ngot:\n{cu}");
+    assert!(cu.contains("r < 8"), "expected .size(.height) to lower to the literal 8;\ngot:\n{cu}");
 }
 
 #[test]
-fn device_image_field_becomes_pointer_param() {
-    let (cu, _) = cuda_codegen("image_ptr_param", r#"
+fn device_labeled_array_field_becomes_pointer_param() {
+    let (cu, _) = cuda_codegen("labeled_ptr_param", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = 0.0
+        img[width = c, height = r] = 0.0
 "#);
     assert!(cu.contains("__global__ void Img_kernel(double* img)"),
-        "expected Image field to become a flat pointer param, same as [T]'unified;\ngot:\n{cu}");
+        "expected a LabeledArray field to become a flat pointer param, same as [T]'unified;\ngot:\n{cu}");
 }
 
 #[test]
-fn device_volume_at_lowers_to_row_major_3d_index() {
-    let (cu, _) = cuda_codegen("volume_at", r#"
+fn device_labeled_array_3_axis_lowers_to_row_major_index() {
+    let (cu, _) = cuda_codegen("labeled_3_axis", r#"
 kernel Vol:
-    mut Volume<float, 4, 4, 4>'unified vol
-    init(Volume<float, 4, 4, 4>'unified data):
+    mut [float, x = 4, y = 4, z = 4]'unified vol
+    init([float, x = 4, y = 4, z = 4]'unified data):
         vol = data
     def ():
-        let x = gpu.thread.x
-        let y = gpu.thread.y
-        let z = gpu.thread.z
-        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+        let tx = gpu.thread.x
+        let ty = gpu.thread.y
+        let tz = gpu.thread.z
+        vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
-    assert!(cu.contains("vol[x + y * 4 + z * 16]"),
-        "expected .at(x,y,z) to lower to row-major x + y*X + z*(X*Y);\ngot:\n{cu}");
+    assert!(cu.contains("vol[tx + ty * 4 + tz * 16]"),
+        "expected [x,y,z] to lower to row-major x + y*4 + z*(4*4);\ngot:\n{cu}");
 }
 
 #[test]
-fn device_shared_image_becomes_fixed_shared_decl() {
-    let (cu, _) = cuda_codegen("shared_image", r#"
+fn device_shared_labeled_array_becomes_fixed_shared_decl() {
+    let (cu, _) = cuda_codegen("shared_labeled", r#"
 kernel Tile:
     mut [float]'unified out
-    let Image<float, 4, 4>'actor tile
+    let [float, width = 4, height = 4]'actor tile
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        out[0] = tile.at(c, r)
+        out[0] = tile[width = c, height = r]
 "#);
     assert!(cu.contains("__shared__ double tile[16];"),
-        "expected fixed __shared__ decl sized C*R, not extern __shared__;\ngot:\n{cu}");
+        "expected fixed __shared__ decl sized width*height, not extern __shared__;\ngot:\n{cu}");
 }
 
 #[test]
-fn kernel_field_image_actor_global_is_valid() {
-    let (cu, _) = cuda_codegen("image_actor_global", r#"
+fn kernel_field_labeled_array_actor_global_is_valid() {
+    let (cu, _) = cuda_codegen("labeled_actor_global", r#"
 kernel Hist:
-    mut Image<int, 4, 4>'actor'global hist
-    init(Image<int, 4, 4>'actor'global data):
+    mut [int, width = 4, height = 4]'actor'global hist
+    init([int, width = 4, height = 4]'actor'global data):
         hist = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        hist.at(c, r) = hist.at(c, r) + 1
+        hist[width = c, height = r] = hist[width = c, height = r] + 1
 "#);
-    assert!(cu.contains("hist"), "expected Image'actor'global field to compile through codegen;\ngot:\n{cu}");
+    assert!(cu.contains("hist"), "expected a LabeledArray'actor'global field to compile through codegen;\ngot:\n{cu}");
 }
 
 #[test]
-fn kernel_field_image_bare_unified_is_valid() {
-    // Unlike `[T,N]'unified` (rejected — size would be redundant with the fixed N),
-    // `Image`/`Volume` behave like dynamic `[T]'unified` for host representation
-    // (a CudaSlice buffer), so bare 'unified is legal — required for the
-    // TransposeKernel migration example in docs/image-volume-types.md, whose
-    // src/dst fields are exactly 'global/'unified.
-    let (cu, rs) = cuda_codegen("image_bare_unified", r#"
+fn kernel_field_labeled_array_bare_unified_is_valid() {
+    let (cu, rs) = cuda_codegen("labeled_bare_unified", r#"
 kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(cu.contains("__global__ void Img_kernel(double* img)"),
-        "expected bare 'unified Image field to compile to a pointer param;\ngot:\n{cu}");
+        "expected bare 'unified LabeledArray field to compile to a pointer param;\ngot:\n{cu}");
     assert!(rs.contains("img: CudaSlice<f64>"),
-        "expected bare 'unified Image field to become a CudaSlice host field, same as [T]'unified;\ngot:\n{rs}");
+        "expected bare 'unified LabeledArray field to become a CudaSlice host field, same as [T]'unified;\ngot:\n{rs}");
 }
 
 #[test]
-fn host_image_field_infers_2d_grid() {
-    let (_, rs) = cuda_codegen("image_2d_grid", r#"
+fn host_labeled_array_field_infers_2d_grid() {
+    let (_, rs) = cuda_codegen("labeled_2d_grid", r#"
 kernel Img:
-    mut Image<float, 16, 32>'unified img
-    init(Image<float, 16, 32>'unified data):
+    mut [float, width = 16, height = 32]'unified img
+    init([float, width = 16, height = 32]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
     assert!(rs.contains("((16 + block_dim.0 - 1) / block_dim.0)"),
-        "expected grid.x inferred from Image's C=16;\ngot:\n{rs}");
+        "expected grid.x inferred from width=16;\ngot:\n{rs}");
     assert!(rs.contains("((32 + block_dim.1 - 1) / block_dim.1)"),
-        "expected grid.y inferred from Image's R=32;\ngot:\n{rs}");
+        "expected grid.y inferred from height=32;\ngot:\n{rs}");
 }
 
 #[test]
-fn host_volume_field_infers_3d_grid() {
-    let (_, rs) = cuda_codegen("volume_3d_grid", r#"
+fn host_labeled_array_3_axis_infers_3d_grid() {
+    let (_, rs) = cuda_codegen("labeled_3d_grid", r#"
 kernel Vol:
-    mut Volume<float, 8, 16, 32>'unified vol
-    init(Volume<float, 8, 16, 32>'unified data):
+    mut [float, x = 8, y = 16, z = 32]'unified vol
+    init([float, x = 8, y = 16, z = 32]'unified data):
         vol = data
     def ():
-        let x = gpu.thread.x
-        let y = gpu.thread.y
-        let z = gpu.thread.z
-        vol.at(x, y, z) = vol.at(x, y, z) * 2.0
+        let tx = gpu.thread.x
+        let ty = gpu.thread.y
+        let tz = gpu.thread.z
+        vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
-    assert!(rs.contains("((8 + block_dim.0 - 1) / block_dim.0)"), "expected grid.x from X=8;\ngot:\n{rs}");
-    assert!(rs.contains("((16 + block_dim.1 - 1) / block_dim.1)"), "expected grid.y from Y=16;\ngot:\n{rs}");
-    assert!(rs.contains("((32 + block_dim.2 - 1) / block_dim.2)"), "expected grid.z from Z=32;\ngot:\n{rs}");
+    assert!(rs.contains("((8 + block_dim.0 - 1) / block_dim.0)"), "expected grid.x from x=8;\ngot:\n{rs}");
+    assert!(rs.contains("((16 + block_dim.1 - 1) / block_dim.1)"), "expected grid.y from y=16;\ngot:\n{rs}");
+    assert!(rs.contains("((32 + block_dim.2 - 1) / block_dim.2)"), "expected grid.z from z=32;\ngot:\n{rs}");
 }
 
-// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
-// docs/image-volume-types.md) ────────────────────────────────────────────────
+// ─── Dynamic-shape LabeledArray: grid inference from shadow fields ─────────
 
 #[test]
-fn host_dynamic_image_field_infers_2d_grid_from_shadow_fields() {
-    let (_, rs) = cuda_codegen("dynamic_image_2d_grid", r#"
+fn host_dynamic_labeled_array_field_infers_2d_grid_from_shadow_fields() {
+    let (_, rs) = cuda_codegen("dynamic_labeled_2d_grid", r#"
 kernel Img:
-    mut Image<float>'unified img
-    init([float]'unified data, int w, int h):
-        img = Image(data, w, h)
+    mut [float, width, height]'unified img
+    init([float]'unified data, uint w, uint h):
+        img = data.reshape(width = w, height = h)
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
 "#);
-    assert!(rs.contains("self.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("self.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
-    // Must NOT fall back to the plain 1D length-based inference every other
-    // dynamic `[T]'unified` field gets.
+    assert!(rs.contains("self.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__img_axis1"), "expected grid.y inferred from the __img_axis1 shadow field;\ngot:\n{rs}");
     assert!(!rs.contains("self.img.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
 }
 
 #[test]
-fn host_dynamic_volume_field_infers_3d_grid_from_shadow_fields() {
-    let (_, rs) = cuda_codegen("dynamic_volume_3d_grid", r#"
+fn host_dynamic_labeled_array_3_axis_infers_3d_grid_from_shadow_fields() {
+    let (_, rs) = cuda_codegen("dynamic_labeled_3d_grid", r#"
 kernel Vol:
-    mut Volume<float>'unified vol
-    init([float]'unified data, int x, int y, int z):
-        vol = Volume(data, x, y, z)
+    mut [float, x, y, z]'unified vol
+    init([float]'unified data, uint xn, uint yn, uint zn):
+        vol = data.reshape(x = xn, y = yn, z = zn)
     def ():
-        let i = gpu.thread.x
-        let j = gpu.thread.y
-        let k = gpu.thread.z
-        vol.at(i, j, k) = vol.at(i, j, k) * 2.0
+        let tx = gpu.thread.x
+        let ty = gpu.thread.y
+        let tz = gpu.thread.z
+        vol[x = tx, y = ty, z = tz] = vol[x = tx, y = ty, z = tz] * 2.0
 "#);
-    assert!(rs.contains("self.__vol_w"), "expected grid.x from the __vol_w shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("self.__vol_h"), "expected grid.y from the __vol_h shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("self.__vol_d"), "expected grid.z from the __vol_d shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__vol_axis0"), "expected grid.x from the __vol_axis0 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__vol_axis1"), "expected grid.y from the __vol_axis1 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("self.__vol_axis2"), "expected grid.z from the __vol_axis2 shadow field;\ngot:\n{rs}");
     assert!(!rs.contains("self.vol.len()"), "should not fall back to 1D length-based grid inference;\ngot:\n{rs}");
 }
 

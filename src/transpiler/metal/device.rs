@@ -4,7 +4,10 @@
 // MSL (Metal Shading Language) device code emitter.
 
 use crate::ast::*;
-use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal, reachable_free_fns};
+use crate::transpiler::helpers::{
+    reachable_free_fns,
+    labeled_array_at_index, labeled_array_dim_literal,
+};
 
 pub(super) fn emit_device_msl(program: &Program) -> String {
     let mut e = DeviceEmitter::new();
@@ -158,13 +161,13 @@ impl DeviceEmitter {
         let mut tg_idx: u32 = 0;
         let mut params: Vec<String> = Vec::new();
 
-        // 1. 'unified / 'global / 'actor'global / 'actor'unified array (and Image/Volume) fields → device T* [[buffer(N)]]
+        // 1. 'unified / 'global / 'actor'global / 'actor'unified array (and LabeledArray) fields → device T* [[buffer(N)]]
         for f in &decl.fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
                     let elem_ty: Option<&Type> = match &f.ty {
                         Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
-                        ty if ty.as_image_volume().is_some() => Some(ty.as_image_volume().unwrap().0),
+                        ty if ty.as_labeled_array().is_some() => Some(ty.as_labeled_array().unwrap().0),
                         _ => None,
                     };
                     if let Some(inner) = elem_ty {
@@ -200,8 +203,8 @@ impl DeviceEmitter {
                         // Array: use the field name directly — accessed as name[i] in the kernel body.
                         params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
                     }
-                    ty if ty.as_image_volume().is_some() => {
-                        // Image/Volume: same direct-pointer treatment as a fixed array.
+                    ty if ty.as_labeled_array().is_some() => {
+                        // Fixed-shape LabeledArray: same direct-pointer treatment.
                         params.push(format!("constant {}* {} [[buffer({})]]", elem, f.name, buf_idx));
                     }
                     _ => {
@@ -217,7 +220,7 @@ impl DeviceEmitter {
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Local)
                 && !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
-                && f.ty.as_image_volume().is_none() {
+                && f.ty.as_labeled_array().is_none() {
                     let ty = msl_type(&f.ty);
                     params.push(format!("constant {}* __{}_init [[buffer({})]]", ty, f.name, buf_idx));
                     buf_idx += 1;
@@ -263,22 +266,25 @@ impl DeviceEmitter {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     let elem = elem_msl_type(inner);
                     self.line(&format!("threadgroup {} {}[{}];", elem, f.name, n));
-                } else if let Some((elem, _)) = f.ty.as_image_volume() {
-                    let len = f.ty.image_volume_len().expect("validator guarantees ConstInt dims");
-                    self.line(&format!("threadgroup {} {}[{}];", elem_msl_type(elem), f.name, len));
+                } else if let Some((elem, _)) = f.ty.as_labeled_array() {
+                    // See cuda::device's identical `labeled_array_len()` note:
+                    // `None` (a const-generic axis) isn't handled here yet.
+                    if let Some(len) = f.ty.labeled_array_len() {
+                        self.line(&format!("threadgroup {} {}[{}];", elem_msl_type(elem), f.name, len));
+                    }
                 }
             }
         }
 
         // Declare 'const scalars: deref the constant buffer pointer into a local.
-        // Arrays (and Image/Volume) are passed directly as `constant T* name` and need no deref.
+        // Arrays (and LabeledArray) are passed directly as `constant T* name` and need no deref.
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Const) {
                 match &f.ty {
                     Type::Array(_) | Type::ArrayN(_, _) => {
                         // Array: accessed directly via name[i] — no deref needed.
                     }
-                    ty if ty.as_image_volume().is_some() => {}
+                    ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         let ty = msl_type(&f.ty);
                         self.line(&format!("const {} {} = *__{};", ty, f.name, f.name));
@@ -296,11 +302,15 @@ impl DeviceEmitter {
                         self.line(&format!("{} {}[{}];", elem, f.name, n));
                     }
                     Type::Array(_) => {}
-                    ty if ty.as_image_volume().is_some() => {
-                        let (elem, _) = ty.as_image_volume().unwrap();
-                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+                        let (elem, _) = ty.as_labeled_array().unwrap();
+                        let len = ty.labeled_array_len().unwrap();
                         self.line(&format!("{} {}[{}];", elem_msl_type(elem), f.name, len));
                     }
+                    // A LabeledArray whose length isn't computable (const-generic
+                    // axis) falls here rather than into the scalar branch below —
+                    // same "not representable, skip" treatment as `Type::Array(_)`.
+                    ty if ty.as_labeled_array().is_some() => {}
                     _ => {
                         // Scalar 'local: initialize from the constant buffer parameter.
                         let ty = msl_type(&f.ty);
@@ -540,20 +550,18 @@ impl DeviceEmitter {
         }
     }
 
-    /// Precabled `Image`/`Volume` methods: `.at(c,r)`/`.at(x,y,z)` lowers to
-    /// row-major flat-index arithmetic; `.width()`/`.height()`/`.depth()` lower to
-    /// the dimension's compile-time literal. See docs/image-volume-types.md.
-    fn try_image_volume_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
+    /// node, not a method call, so it's handled directly in `expr()`'s main
+    /// match instead of here.
+    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
-        let (_, dims) = field.ty.as_image_volume()?;
-        match method {
-            "at" => Some(format!("{}[{}]", name, image_volume_at_index(dims, args_s))),
-            "width"  => image_volume_dim_literal(dims, 0),
-            "height" => image_volume_dim_literal(dims, 1),
-            "depth"  => image_volume_dim_literal(dims, 2),
-            _ => None,
-        }
+        let (_, axes) = field.ty.as_labeled_array()?;
+        if method != "size" { return None; }
+        let [arg] = args else { return None; };
+        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
+        labeled_array_dim_literal(axes, axis_label)
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────
@@ -600,6 +608,23 @@ impl DeviceEmitter {
             ExprKind::Index(arr, idx) => {
                 format!("{}[{}]", self.expr(arr), self.expr(idx))
             }
+            ExprKind::LabeledIndex(obj, args) => {
+                // Stringify every arg's value first (needs `&mut self`) —
+                // only then borrow `self.current_fields` immutably, so the
+                // two borrows never overlap.
+                let pairs: Vec<(String, String)> = args.iter()
+                    .filter_map(|a| a.label.clone().map(|l| (l, self.expr(&a.value))))
+                    .collect();
+                let resolved = if let ExprKind::Var(name) = &obj.kind {
+                    self.current_fields.iter().find(|f| &f.name == name)
+                        .and_then(|field| field.ty.as_labeled_array())
+                        .and_then(|(_, axes)| labeled_array_at_index(axes, &pairs))
+                        .map(|offset| format!("{}[{}]", name, offset))
+                } else {
+                    None
+                };
+                resolved.unwrap_or_else(|| "/* unsupported labeled index */".to_string())
+            }
             ExprKind::Field(obj, field) => {
                 let obj_s = self.expr(obj);
                 map_gpu_field(&obj_s, field)
@@ -622,7 +647,7 @@ impl DeviceEmitter {
                 if let Some(msl) = self.try_atomic_method_call(obj, method, &args_s) {
                     return msl;
                 }
-                if let Some(msl) = self.try_image_volume_method_call(obj, method, &args_s) {
+                if let Some(msl) = self.try_labeled_array_method_call(obj, method, args) {
                     return msl;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -688,7 +713,7 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                         // Array: direct pointer, no deref — same as in the entry point.
                         Some(format!("constant {}* {}", elem, f.name))
                     }
-                    ty if ty.as_image_volume().is_some() => {
+                    ty if ty.as_labeled_array().is_some() => {
                         Some(format!("constant {}* {}", elem, f.name))
                     }
                     _ => {
@@ -742,9 +767,7 @@ fn msl_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", msl_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", msl_type(inner), n),
-        Type::Generic(..) if ty.as_image_volume().is_some() => {
-            format!("{}*", msl_type(ty.as_image_volume().unwrap().0))
-        }
+        Type::LabeledArray(inner, _) => format!("{}*", msl_type(inner)),
         Type::Named(n) => match n.as_str() {
             "float" | "f64" | "f32" => "float".to_string(),
             "int"                   => "int64_t".to_string(),
@@ -774,7 +797,7 @@ fn elem_msl_type(ty: &Type) -> String {
         Type::Array(inner)        => msl_type(inner),
         Type::ArrayN(inner, _)    => msl_type(inner),
         Type::Qualified(inner, _) => elem_msl_type(inner),
-        Type::Generic(..) if ty.as_image_volume().is_some() => msl_type(ty.as_image_volume().unwrap().0),
+        Type::LabeledArray(inner, _) => msl_type(inner),
         _                         => msl_type(ty),
     }
 }

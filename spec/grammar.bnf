@@ -661,8 +661,15 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                   | "." IDENT "(" arg_list? ")"                             # method call
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
                   | "[" expr "]"                                             # index
+                  | "[" IDENT "=" expr ("," IDENT "=" expr)* ","? "]"        # labeled index (2+ axes; see array-multidim-types.md):
+                                                                             #   a[width = w, height = h] — every arg mandatorily
+                                                                             #   labeled, order free at the use site (names disambiguate)
                   | "[" slice_range "]"                                     # slice: a[M..N], a[..N], a[M..], a[..]
                   | "as" type                                                # cast
+                  | "as" "[" IDENT "=" IDENT ("," IDENT "=" IDENT)* ","? "]" # relabel cast (array-multidim-types.md):
+                                                                             #   img as [line = width, column = height] —
+                                                                             #   (target_label = source_label) pairs, must be a
+                                                                             #   complete bijection over the source's own axes
 
 arg_list        ::= arg ("," arg)* ","?    # trailing comma allowed
 arg             ::= (IDENT "=")? expr      # labeled or positional
@@ -677,6 +684,27 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | "(" expr "," expr ("," expr)* ")"   # tuple
                   | "[" (expr ("," expr)*)? "]"          # array literal
                   | "[" ".." expr "]"                    # array alloc: [..n] — allocate n elements without init
+                  | "[" expr "for" ".." expr "]"                    # fill: [v for ..n]
+                  | "[" expr "for" expr "]"                         # fill, bare count: [v for n] — `..` optional
+                                                                     #   here (no bound loop var to justify requiring it);
+                                                                     #   see array-multidim-types.md, "Fill shorthand"
+                  | "[" expr "for" IDENT "in" (".." expr | expr) "]"
+                                                                     # comprehension: [f(i) for i in ..n] (range, start
+                                                                     #   must be 0 — `..n` or `0..n`) or
+                                                                     #   [f(x) for x in xs] (iterate a collection)
+                  | "[" expr ("for" IDENT "in" ".." expr)+ "]"       # chained comprehension (2+ clauses) → a labeled
+                                                                     #   multi-dim array (array-multidim-types.md): the
+                                                                     #   FIRST clause is axis 1 (fastest-varying in
+                                                                     #   row-major storage), regardless of syntactic
+                                                                     #   nesting order — see "Axis order is fixed at
+                                                                     #   declaration". A single clause stays the plain
+                                                                     #   comprehension form above, unchanged.
+                  | "[" expr "for" IDENT "=" const_expr ("," IDENT "=" const_expr)+ "]"
+                                                                     # labeled shape-only fill (2+ axes):
+                                                                     #   [v for width = w, height = h] — the labels are
+                                                                     #   NOT bound as usable variables in `v`, purely
+                                                                     #   descriptive of shape (array-multidim-types.md,
+                                                                     #   "Fill shorthand")
                   | "{" "}"                              # empty set  `{}`  → HashSet::new()
                   | "{" "=" "}"                          # empty dict `{=}` → HashMap::new()
                   | "{" dict_or_set "}"                  # dict or set (non-empty)
@@ -811,6 +839,20 @@ type            ::= primitive_type
                   | "[" type "," const_expr "]"        # fixed-size array: [T, N]  →  [T; N] in Rust
                                                        #   N may be an INT literal, a const generic param name,
                                                        #   or an arithmetic expression over those (W * H, N - 1, …)
+                  | "[" type "," labeled_axis "," labeled_axis ("," labeled_axis)* "]"
+                                                       #   labeled multi-dim array (2+ axes), array-multidim-types.md:
+                                                       #     [T, width, height]           — dynamic shape (every axis
+                                                       #                                    label-only)
+                                                       #     [T, width = W, height = H]   — fixed shape (every axis
+                                                       #                                    has a compile-time size)
+                                                       #   axes are uniformly all-dynamic or all-fixed, never mixed
+                                                       #   (checked at parse time). Axis order is significant and
+                                                       #   permanent for the type — [T,width,height] and
+                                                       #   [T,height,width] are different (transposed) types.
+                                                       #   Disambiguated from `[T, N]` above purely by arity: exactly
+                                                       #   one item after the comma keeps meaning "reference to an
+                                                       #   existing const generic param" (unchanged); two or more
+                                                       #   means this new form.
                   | "(" type ("," type)* ")"           # tuple: (T, U)
                   | "{" type "=" type "}"              # dict: {K = V}  →  HashMap<K,V>
                   | "{" type "}"                       # set: {T}  →  HashSet<T>
@@ -825,6 +867,10 @@ const_expr      ::= INT
                   | const_expr ("+" | "-" | "*" | "/") const_expr
                   | "-" const_expr                     # unary negation
                   | "(" const_expr ")"
+
+# One axis of a labeled multi-dim array type (array-multidim-types.md).
+labeled_axis    ::= IDENT                              # dynamic axis — shape known only at construction
+                  | IDENT "=" const_expr                # fixed axis — compile-time size
 
 # Note: `any Trait` (old syntax) is deprecated. Use bare `Trait` for Box<dyn> and `<Trait>` for impl.
 

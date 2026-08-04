@@ -137,6 +137,14 @@ struct Checker {
     /// position, the same way a plain `let fc = linear_gpu(...)` infers it from the
     /// (single) return type. See `check_let_destructure`.
     fn_returns_resident_tuple: HashMap<String, Vec<bool>>,
+    /// Free function name -> each positional parameter's declared type, when
+    /// annotated (`None` for an unannotated/inferred parameter). Best-effort,
+    /// static-annotation-only, same limitation as `Binding.ty` — used solely for
+    /// the labeled multi-dim array cross-label check (`check_label_compat`),
+    /// which only fires when both sides of a call are statically known to be
+    /// `Type::LabeledArray`. See docs/array-multidim-proposal.md,
+    /// "Cross-label compatibility between same-shape types".
+    fn_param_types: HashMap<String, Vec<Option<Type>>>,
     /// When `true`, every check EXCEPT `check_kernel_dispatch_qualifier` is silenced
     /// (the tree is still walked, to keep scope/binding tracking correct, but no
     /// other error is pushed). See `check_kernel_dispatch_only`'s doc for why this
@@ -155,6 +163,7 @@ impl Checker {
             fn_returns_resident: HashMap::new(),
             fn_gpu_arg_params: HashMap::new(),
             fn_returns_resident_tuple: HashMap::new(),
+            fn_param_types: HashMap::new(),
             kernel_dispatch_only: false,
         }
     }
@@ -298,6 +307,7 @@ impl Checker {
     fn collect_fn_signature(&mut self, f: &FnDecl) {
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
+        self.fn_param_types.insert(f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect());
         if let Some(rt) = &f.return_ty {
             if rt.gpu_resident_qual().is_some() {
                 self.fn_returns_resident.insert(f.name.clone(), rt.clone());
@@ -520,22 +530,155 @@ impl Checker {
         }
     }
 
-    // ── Kernel field types: `Image`/`Volume` shape ──────────────────────────────
+    // ── Kernel field types: `LabeledArray` shape ────────────────────────────────
     //
-    // Deliberately narrow: only `Type::image_volume_shape_error` on each field's
+    // Deliberately narrow: only `Type::labeled_array_shape_error` on each field's
     // declared type. Not gated behind `kernel_dispatch_only` — this must fire for
     // every real target (`boring run`, `boring build`, and `--target
     // cuda`/`rocm`/`metal`/`wgpu` via `check_kernel_dispatch_only`), unlike this
-    // checker's other rules, which are `boring run`/`boring build`-only. See
-    // `Type::image_volume_shape_error`'s doc comment for why this needed to be
-    // added here at all rather than just relaxed. Kernel bodies (methods/inits)
-    // are intentionally not walked here — that's unrelated, pre-existing scope
-    // this pass has never covered, and adding it isn't this check's job.
+    // checker's other rules, which are `boring run`/`boring build`-only. Kernel
+    // bodies (methods/inits) are intentionally not walked here — that's
+    // unrelated, pre-existing scope this pass has never covered, and adding it
+    // isn't this check's job.
 
     fn check_kernel_decl(&mut self, k: &KernelDecl) {
         for field in &k.fields {
-            if let Some(msg) = field.ty.image_volume_shape_error() {
+            if let Some(msg) = field.ty.labeled_array_shape_error() {
                 self.error(msg, field.line, field.col);
+            }
+            // Axis-count cap is kernel-field-specific (GPU thread.x/y/z), not a
+            // property of the type itself — CPU-side labeled arrays are unbounded
+            // (docs/array-multidim-proposal.md, "Generalizing beyond 3 axes"), so
+            // this lives here rather than inside labeled_array_shape_error.
+            if let Some((_, axes)) = field.ty.as_labeled_array() {
+                if axes.len() > 3 {
+                    self.error(
+                        format!(
+                            "kernel fields support at most 3 axes (GPU thread.x/y/z) — \
+                             got {} ({})",
+                            axes.len(),
+                            axes.iter().map(|a| a.label.as_str()).collect::<Vec<_>>().join(", "),
+                        ),
+                        field.line, field.col,
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Labeled multi-dimensional array checks ────────────────────────────────
+    // See docs/array-multidim-proposal.md. Two rules, both best-effort and
+    // static-annotation-only — same limitation as `Binding.ty` elsewhere in this
+    // file (silently skipped whenever a type isn't statically known; never a
+    // false positive from a type this checker can't see):
+    //   1. Passing a `Type::LabeledArray` across a call/assignment boundary
+    //      where the target's axis labels differ from the source's requires an
+    //      explicit `as [...]` mapping (`check_label_compat`).
+    //   2. `as [...]` itself must be a complete bijection over the source's own
+    //      axis labels — every source axis mapped exactly once
+    //      (`check_relabel_cast`).
+
+    /// Peels ownership-qualifier wrappers (`'unified`, `'global`, ...) down to
+    /// the base type — a labeled array's qualifier is irrelevant to whether its
+    /// axis labels match another one's.
+    fn strip_qualifiers(ty: &Type) -> &Type {
+        match ty {
+            Type::Qualified(inner, _) => Self::strip_qualifiers(inner),
+            _ => ty,
+        }
+    }
+
+    /// Best-effort static type of an expression, for the labeled-array checks
+    /// only. Handles exactly the two cases needed: a bound variable's declared
+    /// type, and a `RelabelCast`'s own resulting type (synthesized from its
+    /// mapping, so passing a relabeled value onward — or a chain of two casts —
+    /// can still be checked). `None` for anything else; this is deliberately
+    /// not a general type-inference pass.
+    fn static_labeled_array_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Var(name) => self.lookup(name)?.ty.clone(),
+            ExprKind::RelabelCast(inner, pairs) => {
+                let inner_ty = self.static_labeled_array_type(inner)?;
+                let (elem, axes) = Self::strip_qualifiers(&inner_ty).as_labeled_array()?;
+                let mut mapped = Vec::with_capacity(pairs.len());
+                for (target_label, source_label) in pairs {
+                    let axis = axes.iter().find(|a| &a.label == source_label)?;
+                    mapped.push(LabeledAxis { label: target_label.clone(), size: axis.size.clone() });
+                }
+                Some(Type::LabeledArray(Box::new(elem.clone()), mapped))
+            }
+            _ => None,
+        }
+    }
+
+    /// The core cross-label rule: if both `source_ty` and `target_ty` are
+    /// (possibly qualified) `Type::LabeledArray`s with the same arity but
+    /// different axis labels at some position, `source_expr` must itself be a
+    /// `RelabelCast` — otherwise this is exactly the silent-transpose risk
+    /// docs/array-multidim-proposal.md's "Cross-label compatibility" section
+    /// exists to close off (e.g. `width, height` passed where `line, column` is
+    /// expected). Does nothing when arities differ (a more basic type error,
+    /// not this rule's job) or when either side isn't a labeled array at all.
+    fn check_label_compat(&mut self, source_expr: &Expr, source_ty: &Type, target_ty: &Type, line: usize, col: usize) {
+        let Some((_, source_axes)) = Self::strip_qualifiers(source_ty).as_labeled_array() else { return };
+        let Some((_, target_axes)) = Self::strip_qualifiers(target_ty).as_labeled_array() else { return };
+        if source_axes.len() != target_axes.len() { return; }
+        let labels_match = source_axes.iter().zip(target_axes.iter()).all(|(s, t)| s.label == t.label);
+        if labels_match { return; }
+        if matches!(source_expr.kind, ExprKind::RelabelCast(..)) { return; }
+        let source_labels: Vec<&str> = source_axes.iter().map(|a| a.label.as_str()).collect();
+        let target_labels: Vec<&str> = target_axes.iter().map(|a| a.label.as_str()).collect();
+        self.error(
+            format!(
+                "label sets ({}) \u{2260} ({}) — use `as [{}]` to map explicitly",
+                source_labels.join(", "), target_labels.join(", "),
+                target_labels.iter().zip(source_labels.iter())
+                    .map(|(t, s)| format!("{t} = {s}"))
+                    .collect::<Vec<_>>().join(", "),
+            ),
+            line, col,
+        );
+    }
+
+    /// `as [...]`'s own validity: the mapping must be a complete bijection over
+    /// the source's axis labels — every source axis named exactly once as some
+    /// pair's `source_label`, no unknown or duplicated source axes. Silently
+    /// skipped when the source's type isn't statically known (same best-effort
+    /// limitation as `check_label_compat`).
+    fn check_relabel_cast(&mut self, inner: &Expr, pairs: &[(String, String)], line: usize, col: usize) {
+        let Some(inner_ty) = self.static_labeled_array_type(inner) else { return };
+        let Some((_, axes)) = Self::strip_qualifiers(&inner_ty).as_labeled_array() else { return };
+        let axes = axes.to_vec(); // release the borrow on inner_ty before pushing errors
+
+        let mut seen_targets = std::collections::HashSet::new();
+        for (target, _) in pairs {
+            if !seen_targets.insert(target.as_str()) {
+                self.error(format!("duplicate target axis '{target}' in `as [...]` mapping"), line, col);
+            }
+        }
+
+        let mut source_use_count: HashMap<&str, usize> = HashMap::new();
+        for (_, source) in pairs {
+            *source_use_count.entry(source.as_str()).or_insert(0) += 1;
+            if !axes.iter().any(|a| &a.label == source) {
+                self.error(format!("`as [...]` mapping references unknown source axis '{source}'"), line, col);
+            }
+        }
+        for axis in &axes {
+            match source_use_count.get(axis.label.as_str()) {
+                None | Some(0) => {
+                    self.error(
+                        format!("`as [...]` mapping is missing axis '{}' — every source axis must appear exactly once", axis.label),
+                        line, col,
+                    );
+                }
+                Some(1) => {}
+                Some(n) => {
+                    self.error(
+                        format!("`as [...]` mapping references source axis '{}' {} times — every source axis must appear exactly once", axis.label, n),
+                        line, col,
+                    );
+                }
             }
         }
     }
@@ -637,6 +780,13 @@ impl Checker {
     fn check_let_stmt(&mut self, s: &LetStmt) {
         self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
+        // Labeled multi-dim array cross-label check — only when this `let` has
+        // an explicit type annotation to check the initializer against.
+        if let (Some(target_ty), Some(v)) = (&s.ty, &s.value) {
+            if let Some(source_ty) = self.static_labeled_array_type(v) {
+                self.check_label_compat(v, &source_ty, target_ty, s.line, s.col);
+            }
+        }
         self.define_let(&s.name, s.binding.clone(), s.ty.clone(), s.value.as_ref());
     }
 
@@ -757,6 +907,16 @@ impl Checker {
                     ExprKind::Var(_) => {}
                     _ => self.check_expr(lhs),
                 }
+                // Labeled multi-dim array cross-label check — best-effort, only
+                // fires when the target `Var`'s declared type is statically known.
+                if let ExprKind::Var(name) = &lhs.kind {
+                    let target_ty = self.lookup(name).and_then(|b| b.ty.clone());
+                    if let Some(target_ty) = target_ty {
+                        if let Some(source_ty) = self.static_labeled_array_type(rhs) {
+                            self.check_label_compat(rhs, &source_ty, &target_ty, expr.line, expr.col);
+                        }
+                    }
+                }
             }
             ExprKind::QuestionAssign(lhs, rhs) => {
                 // `?=` is always legal (lazy initialisation / nil-coalescing).
@@ -772,6 +932,10 @@ impl Checker {
             ExprKind::Index(obj, idx) => {
                 self.check_expr(obj);
                 self.check_expr(idx);
+            }
+            ExprKind::LabeledIndex(obj, args) => {
+                self.check_expr(obj);
+                for a in args { self.check_expr(&a.value); }
             }
             ExprKind::Call(callee, args) => {
                 self.check_expr(callee);
@@ -802,6 +966,22 @@ impl Checker {
                         && gpu_arg_positions.as_ref().map(|flags| flags.get(i).copied().unwrap_or(false)).unwrap_or(false);
                     if !carved_out {
                         self.check_expr(&a.value);
+                    }
+                    // Labeled multi-dim array cross-label check (best-effort,
+                    // positional args only — a labeled/named call argument isn't
+                    // matched back to its declared parameter position here).
+                    // See docs/array-multidim-proposal.md.
+                    if a.label.is_none() {
+                        if let ExprKind::Var(fn_name) = &callee.kind {
+                            let target_ty: Option<Type> = self.fn_param_types.get(fn_name.as_str())
+                                .and_then(|types| types.get(i))
+                                .and_then(|t| t.clone());
+                            if let Some(target_ty) = target_ty {
+                                if let Some(source_ty) = self.static_labeled_array_type(&a.value) {
+                                    self.check_label_compat(&a.value, &source_ty, &target_ty, expr.line, expr.col);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -846,6 +1026,22 @@ impl Checker {
                 self.define(var, BindingKind::Let);
                 self.check_expr(expr);
                 self.pop_scope();
+            }
+            // Full shape/cross-label validation lands in the checker's labeled-array
+            // pass (docs/array-multidim-proposal.md); this recurses so undefined-var/
+            // GPU-opacity checks still see every sub-expression in the meantime.
+            ExprKind::LabeledArrayComp { expr, clauses } => {
+                self.push_scope();
+                for (var, count) in clauses {
+                    self.check_expr(count);
+                    self.define(var, BindingKind::Let);
+                }
+                self.check_expr(expr);
+                self.pop_scope();
+            }
+            ExprKind::RelabelCast(inner, pairs) => {
+                self.check_expr(inner);
+                self.check_relabel_cast(inner, pairs, expr.line, expr.col);
             }
             ExprKind::Tuple(elems) => { for e in elems { self.check_expr(e); } }
             ExprKind::Dict(pairs)  => {
@@ -1211,104 +1407,196 @@ print "{result}"
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 
-    // ── Image/Volume shape (docs/image-volume-types.md, Phase 2) ────────────────
-    //
-    // `check_kernel_decl` is the new target-agnostic entry point — these tests go
-    // through both `check` (boring run / boring build) and
-    // `check_kernel_dispatch_only` (the four real GPU backends), since Phase 2's
-    // whole point was that the latter had no such check at all before.
+}
 
-    fn dispatch_only_errors_for(src: &str) -> Vec<String> {
+// ── Labeled multi-dimensional arrays (docs/array-multidim-proposal.md) ─────────
+// Separate from `with_stmt_tests` — new syntax, new rules, no shared fixtures.
+
+#[cfg(test)]
+mod labeled_array_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
         let tokens = lex(src).expect("lex error");
         let program = parse(tokens).expect("parse error");
-        super::check_kernel_dispatch_only(&program).errors.into_iter().map(|e| e.message).collect()
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
     }
 
-    #[test]
-    fn fixed_shape_image_field_is_accepted() {
-        let src = r#"
-kernel Tile:
-    mut Image<float, 16, 16>'actor tile
-    def ():
-        tile.at(0, 0) = 1.0
-"#;
-        assert!(errors_for(src).is_empty(), "expected no errors, got {:?}", errors_for(src));
-        assert!(dispatch_only_errors_for(src).is_empty());
-    }
+    // ── Shape validation ──────────────────────────────────────────────────
 
     #[test]
-    fn dynamic_shape_image_field_is_rejected() {
+    fn valid_dynamic_and_fixed_kernel_fields_are_accepted() {
         let src = r#"
-kernel Tile:
-    mut Image<float>'unified img
+kernel K:
+    mut [float, width, height]'unified a
+    mut [float, width = 16, height = 16]'actor b
     def ():
-        img[0] = 1.0
+        pass
 "#;
         let errs = errors_for(src);
-        assert!(errs.iter().any(|e| e.contains("dynamic shape") && e.contains("not yet supported")),
-            "expected a dynamic-shape rejection, got {errs:?}");
-        // Phase 2's whole point: this must ALSO be rejected for the four real GPU
-        // backends, not just `boring run`/`boring build` — before Phase 2,
-        // `check_kernel_dispatch_only` had no Image/Volume check whatsoever.
-        let dispatch_errs = dispatch_only_errors_for(src);
-        assert!(dispatch_errs.iter().any(|e| e.contains("dynamic shape")),
-            "expected the dynamic-shape rejection under check_kernel_dispatch_only too, got {dispatch_errs:?}");
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 
     #[test]
-    fn dynamic_shape_volume_field_is_rejected() {
+    fn duplicate_axis_label_is_rejected() {
         let src = r#"
-kernel Cube:
-    mut Volume<float>'unified vol
+kernel K:
+    mut [float, width, width]'unified a
     def ():
-        vol[0] = 1.0
+        pass
 "#;
         let errs = errors_for(src);
-        assert!(errs.iter().any(|e| e.contains("Volume<T>") && e.contains("not yet supported")),
-            "expected a dynamic-shape rejection, got {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("duplicate axis label")), "expected a duplicate-label error, got {errs:?}");
     }
 
     #[test]
-    fn wrong_arity_image_field_is_rejected() {
-        // `Image<T, C, R>` takes exactly 2 dimension args — 1 is neither the
-        // fixed form nor the dynamic form.
+    fn more_than_three_axes_is_rejected_for_kernel_fields() {
         let src = r#"
-kernel Tile:
-    mut Image<float, 16>'actor tile
+kernel K:
+    mut [float, a, b, c, d]'unified x
     def ():
-        tile.at(0, 0) = 1.0
+        pass
 "#;
         let errs = errors_for(src);
-        assert!(errs.iter().any(|e| e.contains("expects 2 dimension")),
-            "expected an arity-rejection error, got {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("at most 3 axes")), "expected an axis-count-cap error, got {errs:?}");
+    }
+
+    // ── Cross-label compatibility ─────────────────────────────────────────
+
+    #[test]
+    fn matching_labels_pass_through_with_no_error() {
+        let src = r#"
+def use_grid([float, width, height] grid):
+    pass
+
+let [float, width, height] a
+use_grid(a)
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 
     #[test]
-    fn wrong_arity_volume_field_is_rejected() {
+    fn mismatched_labels_as_a_call_argument_is_rejected() {
         let src = r#"
-kernel Cube:
-    mut Volume<float, 4, 4>'actor vol
-    def ():
-        vol.at(0, 0, 0) = 1.0
+def use_grid([float, line, column] grid):
+    pass
+
+let [float, width, height] a
+use_grid(a)
 "#;
         let errs = errors_for(src);
-        assert!(errs.iter().any(|e| e.contains("expects 3 dimension")),
-            "expected an arity-rejection error, got {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("width") && e.contains("line") && e.contains("as [")),
+            "expected a cross-label error suggesting `as [...]`, got {errs:?}"
+        );
     }
 
     #[test]
-    fn non_const_int_dimension_is_rejected() {
-        // `N` (uppercase single letter) parses as a `Type::TypeParam`, not a
-        // `Type::ConstInt` — same pre-existing check as before Phase 2, now
-        // reachable from every real target instead of only `--target kernel`.
+    fn relabel_cast_at_a_call_site_silences_the_cross_label_error() {
         let src = r#"
-kernel Tile:
-    mut Image<float, N, 16>'actor tile
-    def ():
-        tile.at(0, 0) = 1.0
+def use_grid([float, line, column] grid):
+    pass
+
+let [float, width, height] a
+use_grid(a as [line = width, column = height])
 "#;
         let errs = errors_for(src);
-        assert!(errs.iter().any(|e| e.contains("compile-time integer constants")),
-            "expected a ConstInt-rejection error, got {errs:?}");
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn mismatched_labels_in_assignment_is_rejected() {
+        let src = r#"
+let [float, width, height] a
+var [float, line, column] b
+b = a
+"#;
+        let errs = errors_for(src);
+        assert!(
+            errs.iter().any(|e| e.contains("width") && e.contains("line")),
+            "expected a cross-label error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn matching_labels_in_assignment_is_fine() {
+        let src = r#"
+let [float, width, height] a
+var [float, width, height] b
+b = a
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn mismatched_labels_in_let_initializer_is_rejected() {
+        let src = r#"
+let [float, width, height] a
+let [float, line, column] b = a
+"#;
+        let errs = errors_for(src);
+        assert!(
+            errs.iter().any(|e| e.contains("width") && e.contains("line")),
+            "expected a cross-label error, got {errs:?}"
+        );
+    }
+
+    // ── `as [...]` bijection completeness ──────────────────────────────────
+
+    #[test]
+    fn complete_relabel_mapping_is_accepted() {
+        let src = r#"
+let [float, width, height, depth] a
+let b = a as [x = width, y = height, z = depth]
+"#;
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn relabel_mapping_missing_an_axis_is_rejected() {
+        let src = r#"
+let [float, width, height, depth] a
+let b = a as [x = width, y = height]
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("missing axis 'depth'")), "expected a missing-axis error, got {errs:?}");
+    }
+
+    #[test]
+    fn relabel_mapping_with_unknown_source_axis_is_rejected() {
+        let src = r#"
+let [float, width, height] a
+let b = a as [x = width, y = height, z = bogus]
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("unknown source axis 'bogus'")), "expected an unknown-axis error, got {errs:?}");
+    }
+
+    #[test]
+    fn relabel_mapping_with_duplicated_source_axis_is_rejected() {
+        let src = r#"
+let [float, width, height] a
+let b = a as [x = width, y = width]
+"#;
+        let errs = errors_for(src);
+        assert!(
+            errs.iter().any(|e| e.contains("missing axis 'height'"))
+                && errs.iter().any(|e| e.contains("2 times")),
+            "expected both a missing-axis and a duplicated-source-axis error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn relabel_mapping_with_duplicated_target_axis_is_rejected() {
+        let src = r#"
+let [float, width, height] a
+let b = a as [x = width, x = height]
+"#;
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("duplicate target axis 'x'")), "expected a duplicate-target error, got {errs:?}");
     }
 }

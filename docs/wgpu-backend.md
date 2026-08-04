@@ -194,13 +194,13 @@ shared `src/transpiler/emit_kernel.rs` (`try_emit_kernel_dispatch`), since
 `.dispatch(gx, gy, gz)` is a plain three-`u32` method with no computation of
 its own. When a `kernel:` block omits `grid =`:
 
-- An `Image<T,C,R>`/`Volume<T,X,Y,Z>` field (`'unified`/`'global`/`'actor'global`/
-  `'actor'unified`) defaults `(gx, gy, gz)` from its compile-time `C`/`R`/`X`/`Y`/`Z`
-  and the dispatch site's own `block =` argument — `gx = ceil(C/bx)`, `gy = ceil(R/by)`,
-  `gz = 1` for `Image`; all three axes for `Volume`.
+- A fixed-shape `[T, width=W, height=H]` labeled-array field (`'unified`/`'global`/
+  `'actor'global`/`'actor'unified`) defaults `(gx, gy, gz)` from its compile-time
+  axis sizes and the dispatch site's own `block =` argument — `gx = ceil(W/bx)`,
+  `gy = ceil(H/by)`, `gz = 1`, generalized to 3 axes.
 - Otherwise, `(gx, gy, gz)` defaults to `(1, 1, 1)` — this includes plain `[T]'unified`/
   `'global` array fields, which get no 1D auto-grid inference here (a pre-existing gap,
-  not something Image/Volume introduces) — always pass `grid =` explicitly for those.
+  not something labeled arrays introduce) — always pass `grid =` explicitly for those.
 
 ---
 

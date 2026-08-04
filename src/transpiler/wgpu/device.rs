@@ -4,7 +4,10 @@
 // WGSL device code emitter for the wgpu backend.
 
 use crate::ast::*;
-use crate::transpiler::helpers::{collect_vars_in_stmt, image_volume_at_index, image_volume_dim_literal};
+use crate::transpiler::helpers::{
+    collect_vars_in_stmt,
+    labeled_array_at_index, labeled_array_dim_literal,
+};
 
 /// Emits the WGSL device module(s) for this program. Returns `(real, emulated)`:
 /// `real` always uses `gpu.warp.*`'s real-subgroup mapping (`subgroupShuffle*`,
@@ -278,10 +281,13 @@ impl DeviceEmitter {
                 if let Type::ArrayN(inner, n) = &f.ty {
                     self.line(&format!("var<workgroup> {}: array<{}, {}>;",
                         f.name, wgsl_scalar(inner), n));
-                } else if let Some((elem, _)) = f.ty.as_image_volume() {
-                    let len = f.ty.image_volume_len().expect("validator guarantees ConstInt dims");
-                    self.line(&format!("var<workgroup> {}: array<{}, {}>;",
-                        f.name, wgsl_scalar(elem), len));
+                } else if let Some((elem, _)) = f.ty.as_labeled_array() {
+                    // See cuda::device's identical `labeled_array_len()` note:
+                    // `None` (a const-generic axis) isn't handled here yet.
+                    if let Some(len) = f.ty.labeled_array_len() {
+                        self.line(&format!("var<workgroup> {}: array<{}, {}>;",
+                            f.name, wgsl_scalar(elem), len));
+                    }
                 }
             }
         }
@@ -339,9 +345,9 @@ impl DeviceEmitter {
                     Type::ArrayN(inner, n) => {
                         self.line(&format!("{}: array<{}, {}>,", f.name, wgsl_scalar(inner), n));
                     }
-                    ty if ty.as_image_volume().is_some() => {
-                        let (elem, _) = ty.as_image_volume().unwrap();
-                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+                        let (elem, _) = ty.as_labeled_array().unwrap();
+                        let len = ty.labeled_array_len().unwrap();
                         self.line(&format!("{}: array<{}, {}>,", f.name, wgsl_scalar(elem), len));
                     }
                     _ => {
@@ -853,26 +859,18 @@ impl DeviceEmitter {
         }
     }
 
-    /// Precabled `Image`/`Volume` methods: `.at(c,r)`/`.at(x,y,z)` lowers to
-    /// row-major flat-index arithmetic (WGSL requires a `u32` index, matching
-    /// this backend's existing `Index` lowering); `.width()`/`.height()`/
-    /// `.depth()` lower to the dimension's compile-time literal.
-    /// See docs/image-volume-types.md.
-    fn try_image_volume_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
+    /// node, not a method call, so it's handled directly in `expr()`'s main
+    /// match instead of here.
+    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
-        let (_, dims) = field.ty.as_image_volume()?;
-        let dims: Vec<Type> = dims.to_vec();
-        match method {
-            "at" => {
-                let target = self.expr(obj);
-                Some(format!("{}[u32({})]", target, image_volume_at_index(&dims, args_s)))
-            }
-            "width"  => image_volume_dim_literal(&dims, 0),
-            "height" => image_volume_dim_literal(&dims, 1),
-            "depth"  => image_volume_dim_literal(&dims, 2),
-            _ => None,
-        }
+        let (_, axes) = field.ty.as_labeled_array()?;
+        if method != "size" { return None; }
+        let [arg] = args else { return None; };
+        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
+        labeled_array_dim_literal(axes, axis_label)
     }
 
     /// `let name = arr[idx].min/max/swap/cas(...)` (or `name = ...` via
@@ -979,6 +977,33 @@ impl DeviceEmitter {
             ExprKind::Index(arr, idx) => {
                 format!("{}[u32({})]", self.expr(arr), self.expr(idx))
             }
+            ExprKind::LabeledIndex(obj, args) => {
+                // Stringify every arg's value first (needs `&mut self`) —
+                // only then borrow `self.current_fields` immutably, so the
+                // two borrows never overlap. Cloning `axes` to owned releases
+                // that borrow before the later `self.expr(obj)` call, which
+                // also needs `&mut self` — `obj` must go through
+                // `self.expr(...)`, not the raw AST `Var` name, since this
+                // backend renames storage-buffer variables (e.g. field `img`
+                // becomes WGSL global `img_img`).
+                let pairs: Vec<(String, String)> = args.iter()
+                    .filter_map(|a| a.label.clone().map(|l| (l, self.expr(&a.value))))
+                    .collect();
+                let axes: Option<Vec<crate::ast::LabeledAxis>> = if let ExprKind::Var(name) = &obj.kind {
+                    self.current_fields.iter().find(|f| &f.name == name)
+                        .and_then(|field| field.ty.as_labeled_array())
+                        .map(|(_, axes)| axes.to_vec())
+                } else {
+                    None
+                };
+                match axes.and_then(|axes| labeled_array_at_index(&axes, &pairs)) {
+                    Some(offset) => {
+                        let target = self.expr(obj);
+                        format!("{}[u32({})]", target, offset)
+                    }
+                    None => "/* unsupported labeled index */".to_string(),
+                }
+            }
             ExprKind::Field(obj, field) => {
                 let obj_s = self.expr(obj);
                 map_gpu_field(&obj_s, field)
@@ -1014,7 +1039,7 @@ impl DeviceEmitter {
                 if let Some(wgsl) = self.try_atomic_method_call(obj, method, &args_s) {
                     return wgsl;
                 }
-                if let Some(wgsl) = self.try_image_volume_method_call(obj, method, &args_s) {
+                if let Some(wgsl) = self.try_labeled_array_method_call(obj, method, args) {
                     return wgsl;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -1074,7 +1099,7 @@ fn collect_called_fn_names(body: &[Stmt], out: &mut Vec<String>) {
 fn is_buffer_field(f: &KernelFieldDecl) -> bool {
     match f.qual {
         GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-            matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some()
+            matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some()
         }
         _ => false,
     }
@@ -1101,7 +1126,7 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     };
     let inner_ty: Option<&Type> = match &f.ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => Some(inner.as_ref()),
-        ty if ty.as_image_volume().is_some() => Some(ty.as_image_volume().unwrap().0),
+        ty if ty.as_labeled_array().is_some() => Some(ty.as_labeled_array().unwrap().0),
         _ => None,
     };
     let elem = match inner_ty {
@@ -1180,9 +1205,9 @@ fn wgsl_type(ty: &Type) -> String {
         Type::Array(inner)        => format!("array<{}>", wgsl_scalar(inner)),
         Type::ArrayN(inner, n)    => format!("array<{}, {}>", wgsl_scalar(inner), n),
         Type::Named(n) if n == "Dimension" => "Dimension".into(),
-        ty if ty.as_image_volume().is_some() => {
-            let (elem, _) = ty.as_image_volume().unwrap();
-            let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+        ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+            let (elem, _) = ty.as_labeled_array().unwrap();
+            let len = ty.labeled_array_len().unwrap();
             format!("array<{}, {}>", wgsl_scalar(elem), len)
         }
         other                     => wgsl_scalar(other),

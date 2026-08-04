@@ -127,6 +127,7 @@ impl KernelTranspiler {
             Type::Array(inner)     => format!("kernel::prelude::Vec<{}>", self.emit_type(inner)),
             Type::ArrayN(inner, n) => format!("[{}; {}]", self.emit_type(inner), n),
             Type::ArrayNExpr(inner, _) => format!("[{}; _]", self.emit_type(inner)),
+            Type::LabeledArray(inner, _) => format!("kernel::prelude::Vec<{}>", self.emit_type(inner)),
             Type::ConstInt(n) => n.to_string(),
             Type::Tuple(elems)     => format!(
                 "({})",

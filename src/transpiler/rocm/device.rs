@@ -14,7 +14,10 @@
 // comment updated to reference HIP's toolchain instead of CUDA's.
 
 use crate::ast::*;
-use crate::transpiler::helpers::{image_volume_at_index, image_volume_dim_literal, reachable_free_fns, float_unary_method_c};
+use crate::transpiler::helpers::{
+    reachable_free_fns, float_unary_method_c,
+    labeled_array_at_index, labeled_array_dim_literal,
+};
 
 pub(super) fn emit_device_hip(program: &Program) -> String {
     let mut e = DeviceEmitter::new();
@@ -137,9 +140,14 @@ impl DeviceEmitter {
                 if let Type::ArrayN(inner, n) = &field.ty {
                     let elem = elem_c_type(inner);
                     self.line(&format!("__constant__ {} {}[{}];", elem, field.name, n));
-                } else if let Some((elem, _)) = field.ty.as_image_volume() {
-                    let len = field.ty.image_volume_len().expect("validator guarantees ConstInt dims");
-                    self.line(&format!("__constant__ {} {}[{}];", c_type(elem), field.name, len));
+                } else if let Some((elem, _)) = field.ty.as_labeled_array() {
+                    // `labeled_array_len()` is `None` when an axis size
+                    // references a kernel const-generic param rather than a
+                    // literal int — not yet handled here (no real .br file
+                    // needs it today).
+                    if let Some(len) = field.ty.labeled_array_len() {
+                        self.line(&format!("__constant__ {} {}[{}];", c_type(elem), field.name, len));
+                    }
                 }
             }
         }
@@ -186,9 +194,9 @@ impl DeviceEmitter {
                     Type::ArrayN(inner, n) => {
                         self.line(&format!("__shared__ {} {}[{}];", c_type(inner), field.name, n));
                     }
-                    ty if ty.as_image_volume().is_some() => {
-                        let (elem, _) = ty.as_image_volume().unwrap();
-                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+                        let (elem, _) = ty.as_labeled_array().unwrap();
+                        let len = ty.labeled_array_len().unwrap();
                         self.line(&format!("__shared__ {} {}[{}];", c_type(elem), field.name, len));
                     }
                     _ => {
@@ -208,9 +216,9 @@ impl DeviceEmitter {
                     Type::Array(_) => {
                         // Unsized local array — not representable; skip.
                     }
-                    ty if ty.as_image_volume().is_some() => {
-                        let (elem, _) = ty.as_image_volume().unwrap();
-                        let len = ty.image_volume_len().expect("validator guarantees ConstInt dims");
+                    ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
+                        let (elem, _) = ty.as_labeled_array().unwrap();
+                        let len = ty.labeled_array_len().unwrap();
                         self.line(&format!("{} {}[{}];", c_type(elem), field.name, len));
                     }
                     // Scalar 'local: already a by-value kernel parameter (see
@@ -427,20 +435,18 @@ impl DeviceEmitter {
         }
     }
 
-    /// Precabled `Image`/`Volume` methods: `.at(c,r)`/`.at(x,y,z)` lowers to
-    /// row-major flat-index arithmetic; `.width()`/`.height()`/`.depth()` lower to
-    /// the dimension's compile-time literal. See docs/image-volume-types.md.
-    fn try_image_volume_method_call(&mut self, obj: &Expr, method: &str, args_s: &[String]) -> Option<String> {
+    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
+    /// node, not a method call, so it's handled directly in `expr()`'s main
+    /// match instead of here.
+    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
-        let (_, dims) = field.ty.as_image_volume()?;
-        match method {
-            "at" => Some(format!("{}[{}]", name, image_volume_at_index(dims, args_s))),
-            "width"  => image_volume_dim_literal(dims, 0),
-            "height" => image_volume_dim_literal(dims, 1),
-            "depth"  => image_volume_dim_literal(dims, 2),
-            _ => None,
-        }
+        let (_, axes) = field.ty.as_labeled_array()?;
+        if method != "size" { return None; }
+        let [arg] = args else { return None; };
+        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
+        labeled_array_dim_literal(axes, axis_label)
     }
 
     /// Emit a `print "..."` statement as a HIP `printf(...)` call.
@@ -540,6 +546,23 @@ impl DeviceEmitter {
             ExprKind::Index(arr, idx) => {
                 format!("{}[{}]", self.expr(arr), self.expr(idx))
             }
+            ExprKind::LabeledIndex(obj, args) => {
+                // Stringify every arg's value first (needs `&mut self`) —
+                // only then borrow `self.current_fields` immutably, so the
+                // two borrows never overlap.
+                let pairs: Vec<(String, String)> = args.iter()
+                    .filter_map(|a| a.label.clone().map(|l| (l, self.expr(&a.value))))
+                    .collect();
+                let resolved = if let ExprKind::Var(name) = &obj.kind {
+                    self.current_fields.iter().find(|f| &f.name == name)
+                        .and_then(|field| field.ty.as_labeled_array())
+                        .and_then(|(_, axes)| labeled_array_at_index(axes, &pairs))
+                        .map(|offset| format!("{}[{}]", name, offset))
+                } else {
+                    None
+                };
+                resolved.unwrap_or_else(|| "/* unsupported labeled index */".to_string())
+            }
             ExprKind::Field(obj, field) => {
                 let obj_s = self.expr(obj);
                 map_gpu_field(&obj_s, field)
@@ -566,7 +589,7 @@ impl DeviceEmitter {
                 if let Some(call) = self.try_atomic_method_call(obj, method, &args_s) {
                     return call;
                 }
-                if let Some(call) = self.try_image_volume_method_call(obj, method, &args_s) {
+                if let Some(call) = self.try_labeled_array_method_call(obj, method, args) {
                     return call;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -625,7 +648,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(format!("{}{}* {}", constness, base, f.name))
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays are file-scope globals, not parameters
                 } else {
                     let base = elem_c_type(&f.ty);
@@ -643,7 +666,7 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                 GpuQual::Local => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => None,
-                        ty if ty.as_image_volume().is_some() => None,
+                        ty if ty.as_labeled_array().is_some() => None,
                         _ => Some(format!("{} {}", c_type(&f.ty), f.name)),
                     }
                 }
@@ -663,7 +686,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                 Some(f.name.clone())
             }
             GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
+                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some() {
                     None  // __constant__ arrays accessed via file-scope global, not as args
                 } else {
                     Some(f.name.clone())
@@ -676,7 +699,7 @@ fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
                 GpuQual::Local => {
                     match &f.ty {
                         Type::Array(_) | Type::ArrayN(_, _) => None,
-                        ty if ty.as_image_volume().is_some() => None,
+                        ty if ty.as_labeled_array().is_some() => None,
                         _ => Some(f.name.clone()),
                     }
                 }
@@ -709,9 +732,7 @@ fn c_type(ty: &Type) -> String {
         Type::Nil | Type::Void => "void".into(),
         Type::Array(inner)     => format!("{}*", c_type(inner)),
         Type::ArrayN(inner, n) => format!("{}[{}]", c_type(inner), n),
-        Type::Generic(..) if ty.as_image_volume().is_some() => {
-            format!("{}*", c_type(ty.as_image_volume().unwrap().0))
-        }
+        Type::LabeledArray(inner, _) => format!("{}*", c_type(inner)),
         // Named primitives — the kernel field parser may store raw keyword strings.
         Type::Named(n) => match n.as_str() {
             "float" | "f64" | "f32" => "double".to_string(),
@@ -742,7 +763,7 @@ fn elem_c_type(ty: &Type) -> String {
         Type::Array(inner)     => c_type(inner),
         Type::ArrayN(inner, _) => c_type(inner),
         Type::Qualified(inner, _) => elem_c_type(inner),
-        Type::Generic(..) if ty.as_image_volume().is_some() => c_type(ty.as_image_volume().unwrap().0),
+        Type::LabeledArray(inner, _) => c_type(inner),
         _                      => c_type(ty),
     }
 }

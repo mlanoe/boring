@@ -1236,115 +1236,12 @@ kernel Histogram:
         "expected atomicCompareExchangeWeak(...).old_value;\ngot:\n{wgsl}");
 }
 
-// ─── Image / Volume ─────────────────────────────────────────────────────────
-
-#[test]
-fn device_image_at_lowers_to_row_major_index() {
-    let (wgsl, _) = wgpu_codegen("image_at", r#"
-kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
-        img = data
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
-"#);
-    assert!(wgsl.contains("img_img[u32(c + r * 4)]"),
-        "expected .at(c,r) to lower to row-major c + r*C, with the u32 index cast this backend's Index already uses;\ngot:\n{wgsl}");
-}
-
-#[test]
-fn device_image_width_height_lower_to_literals() {
-    let (wgsl, _) = wgpu_codegen("image_width_height", r#"
-kernel Img:
-    mut Image<float, 4, 8>'unified img
-    init(Image<float, 4, 8>'unified data):
-        img = data
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        if c < img.width() and r < img.height():
-            img.at(c, r) = 0.0
-"#);
-    assert!(wgsl.contains("c < 4"), "expected .width() to lower to the literal 4;\ngot:\n{wgsl}");
-    assert!(wgsl.contains("r < 8"), "expected .height() to lower to the literal 8;\ngot:\n{wgsl}");
-}
-
-#[test]
-fn device_image_field_becomes_storage_buffer() {
-    let (wgsl, _) = wgpu_codegen("image_storage_buffer", r#"
-kernel Img:
-    mut Image<float, 4, 4>'unified img
-    init(Image<float, 4, 4>'unified data):
-        img = data
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = 0.0
-"#);
-    assert!(wgsl.contains("var<storage, read_write> img_img: array<f32>;"),
-        "expected Image field to become a flat storage buffer, same as [T]'unified;\ngot:\n{wgsl}");
-}
-
-#[test]
-fn host_image_field_dispatch_infers_2d_grid() {
-    let src = r#"
-kernel Img:
-    mut Image<float, 16, 32>'unified img
-    init(Image<float, 16, 32>'unified data):
-        img = data
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
-
-let data = [0.0]
-mut k = Img(data)
-kernel:
-    k(block = (8, 8, 1))
-"#;
-    let (_wgsl, rs) = wgpu_codegen("image_2d_grid", src);
-    assert!(rs.contains("k.dispatch((((16 + (8) - 1) / (8))) as u32, (((32 + (8) - 1) / (8))) as u32, (1) as u32)?;"),
-        "expected the kernel: block with no explicit grid= to default gx/gy from Image's C/R and the block= size;\ngot:\n{rs}");
-}
-
-// ─── Dynamic-shape Image/Volume: grid inference from shadow fields (Phase 6,
-// docs/image-volume-types.md) ────────────────────────────────────────────────
-//
-// Unlike CUDA/ROCm/Metal (grid computed inside a method on the kernel type,
-// reading a sibling field via `self.`), wgpu computes the grid at the
-// `kernel: k(...)` dispatch call site itself — so the shadow field is read
-// through the kernel *variable* (`k.__img_w`), not `self.__img_w`.
-
-#[test]
-fn host_dynamic_image_field_dispatch_infers_2d_grid_from_shadow_fields() {
-    let src = r#"
-kernel Img:
-    mut Image<float>'unified img
-    init([float]'unified data, int w, int h):
-        img = Image(data, w, h)
-    def ():
-        let c = gpu.thread.x
-        let r = gpu.thread.y
-        img.at(c, r) = img.at(c, r) * 2.0
-
-let data = [0.0]
-mut k = Img(data, 16, 32)
-kernel:
-    k(block = (8, 8, 1))
-"#;
-    let (_wgsl, rs) = wgpu_codegen("dynamic_image_2d_grid", src);
-    assert!(rs.contains("k.__img_w"), "expected grid.x inferred from the __img_w shadow field;\ngot:\n{rs}");
-    assert!(rs.contains("k.__img_h"), "expected grid.y inferred from the __img_h shadow field;\ngot:\n{rs}");
-}
-
 #[test]
 fn host_device_installs_on_uncaptured_error_handler() {
     // Pipeline creation (`emit_kernel_new`, inside a `PIPELINE.get_or_init` closure
     // that can't itself return a Result) isn't wrapped in an explicit error scope,
     // unlike dispatch() and shader-module creation -- an oversized fixed-'actor
-    // Image/Volume field would otherwise panic via wgpu's default uncaptured-error
+    // field would otherwise panic via wgpu's default uncaptured-error
     // handler instead of being reported. Fixed by installing a non-panicking
     // handler once at device-creation time.
     let (_wgsl, rs) = wgpu_codegen("uncaptured_error_handler", r#"
@@ -1360,19 +1257,117 @@ kernel Scale:
         "expected a non-panicking on_uncaptured_error handler installed at device-creation time;\ngot:\n{rs}");
 }
 
+// ─── Labeled multi-dimensional arrays (docs/array-multidim-types.md) ───────
+// Note the `img_img` naming (the field's WGSL storage-buffer global gets a
+// `{kernel_name_lowercased}_{field}` prefix) — this backend renames
+// storage-buffer variables regardless of which syntax declared them.
+
 #[test]
-fn device_shared_image_becomes_workgroup_decl() {
-    let (wgsl, _) = wgpu_codegen("shared_image", r#"
-kernel Tile:
-    mut [float]'unified out
-    let Image<float, 4, 4>'actor tile
+fn device_labeled_index_lowers_to_row_major_index() {
+    let (wgsl, _) = wgpu_codegen("labeled_at", r#"
+kernel Img:
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
+        img = data
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        out[0] = tile.at(c, r)
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+"#);
+    assert!(wgsl.contains("img_img[u32(c + r * 4)]"),
+        "expected [width=c,height=r] to lower to row-major c + r*width, with the u32 index cast this backend's Index already uses;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_labeled_size_lowers_to_literals() {
+    let (wgsl, _) = wgpu_codegen("labeled_width_height", r#"
+kernel Img:
+    mut [float, width = 4, height = 8]'unified img
+    init([float, width = 4, height = 8]'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        if c < img.size(.width) and r < img.size(.height):
+            img[width = c, height = r] = 0.0
+"#);
+    assert!(wgsl.contains("c < 4"), "expected .size(.width) to lower to the literal 4;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("r < 8"), "expected .size(.height) to lower to the literal 8;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn device_labeled_array_field_becomes_storage_buffer() {
+    let (wgsl, _) = wgpu_codegen("labeled_storage_buffer", r#"
+kernel Img:
+    mut [float, width = 4, height = 4]'unified img
+    init([float, width = 4, height = 4]'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = 0.0
+"#);
+    assert!(wgsl.contains("var<storage, read_write> img_img: array<f32>;"),
+        "expected a LabeledArray field to become a flat storage buffer, same as [T]'unified;\ngot:\n{wgsl}");
+}
+
+#[test]
+fn host_labeled_array_field_dispatch_infers_2d_grid() {
+    let src = r#"
+kernel Img:
+    mut [float, width = 16, height = 32]'unified img
+    init([float, width = 16, height = 32]'unified data):
+        img = data
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+
+let data = [0.0]
+mut k = Img(data)
+kernel:
+    k(block = (8, 8, 1))
+"#;
+    let (_wgsl, rs) = wgpu_codegen("labeled_2d_grid", src);
+    assert!(rs.contains("k.dispatch((((16 + (8) - 1) / (8))) as u32, (((32 + (8) - 1) / (8))) as u32, (1) as u32)?;"),
+        "expected the kernel: block with no explicit grid= to default gx/gy from width/height and the block= size;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_dynamic_labeled_array_field_dispatch_infers_2d_grid_from_shadow_fields() {
+    let src = r#"
+kernel Img:
+    mut [float, width, height]'unified img
+    init([float]'unified data, uint w, uint h):
+        img = data.reshape(width = w, height = h)
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        img[width = c, height = r] = img[width = c, height = r] * 2.0
+
+let data = [0.0]
+mut k = Img(data, 16, 32)
+kernel:
+    k(block = (8, 8, 1))
+"#;
+    let (_wgsl, rs) = wgpu_codegen("dynamic_labeled_2d_grid", src);
+    assert!(rs.contains("k.__img_axis0"), "expected grid.x inferred from the __img_axis0 shadow field;\ngot:\n{rs}");
+    assert!(rs.contains("k.__img_axis1"), "expected grid.y inferred from the __img_axis1 shadow field;\ngot:\n{rs}");
+}
+
+#[test]
+fn device_shared_labeled_array_becomes_workgroup_decl() {
+    let (wgsl, _) = wgpu_codegen("shared_labeled", r#"
+kernel Tile:
+    mut [float]'unified out
+    let [float, width = 4, height = 4]'actor tile
+    def ():
+        let c = gpu.thread.x
+        let r = gpu.thread.y
+        out[0] = tile[width = c, height = r]
 "#);
     assert!(wgsl.contains("var<workgroup> tile: array<f32, 16>;"),
-        "expected a module-scope var<workgroup> declaration sized C*R;\ngot:\n{wgsl}");
+        "expected a module-scope var<workgroup> declaration sized width*height;\ngot:\n{wgsl}");
 }
 
 // ─── .min/.max/.swap/.cas without 'actor — plain, non-atomic fallback ─────────

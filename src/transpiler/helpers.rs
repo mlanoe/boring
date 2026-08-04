@@ -82,89 +82,11 @@ pub(crate) const DIMENSION_STRUCT_RUST: &str =
      #[allow(non_snake_case)]\n\
      fn Dimension(width: u32, height: u32) -> Dimension { Dimension { width, height } }";
 
-/// Row-major flat-buffer index for `Image<T,C,R>`/`Volume<T,X,Y,Z>` `.at(...)` —
-/// see docs/image-volume-types.md. `dims` are the type's `ConstInt` dimension
-/// args (already validator-checked); `args` are the already-lowered index
-/// expression strings, in the same order (`c,r` or `x,y,z`).
-/// Row-major: `idx = a0 + a1*d0 + a2*(d0*d1) + ...`.
-pub(crate) fn image_volume_at_index(dims: &[Type], args: &[String]) -> String {
-    let mut terms: Vec<String> = Vec::with_capacity(args.len());
-    for (i, a) in args.iter().enumerate() {
-        if i == 0 {
-            terms.push(a.clone());
-        } else {
-            let stride: i64 = dims[..i].iter().map(|d| match d {
-                Type::ConstInt(n) => *n,
-                _ => 1,
-            }).product();
-            terms.push(format!("{} * {}", a, stride));
-        }
-    }
-    terms.join(" + ")
-}
-
-/// Literal value of an `Image`/`Volume` dimension arg at `idx` (0=width/C/X,
-/// 1=height/R/Y, 2=depth/Z), for `.width()`/`.height()`/`.depth()` lowering.
-/// `None` if `idx` is out of range (e.g. `.depth()` on an `Image`).
-pub(crate) fn image_volume_dim_literal(dims: &[Type], idx: usize) -> Option<String> {
-    dims.get(idx).and_then(|d| match d {
-        Type::ConstInt(n) => Some(n.to_string()),
-        _ => None,
-    })
-}
-
-/// Ceil-div grid-dim tuple expression for an `Image`/`Volume`-typed field,
-/// e.g. `(((256 + block_dim.0 - 1) / block_dim.0), ((256 + block_dim.1 - 1) / block_dim.1), 1)`.
-/// Reused by the CUDA/ROCm/Metal host emitters — all three represent
-/// `grid_dim`/`block_dim` as a `(u32,u32,u32)` tuple with the same `.0`/`.1`/`.2`
-/// convention (see e.g. `cuda/host.rs`'s existing 1D `auto_grid_field` and
-/// Metal's existing 2D `Dimension`/`'surface` grid inference). Missing axes
-/// (an `Image`'s absent Z) default to `1`, same as the existing 1D case.
-pub(crate) fn image_volume_grid_dim_expr(dims: &[Type]) -> String {
-    let block_axis = |i: usize| match i { 0 => "block_dim.0", 1 => "block_dim.1", _ => "block_dim.2" };
-    let axis_expr = |i: usize| -> String {
-        match dims.get(i) {
-            Some(Type::ConstInt(n)) => format!("(({} + {ax} - 1) / {ax})", n, ax = block_axis(i)),
-            _ => "1".to_string(),
-        }
-    };
-    format!("({}, {}, {})", axis_expr(0), axis_expr(1), axis_expr(2))
-}
-
-/// Phase 6 of docs/image-volume-types.md's dynamic-shape extension: grid
-/// inference for a *desugared* dynamic-shape `Image<T>`/`Volume<T>` field.
-///
-/// By the time any backend's codegen runs, `desugar::desugar_image_volume`
-/// has already rewritten a dynamic-shape field into a plain buffer field plus
-/// `__{field}_w`/`_h`[/`_d`] shadow fields (see that module's doc comment) —
-/// so there is no `Type::Generic("Image"|"Volume", _)` left to recognize via
-/// `as_image_volume` here. This function detects the desugaring's naming
-/// convention instead: if `all_fields` contains siblings named
-/// `__{field_name}_w` and `__{field_name}_h` (and optionally `_d`), returns
-/// their names in `[w, h[, d]]` order — the caller then knows to build a
-/// runtime 2D/3D grid expression instead of falling back to the plain 1D
-/// `self.{field}.len()`-based inference every dynamic `[T]` field otherwise
-/// gets (see `cuda/host.rs`'s `auto_grid_field`). `None` for a genuinely
-/// plain dynamic array with no such shadow siblings.
-pub(crate) fn desugared_image_volume_shadow_fields(field_name: &str, all_fields: &[KernelFieldDecl]) -> Option<Vec<String>> {
-    let shadow = |suffix: &str| -> Option<String> {
-        let name = format!("__{field_name}_{suffix}");
-        all_fields.iter().any(|f| f.name == name).then_some(name)
-    };
-    let w = shadow("w")?;
-    let h = shadow("h")?;
-    let mut out = vec![w, h];
-    if let Some(d) = shadow("d") {
-        out.push(d);
-    }
-    Some(out)
-}
-
 /// The three ceil-div grid-axis expressions for a desugared dynamic-shape
-/// field's shadow fields (see `desugared_image_volume_shadow_fields`),
+/// field's shadow fields (see `desugared_labeled_array_shadow_fields`),
 /// reading each shadow's *runtime* value through `{receiver}.{shadow}`
 /// instead of a `ConstInt` literal — the one real difference from
-/// `image_volume_grid_dim_expr`'s fixed-shape formula, which this otherwise
+/// `labeled_array_grid_dim_expr`'s fixed-shape formula, which this otherwise
 /// mirrors exactly (same ceil-div shape, same "missing axis defaults to 1").
 ///
 /// `receiver` is `"self"` for CUDA/ROCm/Metal's `__boring_launch` method
@@ -188,6 +110,135 @@ pub(crate) fn shadow_grid_axes(receiver: &str, shadows: &[String], block_axes: [
         }
     };
     (axis_expr(0), axis_expr(1), axis_expr(2))
+}
+
+// ─── Labeled multi-dimensional arrays (docs/array-multidim-types.md) ───────
+//
+// A `LabeledAxis`'s fixed size is an arbitrary `ConstExpr` (may reference a
+// kernel const-generic param, e.g. `width = W`), not always a literal
+// `ConstInt` — `const_expr_to_c_like` below stringifies that general case.
+
+/// Stringifies a `LabeledAxis`'s fixed-size `ConstExpr` into the infix
+/// arithmetic syntax shared by all 4 GPU backends — CUDA C, HIP C++, Metal
+/// MSL, and WGSL all use the same `+`/`-`/`*`/`/`/parens/unary-minus syntax
+/// for integer arithmetic, and a bare Boring identifier is already valid
+/// syntax in each, so one shared stringifier covers every backend. Covers
+/// exactly the shapes `spec/grammar.bnf`'s `const_expr` production allows
+/// (`INT | IDENT | const_expr (+|-|*|/) const_expr | -const_expr |
+/// (const_expr)`) — the same restricted grammar `[T, N]`'s `N` already
+/// uses. The fallback marker should be unreachable: the checker rejects a
+/// non-const-expr axis size before this ever runs.
+pub(crate) fn const_expr_to_c_like(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Int(n) => n.to_string(),
+        ExprKind::Var(name) => name.clone(),
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => format!("(-{})", const_expr_to_c_like(inner)),
+        ExprKind::BinOp(op, l, r) => {
+            let sym = match op {
+                BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/",
+                _ => return "/* unsupported const expr */".to_string(),
+            };
+            format!("({} {} {})", const_expr_to_c_like(l), sym, const_expr_to_c_like(r))
+        }
+        _ => "/* unsupported const expr */".to_string(),
+    }
+}
+
+fn const_expr_to_c_like_axis(axis: &crate::ast::LabeledAxis) -> String {
+    let crate::ast::ConstExpr(boxed) = axis.size.as_ref()
+        .expect("fixed-shape LabeledArray: every axis has Some(size) by construction");
+    const_expr_to_c_like(boxed)
+}
+
+/// Product of `axes`' sizes, as a string — folds to a single literal (e.g.
+/// `"480000"`) when every axis size is a literal int; falls back to a
+/// `*`-joined expression string (e.g. `"W * H"`) the moment any axis
+/// references a const-generic param.
+fn labeled_array_stride_str(axes: &[crate::ast::LabeledAxis]) -> String {
+    let mut product: Option<i64> = Some(1);
+    for a in axes {
+        let lit = a.size.as_ref().and_then(|crate::ast::ConstExpr(boxed)| match &boxed.kind {
+            ExprKind::Int(n) => Some(*n),
+            _ => None,
+        });
+        product = match (product, lit) {
+            (Some(p), Some(n)) => Some(p * n),
+            _ => None,
+        };
+        if product.is_none() { break; }
+    }
+    match product {
+        Some(n) => n.to_string(),
+        None => axes.iter().map(const_expr_to_c_like_axis).collect::<Vec<_>>().join(" * "),
+    }
+}
+
+/// Row-major flat-buffer index for a fixed-shape `LabeledArray`'s
+/// `LabeledIndex` (`a[width = w, height = h]`). `axes` are the type's axes
+/// (every one fixed — only a fixed-shape field ever reaches this, dynamic
+/// shape is desugared away before codegen); `args` are (label,
+/// already-stringified index expr) pairs, in whatever order the call site
+/// wrote them (order is free at the use site — see the design doc). `None`
+/// if any axis's label isn't found among `args` (should be unreachable
+/// post-checker).
+pub(crate) fn labeled_array_at_index(axes: &[crate::ast::LabeledAxis], args: &[(String, String)]) -> Option<String> {
+    let mut terms: Vec<String> = Vec::with_capacity(axes.len());
+    for (i, axis) in axes.iter().enumerate() {
+        let (_, idx_str) = args.iter().find(|(label, _)| label == &axis.label)?;
+        if i == 0 {
+            terms.push(idx_str.clone());
+        } else {
+            terms.push(format!("{} * {}", idx_str, labeled_array_stride_str(&axes[..i])));
+        }
+    }
+    Some(terms.join(" + "))
+}
+
+/// Stringified value of a fixed-shape `LabeledArray`'s axis, by label — for
+/// `.size(.axis)` lowering. `None` if `axis_label` doesn't match any of
+/// `axes`.
+pub(crate) fn labeled_array_dim_literal(axes: &[crate::ast::LabeledAxis], axis_label: &str) -> Option<String> {
+    let axis = axes.iter().find(|a| a.label == axis_label)?;
+    let crate::ast::ConstExpr(boxed) = axis.size.as_ref()?;
+    Some(const_expr_to_c_like(boxed))
+}
+
+/// Ceil-div grid-dim tuple expression for a fixed-shape `LabeledArray`
+/// field, generalized to N axes. Missing axes (fewer than 3 declared)
+/// default to `1`, same as the existing 1D/2D/3D cases.
+pub(crate) fn labeled_array_grid_dim_expr(axes: &[crate::ast::LabeledAxis]) -> String {
+    let block_axis = |i: usize| match i { 0 => "block_dim.0", 1 => "block_dim.1", _ => "block_dim.2" };
+    let axis_expr = |i: usize| -> String {
+        match axes.get(i).and_then(|a| a.size.as_ref()) {
+            Some(crate::ast::ConstExpr(boxed)) => {
+                let n = const_expr_to_c_like(boxed);
+                format!("(({} + {ax} - 1) / {ax})", n, ax = block_axis(i))
+            }
+            None => "1".to_string(),
+        }
+    };
+    format!("({}, {}, {})", axis_expr(0), axis_expr(1), axis_expr(2))
+}
+
+/// Detects a *desugared* dynamic-shape `LabeledArray` field's shadow
+/// siblings, using `desugar_labeled_array`'s
+/// positional naming (`__{field}_axis0`/`_axis1`/`_axis2`, not label-text-
+/// based — labels are arbitrary user text). Returns them in axis order;
+/// `None` for a plain dynamic array with no such shadow siblings. Feeds
+/// directly into the existing `shadow_grid_axes` (already name-agnostic —
+/// no LabeledArray-specific sibling needed there).
+pub(crate) fn desugared_labeled_array_shadow_fields(field_name: &str, all_fields: &[KernelFieldDecl]) -> Option<Vec<String>> {
+    let shadow = |i: usize| -> Option<String> {
+        let name = format!("__{field_name}_axis{i}");
+        all_fields.iter().any(|f| f.name == name).then_some(name)
+    };
+    let axis0 = shadow(0)?;
+    let axis1 = shadow(1)?;
+    let mut out = vec![axis0, axis1];
+    if let Some(axis2) = shadow(2) {
+        out.push(axis2);
+    }
+    Some(out)
 }
 
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
@@ -644,6 +695,10 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         ExprKind::UnaryOp(_, e)             => collect_vars_in(e, out),
         ExprKind::Field(e, _) | ExprKind::OptionalField(e, _) => collect_vars_in(e, out),
         ExprKind::Index(e, i)               => { collect_vars_in(e, out); collect_vars_in(i, out); }
+        ExprKind::LabeledIndex(e, args)      => {
+            collect_vars_in(e, out);
+            for a in args { collect_vars_in(&a.value, out); }
+        }
         ExprKind::Call(f, args) | ExprKind::MethodCall(f, _, args) | ExprKind::OptionalMethodCall(f, _, args) => {
             collect_vars_in(f, out);
             for a in args { collect_vars_in(&a.value, out); }
@@ -665,6 +720,11 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         ExprKind::ArrayCompIter { expr, iter, .. } => {
             collect_vars_in(expr, out); collect_vars_in(iter, out);
         }
+        ExprKind::LabeledArrayComp { expr, clauses } => {
+            for (_, count) in clauses { collect_vars_in(count, out); }
+            collect_vars_in(expr, out);
+        }
+        ExprKind::RelabelCast(e, _) => collect_vars_in(e, out),
         ExprKind::Dict(pairs) => {
             for (k, v) in pairs { collect_vars_in(k, out); collect_vars_in(v, out); }
         }
@@ -1850,5 +1910,113 @@ fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
         }
         ExprKind::TryElse(a, b) => { collect_called_names_expr(a, out); collect_called_names_expr(b, out); }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod labeled_array_tests {
+    use super::*;
+    use crate::ast::{LabeledAxis, ConstExpr};
+
+    fn int_axis(label: &str, n: i64) -> LabeledAxis {
+        LabeledAxis {
+            label: label.to_string(),
+            size: Some(ConstExpr(Box::new(Expr { kind: ExprKind::Int(n), line: 0, col: 0, len: 0 }))),
+        }
+    }
+
+    fn var_axis(label: &str, name: &str) -> LabeledAxis {
+        LabeledAxis {
+            label: label.to_string(),
+            size: Some(ConstExpr(Box::new(Expr { kind: ExprKind::Var(name.to_string()), line: 0, col: 0, len: 0 }))),
+        }
+    }
+
+    /// Row-major offset formula, 2 axes: `a0 + a1*d0`.
+    #[test]
+    fn labeled_array_at_index_row_major_offset_for_2d() {
+        let axes = vec![int_axis("width", 800), int_axis("height", 600)];
+        let labeled_args = vec![("width".to_string(), "10".to_string()), ("height".to_string(), "20".to_string())];
+        let labeled_result = labeled_array_at_index(&axes, &labeled_args).expect("all labels present");
+
+        assert_eq!(labeled_result, "10 + 20 * 800");
+    }
+
+    /// Row-major offset formula, 3 axes: `a0 + a1*d0 + a2*(d0*d1)`.
+    #[test]
+    fn labeled_array_at_index_row_major_offset_for_3d() {
+        let axes = vec![int_axis("x", 2), int_axis("y", 3), int_axis("z", 4)];
+        let labeled_args = vec![
+            ("x".to_string(), "1".to_string()),
+            ("y".to_string(), "2".to_string()),
+            ("z".to_string(), "3".to_string()),
+        ];
+        let labeled_result = labeled_array_at_index(&axes, &labeled_args).expect("all labels present");
+
+        assert_eq!(labeled_result, "1 + 2 * 2 + 3 * 6");
+    }
+
+    #[test]
+    fn labeled_array_at_index_is_order_free_at_the_use_site() {
+        let axes = vec![int_axis("width", 800), int_axis("height", 600)];
+        let in_order = labeled_array_at_index(&axes, &[
+            ("width".to_string(), "10".to_string()), ("height".to_string(), "20".to_string()),
+        ]).unwrap();
+        let reversed = labeled_array_at_index(&axes, &[
+            ("height".to_string(), "20".to_string()), ("width".to_string(), "10".to_string()),
+        ]).unwrap();
+        assert_eq!(in_order, reversed);
+    }
+
+    #[test]
+    fn labeled_array_at_index_none_when_a_label_is_missing() {
+        let axes = vec![int_axis("width", 800), int_axis("height", 600)];
+        let args = vec![("width".to_string(), "10".to_string())];
+        assert_eq!(labeled_array_at_index(&axes, &args), None);
+    }
+
+    #[test]
+    fn labeled_array_at_index_splices_in_a_const_generic_stride_unfolded() {
+        // A LabeledArray axis may reference a kernel const-generic param —
+        // the stride can't be folded to a single literal in that case.
+        let axes = vec![int_axis("width", 800), var_axis("height", "H")];
+        let args = vec![("width".to_string(), "10".to_string()), ("height".to_string(), "20".to_string())];
+        let result = labeled_array_at_index(&axes, &args).unwrap();
+        assert_eq!(result, "10 + 20 * 800");
+    }
+
+    #[test]
+    fn labeled_array_dim_literal_stringifies_a_literal_axis() {
+        let axes = vec![int_axis("width", 16), int_axis("height", 32)];
+        assert_eq!(labeled_array_dim_literal(&axes, "width"), Some("16".to_string()));
+        assert_eq!(labeled_array_dim_literal(&axes, "height"), Some("32".to_string()));
+    }
+
+    #[test]
+    fn labeled_array_dim_literal_stringifies_a_const_generic_reference() {
+        let axes = vec![var_axis("width", "W")];
+        assert_eq!(labeled_array_dim_literal(&axes, "width"), Some("W".to_string()));
+    }
+
+    #[test]
+    fn labeled_array_grid_dim_expr_ceil_divs_each_fixed_axis_for_2d() {
+        let axes = vec![int_axis("width", 256), int_axis("height", 128)];
+        assert_eq!(
+            labeled_array_grid_dim_expr(&axes),
+            "(((256 + block_dim.0 - 1) / block_dim.0), ((128 + block_dim.1 - 1) / block_dim.1), 1)",
+        );
+    }
+
+    #[test]
+    fn desugared_labeled_array_shadow_fields_finds_positional_siblings() {
+        let fields = vec![
+            KernelFieldDecl { name: "__src_axis0".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
+            KernelFieldDecl { name: "__src_axis1".into(), binding: FieldBinding::Let, qual: GpuQual::Const, ty: Type::Uint, default: None, line: 0, col: 0 },
+        ];
+        assert_eq!(
+            desugared_labeled_array_shadow_fields("src", &fields),
+            Some(vec!["__src_axis0".to_string(), "__src_axis1".to_string()]),
+        );
+        assert_eq!(desugared_labeled_array_shadow_fields("other", &fields), None);
     }
 }

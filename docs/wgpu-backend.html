@@ -196,10 +196,10 @@ device.<span class="fn">create_compute_pipeline</span>(&amp;wgpu::<span class="k
 <hr>
 <h2 id="grid-inference">Grid inference</h2>
 <p>Unlike CUDA/ROCm/Metal (where the kernel struct&#x27;s own <code>__boring_launch</code>/<code>dispatch</code> method computes <code>grid_dim</code>), wgpu&#x27;s dispatch call-site codegen lives in the shared <code>src/transpiler/emit_kernel.rs</code> (<code>try_emit_kernel_dispatch</code>), since <code>.dispatch(gx, gy, gz)</code> is a plain three-<code>u32</code> method with no computation of its own. When a <code>kernel:</code> block omits <code>grid =</code>:</p>
-<ul><li>An <code>Image&lt;T,C,R&gt;</code>/<code>Volume&lt;T,X,Y,Z&gt;</code> field (<code>&#x27;unified</code>/<code>&#x27;global</code>/<code>&#x27;actor&#x27;global</code>/</li></ul>
-<p>  <code>&#x27;actor&#x27;unified</code>) defaults <code>(gx, gy, gz)</code> from its compile-time <code>C</code>/<code>R</code>/<code>X</code>/<code>Y</code>/<code>Z</code>   and the dispatch site&#x27;s own <code>block =</code> argument — <code>gx = ceil(C/bx)</code>, <code>gy = ceil(R/by)</code>,   <code>gz = 1</code> for <code>Image</code>; all three axes for <code>Volume</code>.</p>
+<ul><li>A fixed-shape <code>[T, width=W, height=H]</code> labeled-array field (<code>&#x27;unified</code>/<code>&#x27;global</code>/</li></ul>
+<p>  <code>&#x27;actor&#x27;global</code>/<code>&#x27;actor&#x27;unified</code>) defaults <code>(gx, gy, gz)</code> from its compile-time   axis sizes and the dispatch site&#x27;s own <code>block =</code> argument — <code>gx = ceil(W/bx)</code>,   <code>gy = ceil(H/by)</code>, <code>gz = 1</code>, generalized to 3 axes.</p>
 <ul><li>Otherwise, <code>(gx, gy, gz)</code> defaults to <code>(1, 1, 1)</code> — this includes plain <code>[T]&#x27;unified</code>/</li></ul>
-<p>  <code>&#x27;global</code> array fields, which get no 1D auto-grid inference here (a pre-existing gap,   not something Image/Volume introduces) — always pass <code>grid =</code> explicitly for those.</p>
+<p>  <code>&#x27;global</code> array fields, which get no 1D auto-grid inference here (a pre-existing gap,   not something labeled arrays introduce) — always pass <code>grid =</code> explicitly for those.</p>
 <hr>
 <h2 id="wgsl-compilation">WGSL compilation</h2>
 <p>WGSL is compiled by wgpu at runtime using the <code>naga</code> compiler (bundled in the wgpu crate). No external toolchain is required. The generated project has no <code>build.rs</code>.</p>
