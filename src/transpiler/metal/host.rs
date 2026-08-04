@@ -217,6 +217,7 @@ impl HostEmitter {
 
     fn blank(&mut self) { self.out.push('\n'); }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_program(
         &mut self,
         program: &Program,
@@ -1065,36 +1066,36 @@ impl HostEmitter {
         // Read accessors for 'unified/'global array fields (D2H).
         for field in &decl.fields {
             match field.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some() {
-                        let elem = elem_rust_type(&field.ty);
-                        self.line(&format!(
-                            "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
-                            field.name, elem
-                        ));
-                        self.indent += 1;
-                        // Ensure every dispatch committed so far (possibly
-                        // including the one that wrote this very field) has
-                        // actually finished before reading its contents -- and
-                        // surface a real error if that dispatch's command
-                        // buffer completed with an error status (see
-                        // `__boring_metal_flush`'s doc), instead of silently
-                        // reading back whatever garbage/zeroed memory a failed
-                        // GPU write left behind.
-                        self.line("__boring_metal_flush()?;");
-                        self.line(&format!(
-                            "let n = self.{}.length() as usize / mem::size_of::<{}>();",
-                            field.name, elem
-                        ));
-                        self.line(&format!(
-                            "let ptr = self.{}.contents() as *const {};",
-                            field.name, elem
-                        ));
-                        self.line("Ok(unsafe { std::slice::from_raw_parts(ptr, n).to_vec() })");
-                        self.indent -= 1;
-                        self.line("}");
-                        self.blank();
-                    }
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
+                    if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _)) || field.ty.as_image_volume().is_some() =>
+                {
+                    let elem = elem_rust_type(&field.ty);
+                    self.line(&format!(
+                        "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
+                        field.name, elem
+                    ));
+                    self.indent += 1;
+                    // Ensure every dispatch committed so far (possibly
+                    // including the one that wrote this very field) has
+                    // actually finished before reading its contents -- and
+                    // surface a real error if that dispatch's command
+                    // buffer completed with an error status (see
+                    // `__boring_metal_flush`'s doc), instead of silently
+                    // reading back whatever garbage/zeroed memory a failed
+                    // GPU write left behind.
+                    self.line("__boring_metal_flush()?;");
+                    self.line(&format!(
+                        "let n = self.{}.length() as usize / mem::size_of::<{}>();",
+                        field.name, elem
+                    ));
+                    self.line(&format!(
+                        "let ptr = self.{}.contents() as *const {};",
+                        field.name, elem
+                    ));
+                    self.line("Ok(unsafe { std::slice::from_raw_parts(ptr, n).to_vec() })");
+                    self.indent -= 1;
+                    self.line("}");
+                    self.blank();
                 }
                 _ => {}
             }
@@ -1465,11 +1466,11 @@ impl HostEmitter {
 
         for f in fields {
             match f.qual {
-                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() {
-                        self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
-                        buf_idx += 1;
-                    }
+                GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
+                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_image_volume().is_some() =>
+                {
+                    self.line(&format!("__encoder.set_buffer({}, Some(&self.{}), 0);", buf_idx, f.name));
+                    buf_idx += 1;
                 }
                 _ => {}
             }

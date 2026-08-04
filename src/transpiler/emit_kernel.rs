@@ -44,7 +44,7 @@ use crate::ast::{Arg, GpuQual, InitDecl, KernelBlockStmt, KernelDecl, KernelFiel
 /// derived from its `init()`-body assignment — see `Transpiler::kernel_output_fill_map`.
 enum KernelOutputInit {
     /// `field = [value for ..count]` — uniform fill.
-    Fill(Expr, Expr),
+    Fill(Expr, Box<Expr>),
     /// `field = [e0, e1, ...]` — literal elements, uploaded as-is.
     Literal(Vec<Expr>),
 }
@@ -474,7 +474,7 @@ impl Transpiler {
                         if let ExprKind::Var(field) = &lhs.kind {
                             match &rhs.kind {
                                 ExprKind::ArrayFill { value, count } => {
-                                    map.insert(field.clone(), KernelOutputInit::Fill((**value).clone(), (**count).clone()));
+                                    map.insert(field.clone(), KernelOutputInit::Fill((**value).clone(), count.clone()));
                                 }
                                 ExprKind::Array(elems) => {
                                     map.insert(field.clone(), KernelOutputInit::Literal(elems.clone()));

@@ -26,6 +26,9 @@ use crate::ast::{GpuQual, TraitDecl, EnumDecl, FnDecl, Stmt, Type};
 // comment for why `'sync` fields need this instead of the usual snapshot/merge).
 pub(crate) type SyncFieldsMap = HashMap<String, Arc<Mutex<Vec<ThreadValue>>>>;
 type SyncCtx<'a> = (&'a SyncFieldsMap, &'a Arc<Barrier>);
+// Per-thread warp coordination context: this thread's count of active lanes,
+// plus the barrier/scratch shared across the warp for `gpu.warp.*` primitives.
+type WarpCtx<'a> = (usize, &'a Arc<Barrier>, &'a Arc<Mutex<Vec<ThreadValue>>>);
 
 // Fixed warp/wavefront/SIMD-group/subgroup size for the CPU simulation. Real
 // hardware varies (32 on NVIDIA and RDNA AMD, 64 on CDNA AMD, adapter-reported
@@ -469,7 +472,7 @@ fn run_kernel_parallel(
         block_idx_x: usize, block_idx_y: usize, block_idx_z: usize,
         thread_in_x: usize, thread_in_y: usize, thread_in_z: usize,
         sync_ctx: Option<SyncCtx>,
-        warp_ctx: Option<(usize, &Arc<Barrier>, &Arc<Mutex<Vec<ThreadValue>>>)>,
+        warp_ctx: Option<WarpCtx>,
     ) -> Result<ThreadResult, String> {
         // Build a fresh interpreter for this thread.
         let mut ti = Interpreter::new_for_kernel(
@@ -1433,6 +1436,7 @@ fn lower_expr(e: &Expr, fields: &ImageFieldDims) -> Expr {
 /// field (`dims` = the field's compile-time dimension constants), returns
 /// the lowered `Index`/`Int` expression. Otherwise `None` — caller falls
 /// back to generic recursion, keeping the original `MethodCall`.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_image_volume_call(
     obj: &Expr, method: &str, args: &[Arg], dims: &[crate::ast::Type], fields: &ImageFieldDims,
     line: usize, col: usize, len: usize,

@@ -1684,7 +1684,7 @@ fn collect_called_names_stmt(stmt: &Stmt, out: &mut Vec<String>) {
         Stmt::Return(r) => { if let Some(v) = &r.value { collect_called_names_expr(v, out); } }
         Stmt::Expr(e) => collect_called_names_expr(e, out),
         Stmt::Throw(t) => { if let Some(v) = &t.value { collect_called_names_expr(v, out); } }
-        Stmt::Break(_label, v) => { if let Some(v) = v { collect_called_names_expr(v, out); } }
+        Stmt::Break(_label, Some(v)) => collect_called_names_expr(v, out),
         Stmt::Wait(e, _) | Stmt::Yield(e, _) => collect_called_names_expr(e, out),
         Stmt::If(i) => {
             for (cond, body) in &i.branches {

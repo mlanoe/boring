@@ -213,6 +213,7 @@ impl HostEmitter {
 
     fn blank(&mut self) { self.out.push('\n'); }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_program(
         &mut self,
         program: &Program,

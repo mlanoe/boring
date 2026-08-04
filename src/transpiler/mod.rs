@@ -2912,15 +2912,13 @@ pub(crate) fn kernel_touching_struct_names(program: &Program, kernel_names: &std
 pub(crate) fn top_level_touches_kernel(program: &Program, kernel_names: &std::collections::HashSet<String>) -> bool {
     for item in &program.items {
         match item {
-            Item::Let(s) => {
-                if s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names) || expr_uses_gpu_device(v)) {
-                    return true;
-                }
+            Item::Let(s)
+                if s.value.as_ref().is_some_and(|v| expr_constructs_kernel(v, kernel_names) || expr_uses_gpu_device(v)) =>
+            {
+                return true;
             }
-            Item::Stmt(s) => {
-                if stmt_touches_kernel(s, kernel_names) || stmt_uses_gpu_device(s) {
-                    return true;
-                }
+            Item::Stmt(s) if stmt_touches_kernel(s, kernel_names) || stmt_uses_gpu_device(s) => {
+                return true;
             }
             _ => {}
         }

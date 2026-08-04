@@ -1213,7 +1213,7 @@ impl Type {
     pub fn as_image_volume(&self) -> Option<(&Type, &[Type])> {
         match self {
             Type::Generic(name, args) if name == "Image" || name == "Volume" => {
-                args.split_first().map(|(t, dims)| (t, dims))
+                args.split_first()
             }
             _ => None,
         }
