@@ -520,6 +520,24 @@ let (int, string) t = (0, "hello")
 let t: (isize, Arc<str>) = (0isize, Arc::from("hello"));
 ```
 
+A tuple has no in-place mutation surface — no index assignment (`t.0 = v`), no
+user-definable methods — so `mut` on a typed tuple variable is rejected at check
+time: there is no operation `mut` would unlock that `let` doesn't already allow.
+`var` remains valid and meaningful — it allows reassigning `t` to a whole new tuple:
+
+```boring
+let (int, string) t = (0, "hello")   # fixed, read-only — fine
+var (int, string) t = (0, "hello")   # reassignable — fine
+t = (1, "world")
+
+mut (int, string) t = (0, "hello")   # ERROR — tuples have no in-place mutation
+```
+
+This is specific to a **single variable of tuple type**. It does not apply to
+[destructuring](#destructuring) (`mut (a, b) = t`) — there, `mut` governs the two
+*extracted* variables individually, not the tuple, which no longer exists as a
+binding once destructured.
+
 #### Destructuring
 
 All four forms are equivalent:
@@ -5521,8 +5539,14 @@ will reject the capture at runtime, and the generated Rust would not compile
 `T'shared` gives read-only shared access (`Arc<T>`). When multiple tasks need to
 **read and write** the same struct, use **`T'actor`** — this wraps the value in
 `Arc<std::sync::Mutex<T>>` and inserts `.lock().unwrap()` automatically at every
-field access and method call. The qualifier works with both `let` and `var`; no
-explicit locking is ever written in Boring source.
+field access and method call. No explicit locking is ever written in Boring source.
+
+Mutation goes through the lock, not through `&mut self` on the binding — so, unlike
+plain owned types, `mut` and `var` behave identically here (both unlock `def` calls;
+`var` additionally allows reassigning the pointer). `let` still gives a **read-only**
+handle: `req` methods and field reads work, but `def` calls are rejected, exactly as
+for any other type. Use `mut`/`var` when the binding itself needs to mutate the
+shared value; use `let` to hand out a read-only view of the same underlying lock.
 
 In an **async context** (inside a `task` function), use **`T'actor'task`** instead —
 this uses `Arc<tokio::sync::Mutex<T>>` and inserts `.lock().await` so the lock can
@@ -5537,13 +5561,13 @@ struct SharedCount:
         self.value
 
 def main():
-    let c'actor = SharedCount()
+    mut c'actor = SharedCount()
     c.inc()                    # → c.lock().unwrap().inc()
     c.inc()
     print "count = {c.value}"  # → c.lock().unwrap().value
 
 task async_main():
-    let c'actor'task = SharedCount()
+    mut c'actor'task = SharedCount()
     c.inc()                    # → c.lock().await.inc()
     c.inc()
     print "count = {c.value}"  # → c.lock().await.value
@@ -5551,7 +5575,7 @@ task async_main():
 
 **Rust equivalent (sync)**
 ```rust
-let c: Arc<std::sync::Mutex<SharedCount>> =
+let mut c: Arc<std::sync::Mutex<SharedCount>> =
     Arc::new(std::sync::Mutex::new(SharedCount::new()));
 c.lock().unwrap().inc();
 c.lock().unwrap().inc();
@@ -5560,7 +5584,7 @@ println!("count = {}", c.lock().unwrap().value);
 
 **Rust equivalent (async)**
 ```rust
-let c: Arc<tokio::sync::Mutex<SharedCount>> =
+let mut c: Arc<tokio::sync::Mutex<SharedCount>> =
     Arc::new(tokio::sync::Mutex::new(SharedCount::new()));
 c.lock().await.inc();
 c.lock().await.inc();

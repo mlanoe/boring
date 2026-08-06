@@ -46,7 +46,8 @@ impl Transpiler {
                         }
                     }
                 }
-                self.line(&format!("let mut {}: {} = {};", s.name, mutex_ty, init));
+                let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                self.line(&format!("{} {}: {} = {};", kw, s.name, mutex_ty, init));
                 return true;
             }
         }

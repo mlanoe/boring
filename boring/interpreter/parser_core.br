@@ -477,6 +477,9 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
         # [type] param — p1 must be Ident (type name), not a literal
         if p0 == "LBracket" and p1 == "Ident": return true
         if p0 == "LBrace" and p1 == "Ident": return true
+        # `mut`/`var` param prefix — an expression call's arguments can never start
+        # with either token, so this alone proves it's a typed parameter list.
+        if p0 == "Var" or p0 == "Mut": return true
         return false
     # Pattern: [ ... ] Ident LParen → array return type
     if parser_token_at_offset_is(p, 0, "LBracket"):
@@ -500,6 +503,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                         if p0 == "Ident" and p1 == "Ident": return true
                         if p0 == "LBracket" and p1 == "Ident": return true
                         if p0 == "LBrace" and p1 == "Ident": return true
+                        if p0 == "Var" or p0 == "Mut": return true
                         return false
             if tok == "Eof": return false
             i = i + 1
@@ -762,11 +766,8 @@ def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
 def Param parse_param(mut Parser p) throws:
     let line = p.current_line()
     var mutable = p.eat(TokenKind.Var)
-    # `mut` is Ident("mut") in the interpreter lexer
     if not mutable:
-        if parser_check(p, "Ident") and parser_peek_token_at(p, 0).text() == "mut":
-            p.advance()
-            mutable = true
+        mutable = p.eat(TokenKind.Mut)
     # Consume optional function-type qualifier: `def`, `req`, `task`, `pub`
     p.eat(TokenKind.Def)
     p.eat(TokenKind.Req)
@@ -881,14 +882,20 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     p.advance()
                 p.eat(TokenKind.Newline)
             TokenKind.Task:
-                # `task RetType method(params): body` or `task def ...` method inside struct
+                # `task RetType method(params): body` or `task def ...` method inside struct.
+                # Both helpers are shared with non-task callers and always hardcode
+                # `is_task = false` — re-wrap the result with `is_task = true` so callers
+                # (e.g. the interpreter's "task methods never count as mutating" check)
+                # can tell a `task` method apart from an ordinary `def`/shorthand one.
                 let stk1 = token_kind_name(parser_peek_token_at(p, 1).kind)
                 if stk1 == "Def" or stk1 == "Req":
-                    methods.push(parse_fn_decl(p, false, true))
+                    let task_method_decl = parse_fn_decl(p, false, stk1 == "Def")
+                    methods.push(FnDecl(name= task_method_decl.name, qualifier= task_method_decl.qualifier, params= task_method_decl.params, return_ty= task_method_decl.return_ty, body= task_method_decl.body, is_pub= task_method_decl.is_pub, can_throw= task_method_decl.can_throw, is_task= true, is_stream= task_method_decl.is_stream, stream_capacity= task_method_decl.stream_capacity, mutating= task_method_decl.mutating, is_native= task_method_decl.is_native, throws_ty= task_method_decl.throws_ty, type_params= task_method_decl.type_params, where_clause= task_method_decl.where_clause, attrs= task_method_decl.attrs, line= task_method_decl.line))
                 else:
                     # shorthand: `task RetType name(params): body`
                     p.advance()  # consume task
-                    methods.push(parse_fn_decl_shorthand(p))
+                    let task_shorthand_decl = parse_fn_decl_shorthand(p)
+                    methods.push(FnDecl(name= task_shorthand_decl.name, qualifier= task_shorthand_decl.qualifier, params= task_shorthand_decl.params, return_ty= task_shorthand_decl.return_ty, body= task_shorthand_decl.body, is_pub= task_shorthand_decl.is_pub, can_throw= task_shorthand_decl.can_throw, is_task= true, is_stream= task_shorthand_decl.is_stream, stream_capacity= task_shorthand_decl.stream_capacity, mutating= task_shorthand_decl.mutating, is_native= task_shorthand_decl.is_native, throws_ty= task_shorthand_decl.throws_ty, type_params= task_shorthand_decl.type_params, where_clause= task_shorthand_decl.where_clause, attrs= task_shorthand_decl.attrs, line= task_shorthand_decl.line))
             _:
                 fields.push(parse_field_decl(p))
     p.eat(TokenKind.Dedent)

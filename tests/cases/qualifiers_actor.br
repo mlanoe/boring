@@ -9,7 +9,7 @@ struct Counter:
     req int get():
         value
 
-let Counter'actor c = Counter()
+mut Counter'actor c = Counter()
 c.inc()
 c.inc()
 c.inc()
@@ -26,7 +26,7 @@ print named.label
 def int read_counter(Counter'actor c):
     c.get()
 
-let Counter'actor c2 = Counter()
+mut Counter'actor c2 = Counter()
 c2.inc()
 print read_counter(c2)
 
@@ -41,7 +41,7 @@ struct Store:
     def void write(int v):
         count = v
 
-let Store'guard s = Store()
+mut Store'guard s = Store()
 s.write(42)
 print s.read()
 
@@ -56,6 +56,6 @@ print gtag.label
 def int read_store(Store'guard s):
     s.read()
 
-let Store'guard s2 = Store()
+mut Store'guard s2 = Store()
 s2.write(7)
 print read_store(s2)

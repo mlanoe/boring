@@ -659,7 +659,7 @@ impl Interpreter {
                         } else { true }
                     };
                     let is_interior_mutable = env.borrow().is_actor(binding_name);
-                    if is_mutating && !is_interior_mutable && !env.borrow().is_mutable(binding_name) {
+                    if is_mutating && !env.borrow().is_mutable(binding_name) {
                         return Err(err(
                             format!("cannot call mutating method '{}' on let binding '{}'", method, binding_name),
                             line,

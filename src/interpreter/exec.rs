@@ -114,7 +114,9 @@ impl Interpreter {
                     if matches!(resolved, Type::Qualified(_, OwnerQual::Owned)) {
                         target_env.borrow_mut().mark_owned_var(&s.name);
                     }
-                    // Interior-mutable qualifiers: def methods allowed on let bindings.
+                    // Track interior-mutable qualifiers (still gated by `mut`/`var` for `def`
+                    // calls, like every other binding — this flag only exempts `'actor`/`'guard`
+                    // from the separate `'shared` "no interior mutability" diagnostic below).
                     if is_actor_ty {
                         target_env.borrow_mut().mark_actor(&s.name);
                     }

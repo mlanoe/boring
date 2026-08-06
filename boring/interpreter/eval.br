@@ -214,6 +214,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Method call
         ExprKind.MethodCall(recv_expr, method, args):
             let recv = eval_expr(interp, recv_expr)
+            check_mutating_method_call(interp, recv_expr, recv, method)
             let arg_vals = eval_args(interp, args)
             let result = call_method(interp, recv, method, arg_vals)
             # Write back mutating array methods to their source lvalue
@@ -2667,6 +2668,24 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                 _: try_match_pattern(interp, subject, inner)
         _:
             nil
+
+# Enforce: a mutating method cannot be called on an immutable (`let`) binding.
+# Qualifiers ('actor/'guard/'shared) are not tracked by this interpreter — every
+# binding is treated the same regardless of qualifier, which is enough for
+# prototyping. Only checked when the receiver is a plain variable reference
+# (`recv_expr` is `ExprKind.Var`) and resolves to a struct instance whose
+# called method is a `def` (mutating, non-`task`) method.
+def void check_mutating_method_call(mut Interpreter interp, Expr recv_expr, Value recv, string method):
+    match recv_expr.kind:
+        ExprKind.Var(name):
+            match recv:
+                Value.Object(inner):
+                    let method_decl_opt = interp.find_method(inner.type_name, method)
+                    if let method_decl = method_decl_opt:
+                        if method_decl.mutating and not method_decl.is_task and not interp.current_env.is_mutable(name):
+                            throw "cannot call mutating method '{method}' on let binding '{name}'"
+                _: nil
+        _: nil
 
 # Assignment to a target expression
 def void assign_target(mut Interpreter interp, Expr target, Value val):

@@ -573,4 +573,10 @@ def void exec_item(mut Interpreter interp, Item item):
 def void run_program(mut Interpreter interp, Program prog):
     for item in prog.items:
         exec_item(interp, item)
+    # Auto-invoke `main` after registering all top-level items, mirroring the
+    # Rust interpreter's entry point — a `.br` program that only declares
+    # `def main():` (the standard idiom) must actually run it.
+    let main_decl_opt = interp.get_fn_decl("main")
+    if let main_decl = main_decl_opt:
+        _ = call_fn(interp, main_decl, [], nil)
 

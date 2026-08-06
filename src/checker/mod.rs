@@ -473,6 +473,26 @@ impl Checker {
         }
     }
 
+    // ── Qualifier constraint: `mut` on a tuple-typed binding ───────────────────
+    //
+    // A tuple has no in-place mutation surface — no field-index assignment
+    // (`t.0 = v`), no user-definable methods. `mut` on an owned tuple binding
+    // (`mut (T1, T2) t = ...`) would therefore never unlock anything: unlike
+    // `mut Counter c` (permits `c.inc()`), there is no operation that becomes
+    // legal on `t` under `mut` that wasn't already legal under `let`. `var`
+    // remains meaningful — it allows reassigning `t` to a whole new tuple.
+    fn check_tuple_mut_constraint(&mut self, binding: &BindingKind, ty: &Option<Type>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if !matches!(binding, BindingKind::Mut) { return; }
+        let Some(ty) = ty else { return };
+        if matches!(ty, Type::Tuple(_)) {
+            self.error(
+                "cannot mark a tuple binding as `mut`: tuples have no in-place mutation — use `let` (fixed) or `var` (reassignable)",
+                line, col,
+            );
+        }
+    }
+
     // ── Kernel dispatch: reject a `'shared`/`'actor`/`'guard`-qualified instance ──
 
     /// A kernel struct instance dispatched via `kernel:` is launched through
@@ -779,6 +799,7 @@ impl Checker {
 
     fn check_let_stmt(&mut self, s: &LetStmt) {
         self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
+        self.check_tuple_mut_constraint(&s.binding, &s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
@@ -1224,6 +1245,48 @@ fn bind_in_pattern(pat: &Pattern, line: usize, col: usize, f: &mut impl FnMut(&s
         Pattern::Variant(_, sub)  => { for p in sub { bind_in_pattern(p, line, col, f); } }
         Pattern::Tuple(sub)       => { for p in sub { bind_in_pattern(p, line, col, f); } }
         Pattern::Wildcard | Pattern::None | Pattern::Lit(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tuple_mut_tests {
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
+    #[test]
+    fn mut_on_typed_tuple_variable_is_rejected() {
+        let src = "def main():\n    mut (int, int) t = (1, 2)\n    print t.0\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("tuple") && e.contains("mut")), "expected a tuple/mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn let_on_typed_tuple_variable_is_fine() {
+        let src = "def main():\n    let (int, int) t = (1, 2)\n    print t.0\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn var_on_typed_tuple_variable_is_fine() {
+        let src = "def main():\n    var (int, int) t = (1, 2)\n    t = (9, 9)\n    print t.0\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_on_tuple_destructure_is_unaffected() {
+        // `mut (a, b) = t` applies `mut` to the two extracted variables
+        // individually, not to the tuple as a whole — must stay legal.
+        let src = "def main():\n    mut (a, b) = (1, 2)\n    a = 5\n    print a\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 }
 
