@@ -659,9 +659,13 @@ impl Interpreter {
                         } else { true }
                     };
                     let is_interior_mutable = env.borrow().is_actor(binding_name);
-                    if is_mutating && !env.borrow().is_mutable(binding_name) {
+                    // Content-mutation permission comes from the resolved *type*
+                    // now, not from `is_mutable` (rebind axis) alone — a plain
+                    // `var Point p` no longer suffices, `'actor`/`'guard`
+                    // included with no exception (docs/mut-type-modifier.md §1).
+                    if is_mutating && !env.borrow().is_content_mutable(binding_name) {
                         return Err(err(
-                            format!("cannot call mutating method '{}' on let binding '{}'", method, binding_name),
+                            format!("cannot call mutating method '{}' on non-mut binding '{}' — declare it with `mut` or `var mut` to permit content mutation", method, binding_name),
                             line,
                         ));
                     }
@@ -670,6 +674,87 @@ impl Interpreter {
                             format!("cannot call mutating method '{}' on shared binding '{}' — use T'actor for interior mutability", method, binding_name),
                             line,
                         ));
+                    }
+                }
+            }
+        }
+        // Enforce the same permission one level down: `recv.field.method()`
+        // (including `self.field.method()`) needs `field`'s own declared type
+        // to grant `mut` — the reassign/content-mutate split
+        // docs/mut-type-modifier.md §3 gives struct fields, independent of
+        // whatever `recv` itself allows (checked separately, above and in
+        // `methods.rs`'s `assign`, which already gates `self.field = x`
+        // reassignment via `current_method_mutating` — a different, narrower
+        // mechanism that doesn't cover `self.field.method()` calls at all).
+        // Only a bare `Var` receiver is resolved (a deeper chain,
+        // `a.b.field.method()`, is not — matches the scope of the
+        // struct-field checks already below in `methods.rs::assign`).
+        if let ExprKind::Field(inner_obj, field_name) = &obj_expr.kind {
+            if !BUILTIN_NON_MUTATING.contains(&method) {
+                if let Value::Object(inner_rc) = &obj {
+                    let type_name = inner_rc.borrow().type_name.clone();
+                    let is_mutating = {
+                        let g = self.global.borrow();
+                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                            decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
+                                .unwrap_or(true)
+                        } else { true }
+                    };
+                    if is_mutating {
+                        if let ExprKind::Var(_recv_name) = &inner_obj.kind {
+                            if let Ok(Value::Object(recv_rc)) = self.eval_expr(inner_obj, Rc::clone(&env)) {
+                                let recv_type = recv_rc.borrow().type_name.clone();
+                                let field_grants_mut = {
+                                    let g = self.global.borrow();
+                                    if let Some(Value::Struct { ref decl, .. }) = g.get(&recv_type) {
+                                        decl.fields.iter().find(|f| f.name == *field_name)
+                                            .map(|f| f.ty.grants_mut())
+                                    } else { None }
+                                };
+                                if field_grants_mut == Some(false) {
+                                    return Err(err(
+                                        format!("cannot call mutating method '{}' on field '{}' — its declared type doesn't grant content mutation; declare the field `mut {}`/`var mut {}`", method, field_name, field_name, field_name),
+                                        line,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // One more level down: `arr[i].method()` (or `dict[k].method()`) needs
+        // the collection's own declared *element*/*value* type to grant `mut`
+        // — `[mut Point] arr` vs plain `[Point] arr`
+        // (docs/mut-type-modifier.md §3). Only resolved for a bare `Var`
+        // collection receiver whose declared type is known (`declared_types`
+        // — set only for an explicit type annotation; an inferred-type
+        // collection isn't checked here, matching this document's inferred-
+        // type scope elsewhere).
+        if let ExprKind::Index(inner_obj, _idx_expr) = &obj_expr.kind {
+            if !BUILTIN_NON_MUTATING.contains(&method) {
+                if let Value::Object(inner_rc) = &obj {
+                    let type_name = inner_rc.borrow().type_name.clone();
+                    let is_mutating = {
+                        let g = self.global.borrow();
+                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                            decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
+                                .unwrap_or(true)
+                        } else { true }
+                    };
+                    if is_mutating {
+                        if let ExprKind::Var(coll_name) = &inner_obj.kind {
+                            if let Some(coll_ty) = env.borrow().get_declared_type(coll_name) {
+                                if let Some(elem_ty) = coll_ty.index_element_type() {
+                                    if !elem_ty.grants_mut() {
+                                        return Err(err(
+                                            format!("cannot call mutating method '{}' on an element of '{}' — its declared element type doesn't grant content mutation; declare it `[mut T]`/`{{K = mut V}}`", method, coll_name),
+                                            line,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

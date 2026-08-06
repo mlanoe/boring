@@ -440,13 +440,20 @@ def bool parser_is_type_start_before_ident(mut Parser p):
 
 def bool parser_is_let_destructure(mut Parser p) throws:
     # At let/var/static. Check for `let x, y = ...` or `let (x, y) = ...`
-    if parser_token_at_offset_is(p, 1, "LParen"):
+    # `var mut (...)` / `var mut x, y = ...` — skip an optional second `mut`
+    # after `var` (docs/mut-type-modifier.md's two-keyword form) so the
+    # offsets below still line up on the real content, not the extra keyword.
+    let base = if parser_token_at_offset_is(p, 0, "Var") and parser_token_at_offset_is(p, 1, "Mut"):
+        2
+    else:
+        1
+    if parser_token_at_offset_is(p, base, "LParen"):
         return true
     # `let x, ...` - ident then comma
-    if parser_token_at_offset_is(p, 1, "Ident") and parser_token_at_offset_is(p, 2, "Comma"):
+    if parser_token_at_offset_is(p, base, "Ident") and parser_token_at_offset_is(p, base + 1, "Comma"):
         return true
     # `let TYPE name, ...` - type ident then comma (e.g. `let string tx, rx = ...`)
-    if parser_token_at_offset_is(p, 1, "Ident") and parser_token_at_offset_is(p, 2, "Ident") and parser_token_at_offset_is(p, 3, "Comma"):
+    if parser_token_at_offset_is(p, base, "Ident") and parser_token_at_offset_is(p, base + 1, "Ident") and parser_token_at_offset_is(p, base + 2, "Comma"):
         return true
     false
 
@@ -525,6 +532,18 @@ bool is_fixed_width_int_name(string s):
     s == "int8" or s == "int16" or s == "int32" or s == "int64" or s == "int128" or s == "uint16" or s == "uint32" or s == "uint64" or s == "uint128"
 
 def Type parse_type(mut Parser p) throws:
+    # `mut Type` / `mut Type&` — docs/mut-type-modifier.md's type-level `mut`,
+    # reachable anywhere a type appears (tuple slot, generic argument, array
+    # element, dict value) as well as a field's own leading keyword (see
+    # `parse_field_decl`, which doesn't otherwise recognize `mut` at all).
+    # This simpler, qualifier-blind interpreter has no `Type::Mut` variant to
+    # carry the permission in — `mutable`-vs-not is tracked only at the
+    # `LetStmt`/`FieldDecl`/`DestructureBinding` level, one flag, same as
+    # `mut`/`var` already collapse to there — so accepting the syntax
+    # without erroring (and simply discarding the modifier) is as far as
+    # this port goes for now.
+    if p.eat(TokenKind.Mut):
+        return parse_type(p)
     let base = parse_type_base(p)
     # Handle `T&` borrow syntax — consume `&` and treat as the base type
     if p.eat(TokenKind.Ampersand):

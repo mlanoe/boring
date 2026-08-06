@@ -21,7 +21,7 @@ struct OPoint:
     init(pub var int x, pub var int y)
 
 let op1 = OPoint(x = 1, y = 2)
-var op2 = op1
+mut op2 = op1
 op2.x = 10
 print op2.x
 
@@ -224,7 +224,7 @@ struct MPoint:
     init(pub var int x, pub var int y)
 
 var mp = MPoint(3, 4)
-var MPoint& refp = mp
+var mut MPoint& refp = mp
 refp.x = 10
 print mp.x
 

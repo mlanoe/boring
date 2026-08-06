@@ -30,6 +30,23 @@ impl Parser {
         let line = self.line();
         let _col = self.col();
 
+        // `mut Type` / `mut Type&` — a "mut"? prefix is grammar-legal on any
+        // `type` (docs/mut-type-modifier.md's "Grammar changes required"),
+        // nested anywhere: tuple slot, generic argument, array element, dict
+        // value. The checker (not the parser) restricts which POSITIONS
+        // actually grant the permission. The let_stmt/destructure/field_decl
+        // *statement-level* leading `mut` keyword is consumed by their own
+        // dedicated code before ever calling into `parse_type`, so a `mut`
+        // reaching here always means this nested, in-type-position prefix.
+        if self.check(&TokenKind::Mut) {
+            let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+            if next.map(|k| self.kind_is_type_start(k)).unwrap_or(false) {
+                self.advance(); // consume `mut`
+                let inner = self.parse_type()?;
+                return Ok(Self::wrap_type_mut(inner));
+            }
+        }
+
         // Prefix modifiers for function types: `req`, `def`, `task`, or combinations.
         // `req int (int)` → Fn (pure), `def int (int)` / `int (int)` → FnMut (default),
         // `task int (int)` → async FnMut, `req task int (int)` → async Fn, etc.
@@ -403,6 +420,19 @@ impl Parser {
                     self.advance(); // consume `&`
                     return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
                 }
+                // `&` with nothing to disambiguate against because there is no
+                // per-element name in this position at all — a tuple slot or
+                // generic argument, e.g. `(Position&, mut Velocity&)`,
+                // `Query<Position&, mut Velocity&>` (docs/mut-type-modifier.md
+                // §2's Bevy-ECS motivating case). Every other `&`-parsing arm
+                // above assumes a trailing name (`T& name`, the param/field/
+                // let_stmt convention) — there is none to assume here, so a
+                // bare borrow is the only possible reading.
+                Some(TokenKind::Comma | TokenKind::RParen | TokenKind::RBracket
+                    | TokenKind::RBrace | TokenKind::Gt) | None => {
+                    self.advance(); // consume `&`
+                    return Ok(Type::Qualified(Box::new(ty), OwnerQual::Borrow));
+                }
                 _ => {} // not a borrow qualifier — fall through
             }
         }
@@ -455,7 +485,14 @@ impl Parser {
                     // `T'actor'unified` → GpuActorUnified  /  bare `T'actor` → Actor (CPU-side;
                     // in kernel-struct field position this is reinterpreted as block-shared
                     // memory by parse_kernel_field, replacing the old 'sync spelling).
-                    if self.eat(&TokenKind::Tick) {
+                    // `T'actor'weak` is deliberately left un-consumed here — it's handled
+                    // by the generic Shared|Actor|Guard chained-`'weak` logic below, which
+                    // expects to see the tick itself still unconsumed.
+                    let next_is_weak = matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::Ident(s)) if s == "weak"
+                    );
+                    if !next_is_weak && self.eat(&TokenKind::Tick) {
                         if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::ActorTask }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "global") { self.advance(); OwnerQual::GpuActorGlobal }
                         else if matches!(self.peek(), TokenKind::Ident(ref s) if s == "unified") { self.advance(); OwnerQual::GpuActorUnified }
@@ -476,8 +513,13 @@ impl Parser {
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
             TokenKind::Guard => {
                 self.advance();
-                // `T'guard'task` → GuardTask
-                if self.eat(&TokenKind::Tick) {
+                // `T'guard'task` → GuardTask. `T'guard'weak` is deliberately left
+                // un-consumed here — handled by the generic chained-`'weak` logic below.
+                let next_is_weak = matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(s)) if s == "weak"
+                );
+                if !next_is_weak && self.eat(&TokenKind::Tick) {
                     if matches!(self.peek(), TokenKind::Task) { self.advance(); OwnerQual::GuardTask }
                     else { return Err(ParseError::Generic { msg: "expected 'task after 'guard'".into(), line: self.line(), col: self.col(), len: self.tok_len() }); }
                 } else {

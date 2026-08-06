@@ -7,7 +7,7 @@ struct Counter:
         value += 1
 
 # 'actor — with grants write access (mutation found), one lock for the whole block
-var c'actor = Counter(0)
+var mut c'actor = Counter(0)
 with c:
     c.increment()
     c.increment()
@@ -24,7 +24,7 @@ struct Cell:
         value
 
 # 'guard, read-only block (no mutation found) — RwLock::read()
-var b'guard = Cell(10)
+var mut b'guard = Cell(10)
 with b:
     print b.peek()
 
@@ -34,8 +34,8 @@ with b:
 print b.value
 
 # multiple names acquired by one `with`
-var a'actor = Counter(0)
-var d'actor = Counter(10)
+var mut a'actor = Counter(0)
+var mut d'actor = Counter(10)
 with a, d:
     a.increment()
     d.increment()

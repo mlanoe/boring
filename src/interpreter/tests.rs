@@ -1153,7 +1153,7 @@ struct Box<T>:
     def void set(T v):
         self.value = v
 
-var b = Box(42)
+mut b = Box(42)
 let _before = b.get()
 b.set(99)
 let _after = b.get()
@@ -1519,7 +1519,7 @@ struct Dog:
     req string name(): self._name
     set name(string val): self._name = val
 
-var d = Dog("Rex")
+mut d = Dog("Rex")
 d.name = "Buddy"
 let _n = d.name
 "#;
@@ -1899,7 +1899,7 @@ ext Counter:
     set value(int v):
         self._value = v
 
-var c = Counter(_value= 0)
+var mut c = Counter(_value= 0)
 c.value = 42
 let _result = c.value
 "#;
@@ -1914,7 +1914,7 @@ struct Point:
     var int x
     var int y
 
-var p = Point(x = 1, y = 2)
+mut p = Point(x = 1, y = 2)
 p.x = 10
 let _result = p.x
 "#;
@@ -1925,7 +1925,7 @@ let _result = p.x
 struct Pair:
     let int a
 
-var p = Pair(a= 1)
+mut p = Pair(a= 1)
 p.a = 99
 "#;
     let (_i, res) = run(src_let);
@@ -1936,7 +1936,7 @@ p.a = 99
 struct Pair:
     int a
 
-var p = Pair(a= 1)
+mut p = Pair(a= 1)
 p.a = 99
 "#;
     let (_i, res) = run(src_implicit);

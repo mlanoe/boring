@@ -207,10 +207,15 @@ struct_member   ::= field_decl
                   | assoc_type_decl   # associated type (e.g. `type Output = int`)
                   | type_method_sig   # type-level method signature (e.g. `type def name():`)
 
-# No keyword → public immutable field.
-# `let` → private immutable. `var` → private mutable. `pub var` → public mutable.
+# No keyword → public immutable field (neither reassignable nor content-mutable).
+# `let` → private immutable, same as no keyword otherwise. `var` → private,
+# REASSIGNABLE only (`self.field = x`) — no longer implies content mutation.
+# `pub var` → public, reassignable. `mut`/`let mut` → private, CONTENT-MUTABLE
+# only (`self.field.method()`) — not reassignable. `var mut` → both. Same
+# four-way as local bindings (`binding_keyword` above) and same "mut lives in
+# the type" mechanism — see docs/mut-type-modifier.md §3.
 # `transient` → physically mutable even from `req` methods (lazy/cache pattern). Implies `var`.
-field_decl      ::= "pub"? "transient"? ("let" | "var")? type IDENT ("=" expr)? NEWLINE
+field_decl      ::= "pub"? "transient"? binding_keyword? type IDENT ("=" expr)? NEWLINE
 
 # ─── Constructors ─────────────────────────────────────────────────────────────
 #
@@ -454,27 +459,48 @@ wait_stmt       ::= "wait" expr NEWLINE
 # `pub` makes the binding visible outside its module.
 # `static` makes it a module-level singleton (no re-evaluation on repeated calls).
 #
-# Binding semantics summary:
-#   let  — immutable binding, immutable instance
-#   mut  — for structs: fixed binding, mutable instance (&mut self access)
-#          for scalars (int, uint, float, bool): equivalent to `var` (rebindable)
-#   var  — rebindable binding; mutability depends on the qualifier
+# Binding semantics summary — see docs/mut-type-modifier.md for the full model:
+#   let      — immutable binding, immutable instance
+#   mut      — fixed binding, content-mutable instance (bare `mut Type a` ≡
+#              `let mut Type a`, always — no context-dependent reading, no
+#              scalar special case; `mut` on a scalar is a checker error)
+#   var      — rebindable binding, NOT content-mutable (does not imply `mut`)
+#   var mut  — rebindable AND content-mutable — the only way to get both
+#
+# `mut` lives in the `type` production (see below), not as a fifth keyword
+# here — `binding_keyword` below covers exactly `let`/`mut`/`var`/`var mut`,
+# resolved by whether a `type` is wrapped in `"mut"? type` once parsed.
 #
 # Move syntax: appending `'` to the binding name requests ownership transfer.
 #   `let b = a`   — borrow by default: `b` is a reference, `a` remains valid
 #   `let b' = a`  — move: `b` takes ownership, `a` is invalidated
-let_stmt        ::= "pub"? "static"? ("let" | "mut" | "var") type? IDENT "'"? ("=" expr)? NEWLINE
-                  | "pub"? "static"? ("let" | "mut" | "var") destructure "=" expr NEWLINE
+let_stmt        ::= "pub"? "static"? (binding_keyword | "lazy") type? IDENT "'"? ("=" expr)? NEWLINE
+                  | "pub"? "static"? binding_keyword destructure "=" expr NEWLINE
+                  # `lazy` is let_stmt-only — not valid in a destructure slot
+                  # or a field_decl, so it's kept out of `binding_keyword` itself.
                   # No initialiser: deferred binding — variable declared but not yet assigned.
                   # A deferred binding must be assigned before first use (Rust enforces this).
                   # Example:  var int x       (later:  x = compute())
 
+# The statement's own leading keyword phrase is mandatory (disambiguates a
+# `let_stmt` from a plain expression statement) and, in the parenthesised
+# destructure form, doubles as the per-element default for an unmarked slot.
+# Shared by let_stmt, destructure slots (`binding` below), and `field_decl`.
+binding_keyword ::= ("let" | "var") "mut"?
+                  | "mut"
+
+# Bare-vs-parenthesised defaulting rule (docs/mut-type-modifier.md §4):
+# an unmarked slot in the BARE form always defaults to `let`, independently
+# per slot; an unmarked slot in the PARENTHESISED form inherits the group's
+# own leading `binding_keyword` (element 0's — see `let_stmt` above) instead.
+# A bare unmarked slot following a differently-keyworded sibling is valid but
+# flagged with a lint (it reads as if it inherited that keyword; it doesn't).
 destructure     ::= "(" binding ("," binding)* ")"   # parenthesised form
                   | binding ("," binding)+             # bare form (two bindings minimum)
 
-binding         ::= type IDENT    # typed binding
-                  | IDENT         # inferred binding
-                  | "_"           # ignored slot
+binding         ::= binding_keyword? type IDENT    # typed binding, own keyword optional
+                  | binding_keyword? IDENT          # inferred binding, own keyword optional
+                  | "_"                              # ignored slot — never keyworded
 
 return_stmt     ::= "return" expr? NEWLINE
 
@@ -859,6 +885,22 @@ type            ::= primitive_type
                   | type "(" type_list? ")"            # function type: ReturnType (ParamTypes)
                   | type "'" owner_qual                # heap / smart-pointer ownership qualifier
                   | type "&" borrow_qual               # borrow / reference qualifier
+                  | "mut"? type "&" borrow_qual        # mut Type& → &mut Type (always valid — the
+                                                       #   borrowed form has an existing Rust type to
+                                                       #   target, `OwnerQual::BorrowMut`; composes into a
+                                                       #   tuple/generic argument/array element/dict value
+                                                       #   exactly like the unprefixed form above)
+                  | "mut"? type                        # mut Type → valid only where the CHECKER allows
+                                                       #   it (tuple slot, struct field, array element,
+                                                       #   dict value, or a let_stmt's own top-level type —
+                                                       #   see binding_keyword above); a Boring-only
+                                                       #   permission with no distinct Rust type of its
+                                                       #   own. Grammar-unrestricted on purpose — parses
+                                                       #   anywhere a `type` does, rejected elsewhere by
+                                                       #   the checker (scalar, `'shared`, `'weak`, a whole
+                                                       #   tuple, a set element — docs/mut-type-modifier.md
+                                                       #   §1/§3). See docs/mut-type-modifier.md for the
+                                                       #   full model this generalizes from.
 
 # Compile-time size expression — used in fixed-size array types `[T, N]`.
 # Only available where the type system can resolve the value statically (kernel fields, etc.).

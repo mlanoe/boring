@@ -159,7 +159,7 @@ ext PCounter:
     set value(int v):
         self._value = v
 
-var pctr = PCounter(_value= 0)
+mut pctr = PCounter(_value= 0)
 pctr.value = 42
 print pctr.value
 

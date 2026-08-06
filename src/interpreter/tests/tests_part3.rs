@@ -860,7 +860,9 @@ let _result = c.n
     assert_eq!(run_src(src), Value::Int(2));
 }
 
-// `var T&` in a let binding annotation — accepted without error.
+// `var mut T&` in a let binding annotation — accepted without error.
+// (`var T&` alone no longer implies content mutation — docs/mut-type-modifier.md
+// §1/§2 — bare `mut T&` is used below since `ref` is never reassigned here.)
 #[test]
 fn test_borrow_mut_let_annotation() {
     let src = r#"
@@ -868,7 +870,7 @@ struct Point:
     init(pub var int x, pub var int y)
 
 var p = Point(3, 4)
-var Point& ref = p
+mut Point& ref = p
 ref.x = 10
 let _result = p.x
 "#;
@@ -2369,7 +2371,7 @@ struct Counter:
     def increment():
         value += 1
 
-var c'actor = Counter(0)
+var mut c'actor = Counter(0)
 with c:
     c.increment()
     c.increment()
@@ -2406,7 +2408,7 @@ struct Cell:
     def bump():
         value += 1
 
-var b'guard = Cell(10)
+var mut b'guard = Cell(10)
 with b:
     b.bump()
 let _result = b.value
@@ -2423,8 +2425,8 @@ struct Counter:
     def increment():
         value += 1
 
-var a'actor = Counter(0)
-var b'actor = Counter(10)
+var mut a'actor = Counter(0)
+var mut b'actor = Counter(10)
 with a, b:
     a.increment()
     b.increment()

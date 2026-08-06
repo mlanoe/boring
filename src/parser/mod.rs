@@ -342,13 +342,8 @@ impl Parser {
                     let line = self.line();
                     let col = self.col();
                     let _is_static = self.eat(&TokenKind::Static);
-                    let binding = match self.peek() {
-                        TokenKind::Mut => BindingKind::Mut,
-                        TokenKind::Var => BindingKind::Var,
-                        _ => BindingKind::Let,
-                    };
-                    self.advance(); // consume let/mut/var
-                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(binding, line, col)?)))
+                    let (binding, var_mut) = self.consume_binding_keyword();
+                    Ok(Item::Stmt(Stmt::LetDestructure(self.parse_let_destructure(binding, var_mut, line, col)?)))
                 } else {
                     Ok(Item::Let(self.parse_let_stmt_pub(is_pub)?))
                 }
@@ -777,6 +772,14 @@ impl Parser {
     /// When `var` precedes a borrow type, upgrade the borrow to a mutable borrow.
     /// `var T&` → `BorrowMut`; `var T&auto` / `var T&task` are left unchanged
     /// (mutating an Rc/Arc borrow makes no sense).
+    ///
+    /// Used only for **parameters** (`parse_fn.rs`) — the parameter model is
+    /// intentionally left as-is by docs/mut-type-modifier.md (see its
+    /// "Parameters" section: full checker enforcement of a distinct `var`/`mut`
+    /// parameter split is separate, future work). `var`/`mut` still both
+    /// transpile to `&mut T` here, unchanged. Local bindings/destructure/field
+    /// declarations use `wrap_type_mut` instead, which additionally handles the
+    /// owned (non-`&`) form via `Type::Mut`.
     fn apply_var_to_borrow(ty: Type) -> Type {
         match ty {
             Type::Qualified(inner, OwnerQual::Borrow) =>
@@ -792,6 +795,62 @@ impl Parser {
                 ),
             other => other,
         }
+    }
+
+    /// Applies a `mut` prefix to a `type` — docs/mut-type-modifier.md §§1-2.
+    /// A borrow-shaped type (`T&`, `T?&`, `T&'a`) has no distinct "mut Type&"
+    /// representation beyond its already-existing mutable-borrow qualifier
+    /// (`&mut T` IS the mutable form — same upgrade `apply_var_to_borrow` does
+    /// for parameters); anything else gets wrapped in the owned `Type::Mut`
+    /// marker, which has no distinct Rust type at all (see its doc). Used for
+    /// the let_stmt/destructure/field_decl leading `mut` keyword AND for a
+    /// nested `mut` reached through `parse_type`'s own prefix handling
+    /// (tuple slot, generic argument, array element, dict value) — same
+    /// mechanism everywhere, per §1's "no context-dependent reading" rule.
+    fn wrap_type_mut(ty: Type) -> Type {
+        match ty {
+            Type::Qualified(inner, OwnerQual::Borrow) =>
+                Type::Qualified(inner, OwnerQual::BorrowMut),
+            Type::Qualified(inner, OwnerQual::BorrowOption) =>
+                Type::Qualified(inner, OwnerQual::BorrowOptionMut),
+            Type::Qualified(inner, OwnerQual::Lifetime(lt)) =>
+                Type::Qualified(
+                    Box::new(Type::Qualified(inner, OwnerQual::BorrowMut)),
+                    OwnerQual::Lifetime(lt),
+                ),
+            // `mut mut T` can't be written syntactically — defensive, not reachable.
+            already_mut @ Type::Mut(_) => already_mut,
+            other => Type::Mut(Box::new(other)),
+        }
+    }
+
+    /// Consumes the leading binding-keyword phrase for a `let`/`mut`/`var`(` mut`)/
+    /// `lazy` statement or destructure — the STATEMENT-level keyword position, not
+    /// a type-position `mut` (see `parse_type`'s own handling for that). Assumes
+    /// the caller has already skipped an optional leading `static`. Returns the
+    /// resolved `BindingKind` — bare `mut` and explicit `let mut` collapse into
+    /// the same `BindingKind::Mut` (§1: "no context-dependent reading") — plus
+    /// whether an explicit second `mut` followed `var` (`var mut ...`, see
+    /// `LetStmt.var_mut`'s doc for why that can't be folded into `BindingKind`
+    /// alone).
+    pub(crate) fn consume_binding_keyword(&mut self) -> (BindingKind, bool) {
+        let mut binding = match self.peek() {
+            TokenKind::Mut  => BindingKind::Mut,
+            TokenKind::Var  => BindingKind::Var,
+            TokenKind::Lazy => BindingKind::Lazy,
+            _               => BindingKind::Let,
+        };
+        self.advance(); // consume let/mut/var/lazy
+        let mut var_mut = false;
+        if matches!(binding, BindingKind::Let | BindingKind::Var) && self.check(&TokenKind::Mut) {
+            self.advance(); // consume the second `mut`
+            if matches!(binding, BindingKind::Let) {
+                binding = BindingKind::Mut; // `let mut` ≡ bare `mut`
+            } else {
+                var_mut = true; // `var mut`
+            }
+        }
+        (binding, var_mut)
     }
 
     /// Returns true when the token at `name_pos` is the start of an associated type
@@ -826,7 +885,14 @@ impl Parser {
         // skip optional `static`
         let base = self.pos + if matches!(self.peek(), TokenKind::Static) { 1 } else { 0 };
         // base points to let/var; base+1 is the first binding token
-        let after_kw = base + 1;
+        let mut after_kw = base + 1;
+        // skip an optional second `mut` after `let`/`var` (`var mut (a, b) = t`,
+        // `let mut a, b = t`) — see `consume_binding_keyword`.
+        if matches!(self.tokens.get(base).map(|t| &t.kind), Some(TokenKind::Let) | Some(TokenKind::Var))
+            && matches!(self.tokens.get(after_kw).map(|t| &t.kind), Some(TokenKind::Mut))
+        {
+            after_kw += 1;
+        }
         match self.tokens.get(after_kw).map(|t| &t.kind) {
             Some(TokenKind::LParen) => {
                 let mut i = after_kw + 1;
@@ -915,15 +981,17 @@ impl Parser {
                         match &tok.kind {
                             TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
-                            // `'actor` may be followed by `'task` → `'actor'task`
+                            // `'actor` may be followed by `'task` → `'actor'task`, or by
+                            // `'weak` → `'actor'weak` (via the trailing-weak check below,
+                            // which needs `qual_is_auto_or_shared` set even for bare `'actor`).
                             TokenKind::Ident(q) if q == "actor" => {
                                 i += 1;
+                                qual_is_auto_or_shared = true;
                                 if i < self.tokens.len()
                                     && matches!(self.tokens[i].kind, TokenKind::Tick)
                                     && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
                                 {
                                     i += 2; // consume `'task`
-                                    qual_is_auto_or_shared = true;
                                 }
                             }
                             // `'guard` may be followed by `'task` → `'guard'task`

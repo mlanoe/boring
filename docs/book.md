@@ -101,16 +101,20 @@ print "Hello, {name}!"
 Boring separates two orthogonal concepts:
 
 - **Rebindable**: can the variable point to a different instance?
-- **Mutable**: can the pointed instance be modified?
+- **Mutable** (content-mutable): can the pointed instance be modified — `def` calls, field writes, structural collection mutation?
 
-Four keywords control this:
+Unlike many languages, these two axes are controlled **independently**, and `mut` lives in the **type**, not just the binding keyword — `mut Type`/`mut Type&` compose the same way anywhere a type appears (a tuple slot, a struct field, an array element, a generic argument), not only at the top of a variable declaration. Four combinations exist for a local binding:
 
-| Keyword | Rebindable | Mutable |
+| Form | Rebindable | Mutable |
 |---|---|---|
-| `let` | no | no |
-| `mut` | no | yes |
-| `var` | yes | depends on qualifier |
-| `lazy` | no | no — deferred init via `?=`, immutable after first assignment |
+| `let Type a` | no | no |
+| `mut Type a` (≡ `let mut Type a`) | no | yes |
+| `var Type a` | yes | no |
+| `var mut Type a` | yes | yes |
+
+`lazy` is a fifth, orthogonal keyword: a deferred, write-once binding — no rebind, no mutation, assigned exactly once via `?=`.
+
+**`mut` never implies `var`, and `var` never implies `mut`** — this is deliberate and has no exceptions (not even for `'actor`/`'guard`-qualified types, where the underlying `Arc<Mutex<T>>`/`Arc<RwLock<T>>` would technically permit mutation through the lock regardless — Boring's own bookkeeping still gates it on the binding, matching every other type). `mut x = 42; x = 43` is a compile error — that's the whole point of writing `mut` instead of `var` in the first place.
 
 ### Immutable bindings — `let`
 
@@ -122,7 +126,7 @@ struct Counter:
 
 let Counter c = Counter()
 c.get()          # ok — req methods work on let
-# c.inc()        # ERROR — def requires mut or var
+# c.inc()        # ERROR — def requires the type to carry mut
 # c = Counter()  # ERROR — let cannot be rebound
 ```
 
@@ -132,47 +136,110 @@ Fixed binding, immutable instance. Neither the binding nor the instance can chan
 
 ```boring
 mut Counter c = Counter()
-c.inc()          # ok — def methods work on mut
+c.inc()          # ok — def methods work: c's type is mut Counter
 c.inc()
 c.get()          # 2
 # c = Counter()  # ERROR — mut cannot be rebound
 ```
 
-Fixed binding, mutable instance. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that `var` prevents.
+Fixed binding, content-mutable instance. `mut Counter c` is exactly `let mut Counter c` — the bare keyword is sugar for that, always, with no other reading. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that `var` prevents.
 
 `let` and `var` are sufficient to write correct code. `mut` is an optional precision when you know the binding will never be rebound.
 
-For structs, `mut` means non-rebindable mutable instance. For primitives (`int`, `uint`, `float`, `bool`), since there is no concept of "mutating in place" (they are always copied), `mut` means rebindable — equivalent to `var`:
+**`mut` on a scalar is a compile error**, not a silent downgrade to `var`. Primitives (`int`, `uint`, `float`, `bool`) expose no `def` methods, so there's nothing for `mut` to unlock:
 
 ```boring
-mut a = 0        # ok — rebindable scalar (equivalent to var)
-mut int a = 0    # ok — rebindable scalar
-a = 1            # ok — rebind
-mut Counter c = Counter()  # ok — fixed binding, mutable instance
-# c = Counter()  # still an error — mut on struct is non-rebindable
+# mut a = 0        # ERROR — no def methods exist on int; use `var` for a rebindable scalar
+var a = 0          # ok — rebindable scalar
+a = 1              # ok — rebind
+mut Counter c = Counter()  # ok — fixed binding, content-mutable instance
+# c = Counter()    # still an error — mut on struct is non-rebindable
 ```
 
-### Rebindable mutable bindings — `var`
+(An earlier version of Boring treated `mut` on a scalar as equivalent to `var` — that shortcut is retired.)
+
+### Rebindable bindings — `var`
 
 ```boring
 var Counter c = Counter()
-c.inc()          # ok — def methods work
-c = Counter()    # ok — rebind to a fresh instance
+# c.inc()          # ERROR — var alone does not grant content mutation
+c = Counter()      # ok — rebind to a fresh instance
+c.get()            # 0
+```
+
+Rebindable binding — the variable can point to a different instance. On its own, `var` grants **only** rebinding, not content mutation — write `var mut` for both:
+
+```boring
+var mut Counter c = Counter()
+c.inc()          # ok — both rebindable and content-mutable
+c = Counter()    # ok — rebind
 c.get()          # 0 — started over
 ```
 
-Rebindable binding — the variable can point to a different instance. Mutability depends on the type.
-
-The difference between `mut` and `var` is visible when rebinding matters:
+The difference between `mut` and `var mut` is rebindability:
 
 ```boring
 mut Counter a = Counter()
-var Counter b = Counter()
+var mut Counter b = Counter()
 
 a.inc()          # ok
 b.inc()          # ok
 # a = Counter()  # ERROR — mut cannot be rebound
-b = Counter()    # ok — var can
+b = Counter()    # ok — var mut can
+```
+
+### `mut` composes into any type position
+
+Since `mut` is a modifier on the **type**, not a fifth binding keyword, it nests anywhere a type can appear — a tuple slot, a struct field (see [§8](#8-structs)), an array element or dict value (see [§7](#7-collections)), or a generic argument:
+
+```boring
+let (mut Point, string) t = (Point(0, 0), "origin")   # slot 0 is content-mutable, slot 1 isn't
+t.0.move_to(1, 1)   # ok
+# t.1 = "elsewhere" # ERROR — the tuple binding itself isn't `var`/reassignable at that slot
+
+Query<(Position&, mut Velocity&)>   # a borrowed tuple slot can carry mut too — see below
+```
+
+`mut Type` (no `&`) is only accepted where the checker can attach a stable, addressable permission to it — a tuple slot, a struct field, an array element, or a dict value. It's rejected on a scalar (above), on `'shared` (no interior mutability to unlock), on a whole tuple as a block (`mut (T1, T2) t` — no in-place mutation surface for a tuple *as a whole*, only per-slot), on a `'weak` reference (nothing but `.upgrade()`/`.clone()` to call on it), and on a set element (`HashSet<T>` has no mutable element access in Rust).
+
+### The borrow form — `mut Type&`
+
+`Type&` is a borrow (`&Type` in Rust); `mut Type&` is a mutable borrow (`&mut Type`). Because it's a genuine, distinct Rust type — unlike the owned `mut Type` form above — it composes freely into tuples and generic arguments, which is exactly what a Bevy-ECS-style query needs:
+
+```boring
+struct Position: var float x; var float y
+struct Velocity: var float dx; var float dy
+
+var p = Position(x = 0.0, y = 0.0)
+var v = Velocity(dx = 1.0, dy = 0.0)
+let (Position&, mut Velocity&) pair = (p, v)
+pair.1.dx = pair.1.dx + 1.0   # ok — slot 1 is a mutable borrow
+# pair.0.x = 5.0              # ERROR — slot 0 is a plain (immutable) borrow
+```
+
+There's no sigil for this (`Type!`/`Type*` were both considered and dropped) — `mut Type&` stays consistent with the rest of Boring's spelled-out-keyword surface syntax.
+
+### Coercion is one-way
+
+A `mut Type` value carries strictly more permission than a plain `Type` value, so it's always safe to use where only `Type` is expected, and never safe the other way:
+
+```boring
+def readOnly(Point p): ...
+def mutate(mut Point p): p.x = 1
+
+mut Point a = Point(0, 0)
+let Point b = Point(0, 0)
+
+readOnly(a)   # ok — mut Point widens to Point
+mutate(a)     # ok — a already is mut Point
+# mutate(b)   # ERROR — Point cannot be used where mut Type is required
+```
+
+Inference follows the same direction: a variable's type inferred from another variable's value always resolves to the **plain** type, never to `mut Type`, even when the source is `mut`-typed — `mut`-ness is requested explicitly at each binding site, never inherited implicitly through aliasing.
+
+```boring
+let mut Point b = Point(0, 0)
+let a = b       # a's inferred type is Point, NOT mut Point
 ```
 
 ### Compound assignment operators
@@ -520,27 +587,65 @@ let (int, string) t = (0, "hello")
 let t: (isize, Arc<str>) = (0isize, Arc::from("hello"));
 ```
 
-A tuple has no in-place mutation surface — no index assignment (`t.0 = v`), no
-user-definable methods — so `mut` on a typed tuple variable is rejected at check
-time: there is no operation `mut` would unlock that `let` doesn't already allow.
-`var` remains valid and meaningful — it allows reassigning `t` to a whole new tuple:
+A tuple *as a whole* has no in-place mutation surface — no user-definable
+methods on the tuple itself — so `mut` on a typed tuple **variable** is
+rejected at check time (whether the tuple type is explicit or only inferred
+from a literal initializer): there is no operation `mut` on the whole tuple
+would unlock that `let` doesn't already allow. `var` remains valid and
+meaningful — it allows reassigning `t` to a whole new tuple:
 
 ```boring
 let (int, string) t = (0, "hello")   # fixed, read-only — fine
 var (int, string) t = (0, "hello")   # reassignable — fine
 t = (1, "world")
 
-mut (int, string) t = (0, "hello")   # ERROR — tuples have no in-place mutation
+# mut (int, string) t = (0, "hello")   # ERROR — tuples have no in-place mutation
+# mut t = (0, "hello")                 # ERROR too — same rule, inferred type
 ```
 
-This is specific to a **single variable of tuple type**. It does not apply to
-[destructuring](#destructuring) (`mut (a, b) = t`) — there, `mut` governs the two
-*extracted* variables individually, not the tuple, which no longer exists as a
-binding once destructured.
+**Individual slots are a different matter.** `mut` composes into a tuple's
+*element* positions — each slot is fixed and addressable (`t.0`, `t.1`),
+exactly like a struct field, so a slot's `mut`-ness controls whether `def`
+can be called on whatever it holds:
+
+```boring
+struct Point: var int x; var int y
+
+let (mut Point, string) t = (Point(0, 0), "origin")
+t.0.move_to(5, 5)     # ok — slot 0's type is `mut Point`
+# t.1 = "elsewhere"   # ERROR — slot 1 isn't reassignable (the binding is `let`)
+```
+
+This does not conflict with the whole-tuple rejection above — `mut` *before*
+the tuple's parentheses (`mut (T1, T2) t`) governs the whole tuple and stays
+rejected; `mut` *inside* the parentheses (`(mut T1, T2) t`) is a different
+grammar position, governing one slot.
 
 #### Destructuring
 
-All four forms are equivalent:
+Each destructured element may carry its own explicit `let`/`mut`/`var`/`var mut`
+keyword. An unmarked element's default depends on whether the destructure is
+parenthesised:
+
+```boring
+let a, b = t                    # bare — a: let, b: let (bare always defaults to let)
+let (a, b) = t                   # parenthesised — a: let, b: let (inherits the group's `let`)
+let mut a, b = t                 # bare — a: mut, b: LET — b does NOT inherit `mut`
+let mut (a, b) = t                # parenthesised — a: mut, b: mut (both inherit the group's `mut`)
+let (mut a, b) = t                 # parenthesised — a: mut (explicit), b: let (inherits the group's `let`)
+```
+
+**This is a real readability trap on the bare form specifically**: `let mut
+a, b = t` reads, at a glance, like the keyword phrase governs the whole
+line — it doesn't; `b` quietly defaults to plain `let`. The rule is
+unambiguous once learned (bare defaults to `let` unconditionally, per
+element, regardless of a sibling's own keyword; parenthesised inherits the
+group's own leading keyword instead) but is exactly the kind of thing worth
+double-checking — the compiler emits a lint warning for precisely this shape
+(an unmarked bare element right after a differently-keyworded one).
+
+Every statement that uses a single keyword throughout, marked or not, means
+exactly what it always did — only the *mixed* case above is new:
 
 ```boring
 let a, b = t               # bare
@@ -549,7 +654,7 @@ let int a, string b = t    # bare with per-variable types
 let (int a, string b) = t  # parenthesised with per-variable types
 ```
 
-In the last two forms, each variable gets its own type annotation; types on one variable do **not** apply to the others.
+In these, each variable gets its own type annotation; types on one variable do **not** apply to the others.
 
 **Rust equivalent**
 ```rust
@@ -1577,6 +1682,28 @@ let numbers: Vec<isize> = vec![1, 2, 3, 4, 5];
 let empty: Vec<isize> = Vec::new();
 ```
 
+#### Element mutability — `[mut T]` vs `mut [T]`
+
+`mut` on the collection's own type (`mut [Point] arr`) and `mut` on the **element** type (`[mut Point] arr`) control two independent things — see [§2](#2-variables-and-mutability):
+
+- **`[mut Point] arr`** — the array itself can't grow/shrink/reassign entries (unless also `mut`/`var mut`, see below), but every element already in it can have `def` called on it: `arr[0].move_to(...)`.
+- **`mut [Point] arr`** — the reverse: `arr` supports structural mutation (`push`, `insert`, index-assign), but elements are plain `Point` — no `def` calls through an index read.
+- **`mut [mut Point] arr`** — both.
+
+```boring
+struct Point: var int x; var int y
+
+let [mut Point] a = [Point(0, 0), Point(1, 1)]
+a[0].x = 5           # ok — element type is mut Point
+a[0].move_to(1, 1)   # ok
+
+let [Point] b = [Point(0, 0)]
+# b[0].x = 5         # ERROR — element type is plain Point, not mut Point
+# b[0].move_to(1, 1) # ERROR — same reason
+```
+
+This is checked for a bare `Var` collection with an explicit type annotation (an inferred-type collection's element permission isn't tracked).
+
 #### Array fill and comprehension
 
 Two shorthand forms create arrays without listing every element:
@@ -1726,6 +1853,8 @@ let scores: HashMap<Arc<str>, isize> = HashMap::from([...]); // literals coerced
 let empty_map: HashMap<isize, isize> = HashMap::new();
 ```
 
+`mut` on the **value** position — `{K = mut V}` — is the dict analogue of `[mut T]`: it controls whether `def` calls work on values fetched via `d[k]` or iteration, independent of `mut {K=V} d` (structural `d[k]=v`/insertion/removal on the dict itself). Keys never accept `mut` — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust `HashMap`.
+
 #### Dictionary methods
 
 | Boring                      | Rust                              |
@@ -1751,6 +1880,8 @@ let {int} empty_set = {}
 let unique: HashSet<isize> = HashSet::from([1, 2, 3]);
 let empty_set: HashSet<isize> = HashSet::new();
 ```
+
+`{mut T}` (element-`mut` on a set) is rejected outright — not a Boring design choice, a hard Rust limitation: `HashSet<T>` deliberately exposes no mutable element access at all (no `iter_mut()`, no `get_mut()`), because mutating an element in place could change its `Hash`/`Eq` behavior and silently corrupt the set's buckets. `mut {T}` (mutable on the *set itself* — structural `add`/`remove`) is unaffected and works normally.
 
 #### Set methods
 
@@ -1946,24 +2077,51 @@ impl Circle {
 
 ### Mutable fields
 
-Fields are immutable by default. Use `var` to make a field mutable:
+Fields get the same four-way as local bindings ([§2](#2-variables-and-mutability)) — `var` (reassignment, `self.field = x`) and `mut` (content mutation, `self.field.method()`) are independent axes, not one flag:
+
+| Field | Reassignable (`self.field = x`) | Content-mutable (`self.field.method()`) |
+|---|---|---|
+| `let Point p` (default, no keyword) | no | no |
+| `mut Point p` (≡ `let mut Point p`) | no | yes |
+| `var Point p` | yes | no |
+| `var mut Point p` | yes | yes |
 
 ```boring
-struct Counter:
-    var int value = 0
+struct Inner:
+    var int n = 0
+    def bump(): n += 1
 
-    def inc():
-        self.value += 1
+struct Outer:
+    mut Inner a       # content-mutable only
+    var mut Inner b    # both
+    let Inner c         # neither
+
+mut o = Outer(a = Inner(), b = Inner(), c = Inner())
+o.a.bump()     # ok — a's type is mut Inner
+o.b.bump()     # ok — b's type is mut Inner too (var mut includes mut)
+o.b = Inner()  # ok — b is reassignable (var)
+# o.a = Inner() # ERROR — a isn't reassignable
+# o.c.bump()    # ERROR — c grants neither
 ```
+
+A field's *own* `mut`/`var` only matters once the containing binding (`o`
+above) already permits reaching it at all — `o` itself still needs `mut`/`var
+mut` to read or write **any** field this way, exactly like calling a method
+on `o` directly would; a plain `let o` or `var o` (without the second `mut`)
+blocks every field access above regardless of each field's own keyword.
+
+Scalar (primitive) fields work the same as scalar local bindings: `mut` on
+one is a checker error (nothing to unlock), so a plain non-struct field only
+ever needs `var` if it should be reassignable.
 
 ### `req` vs `def`
 
-`req` ("request") declares a **read-only** method — it does not mutate the object and can be called on both `let` and `var` bindings. `def` declares a **mutating** method — it may modify the object and can only be called on a `var` binding.
+`req` ("request") declares a **read-only** method — it does not mutate the object and can be called on any receiver. `def` declares a **mutating** method — it may modify the object and can only be called on a receiver whose *type* carries `mut` (`mut Type`/`var mut Type` — plain `var Type` is **not** enough on its own).
 
 | Boring keyword | Mutates `self` | Callable on   | Rust receiver  |
 |----------------|----------------|---------------|----------------|
-| `req`          | no             | `let` + `var` | `&self`        |
-| `def`          | yes            | `var` only    | `&mut self`    |
+| `req`          | no             | any binding | `&self`        |
+| `def`          | yes            | `mut`/`var mut` only | `&mut self`    |
 
 ```boring
 struct Counter:
@@ -1976,12 +2134,15 @@ struct Counter:
         self.value += 1
 
 let c = Counter()
-c.get()    # ok — req on let binding
-# c.inc()  # error — def requires var
+c.get()    # ok — req on any binding
+# c.inc()  # error — def requires the type to carry mut
 
 var mc = Counter()
-mc.inc()   # ok — def on var binding
-mc.get()   # ok — req works on var too
+# mc.inc()   # error — var alone does not grant content mutation
+
+var mut mc2 = Counter()
+mc2.inc()   # ok — var mut grants both
+mc2.get()   # ok — req works on any binding
 ```
 
 **`req` and `def` for top-level functions**
@@ -2060,7 +2221,7 @@ struct Temperature:
     set fahrenheit(float f):
         self.celsius = (f - 32.0) * 5.0 / 9.0
 
-var t = Temperature(celsius = 0.0)
+var mut t = Temperature(celsius = 0.0)   # a setter call content-mutates — needs mut/var mut
 print "{t.fahrenheit}"         # 32.0  — getter via req
 t.fahrenheit = 212.0           # setter via set
 print "{t.celsius}"            # 100.0
@@ -2378,6 +2539,67 @@ let Direction dir = .East     # same as Direction.East
 ```rust
 // No direct equivalent — Rust requires the full path Direction::North.
 // The transpiler resolves .North to Direction::North using the type context.
+```
+
+### Enum methods — `req` and `def`
+
+Enums can declare methods with the same `req`/`def` keywords as structs ([§8](#8-structs), [`req` vs `def`](#req-vs-def)) — inside the body, after the variants:
+
+```boring
+enum EColor:
+    Red
+    Green
+    Blue
+
+    def string ename():        # mutating keyword, but nothing to mutate
+        match self:
+            Red: "red"
+            Green: "green"
+            Blue: "blue"
+
+enum EDirection:
+    North
+    South
+    East
+    West
+
+    req string label():        # read-only getter
+        match self:
+            North: "nord"
+            South: "sud"
+            East: "est"
+            _: "ouest"
+
+let ec = EColor.Red
+print ec.ename()          # "red" — def works on a plain let binding
+
+let ed = EDirection.South
+print ed.label             # "sud" — req getter, no parens needed
+```
+
+Unlike on structs, `def` and `req` are **interchangeable** on an enum: enum
+variants carry no mutable fields, so there is no `self.field = x` for `def`
+to unlock, and both keywords transpile to `&self`. Neither requires the
+receiver's type to carry `mut`/`var mut` — `ec` and `ed` above are plain
+`let` bindings and both calls above compile and run. The choice between them
+is documentation intent only, exactly like `req`/`def` on top-level free
+functions ([§8](#8-structs)): use `req` for a pure accessor (`label`), `def`
+if the method reads as an action even though it can't actually mutate
+(`ename`). A future compiler version may tighten this and reject `def` on
+enums outright, since it currently promises a mutation guarantee it cannot
+enforce — prefer `req` in new code unless mirroring existing `def` usage.
+
+**Rust equivalent**
+```rust
+impl EColor {
+    fn ename(&self) -> Rc<str> {
+        match self {
+            EColor::Red => "red".into(),
+            EColor::Green => "green".into(),
+            EColor::Blue => "blue".into(),
+        }
+    }
+}
 ```
 
 ### Leading-dot static method calls
@@ -2774,9 +2996,9 @@ struct Counter:
 
     type Item<&a> = int         # concrete definition at struct body level
 
-    as Producer:
-        req Item<&a> next():
-            self.value + 1
+ext Counter as Producer:
+    req Item<&a> next():
+        self.value + 1
 
 let c = Counter(value = 10)
 print c.next()                  # 11
@@ -4827,13 +5049,16 @@ boring build --threading single|multi  # concurrency model (default: multi)
 
 ### Binding × qualifier combinations
 
-Each qualifier imposes constraints on `mut`. `mut` is forbidden with `'shared` — it is a compile error.
+Each qualifier imposes constraints on `mut`. `mut`/`var mut` are forbidden with `'shared` — it is a compile error (no interior mutability to unlock).
+
+`'actor`/`'guard` get no special case in the table below — they're checked exactly like every other type ([§2](#2-variables-and-mutability)): `var` alone is rebind-only, never content-mutable, full stop. (An earlier revision of Boring let `var T'actor x` unlock `def` calls on the strength of the qualifier alone; that exception is retired — see `var mut`.)
 
 | Binding | `'shared` | `'actor` | `'guard` | `'stack` | `'heap` |
 |---|---|---|---|---|---|
 | `let` | yes | yes | yes | yes | yes |
 | `mut` | **error** | yes | yes | yes | yes |
 | `var` | yes | yes | yes | yes | yes |
+| `var mut` | **error** | yes | yes | yes | yes |
 | `lazy` | yes | yes | yes | yes | yes |
 
 Qualifiers carry three kinds of information: Rust mapping, passing semantics, and mutability constraints:
@@ -4848,18 +5073,20 @@ Qualifiers carry three kinds of information: Rust mapping, passing semantics, an
 
 ### `let`, `mut`, `var` with `T'shared` and `T'actor`
 
-`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls — the shared value stays read-only. For mutation: hold the value with `mut` + plain ownership, or use `T'actor` for shared mutable state.
+`var` on a reference-counted type allows **reassigning the pointer** but never unlocks `def` method calls on its own — the shared value stays read-only unless the type also carries `mut`. For mutation: hold the value with `mut`/`var mut` + plain ownership, or use `T'actor`/`T'guard` (with `mut`/`var mut`) for shared mutable state.
 
 | Declaration | Reassign | `req` methods | `def` methods |
 |---|---|---|---|
 | `let T'shared x` / `let x'shared` | ✗ | ✓ | ✗ |
-| `var T'shared x` / `var x'shared` | ✓ | ✓ | ✗ — use `'actor` or `'guard` for mutation |
+| `var T'shared x` / `var x'shared` | ✓ | ✓ | ✗ — `'shared` has no interior mutability, `mut`/`var mut` are compile errors on it |
 | `let T'actor x` / `let x'actor` | ✗ | ✓ | ✗ |
 | `mut T'actor x` / `mut x'actor` | ✗ | ✓ | ✓ |
-| `var T'actor x` / `var x'actor` | ✓ | ✓ | ✓ |
+| `var T'actor x` / `var x'actor` | ✓ | ✓ | ✗ — `var` alone no longer suffices; use `var mut` |
+| `var mut T'actor x` | ✓ | ✓ | ✓ |
 | `let T'guard x` / `let x'guard` | ✗ | ✓ | ✗ |
 | `mut T'guard x` / `mut x'guard` | ✗ | ✓ | ✓ |
-| `var T'guard x` / `var x'guard` | ✓ | ✓ | ✓ |
+| `var T'guard x` / `var x'guard` | ✓ | ✓ | ✗ — same as `'actor` above |
+| `var mut T'guard x` | ✓ | ✓ | ✓ |
 
 ```boring
 struct Counter:
@@ -4871,8 +5098,12 @@ var c'shared  = Counter()
 var c2'shared = Counter()
 c = c2        # OK — reassign the Arc/Rc pointer
 c.get()       # OK — req (non-mutating) methods work fine
-# c.inc()     # ERROR — def methods are forbidden on T'shared even with var
-              #         use T'actor for shared mutable state
+# c.inc()     # ERROR — def methods are forbidden on T'shared regardless of mut/var
+              #         use T'actor (with mut/var mut) for shared mutable state
+
+var mut d'actor = Counter()
+d.inc()       # OK — var mut grants both rebind and content mutation
+d = Counter() # OK — rebind
 ```
 
 ### Explicit borrow syntax — `T&`
@@ -5001,7 +5232,7 @@ struct Counter:
     def increment():
         value += 1
 
-var c'actor = Counter(0)
+var mut c'actor = Counter(0)
 
 with c:
     c.increment()
@@ -5026,8 +5257,8 @@ Existing per-call locking is unchanged for code that doesn't use `with` — this
 
 `with` is one keyword, not a read/write pair — the access level is decided per block:
 
-- **`let`-bound name** — always read-only (mutation on a `let` binding is already a compile error, so there is nothing to scan for).
-- **`mut`/`var`-bound name** — the compiler scans the block's own body (recursing into `if`/`while`/`for`/`match`/closures nested inside it, but never into a called function's own body) for a direct assignment, an index/field assignment, or a `def` (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.
+- **`let`/`var`-bound name (no `mut`)** — always read-only (`var` alone doesn't grant content mutation either — see [§2](#2-variables-and-mutability) — so there is nothing to scan for).
+- **`mut`/`var mut`-bound name** — the compiler scans the block's own body (recursing into `if`/`while`/`for`/`match`/closures nested inside it, but never into a called function's own body) for a direct assignment, an index/field assignment, or a `def` (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.
 
 ```boring
 struct Cell:
@@ -5039,7 +5270,7 @@ struct Cell:
     def bump():
         value += 1
 
-var b'guard = Cell(10)
+var mut b'guard = Cell(10)
 
 with b:
     print b.peek()   # read-only block — RwLock::read()
@@ -5541,12 +5772,14 @@ will reject the capture at runtime, and the generated Rust would not compile
 `Arc<std::sync::Mutex<T>>` and inserts `.lock().unwrap()` automatically at every
 field access and method call. No explicit locking is ever written in Boring source.
 
-Mutation goes through the lock, not through `&mut self` on the binding — so, unlike
-plain owned types, `mut` and `var` behave identically here (both unlock `def` calls;
-`var` additionally allows reassigning the pointer). `let` still gives a **read-only**
-handle: `req` methods and field reads work, but `def` calls are rejected, exactly as
-for any other type. Use `mut`/`var` when the binding itself needs to mutate the
-shared value; use `let` to hand out a read-only view of the same underlying lock.
+Mutation goes through the lock, not through `&mut self` on the binding — but Boring
+still gates it on the binding itself, with **no exception** for `'actor`/`'guard`
+([§2](#2-variables-and-mutability)): `mut`/`var mut` unlock `def` calls, plain `var`
+(no `mut`) only allows reassigning the pointer, and `let` gives a **read-only**
+handle — `req` methods and field reads work, but `def` calls are rejected, exactly as
+for any other type. Use `mut`/`var mut` when the binding itself needs to mutate the
+shared value; use `let` (or plain `var`, if it also needs reassigning) to hand out a
+read-only view of the same underlying lock.
 
 In an **async context** (inside a `task` function), use **`T'actor'task`** instead —
 this uses `Arc<tokio::sync::Mutex<T>>` and inserts `.lock().await` so the lock can
@@ -5630,7 +5863,7 @@ struct Counter:
         self.value += 1
 
 task run():
-    let c'guard'task = Counter()
+    mut c'guard'task = Counter()
     c.inc()                   # → c.write().await.inc()
     c.inc()
     print "count = {c.get()}" # → c.read().await.get()
@@ -6457,7 +6690,8 @@ x ?= compute_value()   # subsequent calls — no-op
 |---|---|---|---|
 | `let` | no | no | immediate — `=` required |
 | `mut` | no | yes | immediate — `=` required |
-| `var` | yes | yes | immediate — `=` required |
+| `var` | yes | no | immediate — `=` required |
+| `var mut` | yes | yes | immediate — `=` required |
 | `lazy` | no | no | deferred — `?=` required, immutable after first assignment |
 
 #### Rules

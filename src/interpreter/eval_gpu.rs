@@ -527,8 +527,10 @@ fn run_kernel_parallel(
         for (field_decl, (name, tv)) in decl_fields.iter().zip(initial_fields.iter()) {
             let val = from_thread_value(tv.clone(), &thread_env);
             match field_decl.binding {
-                FieldBinding::Mut | FieldBinding::Var =>
-                    thread_env.borrow_mut().define_mut(name, val),
+                FieldBinding::Mut | FieldBinding::Var => {
+                    thread_env.borrow_mut().define_mut(name, val);
+                    thread_env.borrow_mut().mark_content_mutable(name);
+                }
                 FieldBinding::Let =>
                     thread_env.borrow_mut().define(name, val),
             }
@@ -841,6 +843,8 @@ fn run_kernel_parallel(
                 shared_bindings: Default::default(),
                 actor_bindings: Default::default(),
                 lazy_vars: Default::default(),
+                content_mutable: Default::default(),
+                declared_types: Default::default(),
             })));
             let mut o = obj.borrow_mut();
             if let Some(entry) = o.fields.iter_mut().find(|(n, _)| n == name) {
@@ -1132,10 +1136,12 @@ impl Interpreter {
             for param in &init_decl.params {
                 let val = positional.pop_front().unwrap_or(Value::Nil);
                 env.borrow_mut().define_mut(&param.name, val);
+                env.borrow_mut().mark_content_mutable(&param.name);
             }
             for (_, (name, val)) in decl.fields.iter().zip(fields.iter()) {
                 if !param_names.contains(name) {
                     env.borrow_mut().define_mut(name, val.clone());
+                    env.borrow_mut().mark_content_mutable(name);
                 }
             }
             match self.exec_block(&init_decl.body, Rc::clone(&env)) {

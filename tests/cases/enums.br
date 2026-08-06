@@ -165,7 +165,7 @@ struct EPerson:
     pub let string name
     pub var int age
 
-var epp = EPerson(name = "Alice", age = 30)
+mut epp = EPerson(name = "Alice", age = 30)
 epp.age = 31
 print epp.name
 print epp.age

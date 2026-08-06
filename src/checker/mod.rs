@@ -448,15 +448,39 @@ impl Checker {
         self.warnings.push(CheckWarning::at(msg, line, col));
     }
 
-    // ── Qualifier constraint: `mut 'shared` ───────────────────────────────────
+    // ── Qualifier constraint: `mut 'shared` / `mut 'weak` ─────────────────────
 
-    fn check_qualifier_constraint(&mut self, binding: &BindingKind, ty: &Option<Type>, line: usize, col: usize) {
+    /// `var_mut` — see `LetStmt.var_mut`'s doc: `binding == Mut` (bare/`let
+    /// mut`) always requests content-mutation; `binding == Var` only does with
+    /// an explicit second `mut` (`var mut`). Pass `false` for a parameter,
+    /// which has no `var_mut` concept of its own.
+    fn requests_mut(binding: &BindingKind, var_mut: bool) -> bool {
+        matches!(binding, BindingKind::Mut) || (matches!(binding, BindingKind::Var) && var_mut)
+    }
+
+    fn check_qualifier_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
-        if !matches!(binding, BindingKind::Mut) { return; }
+        if !Self::requests_mut(binding, var_mut) { return; }
         let Some(ty) = ty else { return };
+        // `mut` always wraps the parsed type in `Type::Mut` now (§1) — strip it
+        // before inspecting the shape.
+        let ty = ty.without_mut();
         if self.type_has_shared(ty) {
             self.error(
                 "cannot combine `mut` with `'shared`: shared references are immutable by design; use `'actor` for interior mutability",
+                line, col,
+            );
+        }
+        // A `'weak` reference has no operations besides `.upgrade()`/`.clone()`
+        // (both non-mutating) until it's upgraded — nothing for `mut` to unlock
+        // on the weak reference itself, regardless of what the *upgraded* value
+        // would allow (`T'shared'weak`, `T'actor'weak`, `T'guard'weak` alike —
+        // docs/mut-type-modifier.md's rejection table). Checked on the
+        // *outermost* qualifier only — `'weak` is always the last link in the
+        // chain (`T'actor'weak`, never `T'weak'actor`).
+        if matches!(ty, Type::Qualified(_, OwnerQual::Weak)) {
+            self.error(
+                "cannot combine `mut` with `'weak`: a weak reference has no operations besides `.upgrade()`/`.clone()` until upgraded — there is nothing for `mut` to unlock",
                 line, col,
             );
         }
@@ -481,13 +505,65 @@ impl Checker {
     // `mut Counter c` (permits `c.inc()`), there is no operation that becomes
     // legal on `t` under `mut` that wasn't already legal under `let`. `var`
     // remains meaningful — it allows reassigning `t` to a whole new tuple.
-    fn check_tuple_mut_constraint(&mut self, binding: &BindingKind, ty: &Option<Type>, line: usize, col: usize) {
+    //
+    // Checked both when the tuple type is explicit (`mut (T1, T2) t = ...`)
+    // and when it's only inferred from a tuple-literal initializer
+    // (`mut t = (1, 2)`) — the same constraint applies either way, so the
+    // absence of a type annotation must not let it slip through.
+    fn check_tuple_mut_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, value: &Option<Expr>, line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
-        if !matches!(binding, BindingKind::Mut) { return; }
-        let Some(ty) = ty else { return };
-        if matches!(ty, Type::Tuple(_)) {
+        if !Self::requests_mut(binding, var_mut) { return; }
+        // `mut` always wraps the parsed type in `Type::Mut` now (§1) — strip it
+        // before inspecting the shape, same as `check_qualifier_constraint`.
+        let is_tuple = match ty {
+            Some(ty) => matches!(ty.without_mut(), Type::Tuple(_)),
+            None => matches!(value, Some(v) if matches!(v.kind, ExprKind::Tuple(_))),
+        };
+        if is_tuple {
             self.error(
                 "cannot mark a tuple binding as `mut`: tuples have no in-place mutation — use `let` (fixed) or `var` (reassignable)",
+                line, col,
+            );
+        }
+    }
+
+    // ── Qualifier constraint: `mut` on a scalar ────────────────────────────────
+    //
+    // No `def` methods exist on a primitive — nothing for `mut` to unlock.
+    // Retires the historical "`mut` ≡ `var` for scalars" shortcut
+    // (docs/mut-type-modifier.md §1): `mut int x = 0` is a checker error now,
+    // not a silent downgrade to `var int x = 0`. Checked both when the type is
+    // explicit and when it's only inferred from a literal initializer, mirroring
+    // `check_tuple_mut_constraint` exactly.
+    fn is_scalar_type(ty: &Type) -> bool {
+        matches!(ty,
+            Type::Int | Type::Uint | Type::Uint8
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
+                | Type::Float | Type::Bool)
+        // Lowercase Boring keywords (`int`, `uint`, `float`, `bool`, sized
+        // variants) parse as `Type::Named` — resolved to the variants above only
+        // later (interpreter alias table / transpiler size lookup), which the
+        // checker doesn't have access to — match the spelling directly instead,
+        // same list `emit_top.rs`'s `is_copy_type` already keys off of.
+        || matches!(ty, Type::Named(n) if matches!(n.as_str(),
+            "int" | "uint" | "uint8" | "float" | "bool"
+            | "int8" | "int16" | "int32" | "int64" | "int128"
+            | "uint16" | "uint32" | "uint64" | "uint128"
+            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"))
+    }
+
+    fn check_scalar_mut_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, value: &Option<Expr>, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        if !Self::requests_mut(binding, var_mut) { return; }
+        let is_scalar = match ty {
+            Some(ty) => Self::is_scalar_type(ty.without_mut()),
+            None => matches!(value, Some(v) if matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))),
+        };
+        if is_scalar {
+            self.error(
+                "cannot mark a scalar as `mut`: primitives have no `def` methods to unlock — use `var` for a rebindable scalar",
                 line, col,
             );
         }
@@ -729,7 +805,7 @@ impl Checker {
         self.push_scope();
         for p in &f.params {
             if p.mutable {
-                self.check_qualifier_constraint(&BindingKind::Mut, &p.ty, p.line, p.col);
+                self.check_qualifier_constraint(&BindingKind::Mut, false, &p.ty, p.line, p.col);
             }
             self.define_typed(&p.name, param_binding(p), p.ty.clone());
         }
@@ -798,8 +874,9 @@ impl Checker {
     }
 
     fn check_let_stmt(&mut self, s: &LetStmt) {
-        self.check_qualifier_constraint(&s.binding, &s.ty, s.line, s.col);
-        self.check_tuple_mut_constraint(&s.binding, &s.ty, s.line, s.col);
+        self.check_qualifier_constraint(&s.binding, s.var_mut, &s.ty, s.line, s.col);
+        self.check_tuple_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
+        self.check_scalar_mut_constraint(&s.binding, s.var_mut, &s.ty, &s.value, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
@@ -834,14 +911,40 @@ impl Checker {
             },
             _ => None,
         };
+        // Corresponding tuple-literal element, when the RHS is a literal tuple —
+        // lets each slot's `mut` constraints see an inferred-type value the same
+        // way a plain `let_stmt`'s `check_scalar_mut_constraint`/
+        // `check_tuple_mut_constraint` already do for `mut t = (1, 2)`.
+        let literal_elems: Option<&Vec<Expr>> = match &s.value.kind {
+            ExprKind::Tuple(elems) => Some(elems),
+            _ => None,
+        };
         for (i, b) in s.bindings.iter().enumerate() {
+            if b.bare_unmarked_after_keyworded_sibling {
+                self.warning(
+                    format!(
+                        "`{}` is unmarked in a bare destructure right after a differently-keyworded slot — it defaults to plain `let`, not the previous slot's keyword; write it explicitly if that's not what you meant",
+                        b.name,
+                    ),
+                    s.line, s.col,
+                );
+            }
+            if b.name != "_" {
+                let elem_value = literal_elems.and_then(|elems| elems.get(i)).cloned();
+                self.check_qualifier_constraint(&b.binding, b.var_mut, &b.ty, s.line, s.col);
+                self.check_tuple_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
+                self.check_scalar_mut_constraint(&b.binding, b.var_mut, &b.ty, &elem_value, s.line, s.col);
+            }
             if b.name == "_" { continue; }
             let position_resident = tuple_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
             let has_explicit_resident_ty = b.ty.as_ref().map(|t| t.gpu_resident_qual().is_some()).unwrap_or(false);
             let resident_from_field = position_resident && has_explicit_resident_ty;
             if let Some(scope) = self.scopes.last_mut() {
+                // Each slot's own resolved binding, not the statement's overall
+                // one (they can now differ per-element — docs/mut-type-modifier.md
+                // §4).
                 scope.insert(b.name.clone(), Binding {
-                    kind: s.binding.clone(),
+                    kind: b.binding.clone(),
                     ty: b.ty.clone(),
                     resident_from_field,
                     kernel_type: None,
@@ -1141,7 +1244,19 @@ impl Checker {
                             assign_line, assign_col,
                         );
                     }
-                    BindingKind::Mut | BindingKind::Var => {}
+                    // `mut` is never rebindable — docs/mut-type-modifier.md §1
+                    // decided this with no exception (retiring the historical
+                    // "mut ≡ var for scalars" shortcut). Previously this arm was
+                    // `Mut | Var => {}`, silently allowing reassignment through a
+                    // `mut` binding for any type, not just scalars — a bug this
+                    // document's model corrects.
+                    BindingKind::Mut => {
+                        self.error(
+                            format!("cannot assign to `{name}`: declared as `mut` (fixed) — use `var mut` for a reassignable, content-mutable binding"),
+                            assign_line, assign_col,
+                        );
+                    }
+                    BindingKind::Var => {}
                 }
             }
             // Unknown variable — undefined-var check belongs to the interpreter/transpiler.
@@ -1283,8 +1398,30 @@ mod tuple_mut_tests {
     #[test]
     fn mut_on_tuple_destructure_is_unaffected() {
         // `mut (a, b) = t` applies `mut` to the two extracted variables
-        // individually, not to the tuple as a whole — must stay legal.
+        // individually, not to the tuple as a whole — that part is still legal.
+        // Retired by docs/mut-type-modifier.md §1 ("no exceptions"): `a`/`b` are
+        // `int` here, and `mut` is never rebindable regardless of type (the
+        // historical "mut ≡ var for scalars" shortcut this test used to pin
+        // down) — `a = 5` is now a compiler-flagged error, exactly like a plain
+        // `mut a = 1; a = 5` local binding already was before this document.
         let src = "def main():\n    mut (a, b) = (1, 2)\n    a = 5\n    print a\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("mut") && e.contains("a")), "expected a reassign-to-mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn mut_on_inferred_tuple_type_is_rejected() {
+        // No explicit `(int, int)` annotation — the tuple type is only
+        // inferred from the literal initializer. The constraint must still
+        // fire; only checking the explicit annotation would let this slip.
+        let src = "def main():\n    mut t = (1, 2)\n    print t.0\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|e| e.contains("tuple") && e.contains("mut")), "expected a tuple/mut rejection, got {errs:?}");
+    }
+
+    #[test]
+    fn let_on_inferred_tuple_type_is_fine() {
+        let src = "def main():\n    let t = (1, 2)\n    print t.0\n";
         let errs = errors_for(src);
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }

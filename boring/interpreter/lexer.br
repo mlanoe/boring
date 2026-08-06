@@ -764,5 +764,5 @@ struct Lexer:
 
 def [Token] lex(string source) throws:
     let preprocessed = preprocess_triple_strings(source)
-    var lexer = Lexer(preprocessed.chars())
+    mut lexer = Lexer(preprocessed.chars())
     return lexer.tokenize(preprocessed)

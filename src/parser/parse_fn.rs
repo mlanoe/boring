@@ -477,20 +477,40 @@ impl Parser {
         let explicit_pub = self.eat(&TokenKind::Pub);
         // `transient` implies `var` (mutable)
         let transient = self.eat(&TokenKind::Transient);
-        let (is_pub, mutable) = if transient {
+        // Field declarations now get the same `let`/`mut`/`var`(` mut`) three-way
+        // as local bindings (docs/mut-type-modifier.md §3/checklist item 1) —
+        // `mutable` is the *reassignment* axis (`self.field = x`) only;
+        // content-mutation (`self.field.method()`) comes from wrapping `ty` in
+        // `Type::Mut` below, exactly like `wrap_type_mut` does for let_stmt.
+        let (is_pub, mutable, wrap_mut) = if transient {
             // transient → mutable (implicitly var), private unless pub was explicit
-            (explicit_pub, true)
+            (explicit_pub, true, false)
+        } else if self.eat(&TokenKind::Mut) {
+            // bare `mut` — private unless `pub` was explicit; not reassignable,
+            // content-mutable (§1: `mut Type` ≡ `let mut Type`, no exceptions)
+            (explicit_pub, false, true)
         } else if self.eat(&TokenKind::Let) {
-            // explicit `let` → private unless `pub` was explicit
-            (explicit_pub, false)
+            if self.eat(&TokenKind::Mut) {
+                // `let mut` ≡ bare `mut`
+                (explicit_pub, false, true)
+            } else {
+                // explicit `let` → private unless `pub` was explicit
+                (explicit_pub, false, false)
+            }
         } else if self.eat(&TokenKind::Var) {
-            // explicit `var` → private unless `pub` was explicit
-            (explicit_pub, true)
+            if self.eat(&TokenKind::Mut) {
+                // `var mut` — reassignable AND content-mutable
+                (explicit_pub, true, true)
+            } else {
+                // explicit `var` → private unless `pub` was explicit
+                (explicit_pub, true, false)
+            }
         } else {
             // no keyword → implicit `pub let`
-            (true, false)
+            (true, false, false)
         };
         let ty = self.parse_type()?;
+        let ty = if wrap_mut { Self::wrap_type_mut(ty) } else { ty };
         let name = self.expect_ident()?;
         let default = if self.eat(&TokenKind::Eq) {
             Some(self.parse_expr()?)

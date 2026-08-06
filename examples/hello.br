@@ -285,7 +285,7 @@ struct Counter:
     req int get():
         self.value
 
-var ctr = Counter()
+mut ctr = Counter()
 ctr.inc()
 ctr.inc()
 ctr.inc()
@@ -835,7 +835,7 @@ task void run_tasks():
     w2 = w3                    # OK — reassign the Arc pointer
     print "w2.name after reassign: {w2.name}"    # carol (req method, allowed)
     # T'actor: Arc<Mutex<T>>, all accesses go through .lock().await
-    var SharedCount'actor c = SharedCount()
+    var mut SharedCount'actor c = SharedCount()
     c.inc()
     c.inc()
     print "counter = {c.value}"    # c.lock().await.value

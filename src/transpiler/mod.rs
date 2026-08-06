@@ -413,6 +413,20 @@ struct Transpiler {
     /// trait_name → set of method names declared in that trait (signatures + defaults).
     /// Used to split struct body methods between `impl Trait for Struct {}` and `impl Struct {}`.
     pub(crate) trait_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// trait_name → (default method name → `mutating`). A struct that conforms to
+    /// a trait but doesn't override a default method dispatches through the
+    /// *trait's* Rust default impl directly (no per-struct copy — unlike the
+    /// interpreter, which clones trait defaults into each struct's method list
+    /// at registration; see `Interpreter`'s `Item::Struct` handling) — so
+    /// `struct_req_methods`/`struct_task_methods` (populated only from each
+    /// struct's own body) never gets an entry for an un-overridden default.
+    /// This is the fallback the local-binding content-mutation diagnostic in
+    /// `emit_methods.rs` consults via `struct_protocols` before concluding a
+    /// call is unaccounted-for (and thus assumed mutating).
+    pub(crate) trait_default_mutating: std::collections::HashMap<String, std::collections::HashMap<String, bool>>,
+    /// struct_name → trait names it conforms to (`struct S as Trait1, Trait2:`).
+    /// Paired with `trait_default_mutating` — see its doc.
+    pub(crate) struct_protocols: std::collections::HashMap<String, Vec<String>>,
     /// Types reachable via a user-defined `as T:` conversion (lowercased).
     /// Used in emit_expr to route `x as T` to the generated `into_t()` method.
     pub(crate) user_conv_targets: std::collections::HashSet<String>,
@@ -453,6 +467,24 @@ struct Transpiler {
     /// Local variables and parameters that are mutable but non-rebindable (`mut` binding, or
     /// `mut` param). Used to reject passing a `mut` binding to a `var` out-parameter.
     pub(crate) mut_local_vars: std::collections::HashSet<String>,
+    /// Local variables whose content may be mutated — `def` calls, field writes
+    /// (docs/mut-type-modifier.md). Independent of `mut_local_vars`/
+    /// `immutable_local_vars` (the *rebind* axis): a plain `var Point p` is
+    /// rebindable but NOT in this set; only `var mut`/bare-or-`let mut` is.
+    /// Params are always included here (the parameter model's own `mut`/`var`
+    /// split isn't enforced yet — see docs/mut-type-modifier.md's "Parameters"
+    /// section — so both still grant full content access, unchanged).
+    pub(crate) content_mutable_local_vars: std::collections::HashSet<String>,
+    /// Names bound by an actual `let_stmt`/destructure/parameter — i.e. the
+    /// binding forms docs/mut-type-modifier.md actually covers. `known_local_vars`
+    /// also holds names from `if let`/`while let`/`match` patterns/`for` loop
+    /// vars/etc., which this document does NOT touch (out of scope) and which
+    /// keep their historical, permissive content-mutation behavior. The
+    /// content-mutation diagnostics in `emit_methods.rs`/`emit_expr.rs` consult
+    /// THIS set (not `known_local_vars`) before concluding a name is even
+    /// eligible to be flagged — a name outside it is never rejected, no matter
+    /// what `content_mutable_local_vars` says.
+    pub(crate) mut_checked_local_vars: std::collections::HashSet<String>,
     /// Names declared as `type Name as InnerType` newtype wrappers.
     /// Used in emit_constructor to emit `Name(val)` (tuple struct) rather than `Name { field: val }`.
     pub(crate) newtype_types: std::collections::HashSet<String>,
@@ -868,6 +900,8 @@ impl Transpiler {
             fn_declared_void: false,
             suppress_ok_wrap: false,
             trait_method_names: std::collections::HashMap::new(),
+            trait_default_mutating: std::collections::HashMap::new(),
+            struct_protocols: std::collections::HashMap::new(),
             user_conv_targets: std::collections::HashSet::new(),
             string_arc_vars: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
@@ -880,6 +914,8 @@ impl Transpiler {
             fn_current_params_mut: std::collections::HashSet::new(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),
+            content_mutable_local_vars: std::collections::HashSet::new(),
+            mut_checked_local_vars: std::collections::HashSet::new(),
             newtype_types: std::collections::HashSet::new(),
             newtype_inner: std::collections::HashMap::new(),
             var_newtype_type: std::collections::HashMap::new(),
@@ -1896,6 +1932,7 @@ impl Transpiler {
         ext_methods_by_type: &std::collections::HashMap<&str, Vec<&crate::ast::FnDecl>>,
         ext_setters_by_type: &std::collections::HashMap<&str, Vec<&crate::ast::SetDecl>>,
     ) {
+        self.struct_protocols.insert(s.name.clone(), s.protocols.clone());
         // Don't register method names in fn_sigs — they're only called as obj.method()
         // and would shadow top-level functions with the same name.
         let mut fields: Vec<(String, Type)> = s.fields.iter()
@@ -2140,6 +2177,14 @@ impl Transpiler {
             // Register `req` (getter) methods from ext blocks in struct_getters.
             if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
                 self.struct_getters.insert(format!("{}::{}", tname, m.name));
+            }
+            // Track req (non-mutating) ext methods too — `s.methods`'s own loop
+            // above only sees the struct's own body, missing `ext`-added methods
+            // entirely (a pre-existing gap: the param-mutability diagnostic and
+            // the equivalent local-binding one both consult this set to decide
+            // "is this call actually mutating," not just getters).
+            if !m.mutating {
+                self.struct_req_methods.insert(format!("{}::{}", tname, m.name));
             }
             // Track return types for managed-mode inference.
             if let Some(ret_ty) = &m.return_ty {
@@ -2464,25 +2509,21 @@ impl Transpiler {
                     self.pre_register_fn(f);
                 }
                 Item::Struct(s) if s.name == "Box" => {
+                    // A user-defined struct literally named `Box` (distinct from
+                    // Rust's own `std::boxed::Box`, hence `user_defines_box`
+                    // forcing `std::boxed::Box` everywhere `T'` would otherwise
+                    // emit bare `Box`) — still needs the SAME full registration
+                    // as any other struct (methods, `struct_req_methods`,
+                    // `struct_protocols`, ext blocks, ...). This used to
+                    // duplicate just the field-collection subset of
+                    // `pre_scan_struct_item` inline and skip the rest — a real,
+                    // narrow gap (e.g. `var Box b; b.some_req_method()` was
+                    // never recognized as req, always assumed mutating) that
+                    // predated this document but was silent until the new
+                    // local-binding content-mutation diagnostic below started
+                    // actually consulting `struct_req_methods`.
                     self.user_defines_box = true;
-                    // Also register struct fields (fall through below).
-                    let mut fields: Vec<(String, Type)> = s.fields.iter()
-                        .map(|f| (f.name.clone(), f.ty.clone()))
-                        .collect();
-                    if fields.is_empty() {
-                        for init in &s.inits {
-                            if init.body.is_empty() {
-                                for p in &init.params {
-                                    if let Some(ty) = &p.ty {
-                                        fields.push((p.name.clone(), ty.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
-                    if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
-                    self.struct_fields.insert(s.name.clone(), fields);
+                    self.pre_scan_struct_item(s, &ext_methods_by_type, &ext_setters_by_type);
                     if s.methods.iter().any(|m| m.name.is_empty()) {
                         self.callable_structs.insert(s.name.clone());
                     }
@@ -2498,6 +2539,10 @@ impl Transpiler {
                     for sig in &t.signatures { names.insert(sig.name.clone()); }
                     for d   in &t.defaults   { names.insert(d.name.clone()); }
                     self.trait_method_names.insert(t.name.clone(), names);
+                    let default_mutating: std::collections::HashMap<String, bool> = t.defaults.iter()
+                        .map(|d| (d.name.clone(), d.mutating && !d.task))
+                        .collect();
+                    self.trait_default_mutating.insert(t.name.clone(), default_mutating);
                     // Track associated type names declared in this trait.
                     if !t.assoc_types.is_empty() {
                         let assoc_names: std::collections::HashSet<String> = t.assoc_types.iter()

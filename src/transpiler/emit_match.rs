@@ -956,7 +956,7 @@ impl Transpiler {
         // These are scoped to this arm body and removed afterward.
         let mut bound_actors: Vec<String> = Vec::new();
         for (name, ty) in &bound_types {
-            if matches!(ty, Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
+            if matches!(ty.without_mut(), Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
                 bound_actors.push(name.clone());
                 // Track actor-bound vars in var_mutex_types so emit_let_value knows they are
                 // already Arc<Mutex<T>> and avoids double-wrapping them.

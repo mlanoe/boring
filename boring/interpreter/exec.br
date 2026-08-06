@@ -40,7 +40,7 @@ def Signal? exec_if_as_do(mut Interpreter interp, IfStmt s):
         let cond_val = eval_expr(interp, branch.cond)
         let b = expect_bool(cond_val)
         if b:
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block_do(interp, branch.body)
@@ -49,7 +49,7 @@ def Signal? exec_if_as_do(mut Interpreter interp, IfStmt s):
                 return sig
             return nil
     if let else_body = s.else_body:
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let prev = interp.current_env
         interp.current_env = child
         let sig = exec_block_do(interp, else_body)
@@ -63,7 +63,7 @@ def Signal? exec_if_as_expr(mut Interpreter interp, IfStmt s):
         let cond_val = eval_expr(interp, branch.cond)
         let b = expect_bool(cond_val)
         if b:
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block_fn(interp, branch.body)
@@ -72,7 +72,7 @@ def Signal? exec_if_as_expr(mut Interpreter interp, IfStmt s):
                 return sig
             return ReturnSignal(Value.Nil)
     if let else_body = s.else_body:
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let prev = interp.current_env
         interp.current_env = child
         let sig = exec_block_fn(interp, else_body)
@@ -256,7 +256,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                     Value.Bool(all_true)
             let passed = val_to_bool(cond_val)
             if not passed:
-                let child = new_env(interp.current_env)
+                mut child = new_env(interp.current_env)
                 let prev = interp.current_env
                 interp.current_env = child
                 let sig = exec_block(interp, s.else_body)
@@ -332,7 +332,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
             # `with` exists for already behaves as a plain value — same precedent
             # as every kernel-context qualifier already being a no-op in this
             # interpreter. See docs/scoped-access-blocks.md, "Cross-target behavior".
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block(interp, s.body)
@@ -363,7 +363,7 @@ def Value eval_in_env(mut Interpreter interp, Env'actor env, Expr expr):
 
 def bool exec_if_let_match(mut Interpreter interp, [CondClause] clauses):
     # Evaluate all bindings in the parent scope, populate child env
-    let child = new_env(interp.current_env)
+    mut child = new_env(interp.current_env)
     var all_matched = true
     var ci = 0
     while all_matched and ci < clauses.length:
@@ -393,7 +393,7 @@ def bool exec_if_let_match(mut Interpreter interp, [CondClause] clauses):
 def Signal? exec_while_let_pattern(mut Interpreter interp, Pattern pattern, Expr value_expr, [Stmt] body):
     while true:
         let v = eval_expr(interp, value_expr)
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         if not match_pattern(v, pattern, child):
             break
         let prev = interp.current_env
@@ -413,7 +413,7 @@ def Signal? exec_while_let_simple(mut Interpreter interp, string name, Expr valu
         match v:
             Value.Nil: break
             _:
-                let child = new_env(interp.current_env)
+                mut child = new_env(interp.current_env)
                 child.define(name, v)
                 let prev = interp.current_env
                 interp.current_env = child
@@ -436,7 +436,7 @@ def Signal? exec_while_let(mut Interpreter interp, WhileLetStmt s):
 
 def Signal? exec_loop(mut Interpreter interp, LoopStmt s):
     while true:
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let prev = interp.current_env
         interp.current_env = child
         let sig = exec_block(interp, s.body)
@@ -452,7 +452,7 @@ def Signal? exec_loop(mut Interpreter interp, LoopStmt s):
 
 def Signal? exec_do_while(mut Interpreter interp, DoWhileStmt s):
     while true:
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let prev = interp.current_env
         interp.current_env = child
         let sig = exec_block(interp, s.body)
@@ -475,14 +475,14 @@ def Signal? exec_if(mut Interpreter interp, IfStmt s):
         let cond_val = eval_expr(interp, branch.cond)
         let b = expect_bool(cond_val)
         if b:
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block(interp, branch.body)
             interp.current_env = prev
             return sig
     if let else_body = s.else_body:
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let prev = interp.current_env
         interp.current_env = child
         let sig = exec_block(interp, else_body)
@@ -501,7 +501,7 @@ def Signal? exec_while(mut Interpreter interp, WhileStmt s):
         if not b:
             running = false
         else:
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block(interp, s.body)
@@ -526,7 +526,7 @@ def Signal? exec_for(mut Interpreter interp, ForStmt s):
     while not done and idx < items.length:
         let item = items[idx]
         idx = idx + 1
-        let child = new_env(interp.current_env)
+        mut child = new_env(interp.current_env)
         let vars = s.vars
         if vars.length == 1:
             child.define_mut(vars[0], item)
@@ -613,7 +613,7 @@ def Signal? exec_match_stmt(mut Interpreter interp, MatchStmt s):
         while not matched and pat_idx < arm.patterns.length:
             let pattern = arm.patterns[pat_idx]
             pat_idx = pat_idx + 1
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let did_match = match_pattern(subject, pattern, child)
             if did_match:
                 var guard_ok = true
@@ -728,7 +728,7 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
 # ─── exec_try ─────────────────────────────────────────────────────────────────
 
 def Signal? exec_try(mut Interpreter interp, TryStmt s):
-    let child = new_env(interp.current_env)
+    mut child = new_env(interp.current_env)
     let prev = interp.current_env
     interp.current_env = child
     let body_sig = exec_block(interp, s.body)
@@ -756,7 +756,7 @@ def Signal? exec_try(mut Interpreter interp, TryStmt s):
             let matches = num_types == 0 or type_matches
             if matches:
                 handled = true
-                let cenv = new_env(interp.current_env)
+                mut cenv = new_env(interp.current_env)
                 cenv.define("error", exc_val)
                 let cprev = interp.current_env
                 interp.current_env = cenv
@@ -839,7 +839,7 @@ def [Value] exec_stream_fn(mut Interpreter interp, [Stmt] stmts):
 
 def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? captured):
     let base_env = captured else interp.global_env
-    let fn_env = new_env(base_env.clone())
+    mut fn_env = new_env(base_env.clone())
     var {string=Value} labeled = {}
     var positional = []
     for val in args:
@@ -898,7 +898,7 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
 # ─── call_closure ─────────────────────────────────────────────────────────────
 
 def Value call_closure(mut Interpreter interp, [Param] params, ClosureBody body, [Value] args, Env? captured):
-    let fn_env = new_env(captured)
+    mut fn_env = new_env(captured)
     var i = 0
     for param in params:
         let val = if i < args.length: args[i] else: Nil

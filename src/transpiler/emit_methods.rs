@@ -326,8 +326,24 @@ impl Transpiler {
                 let (rust_method, extra_wrap) = map_method(method, args.len());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let struct_name = self.var_struct_types.get(v.as_str()).cloned().unwrap_or_default();
-                let req_key = format!("{}::{}", struct_name, method);
-                let is_req = self.struct_req_methods.contains(&req_key);
+                let is_req = self.method_is_req_or_task(&struct_name, method);
+                // `'guard` (RwLock) gets no exception from the general rule —
+                // docs/mut-type-modifier.md §1: mutation goes through the lock
+                // rather than `&mut self`, but Boring still gates it on the
+                // binding, same as every other type. `var T'guard x` alone no
+                // longer suffices; only `var mut T'guard x` does. Rust's own
+                // type system wouldn't catch this (the RwLock always allows
+                // `.write()` regardless of Boring's own `mut` bookkeeping).
+                if !is_req && self.known_local_vars.contains(v.as_str())
+                    && !self.content_mutable_local_vars.contains(v.as_str())
+                    && self.mut_checked_local_vars.contains(v.as_str())
+                    // Permissive when the receiver's struct type couldn't even
+                    // be resolved — see the matching comment in
+                    // `try_emit_mutex_method`.
+                    && self.struct_fields.contains_key(struct_name.as_str())
+                {
+                    self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
+                }
                 let guard = if is_req {
                     if is_task { self.guard_task_read_access(v) } else { self.guard_read_access(v) }
                 } else {
@@ -387,6 +403,30 @@ impl Transpiler {
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
             if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                // `'actor` gets no exception from the general rule either — see
+                // the matching check/comment in `try_emit_rwlock_method`.
+                // Params are excluded (unchanged, still-unenforced parameter
+                // model — see `content_mutable_local_vars`'s doc); only a
+                // genuine local binding is checked here.
+                if !self.fn_current_params.contains_key(v.as_str())
+                    && self.known_local_vars.contains(v.as_str())
+                    && !self.content_mutable_local_vars.contains(v.as_str())
+                    && self.mut_checked_local_vars.contains(v.as_str())
+                {
+                    let struct_name = self.var_struct_types.get(v.as_str()).cloned().unwrap_or_default();
+                    // If we can't even resolve the receiver's struct type (a
+                    // real inference gap independent of this diagnostic — e.g.
+                    // an inferred `let cur = interp.current_env` chained field
+                    // read), we have no basis to call it mutating either;
+                    // don't guess. Same permissive-on-unknown shape as the
+                    // general local-binding check in `emit_method_call_fallback`
+                    // (gated on `self.struct_fields.contains_key(sn)`).
+                    if self.struct_fields.contains_key(struct_name.as_str())
+                        && !self.method_is_req_or_task(&struct_name, method)
+                    {
+                        self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
+                    }
+                }
                 let (mut rust_method, extra_wrap) = map_method(method, args.len());
                 // `append(xs)` where xs is a collection → use `extend` instead of `push`
                 // so that Vec<T> arguments are flattened into the actor collection.
@@ -1431,6 +1471,108 @@ impl Transpiler {
                         }
                     }
                 }
+            } else if v != "self"
+                && !self.fn_current_params.contains_key(v.as_str())
+                && self.known_local_vars.contains(v.as_str())
+                && !self.content_mutable_local_vars.contains(v.as_str())
+                && self.mut_checked_local_vars.contains(v.as_str())
+                && !self.var_mutex_types.contains(v.as_str())
+                && !self.var_mutex_task_types.contains(v.as_str())
+                && !self.var_rwlock_types.contains(v.as_str())
+                && !self.var_rwlock_task_types.contains(v.as_str())
+            {
+                // Same diagnostic as above, for a plain local binding rather than
+                // a parameter — docs/mut-type-modifier.md's Implementation
+                // checklist item 0: `var Point p` alone no longer grants
+                // `p.inc()`; only `mut`/`var mut` does. Rust's own borrow
+                // checker would NOT catch this on its own (the emitted binding
+                // is `let mut` either way — see `BindingKind::is_mutable`'s
+                // doc), so this has to be a Boring-level check.
+                let struct_name = self.var_struct_types.get(v.as_str()).cloned()
+                    .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                        if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
+                    }));
+                if let Some(sn) = struct_name {
+                    if self.struct_fields.contains_key(sn.as_str())
+                        && !self.method_is_req_or_task(sn.as_str(), method)
+                    {
+                        self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, sn, v, sn, v));
+                    }
+                }
+            }
+        }
+        // One level down: `recv.field.method()` (including `self.field.method()`)
+        // needs `field`'s own declared type to grant `mut` — the reassign/
+        // content-mutate split docs/mut-type-modifier.md §3 gives struct
+        // fields, independent of whatever `recv` itself allows (checked
+        // above). `struct_fields` already carries each field's declared
+        // `Type` (already `Type::Mut`-wrapped by the parser where
+        // applicable), so no separate lookup of the struct's own AST is
+        // needed. Only a bare `Var` owner is resolved (a deeper chain,
+        // `a.b.field.method()`, is not — matches the interpreter's identical
+        // scope in `eval_expr.rs`).
+        if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
+            let owner_struct: Option<String> = match &inner_obj.kind {
+                ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+                ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned()
+                    .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                        if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
+                    })),
+                _ => None,
+            };
+            if let Some(owner) = owner_struct {
+                let field_ty = self.struct_fields.get(owner.as_str())
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == field_name).map(|(_, t)| t.clone()));
+                if let Some(field_ty) = field_ty {
+                    if !field_ty.grants_mut() {
+                        let field_struct_name = match field_ty.without_mut() {
+                            crate::ast::Type::Named(n) => Some(n.clone()),
+                            _ => None,
+                        };
+                        if let Some(fsn) = field_struct_name {
+                            if self.struct_fields.contains_key(fsn.as_str())
+                                && !self.method_is_req_or_task(fsn.as_str(), method)
+                            {
+                                self.push_error(obj.line, obj.col, format!(
+                                    "cannot call mutating method `.{}()` on field `.{}` — its declared type doesn't grant content mutation; declare the field `mut {}`/`var mut {}`",
+                                    method, field_name, field_name, field_name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // One more level down: `arr[i].method()` (or `dict[k].method()`)
+        // needs the collection's own declared *element*/*value* type to
+        // grant `mut` — `[mut Point] arr` vs plain `[Point] arr`
+        // (docs/mut-type-modifier.md §3). Only resolved for a bare `Var`
+        // collection receiver with an explicit type in `var_types` — an
+        // inferred-type collection isn't checked, matching the interpreter's
+        // identical scope in `eval_expr.rs`.
+        if let ExprKind::Index(inner_obj, _idx) = &obj.kind {
+            if let ExprKind::Var(coll_name) = &inner_obj.kind {
+                if let Some(coll_ty) = self.var_types.get(coll_name.as_str()) {
+                    if let Some(elem_ty) = coll_ty.index_element_type() {
+                        if !elem_ty.grants_mut() {
+                            let elem_struct_name = match elem_ty.without_mut() {
+                                crate::ast::Type::Named(n) => Some(n.clone()),
+                                _ => None,
+                            };
+                            if let Some(esn) = elem_struct_name {
+                                if self.struct_fields.contains_key(esn.as_str())
+                                    && !self.method_is_req_or_task(esn.as_str(), method)
+                                {
+                                    self.push_error(obj.line, obj.col, format!(
+                                        "cannot call mutating method `.{}()` on an element of `{}` — its declared element type doesn't grant content mutation; declare it `[mut {}]`/`{{K = mut {}}}`",
+                                        method, coll_name, esn, esn
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -2363,8 +2505,9 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Var(v) => {
                 if let Some(ty) = self.var_types.get(v.as_str()) {
+                    let ty = ty.without_mut();
                     return matches!(ty, Type::Qualified(_, OwnerQual::Actor))
-                        || matches!(ty, Type::Optional(inner) if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Actor)));
+                        || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, OwnerQual::Actor)));
                 }
                 self.managed_refcell_vars.contains(v.as_str()) || self.managed_mutex_vars.contains(v.as_str())
             }
@@ -2378,8 +2521,11 @@ impl Transpiler {
                 };
                 struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
                     .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
-                    .map(|(_, ty)| matches!(ty, Type::Qualified(_, OwnerQual::Actor))
-                        || matches!(ty, Type::Optional(inner) if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Actor))))
+                    .map(|(_, ty)| {
+                        let ty = ty.without_mut();
+                        matches!(ty, Type::Qualified(_, OwnerQual::Actor))
+                            || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
+                    })
                     .unwrap_or(false)
             }
             _ => false,
@@ -2497,6 +2643,8 @@ impl Transpiler {
             struct_rwlock_fields: self.struct_rwlock_fields.clone(),
             struct_rwlock_task_fields: self.struct_rwlock_task_fields.clone(),
             struct_req_methods: self.struct_req_methods.clone(),
+            struct_protocols: self.struct_protocols.clone(),
+            trait_default_mutating: self.trait_default_mutating.clone(),
             fn_var_params: self.fn_var_params.clone(),
             with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
@@ -2596,6 +2744,8 @@ impl Transpiler {
             fn_current_params_mut: std::collections::HashSet::new(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),
+            content_mutable_local_vars: self.content_mutable_local_vars.clone(),
+            mut_checked_local_vars: self.mut_checked_local_vars.clone(),
             auto_ref_params: self.auto_ref_params.clone(),
             in_req_fn: self.in_req_fn,
             in_struct_method: self.in_struct_method,

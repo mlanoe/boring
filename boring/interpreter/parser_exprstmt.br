@@ -991,8 +991,14 @@ def Stmt parse_stmt(mut Parser p) throws:
         if parser_is_let_destructure(p):
             let line = parser_line(p)
             parser_eat(p, "Static")
-            let mutable = parser_check(p, "Var") or parser_check(p, "Mut")
+            var mutable = parser_check(p, "Var") or parser_check(p, "Mut")
             parser_advance(p)
+            # `var mut (...)` — second keyword accepted, no additional state
+            # to set since `mutable` already collapses mut/var (see the
+            # matching comment in `parse_let_stmt_pub`).
+            if parser_check(p, "Mut"):
+                parser_advance(p)
+                mutable = true
             return stmt_let_destructure(parse_let_destructure(p, mutable, line))
         else:
             return stmt_let(parse_let_stmt(p))
@@ -1177,12 +1183,23 @@ def LetStmt parse_let_stmt_pub(mut Parser p, bool is_pub) throws:
     let line = parser_line(p)
     let is_static = parser_eat(p, "Static")
     let is_lazy = parser_check(p, "Lazy")
-    let mutable = if parser_check(p, "Var") or parser_check(p, "Mut"):
+    var mutable = if parser_check(p, "Var") or parser_check(p, "Mut"):
         parser_advance(p)
         true
     else:
         parser_advance(p)
         false
+    # `var mut`/`let mut` — the two-keyword forms from
+    # docs/mut-type-modifier.md. This self-hosted interpreter's simpler model
+    # already collapses `mut`/`var` into one `mutable: bool` (unlike the Rust
+    # compiler's checker/interpreter, which separates rebind from content-
+    # mutation) — accepting the syntax without erroring is as far as this
+    # port goes; `let mut` still just means `mutable = true`, same as bare
+    # `mut`, and `var mut` stays `mutable = true`, same as bare `var` already
+    # was.
+    if parser_check(p, "Mut"):
+        parser_advance(p)
+        mutable = true
     if is_lazy:
         let name_ty = if parser_is_type_start_before_ident(p):
             let base = parse_type(p)
@@ -1237,6 +1254,17 @@ def LetDestructureStmt parse_let_destructure(mut Parser p, bool mutable, int lin
             break
         if not parens and (parser_check(p, "Eq") or parser_check(p, "Eof")):
             break
+        # Per-element `let`/`mut`/`var`(` mut`) keyword
+        # (docs/mut-type-modifier.md §4). This simpler, qualifier-blind
+        # interpreter has nowhere to record a *per-slot* override —
+        # `DestructureBinding` carries no binding-kind field at all, only
+        # `name`/`ty` — so accepting (and discarding) the keyword here, and
+        # applying the group's own `mutable` uniformly to every slot as
+        # before, is as far as this port goes: it stops the parser from
+        # erroring on the new syntax without yet honoring per-slot overrides.
+        if parser_check(p, "Let") or parser_check(p, "Var") or parser_check(p, "Mut"):
+            parser_advance(p)
+            parser_eat(p, "Mut")
         let name_ty = if parser_peek_ident(p) == "_":
             parser_advance(p)
             ("_", nil)

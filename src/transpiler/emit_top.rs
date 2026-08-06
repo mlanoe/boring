@@ -1145,6 +1145,15 @@ impl Transpiler {
             .filter(|p| p.mutable && !p.rebindable)
             .map(|p| p.name.clone())
             .collect();
+        let prev_content_mutable_local_vars = std::mem::take(&mut self.content_mutable_local_vars);
+        // Any `mut`/`var` param still grants full content access, unchanged —
+        // the parameter model's own split isn't enforced yet (see
+        // `content_mutable_local_vars`'s doc).
+        self.content_mutable_local_vars = f.params.iter()
+            .filter(|p| p.mutable)
+            .map(|p| p.name.clone())
+            .collect();
+        let prev_mut_checked_local_vars = std::mem::take(&mut self.mut_checked_local_vars);
         let prev_auto_ref_params = std::mem::take(&mut self.auto_ref_params);
         self.auto_ref_params = f.params.iter()
             .filter(|p| matches!(&p.ty,
@@ -1252,6 +1261,8 @@ impl Transpiler {
         self.fn_current_params_mut  = prev_fn_current_params_mut;
         self.immutable_local_vars   = prev_immutable_local_vars;
         self.mut_local_vars         = prev_mut_local_vars;
+        self.content_mutable_local_vars = prev_content_mutable_local_vars;
+        self.mut_checked_local_vars = prev_mut_checked_local_vars;
         self.auto_ref_params       = prev_auto_ref_params;
         self.var_primitive_params  = prev_var_primitive_params;
         self.task_vars             = prev_task_vars;
@@ -1933,22 +1944,51 @@ impl Transpiler {
     /// Extract the top-level `OwnerQual` from a `Type::Qualified`, if present.
     /// Returns a placeholder variant that matches nothing if the type is not qualified.
     pub(crate) fn unwrap_qual(ty: &Type) -> &OwnerQual {
-        if let Type::Qualified(_, q) = ty { q } else { &OwnerQual::Stack }
+        // `mut T'actor` etc. wraps the whole qualified type in `Type::Mut`
+        // (docs/mut-type-modifier.md §1) — strip it first, same as every other
+        // qualifier-dispatch helper below. `mut` itself is never an `OwnerQual`.
+        if let Type::Qualified(_, q) = ty.without_mut() { q } else { &OwnerQual::Stack }
     }
 
     /// Only applies to user-defined struct types (PascalCase names), not primitives or `string`.
     /// The `mutable` parameter is ignored — `T'actor` is always mutex regardless of let/var.
     pub(crate) fn is_mutex_binding(_mutable: bool, ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask))
     }
 
     pub(crate) fn is_mutex_task_binding(_mutable: bool, ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::ActorTask))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::ActorTask))
+    }
+
+    /// True if calling `method` on a `struct_name` receiver is known NOT to
+    /// require content-mutation permission (a `req` method, or a `task`
+    /// method — see `struct_task_methods`'s callers). Checks the struct's own
+    /// body first (`struct_req_methods`/`struct_task_methods`); if the method
+    /// isn't there at all, it may be an un-overridden trait default dispatched
+    /// through the trait's own Rust default impl (see `trait_default_mutating`'s
+    /// doc) — check every trait the struct conforms to before giving up.
+    /// Returns `false` (assume mutating — the conservative default) only when
+    /// none of these positively say otherwise.
+    pub(crate) fn method_is_req_or_task(&self, struct_name: &str, method: &str) -> bool {
+        let key = format!("{}::{}", struct_name, method);
+        if self.struct_req_methods.contains(&key) || self.struct_task_methods.contains(&key) {
+            return true;
+        }
+        if let Some(protocols) = self.struct_protocols.get(struct_name) {
+            for trait_name in protocols {
+                if let Some(defaults) = self.trait_default_mutating.get(trait_name) {
+                    if let Some(&mutating) = defaults.get(method) {
+                        return !mutating;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Extract the inner `T` from a `T'actor` or `T'actor'task` mutex type.
     pub(crate) fn mutex_inner(ty: &Type) -> Option<&Type> {
-        if let Type::Qualified(inner, OwnerQual::Actor | OwnerQual::ActorTask) = ty {
+        if let Type::Qualified(inner, OwnerQual::Actor | OwnerQual::ActorTask) = ty.without_mut() {
             Some(inner)
         } else {
             None
@@ -2168,16 +2208,16 @@ impl Transpiler {
 
     /// Returns true when a binding declared `T'guard` or `T'guard'task` should become `Arc<RwLock<T>>`.
     pub(crate) fn is_rwlock_binding(_mutable: bool, ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask))
     }
 
     pub(crate) fn is_rwlock_task_binding(_mutable: bool, ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::GuardTask))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::GuardTask))
     }
 
     /// Extract the inner `T` from a `T'guard` or `T'guard'task` rwlock type.
     pub(crate) fn rwlock_inner(ty: &Type) -> Option<&Type> {
-        if let Type::Qualified(inner, OwnerQual::Guard | OwnerQual::GuardTask) = ty {
+        if let Type::Qualified(inner, OwnerQual::Guard | OwnerQual::GuardTask) = ty.without_mut() {
             Some(inner)
         } else {
             None
@@ -2187,7 +2227,7 @@ impl Transpiler {
     /// If `ty` is `T'shared`, `T'actor`, or `T'guard`, return the name of the inner named type.
     /// Used by `pre_scan` to populate `arc_qualified_types`.
     pub(crate) fn arc_inner_type_name(ty: &Type) -> Option<&str> {
-        match ty {
+        match ty.without_mut() {
             Type::Qualified(inner, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask) => {
                 if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
             }
@@ -2210,6 +2250,7 @@ impl Transpiler {
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
                 | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"),
             Type::Optional(inner) => Self::is_copy_type(inner),
+            Type::Mut(inner) => Self::is_copy_type(inner),
             _ => false,
         }
     }
@@ -2462,6 +2503,10 @@ impl Transpiler {
                 OwnerQual::GpuConst   => format!("*const {}", self.emit_type(inner)),
                 OwnerQual::GpuSurface => format!("*mut {}", self.emit_type(inner)),
             }
+            // `mut Type` (owned form) is a Boring-only permission — no distinct Rust
+            // type behind it (see `Type::Mut`'s doc). Emit the inner type; the
+            // checker/interpreter are what enforce the permission itself.
+            Type::Mut(inner) => self.emit_type(inner),
         }
     }
 
@@ -2506,6 +2551,10 @@ impl Transpiler {
                 // Size-based auto-boxing is suppressed: field bytes are part of the parent layout.
                 normalize_type_name(n, self.use_rc_str())
             }
+            // `mut Type` field — no distinct Rust type; recurse so the inner type
+            // still gets this function's field-specific treatment (auto-boxing
+            // suppression, etc.), not `emit_type`'s generic handling.
+            Type::Mut(inner) => self.emit_field_type(inner, _rebindable),
             other => self.emit_type(other),
         }
     }

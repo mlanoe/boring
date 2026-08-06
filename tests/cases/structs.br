@@ -48,7 +48,7 @@ struct Counter:
     req int get():
         self.value
 
-var ctr = Counter()
+mut ctr = Counter()
 ctr.inc()
 ctr.inc()
 ctr.inc()
@@ -68,7 +68,7 @@ struct SDog2:
     req string name(): self._name
     set name(string val): self._name = val
 
-var sdog2 = SDog2("Rex")
+mut sdog2 = SDog2("Rex")
 sdog2.name = "Buddy"
 print sdog2.name
 
@@ -153,7 +153,7 @@ struct SCounter:
     def void increment(): self.count = self.count + 1
     req int value(): self.count
 
-var sctr = SCounter()
+mut sctr = SCounter()
 sctr.increment()
 sctr.increment()
 print sctr.value()

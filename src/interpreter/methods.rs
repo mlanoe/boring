@@ -1535,11 +1535,16 @@ impl Interpreter {
                         }
                     }
                 }
-                // Check: cannot mutate a let binding's field
+                // Check: cannot mutate a let binding's field.
+                // `self` is excluded — it's always bound via `define_mut` (see
+                // every `fn_env.define_mut("self", ...)` call site) regardless of
+                // `def`/`req`, so this never distinguished self-field-write
+                // legality anyway; that's `self.current_method_mutating` below
+                // ("cannot mutate non-transient field from a req method").
                 if let ExprKind::Var(binding_name) = &obj_expr.kind {
-                    if !env.borrow().is_mutable(binding_name) {
+                    if binding_name != "self" && !env.borrow().is_content_mutable(binding_name) {
                         return Err(err(
-                            format!("cannot mutate let binding '{}'", binding_name),
+                            format!("cannot mutate field '{}' on non-mut binding '{}' — declare it with `mut` or `var mut` to permit content mutation", field, binding_name),
                             line,
                         ));
                     }
@@ -1550,6 +1555,24 @@ impl Interpreter {
                             format!("cannot assign to field '{}' on shared binding '{}' — use T'actor for interior mutability", field, binding_name),
                             line,
                         ));
+                    }
+                }
+                // `arr[i].field = v` — same permission as `arr[i].method()`
+                // (see `eval_expr.rs`'s identical check): the collection's own
+                // declared element type must grant `mut` — `[mut Point] arr`
+                // vs plain `[Point] arr` (docs/mut-type-modifier.md §3).
+                if let ExprKind::Index(inner_obj, _idx) = &obj_expr.kind {
+                    if let ExprKind::Var(coll_name) = &inner_obj.kind {
+                        if let Some(coll_ty) = env.borrow().get_declared_type(coll_name) {
+                            if let Some(elem_ty) = coll_ty.index_element_type() {
+                                if !elem_ty.grants_mut() {
+                                    return Err(err(
+                                        format!("cannot assign to field '{}' on an element of '{}' — its declared element type doesn't grant content mutation; declare it `[mut T]`/`{{K = mut V}}`", field, coll_name),
+                                        line,
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
@@ -2125,6 +2148,10 @@ impl Interpreter {
 
             // Associated type reference — no ownership qualifier needed (resolved later)
             Type::SelfAssoc(_) | Type::AssocOf(_, _) => Ok(()),
+
+            // `mut Type` — a Boring-only permission, no ownership qualifier of its
+            // own; check the wrapped type.
+            Type::Mut(inner) => self.check_resolved_qualifier(inner, line),
         }
     }
 

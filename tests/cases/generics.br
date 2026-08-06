@@ -29,7 +29,7 @@ struct Box<T>:
     def void set(T v):
         self.value = v
 
-var b = Box(42)
+mut b = Box(42)
 print b.get()
 b.set(99)
 print b.get()

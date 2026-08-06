@@ -84,16 +84,10 @@ impl Parser {
         if matches!(self.peek(), TokenKind::Let | TokenKind::Mut | TokenKind::Var | TokenKind::Static | TokenKind::Lazy) {
             if self.is_let_destructure() {
                 let _is_static = self.eat(&TokenKind::Static);
-                let binding = match self.peek() {
-                    TokenKind::Mut => BindingKind::Mut,
-                    TokenKind::Var => BindingKind::Var,
-                    TokenKind::Lazy => BindingKind::Lazy,
-                    _ => BindingKind::Let,
-                };
-                self.advance();
+                let (binding, var_mut) = self.consume_binding_keyword();
                 let saved = self.in_inline_context;
                 self.in_inline_context = true;
-                let result = self.parse_let_destructure(binding, line, col);
+                let result = self.parse_let_destructure(binding, var_mut, line, col);
                 self.in_inline_context = saved;
                 return Ok(Stmt::LetDestructure(result?));
             } else {

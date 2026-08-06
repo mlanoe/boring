@@ -464,7 +464,7 @@ def void register_stdlib(mut Interpreter interp):
 # ─── new_interpreter ──────────────────────────────────────────────────────────
 
 def Interpreter'actor new_interpreter():
-    let global = new_env(nil)
+    mut global = new_env(nil)
     var interp'actor = Interpreter(
         global_env = global,
         current_env = global,

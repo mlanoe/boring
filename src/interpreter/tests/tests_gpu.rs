@@ -1049,7 +1049,7 @@ kernel Fill:
         pixels[0] = uint(iters)
 
 let screen = Screen(Dimension(1, 1))
-var k = Fill(screen.dimension)
+mut k = Fill(screen.dimension)
 
 kernel:
     loop:

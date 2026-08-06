@@ -230,6 +230,10 @@ impl KernelTranspiler {
                 };
                 format!("{}::{}", base_name, assoc)
             }
+            // `mut Type` (owned form) — kernel structs are a distinct, separate model
+            // (docs/mut-type-modifier.md's "Kernel structs" section) with no `mut`
+            // type-modifier support; erase to the inner type defensively.
+            Type::Mut(inner) => self.emit_type(inner),
         }
     }
 }

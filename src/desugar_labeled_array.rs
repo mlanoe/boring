@@ -354,6 +354,7 @@ fn desugar_let(mut s: LetStmt, scope: &mut ArrayScope) -> Vec<LetStmt> {
         for (name, value) in names.iter().zip(values.into_iter()) {
             out.push(LetStmt {
                 binding: BindingKind::Let,
+                var_mut: false,
                 is_pub: false,
                 is_static: false,
                 name: name.clone(),
@@ -933,7 +934,7 @@ fn desugar_labeled_comp(
 ) -> Expr {
     let tmp = format!("__comp_{line}_{col}");
     let mut stmts = vec![Stmt::Let(LetStmt {
-        binding: BindingKind::Var, is_pub: false, is_static: false,
+        binding: BindingKind::Var, var_mut: false, is_pub: false, is_static: false,
         name: tmp.clone(), ty: None, value: None, is_lazy: false, line, col,
     })];
     stmts.extend(labeled_comp_fill_stmts(&tmp, expr, clauses, scope, line, col));

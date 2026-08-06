@@ -1921,6 +1921,45 @@ impl Transpiler {
                             self.push_error(line, col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, field, sn, v));
                         }
                     }
+                } else if v != "self"
+                    && !self.fn_current_params.contains_key(v.as_str())
+                    && self.known_local_vars.contains(v.as_str())
+                    && !self.content_mutable_local_vars.contains(v.as_str())
+                    && self.mut_checked_local_vars.contains(v.as_str())
+                    && !self.var_mutex_types.contains(v.as_str())
+                    && !self.var_mutex_task_types.contains(v.as_str())
+                    && !self.var_rwlock_types.contains(v.as_str())
+                    && !self.var_rwlock_task_types.contains(v.as_str())
+                {
+                    // Same diagnostic as above, for a plain local binding rather
+                    // than a parameter — see the matching comment in
+                    // `emit_methods.rs`'s `emit_method_call_fallback`.
+                    let struct_name = self.var_struct_types.get(v.as_str()).cloned()
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                            if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
+                        }));
+                    if let Some(sn) = struct_name {
+                        if self.struct_fields.contains_key(sn.as_str()) {
+                            self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, field, sn, v, sn, v));
+                        }
+                    }
+                }
+            } else if let ExprKind::Index(inner_obj, _idx) = &obj.kind {
+                // `arr[i].field = v` — same permission as `arr[i].method()`
+                // (see the matching check in `emit_methods.rs`'s
+                // `emit_method_call_fallback`): the collection's own declared
+                // element type must grant `mut`.
+                if let ExprKind::Var(coll_name) = &inner_obj.kind {
+                    if let Some(coll_ty) = self.var_types.get(coll_name.as_str()) {
+                        if let Some(elem_ty) = coll_ty.index_element_type() {
+                            if !elem_ty.grants_mut() {
+                                self.push_error(obj.line, obj.col, format!(
+                                    "cannot assign to field `.{}` on an element of `{}` — its declared element type doesn't grant content mutation; declare it `[mut T]`/`{{K = mut V}}`",
+                                    field, coll_name
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

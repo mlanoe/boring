@@ -652,6 +652,21 @@ pub struct Env {
     /// Variables declared with `lazy` — uninitialized until first `?=` assignment.
     /// After the first assignment the name is removed from this set (init-once semantics).
     pub lazy_vars: HashSet<String>,
+    /// Variables whose *content* may be mutated — `def` calls, field writes,
+    /// structural collection mutation (docs/mut-type-modifier.md). Independent
+    /// of `mutable` (which gates *reassignment*, `x = newval`, and still
+    /// answers `true` for a plain `var` with no `mut` — see `is_mutable`'s
+    /// doc): `var Point p` alone no longer implies `p.inc()` is legal, only
+    /// `var mut Point p` (or bare/`let mut Point p`) does. Populated from
+    /// whether the resolved *type* carries `mut`, not from `BindingKind` alone
+    /// — see `Type::grants_mut`.
+    pub content_mutable: HashSet<String>,
+    /// A binding's explicit type annotation, when it has one (`let_stmt`/
+    /// destructure only — params aren't tracked here). Lets a later
+    /// `arr[i].method()` (or `dict[k].method()`) check the *element*/*value*
+    /// type's own `mut` — `[mut Point] arr` vs plain `[Point] arr` — the same
+    /// way `content_mutable` already gates a bare `arr.method()`/`recv.field`.
+    pub declared_types: HashMap<String, Type>,
 }
 
 impl fmt::Debug for Env {
@@ -674,6 +689,8 @@ impl Env {
             shared_bindings: HashSet::new(),
             actor_bindings: HashSet::new(),
             lazy_vars: HashSet::new(),
+            content_mutable: HashSet::new(),
+            declared_types: HashMap::new(),
         }));
         register_stdlib(&env);
         env
@@ -690,6 +707,8 @@ impl Env {
             shared_bindings: HashSet::new(),
             actor_bindings: HashSet::new(),
             lazy_vars: HashSet::new(),
+            content_mutable: HashSet::new(),
+            declared_types: HashMap::new(),
         }))
     }
 
@@ -764,9 +783,10 @@ impl Env {
 
     pub fn define(&mut self, name: &str, value: Value) {
         self.vars.insert(name.to_string(), value);
-        // Shadowing: if a previous `var` binding exists in this scope,
-        // re-declaring with `let` must make it immutable.
+        // Shadowing: if a previous `var`/content-mutable binding exists in this
+        // scope, re-declaring with `let` must make it immutable both ways.
         self.mutable.remove(name);
+        self.content_mutable.remove(name);
     }
 
     /// Update an existing variable bypassing the immutability check.
@@ -839,6 +859,7 @@ impl Env {
             self.owned_vars.remove(name);
             self.shared_bindings.remove(name);
             self.actor_bindings.remove(name);
+            self.content_mutable.remove(name);
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().invalidate(name);
         }
@@ -850,6 +871,7 @@ impl Env {
         if self.vars.contains_key(name) {
             self.vars.insert(name.to_string(), Value::Moved(name.to_string()));
             self.mutable.remove(name);
+            self.content_mutable.remove(name);
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().set_moved(name);
         }
@@ -857,6 +879,10 @@ impl Env {
 
     /// Returns true if `name` was declared with `var` (mutable), false if `let` (immutable).
     /// Returns true if not found (treat unknown as mutable for bare assignment contexts).
+    ///
+    /// **Rebindability only** — no longer the gate for `def` calls/field writes/
+    /// collection mutation; see `is_content_mutable` for that (they used to be
+    /// the same flag — docs/mut-type-modifier.md's Implementation checklist item 0).
     pub fn is_mutable(&self, name: &str) -> bool {
         if self.vars.contains_key(name) {
             self.mutable.contains(name)
@@ -864,6 +890,47 @@ impl Env {
             parent.borrow().is_mutable(name)
         } else {
             true // not found — treat as mutable (bare assignment will define it)
+        }
+    }
+
+    /// Mark a variable as content-mutable — see `content_mutable`'s doc. Called
+    /// alongside `define`/`define_mut` wherever a binding's resolved type grants
+    /// `mut` (`Type::grants_mut`), independent of whether the binding itself is
+    /// rebindable.
+    pub fn mark_content_mutable(&mut self, name: &str) {
+        self.content_mutable.insert(name.to_string());
+    }
+
+    /// Returns true if `def` calls / field writes / structural collection
+    /// mutation are permitted on `name` — see `content_mutable`'s doc. Returns
+    /// true if not found, matching `is_mutable`'s "treat unknown as permissive"
+    /// convention (bare assignment / dynamically-defined names).
+    pub fn is_content_mutable(&self, name: &str) -> bool {
+        if self.vars.contains_key(name) {
+            self.content_mutable.contains(name)
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().is_content_mutable(name)
+        } else {
+            true
+        }
+    }
+
+    /// Record a binding's explicit type annotation — see `declared_types`'s doc.
+    pub fn mark_declared_type(&mut self, name: &str, ty: Type) {
+        self.declared_types.insert(name.to_string(), ty);
+    }
+
+    /// Returns the binding's explicit type annotation, if one was recorded —
+    /// see `declared_types`'s doc. `None` for an inferred-type binding, a
+    /// param, or an unresolved name (never treated as a hard error — callers
+    /// fall back to the permissive default, matching `is_content_mutable`).
+    pub fn get_declared_type(&self, name: &str) -> Option<Type> {
+        if self.vars.contains_key(name) {
+            self.declared_types.get(name).cloned()
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().get_declared_type(name)
+        } else {
+            None
         }
     }
 
@@ -2497,7 +2564,13 @@ impl Interpreter {
                 } else {
                     env.borrow_mut().define(&stmt.name, val);
                 }
+                // See the matching comment in `exec.rs`'s `Stmt::Let` — content
+                // mutation permission is independent of the rebind axis above.
+                if crate::ast::binding_grants_mut(&stmt.binding, stmt.var_mut, stmt.ty.as_ref()) {
+                    env.borrow_mut().mark_content_mutable(&stmt.name);
+                }
                 if let Some(ty) = &stmt.ty {
+                    env.borrow_mut().mark_declared_type(&stmt.name, ty.clone());
                     let resolved = self.resolve_type(ty);
                     if Self::type_has_owned_elems(&resolved) {
                         env.borrow_mut().mark_owned_collection(&stmt.name);

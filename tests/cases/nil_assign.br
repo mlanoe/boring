@@ -30,7 +30,7 @@ struct Config:
         host ?= "localhost"
         port ?= 8080
 
-var cfg = Config()
+mut cfg = Config()
 cfg.set_defaults()
 print (cfg.host else "?")
 print (cfg.port else 0)

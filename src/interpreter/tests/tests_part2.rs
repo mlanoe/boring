@@ -57,7 +57,7 @@ struct Person:
     pub let string name
     pub var int age
 
-var p = Person(name = "Alice", age = 30)
+mut p = Person(name = "Alice", age = 30)
 p.age = 31
 let _name = p.name
 let _age = p.age
@@ -355,7 +355,11 @@ let _result = c.doubled()
 
 #[test]
 fn test_def_requires_var() {
-    // calling `def` on a `let` binding must produce a runtime error
+    // Calling `def` on a `let` binding must be rejected — now by BOTH backends
+    // (docs/mut-type-modifier.md's Implementation checklist item 0 gave the
+    // transpiler this same enforcement, which it didn't have before). Bypasses
+    // the shared `run()` helper (which asserts the transpile step succeeds)
+    // since this test is specifically about the negative case.
     let src = r#"
 struct Counter:
     var int value
@@ -366,7 +370,17 @@ struct Counter:
 let c = Counter(value= 0)
 c.increment()
 "#;
-    let (_interp, res) = run(src);
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+
+    // `boring build`: transpiling now rejects this too.
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "expected a transpile error calling def on a let binding");
+    assert!(out.errors.iter().any(|e| e.message.contains("not declared `mut`")), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+
+    // `boring run`: interpreting rejects it too, independently.
+    let mut interp = Interpreter::new();
+    let res = interp.exec_program(&program);
     assert!(res.is_err(), "calling def on let binding should error");
     let msg = res.unwrap_err().message;
     assert!(msg.contains("cannot call mutating method"), "unexpected error: {}", msg);
@@ -507,7 +521,7 @@ struct Counter:
     def void increment(): self.count = self.count + 1
     req int value(): self.count
 
-var c = Counter()
+mut c = Counter()
 c.increment()
 c.increment()
 let _result = c.value()
@@ -1183,7 +1197,7 @@ struct Point:
     init(pub var int x, pub var int y)
 
 let a = Point(x = 1, y = 2)
-var b = a
+var mut b = a
 b.x = 10
 let result = b.x
 "#;
@@ -1318,6 +1332,43 @@ let upgraded = w.upgrade()
 let _result = upgraded.name
 "#;
     assert_eq!(run_src(src), Value::Str("Buddy".into()));
+}
+
+#[test]
+fn test_actor_weak_parses_and_upgrades() {
+    // `T'actor'weak` — regression test: the parser used to eagerly consume the
+    // tick after `'actor` expecting only `'task`/`'global`/`'unified`, which
+    // made `'weak` unreachable (`Counter'actor'weak` failed to parse at all).
+    let src = r#"
+struct Counter:
+    var int value = 0
+    def inc(): self.value += 1
+
+let c'actor = Counter()
+let Counter'actor'weak w = c
+mut upgraded = w.upgrade()
+upgraded.inc()
+let _result = upgraded.value
+"#;
+    assert_eq!(run_src(src), Value::Int(1));
+}
+
+#[test]
+fn test_guard_weak_parses_and_upgrades() {
+    // `T'guard'weak` — same class of bug as `'actor'weak` above, in the
+    // `TokenKind::Guard` branch instead.
+    let src = r#"
+struct Store:
+    var int count = 0
+    def write(int v): self.count = v
+
+let s'guard = Store()
+let Store'guard'weak w = s
+mut upgraded = w.upgrade()
+upgraded.write(7)
+let _result = upgraded.count
+"#;
+    assert_eq!(run_src(src), Value::Int(7));
 }
 
 // ─── var in function parameters ──────────────────────────────────────────────

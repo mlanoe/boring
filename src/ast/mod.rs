@@ -221,6 +221,14 @@ pub struct AsDecl {
 pub struct FieldDecl {
     pub name: String,
     pub is_pub: bool,
+    /// `true` for `var`/`var mut` (the field's own name — `self.field = x` — may be
+    /// reassigned to a different instance); `false` for `let`/`mut` (bare or
+    /// explicit `let mut`). This is the *reassignment* axis only, independent of
+    /// content mutation — see docs/mut-type-modifier.md §3. Before that document,
+    /// this single flag conflated both (`var Point p` granted `self.p = x` AND
+    /// `self.p.inc()`); content-mutation permission ("can `self.field.method()` be
+    /// called, can a nested field be written") now comes from `ty.grants_mut()`
+    /// instead, matching local bindings/tuple slots/collection elements exactly.
     pub mutable: bool,
     pub transient: bool,
     pub ty: Type,
@@ -452,8 +460,43 @@ pub enum BindingKind {
     Lazy,
 }
 
+/// Whether a `let_stmt`/destructure-slot's binding keyword + type together grant
+/// content-mutation permission — `def` calls, field writes, structural
+/// collection mutation (docs/mut-type-modifier.md, Implementation checklist
+/// item 0). Used by the interpreter/transpiler wherever a `LetStmt` or
+/// `DestructureBinding` is bound, to decide whether to also mark the binding
+/// content-mutable (separately from whether it's *rebindable*, `BindingKind::Var`).
+///
+/// When `ty` is explicit, the parser has already wrapped it in `Type::Mut`
+/// wherever `mut` was requested (bare, `let mut`, or `var mut`), so
+/// `Type::grants_mut` alone is authoritative. When `ty` is `None` (inferred
+/// from the initializer), there's no `Type` node to carry that — fall back to
+/// the keyword phrase itself, mirroring `check_tuple_mut_constraint`'s existing
+/// "inferred, not just explicit, type" handling. Callers needing the inferred
+/// case to also honor the scalar/`'shared`/`'weak`/tuple-whole rejection table
+/// must run that check (as the checker's `check_scalar_mut_constraint` etc.
+/// already do) — this function only reports what was *requested*, not whether
+/// the request was legal.
+pub fn binding_grants_mut(binding: &BindingKind, var_mut: bool, ty: Option<&Type>) -> bool {
+    match ty {
+        Some(t) => t.grants_mut(),
+        None => matches!(binding, BindingKind::Mut) || (matches!(binding, BindingKind::Var) && var_mut),
+    }
+}
+
 impl BindingKind {
-    /// Returns `true` for `Mut` and `Var` — both produce a mutable Rust binding.
+    /// Returns `true` for `Mut` and `Var` — both need a `let mut` Rust binding
+    /// (`Var` to allow reassignment, `Mut` because the type it always carries is
+    /// `mut`-wrapped and needs `&mut self` to call through). Still correct for
+    /// that one purpose — transpiler codegen deciding `let` vs `let mut` for the
+    /// *outer* Rust local — after docs/mut-type-modifier.md.
+    ///
+    /// **No longer the source of truth for "is `def`/field-write/collection-mutation
+    /// allowed."** That permission now comes from whether the *resolved type*
+    /// carries `mut` (`Type::grants_mut`), not from `BindingKind` alone — a plain
+    /// `var Point p` (this returns `true`) does NOT permit `p.inc()` under the new
+    /// rules; only `var mut Point p` does. See docs/mut-type-modifier.md's
+    /// Implementation checklist item 0.
     pub fn is_mutable(&self) -> bool {
         matches!(self, BindingKind::Mut | BindingKind::Var)
     }
@@ -540,6 +583,10 @@ pub struct KernelBlockStmt {
 #[derive(Debug, Clone)]
 pub struct LetDestructureStmt {
     pub binding: BindingKind,
+    /// The group's own leading `var mut` — see `LetStmt.var_mut`'s doc. Also
+    /// serves as (half of) the parenthesised form's per-element default
+    /// (docs/mut-type-modifier.md §4).
+    pub var_mut: bool,
     pub bindings: Vec<DestructureBinding>,
     pub value: Expr,
     pub line: usize,
@@ -548,10 +595,33 @@ pub struct LetDestructureStmt {
 
 /// One slot in a destructure: a name with an optional type.
 /// Use `_` as name for a wildcard slot.
+///
+/// Each slot carries its own fully-resolved `binding`/`var_mut`, per
+/// docs/mut-type-modifier.md §4 — the parser resolves an unmarked slot's default
+/// (bare form → always `Let`; parenthesised form → inherits the group's own
+/// leading keyword, `LetDestructureStmt.binding`/`.var_mut`) before ever
+/// constructing this struct, so nothing downstream needs to re-derive it.
 #[derive(Debug, Clone)]
 pub struct DestructureBinding {
     pub name: String,          // variable name, or "_" for wildcard
     pub ty: Option<Type>,
+    /// This slot's own resolved binding kind (never `Lazy` — not valid in a
+    /// destructure slot). When `ty` is explicit and this grants mutation
+    /// (`Mut`, or `Var` with `var_mut`), the parser has already wrapped `ty` in
+    /// `Type::Mut` — see `Type::grants_mut`. When `ty` is `None` (inferred from
+    /// the corresponding tuple position), this field is what the checker
+    /// consults once the concrete type is known.
+    pub binding: BindingKind,
+    /// `true` only for this slot's own explicit `var mut` — see `LetStmt.var_mut`'s
+    /// doc for why this can't be folded into `binding` alone.
+    pub var_mut: bool,
+    /// `true` when this slot was left unmarked in a *bare* (no parens) destructure
+    /// immediately after a *different* slot in the same statement carried its own
+    /// explicit keyword — docs/mut-type-modifier.md §4's readability trap
+    /// (`mut a, b = t` reads like `b` inherits `mut`; it quietly defaults to
+    /// `let` instead). Correct either way — this only drives a lint warning, not
+    /// an error.
+    pub bare_unmarked_after_keyworded_sibling: bool,
 }
 
 /// One clause in a multi-condition `if let` or `guard let`.
@@ -597,6 +667,20 @@ pub struct LetStmt {
     pub is_static: bool,
     pub name: String,
     pub ty: Option<Type>,
+    /// `true` only for an explicit `var mut Type a` (a second `mut` keyword
+    /// following `var`). Meaningless unless `binding == BindingKind::Var`.
+    ///
+    /// Why this can't just be folded into `binding`: `BindingKind` has no
+    /// `VarMut` variant, and `mut Type` composing into `ty` (via `Type::Mut`,
+    /// wrapped by the parser whenever `ty` is explicit) already carries the
+    /// permission for `BindingKind::Mut`/bare-mut — but when `ty` is `None`
+    /// (inferred from the initializer), there is no `Type` node yet for the
+    /// parser to wrap, so this flag is what the checker consults once the
+    /// concrete type is known, exactly the same way `binding ==
+    /// BindingKind::Mut` already needs to be consulted for the inferred-type
+    /// bare-`mut` case (see `check_tuple_mut_constraint`'s existing precedent
+    /// for "inferred, not just explicit, type" handling).
+    pub var_mut: bool,
     /// `None` for deferred initialisation: `let v` / `var v` without `= expr`.
     pub value: Option<Expr>,
     /// `true` for `lazy` bindings — deferred, write-once via `?=`.
@@ -1164,6 +1248,15 @@ pub enum Type {
     /// Associated type access on a named type: `LinkedList.Index`, `Tree<T>.Node`.
     /// First element is the base type, second is the associated type name.
     AssocOf(Box<Type>, String),
+    /// `mut Type` (owned form, no `&`) — see docs/mut-type-modifier.md. A Boring-only
+    /// permission with no distinct Rust type behind it: unlocks `def` calls and field
+    /// writes on whatever this type nests into (a local binding, a tuple slot, a
+    /// struct field, an array element, a dict value). The *borrowed* form (`mut
+    /// Type&` → `&mut Type`) does NOT use this wrapper — it reuses the existing
+    /// `Qualified(_, OwnerQual::BorrowMut)` representation, since that already has a
+    /// real distinct Rust type. Parses everywhere a `type` does (grammar-unrestricted,
+    /// per the doc); the checker rejects it outside the positions listed above.
+    Mut(Box<Type>),
 }
 
 /// Copy-ness of a single owner qualifier, matching the rules in `Type::is_copy`.
@@ -1177,8 +1270,68 @@ fn owner_qual_is_copy(q: &OwnerQual) -> bool {
 }
 
 impl Type {
+    /// True if this is a `mut Type` (owned-form) wrapper.
+    pub fn is_mut(&self) -> bool {
+        matches!(self, Type::Mut(_))
+    }
+
+    /// Strips one level of `mut Type` wrapper, if present. Every consumer that only
+    /// cares about the underlying Rust representation (size/Copy-ness, codegen
+    /// target type, etc.) should go through this first — `mut` has no Rust-level
+    /// representation of its own (see `Type::Mut`'s doc), so those consumers are
+    /// meant to be blind to it. Only the checker's permission logic and the type's
+    /// own display/coercion logic should look at `Type::Mut` directly.
+    pub fn without_mut(&self) -> &Type {
+        match self {
+            Type::Mut(inner) => inner.without_mut(),
+            other => other,
+        }
+    }
+
+    /// Owning version of `without_mut`.
+    pub fn into_without_mut(self) -> Type {
+        match self {
+            Type::Mut(inner) => inner.into_without_mut(),
+            other => other,
+        }
+    }
+
+    /// True if this type grants content-mutation permission — `def` calls, field
+    /// writes, structural collection mutation — wherever it's the declared type of a
+    /// binding/slot. Covers both spellings: the owned `mut Type` wrapper (no
+    /// distinct Rust type — see `Type::Mut`'s doc) and the borrowed `mut Type&` →
+    /// `&mut Type` (`OwnerQual::BorrowMut`/`BorrowOptionMut`, which already existed
+    /// before this proposal). This is the single source of truth checklist item 0
+    /// asks for — permission comes from the *type*, never from `BindingKind` alone.
+    pub fn grants_mut(&self) -> bool {
+        matches!(
+            self,
+            Type::Mut(_)
+                | Type::Qualified(_, OwnerQual::BorrowMut | OwnerQual::BorrowOptionMut)
+        )
+    }
+
+    /// The element/value type an index read (`arr[i]`, `dict[k]`) yields,
+    /// for a collection type — `[mut Point] arr` vs plain `[Point] arr`
+    /// controls whether `arr[i].method()` may call a `def` method, exactly
+    /// like a struct field's own type does (docs/mut-type-modifier.md §3).
+    /// Strips one level of `Type::Mut` first (the *collection's own* mut,
+    /// `mut [Point]`, is a different axis — structural mutation of the
+    /// collection itself — and doesn't affect this). Keys/sets have no
+    /// element-mut position — `None` for `Set`, and only the value side of
+    /// `Dict` is meaningful here.
+    pub fn index_element_type(&self) -> Option<&Type> {
+        match self.without_mut() {
+            Type::Array(elem) | Type::ArrayN(elem, _) | Type::ArrayNExpr(elem, _)
+                | Type::LabeledArray(elem, _) => Some(elem),
+            Type::Dict(_, v) => Some(v),
+            _ => None,
+        }
+    }
+
     pub fn is_copy(&self) -> bool {
         match self {
+            Type::Mut(inner) => inner.is_copy(),
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
@@ -1211,6 +1364,7 @@ impl Type {
     /// True if the type is task-safe (can be captured by a task).
     pub fn is_task_safe(&self) -> bool {
         match self {
+            Type::Mut(inner) => inner.is_task_safe(),
             // Primitive copy types are always safe
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128

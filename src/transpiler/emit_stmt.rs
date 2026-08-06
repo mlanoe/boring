@@ -529,6 +529,7 @@ impl Transpiler {
     }
 
     pub(crate) fn is_string_type(ty: &Type) -> bool {
+        let ty = ty.without_mut();
         matches!(ty, Type::Str)
             || matches!(ty, Type::Named(n) if n == "string")
             || matches!(ty, Type::Qualified(inner, _) if matches!(**inner, Type::Str))
@@ -537,7 +538,7 @@ impl Transpiler {
     /// Returns true for types that map to `Arc<Mutex<T>>` or `Arc<RwLock<T>>` in Rust.
     /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }
 
     /// Returns true if `value` is a variable whose qualifier is 'heap (Box<T>).
@@ -548,14 +549,14 @@ impl Transpiler {
             return matches!(q, OwnerQual::Owned | OwnerQual::New);
         }
         if let Some(ty) = self.var_types.get(v.as_str()) {
-            return matches!(ty, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New));
+            return matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Owned | OwnerQual::New));
         }
         false
     }
 
     /// Returns true for `T'shared` (Arc<T> multi or Rc<T> single).
     pub(crate) fn is_rc_qualified(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Shared))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Shared))
     }
 
     /// Returns true when `ty` is an anonymous `T'` (OwnerQual::Owned) and the inner type
@@ -658,19 +659,20 @@ impl Transpiler {
 
     /// Returns true for `T'weak` (any form) which maps to `Weak<T>` in Rust.
     pub(crate) fn is_weak_qualified(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Weak))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Weak))
     }
 
     /// Returns true for `T'shared'weak` / `T'actor'weak` — weak ref to an Arc-backed type.
     /// These require `Arc::downgrade` and `std::sync::Weak<T>` in Rust.
     pub(crate) fn is_arc_weak(ty: &Type) -> bool {
-        matches!(ty,
+        matches!(ty.without_mut(),
             Type::Qualified(inner, OwnerQual::Weak)
             if matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard))
         )
     }
 
     pub(crate) fn is_str_ref_type(ty: &Type) -> bool {
+        let ty = ty.without_mut();
         matches!(ty, Type::Named(n) if n == "str")
             || matches!(ty, Type::Qualified(inner, OwnerQual::Stack) if matches!(**inner, Type::Str))
     }

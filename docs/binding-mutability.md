@@ -1,5 +1,14 @@
 # Binding and mutability in Boring
 
+> **Superseded for local bindings by [mut-type-modifier.md](mut-type-modifier.md).**
+> This document predates that proposal and still describes `mut`/`var` as a
+> single binding-keyword axis (`is_mutable()` true for both). Under
+> mut-type-modifier.md, mutability comes from the *type* (`mut Type`), not
+> from the keyword alone — `var Type a` is rebindable only; `var mut Type a`
+> is required for both. The tables below are updated to match; see that
+> document for the full model (destructuring, tuples, struct fields,
+> collections).
+
 ## Concepts
 
 Two orthogonal axes:
@@ -13,9 +22,15 @@ Two orthogonal axes:
 |---|---|---|
 | `let` | no | no |
 | `mut` | no | yes |
-| `var` | yes | depends on qualifier |
+| `var` | yes | no |
+| `var mut` | yes | yes |
 
 The progression is intentionally graduated from most rigid to most permissive.
+`var` alone no longer implies `mut` (see mut-type-modifier.md §1) — a plain
+`var Type a` is rebindable but not content-mutable; only the explicit `var
+mut Type a` combination is both. Retired: the old table's "Mutable: depends
+on qualifier" reading of `var`, which came from `var` auto-implying `mut`
+regardless of qualifier.
 
 ## Qualifiers
 
@@ -40,13 +55,30 @@ They carry three kinds of information: the Rust mapping, the passing semantics b
 
 ## Valid combinations
 
+`yes` below means "parses, and grants what the row's keyword nominally
+promises" — for `mut`/`var mut`, that's content mutation (`def` calls); for
+`var`, it's rebinding only. Per mut-type-modifier.md §1, this is a **no
+special case**: `'actor`/`'guard` are checked exactly like any other type,
+not given their own exception the way an earlier draft of this table did.
+
 | Binding | `'shared` | `'actor` | `'guard` | `'stack` | `'heap` |
 |---|---|---|---|---|---|
-| `let` | yes | yes | yes | yes | yes |
-| `mut` | **error** | yes | yes | yes | yes |
-| `var` | yes | yes | yes | yes | yes |
+| `let` (no mutation) | yes | yes | yes | yes | yes |
+| `mut` (content-mutable, fixed) | **error** | yes | yes | yes | yes |
+| `var` (rebindable only) | yes | yes | yes | yes | yes |
+| `var mut` (rebindable + content-mutable) | **error** | yes | yes | yes | yes |
 
-`mut` with `'shared` is an error because `'shared` is an immutable reference-counted pointer — there is no instance to mutate through it directly.
+`mut`/`var mut` with `'shared` is an error because `'shared` is an immutable
+reference-counted pointer — there is no instance to mutate through it
+directly.
+
+**Changed from the previous revision of this table:** `var T'actor x` /
+`var T'guard x` alone used to be listed as sufficient for `def` calls (since
+`is_mutable()` returned `true` for `Var` unconditionally). That's retired —
+`var` alone is rebind-only now, full stop, matching every other type; only
+`var mut T'actor x` / `var mut T'guard x` unlock `def` calls on a rebindable
+actor/guard binding. `mut T'actor x` (bare, non-rebindable) is unaffected —
+it already granted `def` calls and still does.
 
 ## Type-level immutability
 

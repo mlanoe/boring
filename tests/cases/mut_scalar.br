@@ -1,19 +1,19 @@
-mut x = 42
+var x = 42
 x = 99
 print x
 
-mut int n = 0
+var int n = 0
 n = 7
 print n
 
-mut float f = 1.0
+var float f = 1.0
 f = 3.14
 print f
 
-mut b = true
+var b = true
 b = false
 print b
 
-mut uint u = 0
+var uint u = 0
 u = 100
 print u

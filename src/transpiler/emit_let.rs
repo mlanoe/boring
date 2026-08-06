@@ -86,7 +86,7 @@ impl Transpiler {
         // multi → Arc<std::sync::Mutex<T>>, single → RefCell<T>.
         // Track the variable so field/method access emits correct locking.
         if self.is_managed_owned_user(ty) {
-            if let Type::Qualified(inner, OwnerQual::Owned) = ty {
+            if let Type::Qualified(inner, OwnerQual::Owned) = ty.without_mut() {
                 let managed_ty = self.emit_managed_actor(inner);
                 let raw_val = self.emit_let_value(Some(inner.as_ref()), s_value);
                 let init = self.wrap_managed(&raw_val);
@@ -877,6 +877,15 @@ impl Transpiler {
                 self.mut_local_vars.remove(&s.name);
             }
         }
+        // Content-mutation permission (`def` calls, field writes) — independent
+        // of the rebind-axis tracking above; see `content_mutable_local_vars`'s
+        // doc and `crate::ast::binding_grants_mut`.
+        if crate::ast::binding_grants_mut(&s.binding, s.var_mut, s.ty.as_ref()) {
+            self.content_mutable_local_vars.insert(s.name.clone());
+        } else {
+            self.content_mutable_local_vars.remove(&s.name);
+        }
+        self.mut_checked_local_vars.insert(s.name.clone());
         // `lazy T name` — deferred write-once binding backed by OnceCell<T>.
         // `lazy` vars must NOT have an initializer; the value is provided later via `?=`.
         if s.binding == BindingKind::Lazy {
@@ -1655,10 +1664,18 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let_destructure(&mut self, s: &LetDestructureStmt) {
-        // Track all bound names as known locals.
+        // Track all bound names as known locals, and each slot's own
+        // content-mutation permission — independent per-slot, may differ from
+        // the statement's overall `binding` (docs/mut-type-modifier.md §4).
         for b in &s.bindings {
             if b.name != "_" {
                 self.known_local_vars.insert(b.name.clone());
+                if crate::ast::binding_grants_mut(&b.binding, b.var_mut, b.ty.as_ref()) {
+                    self.content_mutable_local_vars.insert(b.name.clone());
+                } else {
+                    self.content_mutable_local_vars.remove(&b.name);
+                }
+                self.mut_checked_local_vars.insert(b.name.clone());
             }
         }
         // Interprocedural GPU residency, tuple case (mirrors

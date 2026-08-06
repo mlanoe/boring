@@ -23,7 +23,7 @@ def void env_define(mut Interpreter interp, string name, Value val, bool is_muta
         interp.current_env.define(name, val)
 
 def Env'actor push_scope(mut Interpreter interp):
-    let child = new_env(interp.current_env)
+    mut child = new_env(interp.current_env)
     interp.current_env = child.clone()
     child
 
@@ -369,7 +369,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         # Do block (inline block expression)
         ExprKind.Do(stmts):
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block_do(interp, stmts)
@@ -518,7 +518,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     _: v
 
         ExprKind.TryElseBlock(try_stmts, else_stmts):
-            let child = new_env(interp.current_env)
+            mut child = new_env(interp.current_env)
             let prev = interp.current_env
             interp.current_env = child
             let sig = exec_block_fn(interp, try_stmts)
@@ -534,7 +534,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 threw_val = interp.take_pending_throw()
                 has_throw = true
             if has_throw:
-                let child2 = new_env(interp.current_env)
+                mut child2 = new_env(interp.current_env)
                 child2.define("error", threw_val)
                 let prev2 = interp.current_env
                 interp.current_env = child2
@@ -551,7 +551,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         ExprKind.Loop(s):
             var break_val = Value.Nil
             while true:
-                let child = new_env(interp.current_env)
+                mut child = new_env(interp.current_env)
                 let prev = interp.current_env
                 interp.current_env = child
                 let sig = exec_block(interp, s.body)

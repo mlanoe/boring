@@ -761,10 +761,12 @@ impl Transpiler {
 
         // Collect private, unqualified fields with their declared inner type name.
         let target_fields: std::collections::HashMap<String, String> = s.fields.iter()
-            .filter(|f| !matches!(f.ty, Type::Qualified(..)))
+            // `mut Point p` wraps `f.ty` in `Type::Mut` (docs/mut-type-modifier.md
+            // §3) — strip it before inspecting the shape, same as everywhere else.
+            .filter(|f| !matches!(f.ty.without_mut(), Type::Qualified(..)))
             .filter_map(|f| {
                 // Only struct-typed fields (Named type) are candidates for qualifier inference.
-                if let Type::Named(type_name) = &f.ty {
+                if let Type::Named(type_name) = f.ty.without_mut() {
                     Some((f.name.clone(), type_name.clone()))
                 } else {
                     None
@@ -1159,7 +1161,7 @@ impl Transpiler {
     /// If the variable has a Union qualifier (declared), return the member list.
     fn var_union<'a>(&'a self, name: &str) -> Option<&'a Vec<OwnerQual>> {
         let ty = self.fn_current_params.get(name).or_else(|| self.var_types.get(name))?;
-        if let Type::Qualified(_, OwnerQual::Union(members)) = ty {
+        if let Type::Qualified(_, OwnerQual::Union(members)) = ty.without_mut() {
             return Some(members);
         }
         None
@@ -1500,7 +1502,7 @@ fn mutation_root(expr: &Expr) -> Option<&str> {
 }
 
 fn qual_of_type(ty: &Type) -> Option<OwnerQual> {
-    match ty {
+    match ty.without_mut() {
         Type::Qualified(_, q) => match q {
             OwnerQual::Stack | OwnerQual::Owned | OwnerQual::Shared
             | OwnerQual::Actor | OwnerQual::Guard => Some(q.clone()),

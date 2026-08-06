@@ -30,7 +30,7 @@ struct Counter:
     req int get():
         value
 
-var ctr = Counter()
+mut ctr = Counter()
 ctr.inc()
 ctr.inc()
 ctr.add(3)

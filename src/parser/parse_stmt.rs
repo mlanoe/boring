@@ -55,14 +55,8 @@ impl Parser {
                     let line = self.line();
                     let col = self.col();
                     let _is_static = self.eat(&TokenKind::Static);
-                    let binding = match self.peek() {
-                        TokenKind::Mut => BindingKind::Mut,
-                        TokenKind::Var => BindingKind::Var,
-                        TokenKind::Lazy => BindingKind::Lazy,
-                        _ => BindingKind::Let,
-                    };
-                    self.advance(); // consume let/mut/var/lazy
-                    Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, line, col)?))
+                    let (binding, var_mut) = self.consume_binding_keyword();
+                    Ok(Stmt::LetDestructure(self.parse_let_destructure(binding, var_mut, line, col)?))
                 } else {
                     Ok(Stmt::Let(self.parse_let_stmt()?))
                 }
@@ -360,19 +354,28 @@ impl Parser {
         let col = self.col();
         // optional `static` before `let` / `var`
         let is_static = self.eat(&TokenKind::Static);
-        let binding = match self.peek() {
-            TokenKind::Mut  => { self.advance(); BindingKind::Mut }
-            TokenKind::Var  => { self.advance(); BindingKind::Var }
-            TokenKind::Lazy => { self.advance(); BindingKind::Lazy }
-            _ => { self.advance(); BindingKind::Let } // let
-        };
+        // Leading keyword phrase: `let`, `mut` (shorthand for `let mut`), `var`,
+        // `var mut`, or `lazy` — see `consume_binding_keyword`'s doc.
+        let (binding, var_mut) = self.consume_binding_keyword();
+        // Does this binding grant content-mutation permission? — `Mut` always
+        // does (bare/`let mut`, §1); `Var` only with the explicit second `mut`.
+        // Used below to wrap an *explicit* type in `Type::Mut` (or upgrade a
+        // borrow to its mutable form) right here at parse time. When the type
+        // is inferred instead (`ty` stays `None`), there is no `Type` node to
+        // wrap — the checker consults `var_mut`/`binding` once the concrete
+        // type is known (mirroring `check_tuple_mut_constraint`'s existing
+        // inferred-type handling).
+        let wrap_mut = matches!(binding, BindingKind::Mut)
+            || (matches!(binding, BindingKind::Var) && var_mut);
         // `let name = value`         — no type annotation, borrow by default
         // `let type name = value`    — explicit type annotation (boring convention)
         let (name, ty) = if self.is_type_start_before_ident() {
             let base = self.parse_type()?;
             let ty = self.parse_type_qualifier(base)?;
-            // `var T&` / `mut T&` → absorb mutability into the borrow type
-            let ty = if binding.is_mutable() { Self::apply_var_to_borrow(ty) } else { ty };
+            // `mut Type` / `mut Type&` / `var mut Type&` → apply the permission
+            // to the type itself (owned form wraps in `Type::Mut`; borrow form
+            // upgrades to its mutable qualifier) — see `wrap_type_mut`'s doc.
+            let ty = if wrap_mut { Self::wrap_type_mut(ty) } else { ty };
             let name = self.expect_ident()?;
             // `var T name'qualifier = value` — qualifier after the name applies to the type
             let ty = if self.check(&TokenKind::Tick) {
@@ -409,7 +412,8 @@ impl Parser {
                                 } else { Some(qualified) }
                             } else { Some(qualified) }
                         } else { Some(qualified) };
-                        return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col });
+                        let ty = if wrap_mut { ty.map(Self::wrap_type_mut) } else { ty };
+                        return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col });
                     }
                     _ => {}
                 }
@@ -419,29 +423,53 @@ impl Parser {
         // `lazy T name` — deferred write-once binding, no initializer allowed.
         if matches!(binding, BindingKind::Lazy) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: true, line, col });
+            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: true, line, col });
         }
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, is_pub, is_static, name, ty, value: None, is_lazy: false, line, col });
+            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: false, line, col });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { binding, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col })
+        Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col })
     }
 
     /// Parse the binding list of a destructuring `let`.
     /// Handles both the parenthesised form `(a, b)` and the bare form `a, b`.
-    /// Called after the `let`/`var` keyword has already been consumed.
-    pub(crate) fn parse_let_destructure(&mut self, binding: BindingKind, line: usize, col: usize) -> Result<LetDestructureStmt, ParseError> {
+    /// Called after the statement's own mandatory leading keyword phrase
+    /// (`binding`/`var_mut`) has already been consumed — that phrase doubles as
+    /// element 0's own keyword (see docs/mut-type-modifier.md §4's grammar note:
+    /// "the statement's own leading keyword phrase [is] mandatory on the *first*
+    /// element"). Element 1+ may each carry their own explicit `let`/`mut`/
+    /// `var`(` mut`); an unmarked element defaults per §4's bare-vs-parenthesised
+    /// rule: bare → always `let`, parenthesised → inherits `binding`/`var_mut`.
+    pub(crate) fn parse_let_destructure(&mut self, binding: BindingKind, var_mut: bool, line: usize, col: usize) -> Result<LetDestructureStmt, ParseError> {
         let parens = self.eat(&TokenKind::LParen);
         if parens { self.skip_newlines_and_indent(); }
         let mut bindings = Vec::new();
+        let mut index = 0usize;
+        // Tracks whether an earlier element in a *bare* list carried its own
+        // explicit, non-trivial (not plain `let`) keyword — the specific shape
+        // §4 flags as a readability trap for the next unmarked element.
+        let mut saw_nontrivial_keyword = false;
         loop {
             if parens && self.check(&TokenKind::RParen) { break; }
             if !parens && (self.check(&TokenKind::Eq) || self.check(&TokenKind::Eof)) { break; }
+
+            // Element 0's keyword is the statement's own leading phrase, already
+            // consumed by the caller. Element 1+ may carry its own.
+            let own_keyword: Option<(BindingKind, bool)> = if index == 0 {
+                Some((binding.clone(), var_mut))
+            } else if matches!(self.peek(), TokenKind::Let | TokenKind::Var | TokenKind::Mut) {
+                Some(self.consume_binding_keyword())
+            } else {
+                None
+            };
+            let is_explicit = own_keyword.is_some();
+            let bare_unmarked_after_keyworded_sibling = !parens && !is_explicit && saw_nontrivial_keyword;
+
             // Each slot: optional type + name, or just `_`
             let (name, ty) = if self.check(&TokenKind::Ident(String::from("_"))) {
                 self.advance();
@@ -453,7 +481,26 @@ impl Parser {
             } else {
                 (self.expect_ident()?, None)
             };
-            bindings.push(DestructureBinding { name, ty });
+
+            // Resolve this slot's binding: its own explicit keyword, or the
+            // bare-vs-parenthesised default (docs/mut-type-modifier.md §4).
+            let (elem_binding, elem_var_mut) = own_keyword.unwrap_or_else(|| {
+                if parens { (binding.clone(), var_mut) } else { (BindingKind::Let, false) }
+            });
+            let elem_wrap_mut = matches!(elem_binding, BindingKind::Mut)
+                || (matches!(elem_binding, BindingKind::Var) && elem_var_mut);
+            let ty = if elem_wrap_mut { ty.map(Self::wrap_type_mut) } else { ty };
+
+            let nontrivial = !matches!(elem_binding, BindingKind::Let) || elem_var_mut;
+            if is_explicit && nontrivial { saw_nontrivial_keyword = true; }
+
+            bindings.push(DestructureBinding {
+                name, ty,
+                binding: elem_binding,
+                var_mut: elem_var_mut,
+                bare_unmarked_after_keyworded_sibling,
+            });
+            index += 1;
             if !self.eat(&TokenKind::Comma) { break; }
             self.skip_newlines_and_indent();
         }
@@ -461,7 +508,7 @@ impl Parser {
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetDestructureStmt { binding, bindings, value, line, col })
+        Ok(LetDestructureStmt { binding, var_mut, bindings, value, line, col })
     }
 
     pub(crate) fn parse_return_stmt(&mut self) -> Result<ReturnStmt, ParseError> {

@@ -99,7 +99,14 @@ impl Interpreter {
                 } else {
                     target_env.borrow_mut().define(&s.name, val);
                 }
+                // Content-mutation permission (`def` calls, field writes,
+                // collection mutation) is independent of the rebind axis above —
+                // `var Point p` alone no longer grants it; see `binding_grants_mut`.
+                if crate::ast::binding_grants_mut(&s.binding, s.var_mut, s.ty.as_ref()) {
+                    target_env.borrow_mut().mark_content_mutable(&s.name);
+                }
                 if let Some(ty) = &s.ty {
+                    target_env.borrow_mut().mark_declared_type(&s.name, ty.clone());
                     let resolved = self.resolve_type(ty);
                     // Owned-element collection: track + invalidate sources
                     if Self::type_has_owned_elems(&resolved) {
@@ -169,10 +176,19 @@ impl Interpreter {
                         let resolved = self.resolve_type(ty);
                         v = Self::coerce_to_type(v, &resolved);
                     }
-                    if s.binding.is_mutable() {
+                    // Each slot's own resolved binding, not the statement's
+                    // overall one — they can differ per-element
+                    // (docs/mut-type-modifier.md §4).
+                    if binding.binding.is_mutable() {
                         env.borrow_mut().define_mut(&binding.name, v);
                     } else {
                         env.borrow_mut().define(&binding.name, v);
+                    }
+                    if crate::ast::binding_grants_mut(&binding.binding, binding.var_mut, binding.ty.as_ref()) {
+                        env.borrow_mut().mark_content_mutable(&binding.name);
+                    }
+                    if let Some(ty) = &binding.ty {
+                        env.borrow_mut().mark_declared_type(&binding.name, ty.clone());
                     }
                 }
                 Ok(())
@@ -805,6 +821,12 @@ impl Interpreter {
                     args.iter().map(|a| self.resolve_type(a)).collect(),
                 ),
             },
+            // `mut Type` — recurse so an aliased inner type (`mut int x`, parsed as
+            // `Mut(Named("int"))` until alias resolution) actually resolves; the
+            // previous default (`other => other.clone()`) left the inner `Named`
+            // unresolved, which then failed `value_matches_type`'s `Named` branch
+            // (looks for `Channel`/`Object`/`EnumVariant`, not a bare primitive).
+            Type::Mut(inner) => Type::Mut(Box::new(self.resolve_type(inner))),
             // `LinkedList.Index` — resolve by looking up the struct's assoc type def.
             // Falls back to the unresolved AssocOf when the struct isn't found.
             Type::AssocOf(base, assoc) => {
@@ -1032,6 +1054,7 @@ impl Interpreter {
                 };
                 format!("{}.{}", base_str, assoc)
             }
+            Type::Mut(inner) => format!("mut {}", Self::display_type(inner)),
         }
     }
 
@@ -1073,6 +1096,9 @@ impl Interpreter {
             Type::Never  => false,
             Type::Optional(inner) => matches!(val, Value::Nil) || self.value_matches_type(val, inner),
             Type::Qualified(inner, _) => self.value_matches_type(val, inner),
+            // `mut` has no Rust-level representation and runtime values carry no
+            // permission tag — strip and delegate to the inner type.
+            Type::Mut(inner) => self.value_matches_type(val, inner),
             Type::TypeParam(_) => true,
             Type::Named(name) => match val {
                 Value::Channel { is_sender, .. } => match name.as_str() {
@@ -1545,7 +1571,7 @@ impl Interpreter {
 
     /// Returns true if a type element qualifier is Owned.
     pub(crate) fn is_owned_qual(ty: &Type) -> bool {
-        matches!(ty, Type::Qualified(_, OwnerQual::Owned))
+        matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Owned))
     }
 
     /// Returns true if the type is a collection with exclusively-owned element type (`T'`).
