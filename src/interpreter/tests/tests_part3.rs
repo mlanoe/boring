@@ -580,6 +580,53 @@ fn test_attr_ast_name_preserved() {
 }
 
 #[test]
+fn test_derive_attr_before_pub_struct_is_not_dropped() {
+    // Regression test: `@derive(...)` on the line before `pub struct` used to
+    // be silently discarded — the parser only recognized Def/Req/Struct/Enum
+    // immediately after an attribute list, so a `Pub` token in between fell
+    // through to a catch-all that reparsed the item with no attributes at
+    // all (no error). `pub @derive(...)` (pub first) already worked; this
+    // covers the previously-broken ordering.
+    let src = "@derive(Debug)\npub struct Foo:\n    int x\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let crate::ast::Item::Struct(decl) = &program.items[0] {
+        assert!(decl.is_pub, "`pub` after the attribute list should still mark the struct pub");
+        assert_eq!(decl.attrs.len(), 1, "the @derive attribute must not be dropped");
+        assert_eq!(decl.attrs[0].name, "derive");
+        assert_eq!(decl.attrs[0].args, vec!["Debug"]);
+    } else {
+        panic!("expected Struct item");
+    }
+}
+
+#[test]
+fn test_derive_attr_after_pub_fn_is_not_dropped() {
+    // Same regression, function form: `@inline` before `pub def`.
+    let src = "@inline\npub def int double(int x):\n    return x * 2\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    if let crate::ast::Item::Fn(decl) = &program.items[0] {
+        assert!(decl.is_pub);
+        assert_eq!(decl.attrs.len(), 1);
+        assert_eq!(decl.attrs[0].name, "inline");
+    } else {
+        panic!("expected Fn item");
+    }
+}
+
+#[test]
+fn test_attr_before_mod_still_parses_with_attrs_discarded() {
+    // Non-regression: `@cfg(test)` before `mod` (examples/todo.br's real
+    // pattern) has no AST slot to attach attributes to — must keep parsing
+    // successfully with the attribute discarded, not become a hard error.
+    let src = "@cfg(test)\nmod tests:\n    let x = 1\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    assert_eq!(program.items.len(), 1);
+}
+
+#[test]
 fn test_attr_ast_multiple_args() {
     // Check that multiple args are stored
     let src = "@derive(Debug, Clone, PartialEq)\nstruct Foo: pass\n";

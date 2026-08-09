@@ -235,15 +235,29 @@ impl Parser {
                 self.parse_item(true)
             }
             TokenKind::At => {
-                // Attributes: parse them and then dispatch to the annotated item
+                // Attributes: parse them and then dispatch to the annotated item.
+                // `pub` may appear either before the attributes (`pub @derive(...)`,
+                // handled by the `TokenKind::Pub` arm above, which recurses here with
+                // is_pub=true) or after them (`@derive(...)` then `pub struct` on the
+                // next line) — accept both orderings, so a `pub` placed after the
+                // attribute list is folded into `is_pub` here instead of falling
+                // through to the discard branch below and silently losing the
+                // attributes (that used to make `@derive(Component)` / `pub struct`
+                // on separate lines emit a plain, non-`Component` struct with no
+                // error at all).
                 let attrs = self.parse_attrs();
+                let is_pub = if self.eat(&TokenKind::Pub) { true } else { is_pub };
                 match self.peek().clone() {
                     TokenKind::Def => Ok(Item::Fn(self.parse_fn_decl_with_attrs(is_pub, true, attrs)?)),
                     TokenKind::Req => Ok(Item::Fn(self.parse_fn_decl_with_attrs(is_pub, false, attrs)?)),
                     TokenKind::Struct => Ok(Item::Struct(self.parse_struct_decl_with_attrs(is_pub, attrs)?)),
                     TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?)),
                     _ => {
-                        // Attrs on unsupported items: parse item normally (attrs are discarded)
+                        // Attrs on item kinds with no AST slot to attach them to
+                        // (e.g. `@cfg(test)` / `@test` before `mod`/`task` in
+                        // examples/todo.br) — parse normally; attrs are discarded,
+                        // same as before this fix. Only the Pub-after-attrs case
+                        // above is new behavior.
                         self.parse_item(is_pub)
                     }
                 }
