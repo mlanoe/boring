@@ -1579,6 +1579,11 @@ impl Parser {
                 TokenKind::As => {
                     conversions.push(self.parse_as_decl()?);
                 }
+                // `pass` — no-op placeholder, allows `struct Foo:\n    pass` for an empty body.
+                TokenKind::Pass => {
+                    self.advance();
+                    self.expect_newline_soft();
+                }
                 _ => {
                     fields.push(self.parse_field_decl()?);
                 }

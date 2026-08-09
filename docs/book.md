@@ -2015,6 +2015,24 @@ impl std::fmt::Display for Vec2 {
 }
 ```
 
+### Empty structs — `pass`
+
+A struct with no fields and no methods uses `pass` as a placeholder body, either inline or indented — both are equivalent:
+
+```boring
+struct Empty: pass
+
+struct AlsoEmpty:
+    pass
+
+let e = Empty()
+```
+
+**Rust equivalent**
+```rust
+struct Empty;
+```
+
 ### Constructors
 
 Without an explicit `init`, structs are constructed with named fields:

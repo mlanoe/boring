@@ -197,3 +197,10 @@ def int makeNest():
     np.x + np.y
 
 print makeNest()
+
+# empty struct body via block-form `pass`
+struct SEmpty:
+    pass
+
+let sempty = SEmpty()
+print "empty-block-ok"

@@ -900,6 +900,10 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                 while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
                     p.advance()
                 p.eat(TokenKind.Newline)
+            TokenKind.Pass:
+                # no-op placeholder, allows `struct Foo:\n    pass` for an empty body
+                p.advance()
+                p.eat(TokenKind.Newline)
             TokenKind.Task:
                 # `task RetType method(params): body` or `task def ...` method inside struct.
                 # Both helpers are shared with non-task callers and always hardcode
