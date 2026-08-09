@@ -315,8 +315,31 @@ impl Transpiler {
             }
             _ => format!("{}.into_iter()", iter),
         };
-        // Tuple destructuring: `for k, v in dict:` → `for (k, v) in dict { ... }`
-        let pat = if s.vars.len() > 1 { format!("({})", vars) } else { vars };
+        // Tuple destructuring: `for k, v in dict:` → `for (k, v) in dict { ... }`.
+        // When the iterable's static type is tuple-shaped with `mut`-tagged
+        // slots (e.g. a Bevy-ECS-style `Query<(mut Position&, Velocity&)>`
+        // parameter), prefix the corresponding loop variable(s) with `mut` —
+        // required for the item's `Mut<T>`-style wrapper (or any type whose
+        // field-mutation needs a mutable binding to reborrow through) to be
+        // usable in the loop body; see docs/mut-type-modifier.md's open
+        // "propagating a mut-qualified type argument through generic
+        // instantiation" note.
+        let pat = if s.vars.len() > 1 {
+            let mut_flags: Option<Vec<bool>> = match &s.iterable.kind {
+                ExprKind::Var(v) => self.var_types.get(v.as_str())
+                    .or_else(|| self.fn_current_params.get(v.as_str()))
+                    .and_then(Type::tuple_slot_mut_flags),
+                _ => None,
+            };
+            let parts: Vec<String> = s.vars.iter().enumerate().map(|(i, v)| {
+                let name = escape_rust_keyword(v);
+                let is_mut = mut_flags.as_ref().and_then(|flags| flags.get(i)).copied().unwrap_or(false);
+                if is_mut { format!("mut {}", name) } else { name }
+            }).collect();
+            format!("({})", parts.join(", "))
+        } else {
+            vars
+        };
         self.line(&format!("for {} in {} {{", pat, iter_expr));
         self.indent += 1;
         self.emit_loop_body(&s.body);

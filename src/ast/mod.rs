@@ -1333,6 +1333,26 @@ impl Type {
         }
     }
 
+    /// If this type is (or wraps, through one level of `Generic<...>`,
+    /// `Array`/`ArrayN`, `Optional`, `Mut`, or `Qualified`) a tuple type,
+    /// returns one `grants_mut()` flag per tuple element. Used to decide,
+    /// for `for a, b in iterable:`, which destructured loop variables need a
+    /// Rust `mut` binding — the tuple slot's own `mut T&`/`mut T` doesn't
+    /// give the *loop variable* a Rust-level mutable binding by itself (e.g.
+    /// Bevy's `Query<(mut Position&, Velocity&)>` yields `Mut<Position>` per
+    /// item, whose `DerefMut` needs `mut pos` in the pattern to call).
+    /// Returns `None` if this type isn't recognizably tuple-shaped — callers
+    /// then fall back to no `mut` on any slot (today's behavior).
+    pub fn tuple_slot_mut_flags(&self) -> Option<Vec<bool>> {
+        match self {
+            Type::Tuple(elems) => Some(elems.iter().map(Type::grants_mut).collect()),
+            Type::Generic(_, args) if args.len() == 1 => args[0].tuple_slot_mut_flags(),
+            Type::Array(inner) | Type::ArrayN(inner, _) => inner.tuple_slot_mut_flags(),
+            Type::Optional(inner) | Type::Mut(inner) | Type::Qualified(inner, _) => inner.tuple_slot_mut_flags(),
+            _ => None,
+        }
+    }
+
     pub fn is_copy(&self) -> bool {
         match self {
             Type::Mut(inner) => inner.is_copy(),

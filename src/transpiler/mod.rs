@@ -3241,6 +3241,49 @@ mod tests {
     }
 
     #[test]
+    fn test_for_loop_destructure_marks_mut_tuple_slot() {
+        // `Query<(mut Position&, Velocity&)>`-shaped parameter (Bevy-ECS-style,
+        // see docs/mut-type-modifier.md's motivating example): destructuring
+        // its items in a `for` loop must bind the slot declared `mut T&` with
+        // a Rust `mut` in the pattern — required for that item's type (e.g.
+        // Bevy's `Mut<T>` change-detection wrapper) to be field-mutable, since
+        // Boring has no source syntax to write `mut` on a for-loop variable
+        // directly (only inferred from the iterable's declared type).
+        let src = "\
+struct Position:\n    pub var float x\n\nstruct Velocity:\n    pub float x\n\n\
+def move_system(Query<(mut Position&, Velocity&)> query):\n    for pos, vel in query:\n        pos.x = pos.x + vel.x\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("for (mut pos, vel) in"),
+            "expected `mut` on the slot declared `mut Position&`, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_for_loop_destructure_no_spurious_mut() {
+        // Non-regression: a plain (non-`mut`-tagged) tuple/dict destructure
+        // must NOT gain a `mut` binding it didn't have before this feature.
+        let src = "let m = {\"a\" = 1}\nfor k, v in m:\n    print \"{k}={v}\"\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        // Check the actual `for` line, not a substring match anywhere in the
+        // file — the standard-library boilerplate Boring always emits (e.g.
+        // `BoringArrayIndex::remove_at`) legitimately contains `let mut v = ...`
+        // elsewhere, which a bare `!code.contains("mut v")` would false-positive on.
+        assert!(code.contains("for (k, v) in"),
+            "plain dict destructure must not gain a spurious `mut`, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_for_loop_destructure_mixed_mut_slots() {
+        // Both tuple positions independently `mut`-tagged, or neither, must
+        // each be judged on their own slot — not "any mut anywhere -> all mut".
+        let src = "\
+struct A:\n    pub var float x\n\nstruct B:\n    pub var float x\n\n\
+def sys(Query<(mut A&, mut B&)> query):\n    for a, b in query:\n        a.x = a.x + b.x\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("for (mut a, mut b) in"),
+            "both slots declared `mut T&` should both bind `mut`, got:\n{}", code);
+    }
+
+    #[test]
     fn test_single_thread_uses_spawn_local() {
         // In --threading single mode, task expressions must emit tokio::task::spawn_local.
         let src = "task int work(int n):\n    return n\n\nlet t = task work(1)\n";
