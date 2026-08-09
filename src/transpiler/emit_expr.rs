@@ -1279,6 +1279,25 @@ impl Transpiler {
                 let rs = if r_is_int_lit { format!("{}_f64", rs_raw) } else { rs_raw };
                 return format!("({} {} {})", ls, binop_str(op), rs);
             }
+            // Bare int literal against a float-*typed* (non-literal) operand, e.g.
+            // `1 < b` / `1 + b` where `b: float`. Rust's numeric-literal inference
+            // unifies an untyped int literal with another integer type or with an
+            // untyped float literal, but never across the int/float kind boundary —
+            // so without this, `1 < b` emits as `(1 < b)` and rustc rejects it
+            // ("can't compare {integer} with f64" / "cannot add f64 to {integer}").
+            // Suffix the literal with the other side's concrete float type instead.
+            if l_is_int_lit != r_is_int_lit {
+                let other = if l_is_int_lit { r } else { l };
+                if let Some(other_ty) = self.get_expr_rust_type(other) {
+                    if other_ty == "f32" || other_ty == "f64" {
+                        let ls_raw = self.emit_expr(l);
+                        let rs_raw = self.emit_expr(r);
+                        let ls = if l_is_int_lit { format!("{}_{}", ls_raw, other_ty) } else { ls_raw };
+                        let rs = if r_is_int_lit { format!("{}_{}", rs_raw, other_ty) } else { rs_raw };
+                        return format!("({} {} {})", ls, binop_str(op), rs);
+                    }
+                }
+            }
             if let Some((l_ty, r_ty)) = self.get_numeric_types(l, r) {
                 if l_ty != r_ty {
                     let wider = wider_numeric_type(&l_ty, &r_ty);

@@ -1,0 +1,6 @@
+let float b = 2.5
+print 1 < b
+print 1 > b
+print b < 1
+print 1 <= b
+print 1 >= b

@@ -209,6 +209,7 @@ interp_test!(supertraits);
 interp_test!(type_cast);
 interp_test!(ref_identity);
 interp_test!(mut_scalar);
+interp_test!(int_float_literal_compare);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

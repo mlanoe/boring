@@ -126,18 +126,39 @@ struct BoringToml {
     name:    String,
     version: String,
     main:    String,
+    /// Raw `[dependencies]` lines (e.g. `bevy = { version = "0.19", default-features = false }`),
+    /// copied verbatim into the generated Cargo.toml's own `[dependencies]` section — see
+    /// `Self::parse`'s doc comment for why this stays text, not a real TOML value.
+    dependencies: Vec<String>,
 }
 
 impl BoringToml {
-    /// Parse a `boring.toml` file.  No external dependency â€” the format is tiny.
+    /// Parse a `boring.toml` file.  No external dependency â€” the format is tiny: flat
+    /// `key = value` lines, plus one recognized section header, `[dependencies]`, whose
+    /// body lines are kept as opaque text (not parsed) and spliced verbatim into the
+    /// generated Cargo.toml's `[dependencies]` section by `emit_rust_to_dir`. This is the
+    /// only way today to add an external Cargo dependency (e.g. `bevy`) without hand-editing
+    /// the generated project after `boring build` — Boring itself has no opinion on the
+    /// value's syntax (inline tables, feature arrays, etc. all pass through as-is).
     fn parse(src: &str) -> Self {
         let mut name    = String::new();
         let mut version = "0.1.0".to_string();
         let mut main    = "main.br".to_string();
+        let mut dependencies = Vec::new();
+        let mut in_dependencies = false;
 
         for line in src.lines() {
             let line = line.trim();
-            if let Some(rest) = line.strip_prefix("name") {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') {
+                in_dependencies = line == "[dependencies]";
+                continue;
+            }
+            if in_dependencies {
+                dependencies.push(line.to_string());
+            } else if let Some(rest) = line.strip_prefix("name") {
                 if let Some(v) = Self::extract_value(rest) { name = v; }
             } else if let Some(rest) = line.strip_prefix("version") {
                 if let Some(v) = Self::extract_value(rest) { version = v; }
@@ -145,7 +166,7 @@ impl BoringToml {
                 if let Some(v) = Self::extract_value(rest) { main = v; }
             }
         }
-        BoringToml { name, version, main }
+        BoringToml { name, version, main, dependencies }
     }
 
     /// Extract the value from `= "value"` or `= value`.
@@ -158,6 +179,39 @@ impl BoringToml {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod boring_toml_tests {
+    use super::BoringToml;
+
+    #[test]
+    fn dependencies_section_captured_verbatim() {
+        let src = "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[dependencies]\nbevy = { version = \"0.19\", default-features = false }\nserde = { version = \"1\", features = [\"derive\"] }\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.name, "demo");
+        assert_eq!(toml.dependencies, vec![
+            "bevy = { version = \"0.19\", default-features = false }".to_string(),
+            "serde = { version = \"1\", features = [\"derive\"] }".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn no_dependencies_section_is_empty() {
+        let src = "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+        let toml = BoringToml::parse(src);
+        assert!(toml.dependencies.is_empty());
+    }
+
+    #[test]
+    fn dependencies_before_project_section_still_parses_name() {
+        // Section order shouldn't matter — `name`/`version`/`main` are read
+        // whenever we're not inside `[dependencies]`, regardless of position.
+        let src = "[dependencies]\nbevy = \"0.19\"\n\n[project]\nname = \"demo\"\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.name, "demo");
+        assert_eq!(toml.dependencies, vec!["bevy = \"0.19\"".to_string()]);
     }
 }
 
@@ -407,7 +461,7 @@ fn run_project() {
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
 fn build_project_with_config(config: transpiler::TranspileConfig) {
     let (toml, _) = load_project_toml();
-    emit_rust_with_version_and_config(&toml.main, &toml.version, config);
+    emit_rust_with_version_and_config(&toml.main, &toml.version, config, &toml.dependencies);
 }
 
 /// `boring build --target kernel` â€” emit a kernel Cargo project from `boring.toml`.
@@ -639,7 +693,7 @@ fn parse_build_command(build_args: &[String]) {
     let project_dir = match (target_kernel, file, output_dir) {
         (true,  Some(path), _)          => { emit_kernel(path); return; }
         (true,  None, _)                => { build_project_kernel(); return; }
-        (false, Some(path), Some(dir))  => { emit_rust_to_dir(path, "0.1.0", config, dir.clone()); dir }
+        (false, Some(path), Some(dir))  => { emit_rust_to_dir(path, "0.1.0", config, dir.clone(), &[]); dir }
         (false, Some(path), None)       => {
             let stem = std::path::Path::new(path)
                 .file_stem().map(|s| s.to_string_lossy().into_owned())
@@ -794,7 +848,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
 // â”€â”€â”€ Core: transpile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn emit_rust_with_config(path: &str, config: transpiler::TranspileConfig) {
-    emit_rust_with_version_and_config(path, "0.1.0", config);
+    emit_rust_with_version_and_config(path, "0.1.0", config, &[]);
 }
 
 /// Transpile a `.br` file and print the generated Rust source to stdout.
@@ -834,7 +888,7 @@ fn rust_dir_name_full(stem: &str, threading: &transpiler::ThreadingMode, mode: &
     }
 }
 
-fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig) {
+fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpiler::TranspileConfig, extra_deps: &[String]) {
     let path = PathBuf::from(path);
 
     // Determine output project directory next to the source file
@@ -844,10 +898,10 @@ fn emit_rust_with_version_and_config(path: &str, version: &str, config: transpil
     let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let project_dir = base_dir.join(rust_dir_name_full(&stem, &config.threading, &config.mode));
 
-    emit_rust_to_dir(path.to_str().unwrap_or(""), version, config, project_dir);
+    emit_rust_to_dir(path.to_str().unwrap_or(""), version, config, project_dir, extra_deps);
 }
 
-fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConfig, project_dir: PathBuf) {
+fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConfig, project_dir: PathBuf, extra_deps: &[String]) {
     let path = PathBuf::from(path);
 
     let source = match std::fs::read_to_string(&path) {
@@ -968,6 +1022,15 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     } else {
         ""
     };
+    // Extra dependencies declared under `[dependencies]` in `boring.toml` (e.g.
+    // `bevy = { version = "0.19", default-features = false }`) — copied verbatim,
+    // one per line, after the crates the transpiler adds on its own. This is the
+    // only source of dependencies Boring doesn't infer from `.br` usage itself.
+    let user_deps = if extra_deps.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", extra_deps.join("\n"))
+    };
     let cargo_toml = format!(
         r#"[package]
 name = "{stem}"
@@ -979,7 +1042,7 @@ name = "{stem}"
 path = "src/main.rs"
 
 [dependencies]
-tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{local_channel_dep}"#
+tokio = {{ version = "1", features = ["full"] }}{stream_deps}{log_dep}{thiserror_dep}{reqwest_dep}{tokio_util_dep}{serde_dep}{local_channel_dep}{user_deps}"#
     );
     let cargo_path = project_dir.join("Cargo.toml");
     if let Err(e) = std::fs::write(&cargo_path, cargo_toml) {
