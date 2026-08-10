@@ -1,0 +1,8 @@
+pub let float32 LEFT_WALL = -450.0
+let float32 PRIVATE_SPEED = 88.0
+
+pub float32 combined():
+    LEFT_WALL + PRIVATE_SPEED
+
+def main():
+    print "{combined()}"

@@ -243,5 +243,12 @@ transpile_test!(top_level_const);
 // dependency) — transpiler-only by nature (the interpreter has no runtime concept of
 // an external Rust value to deref), so this is NOT in tests/run.rs.
 transpile_test!(pointee);
+// `pub let` at module scope must emit `pub const` (private `let` stays a private
+// `const`) -- this single-crate run only proves the generated code still compiles
+// and runs correctly for both; it can't observe cross-module visibility on its own,
+// since the generated project is a single binary crate with no sibling module
+// importing it. `pub_module_const.rs` is the test that actually exercises that
+// (a hand-written sibling file in a real two-file crate, built with `cargo build`).
+transpile_test!(pub_top_level_const);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

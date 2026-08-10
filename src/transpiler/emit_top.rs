@@ -73,7 +73,11 @@ impl Transpiler {
                     } else {
                         s.name.clone()
                     };
-                    self.line(&format!("const {}: {} = {};", const_name, ty_str, val_str));
+                    // `pub let` at module scope → `pub const`, mirroring `pub struct`/`pub def`/
+                    // `pub enum` above. A bare `let` (no `pub`) keeps emitting a private const,
+                    // matching prior behavior for code that never intended cross-module access.
+                    let vis = if s.is_pub { "pub " } else { "" };
+                    self.line(&format!("{}const {}: {} = {};", vis, const_name, ty_str, val_str));
                 } else {
                     self.emit_let(s, false);
                 }
