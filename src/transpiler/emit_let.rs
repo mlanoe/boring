@@ -13,6 +13,29 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+/// Extracts the receiver type name from a constructor call value, for either shape:
+/// a bare struct constructor `TypeName(args)` (`ExprKind::Call(Var(name), _)`), or an
+/// enum variant constructor `TypeName.Variant(args)` — parsed generically as
+/// `ExprKind::MethodCall(Var(name), "Variant", args)` by `parse_expr.rs`'s postfix `.`
+/// handling, same as any other dotted call; there is no dedicated enum-construction AST
+/// node. Used by `try_emit_qualified_let`'s `'actor`/`'guard` branches to populate
+/// `var_struct_types` for the non-mut-binding `def`-call diagnostic
+/// (`emit_methods.rs`'s `resolve_receiver_type_name`) — struct constructors already got
+/// this before enum variant fields could carry `mut` (docs/mut-type-modifier.md); the enum
+/// shape needs its own case since it's a `MethodCall`, not a `Call`, and so never matched
+/// the struct-only pattern this mirrors.
+fn constructor_type_name(value: &Expr) -> Option<&str> {
+    match &value.kind {
+        ExprKind::Call(callee, _) => {
+            if let ExprKind::Var(type_name) = &callee.kind { Some(type_name.as_str()) } else { None }
+        }
+        ExprKind::MethodCall(receiver, _variant, _) => {
+            if let ExprKind::Var(type_name) = &receiver.kind { Some(type_name.as_str()) } else { None }
+        }
+        _ => None,
+    }
+}
+
 impl Transpiler {
     /// `T'actor` → `Arc<Mutex<T>>`/`Rc<RefCell<T>>`, `T'guard` → `Arc<RwLock<T>>`, and
     /// managed-mode `T'` (`OwnerQual::Owned`) over a user type — locking wrapper bindings
@@ -37,13 +60,12 @@ impl Transpiler {
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                     self.rc_vars.insert(s.name.clone());
                 }
-                if let ExprKind::Call(callee, _) = &s_value.kind {
-                    if let ExprKind::Var(type_name) = &callee.kind {
-                        if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                            && self.struct_fields.contains_key(type_name.as_str())
-                        {
-                            self.var_struct_types.insert(s.name.clone(), type_name.clone());
-                        }
+                if let Some(type_name) = constructor_type_name(s_value) {
+                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && (self.struct_fields.contains_key(type_name)
+                            || self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", type_name))))
+                    {
+                        self.var_struct_types.insert(s.name.clone(), type_name.to_string());
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
@@ -68,13 +90,12 @@ impl Transpiler {
                     self.var_rwlock_types.insert(s.name.clone());
                 }
                 self.arc_vars.insert(s.name.clone());
-                if let ExprKind::Call(callee, _) = &s_value.kind {
-                    if let ExprKind::Var(type_name) = &callee.kind {
-                        if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                            && self.struct_fields.contains_key(type_name.as_str())
-                        {
-                            self.var_struct_types.insert(s.name.clone(), type_name.clone());
-                        }
+                if let Some(type_name) = constructor_type_name(s_value) {
+                    if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && (self.struct_fields.contains_key(type_name)
+                            || self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", type_name))))
+                    {
+                        self.var_struct_types.insert(s.name.clone(), type_name.to_string());
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };

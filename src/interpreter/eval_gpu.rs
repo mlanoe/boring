@@ -261,6 +261,7 @@ impl PartialEq for ThreadValue {
             (ThreadValue::Uint32(a), ThreadValue::Uint32(b)) => a == b,
             (ThreadValue::Uint64(a), ThreadValue::Uint64(b)) => a == b,
             (ThreadValue::Uint128(a), ThreadValue::Uint128(b)) => a == b,
+            (ThreadValue::Float32(a), ThreadValue::Float32(b)) => a == b,
             (ThreadValue::Float64(a), ThreadValue::Float64(b)) => a == b,
             (ThreadValue::Str(a),   ThreadValue::Str(b))   => a == b,
             (ThreadValue::Array(a), ThreadValue::Array(b)) => a == b,

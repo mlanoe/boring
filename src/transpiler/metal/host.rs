@@ -2198,9 +2198,13 @@ impl HostEmitter {
                         return format!("boring_metal_device_n({} as usize)?", idx);
                     }
                 }
-                // `float(expr)` → `expr as f32` (Metal uses f32, not f64)
+                // `float(expr)`/`float64(expr)` → `expr as f32` (Metal is f32-only —
+                // see `msl_unsupported_f64` in device.rs for the device-side rejection
+                // of a real `float64` field; this host-side helper narrows the same
+                // way it always has, unaffected by that new device-side error).
+                // `float32(expr)` → `expr as f32` too, natively (no narrowing at all).
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "float" {
+                    if name == "float" || name == "float64" || name == "float32" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
                             return format!("({} as f32)", inner);
@@ -2860,8 +2864,8 @@ fn rust_type(ty: &Type) -> String {
         Type::Set(inner)     => format!("std::collections::HashSet<{}>", rust_type(inner)),
         Type::Optional(inner)  => format!("Option<{}>", rust_type(inner)),
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" => "f32",
-            "f32"           => "f32",
+            "float" | "float64" | "f64" => "f32",
+            "float32" | "f32"           => "f32",
             "int"           => "isize",
             "uint"          => "usize",
             "i64"           => "i64",
@@ -2901,8 +2905,8 @@ fn elem_size_bytes(ty: &Type) -> usize {
         Type::Int128 | Type::Uint128               => 16,
         Type::Bool                                => 1,
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" => 4,
-            "f32"           => 4,
+            "float" | "float64" | "f64" => 4,
+            "float32" | "f32"           => 4,
             "int"   | "i64" => 8,
             "uint"  | "u64" => 8,
             "uint8" | "int8" => 1,

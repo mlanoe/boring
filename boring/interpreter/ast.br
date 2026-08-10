@@ -189,6 +189,15 @@ struct EnumVariant:
 struct VariantField:
     string? name
     Type ty
+    # `true` for a field declared `mut Type` (docs/mut-type-modifier.md) — e.g.
+    # `enum Holder: Value(mut Point p)`. Unlike `parse_type`'s general `mut`-prefix
+    # handling (which discards the modifier — this simpler, qualifier-blind
+    # interpreter has no `Type.Mut` variant to carry it in), a variant field's `mut`
+    # is captured here specifically, one flag per field, so `match_pattern`/
+    # `try_match_pattern` can bind the matched field content-mutable. Defaults to
+    # `false` for every other field/qualifier position this interpreter still doesn't
+    # track.
+    bool is_mut = false
 
 struct AssocTypeDecl:
     string name

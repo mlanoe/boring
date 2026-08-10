@@ -165,6 +165,8 @@ interp_test!(format);
 interp_test!(loops);
 interp_test!(traits);
 interp_test!(numeric);
+interp_test!(float_width_cross_eq);
+interp_test!(scalar_catch);
 interp_test!(modules);
 interp_test!(ownership);
 interp_test!(let_pattern);

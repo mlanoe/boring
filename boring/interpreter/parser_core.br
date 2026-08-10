@@ -1086,12 +1086,17 @@ def EnumVariant parse_enum_variant(mut Parser p) throws:
     var fields = [VariantField]{}
     if p.eat(TokenKind.LParen):
         while p.peek() != TokenKind.RParen:
+            # Captured here, ahead of `parse_type` — its own leading-`mut` handling
+            # discards the modifier (no `Type.Mut` variant to carry it in), but a
+            # variant field is one of the few positions this interpreter tracks `mut`
+            # for at all (see `VariantField.is_mut`'s doc).
+            let field_is_mut = p.eat(TokenKind.Mut)
             let ty = parse_type(p)
             # Optional field name after type: `Circle(float r)` vs `Circle(float)`
             var string? field_name = nil
             if parser_check(p, "Ident"):
                 field_name = parser_expect_ident(p)
-            fields.push(VariantField(name= field_name, ty= ty))
+            fields.push(VariantField(name= field_name, ty= ty, is_mut= field_is_mut))
             if p.peek() != TokenKind.RParen:
                 p.expect(TokenKind.Comma)
         p.expect(TokenKind.RParen)
@@ -2483,7 +2488,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Int(n): return Value.Int(n)
             Value.Uint(n): return Value.Int(n as int)
             Value.Uint8(n): return Value.Int(n as int)
-            Value.Float(f): return Value.Int(int(f))
+            Value.Float64(f): return Value.Int(int(f))
             Value.Bool(b): return if b: Value.Int(1) else Value.Int(0)
             _:
                 if let g = cast_numeric_generic(v, "int"):
@@ -2495,7 +2500,7 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Uint(n): return Value.Uint(n)
             Value.Uint8(n): return Value.Uint(n as uint)
             Value.Int(n): return Value.Uint(n as uint)
-            Value.Float(f): return Value.Uint(f as uint)
+            Value.Float64(f): return Value.Uint(f as uint)
             _:
                 if let g = cast_numeric_generic(v, "uint"):
                     return g
@@ -2506,21 +2511,36 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             Value.Uint8(n): return Value.Uint8(n)
             Value.Uint(n): return Value.Uint8(n as uint8)
             Value.Int(n): return Value.Uint8(n as uint8)
-            Value.Float(f): return Value.Uint8(f as uint8)
+            Value.Float64(f): return Value.Uint8(f as uint8)
             _:
                 if let g = cast_numeric_generic(v, "uint8"):
                     return g
                 return Value.Nil
-    if name == "float":
+    if name == "float" or name == "float64":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f)
-            Value.Int(n): return Value.Float(float(n))
-            Value.Uint(n): return Value.Float(n as float)
-            Value.Uint8(n): return Value.Float(n as float)
+            Value.Float64(f): return Value.Float64(f)
+            Value.Float32(f): return Value.Float64(f as float64)
+            Value.Int(n): return Value.Float64(float(n))
+            Value.Uint(n): return Value.Float64(n as float)
+            Value.Uint8(n): return Value.Float64(n as float)
             _:
                 if let iv = value_as_i128(v):
-                    return Value.Float(iv as float)
+                    return Value.Float64(iv as float)
+                return Value.Nil
+    # float32 sibling of the float/float64 conversion above — real f32
+    # narrowing, not a label over float64 (docs/float-width-types.md §8-9).
+    if name == "float32":
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Float32(f): return Value.Float32(f)
+            Value.Float64(f): return Value.Float32(f as float32)
+            Value.Int(n): return Value.Float32(n as float32)
+            Value.Uint(n): return Value.Float32(n as float32)
+            Value.Uint8(n): return Value.Float32(n as float32)
+            _:
+                if let iv = value_as_i128(v):
+                    return Value.Float32(iv as float32)
                 return Value.Nil
     if is_fixed_width_int_name(name):
         let v = args[0] else Value.Nil
@@ -2536,13 +2556,15 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
     if name == "sqrt":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.sqrt())
-            Value.Int(n): return Value.Float(float(n).sqrt())
+            Value.Float64(f): return Value.Float64(f.sqrt())
+            Value.Float32(f): return Value.Float32(f.sqrt())
+            Value.Int(n): return Value.Float64(float(n).sqrt())
             _: throw "sqrt: expected number"
     if name == "abs":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.abs())
+            Value.Float64(f): return Value.Float64(f.abs())
+            Value.Float32(f): return Value.Float32(f.abs())
             Value.Int(n): return Value.Int(if n < 0: -n else n)
             _: throw "abs: expected number"
     if name == "min":
@@ -2553,9 +2575,13 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
                 match b:
                     Value.Int(y): return if x < y: Value.Int(x) else Value.Int(y)
                     _: throw "min: type mismatch"
-            Value.Float(x):
+            Value.Float64(x):
                 match b:
-                    Value.Float(y): return if x < y: Value.Float(x) else Value.Float(y)
+                    Value.Float64(y): return if x < y: Value.Float64(x) else Value.Float64(y)
+                    _: throw "min: type mismatch"
+            Value.Float32(x):
+                match b:
+                    Value.Float32(y): return if x < y: Value.Float32(x) else Value.Float32(y)
                     _: throw "min: type mismatch"
             _: throw "min: expected numbers"
     if name == "max":
@@ -2566,9 +2592,13 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
                 match b:
                     Value.Int(y): return if x > y: Value.Int(x) else Value.Int(y)
                     _: throw "max: type mismatch"
-            Value.Float(x):
+            Value.Float64(x):
                 match b:
-                    Value.Float(y): return if x > y: Value.Float(x) else Value.Float(y)
+                    Value.Float64(y): return if x > y: Value.Float64(x) else Value.Float64(y)
+                    _: throw "max: type mismatch"
+            Value.Float32(x):
+                match b:
+                    Value.Float32(y): return if x > y: Value.Float32(x) else Value.Float32(y)
                     _: throw "max: type mismatch"
             _: throw "max: expected numbers"
     if name == "exit":
@@ -2594,71 +2624,71 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
     if name == "sin":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.sin())
-            Value.Int(n): return Value.Float(float(n).sin())
+            Value.Float64(f): return Value.Float64(f.sin())
+            Value.Int(n): return Value.Float64(float(n).sin())
             _: throw "sin: expected number"
     if name == "cos":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.cos())
-            Value.Int(n): return Value.Float(float(n).cos())
+            Value.Float64(f): return Value.Float64(f.cos())
+            Value.Int(n): return Value.Float64(float(n).cos())
             _: throw "cos: expected number"
     if name == "tan":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.tan())
-            Value.Int(n): return Value.Float(float(n).tan())
+            Value.Float64(f): return Value.Float64(f.tan())
+            Value.Int(n): return Value.Float64(float(n).tan())
             _: throw "tan: expected number"
     if name == "round":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Int(int(f.round()))
+            Value.Float64(f): return Value.Int(int(f.round()))
             Value.Int(n): return Value.Int(n)
             _: throw "round: expected number"
     if name == "floor":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Int(int(f.floor()))
+            Value.Float64(f): return Value.Int(int(f.floor()))
             Value.Int(n): return Value.Int(n)
             _: throw "floor: expected number"
     if name == "ceil":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Int(int(f.ceil()))
+            Value.Float64(f): return Value.Int(int(f.ceil()))
             Value.Int(n): return Value.Int(n)
             _: throw "ceil: expected number"
     if name == "pow":
         let base = args[0] else Value.Nil
         let exp = args[1] else Value.Nil
         match base:
-            Value.Float(b):
+            Value.Float64(b):
                 match exp:
-                    Value.Float(e): return Value.Float(b.powf(e))
-                    Value.Int(e): return Value.Float(b.powf(float(e)))
+                    Value.Float64(e): return Value.Float64(b.powf(e))
+                    Value.Int(e): return Value.Float64(b.powf(float(e)))
                     _: throw "pow: expected number"
             Value.Int(b):
                 match exp:
                     Value.Int(e): return Value.Int(int(float(b).powf(float(e))))
-                    Value.Float(e): return Value.Float(float(b).powf(e))
+                    Value.Float64(e): return Value.Float64(float(b).powf(e))
                     _: throw "pow: expected number"
             _: throw "pow: expected number"
     if name == "log" or name == "ln":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.ln())
-            Value.Int(n): return Value.Float(float(n).ln())
+            Value.Float64(f): return Value.Float64(f.ln())
+            Value.Int(n): return Value.Float64(float(n).ln())
             _: throw "{name}: expected number"
     if name == "log2":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.log2())
-            Value.Int(n): return Value.Float(float(n).log2())
+            Value.Float64(f): return Value.Float64(f.log2())
+            Value.Int(n): return Value.Float64(float(n).log2())
             _: throw "log2: expected number"
     if name == "log10":
         let v = args[0] else Value.Nil
         match v:
-            Value.Float(f): return Value.Float(f.log10())
-            Value.Int(n): return Value.Float(float(n).log10())
+            Value.Float64(f): return Value.Float64(f.log10())
+            Value.Int(n): return Value.Float64(float(n).log10())
             _: throw "log10: expected number"
     if name == "type":
         let v = args[0] else Value.Nil

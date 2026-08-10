@@ -1,0 +1,44 @@
+struct Animal:
+    string name
+
+    req string speak(int times):
+        "{self.name} x{times}"
+
+    req string speak(string sound):
+        "{self.name}: {sound}!"
+
+let a = Animal(name = "Dog")
+print a.speak(3)
+print a.speak("woof")
+
+# Overload declared via `ext`, alongside an inline struct method of the same
+# name but a different signature — both must survive (book.md "Struct
+# methods can also be overloaded within ext blocks").
+struct Greeter:
+    string name
+
+    req string greet(string who):
+        "{self.name} says hi to {who}"
+
+ext Greeter:
+    req string greet(int count):
+        "{self.name} says hi {count} times"
+
+let g = Greeter(name = "Sam")
+print g.greet("Alex")
+print g.greet(5)
+
+# Enum method overloading
+enum Shape:
+    Circle(float)
+    Square(float)
+
+    req string describe(int scale):
+        "scaled x{scale}"
+
+    req string describe(string label):
+        "labeled {label}"
+
+let c = Shape.Circle(2.0)
+print c.describe(4)
+print c.describe("small")

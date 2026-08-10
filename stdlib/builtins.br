@@ -33,13 +33,20 @@ def string chr(int code):    native   # single-char string for a Unicode codepoi
 # ── Type conversion ────────────────────────────────────────────────────────────
 def int    int(any v):    native   # int / float / bool / string → int
 def uint   uint(any v):   native   # same, unsigned
-def float  float(any v):  native   # int / string → float
+def float  float(any v):  native   # int / string → float — `float` is a pure alias
+                                    # of `float64` (docs/float-width-types.md §2)
+def float32 float32(any v): native # int / string / float64 → float32 (narrowing)
+def float64 float64(any v): native # int / string / float32 → float64 (widening)
 def string str(any v):    native   # any value → its string representation
 
 # ── Collections ────────────────────────────────────────────────────────────────
 def int len(any coll): native   # length of string, [T], {K:V}, or {T}
 
 # ── Math ───────────────────────────────────────────────────────────────────────
+# `float` here means `float64` (its alias, docs/float-width-types.md §2) — a
+# `float32` overload of each signature follows below. There is no separate
+# `float64` overload: `def float64 abs(float64 x)` would be the exact same
+# resolved signature as `def float abs(float x)` above, not a distinct one.
 def float abs(float x):                         native   # also accepts int
 def int   floor(float x):                       native
 def int   ceil(float x):                        native
@@ -62,6 +69,30 @@ def bool  isNaN(float x):                       native
 def bool  isInfinite(float x):                  native
 def float min(float a, float b):                native   # also: min([T])
 def float max(float a, float b):                native   # also: max([T])
+
+# ── Math (float32 overloads) ────────────────────────────────────────────────────
+def float32 abs(float32 x):                         native
+def int     floor(float32 x):                       native
+def int     ceil(float32 x):                        native
+def int     round(float32 x):                       native
+def float32 sqrt(float32 x):                        native
+def float32 pow(float32 base, float32 exp):         native
+def float32 log(float32 x):                         native
+def float32 log2(float32 x):                        native
+def float32 log10(float32 x):                       native
+def float32 sin(float32 x):                         native
+def float32 cos(float32 x):                         native
+def float32 tan(float32 x):                         native
+def float32 asin(float32 x):                        native
+def float32 acos(float32 x):                        native
+def float32 atan(float32 x):                        native
+def float32 atan2(float32 y, float32 x):            native
+def float32 clamp(float32 x, float32 lo, float32 hi): native
+def float32 sign(float32 x):                        native
+def bool    isNaN(float32 x):                       native
+def bool    isInfinite(float32 x):                  native
+def float32 min(float32 a, float32 b):              native
+def float32 max(float32 a, float32 b):              native
 
 # ── Assertions ─────────────────────────────────────────────────────────────────
 def void assert(bool cond, any msg):  native   # msg is optional

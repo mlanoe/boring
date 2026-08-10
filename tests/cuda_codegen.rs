@@ -838,11 +838,13 @@ fn example_saxpy() {
     let src = std::fs::read_to_string("examples/saxpy.br").expect("examples/saxpy.br not found");
     let (cu, rs) = cuda_codegen("saxpy_example", &src);
 
-    // Device kernel
+    // Device kernel — the example uses float32 throughout (not the bare
+    // `float`/`float64` alias), since MSL (--target metal, this same source's
+    // other advertised target) has no native `double`.
     assert!(cu.contains("__global__ void Saxpy_kernel("), "missing Saxpy_kernel;\ngot:\n{cu}");
-    assert!(cu.contains("const double alpha"),            "missing const scalar alpha;\ngot:\n{cu}");
-    assert!(cu.contains("const double* x"),              "missing x param;\ngot:\n{cu}");
-    assert!(cu.contains("double* y"),                    "missing y param;\ngot:\n{cu}");
+    assert!(cu.contains("const float alpha"),            "missing const scalar alpha;\ngot:\n{cu}");
+    assert!(cu.contains("const float* x"),              "missing x param;\ngot:\n{cu}");
+    assert!(cu.contains("float* y"),                    "missing y param;\ngot:\n{cu}");
     assert!(cu.contains("y[i] = ((alpha * x[i]) + y[i])"), "missing saxpy body;\ngot:\n{cu}");
 
     // Host struct
@@ -851,13 +853,13 @@ fn example_saxpy() {
     // parameter, not a device buffer -- `CudaSlice<f64>` here was a real E0308,
     // confirmed via a `cargo check` against real cudarc 0.19.8 (the constructor
     // assigns it a bare `f64`, not a `CudaSlice`). See `host_field_type`'s fix.
-    assert!(rs.contains("alpha: f64"),           "missing alpha field;\ngot:\n{rs}");
-    assert!(rs.contains("x: CudaSlice<f64>"),    "missing x field;\ngot:\n{rs}");
-    assert!(rs.contains("y: CudaSlice<f64>"),    "missing y field;\ngot:\n{rs}");
+    assert!(rs.contains("alpha: f32"),           "missing alpha field;\ngot:\n{rs}");
+    assert!(rs.contains("x: CudaSlice<f32>"),    "missing x field;\ngot:\n{rs}");
+    assert!(rs.contains("y: CudaSlice<f32>"),    "missing y field;\ngot:\n{rs}");
 
     // Host main: print, float cast, enumerate loop
     assert!(rs.contains("println!("),                      "print not translated to println!;\ngot:\n{rs}");
-    assert!(rs.contains("as f64)"),                        "float() cast not translated;\ngot:\n{rs}");
+    assert!(rs.contains("as f32)"),                        "float32() cast not translated;\ngot:\n{rs}");
     assert!(rs.contains(".iter().enumerate()"),            "for i,v not translated to enumerate;\ngot:\n{rs}");
 }
 

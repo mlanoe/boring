@@ -157,7 +157,9 @@ print "Hello, {name}!"
 |---|---|
 | `int` | `isize` |
 | `uint` | `usize` |
-| `float` | `f64` |
+| `float32` | `f32` |
+| `float64` | `f64` |
+| `float` | `f64` (pure alias of `float64` — not an independent type like `int`/`uint`) |
 | `bool` | `bool` |
 | `string` | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread) — or `&'static str` in strict mode (literals only) |
 | `[T]` | `Vec<T>` |

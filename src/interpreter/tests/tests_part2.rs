@@ -492,6 +492,108 @@ h.bumpit()
 }
 
 #[test]
+fn test_enum_with_mut_field_actor_requires_mut_receiver_for_def() {
+    // Same rule as `test_enum_with_mut_field_requires_mut_receiver_for_def`, but through
+    // an `'actor` (Mutex-backed) binding — a separate diagnostic path
+    // (`try_emit_mutex_method`) that resolves the receiver's type name differently (an
+    // enum-variant constructor is a `MethodCall`, not a `Call`, so it never populated
+    // `var_struct_types` the way a bare struct constructor does — this was a real,
+    // now-fixed gap in `try_emit_qualified_let`/`resolve_receiver_type_name`).
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+enum Holder:
+    Value(mut Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+
+let Holder'actor h = Holder.Value(Point(x= 5))
+h.bumpit()
+"#;
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "expected a transpile error calling def on a non-mut 'actor enum binding");
+    assert!(out.errors.iter().any(|e| e.message.contains("not declared `mut`")), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_enum_with_mut_field_guard_requires_mut_receiver_for_def() {
+    // Same as the `'actor` case above, through the `'guard` (RwLock-backed) diagnostic
+    // path (`try_emit_rwlock_method`) instead.
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+enum Holder:
+    Value(mut Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+
+let Holder'guard h = Holder.Value(Point(x= 5))
+h.bumpit()
+"#;
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "expected a transpile error calling def on a non-mut 'guard enum binding");
+    assert!(out.errors.iter().any(|e| e.message.contains("not declared `mut`")), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_enum_with_mut_field_actor_allows_def_when_declared_mut() {
+    // Positive control: a `mut Holder'actor` binding (or a `req` call on a plain
+    // `Holder'actor`) is NOT rejected — only the missing-`mut` case above is.
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+    req int getx(): self.x
+
+enum Holder:
+    Value(mut Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+
+    req int peek():
+        match self:
+            Value(p):
+                p.getx()
+
+let mut Holder'actor h = Holder.Value(Point(x= 5))
+h.bumpit()
+
+let Holder'actor h2 = Holder.Value(Point(x= 5))
+let _result = h2.peek()
+"#;
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(out.errors.is_empty(), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+}
+
+#[test]
 fn test_enum_without_mut_field_def_still_callable_on_let() {
     // Control case: an enum with a variant field that is NOT `mut`-qualified
     // keeps the historical behavior — `def` is always callable, even on a

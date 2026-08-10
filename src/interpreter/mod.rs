@@ -378,6 +378,7 @@ impl PartialEq for Value {
             (Value::Uint32(a), Value::Uint32(b)) => a == b,
             (Value::Uint64(a), Value::Uint64(b)) => a == b,
             (Value::Uint128(a), Value::Uint128(b)) => a == b,
+            (Value::Float32(a), Value::Float32(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
@@ -485,7 +486,13 @@ impl Value {
             Value::Uint64(_) => "Uint64".into(),
             Value::Uint128(_) => "Uint128".into(),
             Value::Float32(_) => "Float32".into(),
-            Value::Float64(_) => "Float64".into(),
+            // Kept as "Float" (not "Float64") for backward compatibility with
+            // existing `catch Float:` clauses, which `exec_try` matches by this
+            // exact string (docs/float-width-types.md — `float`/`Float`/`float64`/
+            // `Float64` are all the same type, `Type::Float64`, so the single
+            // catch name "Float" is correct for all of them). `Float32` is a
+            // distinct type and gets its own catch name below.
+            Value::Float64(_) => "Float".into(),
             Value::Str(_) => "String".into(),
             Value::Array(_) => "Array".into(),
             Value::Tuple(_) => "Tuple".into(),
@@ -1432,6 +1439,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     Value::Array(arr) => Ok(arr.iter().min_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0 })),
@@ -1443,8 +1451,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x <= y { a } else { b }),
+                    (Value::Float32(x), Value::Float32(y)) => Ok(if x <= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
+                    (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) <= *y { a } else { b }),
+                    (Value::Float32(x), Value::Int(y)) => Ok(if *x <= (*y as f32) { a } else { b }),
                     _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }
@@ -1458,6 +1469,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     Value::Array(arr) => Ok(arr.iter().max_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0 })),
@@ -1468,8 +1480,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Float64(x), Value::Float64(y)) => Ok(if x >= y { a } else { b }),
+                    (Value::Float32(x), Value::Float32(y)) => Ok(if x >= y { a } else { b }),
                     (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
+                    (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) >= *y { a } else { b }),
+                    (Value::Float32(x), Value::Int(y)) => Ok(if *x >= (*y as f32) { a } else { b }),
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }

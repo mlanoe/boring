@@ -870,6 +870,9 @@ impl Transpiler {
             "parseFloat" => {
                 return Some(format!("{}.trim().parse::<f64>().ok()", obj_s));
             }
+            "parseFloat32" => {
+                return Some(format!("{}.trim().parse::<f32>().ok()", obj_s));
+            }
             "chars" => {
                 // Use threading-mode-aware string type (Rc<str> in single-thread, Arc<str> in multi).
                 let str_ty = if self.use_rc_str() { "Rc::<str>" } else { "Arc::<str>" };

@@ -1,0 +1,24 @@
+def risky(int which) throws:
+    if which == 0:
+        let int8 x = 5
+        throw x
+    if which == 1:
+        let float32 f = 3.5
+        throw f
+    throw 9.5
+
+def try_it(int which):
+    try:
+        risky(which)
+    catch Int8:
+        print "int8: {error}"
+    catch Float32:
+        print "float32: {error}"
+    catch Float64:
+        print "float64: {error}"
+    catch:
+        print "other: {error}"
+
+try_it(0)
+try_it(1)
+try_it(2)

@@ -38,7 +38,8 @@ ext string:
 
     # ── Parse ───────────────────────────────────────────────────────────────────
     req int?     parseInt():                    native   # nil on failure
-    req float?   parseFloat():                  native   # nil on failure
+    req float?   parseFloat():                  native   # nil on failure — parses as float64 (float's alias)
+    req float32? parseFloat32():                native   # nil on failure
 
     # ── Properties (accessed as fields, not calls) ──────────────────────────────
     # s.length  →  int   (number of bytes; also: .len)

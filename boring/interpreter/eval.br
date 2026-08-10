@@ -172,7 +172,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                         Value.Float32(f):
                             Value.Float32(0.0 - f)
                         Value.Object(neg_inner):
-                            let neg_method_opt = interp.find_method(neg_inner.type_name, "neg")
+                            let neg_method_opt = interp.find_best_method(neg_inner.type_name, "neg", [])
                             if let _ = neg_method_opt:
                                 call_method(interp, Value.Object(neg_inner), "neg", [])
                             else:
@@ -218,7 +218,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     all_args.push(a)
                 call_fn(interp, fn_decl, all_args, nil)
             else:
-                let hints = method_hint_types(interp, obj, method)
+                let hints = method_hint_types(interp, obj, method, args.length)
                 let extra_args = eval_args_with_hints(interp, args, hints)
                 call_method(interp, obj, method, extra_args)
 
@@ -226,7 +226,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         ExprKind.MethodCall(recv_expr, method, args):
             let recv = eval_expr(interp, recv_expr)
             check_mutating_method_call(interp, recv_expr, recv, method)
-            let hints = method_hint_types(interp, recv, method)
+            let hints = method_hint_types(interp, recv, method, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
             let result = call_method(interp, recv, method, arg_vals)
             # Write back mutating array methods to their source lvalue
@@ -290,7 +290,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             match recv:
                 Value.Nil: Value.Nil
                 _:
-                    let hints = method_hint_types(interp, recv, method)
+                    let hints = method_hint_types(interp, recv, method, args.length)
                     let arg_vals = eval_args_with_hints(interp, args, hints)
                     call_method(interp, recv, method, arg_vals)
 
@@ -713,6 +713,18 @@ def Value eval_dot_ident(mut Interpreter interp, string variant_name):
         return found
     throw "unknown dot-prefix variant '.{variant_name}'"
 
+# Extracts the base struct/enum name from a type, stripping any ownership qualifier —
+# mirrors Interpreter::type_base_name (src/interpreter/exec.rs). Returns nil for anything
+# that isn't a (possibly `'qualified`) Named type.
+def string? type_base_name(Type ty):
+    match ty:
+        Type.Named(n): some(n)
+        Type.Qualified(inner, _):
+            match inner:
+                Type.Named(n2): some(n2)
+                _: nil
+        _: nil
+
 # Resolve `.Variant` against a known expected type — a function/method parameter's
 # declared type, or the enclosing function's declared return type (see
 # Interpreter.current_return_ty) — instead of eval_dot_ident's ambiguous-scan default.
@@ -721,13 +733,7 @@ def Value eval_dot_ident(mut Interpreter interp, string variant_name):
 # throws on a genuine unresolved collision. Mirrors resolve_dot_ident_hint
 # (src/interpreter/exec.rs).
 def Value? eval_dot_ident_hint(mut Interpreter interp, string variant_name, Type hint_ty):
-    let base_opt = match hint_ty:
-        Type.Named(n): some(n)
-        Type.Qualified(inner, _):
-            match inner:
-                Type.Named(n2): some(n2)
-                _: nil
-        _: nil
+    let base_opt = type_base_name(hint_ty)
     if let base = base_opt:
         let decl_opt = interp.get_enum_decl(base)
         if let decl = decl_opt:
@@ -801,15 +807,72 @@ def [Type?] call_hint_types(mut Interpreter interp, Value callee):
             []
         _: []
 
+# For an overloaded call (several same-named candidate FnDecls — a struct/enum method
+# resolved via find_best_method, or in principle a free-function OverloadedFn once
+# resolve_overload becomes argument-type-aware), build a per-position `.Variant` hint —
+# mirrors merged_overload_param_hints (src/interpreter/exec.rs). The real overload is
+# only picked once the args are evaluated (find_best_method needs runtime `[Value]`s),
+# so position i only gets a hint when every arity-compatible candidate agrees on a
+# single *enum* there: a candidate whose declared type at `i` isn't a known enum (an
+# `int` overload alongside a `TrafficLight` one) is simply irrelevant — a `.Variant`
+# argument could never resolve against it anyway, so it doesn't block the hint. Two
+# *different* enums at the same position is genuine ambiguity — picking one would
+# silently guess which overload gets called — so that still yields no hint, falling
+# back to eval_dot_ident's ambiguous-scan default exactly as for a non-overloaded call.
+def [Type?] merged_overload_hint_types(mut Interpreter interp, [FnDecl] candidates, int arg_count):
+    var applicable = [FnDecl]{}
+    for d in candidates:
+        var min_a = 0
+        var pi = 0
+        while pi < d.params.length:
+            if d.params[pi].default == nil:
+                min_a = min_a + 1
+            pi += 1
+        if arg_count >= min_a and arg_count <= d.params.length:
+            applicable.push(d)
+    var [Type?] hints = []
+    var i = 0
+    while i < arg_count:
+        var [string] distinct_bases = []
+        var Type? chosen = nil
+        for d in applicable:
+            if i < d.params.length:
+                let ty_opt = d.params[i].ty
+                if let ty = ty_opt:
+                    let base_opt = type_base_name(ty)
+                    if let base = base_opt:
+                        if not distinct_bases.contains(base):
+                            let decl_opt = interp.get_enum_decl(base)
+                            if let decl = decl_opt:
+                                # decl.name rather than reusing `base` — get_enum_decl
+                                # moves its `name` param (see eval_dot_ident_hint).
+                                distinct_bases.push(decl.name)
+                                chosen = ty
+        var Type? hint = nil
+        if distinct_bases.length == 1:
+            hint = chosen
+        hints.push(hint)
+        i += 1
+    hints
+
 # Per-position `.Variant` hints for a method call, from the receiver's own type — see
-# call_hint_types. Only covers the first method registered under this name
-# (find_method's own "first match" rule, unchanged) since there is no overload list to
-# consult here beyond that.
-def [Type?] method_hint_types(mut Interpreter interp, Value recv, string method_name):
+# call_hint_types / merged_overload_hint_types. Collects every same-named candidate on
+# the receiver's type (a type may have several — overloads, now resolved by
+# find_best_method at the actual call_method dispatch below) rather than find_method's
+# "first match", so an overloaded method gets the same merged-consensus hint a free
+# OverloadedFn call does.
+def [Type?] method_hint_types(mut Interpreter interp, Value recv, string method_name, int arg_count):
     let type_name = recv.type_name()
-    let decl_opt = interp.find_method(type_name, method_name)
-    if let decl = decl_opt:
-        return decl.params.map((p): p.ty)
+    let methods_opt = interp.struct_methods.get(type_name)
+    if let methods = methods_opt:
+        var candidates = [FnDecl]{}
+        for m in methods:
+            if m.name == method_name:
+                candidates.push(m)
+        if candidates.length == 1:
+            return candidates[0].params.map((p): p.ty)
+        if candidates.length > 1:
+            return merged_overload_hint_types(interp, candidates, arg_count)
     []
 
 # Binary operation dispatch
@@ -865,7 +928,7 @@ def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
             if let mname = ov_method:
                 match l:
                     Value.Object(ov_inner):
-                        let ov_found = interp.find_method(ov_inner.type_name, mname)
+                        let ov_found = interp.find_best_method(ov_inner.type_name, mname, [r.clone()])
                         if let _ = ov_found:
                             # Recompute the method name to avoid a move issue
                             var string ov_call_name = "eq"
@@ -1580,8 +1643,10 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
             if let v = val_opt:
                 v
             else:
-                # Try calling as a zero-arg method
-                let method_opt = interp.find_method(inner.type_name, field_name)
+                # Try calling as a zero-arg method — find_best_method (not
+                # find_method) so a zero-arg overload is picked correctly
+                # even when other overloads of the same name take args.
+                let method_opt = interp.find_best_method(inner.type_name, field_name, [])
                 if let _ = method_opt:
                     call_method(interp, Value.Object(inner), field_name, [])
                 else:
@@ -1617,8 +1682,9 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
                 if named_field_found:
                     named_field_val
                 else:
-                    # Try calling as a zero-arg enum method
-                    let method_opt = interp.find_method(type_name, field_name)
+                    # Try calling as a zero-arg enum method (find_best_method,
+                    # same reasoning as the struct-field case above)
+                    let method_opt = interp.find_best_method(type_name, field_name, [])
                     if let _ = method_opt:
                         call_method(interp, Value.EnumVariant(type_name, variant, fields), field_name, [])
                     else:
@@ -2751,7 +2817,7 @@ req string display_value(Interpreter interp, Value val):
 
 # Call a method on a struct object
 def Value call_enum_method(mut Interpreter interp, string type_name, string variant, [Value] fields, string method, [Value] args):
-    let method_decl_opt = interp.find_method(type_name, method)
+    let method_decl_opt = interp.find_best_method(type_name, method, args)
     if let method_decl = method_decl_opt:
         let self_val = Value.EnumVariant(type_name, variant, fields)
         let child_env = push_scope(interp)
@@ -2799,7 +2865,7 @@ def Value task_obj_get_value(Value v):
 
 def Value call_object_method(mut Interpreter interp, ObjectInner obj, string method, [Value] args):
     let type_name = obj.type_name
-    let method_decl_opt = interp.find_method(type_name, method)
+    let method_decl_opt = interp.find_best_method(type_name, method, args)
     if let method_decl = method_decl_opt:
         let child_env = push_scope(interp)
         env_define(interp, "self", Value.Object(obj), false)
@@ -2973,14 +3039,14 @@ def Value eval_match(mut Interpreter interp, Value subject, [MatchArm] arms):
             if let guard_cond = arm.match_guard:
                 let child = push_scope(interp)
                 for binding in bindings:
-                    env_define(interp, binding.name, binding.value, false)
+                    env_define(interp, binding.name, binding.value, binding.is_mut)
                 let guard_val = eval_expr(interp, guard_cond)
                 pop_scope(interp)
                 match guard_val:
                     Value.Bool(true):
                         let child2 = push_scope(interp)
                         for binding in bindings:
-                            env_define(interp, binding.name, binding.value, false)
+                            env_define(interp, binding.name, binding.value, binding.is_mut)
                         let result = eval_match_body(interp, arm.body)
                         pop_scope(interp)
                         return result
@@ -2989,7 +3055,7 @@ def Value eval_match(mut Interpreter interp, Value subject, [MatchArm] arms):
             else:
                 let child = push_scope(interp)
                 for binding in bindings:
-                    env_define(interp, binding.name, binding.value, false)
+                    env_define(interp, binding.name, binding.value, binding.is_mut)
                 let result = eval_match_body(interp, arm.body)
                 pop_scope(interp)
                 return result
@@ -3012,7 +3078,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
             else:
                 nil
         Pattern.Bind(name):
-            [Binding(name, subject)]
+            [Binding(name, subject, false)]
         Pattern.Variant(variant, sub_patterns):
             match subject:
                 Value.EnumVariant(stype, svariant, sfields):
@@ -3021,16 +3087,32 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
                         if sub_patterns.length == 0:
                             []
                         else if sub_patterns.length == sfields.length:
+                            # Declared field types for this variant, if the enum is known —
+                            # used to flag a `mut`-qualified field (VariantField.is_mut,
+                            # docs/mut-type-modifier.md) bound directly at this level, so
+                            # `eval_match`/its callers `env_define` it content-mutable.
+                            # Resolved once, as a plain `[bool]` (one per field), rather than
+                            # re-deriving from `EnumVariant?` on every loop iteration — that
+                            # Optional-of-struct doesn't get automatic by-ref parameter
+                            # passing the way a bare struct/enum does, so re-passing it into a
+                            # helper on each iteration moves it and fails to transpile past the
+                            # first iteration.
+                            let field_muts = enum_variant_field_mut_flags(find_enum_variant_decl(interp, stype, svariant))
                             var [Binding] all_bindings = []
                             var ok = true
                             var i = 0
                             while i < sub_patterns.length:
-                                let [Binding]? sub_match = try_match_pattern(interp, sfields[i], sub_patterns[i])
-                                if let sb = sub_match:
-                                    for b in sb:
-                                        all_bindings.push(b)
-                                else:
-                                    ok = false
+                                let field_is_mut = if i < field_muts.length: field_muts[i] else: false
+                                match sub_patterns[i]:
+                                    Pattern.Bind(bname):
+                                        all_bindings.push(Binding(bname, sfields[i], is_mut= field_is_mut))
+                                    _:
+                                        let sub_match = try_match_pattern(interp, sfields[i], sub_patterns[i])
+                                        if let sb = sub_match:
+                                            for b in sb:
+                                                all_bindings.push(b)
+                                        else:
+                                            ok = false
                                 i = i + 1
                             if ok: all_bindings else: nil
                         else:
@@ -3116,6 +3198,11 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
 # prototyping. Only checked when the receiver is a plain variable reference
 # (`recv_expr` is `ExprKind.Var`) and resolves to a struct instance whose
 # called method is a `def` (mutating, non-`task`) method.
+# Runs before args are evaluated (see the ExprKind.MethodCall case above), so
+# there is no argument list yet to pick the right overload with — uses
+# find_method's "first match" rule, same simplification the Rust reference
+# interpreter's equivalent check makes (src/interpreter/eval_expr.rs, the
+# `cannot call mutating method` check, also does a plain `.find()` by name).
 def void check_mutating_method_call(mut Interpreter interp, Expr recv_expr, Value recv, string method):
     match recv_expr.kind:
         ExprKind.Var(name):

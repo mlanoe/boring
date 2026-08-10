@@ -60,13 +60,18 @@ types with a real identity, not a new problem being bundled in:
   32-bit precision on-device today, with nothing telling the author. Once
   `float64` is a real, checked type, this stops being representable at all —
   see [Metal below](#metal-mslfloat64-device-side-is-a-compile-error-not-a-silent-narrowing).
-- **The CUDA/ROCm/wgpu GPU-buffer host/device split already narrows silently.**
-  `kernel_host_scalar_type` (device-facing) maps `Type::Float` to `"f32"`
-  while `kernel_host_element_type` (host-facing) maps the same `Type::Float`
-  to `"f64"` (`src/transpiler/emit_kernel.rs`) — a buffer declared `float` is
-  32-bit on the GPU side and 64-bit on the host side, silently. This
-  divergence becomes an explicit, checked distinction once `float32`/`float64`
-  exist as separate types instead of one type read two different ways.
+- **The generic `'gpu'unified` residency path already narrows `float` to
+  32-bit on the device side, on purpose — `float32`/`float64` make that
+  explicit instead of implicit.** `kernel_host_scalar_type` (device-facing)
+  maps `Type::Float` to `"f32"` while `kernel_host_element_type`
+  (host-facing) maps the same `Type::Float` to `"f64"`
+  (`src/transpiler/emit_kernel.rs`) — a deliberate choice (this path targets
+  wgpu, which has no 64-bit float at all), not a bug; see
+  [§6's note](#hostdevice-buffer-narrowing-in-the-generic-gpuunified-residency-path--not-a-bug-after-all)
+  for why an earlier revision of this document mischaracterized it as one.
+  `float32`/`float64` as separate types at least make the two functions'
+  differing treatment legible by name instead of both silently reading the
+  same `Type::Float`.
 - **`BoringError` boxes every fixed-width scalar through the same generic
   path as arbitrary user types, today.** `catch Int8:`/`catch Uint32:`/etc.
   already exist and already work, but only by falling through to
@@ -261,20 +266,38 @@ is a validator error: "WGSL has no 64-bit float type; use `float32`."
 already does this for `Type::Float` today — no behavior change, same
 correctness gap being closed as Metal's).
 
-#### Host/device buffer narrowing (CUDA/ROCm/wgpu): fixed by construction
+#### Host/device buffer narrowing in the generic `'gpu'unified` residency path — not a bug after all
 
-Today's `kernel_host_scalar_type` (device-facing, narrows to `"f32"`) vs.
-`kernel_host_element_type` (host-facing, stays `"f64"`) split
-(`src/transpiler/emit_kernel.rs`) was silently narrowing every `float`
-buffer's device representation regardless of what the host believed it held.
-With real `Type::Float32`/`Type::Float64`, both functions map each variant
-to its **own** Rust type on both sides — `Type::Float32 → "f32"` (both
-functions, no narrowing, because there was never a wider type to narrow
-from) and `Type::Float64 → "f64"` (both functions, matching CUDA/ROCm's
-native `double` support). The narrowing bug disappears because there is no
-longer an ambiguous `Type::Float` for the two functions to disagree about —
-this isn't a special case to add, it's the mechanical consequence of §1's
-rename applied to these two functions like every other site.
+**An earlier revision of this section claimed `kernel_host_scalar_type`
+(device-facing, narrows to `"f32"`) vs. `kernel_host_element_type`
+(host-facing, stays `"f64"`) — both in `src/transpiler/emit_kernel.rs` —
+disagreeing for a `float`/`float64` buffer was a bug this document would fix
+"by construction." Investigated further and reverted: it isn't a bug.**
+These two functions are specifically the generic, backend-agnostic
+`'gpu'unified` residency path (interprocedural resident values, the feature
+`with`/dual-typed-parameter tests exercise) — `kernel_host_scalar_type`'s own
+doc comment says so directly: *"GPU buffers always use 32-bit elements"*,
+modeled on `wgpu::host::host_scalar_type` because wgpu is this path's primary
+real target and WGSL has no 64-bit float at all. Making `Type::Float64` stop
+narrowing here (as an earlier draft of this feature did) breaks exactly the
+case it exists for — a `float`/`float64` value flowing through this generic
+path on `--target wgpu` needs its GPU-side buffer to genuinely be `f32`,
+independent of whatever the host-side "general convention" (`f64`) reads it
+back as. `Type::Float32` needs no narrowing here since it's already 32-bit;
+`Type::Float64` keeps the pre-existing narrow-to-`f32` behavior, unchanged.
+
+This is a **different code path** from an actual `kernel struct`'s own field
+type, which each backend maps in its own `device.rs`/`host.rs` (§6 above) —
+those correctly do NOT narrow `float64` for CUDA/ROCm (native `double`) and
+correctly DO reject it outright for Metal/wgpu (`msl_unsupported_f64`/
+`wgsl_unsupported_f64`). The narrowing discussed here is specific to the
+generic residency functions, which have no per-backend knowledge to
+condition on. One real, pre-existing gap remains, called out honestly rather
+than silently left implied: this generic path silently narrows a
+`float`/`float64` resident value to `f32` instead of erroring the way an
+actual `kernel struct` field declared `float64` now does on Metal/wgpu — a
+narrower, pre-existing inconsistency (identical to `float`'s behavior before
+this document), not introduced by float32/float64 and not fixed here.
 
 ### 7. `BoringError::Scalar` — one dedicated variant for the whole fixed-width family, replacing `Other`
 

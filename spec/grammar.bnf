@@ -937,7 +937,8 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   string →  String'shared →  Arc<str>  (single-thread: Rc<str>; multi-thread: Arc<str>)
 #   int    →  Int'copy      →  i64
 #   uint   →  Uint'copy     →  u64
-#   float  →  Float'copy    →  f64
+#   float  →  Float64'copy  →  f64        (float is a pure alias of float64)
+#   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
 #
 owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "weak"
@@ -973,25 +974,36 @@ primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "neve
                   # Capitalised aliases (Int, Float, …) are accepted by the parser for
                   # compatibility but normalised to lowercase in the AST.
                   # `int`/`uint` transpile to Rust `isize`/`usize` (pointer-width).
+                  # `float` is a pure alias of `float64` below — unlike `int`/`uint`,
+                  # it has no independent identity of its own (docs/float-width-types.md
+                  # §2): every stage after alias resolution sees `float64`, never a
+                  # separate `float` runtime type.
 
 # Fixed-width numeric types — each is a distinct runtime type (its own Value variant in
-# the interpreter, e.g. `uint8` → `Value::Uint8(u8)`), not an alias collapsing into the
-# bare `int`/`uint` above. The Rust-style spellings (`i8`, `u32`, …) are accepted as
-# aliases for the corresponding boring name and transpile to the identical Rust type.
+# the interpreter, e.g. `uint8` → `Value::Uint8(u8)`, `float32` → `Value::Float32(f32)`),
+# not an alias collapsing into the bare `int`/`uint`/`float` above (`float` is the one
+# exception — see `primitive_type`'s note). The Rust-style spellings (`i8`, `u32`, `f32`,
+# `f64`) are accepted as aliases for the corresponding boring name and transpile to the
+# identical Rust type.
 #   Signed:   int8/i8  int16/i16  int32/i32  int64/i64  int128/i128
 #   Unsigned: uint8/u8  uint16/u16  uint32/u32  uint64/u64  uint128/u128
-#   Floats:   f32  f64                  (→ interpreter: float'copy)
-# Mixing two *distinct* fixed-width types directly (`a_uint16 + a_int32`) is a type
-# error requiring an explicit `as` cast — mirrors Rust's own refusal to implicitly
-# coerce between distinct integer types. Each fixed-width type freely mixes with the
-# flexible bare `int`/`uint` kind (e.g. an untyped integer literal).
-# GPU targets: WGSL (`--target wgpu`) only has native 32-bit int/uint — 8/16/64/128-bit
-# fields are a compile error. MSL (`--target metal`) has no native 64/128-bit integer.
-# CUDA (`--target cuda`) supports the full range via <cstdint> (128-bit via the
-# non-standard `__int128` GCC/NVCC extension).
+#   Floats:   float32/f32 (32-bit)   float64/f64 (64-bit, = bare `float`)
+# Mixing two *distinct* fixed-width types directly (`a_uint16 + a_int32`,
+# `a_float32 + a_float64`) is a type error requiring an explicit `as` cast — mirrors
+# Rust's own refusal to implicitly coerce between distinct numeric types. Each
+# fixed-width type freely mixes with its own family's flexible/untyped kind: the bare
+# `int`/`uint` kind for integers, and an untyped float literal (not a resolved `float64`
+# value — `float` has no independent flexible kind of its own) for `float32`/`float64`.
+# GPU targets: WGSL (`--target wgpu`) only has native 32-bit int/uint/float —
+# 8/16/64/128-bit int fields AND `float64` are a compile error (WGSL has no 64-bit
+# float type at all). MSL (`--target metal`) has no native 64/128-bit integer and no
+# native `double` — `float64` is a compile error there too (use `float32`). CUDA
+# (`--target cuda`) and ROCm (`--target rocm`) support the full integer range via
+# <cstdint> (128-bit via the non-standard `__int128` extension) and both float widths
+# natively (`float` in device code, `double` for `float64`).
 numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                  | "f32" | "f64"
+                  | "f32" | "f64" | "float32" | "float64"
 
 type_list       ::= type ("," type)*
 

@@ -55,6 +55,48 @@ struct Interpreter:
                     return m
         nil
 
+    # Overload-aware lookup — mirrors src/interpreter/methods.rs::find_best_method.
+    # `find_method` above always returns the *first* declaration named
+    # `method_name`, which is wrong as soon as a type has more than one method
+    # sharing that name (overloads). This variant collects every candidate,
+    # returns it directly when there is only one, and otherwise picks the
+    # first candidate whose arity (accounting for default params) and static
+    # param types all match the given runtime `args` — falling back to the
+    # first candidate when none match exactly, same as the Rust reference.
+    req FnDecl? find_best_method(string type_name, string method_name, [Value] args):
+        let methods_opt = struct_methods.get(type_name)
+        if let methods = methods_opt:
+            var [FnDecl] candidates = []
+            for m in methods:
+                if m.name == method_name:
+                    candidates.push(m)
+            if candidates.length == 0:
+                return nil
+            if candidates.length == 1:
+                return candidates[0]
+            for decl in candidates:
+                let max_args = decl.params.length
+                var min_args = 0
+                var pi = 0
+                while pi < decl.params.length:
+                    let p = decl.params[pi]
+                    if p.default == nil:
+                        min_args = min_args + 1
+                    pi = pi + 1
+                if args.length >= min_args and args.length <= max_args:
+                    var all_match = true
+                    var i = 0
+                    while i < decl.params.length and i < args.length:
+                        let p = decl.params[i]
+                        if let pty = p.ty:
+                            if not value_matches_type_static(args[i], pty):
+                                all_match = false
+                        i = i + 1
+                    if all_match:
+                        return decl
+            return candidates[0]
+        nil
+
     def void set_method_decls(string name, [FnDecl] methods):
         struct_methods.set(name, methods)
 
@@ -639,19 +681,31 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Use(decl):
             env_define(interp.current_env, "__use__", Value.Nil, true)
         Item.Ext(decl):
-            # Register extension methods on the target type; ext overrides struct methods
+            # Register extension methods on the target type. An `ext` method
+            # overrides an *existing* method only when they share the same
+            # signature (same name + same param shapes, via
+            # params_same_signature) — a same-named method with a different
+            # signature is a separate overload and both must survive (book.md
+            # "Struct methods can also be overloaded within ext blocks").
+            # Name-only dedup here would silently drop every other overload
+            # of that name the moment any single ext method shared its name.
             let existing_methods_opt = interp.struct_methods.get(decl.type_name)
             var all_methods = [FnDecl]{}
-            # Build name index of ext methods for fast dedup check
-            var ext_names_str = ","
-            for m in decl.methods:
-                ext_names_str = ext_names_str + m.name + ","
-                all_methods.push(m)
-            # Append existing methods that are not overridden by ext
+            var di = 0
+            while di < decl.methods.length:
+                all_methods.push(decl.methods[di])
+                di = di + 1
             if let existing = existing_methods_opt:
-                for m in existing:
-                    if not ext_names_str.contains("," + m.name + ","):
-                        all_methods.push(m)
+                for em in existing:
+                    var overridden = false
+                    var dj = 0
+                    while dj < decl.methods.length:
+                        let m = decl.methods[dj]
+                        if em.name == m.name and params_same_signature(em.clone(), m):
+                            overridden = true
+                        dj = dj + 1
+                    if not overridden:
+                        all_methods.push(em)
             interp.set_method_decls(decl.type_name, all_methods)
         Item.Mod(decl):
             for sub_item in decl.items:

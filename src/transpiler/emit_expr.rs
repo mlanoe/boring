@@ -2995,6 +2995,27 @@ impl Transpiler {
         }
     }
 
+    /// "f32" when `e` is known (via `var_types`) to be `float32`-typed, else the
+    /// default "f64" — used by the free-function math builtins below (`sqrt(x)`,
+    /// `abs(x)`, …) so a `float32` argument doesn't get silently widened to `f64`
+    /// and back (docs/float-width-types.md — float32/float64 are distinct runtime
+    /// types with the same method surface, so the cast target just needs to match
+    /// the argument's own width instead of always assuming 64-bit).
+    fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
+        match &e.kind {
+            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+                Some(Type::Float32) => "f32",
+                // Lowercase source spelling (`let float32 a = ...`) parses as
+                // `Type::Named` — the transpiler has no separate alias-resolution
+                // pass, so this is stored as-is (same reason other var_types
+                // lookups throughout this file match both forms).
+                Some(Type::Named(n)) if n == "float32" || n == "f32" => "f32",
+                _ => "f64",
+            },
+            _ => "f64",
+        }
+    }
+
     pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {
         match name {
             // some(x) → Some(x): wrap a value in Option
@@ -3094,15 +3115,18 @@ impl Transpiler {
                 let rust_ty = normalize_type_name(name, self.use_rc_str());
                 format!("{}.trim().parse::<{}>().unwrap_or(0)", self.emit_expr(&args[0].value), rust_ty)
             }
-            "float" if self.is_string_expr(&args[0].value) =>
+            "float" | "float64" if self.is_string_expr(&args[0].value) =>
                 format!("{}.trim().parse::<f64>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
+            "float32" if self.is_string_expr(&args[0].value) =>
+                format!("{}.trim().parse::<f32>().unwrap_or(0.0)", self.emit_expr(&args[0].value)),
             "int" | "uint" | "uint8"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128" => {
                 let rust_ty = normalize_type_name(name, self.use_rc_str());
                 format!("({} as {})", self.emit_expr(&args[0].value), rust_ty)
             }
-            "float" => format!("({} as f64)", self.emit_expr(&args[0].value)),
+            "float" | "float64" => format!("({} as f64)", self.emit_expr(&args[0].value)),
+            "float32" => format!("({} as f32)", self.emit_expr(&args[0].value)),
             "str"   => {
                 // Single non-string arg → conversion.
                 // String first arg (with optional extra args) → format like format().
@@ -3115,31 +3139,81 @@ impl Transpiler {
             }
             // Math functions: boring global → Rust method on f64.
             // Cast argument to f64 to avoid "ambiguous numeric type" errors on literals.
-            "sqrt"       => format!("({} as f64).sqrt()", self.emit_expr(&args[0].value)),
-            "abs"        => format!("({} as f64).abs()", self.emit_expr(&args[0].value)),
-            "floor"      => format!("({} as f64).floor()", self.emit_expr(&args[0].value)),
-            "ceil"       => format!("({} as f64).ceil()", self.emit_expr(&args[0].value)),
-            "round"      => format!("({} as f64).round()", self.emit_expr(&args[0].value)),
-            "sin"        => format!("({} as f64).sin()", self.emit_expr(&args[0].value)),
-            "cos"        => format!("({} as f64).cos()", self.emit_expr(&args[0].value)),
-            "tan"        => format!("({} as f64).tan()", self.emit_expr(&args[0].value)),
-            "asin"       => format!("({} as f64).asin()", self.emit_expr(&args[0].value)),
-            "acos"       => format!("({} as f64).acos()", self.emit_expr(&args[0].value)),
-            "atan"       => format!("({} as f64).atan()", self.emit_expr(&args[0].value)),
+            "sqrt" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).sqrt()", self.emit_expr(&args[0].value))
+            }
+            "abs" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).abs()", self.emit_expr(&args[0].value))
+            }
+            "floor" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).floor()", self.emit_expr(&args[0].value))
+            }
+            "ceil" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).ceil()", self.emit_expr(&args[0].value))
+            }
+            "round" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).round()", self.emit_expr(&args[0].value))
+            }
+            "sin" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).sin()", self.emit_expr(&args[0].value))
+            }
+            "cos" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).cos()", self.emit_expr(&args[0].value))
+            }
+            "tan" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).tan()", self.emit_expr(&args[0].value))
+            }
+            "asin" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).asin()", self.emit_expr(&args[0].value))
+            }
+            "acos" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).acos()", self.emit_expr(&args[0].value))
+            }
+            "atan" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).atan()", self.emit_expr(&args[0].value))
+            }
             "atan2"      => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
                 let y = self.emit_expr(&args[0].value);
                 let x = self.emit_expr(&args[1].value);
-                format!("({} as f64).atan2({} as f64)", y, x)
+                format!("({} as {ty}).atan2({} as {ty})", y, x)
             }
-            "exp"        => format!("({} as f64).exp()", self.emit_expr(&args[0].value)),
-            "tanh"       => format!("({} as f64).tanh()", self.emit_expr(&args[0].value)),
-            "log"        => format!("({} as f64).ln()", self.emit_expr(&args[0].value)),
-            "log2"       => format!("({} as f64).log2()", self.emit_expr(&args[0].value)),
-            "log10"      => format!("({} as f64).log10()", self.emit_expr(&args[0].value)),
+            "exp" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).exp()", self.emit_expr(&args[0].value))
+            }
+            "tanh" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).tanh()", self.emit_expr(&args[0].value))
+            }
+            "log"        => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).ln()", self.emit_expr(&args[0].value))
+            }
+            "log2" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).log2()", self.emit_expr(&args[0].value))
+            }
+            "log10" => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
+                format!("({} as {ty}).log10()", self.emit_expr(&args[0].value))
+            }
             "pow"        => {
+                let ty = self.math_builtin_float_ty(&args[0].value);
                 let b = self.emit_expr(&args[0].value);
                 let e = self.emit_expr(&args[1].value);
-                format!("({} as f64).powf({} as f64)", b, e)
+                format!("({} as {ty}).powf({} as {ty})", b, e)
             }
             "min"        => {
                 if args.len() == 1 {

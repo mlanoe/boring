@@ -59,6 +59,147 @@ def string val_type_name(Value v):
         Value.EnumVariant(type_name, _, _): type_name
         _: "unknown"
 
+# Simplified static type check used for method-overload resolution — mirrors
+# src/interpreter/methods.rs::value_matches_type_static. Every recognized
+# primitive `Type` variant compares its keyword against `val_type_name(val)`,
+# which already uses the identical keyword spellings ("int", "float" for
+# Float64, "float32" for Float32, etc.) — see val_type_name above. A `Named`
+# type that isn't one of those keywords is a custom struct/enum name; it is
+# always accepted without checking the value's actual type name, the same
+# simplification the Rust reference implementation makes (find_best_method's
+# job is picking *an* overload, not fully type-checking the call).
+def bool value_matches_named_type_static(Value val, string name):
+    let vt = val_type_name(val)
+    match name:
+        "int": vt == "int"
+        "uint": vt == "uint"
+        "uint8": vt == "uint8"
+        "int8": vt == "int8"
+        "int16": vt == "int16"
+        "int32": vt == "int32"
+        "int64": vt == "int64"
+        "int128": vt == "int128"
+        "uint16": vt == "uint16"
+        "uint32": vt == "uint32"
+        "uint64": vt == "uint64"
+        "uint128": vt == "uint128"
+        "float32": vt == "float32"
+        "f32": vt == "float32"
+        "float": vt == "float"
+        "float64": vt == "float"
+        "f64": vt == "float"
+        "bool": vt == "bool"
+        "string": vt == "string"
+        _: true
+
+def bool value_matches_type_static(Value val, Type ty):
+    let vt = val_type_name(val)
+    match ty:
+        Type.Int: vt == "int"
+        Type.Uint: vt == "uint"
+        Type.Uint8: vt == "uint8"
+        Type.Int8: vt == "int8"
+        Type.Int16: vt == "int16"
+        Type.Int32: vt == "int32"
+        Type.Int64: vt == "int64"
+        Type.Int128: vt == "int128"
+        Type.Uint16: vt == "uint16"
+        Type.Uint32: vt == "uint32"
+        Type.Uint64: vt == "uint64"
+        Type.Uint128: vt == "uint128"
+        Type.Float32: vt == "float32"
+        Type.Float64: vt == "float"
+        Type.Str: vt == "string"
+        Type.Bool: vt == "bool"
+        Type.Qualified(inner, _): value_matches_type_static(val, inner)
+        Type.Named(name): value_matches_named_type_static(val, name)
+        Type.Optional(_): true
+        Type.Array(_): vt == "array"
+        Type.Dict(_, _): vt == "dict"
+        Type.Set(_): vt == "set"
+        _: true
+
+# Normalizes a float type-name alias down to the same keyword val_type_name
+# would produce ("f32"/"float32" → "float32", "f64"/"float64"/"float" →
+# "float"), otherwise returns the name unchanged. Shared by
+# value_matches_named_type_static (above) and type_overload_keyword (below).
+def string normalize_overload_float_alias(string name):
+    match name:
+        "f32": "float32"
+        "float32": "float32"
+        "f64": "float"
+        "float64": "float"
+        "float": "float"
+        _: name
+
+# The outermost "shape" of a `Type`, as a keyword string, for
+# types_match_for_overload below — nil for shapes that function doesn't
+# compare (matches the Rust reference's fallback `_ => false`). A `Named`
+# type normalizes through normalize_overload_float_alias first so
+# `Named("f64")` and the dedicated `Float64` variant produce the same
+# keyword; any other `Named` name (a struct/enum) passes through unchanged,
+# so two `Named` types compare equal exactly when their names are equal —
+# mirrors src/interpreter/mod.rs::types_match_for_overload.
+def string? type_overload_keyword(Type ty):
+    match ty:
+        Type.Int: "int"
+        Type.Uint: "uint"
+        Type.Uint8: "uint8"
+        Type.Int8: "int8"
+        Type.Int16: "int16"
+        Type.Int32: "int32"
+        Type.Int64: "int64"
+        Type.Int128: "int128"
+        Type.Uint16: "uint16"
+        Type.Uint32: "uint32"
+        Type.Uint64: "uint64"
+        Type.Uint128: "uint128"
+        Type.Float32: "float32"
+        Type.Float64: "float"
+        Type.Str: "string"
+        Type.Bool: "bool"
+        Type.Named(name): normalize_overload_float_alias(name)
+        Type.Array(_): "array"
+        Type.Dict(_, _): "dict"
+        Type.Set(_): "set"
+        _: nil
+
+# Simplified type-shape equality for overload-conflict/dedup purposes — only
+# the outermost shape is compared (an `[int]` and a `[string]` param count as
+# the same "shape" here), same simplification the Rust reference
+# implementation makes (src/interpreter/mod.rs::types_match_for_overload).
+def bool types_match_for_overload(Type a, Type b):
+    let ka_opt = type_overload_keyword(a)
+    let kb_opt = type_overload_keyword(b)
+    if let ka = ka_opt:
+        if let kb = kb_opt:
+            return ka == kb
+    false
+
+# True when `a` and `b` declare the same parameter count and (shape-)matching
+# param types — i.e. they are the *same* overload, not two different ones.
+# Used by `ext` method merging (stdlib.br's Item.Ext handling) to distinguish
+# "override this exact overload" from "add a new overload with the same
+# name" — mirrors src/interpreter/mod.rs::params_same_signature.
+def bool params_same_signature(FnDecl a, FnDecl b):
+    if a.params.length != b.params.length:
+        return false
+    var i = 0
+    while i < a.params.length:
+        let pa_ty = a.params[i].ty
+        let pb_ty = b.params[i].ty
+        if let ta = pa_ty:
+            if let tb = pb_ty:
+                if not types_match_for_overload(ta, tb):
+                    return false
+            else:
+                return false
+        else:
+            if pb_ty != nil:
+                return false
+        i = i + 1
+    true
+
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     if method_name == "clone" and args.length == 0:
         return recv
@@ -187,7 +328,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     if parsed == nil:
                         Value.Nil
                     else:
-                        Value.Float(parsed else 0.0)
+                        Value.Float64(parsed else 0.0)
                 "isDigit":
                     Value.Bool(s.length == 1 and s.chars().all((c): c >= "0" and c <= "9"))
                 "isAlpha":
@@ -482,7 +623,8 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                 match arr[i]:
                                     Value.Str(sv): parts.push(sv)
                                     Value.Int(n): parts.push("{n}")
-                                    Value.Float(f): parts.push("{f}")
+                                    Value.Float64(f): parts.push("{f}")
+                                    Value.Float32(f): parts.push("{f}")
                                     Value.Bool(b): parts.push("{b}")
                                     _: parts.push("nil")
                                 i = i + 1
@@ -496,13 +638,16 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     while i < arr.length:
                         match arr[i]:
                             Value.Int(n): int_sum = int_sum + n
-                            Value.Float(f):
+                            Value.Float64(f):
                                 float_sum = float_sum + f
+                                has_float = true
+                            Value.Float32(f):
+                                float_sum = float_sum + (f as float64)
                                 has_float = true
                             _: throw "sum: non-numeric element"
                         i = i + 1
                     if has_float:
-                        Value.Float(float_sum + int_sum as float)
+                        Value.Float64(float_sum + int_sum as float64)
                     else:
                         Value.Int(int_sum)
                 "min":
@@ -519,9 +664,15 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                             if n < m:
                                                 min_val = arr[i]
                                         _: throw "min: mixed types"
-                                Value.Float(f):
+                                Value.Float64(f):
                                     match min_val:
-                                        Value.Float(m):
+                                        Value.Float64(m):
+                                            if f < m:
+                                                min_val = arr[i]
+                                        _: throw "min: mixed types"
+                                Value.Float32(f):
+                                    match min_val:
+                                        Value.Float32(m):
                                             if f < m:
                                                 min_val = arr[i]
                                         _: throw "min: mixed types"
@@ -542,9 +693,15 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                                             if n > m:
                                                 max_val = arr[i]
                                         _: throw "max: mixed types"
-                                Value.Float(f):
+                                Value.Float64(f):
                                     match max_val:
-                                        Value.Float(m):
+                                        Value.Float64(m):
+                                            if f > m:
+                                                max_val = arr[i]
+                                        _: throw "max: mixed types"
+                                Value.Float32(f):
+                                    match max_val:
+                                        Value.Float32(m):
                                             if f > m:
                                                 max_val = arr[i]
                                         _: throw "max: mixed types"
@@ -887,7 +1044,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     else:
                         Value.Int(n)
                 "sqrt":
-                    Value.Float((n as float).sqrt())
+                    Value.Float64((n as float64).sqrt())
                 "floor":
                     Value.Int(n)
                 "ceil":
@@ -908,7 +1065,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 "abs":
                     Value.Uint(n)
                 "sqrt":
-                    Value.Float((n as float).sqrt())
+                    Value.Float64((n as float64).sqrt())
                 "floor":
                     Value.Uint(n)
                 "ceil":
@@ -929,7 +1086,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 "abs":
                     Value.Uint8(n)
                 "sqrt":
-                    Value.Float((n as float).sqrt())
+                    Value.Float64((n as float64).sqrt())
                 "floor":
                     Value.Uint8(n)
                 "ceil":
@@ -948,7 +1105,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Int8(n):
             match method_name:
                 "abs": if n < 0: Value.Int8(0 - n) else: Value.Int8(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Int8(n)
                 "ceil": Value.Int8(n)
                 "round": Value.Int8(n)
@@ -960,7 +1117,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Int16(n):
             match method_name:
                 "abs": if n < 0: Value.Int16(0 - n) else: Value.Int16(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Int16(n)
                 "ceil": Value.Int16(n)
                 "round": Value.Int16(n)
@@ -972,7 +1129,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Int32(n):
             match method_name:
                 "abs": if n < 0: Value.Int32(0 - n) else: Value.Int32(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Int32(n)
                 "ceil": Value.Int32(n)
                 "round": Value.Int32(n)
@@ -984,7 +1141,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Int64(n):
             match method_name:
                 "abs": if n < 0: Value.Int64(0 - n) else: Value.Int64(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Int64(n)
                 "ceil": Value.Int64(n)
                 "round": Value.Int64(n)
@@ -996,7 +1153,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Int128(n):
             match method_name:
                 "abs": if n < 0: Value.Int128(0 - n) else: Value.Int128(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Int128(n)
                 "ceil": Value.Int128(n)
                 "round": Value.Int128(n)
@@ -1008,7 +1165,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Uint16(n):
             match method_name:
                 "abs": Value.Uint16(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Uint16(n)
                 "ceil": Value.Uint16(n)
                 "round": Value.Uint16(n)
@@ -1020,7 +1177,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Uint32(n):
             match method_name:
                 "abs": Value.Uint32(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Uint32(n)
                 "ceil": Value.Uint32(n)
                 "round": Value.Uint32(n)
@@ -1032,7 +1189,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Uint64(n):
             match method_name:
                 "abs": Value.Uint64(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Uint64(n)
                 "ceil": Value.Uint64(n)
                 "round": Value.Uint64(n)
@@ -1044,7 +1201,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         Value.Uint128(n):
             match method_name:
                 "abs": Value.Uint128(n)
-                "sqrt": Value.Float((n as float).sqrt())
+                "sqrt": Value.Float64((n as float64).sqrt())
                 "floor": Value.Uint128(n)
                 "ceil": Value.Uint128(n)
                 "round": Value.Uint128(n)
@@ -1053,15 +1210,43 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 "toHex": Value.Str("{n:x}")
                 _: throw "unknown method {method_name} on {recv_type}"
 
-        Value.Float(f):
+        Value.Float64(f):
             match method_name:
                 "abs":
                     if f < 0.0:
-                        Value.Float(0.0 - f)
+                        Value.Float64(0.0 - f)
                     else:
-                        Value.Float(f)
+                        Value.Float64(f)
                 "sqrt":
-                    Value.Float(f.sqrt())
+                    Value.Float64(f.sqrt())
+                "floor":
+                    Value.Int(f.floor() as int)
+                "ceil":
+                    Value.Int(f.ceil() as int)
+                "round":
+                    Value.Int(f.round() as int)
+                "toStr":
+                    Value.Str("{f}")
+                "toBin":
+                    let fi = f.floor() as int
+                    Value.Str("{fi:b}")
+                "toHex":
+                    let fi = f.floor() as int
+                    Value.Str("{fi:x}")
+                _:
+                    throw "unknown method {method_name} on {recv_type}"
+
+        # float32 sibling of the Value.Float64 block above — same method set,
+        # f32 precision throughout.
+        Value.Float32(f):
+            match method_name:
+                "abs":
+                    if f < 0.0:
+                        Value.Float32(0.0 - f)
+                    else:
+                        Value.Float32(f)
+                "sqrt":
+                    Value.Float32(f.sqrt())
                 "floor":
                     Value.Int(f.floor() as int)
                 "ceil":
@@ -1161,7 +1346,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 return Value.Nil
             # Struct method call
             let type_name = inner.type_name.clone()
-            let method_decl_opt = interp.find_method(type_name, method_name)
+            let method_decl_opt = interp.find_best_method(type_name, method_name, args)
             if let method_decl = method_decl_opt:
                 let self_val = Value.Object(inner)
                 let child_env = push_scope(interp)
@@ -1193,7 +1378,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
 
         Value.EnumVariant(type_name, variant, fields):
             # Enum variant method call — look up in interp method table
-            let method_decl_opt = interp.find_method(type_name, method_name)
+            let method_decl_opt = interp.find_best_method(type_name, method_name, args)
             if let method_decl = method_decl_opt:
                 let self_val = Value.EnumVariant(type_name, variant, fields)
                 let child_env = push_scope(interp)

@@ -87,7 +87,7 @@ kernel Scale:
 fn device_unified_field_becomes_device_ptr_buffer() {
     let (msl, _) = metal_codegen("unified_ptr", r#"
 kernel Scale:
-    mut [float]'unified buf
+    mut [float32]'unified buf
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * 2.0
@@ -100,7 +100,7 @@ kernel Scale:
 fn device_global_field_becomes_device_ptr_buffer() {
     let (msl, _) = metal_codegen("global_ptr", r#"
 kernel G:
-    mut [float]'global buf
+    mut [float32]'global buf
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] + 1.0
@@ -126,8 +126,8 @@ kernel Scale:
 fn device_const_scalar_becomes_constant_ptr_with_deref() {
     let (msl, _) = metal_codegen("const_scalar", r#"
 kernel C:
-    mut [float]'unified buf
-    let float'const     factor
+    mut [float32]'unified buf
+    let float32'const     factor
     def ():
         let tid = gpu.thread.x
         buf[tid] = buf[tid] * factor
@@ -142,8 +142,8 @@ kernel C:
 fn device_shared_dynamic_becomes_threadgroup_ptr() {
     let (msl, _) = metal_codegen("shared_dynamic", r#"
 kernel S:
-    mut [float]'unified out
-    let [float]'actor  scratch
+    mut [float32]'unified out
+    let [float32]'actor  scratch
     def ():
         let tid = gpu.thread.x
         out[tid] = scratch[0]
@@ -159,8 +159,8 @@ kernel S:
 fn device_shared_static_declared_in_body() {
     let (msl, _) = metal_codegen("shared_static", r#"
 kernel S:
-    mut [float]'unified out
-    let [float, 32]'actor tile
+    mut [float32]'unified out
+    let [float32, 32]'actor tile
     def ():
         let tid = gpu.thread.x
         out[tid] = tile[0]
@@ -176,8 +176,8 @@ kernel S:
 fn device_local_fixed_array_declared_in_body() {
     let (msl, _) = metal_codegen("local_array", r#"
 kernel L:
-    mut [float]'unified out
-    let [float, 8]'local tmp
+    mut [float32]'unified out
+    let [float32, 8]'local tmp
     def ():
         let tid = gpu.thread.x
         out[tid] = tmp[0]
@@ -802,8 +802,8 @@ kernel Img:
 fn device_labeled_array_field_becomes_device_buffer_param() {
     let (msl, _) = metal_codegen("labeled_ptr_param", r#"
 kernel Img:
-    mut [float, width = 4, height = 4]'unified img
-    init([float, width = 4, height = 4]'unified data):
+    mut [float32, width = 4, height = 4]'unified img
+    init([float32, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
@@ -887,8 +887,8 @@ kernel Vol:
 fn device_shared_labeled_array_becomes_fixed_threadgroup_decl() {
     let (msl, _) = metal_codegen("shared_labeled", r#"
 kernel Tile:
-    mut [float]'unified out
-    let [float, width = 4, height = 4]'actor tile
+    mut [float32]'unified out
+    let [float32, width = 4, height = 4]'actor tile
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y

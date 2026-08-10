@@ -431,7 +431,7 @@ def bool exec_if_let_match(mut Interpreter interp, [CondClause] clauses):
                     _: child.define(name, v)
             CondClause.LetPat(pat, expr):
                 let v = eval_expr(interp, expr)
-                if not match_pattern(v, pat, child):
+                if not match_pattern(v, pat, child, interp):
                     all_matched = false
             CondClause.Expr(expr):
                 # guard: eval in child context via helper (forces Arc::clone at call site)
@@ -448,7 +448,7 @@ def Signal? exec_while_let_pattern(mut Interpreter interp, Pattern pattern, Expr
     while true:
         let v = eval_expr(interp, value_expr)
         mut child = new_env(interp.current_env)
-        if not match_pattern(v, pattern, child):
+        if not match_pattern(v, pattern, child, interp):
             break
         let prev = interp.current_env
         interp.current_env = child
@@ -668,7 +668,7 @@ def Signal? exec_match_stmt(mut Interpreter interp, MatchStmt s):
             let pattern = arm.patterns[pat_idx]
             pat_idx = pat_idx + 1
             mut child = new_env(interp.current_env)
-            let did_match = match_pattern(subject, pattern, child)
+            let did_match = match_pattern(subject, pattern, child, interp)
             if did_match:
                 var guard_ok = true
                 if let guard_expr = arm.match_guard:
@@ -703,7 +703,41 @@ def Value expr_to_value_literal(Expr expr):
         ExprKind.Void: Value.Nil
         _: Value.Nil
 
-def bool match_pattern(Value val, Pattern pattern, Env'actor env):
+# Looks up the declared EnumVariant for a runtime EnumVariant value's (type, variant)
+# pair, so match_pattern can tell whether a given field position was declared `mut Type`
+# (docs/mut-type-modifier.md, `VariantField.is_mut`) and bind it content-mutable
+# accordingly — mirrors the Rust interpreter's match_pattern (src/interpreter/methods.rs).
+req EnumVariant? find_enum_variant_decl(Interpreter interp, string type_name, string variant_name):
+    if let decl = interp.get_enum_decl(type_name):
+        for v in decl.variants:
+            if v.name == variant_name:
+                return v
+    nil
+
+req [bool] enum_variant_field_mut_flags(EnumVariant? variant_decl):
+    var [bool] flags = []
+    if let vdecl = variant_decl:
+        for f in vdecl.fields:
+            flags.push(f.is_mut)
+    flags
+
+# Binds one enum-variant field's value against its sub-pattern. A direct `Pattern.Bind`
+# is handled here rather than through the general recursive `match_pattern` call so it can
+# consult `field_is_mut` and call `env.define_mut` instead of the always-immutable
+# `env.define` a bare recursive call would use — every other sub-pattern shape (nested
+# Variant, Tuple, literal, ...) falls through to the ordinary recursive match unchanged.
+def bool bind_variant_field(Value fval, Pattern fpat, Env'actor env, Interpreter interp, bool field_is_mut):
+    match fpat:
+        Pattern.Bind(bname):
+            if field_is_mut:
+                env.define_mut(bname, fval)
+            else:
+                env.define(bname, fval)
+            true
+        _:
+            match_pattern(fval, fpat, env, interp)
+
+def bool match_pattern(Value val, Pattern pattern, Env'actor env, Interpreter interp):
     match pattern:
         Pattern.Wildcard:
             true
@@ -722,12 +756,12 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
                 Value.EnumVariant(stype, svariant, sfields):
                     if svariant == "Some" or svariant == "some":
                         if sfields.length == 1:
-                            match_pattern(sfields[0], inner, env)
+                            match_pattern(sfields[0], inner, env, interp)
                         else:
-                            match_pattern(Value.Tuple(sfields), inner, env)
+                            match_pattern(Value.Tuple(sfields), inner, env, interp)
                     else:
                         false
-                _: match_pattern(val, inner, env)
+                _: match_pattern(val, inner, env, interp)
         Pattern.Lit(lit):
             match lit:
                 LitPattern.Int(n):
@@ -760,7 +794,7 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
                         var ok = true
                         var i = 0
                         while ok and i < pats.length:
-                            ok = match_pattern(elems[i], pats[i], env)
+                            ok = match_pattern(elems[i], pats[i], env, interp)
                             i = i + 1
                         ok
                 _: false
@@ -771,11 +805,13 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
                     if full != variant_name and vvariant != variant_name:
                         false
                     else:
+                        let field_muts = enum_variant_field_mut_flags(find_enum_variant_decl(interp, vtype, vvariant))
                         var ok = true
                         var i = 0
                         while ok and i < field_pats.length:
                             let fval = if i < vfields.length: vfields[i] else: Value.Nil
-                            ok = match_pattern(fval, field_pats[i], env)
+                            let field_is_mut = if i < field_muts.length: field_muts[i] else: false
+                            ok = bind_variant_field(fval, field_pats[i], env, interp, field_is_mut)
                             i = i + 1
                         ok
                 _: false
@@ -1027,7 +1063,7 @@ def Value call_value(mut Interpreter interp, Value callee, [Value] args):
         Value.Object(obj):
             # Callable struct: look for __call__ method
             let obj_type = obj.type_name
-            let method_opt = interp.find_method(obj_type, "__call__")
+            let method_opt = interp.find_best_method(obj_type, "__call__", args)
             if let _ = method_opt:
                 call_method(interp, Value.Object(obj), "__call__", args)
             else:
@@ -1040,9 +1076,25 @@ def Value call_value(mut Interpreter interp, Value callee, [Value] args):
 def string normalize_type_name(string name):
     if name == "String": "string"
     else if name == "Int": "int"
-    else if name == "Float": "float"
+    else if name == "Uint": "uint"
+    else if name == "Uint8": "uint8"
+    else if name == "Int8": "int8"
+    else if name == "Int16": "int16"
+    else if name == "Int32": "int32"
+    else if name == "Int64": "int64"
+    else if name == "Int128": "int128"
+    else if name == "Uint16": "uint16"
+    else if name == "Uint32": "uint32"
+    else if name == "Uint64": "uint64"
+    else if name == "Uint128": "uint128"
     else if name == "Float32": "float32"
-    else if name == "Float64": "float64"
+    # `Float64`/`float64` are accepted spellings of `Float`/`float` here too —
+    # `value_type_name` reports "float" for a Value.Float64 (`float` is
+    # `float64`'s pure alias, docs/float-width-types.md §2), so this needs to
+    # normalize to the same string, not "float64", for the `==` comparison in
+    # `exec_try` below to actually match.
+    else if name == "Float": "float"
+    else if name == "Float64": "float"
     else if name == "Bool": "bool"
     else if name == "Nil": "nil"
     else: name

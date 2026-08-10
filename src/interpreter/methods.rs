@@ -628,6 +628,12 @@ impl Interpreter {
                     Err(_) => Ok(Some(Value::Nil)),
                 }
             }
+            "parseFloat32" => {
+                match s.trim().parse::<f32>() {
+                    Ok(f) => Ok(Some(Value::Float32(f))),
+                    Err(_) => Ok(Some(Value::Nil)),
+                }
+            }
             "indexOf" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 match s.find(sub.as_str()) {

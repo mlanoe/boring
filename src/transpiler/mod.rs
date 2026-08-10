@@ -1400,19 +1400,26 @@ impl Transpiler {
              // which requires no instance — fully collision-free even when two modules define identically-named types.\n\
              //\n\
              // `Scalar(ScalarKind, u128)` is the fixed-width numeric family's own path —\n\
-             // int8..int128, uint8..uint128, float32, float64 — kept OUT of `Other` on\n\
-             // purpose (docs/float-width-types.md §7): the compiler already knows,\n\
-             // statically, that a thrown value here is exactly one of twelve small Copy\n\
-             // kinds, so paying for a heap allocation + `dyn Any` downcast the way `Other`\n\
-             // does for arbitrary user enums/structs would be pure overhead. The raw bits\n\
-             // are reinterpreted per `kind` in `Display` below and at each `catch` arm —\n\
+             // int8..int128, uint8..uint128, and float32 — kept OUT of `Other` on purpose\n\
+             // (docs/float-width-types.md §7): the compiler already knows, statically,\n\
+             // that a thrown value here is exactly one of eleven small Copy kinds, so\n\
+             // paying for a heap allocation + `dyn Any` downcast the way `Other` does for\n\
+             // arbitrary user enums/structs would be pure overhead. The raw bits are\n\
+             // reinterpreted per `kind` in `Display` below and at each `catch` arm —\n\
              // sign/zero-extended into the shared `u128` slot on the way in, truncated (or\n\
-             // bit-reinterpreted, for the two float kinds) back to the exact original type\n\
-             // on the way out; this round-trips exactly, it never touches `Other`'s TypeId\n\
-             // machinery at all. `Other` still exists, narrowed to what only it can do:\n\
-             // genuine user-defined enums/structs the compiler can't enumerate in advance.\n\
+             // bit-reinterpreted, for float32) back to the exact original type on the way\n\
+             // out; this round-trips exactly, it never touches `Other`'s TypeId machinery\n\
+             // at all. `float`/`float64` deliberately stay on their own pre-existing\n\
+             // `BoringError::Float(f64)` fast path instead of joining `Scalar` — unlike\n\
+             // the other eleven kinds, they already had a dedicated, no-allocation\n\
+             // representation before this family existed, and giving them a second,\n\
+             // parallel one here would only create two disjoint representations for the\n\
+             // same type with no single `catch` spelling reliably catching both (a literal\n\
+             // float throw and a `float64`-typed variable throw would land in different\n\
+             // variants). `Other` still exists, narrowed to what only it can do: genuine\n\
+             // user-defined enums/structs the compiler can't enumerate in advance.\n\
              #[derive(Debug, Clone, Copy, PartialEq)]\n\
-             enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32, Float64 }\n\
+             enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32 }\n\
              impl BoringError {\n\
              \x20   fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }\n\
              \x20   fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }\n\
@@ -1425,7 +1432,6 @@ impl Transpiler {
              \x20   fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }\n\
              \x20   fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }\n\
              \x20   fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }\n\
-             \x20   fn scalar_f64(v: f64) -> Self { BoringError::Scalar(ScalarKind::Float64, v.to_bits() as u128) }\n\
              }\n\
              #[derive(Debug)]\n\
              enum BoringError {\n\
@@ -1457,7 +1463,6 @@ impl Transpiler {
              \x20               ScalarKind::Uint64  => write!(f, \"{}\", *bits as u64),\n\
              \x20               ScalarKind::Uint128 => write!(f, \"{}\", *bits),\n\
              \x20               ScalarKind::Float32 => write!(f, \"{}\", f32::from_bits(*bits as u32)),\n\
-             \x20               ScalarKind::Float64 => write!(f, \"{}\", f64::from_bits(*bits as u64)),\n\
              \x20           },\n\
              \x20           BoringError::Other(_, e)    => write!(f, \"{}\", e),\n\
              \x20       }\n\

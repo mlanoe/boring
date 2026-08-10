@@ -569,7 +569,11 @@ pub(crate) fn boring_type_to_boring_val_arms(ty: &str) -> Vec<(String, String, S
             ("BoringError::Int(__boring_n)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_n.to_string())".to_string()),
         ],
-        "Float" | "float" => vec![
+        // `Float64`/`float64` are accepted spellings of `Float`/`float` here too —
+        // both route through the same pre-existing `BoringError::Float` fast path,
+        // not through `Scalar` (see `scalar_ctor_name`'s doc comment for why
+        // float64 is deliberately excluded from that mechanism).
+        "Float" | "float" | "Float64" | "float64" | "f64" => vec![
             ("BoringError::Float(__boring_f)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_f.to_string())".to_string()),
         ],
@@ -595,11 +599,6 @@ pub(crate) fn boring_type_to_boring_val_arms(ty: &str) -> Vec<(String, String, S
             "BoringError::Scalar(ScalarKind::Float32, __boring_bits)".to_string(),
             "f32".to_string(),
             "f32::from_bits(__boring_bits as u32)".to_string(),
-        )],
-        "Float64" | "float64" | "f64" => vec![(
-            "BoringError::Scalar(ScalarKind::Float64, __boring_bits)".to_string(),
-            "f64".to_string(),
-            "f64::from_bits(__boring_bits as u64)".to_string(),
         )],
         other => vec![
             // Unknown type: will be handled by the named-clause path (BoringError::Other)
@@ -1350,8 +1349,17 @@ pub(crate) fn scalar_ctor_name(ty: &Type) -> Option<&'static str> {
         Type::Uint32 => Some("scalar_u32"),
         Type::Uint64 => Some("scalar_u64"),
         Type::Uint128 => Some("scalar_u128"),
+        // float64 deliberately excluded — `float`/`float64` already have their own
+        // pre-existing fast path (`BoringError::Float(f64)`, covering the common
+        // literal-throw case), unaffected by this feature. Routing it through
+        // `Scalar` too would create two disjoint representations for the same
+        // type depending on whether the thrown expression was a literal or a
+        // variable, with no single `catch` clause spelling that reliably catches
+        // both — see docs/float-width-types.md and the exec.rs `catch Float:` /
+        // `catch Float64:` alias-matching note. `float32` has no such pre-existing
+        // path (it was never a distinct type before), so it has no equivalent
+        // conflict and stays routed through `Scalar`.
         Type::Float32 => Some("scalar_f32"),
-        Type::Float64 => Some("scalar_f64"),
         Type::Qualified(inner, _) => scalar_ctor_name(inner),
         Type::Named(n) => match n.as_str() {
             "int8" | "i8" => Some("scalar_i8"),
@@ -1365,7 +1373,6 @@ pub(crate) fn scalar_ctor_name(ty: &Type) -> Option<&'static str> {
             "uint64" | "u64" => Some("scalar_u64"),
             "uint128" | "u128" => Some("scalar_u128"),
             "float32" | "f32" => Some("scalar_f32"),
-            "float64" | "f64" => Some("scalar_f64"),
             _ => None,
         },
         _ => None,

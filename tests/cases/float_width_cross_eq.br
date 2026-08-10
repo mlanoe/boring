@@ -1,0 +1,27 @@
+let float32 a = 1.5
+let float64 b = 2.5
+
+# Untyped literal mixes freely with either width (docs/float-width-types.md §3)
+let c = a + 3.0
+print c
+let d = b + 3.0
+print d
+
+# Explicit cast between widths is required to mix — this is the correct,
+# supported way to combine a float32 and a float64
+let e = (a as float64) + b
+print e
+let f = a + (b as float32)
+print f
+
+# float == float64: mixing a `float`-typed value with `float64` is not a
+# mismatch at all, since they're the same type
+let float g = 4.0
+print g + b
+
+# Comparisons are more permissive than arithmetic — float32/float64 compare
+# freely against each other and against int, no cast required
+print a < b
+print a == 1.5
+print b == 2.5
+print 1.0 < b

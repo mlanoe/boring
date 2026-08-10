@@ -1433,11 +1433,17 @@ impl<'a> HostEmitter<'a> {
             ExprKind::Field(obj, field) => {
                 format!("{}.{}", self.host_expr(obj), field)
             }
-            // float(expr) → expr as f32
+            // float(expr)/float32(expr) → expr as f32 (wgpu is f32-only on device,
+            // and this host helper narrows the same way regardless of width —
+            // float64(expr) stays a real f64 here, matching `host_scalar_type`'s
+            // own float64-is-a-compile-error-on-device-only stance).
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Var(n) = &callee.kind {
-                    if n == "float" && args.len() == 1 {
+                    if (n == "float" || n == "float32") && args.len() == 1 {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
+                    }
+                    if n == "float64" && args.len() == 1 {
+                        return format!("({} as f64)", self.host_expr(&args[0].value));
                     }
                 }
                 // Generic call (best effort)

@@ -766,7 +766,16 @@ impl Interpreter {
             let mut handled = false;
             for clause in &s.catch_clauses {
                 let matches = clause.types.is_empty()
-                    || clause.types.iter().any(|t| t == &exc_type);
+                    || clause.types.iter().any(|t| {
+                        t == &exc_type
+                            // `Float64` is accepted as a spelling of `Float` here —
+                            // `Value::Float64::type_name()` returns "Float" (kept for
+                            // backward compatibility with existing `catch Float:`
+                            // clauses), but a `catch Float64:` clause is just as valid
+                            // a way to name the same type (docs/float-width-types.md
+                            // §2 — float/Float/float64/Float64 are all Type::Float64).
+                            || (exc_type == "Float" && t == "Float64")
+                    });
                 if matches {
                     let cenv = Env::child(Rc::clone(&env));
                     cenv.borrow_mut().define("error", exc_val.clone());

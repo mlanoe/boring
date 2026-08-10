@@ -876,16 +876,24 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
         Type::Uint32 => "u32",
         Type::Uint64 => "u64",
         Type::Uint128 => "u128",
-        // Both widths keep their own real size now — no more silent GPU-buffer
-        // narrowing to f32 for a declared float64 (docs/float-width-types.md §6:
-        // this used to disagree with `kernel_host_element_type` below, which always
-        // kept f64 on the host side, so a `float`/`float64` buffer was 32-bit on the
-        // GPU and 64-bit on the host, silently). CUDA/ROCm support native `double`;
-        // Metal/wgpu already reject `float64` device-side via their own validators
-        // (`msl_unsupported_width` / `wgsl_unsupported_f64`), so this function
-        // disagreeing with them is no longer possible either.
+        // `float32` is already 32-bit, no narrowing needed. `float64` keeps this
+        // function's own pre-existing narrowing to f32 -- this function models
+        // the generic/portable `'gpu'unified` residency path (its own doc line
+        // above: "GPU buffers always use 32-bit elements", matching wgpu, the
+        // backend this path is primarily written for), which has no per-backend
+        // knowledge to do otherwise. An earlier revision of this document/comment
+        // claimed the `kernel_host_scalar_type` (f32) vs `kernel_host_element_type`
+        // (f64) split for `float64` was a bug to remove — reverted: this path's
+        // device-side representation is subject to a wgpu-shaped real hardware
+        // constraint independent of what CUDA/ROCm/Metal support for an actual
+        // `kernel struct` field (see those backends' own `Type::Float64` mappings,
+        // which correctly do NOT narrow). The remaining gap — this generic path
+        // silently narrowing `float64` instead of erroring the way a `kernel`
+        // struct field now does via `wgsl_unsupported_f64`/`msl_unsupported_f64` —
+        // is real but pre-existing (identical to `float`'s behavior before this
+        // feature), not introduced by float32/float64, and is left as-is.
         Type::Float32 => "f32",
-        Type::Float64 => "f64",
+        Type::Float64 => "f32",
         Type::Bool  => "bool",
         Type::Named(n) => match n.as_str() {
             "int"                    => "i32",
@@ -900,8 +908,7 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
             "uint32"                 => "u32",
             "uint64"                 => "u64",
             "uint128"                => "u128",
-            "float32"                => "f32",
-            "float" | "float64"     => "f64",
+            "float32" | "float" | "float64" => "f32",
             "bool"                   => "bool",
             _                        => "i64",
         },

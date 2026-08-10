@@ -1888,12 +1888,18 @@ impl HostEmitter {
                         return "println!()".into();
                     }
                 }
-                // `float(expr)` → `expr as f64`
+                // `float(expr)`/`float64(expr)` → `expr as f64`; `float32(expr)` → `expr as f32`
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "float" {
+                    if name == "float" || name == "float64" {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
                             return format!("({} as f64)", inner);
+                        }
+                    }
+                    if name == "float32" {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            return format!("({} as f32)", inner);
                         }
                     }
                 }
@@ -2456,8 +2462,8 @@ fn rust_type(ty: &Type) -> String {
         Type::Optional(inner)  => format!("Option<{}>", rust_type(inner)),
         // Named primitives — the kernel field parser stores raw keyword strings.
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" => "f64",
-            "f32"           => "f32",
+            "float" | "float64" | "f64" => "f64",
+            "float32" | "f32"           => "f32",
             "int"           => "isize",
             "uint"          => "usize",
             "i64"           => "i64",
@@ -2517,8 +2523,8 @@ fn elem_size_bytes(ty: &Type) -> usize {
         Type::Int128 | Type::Uint128          => 16,
         Type::Bool                           => 1,
         Type::Named(n) => match n.as_str() {
-            "float" | "f64"         => 8,
-            "f32"                   => 4,
+            "float" | "float64" | "f64"         => 8,
+            "float32" | "f32"                   => 4,
             "int"   | "i64"         => 8,
             "uint"  | "u64"         => 8,
             "uint8" | "int8"        => 1,

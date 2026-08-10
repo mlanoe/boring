@@ -15,6 +15,13 @@ enum Signal:
 struct Binding:
     string name
     Value value
+    # `true` when this binding came from an enum variant field declared `mut Type`
+    # (docs/mut-type-modifier.md) — `try_match_pattern`'s Pattern.Variant case sets this
+    # for a direct field-position bind so `eval_match`/its callers can `env_define` it
+    # content-mutable, mirroring the Rust interpreter's match_pattern
+    # (src/interpreter/methods.rs). Every other binding site defaults to `false`, same as
+    # before this field existed.
+    bool is_mut = false
 
 # ─── ObjectInner ──────────────────────────────────────────────────────────────
 

@@ -6,9 +6,12 @@
 #   boring run saxpy.br                          # interpreted simulation
 #   boring build --target cuda saxpy.br          # CUDA (simulation on macOS without nvidia)
 #   boring build --target metal saxpy.br         # Metal (macOS native)
+#
+# Uses float32 throughout (not the bare `float`/`float64` alias) — MSL has no
+# native `double`, so a `--target metal` build requires float32 buffers.
 
 let N = 16        # small enough to print in full
-let alpha = 2.0
+let float32 alpha = 2.0
 
 # Print device info
 let g = GPU(0)
@@ -16,17 +19,17 @@ print "Device : {g.name()}"
 print "Memory : {g.totalMem() / 1_073_741_824} GB"
 
 # Input vectors: x = [0..N-1], y = [1.0 * N]
-var [float]'gpu'unified x = [0.0 for ..N]
-var [float]'gpu'unified y = [1.0 for ..N]
+var [float32]'gpu'unified x = [0.0 for ..N]
+var [float32]'gpu'unified y = [1.0 for ..N]
 for i in 0..N:
-    x[i] = float(i)
+    x[i] = float32(i)
 
 kernel Saxpy:
-    let float          alpha
-    let [float]'unified x
-    mut [float]'unified y
+    let float32          alpha
+    let [float32]'unified x
+    mut [float32]'unified y
 
-    init(float a, [float]'unified xs, [float]'unified ys):
+    init(float32 a, [float32]'unified xs, [float32]'unified ys):
         alpha = a
         x    = xs
         y    = ys

@@ -365,11 +365,14 @@ print a            # error: use of moved value 'a': the value was moved
 | `uint32`       | `u32`           | 32-bit unsigned integer             |
 | `uint64`       | `u64`           | 64-bit unsigned integer             |
 | `uint128`      | `u128`          | 128-bit unsigned integer            |
-| `float`        | `f64`           | 64-bit floating-point               |
+| `float32`      | `f32`           | 32-bit floating-point               |
+| `float64`      | `f64`           | 64-bit floating-point (`float` is a pure alias of this — see below) |
 | `bool`         | `bool`          | `true` / `false`                    |
 | `string`       | `&str` (literal) / `Rc<str>` · `Arc<str>` (stored/computed) | Literals stay `&str`; the transpiler promotes to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it |
 
-The Rust-style spellings `i8`/`i16`/`i32`/`i64`/`i128`/`isize` and `u8`/`u16`/`u32`/`u64`/`u128`/`usize` are accepted as aliases for the corresponding Boring name (`i32` ≡ `int32`, `isize` ≡ `int`, etc.) and transpile identically.
+The Rust-style spellings `i8`/`i16`/`i32`/`i64`/`i128`/`isize`, `u8`/`u16`/`u32`/`u64`/`u128`/`usize`, and `f32`/`f64` are accepted as aliases for the corresponding Boring name (`i32` ≡ `int32`, `isize` ≡ `int`, `f32` ≡ `float32`, etc.) and transpile identically.
+
+**`float` is `float64`, not a third type.** Unlike `int`/`uint` (which map to pointer-width `isize`/`usize`, independent of `int64`/`uint64`), `float` has no independent identity — write `float`, get exactly `float64`, indistinguishable at every stage after parsing. This is why the table above lists `float32`/`float64` as the two real members of the family rather than giving `float` its own row.
 
 ### Fixed-width integers
 
@@ -399,8 +402,30 @@ Casting to a narrower type checks the range and produces `nil` (or errors, depen
 | 32-bit | full support (`i32`/`u32`) | full support | full support | full support (`int`/`uint`) |
 | 64-bit | not supported (compile error) | full support | full support | not supported (compile error) |
 | 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | supported via the non-standard `__int128` GCC/HIP-clang extension | not supported (compile error) |
+| 32-bit float (`float32`) | full support (native `f32`) | full support (`float`) | full support (`float`) | full support (native `float`) |
+| 64-bit float (`float64`/`float`) | not supported (compile error — no `f64` in WGSL at all) | full support (`double`) | full support (`double`) | not supported (compile error — MSL has no native `double`) |
 
-WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support. Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.
+WGSL has no native integer type below or above 32 bits, and no 64-bit float type at all; MSL has no native 64/128-bit integer and no native `double` (Apple GPUs historically lack native 64-bit ALU ops, for both integers and floats). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support, floats included. Using an unsupported width — or `float64`/`float` on Metal or wgpu — on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data; use `float32` there instead.
+
+### Fixed-width floats
+
+`float32`/`float64` follow the exact same strict-mixing rule as the fixed-width integers above — two different widths never mix implicitly:
+
+```boring
+let float32 a = 1.0
+let float64 b = 2.0
+let c = a + b               # ERROR — cannot mix float32 and float64
+let c = (a as float64) + b  # OK — explicit cast
+```
+
+An untyped float literal mixes freely with either width, resolved from context — the same precedent as an untyped int literal mixing with any fixed-width integer:
+
+```boring
+let float32 a = 1.0
+let c = a + 3.14   # OK — 3.14 resolves to float32 here
+```
+
+`float` is `float64`'s alias (see "Scalar types" above), so it participates in this rule exactly as `float64` would — `a_float32_var + a_float_var` is exactly as much a type error as mixing two explicit `float32`/`float64` values.
 
 ### Integer literals
 
@@ -6436,7 +6461,9 @@ unreachable("variant {v} should have been handled above")
 |-------------------|-----------------|---------------------------------------|
 | `int`             | `Int'stack`     | `isize`                               |
 | `uint`            | `Uint'stack`    | `usize`                               |
-| `float`           | `Float'stack`   | `f64`                                 |
+| `float`           | `Float64'stack` | `f64` (pure alias of `float64`)       |
+| `float32`         | `Float32'stack` | `f32`                                 |
+| `float64`         | `Float64'stack` | `f64`                                 |
 | `bool`            | `Bool'stack`    | `bool`                                |
 | `string` (literal)         | —               | `&str` — zero allocation; promoted to `Rc<str>`/`Arc<str>` when stored |
 | `string` (stored/computed) | —               | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread)                 |
@@ -6981,6 +7008,39 @@ The `TypeId` uniquely identifies `CalcError` at the catch site regardless of mod
 | `catch CalcError:` | ✗ | ✓ dispatches via `TypeId` |
 | `try … else` | ✓ | ✓ |
 | Propagate with `?` | ✓ | ✓ (unwrapped at the catching `try:` block) |
+
+#### Fixed-width scalar throws — `BoringError::Scalar`
+
+`int8`..`int128`, `uint8`..`uint128`, `float32`, and `float64` route through their own `BoringError::Scalar(ScalarKind, u128)` variant, not `BoringError::Other`. The compiler already knows, statically, that a thrown value here is exactly one of twelve small `Copy` kinds — `Other`'s `TypeId` + heap-allocated `Box<dyn Any>` machinery exists for arbitrary user-defined enums/structs the compiler *can't* enumerate in advance, and paying that cost for a plain `i8` or `f32` would be pure overhead.
+
+```boring
+def risky(bool asFloat) throws:
+    if asFloat:
+        let float32 f = 3.5
+        throw f
+    let int8 x = 5
+    throw x
+```
+
+```rust
+fn risky(as_float: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if as_float {
+        let f: f32 = 3.5;
+        return Err(Box::new(BoringError::scalar_f32(f)));
+    }
+    let x: i8 = 5;
+    return Err(Box::new(BoringError::scalar_i8(x)));
+}
+```
+
+`catch Int8:` / `catch Float32:` each compile to a guard on the `ScalarKind` tag, binding `error` as the real native type (`i8`, `f32`, …) reconstructed from the shared `u128` payload — not a stringified `Arc<str>` the way the untyped `Int`/`Float`/`Bool` fast paths do:
+
+```rust
+BoringError::Scalar(ScalarKind::Int8, __bits) => { let error: i8 = __bits as i128 as i8; /* body */ }
+BoringError::Scalar(ScalarKind::Float32, __bits) => { let error: f32 = f32::from_bits(__bits as u32); /* body */ }
+```
+
+`Other` still exists, unchanged, for exactly what only it can do — genuine user-defined `throws ErrorType` enums/structs.
 
 #### Qualified error type paths
 

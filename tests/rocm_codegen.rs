@@ -845,22 +845,24 @@ fn example_saxpy() {
     let src = std::fs::read_to_string("examples/saxpy.br").expect("examples/saxpy.br not found");
     let (hip, rs) = rocm_codegen("saxpy_example", &src);
 
-    // Device kernel
+    // Device kernel — the example uses float32 throughout (not the bare
+    // `float`/`float64` alias), since MSL (--target metal, this same source's
+    // other advertised target) has no native `double`.
     assert!(hip.contains("__global__ void Saxpy_kernel("), "missing Saxpy_kernel;\ngot:\n{hip}");
-    assert!(hip.contains("const double alpha"),            "missing const scalar alpha;\ngot:\n{hip}");
-    assert!(hip.contains("const double* x"),              "missing x param;\ngot:\n{hip}");
-    assert!(hip.contains("double* y"),                    "missing y param;\ngot:\n{hip}");
+    assert!(hip.contains("const float alpha"),            "missing const scalar alpha;\ngot:\n{hip}");
+    assert!(hip.contains("const float* x"),              "missing x param;\ngot:\n{hip}");
+    assert!(hip.contains("float* y"),                    "missing y param;\ngot:\n{hip}");
     assert!(hip.contains("y[i] = ((alpha * x[i]) + y[i])"), "missing saxpy body;\ngot:\n{hip}");
 
     // Host struct
     assert!(rs.contains("struct Saxpy"),          "missing struct Saxpy;\ngot:\n{rs}");
-    assert!(rs.contains("alpha: f64"),                "missing alpha field;\ngot:\n{rs}");
-    assert!(rs.contains("x: DeviceBuffer<f64>"),      "missing x field;\ngot:\n{rs}");
-    assert!(rs.contains("y: DeviceBuffer<f64>"),      "missing y field;\ngot:\n{rs}");
+    assert!(rs.contains("alpha: f32"),                "missing alpha field;\ngot:\n{rs}");
+    assert!(rs.contains("x: DeviceBuffer<f32>"),      "missing x field;\ngot:\n{rs}");
+    assert!(rs.contains("y: DeviceBuffer<f32>"),      "missing y field;\ngot:\n{rs}");
 
     // Host main: print, float cast, enumerate loop
     assert!(rs.contains("println!("),                      "print not translated to println!;\ngot:\n{rs}");
-    assert!(rs.contains("as f64)"),                        "float() cast not translated;\ngot:\n{rs}");
+    assert!(rs.contains("as f32)"),                        "float32() cast not translated;\ngot:\n{rs}");
     assert!(rs.contains(".iter().enumerate()"),            "for i,v not translated to enumerate;\ngot:\n{rs}");
 }
 

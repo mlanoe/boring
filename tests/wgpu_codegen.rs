@@ -132,8 +132,8 @@ kernel:
 fn test_scalar_uniform() {
     let src = r#"
 kernel Scale:
-    mut [float]'unified data
-    let float alpha
+    mut [float32]'unified data
+    let float32 alpha
 
     def ():
         let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
@@ -153,8 +153,8 @@ kernel Scale:
 fn test_sync_barrier_fixed_array() {
     let src = r#"
 kernel Tile:
-    let [float, 256]'actor tile
-    mut [float]'unified data
+    let [float32, 256]'actor tile
+    mut [float32]'unified data
 
     def ():
         let i = gpu.block.x * gpu.block_dim.x + gpu.thread.x
@@ -290,7 +290,7 @@ kernel WarpBuiltins:
 fn test_gpu_warp_shuffle_emulated_fallback_shape() {
     let src = r#"
 kernel WarpEmulated:
-    mut [float]'unified buf
+    mut [float32]'unified buf
 
     def ():
         let tid = gpu.thread.x
@@ -1299,8 +1299,8 @@ kernel Img:
 fn device_labeled_array_field_becomes_storage_buffer() {
     let (wgsl, _) = wgpu_codegen("labeled_storage_buffer", r#"
 kernel Img:
-    mut [float, width = 4, height = 4]'unified img
-    init([float, width = 4, height = 4]'unified data):
+    mut [float32, width = 4, height = 4]'unified img
+    init([float32, width = 4, height = 4]'unified data):
         img = data
     def ():
         let c = gpu.thread.x
@@ -1359,8 +1359,8 @@ kernel:
 fn device_shared_labeled_array_becomes_workgroup_decl() {
     let (wgsl, _) = wgpu_codegen("shared_labeled", r#"
 kernel Tile:
-    mut [float]'unified out
-    let [float, width = 4, height = 4]'actor tile
+    mut [float32]'unified out
+    let [float32, width = 4, height = 4]'actor tile
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y

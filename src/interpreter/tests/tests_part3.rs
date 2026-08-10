@@ -58,14 +58,15 @@ let _result = double(21)
 
 #[test]
 fn test_numeric_f32_alias() {
-    // f32 is an alias for float'copy at runtime
+    // f32 is a real, distinct 32-bit float type at runtime — Value::Float32,
+    // not a label collapsing into Value::Float64 (docs/float-width-types.md).
     let src = r#"
 def f32 half(f32 x):
     return x / 2.0
 
 let _result = half(3.14)
 "#;
-    let Value::Float64(v) = run_src(src) else { panic!("expected float") };
+    let Value::Float32(v) = run_src(src) else { panic!("expected float32") };
     assert!((v - 1.57).abs() < 1e-5);
 }
 
