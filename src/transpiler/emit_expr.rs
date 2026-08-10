@@ -3014,25 +3014,113 @@ impl Transpiler {
         }
     }
 
-    /// "f32" when `e` is known (via `var_types`) to be `float32`-typed, else the
-    /// default "f64" — used by the free-function math builtins below (`sqrt(x)`,
-    /// `abs(x)`, …) so a `float32` argument doesn't get silently widened to `f64`
-    /// and back (docs/float-width-types.md — float32/float64 are distinct runtime
-    /// types with the same method surface, so the cast target just needs to match
-    /// the argument's own width instead of always assuming 64-bit).
-    fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
+    /// Resolves the struct type name of an expression that denotes a struct-typed
+    /// value (a plain var, `self`, or a chain of field accesses) — used by
+    /// `infer_float_width` to look field types up in `struct_fields`. Mirrors the
+    /// `var_struct_types` / `var_types` fallback already used by field-access
+    /// emission elsewhere in this file (e.g. `field_is_arc` above).
+    fn resolve_struct_name(&self, e: &Expr) -> Option<String> {
+        let named = |t: &Type| -> Option<String> {
+            match t {
+                Type::Named(n) => Some(n.clone()),
+                Type::Qualified(inner, _) => match inner.as_ref() {
+                    Type::Named(n) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
         match &e.kind {
-            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
-                Some(Type::Float32) => "f32",
+            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned()
+                .or_else(|| self.var_types.get(v.as_str()).and_then(named)),
+            ExprKind::Field(base, field) => {
+                let struct_name = self.resolve_struct_name(base)?;
+                let fields = self.struct_fields.get(struct_name.as_str())?;
+                let (_, fty) = fields.iter().find(|(fname, _)| fname == field)?;
+                named(fty)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Some("f32")`/`Some("f64")` when the expression's float width can be
+    /// determined statically, `None` when it's ambiguous (e.g. an untyped literal)
+    /// — used by `math_builtin_float_ty` below.
+    fn infer_float_width(&self, e: &Expr) -> Option<&'static str> {
+        let width_of = |t: &Type| -> Option<&'static str> {
+            match t {
+                Type::Float32 => Some("f32"),
                 // Lowercase source spelling (`let float32 a = ...`) parses as
                 // `Type::Named` — the transpiler has no separate alias-resolution
                 // pass, so this is stored as-is (same reason other var_types
                 // lookups throughout this file match both forms).
-                Some(Type::Named(n)) if n == "float32" || n == "f32" => "f32",
-                _ => "f64",
+                Type::Named(n) if n == "float32" || n == "f32" => Some("f32"),
+                Type::Float64 => Some("f64"),
+                Type::Named(n) if n == "float64" || n == "float" || n == "f64" => Some("f64"),
+                _ => None,
+            }
+        };
+        match &e.kind {
+            ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(width_of),
+            // Struct field access — e.g. `v.x` where `Velocity.x` is declared `float32`.
+            ExprKind::Field(base, field) => {
+                let struct_name = self.resolve_struct_name(base)?;
+                let fields = self.struct_fields.get(struct_name.as_str())?;
+                let (_, fty) = fields.iter().find(|(fname, _)| fname == field)?;
+                width_of(fty)
+            }
+            // Arithmetic/unary propagate the width of whichever operand has a
+            // known one (Boring requires matching widths to mix float32/float64
+            // in arithmetic — docs/float-width-types.md §3 — so if one side is
+            // known the other, if also known, necessarily agrees).
+            ExprKind::BinOp(_, l, r) => self.infer_float_width(l).or_else(|| self.infer_float_width(r)),
+            ExprKind::UnaryOp(_, inner) => self.infer_float_width(inner),
+            ExprKind::Index(base, _) => match &base.kind {
+                ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+                    Some(Type::Array(elem)) => width_of(elem),
+                    _ => None,
+                },
+                _ => None,
             },
-            _ => "f64",
+            ExprKind::MethodCall(recv, method, _) => {
+                let struct_name = self.resolve_struct_name(recv)?;
+                let key = format!("{}::{}", struct_name, method);
+                self.struct_method_return_types.get(&key).and_then(width_of)
+            }
+            ExprKind::Call(callee, args) => {
+                if let ExprKind::Var(fname) = &callee.kind {
+                    match fname.as_str() {
+                        "float32" => return Some("f32"),
+                        "float" | "float64" => return Some("f64"),
+                        // Nested builtin math call: `sqrt(sqrt(x))` etc. lowers to
+                        // `(<arg> as ty).sqrt()`, so its own result width is exactly
+                        // its argument's inferred width.
+                        "sqrt" | "abs" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan"
+                            | "asin" | "acos" | "atan" | "atan2" | "exp" | "tanh"
+                            | "log" | "log2" | "log10" | "pow"
+                            if !args.is_empty() => return self.infer_float_width(&args[0].value),
+                        _ => {}
+                    }
+                    self.fn_return_types.get(fname.as_str()).and_then(width_of)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
+    }
+
+    /// "f32" when `e` is known to be `float32`-typed, else the default "f64" —
+    /// used by the free-function math builtins below (`sqrt(x)`, `abs(x)`, …) so
+    /// a `float32` argument (including one buried in a struct field or an
+    /// arithmetic expression over one, not just a bare variable) doesn't get
+    /// silently widened to `f64` and back (docs/float-width-types.md —
+    /// float32/float64 are distinct runtime types with the same method surface,
+    /// so the cast target just needs to match the argument's own width instead of
+    /// always assuming 64-bit).
+    fn math_builtin_float_ty(&self, e: &Expr) -> &'static str {
+        self.infer_float_width(e).unwrap_or("f64")
     }
 
     pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {

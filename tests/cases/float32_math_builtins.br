@@ -1,0 +1,27 @@
+# Regression test: a `float32`-returning function whose body funnels a
+# `float32` struct field through a builtin math function (`sqrt`, `abs`, ...)
+# must keep its result at `f32` in the transpiled Rust — the builtin math
+# lowering used to always promote through `as f64` before calling the method,
+# which type-checks fine in the untyped interpreter but fails `rustc` on the
+# emitted Rust (`expected f32, found f64`) because the declared return type
+# stays f32. This is only caught by a real `rustc`/`cargo build` compile of
+# the `--emit-rust` output (see tests/transpile.rs), not by `boring run`.
+#
+# Constructs are passed as inline constructor calls (`speed(Velocity(...))`)
+# rather than through an intermediate `let v = Velocity(...)` binding — the
+# latter trips an unrelated transpiler bug where a struct-typed local passed
+# into a by-value struct parameter gets mis-annotated as `&Velocity` instead
+# of `Velocity`, which is out of scope here.
+
+struct Velocity:
+    float32 x
+    float32 y
+
+pub def float32 speed(Velocity v):
+    sqrt(v.x * v.x + v.y * v.y)
+
+pub def float32 speed_abs(Velocity v):
+    abs(v.x) + abs(v.y)
+
+print speed(Velocity(3.0, 4.0))
+print speed_abs(Velocity(3.0, 4.0))
