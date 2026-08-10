@@ -1437,6 +1437,27 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        // `.pointee` — explicit dereference for opaque/external Rust values (e.g.
+        // Bevy's `Single<T>`, `Mut<T>`) that implement `Deref`/`DerefMut` but are
+        // not structs Boring itself manages. Pure syntactic pass-through:
+        // `expr.pointee` emits Rust's `*expr` verbatim, in both read position
+        // (`let x = expr.pointee`) and assignment-target position
+        // (`expr.pointee = value`, handled by emit_expr_assign's fallback, which
+        // calls back into emit_expr → here) — no interaction with Boring's own
+        // ownership/mut-type-modifier system. A real struct field literally named
+        // `pointee` still takes priority, so this only fires when the receiver's
+        // type is unknown to Boring's checker (i.e. an opaque external type).
+        if field == "pointee" {
+            let has_real_field = self.resolve_expr_struct_type(obj)
+                .map(|ty| self.struct_fields.get(ty.as_str())
+                    .map(|fields| fields.iter().any(|(fname, _)| fname == "pointee"))
+                    .unwrap_or(false))
+                .unwrap_or(false);
+            if !has_real_field {
+                let obj_s = self.emit_expr(obj);
+                return format!("*{}", obj_s);
+            }
+        }
         // GPU targets only (see emit_kernel.rs): reading a `'unified`/`'global`
         // array field on a tracked kernel variable reads back the GPU buffer
         // instead of a plain (host-uninitialized) field access.

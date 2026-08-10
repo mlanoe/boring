@@ -237,5 +237,11 @@ transpile_test!(float32_math_builtins);
 // E0425 "cannot find value" -- this case's real value is the `cargo run` compile this
 // harness performs, not just the interpreter comparison `tests/run.rs` also runs here).
 transpile_test!(top_level_const);
+// `.pointee` — explicit dereference for opaque/external Rust types (Deref/DerefMut),
+// e.g. Bevy's `Single<T>`/`Mut<T>`. Real `Box<T>` stands in for the foreign type here
+// so this stays a self-contained transpile+cargo-build case (no extra Cargo
+// dependency) — transpiler-only by nature (the interpreter has no runtime concept of
+// an external Rust value to deref), so this is NOT in tests/run.rs.
+transpile_test!(pointee);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

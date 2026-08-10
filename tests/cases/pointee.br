@@ -1,0 +1,34 @@
+# `.pointee` — explicit dereference for opaque/external Rust values that
+# implement Deref/DerefMut but aren't Boring structs Boring itself manages
+# (e.g. Bevy's `Single<T>`, `Mut<T>` — see breakout-boring's
+# `update_scoreboard`, which needs `*writer.text(...) = ...`). Exercised here
+# with `Box<T>` — a real Rust std type with a genuine `Deref`/`DerefMut` impl,
+# a stand-in that needs no extra Cargo dependency but has the exact same
+# shape: a foreign type, read/written only via deref, not a Boring struct.
+
+def Box<int> make_box(int v):
+    Box(v)
+
+def run():
+    # Write then read through a plain variable.
+    mut Box<int> b = Box(5)
+    b.pointee = 10
+    print "{b.pointee}"
+
+    # Read through a call-expression result directly — mirrors
+    # `writer.text(...).pointee` (Bevy's TextUiWriter::text() -> Mut<str>),
+    # not just a bare stored variable. `resolve_expr_struct_type` returns
+    # None for a call expression, so this must still hit the deref path.
+    print "{make_box(42).pointee}"
+
+    # A real Boring struct field literally named `pointee` still wins over
+    # the deref interpretation — `.pointee` is only a magic pass-through
+    # accessor when the receiver's type is unknown to Boring's checker.
+    mut p = Ptr(7)
+    p.pointee = 99
+    print "{p.pointee}"
+
+struct Ptr:
+    var int pointee = 0
+
+run()
