@@ -1,0 +1,52 @@
+# `_` fill-rest marker — Transform(x = 1.0, y = 2.0, _)
+#
+# `_` fills every field a struct-construction call doesn't otherwise provide:
+# - a field with its own declared `= expr` default keeps that value (not the
+#   type's blanket zero), matching `..Default::default()` combined with an
+#   explicit override in the transpiled Rust
+# - every other field falls back to its type's default (0.0, "", false, ...)
+#
+# This is the shorthand that unblocks constructing a struct where most fields
+# should just take their default — the same shape as Rust's own
+# `Transform { translation: ..., ..default() }` for external (non-Boring)
+# types such as Bevy's `Transform`, which this test models with a throwaway
+# Boring-owned struct instead (no external crate dependency in this suite).
+
+struct Transform:
+    float x = 0.0
+    float y = 0.0
+    float scale = 1.0
+    string label = "untitled"
+
+# Partial fields + `_` — `scale`/`label` fall back to their own declared defaults.
+let t1 = Transform(x = 1.0, y = 2.0, _)
+print t1.x
+print t1.y
+print t1.scale
+print t1.label
+
+# All fields defaulted — equivalent to `Transform { ..Default::default() }`.
+let t2 = Transform(_)
+print t2.x
+print t2.y
+print t2.scale
+print t2.label
+
+# Explicit override always wins over the field's own declared default.
+let t3 = Transform(x = 9.0, scale = 2.0, _)
+print t3.x
+print t3.y
+print t3.scale
+print t3.label
+
+# Struct with no declared field defaults at all — remaining fields fall back
+# to their type's blanket zero value.
+struct Point:
+    float x
+    float y
+    bool visible
+
+let p = Point(x = 5.0, _)
+print p.x
+print p.y
+print p.visible

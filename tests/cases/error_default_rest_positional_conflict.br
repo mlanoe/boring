@@ -1,0 +1,10 @@
+# `_` only makes sense alongside named struct fields — combining it with a
+# positional (unlabeled) argument must be rejected at parse time.
+
+struct Point:
+    float x = 0.0
+    float y = 0.0
+
+def main():
+    let p = Point(1.0, _)
+    print p.x

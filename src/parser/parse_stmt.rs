@@ -329,7 +329,7 @@ impl Parser {
                         let mut args = Vec::new();
                         loop {
                             let arg = self.parse_or()?;
-                            args.push(Arg { label: None, value: arg , spread: false});
+                            args.push(Arg { label: None, value: arg , spread: false, default_rest: false});
                             if !self.eat(&TokenKind::Comma) { break; }
                         }
                         Expr { kind: ExprKind::Call(Box::new(lhs), args), line, col, len: self.tok_len()}

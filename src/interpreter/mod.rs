@@ -225,6 +225,14 @@ impl IndexValue {
     }
 }
 
+/// Sentinel label used to smuggle a bare `_` fill-rest constructor arg
+/// (`Arg::default_rest`, see `src/ast/mod.rs`) through the flat `Vec<Value>`
+/// that `eval_args_with_hints` produces, the same way `..spread` args are
+/// smuggled through as synthetic `Value::Labeled` entries. Contains a `.`,
+/// which is never valid inside a Boring field/identifier name, so it can't
+/// collide with a real field. Consumed by `instantiate_struct_labeled`.
+pub(crate) const DEFAULT_REST_ARG_LABEL: &str = "..default_rest..";
+
 impl fmt::Display for IndexValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

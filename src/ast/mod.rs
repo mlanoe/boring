@@ -1036,6 +1036,11 @@ pub struct Arg {
     /// `..expr` — spread all fields from a struct value into this call.
     /// The `label` is always `None` for spread args; `value` is the source object.
     pub spread: bool,
+    /// Bare `_` — fill every remaining field of a struct-construction call with
+    /// `Default::default()`, e.g. `Transform(translation = ..., scale = ..., _)`.
+    /// Mirrors the `_` wildcard used in `match` arms and discard bindings.
+    /// `label` is always `None` and `value` is an unused placeholder when this is set.
+    pub default_rest: bool,
 }
 
 #[derive(Debug, Clone)]

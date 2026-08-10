@@ -280,6 +280,19 @@ struct Transpiler {
     pub(crate) fn_defaults: std::collections::HashMap<String, Vec<Option<String>>>,
     /// Struct name → [(field_name, field_type)] for constructor coercion.
     pub(crate) struct_fields: std::collections::HashMap<String, Vec<(String, Type)>>,
+    /// "StructName::field" → the field's own declared `= expr` default (plain
+    /// `struct` field declarations, not `init` param defaults — see
+    /// `struct_init_defaults` for those). Consulted by the `_` fill-rest marker
+    /// (`Arg::default_rest`) so a field like `float scale = 1.0` fills back to
+    /// its own declared `1.0` instead of the type's blanket zero value.
+    pub(crate) struct_field_defaults: std::collections::HashMap<String, Expr>,
+    /// Boring-owned struct names ever constructed with the `_` fill-rest marker
+    /// (`Arg::default_rest`) — computed by `helpers::collect_default_rest_targets`
+    /// during `pre_scan`, before any struct is emitted. `emit_struct` consults this
+    /// to add `Default` to the struct's derive list, since `_` lowers to a trailing
+    /// `..Default::default()` that needs it. Not populated for/consulted on external
+    /// types (e.g. Bevy's `Transform`) — those already implement `Default` themselves.
+    pub(crate) structs_needing_default: std::collections::HashSet<String>,
     /// Estimated stack sizes (bytes) for user-defined types, computed during pre_scan.
     /// Used for strict-mode auto-boxing (> stack_auto_bytes → Box<T>).
     pub(crate) type_sizes: std::collections::HashMap<String, usize>,
@@ -863,6 +876,8 @@ impl Transpiler {
             optional_vars: std::collections::HashSet::new(),
             fn_defaults: std::collections::HashMap::new(),
             struct_fields: std::collections::HashMap::new(),
+            struct_field_defaults: std::collections::HashMap::new(),
+            structs_needing_default: std::collections::HashSet::new(),
             type_sizes: std::collections::HashMap::new(),
             qualified_struct_types: std::collections::HashSet::new(),
             actor_source_types: std::collections::HashSet::new(),
@@ -2043,6 +2058,11 @@ impl Transpiler {
         let has_qualified = fields.iter().any(|(_, ty)| Self::field_type_has_qualifier(ty));
         if has_qualified { self.qualified_struct_types.insert(s.name.clone()); }
         self.struct_fields.insert(s.name.clone(), fields);
+        for f in &s.fields {
+            if let Some(def) = &f.default {
+                self.struct_field_defaults.insert(format!("{}::{}", s.name, f.name), def.clone());
+            }
+        }
         if s.methods.iter().any(|m| m.name.is_empty()) {
             self.callable_structs.insert(s.name.clone());
         }
@@ -2470,6 +2490,10 @@ impl Transpiler {
     }
 
     fn pre_scan(&mut self, program: &Program) {
+        // Must run before any struct is emitted — `emit_struct` consults this set
+        // to decide whether to add `Default` to a struct's derive list.
+        helpers::collect_default_rest_targets(&program.items, &mut self.structs_needing_default);
+
         // Pre-populate the stdlib `Error` enum so it's always available without a user declaration.
         self.typed_error_enums.insert("Error".to_string());
         for variant in &["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"] {

@@ -1603,8 +1603,8 @@ def Expr make_assign(Expr target, Expr value, int line):
 def Expr make_question_assign(Expr target, Expr value, int line):
     Expr(kind= ExprKind.QuestionAssign(target, value), line= line)
 
-def Arg make_arg(string? label, Expr value, bool spread):
-    Arg(label= label, value= value, spread= spread)
+def Arg make_arg(string? label, Expr value, bool spread, bool default_rest):
+    Arg(label= label, value= value, spread= spread, default_rest= default_rest)
 
 def Expr make_call(Expr callee, [Arg] args, int line):
     Expr(kind= ExprKind.Call(callee, args), line= line)
@@ -1945,7 +1945,7 @@ def TryStmt make_try_stmt([Stmt] body, [CatchClause] catch_clauses, int line):
 def [Arg] map_args([Expr] exprs):
     var result = []
     for e in exprs:
-        result.push(make_arg(nil, e, false))
+        result.push(make_arg(nil, e, false, false))
     result
 
 def [Param] elems_to_params([Expr] elems, int line):

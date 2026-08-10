@@ -124,7 +124,7 @@ def Stmt parse_inline_stmt_impl(mut Parser p, bool stop_at_else) throws:
             var args = []
             while true:
                 let arg = parse_or(p)
-                args.push(make_arg(nil, arg, false))
+                args.push(make_arg(nil, arg, false, false))
                 if not parser_eat(p, "Comma"):
                     break
             make_call(lhs, args, line)
@@ -822,6 +822,38 @@ def Expr parse_primary(mut Parser p) throws:
 def [Arg] parse_arg_list(mut Parser p) throws:
     parse_call_args(p)
 
+# `field: expr` labeled args parse as a disguised single-param closure (see
+# `parse_arg`'s note) — matches the check `emit_constructor_inner` (the Rust
+# transpiler) makes when deciding whether a call is "all named fields".
+def bool is_single_param_closure(Expr value):
+    match value.kind:
+        ExprKind.Closure(params, _, _, _, _):
+            params.length == 1
+        _:
+            false
+
+# Validate a bare `_` fill-rest arg (see `parse_arg`), if present:
+# - it cannot be combined with a `..spread` arg (a struct literal can only
+#   have one `..` tail), and
+# - every other arg must be named (`field = value`, or the closure-style
+#   `field: value`) — `_` only makes sense alongside struct fields, not
+#   positional constructor args.
+def void check_default_rest_arg([Arg] args) throws:
+    var idx = -1
+    for i in 0..args.length:
+        if args[i].default_rest:
+            idx = i
+    if idx == -1:
+        return
+    for a in args:
+        if a.spread:
+            throw "`_` cannot be combined with a `..spread` argument in the same call"
+    for i in 0..args.length:
+        if i != idx:
+            let a = args[i]
+            if a.label == nil and not is_single_param_closure(a.value):
+                throw "`_` can only be combined with named fields (`field = value`) in a struct construction call"
+
 def [Arg] parse_call_args(mut Parser p) throws:
     parser_expect(p, "LParen")
     parser_skip_newlines_and_indent(p)
@@ -836,6 +868,7 @@ def [Arg] parse_call_args(mut Parser p) throws:
     parser_skip_newlines_and_indent(p)
     parser_expect(p, "RParen")
     parser_set_allow_trailing_closure(p, saved_tc)
+    check_default_rest_arg(args)
     args
 
 def (string, string) parse_relabel_pair(mut Parser p) throws:
@@ -847,16 +880,26 @@ def (string, string) parse_relabel_pair(mut Parser p) throws:
 def Arg parse_arg(mut Parser p) throws:
     if parser_eat(p, "DotDot"):
         let value = parse_or(p)
-        return make_arg(nil, value, true)
+        return make_arg(nil, value, true, false)
+    # Fill-rest marker: bare `_` — fill every remaining field of a struct
+    # construction call with its default value, e.g.
+    # `Transform(translation = ..., scale = ..., _)`. Mirrors the `_`
+    # wildcard already used in match arms and discard bindings. Guarded
+    # against `_ = expr`, which the labeled-arg case below already handles.
+    if parser_peek_ident(p) == "_" and not parser_check2(p, "Eq"):
+        let line = parser_line(p)
+        parser_advance(p)
+        let placeholder = Expr(kind= ExprKind.Var("_"), line= line)
+        return make_arg(nil, placeholder, false, true)
     if parser_peek_is_ident(p) and parser_check2(p, "Eq"):
         let is_double_eq = parser_token_at_is_eq(p, 2)
         if not is_double_eq:
             let label = parser_expect_ident(p)
             parser_advance(p)
             let value = parse_or(p)
-            return make_arg(label, value, false)
+            return make_arg(label, value, false, false)
     let value = parse_expr(p)
-    make_arg(nil, value, false)
+    make_arg(nil, value, false, false)
 
 def Expr parse_brace_expr(mut Parser p, int line) throws:
     parser_expect(p, "LBrace")
@@ -948,7 +991,7 @@ def [Arg] parse_trailing_closure(mut Parser p, [Arg] existing_args) throws:
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure(params, nil, body, ex.can_throw or inf.can_throw, ex.is_task or inf.is_task, line)
     var args = existing_args
-    args.push(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false, false))
     args
 
 def [Arg] parse_trailing_body(mut Parser p, [Arg] existing_args) throws:
@@ -962,7 +1005,7 @@ def [Arg] parse_trailing_body(mut Parser p, [Arg] existing_args) throws:
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
-    args.push(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false, false))
     args
 
 def [Arg] parse_trailing_body_no_colon(mut Parser p, [Arg] existing_args) throws:
@@ -972,7 +1015,7 @@ def [Arg] parse_trailing_body_no_colon(mut Parser p, [Arg] existing_args) throws
     let (inf, body) = infer_throws_task(body)
     let closure_expr = make_closure([], nil, body, inf.can_throw, inf.is_task, line)
     var args = existing_args
-    args.push(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false, false))
     args
 
 def [Arg] parse_trailing_closure_no_paren(mut Parser p, [Arg] existing_args) throws:
@@ -987,7 +1030,7 @@ def [Arg] parse_trailing_closure_no_paren(mut Parser p, [Arg] existing_args) thr
     let (throws_task, body) = infer_throws_task(body)
     let closure_expr = make_closure([param], nil, body, throws_task.can_throw, throws_task.is_task, line)
     var args = existing_args
-    args.push(make_arg(nil, closure_expr, false))
+    args.push(make_arg(nil, closure_expr, false, false))
     args
 
 def [Param] parse_closure_params(mut Parser p) throws:
@@ -1043,7 +1086,7 @@ def Expr parse_task_expr(mut Parser p) throws:
         if expr_is_var(expr) and parser_peek_starts_expr(p):
             let arg_line = expr.line
             let arg = parse_expr(p)
-            make_call(expr, [make_arg(nil, arg, false)], arg_line)
+            make_call(expr, [make_arg(nil, arg, false, false)], arg_line)
         else:
             expr
     make_task_expr(inner, line)
@@ -1264,7 +1307,7 @@ def Stmt parse_stmt(mut Parser p) throws:
             var args = []
             while true:
                 let arg = parse_or(p)
-                args.push(make_arg(nil, arg, false))
+                args.push(make_arg(nil, arg, false, false))
                 if not parser_eat(p, "Comma"):
                     break
             make_call(lhs, args, line)

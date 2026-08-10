@@ -152,6 +152,7 @@ impl KernelTranspiler {
                         label: None,
                         value: a.clone(),
                         spread: false,
+                        default_rest: false,
                     }).collect();
                     return self.emit_print_call(&fake_args);
                 }

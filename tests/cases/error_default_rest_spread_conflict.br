@@ -1,0 +1,12 @@
+# `_` cannot be combined with `..spread` in the same call — Rust struct-update
+# syntax only allows a single `..` tail, so this must be rejected at parse time
+# rather than emitting a broken double-spread literal.
+
+struct Config:
+    string host = "localhost"
+    bool tls = false
+
+def main():
+    let base = Config()
+    let c = Config(..base, host = "x", _)
+    print c.host

@@ -30,12 +30,16 @@ impl Transpiler {
                     Self::is_arc_qualified(&f.ty)
                     || matches!(&f.ty, Type::Optional(inner) if Self::is_arc_qualified(inner))
                 });
+            // Constructed somewhere with the `_` fill-rest marker (`Transform(x = 1.0, _)`,
+            // see `helpers::collect_default_rest_targets`) → that call lowers to a trailing
+            // `..Default::default()`, so the struct needs `Default` too.
+            let needs_default = self.structs_needing_default.contains(&s.name);
             if has_non_clone_field {
-                self.line("#[derive(Debug)]");
+                self.line(if needs_default { "#[derive(Debug, Default)]" } else { "#[derive(Debug)]" });
             } else if has_custom_cmp || has_sync_mutex_field {
-                self.line("#[derive(Debug, Clone)]");
+                self.line(if needs_default { "#[derive(Debug, Clone, Default)]" } else { "#[derive(Debug, Clone)]" });
             } else {
-                self.line("#[derive(Debug, Clone, PartialEq)]");
+                self.line(if needs_default { "#[derive(Debug, Clone, Default, PartialEq)]" } else { "#[derive(Debug, Clone, PartialEq)]" });
             }
         }
         for attr in &s.attrs {

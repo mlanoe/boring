@@ -758,6 +758,16 @@ def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hin
     var i = 0
     while i < args.length:
         let arg = args[i]
+        if arg.default_rest:
+            # Bare `_` — carries no value of its own (`arg.value` is an unused
+            # placeholder, see `Arg.default_rest`'s doc), so skip evaluating it
+            # entirely and pass a sentinel through instead. Picked up by
+            # `instantiate_struct`, which fills every field the call didn't
+            # otherwise provide with its declared per-type default — the
+            # interpreter's analog of the transpiler's `..Default::default()`.
+            vals.push(Value.Labeled("..default_rest..", Value.Nil))
+            i += 1
+            continue
         var v = Value.Nil
         var hinted = false
         if i < hints.length:
@@ -3306,6 +3316,39 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
         _:
             throw "invalid assignment target"
 
+# Interpreter-side analog of the transpiler's `..Default::default()`: the
+# per-type "zero" value used by `instantiate_struct` to fill a struct field
+# the caller left unset via the `_` fill-rest marker (`Arg.default_rest`).
+# Falls back to `Value.Nil` for named/compound types this interpreter can't
+# meaningfully default-construct on its own (matching what an unset field
+# already got before `_` existed).
+def Value default_value_for_type(Type ty):
+    match ty:
+        Type.Int: Value.Int(0)
+        Type.Int8: Value.Int8(0)
+        Type.Int16: Value.Int16(0)
+        Type.Int32: Value.Int32(0)
+        Type.Int64: Value.Int64(0)
+        Type.Int128: Value.Int128(0)
+        Type.Uint: Value.Uint(0)
+        Type.Uint8: Value.Uint8(0)
+        Type.Uint16: Value.Uint16(0)
+        Type.Uint32: Value.Uint32(0)
+        Type.Uint64: Value.Uint64(0)
+        Type.Uint128: Value.Uint128(0)
+        Type.Float32: Value.Float32(0.0)
+        Type.Float64: Value.Float64(0.0)
+        Type.Bool: Value.Bool(false)
+        Type.Str: Value.Str("")
+        Type.Optional(_): Value.Nil
+        Type.Array(_): Value.Array([])
+        Type.ArrayN(_, _): Value.Array([])
+        Type.Dict(_, _): Value.Dict([])
+        Type.Set(_): Value.Set([])
+        Type.Tuple(elems): Value.Tuple(elems.map((e): default_value_for_type(e)))
+        Type.Qualified(inner, _): default_value_for_type(inner)
+        _: Value.Nil
+
 # Instantiate a struct from constructor args
 def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] args):
     # Separate labeled and positional args
@@ -3315,6 +3358,11 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
         match arg:
             Value.Labeled(label, v): labeled.set(label, v)
             _: positional.push(arg)
+    # `_` fill-rest marker (see `Arg.default_rest`) — smuggled through
+    # `eval_args_with_hints` as a sentinel-labeled value. Its only effect is
+    # to switch the "no value provided" fallback below from the universal
+    # `Value.Nil` sentinel to a type-appropriate default.
+    let default_rest = labeled.has("..default_rest..")
     var fields = []
     var pos_idx = 0
     for field in decl.fields:
@@ -3327,6 +3375,8 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
             var fval = Value.Nil
             if let default_expr = field.default:
                 fval = eval_expr(interp, default_expr)
+            elif default_rest:
+                fval = default_value_for_type(field.ty)
             fields.push((field.name, fval))
     # Handle init declarations: pub params become fields
     if decl.inits.length > 0:

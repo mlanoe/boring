@@ -2561,7 +2561,7 @@ impl Transpiler {
             // (which may be an auto-ref'd array/dict/set/struct param) gets the
             // correct `&`/`&mut`/`.clone()` treatment instead of being emitted raw.
             let mut all_args: Vec<Arg> = Vec::with_capacity(args.len() + 1);
-            all_args.push(Arg { label: None, value: lhs.clone(), spread: false });
+            all_args.push(Arg { label: None, value: lhs.clone(), spread: false, default_rest: false });
             all_args.extend_from_slice(args);
             let all_args = self.emit_args_coerced(name, &all_args);
             let base = format!("{}({})", escape_rust_keyword(name), all_args);
@@ -2755,11 +2755,15 @@ impl Transpiler {
 
         // If all args are labeled (explicit label or closure-style `|field| expr`) → struct literal.
         // In Boring, `Struct(field: expr)` is parsed as a single-param closure |field| expr.
+        // A bare `_` fill-rest marker is also allowed here — it carries no label/value
+        // of its own and is filtered out below; it only flags `has_default_rest`.
+        let has_default_rest = args.iter().any(|a| a.default_rest);
         let all_labeled = args.iter().all(|a| {
-            a.label.is_some() || matches!(&a.value.kind, ExprKind::Closure(params, _, _, _, _) if params.len() == 1)
+            a.default_rest || a.label.is_some() || matches!(&a.value.kind, ExprKind::Closure(params, _, _, _, _) if params.len() == 1)
         });
         if all_labeled {
             let mut fields: Vec<String> = args.iter()
+                .filter(|a| !a.default_rest)
                 .map(|a| {
                     // Determine the field label: explicit label or closure-style param name.
                     let label: String = if let Some(l) = &a.label {
@@ -2932,9 +2936,26 @@ impl Transpiler {
                         // Optional fields (including Optional<Qualified<...>>) default to None.
                         if matches!(fty, Type::Optional(_)) {
                             fields.push(format!("{}: None", fname));
+                        } else if has_default_rest {
+                            // `_` present: prefer the field's own declared `= expr` default
+                            // (e.g. `float scale = 1.0`) over the blanket `Default::default()`
+                            // tail below, which would silently reset it to the type's zero
+                            // value instead. Only plain fields reach here — transient/mutex/
+                            // rwlock fields were already filled (with their own defaults) above.
+                            if let Some(def) = self.struct_field_defaults.get(&tkey).cloned() {
+                                let val = self.emit_let_value(Some(fty), &def);
+                                fields.push(format!("{}: {}", fname, val));
+                            }
                         }
                     }
                 }
+            }
+            // `_` fill-rest marker: any field not already emitted above (including
+            // plain fields with no declared default, and fields of a type Boring
+            // doesn't own at all, e.g. an external Bevy struct) is picked up from
+            // `Default::default()`.
+            if has_default_rest {
+                fields.push("..Default::default()".to_string());
             }
             format!("{} {{ {} }}", name, fields.join(", "))
         } else {

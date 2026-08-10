@@ -627,7 +627,7 @@ fn resolve_axis_property(info: &LabeledInfo, axis_label: &str, line: usize, col:
 }
 
 fn desugar_arg(a: Arg, scope: &ArrayScope) -> Arg {
-    Arg { label: a.label, value: desugar_expr(a.value, scope), spread: a.spread }
+    Arg { label: a.label, value: desugar_expr(a.value, scope), spread: a.spread, default_rest: a.default_rest }
 }
 
 fn desugar_expr(e: Expr, scope: &ArrayScope) -> Expr {

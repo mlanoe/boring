@@ -421,6 +421,11 @@ struct Arg:
     string? label
     Expr value
     bool spread
+    # Bare `_` — fill every remaining field of a struct-construction call with
+    # its default value, e.g. `Transform(translation = ..., scale = ..., _)`.
+    # Mirrors the `_` wildcard already used in match arms and discard bindings.
+    # `label` is always nil and `value` an unused placeholder when this is true.
+    bool default_rest
 
 enum ClosureBody:
     Expr(Expr expr)

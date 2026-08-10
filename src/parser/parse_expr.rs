@@ -170,7 +170,7 @@ impl Parser {
                 let mut args = Vec::new();
                 loop {
                     let arg = self.parse_or()?;
-                    args.push(Arg { label: None, value: arg , spread: false});
+                    args.push(Arg { label: None, value: arg , spread: false, default_rest: false});
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
                 Expr { kind: ExprKind::Call(Box::new(lhs), args), line, col, len: self.tok_len()}
@@ -1071,7 +1071,7 @@ impl Parser {
         let closure_expr = Expr {
             kind: ExprKind::Closure(params, None, body, ex_throws | inf_throws, ex_task | inf_task),
             line, col, len: self.tok_len(), };
-        existing_args.push(Arg { label: None, value: closure_expr , spread: false});
+        existing_args.push(Arg { label: None, value: closure_expr , spread: false, default_rest: false});
         Ok(existing_args)
     }
 
@@ -1102,7 +1102,7 @@ impl Parser {
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![], None, body, inf_throws, inf_task),
             line, col, len: self.tok_len(), };
-        existing_args.push(Arg { label: None, value: closure_expr, spread: false });
+        existing_args.push(Arg { label: None, value: closure_expr, spread: false, default_rest: false });
         Ok(existing_args)
     }
 
@@ -1120,7 +1120,7 @@ impl Parser {
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![], None, ClosureBody::Expr(Box::new(body_expr)), inf_throws, inf_task),
             line, col, len: self.tok_len(), };
-        existing_args.push(Arg { label: None, value: closure_expr, spread: false });
+        existing_args.push(Arg { label: None, value: closure_expr, spread: false, default_rest: false });
         Ok(existing_args)
     }
 
@@ -1163,7 +1163,7 @@ impl Parser {
         let closure_expr = Expr {
             kind: ExprKind::Closure(vec![param], None, body, throws, task),
             line, col, len: self.tok_len(), };
-        existing_args.push(Arg { label: None, value: closure_expr , spread: false});
+        existing_args.push(Arg { label: None, value: closure_expr , spread: false, default_rest: false});
         Ok(existing_args)
     }
 
@@ -1221,7 +1221,37 @@ impl Parser {
         self.skip_newlines_and_indent(); // allow newline before `)`
         self.expect(&TokenKind::RParen)?;
         self.allow_trailing_closure = saved_tc;
+        self.check_default_rest_arg(&args)?;
         Ok(args)
+    }
+
+    /// Validate a bare `_` fill-rest arg (see `parse_arg`), if present:
+    /// - it cannot be combined with a `..spread` arg (Rust struct-update syntax
+    ///   only allows a single `..` tail per literal), and
+    /// - every other arg must be named (`field = expr`, or the closure-style
+    ///   `field: expr`) — `_` only makes sense alongside struct fields, not
+    ///   positional constructor args.
+    fn check_default_rest_arg(&self, args: &[Arg]) -> Result<(), ParseError> {
+        let Some(idx) = args.iter().position(|a| a.default_rest) else { return Ok(()) };
+        let (line, col, len) = (args[idx].value.line, args[idx].value.col, args[idx].value.len);
+        if args.iter().any(|a| a.spread) {
+            return Err(ParseError::Generic {
+                msg: "`_` cannot be combined with a `..spread` argument in the same call".into(),
+                line, col, len,
+            });
+        }
+        let all_named = args.iter().enumerate().all(|(i, a)| {
+            i == idx
+                || a.label.is_some()
+                || matches!(&a.value.kind, ExprKind::Closure(params, _, _, _, _) if params.len() == 1)
+        });
+        if !all_named {
+            return Err(ParseError::Generic {
+                msg: "`_` can only be combined with named fields (`field = value`) in a struct construction call".into(),
+                line, col, len,
+            });
+        }
+        Ok(())
     }
 
     /// One `target_label = source_label` pair inside `as [...]` (cross-label
@@ -1237,7 +1267,21 @@ impl Parser {
         // Spread arg: `..expr` — copy all fields from the given struct value.
         if self.eat(&TokenKind::DotDot) {
             let value = self.parse_or()?;
-            return Ok(Arg { label: None, value, spread: true });
+            return Ok(Arg { label: None, value, spread: true, default_rest: false });
+        }
+        // Fill-rest marker: bare `_` — fill every remaining field of a struct
+        // construction call with `Default::default()`, e.g.
+        // `Transform(translation = ..., scale = ..., _)`. Mirrors the `_`
+        // wildcard already used in `match` arms and discard bindings. Only
+        // valid as a standalone argument (not `_ = expr`, which is handled by
+        // the ordinary labeled-arg case below and by `check_assign_target`).
+        if matches!(self.peek(), TokenKind::Ident(s) if s == "_") && !self.check2(&TokenKind::Eq) {
+            let line = self.line();
+            let col = self.col();
+            let len = self.tok_len();
+            self.advance(); // consume `_`
+            let placeholder = Expr { kind: ExprKind::Var("_".to_string()), line, col, len };
+            return Ok(Arg { label: None, value: placeholder, spread: false, default_rest: true });
         }
         // Labeled arg: `ident= expr` or `ident: expr`
         // Detected by `Ident` followed immediately by `Eq` or `Colon`.
@@ -1251,7 +1295,7 @@ impl Parser {
                     let label = self.expect_ident()?;
                     self.advance(); // consume `=`
                     let value = self.parse_or()?; // stop before comma
-                    return Ok(Arg { label: Some(label), value, spread: false });
+                    return Ok(Arg { label: Some(label), value, spread: false, default_rest: false });
                 }
             }
             // Note: `ident: expr` is NOT parsed as a labeled arg here because it is
@@ -1259,7 +1303,7 @@ impl Parser {
             // for labeled arguments instead. The `ident:` form is parsed as a
             // no-paren closure in parse_primary when allow_noparen_closure is true.
         let value = self.parse_expr()?;
-        Ok(Arg { label: None, value, spread: false })
+        Ok(Arg { label: None, value, spread: false, default_rest: false })
     }
 
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -1880,7 +1924,7 @@ impl Parser {
                     let arg_line = expr.line;
                     let arg = self.parse_expr()?;
                     Expr {
-                        kind: ExprKind::Call(Box::new(expr), vec![Arg { label: None, value: arg , spread: false}]),
+                        kind: ExprKind::Call(Box::new(expr), vec![Arg { label: None, value: arg , spread: false, default_rest: false }]),
                         line: arg_line, col, len: self.tok_len(), }
                 } else {
                     expr

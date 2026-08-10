@@ -2686,6 +2686,8 @@ impl Transpiler {
             optional_vars: self.optional_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),
+            struct_field_defaults: self.struct_field_defaults.clone(),
+            structs_needing_default: self.structs_needing_default.clone(),
             type_sizes: self.type_sizes.clone(),
             qualified_struct_types: self.qualified_struct_types.clone(),
             actor_source_types: self.actor_source_types.clone(),

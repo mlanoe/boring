@@ -390,6 +390,12 @@ impl Interpreter {
                 other => positional.push_back(other),
             }
         }
+        // `_` fill-rest marker (see `Arg::default_rest`) — smuggled through
+        // `eval_args_with_hints` as a sentinel-labeled value. Strip it out here;
+        // its only effect is to switch the "no value provided" fallback below
+        // from the universal `Value::Nil` sentinel to a type-appropriate default,
+        // mirroring the transpiler's `..Default::default()`.
+        let default_rest = labeled.remove(DEFAULT_REST_ARG_LABEL).is_some();
         let mut fields: Vec<(String, Value)> = Vec::new();
         for field_decl in &decl.fields {
             let val = if let Some(v) = labeled.remove(&field_decl.name) {
@@ -399,6 +405,12 @@ impl Interpreter {
             } else if let Some(default_expr) = &field_decl.default {
                 let default_expr = default_expr.clone();
                 self.eval_expr(&default_expr, Rc::clone(captured))?
+            } else if default_rest {
+                // Field types keep bare builtin names as `Type::Named("float")` etc.
+                // (resolved to the real `Type::Float64`/`Type::Bool`/... variant only
+                // via the alias table) — resolve first or every scalar field falls
+                // through `default_value_for_type`'s catch-all to `Value::Nil`.
+                default_value_for_type(&self.resolve_type(&field_decl.ty))
             } else {
                 Value::Nil
             };
@@ -770,4 +782,33 @@ impl Interpreter {
         }
     }
 
+}
+
+/// Interpreter-side analog of the transpiler's `..Default::default()`: the
+/// per-type "zero" value used by `instantiate_struct_labeled` to fill a field
+/// the caller left unset via the `_` fill-rest marker. Falls back to
+/// `Value::Nil` for named/compound types the interpreter can't meaningfully
+/// default-construct on its own (matching what an unset field already got
+/// before `_` existed).
+fn default_value_for_type(ty: &Type) -> Value {
+    match ty {
+        Type::Int | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 => Value::Int(0),
+        Type::Uint => Value::Uint(0),
+        Type::Uint8 => Value::Uint8(0),
+        Type::Uint16 => Value::Uint16(0),
+        Type::Uint32 => Value::Uint32(0),
+        Type::Uint64 => Value::Uint64(0),
+        Type::Uint128 => Value::Uint128(0),
+        Type::Float32 => Value::Float32(0.0),
+        Type::Float64 => Value::Float64(0.0),
+        Type::Bool => Value::Bool(false),
+        Type::Str => Value::Str(String::new()),
+        Type::Optional(_) => Value::Nil,
+        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _) => Value::Array(Rc::new(Vec::new())),
+        Type::Dict(_, _) => Value::Dict(Vec::new()),
+        Type::Set(_) => Value::Set(Vec::new()),
+        Type::Tuple(elems) => Value::Tuple(elems.iter().map(default_value_for_type).collect()),
+        Type::Qualified(inner, _) => default_value_for_type(inner),
+        _ => Value::Nil,
+    }
 }

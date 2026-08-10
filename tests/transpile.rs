@@ -207,6 +207,7 @@ transpile_test!(multi_catch);
 transpile_test!(implicit_self);
 transpile_test!(shadowing);
 transpile_test!(struct_spread);
+transpile_test!(default_rest);
 transpile_test!(tuple_string);
 transpile_test!(tuple_methods);
 transpile_test!(tuple_map);

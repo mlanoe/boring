@@ -147,6 +147,7 @@ itest!(multi_catch);
 itest!(implicit_self);
 itest!(shadowing);
 itest!(struct_spread);
+itest!(default_rest);
 itest!(tuple_string);
 itest!(array_pop_remove);
 itest!(closure_break);

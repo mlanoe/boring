@@ -1047,6 +1047,251 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
     }
 }
 
+/// Walks the whole program looking for struct-construction calls that use the
+/// `_` fill-rest marker (`Arg::default_rest`, see `src/ast/mod.rs`) and records
+/// the callee name into `out`. Consulted by `emit_struct` (`emit_struct.rs`) to
+/// conditionally add `Default` to the struct's derive list: `_` lowers to a
+/// trailing `..Default::default()` (`emit_constructor_inner`,
+/// `emit_expr.rs`), which requires the target type to implement `Default`.
+/// Only matters for Boring-*owned* structs — the motivating external case
+/// (e.g. Bevy's `Transform`) already implements `Default` in its own crate
+/// and needs no derive from us; those calls just never match any name here.
+///
+/// Best-effort, not exhaustively complete over every `ExprKind`: an unlisted
+/// nesting form degrades to "the struct doesn't get `#[derive(Default)]`",
+/// which surfaces at `cargo build` time as rustc's own
+/// "the trait `Default` is not implemented" diagnostic — a safe, if less
+/// friendly, failure mode rather than a silent miscompile.
+pub(crate) fn collect_default_rest_targets(items: &[Item], out: &mut std::collections::HashSet<String>) {
+    for item in items {
+        match item {
+            Item::Fn(f) => scan_stmts_for_default_rest(&f.body, out),
+            Item::Struct(s) => {
+                for m in &s.methods { scan_stmts_for_default_rest(&m.body, out); }
+                for i in &s.inits { scan_stmts_for_default_rest(&i.body, out); }
+                for tm in &s.type_methods { scan_stmts_for_default_rest(&tm.body, out); }
+                for st in &s.setters { scan_stmts_for_default_rest(&st.body, out); }
+                for f in &s.fields {
+                    if let Some(d) = &f.default { scan_expr_for_default_rest(d, out); }
+                }
+            }
+            Item::Enum(e) => {
+                for m in &e.methods { scan_stmts_for_default_rest(&m.body, out); }
+                for st in &e.setters { scan_stmts_for_default_rest(&st.body, out); }
+            }
+            Item::Ext(e) => {
+                for m in &e.methods { scan_stmts_for_default_rest(&m.body, out); }
+                for st in &e.setters { scan_stmts_for_default_rest(&st.body, out); }
+            }
+            Item::Trait(t) => {
+                for m in &t.defaults { scan_stmts_for_default_rest(&m.body, out); }
+            }
+            Item::Let(s) => {
+                if let Some(v) = &s.value { scan_expr_for_default_rest(v, out); }
+            }
+            Item::Mod(m) => collect_default_rest_targets(&m.items, out),
+            Item::Stmt(s) => scan_stmt_for_default_rest(s, out),
+            _ => {}
+        }
+    }
+}
+
+fn scan_stmts_for_default_rest(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for s in stmts { scan_stmt_for_default_rest(s, out); }
+}
+
+fn scan_cond_clause_for_default_rest(c: &CondClause, out: &mut std::collections::HashSet<String>) {
+    match c {
+        CondClause::Let(_, e) | CondClause::LetPat(_, e) | CondClause::Expr(e) => scan_expr_for_default_rest(e, out),
+    }
+}
+
+fn scan_stmt_for_default_rest(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let(l) => { if let Some(v) = &l.value { scan_expr_for_default_rest(v, out); } }
+        Stmt::LetDestructure(l) => scan_expr_for_default_rest(&l.value, out),
+        Stmt::Return(r) => { if let Some(v) = &r.value { scan_expr_for_default_rest(v, out); } }
+        Stmt::Throw(t) => { if let Some(v) = &t.value { scan_expr_for_default_rest(v, out); } }
+        Stmt::If(i) => {
+            for (cond, body) in &i.branches {
+                scan_expr_for_default_rest(cond, out);
+                scan_stmts_for_default_rest(body, out);
+            }
+            if let Some(b) = &i.else_body { scan_stmts_for_default_rest(b, out); }
+        }
+        Stmt::IfLet(i) => {
+            for c in &i.clauses { scan_cond_clause_for_default_rest(c, out); }
+            scan_stmts_for_default_rest(&i.then_body, out);
+            for br in &i.elif_branches {
+                for c in &br.clauses { scan_cond_clause_for_default_rest(c, out); }
+                scan_stmts_for_default_rest(&br.body, out);
+            }
+            if let Some(b) = &i.else_body { scan_stmts_for_default_rest(b, out); }
+        }
+        Stmt::Match(m) => {
+            scan_expr_for_default_rest(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { scan_expr_for_default_rest(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => scan_expr_for_default_rest(e, out),
+                    MatchBody::Block(b) => scan_stmts_for_default_rest(b, out),
+                }
+            }
+        }
+        Stmt::While(w) => { scan_expr_for_default_rest(&w.condition, out); scan_stmts_for_default_rest(&w.body, out); }
+        Stmt::WhileLet(w) => { scan_expr_for_default_rest(&w.value, out); scan_stmts_for_default_rest(&w.body, out); }
+        Stmt::DoWhile(d) => { scan_stmts_for_default_rest(&d.body, out); scan_expr_for_default_rest(&d.condition, out); }
+        Stmt::Loop(l) => scan_stmts_for_default_rest(&l.body, out),
+        Stmt::Wait(e, _) => scan_expr_for_default_rest(e, out),
+        Stmt::For(f) => { scan_expr_for_default_rest(&f.iterable, out); scan_stmts_for_default_rest(&f.body, out); }
+        Stmt::Guard(g) => {
+            match &g.cond {
+                GuardCond::Expr(e) => scan_expr_for_default_rest(e, out),
+                GuardCond::Clauses(cs) => for c in cs { scan_cond_clause_for_default_rest(c, out); },
+            }
+            scan_stmts_for_default_rest(&g.else_body, out);
+        }
+        Stmt::Try(t) => {
+            scan_stmts_for_default_rest(&t.body, out);
+            for c in &t.catch_clauses { scan_stmts_for_default_rest(&c.body, out); }
+        }
+        Stmt::Defer(b) => scan_stmts_for_default_rest(b, out),
+        Stmt::Expr(e) => scan_expr_for_default_rest(e, out),
+        Stmt::Fn(f) => scan_stmts_for_default_rest(&f.body, out),
+        Stmt::Struct(s) => {
+            for m in &s.methods { scan_stmts_for_default_rest(&m.body, out); }
+            for i in &s.inits { scan_stmts_for_default_rest(&i.body, out); }
+        }
+        Stmt::Enum(e) => { for m in &e.methods { scan_stmts_for_default_rest(&m.body, out); } }
+        Stmt::Mod(m) => collect_default_rest_targets(&m.items, out),
+        Stmt::Yield(e, _) => scan_expr_for_default_rest(e, out),
+        Stmt::KernelBlock(k) => scan_stmts_for_default_rest(&k.body, out),
+        Stmt::With(w) => scan_stmts_for_default_rest(&w.body, out),
+        Stmt::Break(_, Some(e)) => scan_expr_for_default_rest(e, out),
+        _ => {}
+    }
+}
+
+fn scan_expr_for_default_rest(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match &expr.kind {
+        ExprKind::Call(callee, args) => {
+            scan_expr_for_default_rest(callee, out);
+            if args.iter().any(|a| a.default_rest) {
+                if let ExprKind::Var(name) = &callee.kind {
+                    out.insert(name.clone());
+                }
+            }
+            for a in args { scan_expr_for_default_rest(&a.value, out); }
+        }
+        ExprKind::MethodCall(recv, _, args) | ExprKind::OptionalMethodCall(recv, _, args) => {
+            scan_expr_for_default_rest(recv, out);
+            for a in args { scan_expr_for_default_rest(&a.value, out); }
+        }
+        ExprKind::GenericCall(callee, _, args) => {
+            scan_expr_for_default_rest(callee, out);
+            for a in args { scan_expr_for_default_rest(&a.value, out); }
+        }
+        ExprKind::Pipe(lhs, _, args) => {
+            scan_expr_for_default_rest(lhs, out);
+            for a in args { scan_expr_for_default_rest(&a.value, out); }
+        }
+        ExprKind::BinOp(_, l, r) | ExprKind::Assign(l, r) | ExprKind::QuestionAssign(l, r)
+            | ExprKind::Else(l, r) | ExprKind::TryElse(l, r) => {
+            scan_expr_for_default_rest(l, out);
+            scan_expr_for_default_rest(r, out);
+        }
+        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) | ExprKind::OptionalField(e, _)
+            | ExprKind::Cast(e, _) => scan_expr_for_default_rest(e, out),
+        ExprKind::Index(obj, idx) => { scan_expr_for_default_rest(obj, out); scan_expr_for_default_rest(idx, out); }
+        ExprKind::LabeledIndex(obj, args) => {
+            scan_expr_for_default_rest(obj, out);
+            for a in args { scan_expr_for_default_rest(&a.value, out); }
+        }
+        ExprKind::New { arena, ctor } => {
+            if let Some(a) = arena { scan_expr_for_default_rest(a, out); }
+            scan_expr_for_default_rest(ctor, out);
+        }
+        ExprKind::TryElseBlock(body, else_body) => {
+            scan_stmts_for_default_rest(body, out);
+            scan_stmts_for_default_rest(else_body, out);
+        }
+        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) | ExprKind::JoinAll(elems) => {
+            for e in elems { scan_expr_for_default_rest(e, out); }
+        }
+        ExprKind::ArrayFill { value, count } => {
+            scan_expr_for_default_rest(value, out);
+            scan_expr_for_default_rest(count, out);
+        }
+        ExprKind::ArrayAlloc { count } => scan_expr_for_default_rest(count, out),
+        ExprKind::ArrayComp { expr, count, .. } => {
+            scan_expr_for_default_rest(expr, out);
+            scan_expr_for_default_rest(count, out);
+        }
+        ExprKind::ArrayCompIter { expr, iter, .. } => {
+            scan_expr_for_default_rest(expr, out);
+            scan_expr_for_default_rest(iter, out);
+        }
+        ExprKind::LabeledArrayComp { expr, clauses } => {
+            scan_expr_for_default_rest(expr, out);
+            for (_, c) in clauses { scan_expr_for_default_rest(c, out); }
+        }
+        ExprKind::Dict(pairs) => {
+            for (k, v) in pairs {
+                scan_expr_for_default_rest(k, out);
+                scan_expr_for_default_rest(v, out);
+            }
+        }
+        ExprKind::Range { start, end, .. } => {
+            scan_expr_for_default_rest(start, out);
+            scan_expr_for_default_rest(end, out);
+        }
+        ExprKind::SliceRange { start, end, .. } => {
+            if let Some(s) = start { scan_expr_for_default_rest(s, out); }
+            if let Some(e) = end { scan_expr_for_default_rest(e, out); }
+        }
+        ExprKind::RelabelCast(e, _) => scan_expr_for_default_rest(e, out),
+        ExprKind::Closure(_, _, body, _, _) => match body {
+            ClosureBody::Expr(e) => scan_expr_for_default_rest(e, out),
+            ClosureBody::Block(b) => scan_stmts_for_default_rest(b, out),
+        },
+        ExprKind::If(i) => {
+            for (cond, body) in &i.branches {
+                scan_expr_for_default_rest(cond, out);
+                scan_stmts_for_default_rest(body, out);
+            }
+            if let Some(b) = &i.else_body { scan_stmts_for_default_rest(b, out); }
+        }
+        ExprKind::Match(m) => {
+            scan_expr_for_default_rest(&m.subject, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard { scan_expr_for_default_rest(g, out); }
+                match &arm.body {
+                    MatchBody::Expr(e) => scan_expr_for_default_rest(e, out),
+                    MatchBody::Block(b) => scan_stmts_for_default_rest(b, out),
+                }
+            }
+        }
+        ExprKind::Block(b) | ExprKind::Do(b) => scan_stmts_for_default_rest(b, out),
+        ExprKind::Loop(l) => scan_stmts_for_default_rest(&l.body, out),
+        ExprKind::Task(e) => scan_expr_for_default_rest(e, out),
+        ExprKind::TaskWithTimeout(a, b) => {
+            scan_expr_for_default_rest(a, out);
+            scan_expr_for_default_rest(b, out);
+        }
+        ExprKind::StringInterp(segs) => {
+            for seg in segs {
+                match seg {
+                    StringSegment::Expr(e) | StringSegment::FormattedExpr(e, _) => scan_expr_for_default_rest(e, out),
+                    StringSegment::Lit(_) => {}
+                }
+            }
+        }
+        ExprKind::MacroCall { args, .. } => { for a in args { scan_expr_for_default_rest(a, out); } }
+        ExprKind::KernelLaunch { kernel, .. } => scan_expr_for_default_rest(kernel, out),
+        _ => {}
+    }
+}
+
 /// Records which of `candidates` (top-level immutable `let` scalar-constant names,
 /// per `Transpiler::top_level_let_is_const_safe`) are referenced as free variables
 /// inside `body` — a function or struct/enum/ext method body — and inserts each into

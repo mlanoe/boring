@@ -2384,6 +2384,19 @@ impl Interpreter {
     pub(crate) fn eval_args_with_hints(&mut self, args: &[Arg], env: EnvRef, hints: &[Option<Type>]) -> Result<Vec<Value>, Signal> {
         let mut vals = Vec::new();
         for (i, arg) in args.iter().enumerate() {
+            if arg.default_rest {
+                // Bare `_` — carries no value of its own (`arg.value` is an unused
+                // placeholder, see `Arg::default_rest`'s doc), so skip evaluating it
+                // entirely and pass a sentinel through instead. Picked up by
+                // `instantiate_struct_labeled`, which fills every field the call
+                // didn't otherwise provide with its declared per-type default —
+                // the interpreter's analog of the transpiler's `..Default::default()`.
+                vals.push(Value::Labeled {
+                    label: DEFAULT_REST_ARG_LABEL.to_string(),
+                    value: Box::new(Value::Nil),
+                });
+                continue;
+            }
             let hinted = match (&arg.value.kind, hints.get(i).and_then(|h| h.as_ref())) {
                 (ExprKind::DotIdent(name), Some(ty)) => self.resolve_dot_ident_hint(name, ty),
                 _ => None,
