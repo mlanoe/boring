@@ -352,7 +352,7 @@ fn desugar_let(mut s: LetStmt, scope: &mut ArrayScope) -> Vec<LetStmt> {
     scope.insert(s.name.clone(), info.clone());
     let mut out = vec![s];
     if let (Some(names), Some(values)) = (&info.shadow_names, shadow_values) {
-        for (name, value) in names.iter().zip(values.into_iter()) {
+        for (name, value) in names.iter().zip(values) {
             out.push(LetStmt {
                 binding: BindingKind::Let,
                 var_mut: false,
@@ -435,7 +435,7 @@ fn desugar_reassign_stmt(e: Expr, scope: &mut ArrayScope) -> Vec<Stmt> {
             vec![Stmt::Expr(Expr { kind: ExprKind::Assign(lhs, Box::new(rhs_d)), line, col, len: 0 })]
         }
     };
-    for (shadow_name, value) in shadow_names.iter().zip(values.into_iter()) {
+    for (shadow_name, value) in shadow_names.iter().zip(values) {
         // Explicit `as int` — see desugar_let's identical note: the source
         // expression's type isn't guaranteed (int or uint both appear in
         // real kernel `init`/method params), and the shadow field's own
