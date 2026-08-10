@@ -228,7 +228,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                 var hinted = false
                 match expr.kind:
                     ExprKind.DotIdent(variant_name):
-                        let hint_opt = interp.current_return_ty()
+                        let hint_opt = current_return_ty(interp)
                         if let hint = hint_opt:
                             let resolved = eval_dot_ident_hint(interp, variant_name, hint)
                             if let rv = resolved:
@@ -939,15 +939,15 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
     # can resolve the enum shorthand via eval_dot_ident_hint instead of eval_dot_ident's
     # ambiguous-scan default — mirrors the Rust interpreter's return_ty_stack
     # (src/interpreter/call.rs / exec.rs).
-    interp.push_return_ty(decl.return_ty)
+    push_return_ty(interp, decl.return_ty)
     if decl.is_stream:
         # Stream function: collect all yielded values into an array
         let stream_result = exec_stream_fn(interp, decl.body)
-        interp.pop_return_ty()
+        pop_return_ty(interp)
         interp.current_env = prev_env
         return Value.Array(stream_result)
     let sig = exec_block_fn(interp, decl.body)
-    interp.pop_return_ty()
+    pop_return_ty(interp)
     interp.current_env = prev_env
     match sig:
         nil: Nil

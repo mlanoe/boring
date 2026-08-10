@@ -191,33 +191,43 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Function/constructor call
         ExprKind.Call(callee_expr, args):
             let callee = eval_expr(interp, callee_expr)
-            let arg_vals = eval_args(interp, args)
+            let hints = call_hint_types(interp, callee)
+            let arg_vals = eval_args_with_hints(interp, args, hints)
             call_value(interp, callee, arg_vals)
 
         ExprKind.GenericCall(callee_expr2, _type_args, gen_args):
             # Ignore type args — evaluate as a regular call
             let gen_callee = eval_expr(interp, callee_expr2)
-            let gen_arg_vals = eval_args(interp, gen_args)
+            let gen_hints = call_hint_types(interp, gen_callee)
+            let gen_arg_vals = eval_args_with_hints(interp, gen_args, gen_hints)
             call_value(interp, gen_callee, gen_arg_vals)
 
         # Pipe: `lhs |> name(args)` — free function if one exists, else method call.
         ExprKind.Pipe(left, method, args):
             let obj = eval_expr(interp, left)
-            let extra_args = eval_args(interp, args)
             let fn_decl_opt = interp.get_fn_decl(method)
             if let fn_decl = fn_decl_opt:
+                # `obj` is prepended as the first positional arg below, so its hint slot
+                # (params[0]) doesn't apply to `args` — shift the hint list by one to line
+                # params[1..] up with args[0..].
+                let all_hints = fn_decl.params.map((p): p.ty)
+                let extra_hints = if all_hints.length > 0: all_hints.slice(1, all_hints.length) else []
+                let extra_args = eval_args_with_hints(interp, args, extra_hints)
                 var all_args = [obj]
                 for a in extra_args:
                     all_args.push(a)
                 call_fn(interp, fn_decl, all_args, nil)
             else:
+                let hints = method_hint_types(interp, obj, method)
+                let extra_args = eval_args_with_hints(interp, args, hints)
                 call_method(interp, obj, method, extra_args)
 
         # Method call
         ExprKind.MethodCall(recv_expr, method, args):
             let recv = eval_expr(interp, recv_expr)
             check_mutating_method_call(interp, recv_expr, recv, method)
-            let arg_vals = eval_args(interp, args)
+            let hints = method_hint_types(interp, recv, method)
+            let arg_vals = eval_args_with_hints(interp, args, hints)
             let result = call_method(interp, recv, method, arg_vals)
             # Write back mutating array methods to their source lvalue
             if method == "pop":
@@ -280,7 +290,8 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             match recv:
                 Value.Nil: Value.Nil
                 _:
-                    let arg_vals = eval_args(interp, args)
+                    let hints = method_hint_types(interp, recv, method)
+                    let arg_vals = eval_args_with_hints(interp, args, hints)
                     call_method(interp, recv, method, arg_vals)
 
         # Index access
@@ -722,7 +733,9 @@ def Value? eval_dot_ident_hint(mut Interpreter interp, string variant_name, Type
         if let decl = decl_opt:
             for variant in decl.variants:
                 if variant.name == variant_name:
-                    return some(Value.EnumVariant(base, variant_name, []))
+                    # decl.name rather than reusing `base` — get_enum_decl takes its
+                    # `name` param by value, and decl.name is a distinct fresh read.
+                    return some(Value.EnumVariant(decl.name, variant_name, []))
     nil
 
 # Evaluate a list of call arguments
@@ -768,6 +781,36 @@ def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hin
                 vals.push(v)
         i += 1
     vals
+
+# Per-position `.Variant` hints (see eval_dot_ident_hint) for a free-function call, built
+# from the callee's own declared param types. `Value.OverloadedFn` doesn't have one
+# settled FnDecl — resolve_overload always just returns the first candidate today (it
+# doesn't consider argument types at all yet, a separate pre-existing gap), so the first
+# candidate's params are exactly what will actually run. Closures, native fns, and
+# constructors get no hints, same as before this existed.
+def [Type?] call_hint_types(mut Interpreter interp, Value callee):
+    match callee:
+        Value.Fn(name, _):
+            let decl_opt = interp.get_fn_decl(name)
+            if let decl = decl_opt:
+                return decl.params.map((p): p.ty)
+            []
+        Value.OverloadedFn(_, variants):
+            if variants.length > 0:
+                return call_hint_types(interp, variants[0])
+            []
+        _: []
+
+# Per-position `.Variant` hints for a method call, from the receiver's own type — see
+# call_hint_types. Only covers the first method registered under this name
+# (find_method's own "first match" rule, unchanged) since there is no overload list to
+# consult here beyond that.
+def [Type?] method_hint_types(mut Interpreter interp, Value recv, string method_name):
+    let type_name = recv.type_name()
+    let decl_opt = interp.find_method(type_name, method_name)
+    if let decl = decl_opt:
+        return decl.params.map((p): p.ty)
+    []
 
 # Binary operation dispatch
 def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
