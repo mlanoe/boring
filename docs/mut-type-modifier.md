@@ -213,6 +213,31 @@ fully built yet (it isn't — see below):
 
 - **Tuple slots** — `(mut Point, string)`. Each position is fixed and
   addressable (`t.0`, `t.1`), exactly like a struct field.
+- **Enum variant fields** — **shipped**, unlike the struct-field case right
+  below (`enum Holder: Value(mut Point p)`). Each variant field is exactly as
+  fixed/addressable as a tuple slot or struct field, so the same mechanism
+  applies with no new grammar — `mut` reaching a variant field's type is an
+  incidental consequence of `parse_type` accepting the `mut`-prefix anywhere
+  a type can appear (§2), not special-cased parsing. What *is* new, specific
+  to enums: whether the enum's own `def` methods get `&self` or `&mut self`.
+  By default every enum method (`req` or `def`) transpiles to `&self` —
+  variants have no mutable fields to justify anything else, so `def` there is
+  documentation intent only, exactly like a top-level free function (see
+  `binding-mutability.md`/`CLAUDE.md`'s enum section). An enum with at least
+  one `mut`-qualified variant field is the one exception: it's checked **per
+  enum type**, not per method body — if the type has such a field anywhere,
+  every `def` method on it gets a genuine `&mut self`, and calling one now
+  requires the enum instance itself to carry `mut`/`var mut`, same as a
+  struct's `def` method. Matching bare `self` inside such a method hits
+  Rust's own match ergonomics (implicit `&mut` binding mode), which binds a
+  matched variant field directly as `&mut T` with no `mut`/`ref mut`
+  annotation on the pattern — and rejects one if written, since an explicit
+  `mut` binding modifier conflicts with an implicit by-reference binding
+  mode. Matching a plain *owned* enum local (not `self`) still needs the
+  usual `mut`-promotion on the bound pattern name to call a `def` method
+  through it, same as any owned match subject. Full walkthrough, with the
+  Rust output for both the mut-field and no-mut-field cases, in
+  [book.md §9, "Enum variant fields — `mut Type`"](book.md#enum-variant-fields--mut-type).
 - **Struct fields** — **not actually shipped yet, an earlier revision of
   this document overclaimed it was.** `mut` isn't even a valid field
   keyword today (`struct S: mut Point p` fails to parse — fields only

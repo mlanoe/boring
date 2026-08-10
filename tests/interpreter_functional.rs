@@ -159,6 +159,7 @@ itest!(lazy);
 itest!(array_comprehension);
 itest!(callable_struct);
 itest!(fixed_array);
+itest!(labeled_array);
 itest!(collections2);
 itest!(triple_string);
 itest!(pipe);

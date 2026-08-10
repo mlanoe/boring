@@ -219,9 +219,9 @@ kernel Transpose:
 - **Indexing**: `a[width = w, height = h]` — no `.at(...)` method call; labels
   are mandatory for 2+ axes and order-free at the use site
   (`a[height=h, width=w]` is identical to `a[width=w, height=h]`).
-- **Shape queries**: `a.size(.width)` / `a.size(.height)` / `a.size(.depth)` —
-  one method, an axis-selector enum synthesized per array type instead of a
-  separate method name per axis.
+- **Shape queries**: `a.width` / `a.height` / `a.depth` — each declared axis
+  is a read-only property, no separate accessor method per axis and no call
+  syntax at all.
 - **Layout**: row-major — the *first declared label* is the fastest-varying
   axis (`a[width=w, height=h]` lowers to flat index `w + h*width_size`),
   regardless of what the labels are named.

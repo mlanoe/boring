@@ -3,15 +3,20 @@
 # Generalized instead of one hand-written match arm per numeric-kind pair —
 # see the NumKind model in eval.br (num_kind_of/value_as_i128/etc.).
 def bool value_lt(Value a, Value b):
+    # float32/float64 compare freely against each other and against any int
+    # kind (widened to float64) — same permissive precedent as elsewhere
+    # (docs/float-width-types.md §3).
     let a_is_float = match a:
-        Value.Float(_): true
+        Value.Float64(_): true
+        Value.Float32(_): true
         _: false
     let b_is_float = match b:
-        Value.Float(_): true
+        Value.Float64(_): true
+        Value.Float32(_): true
         _: false
     if a_is_float or b_is_float:
-        guard let af = value_as_float_numeric(a) else: return false
-        guard let bf = value_as_float_numeric(b) else: return false
+        guard let af = value_as_float64_widened(a) else: return false
+        guard let bf = value_as_float64_widened(b) else: return false
         af < bf
     else:
         match a:
@@ -38,10 +43,12 @@ def string val_type_name(Value v):
         Value.Uint32(_): "uint32"
         Value.Uint64(_): "uint64"
         Value.Uint128(_): "uint128"
-        Value.Float(_): "float"
+        Value.Float64(_): "float"
+        Value.Float32(_): "float32"
         Value.Str(_): "string"
         Value.Bool(_): "bool"
         Value.Array(_): "array"
+        Value.LabeledArray(_, _): "array"
         Value.Dict(_): "dict"
         Value.Set(_): "set"
         Value.Nil: "nil"
@@ -556,6 +563,45 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Array(result)
                 "isEmpty":
                     Value.Bool(arr.length == 0)
+                "reshape":
+                    # flat.reshape(width = W, height = H) → labeled array
+                    # (docs/array-multidim-types.md) — zero-copy at the value
+                    # level (same underlying elements, just a shape attached).
+                    # No static checker here, so the length check is always
+                    # at runtime, unlike the Rust compiler's compile-time
+                    # check when both sizes are known constants.
+                    var axes = []
+                    for a in args:
+                        match a:
+                            Value.Labeled(label, v):
+                                match v:
+                                    Value.Int(n): axes.push((label, n))
+                                    _: throw "reshape: axis size for '{label}' must be int, got {v.type_name()}"
+                            _: throw "reshape: every argument must be labeled (width = w, ...)"
+                    if axes.length < 2:
+                        throw "reshape: labeled array types need at least 2 axes"
+                    var total = 1
+                    for ax in axes:
+                        total = total * ax.1
+                    if arr.length != total:
+                        throw "reshape: length mismatch — buffer has {arr.length} elements, shape needs {total}"
+                    Value.LabeledArray(arr, axes)
+                _:
+                    throw "unknown method {method_name} on {recv_type}"
+
+        Value.LabeledArray(arr, axes):
+            match method_name:
+                "length":
+                    Value.Int(arr.length)
+                "len":
+                    Value.Int(arr.length)
+                "isEmpty":
+                    Value.Bool(arr.length == 0)
+                "flatten":
+                    # a.flatten() → [T], exact inverse of .reshape() — drops
+                    # the shape, keeps the same underlying elements
+                    # (docs/array-multidim-types.md).
+                    Value.Array(arr)
                 _:
                     throw "unknown method {method_name} on {recv_type}"
 

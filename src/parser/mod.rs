@@ -483,7 +483,7 @@ impl Parser {
     fn is_type_name(s: &str) -> bool {
         s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
             || matches!(s,
-                "int" | "uint" | "uint8" | "float" | "bool" | "string" | "str"
+                "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool" | "string" | "str"
                 | "void" | "never"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
@@ -1383,7 +1383,7 @@ impl Parser {
             // the scalar arm — a labeled array is a buffer shape
             // (Type::LabeledArray), not a scalar, even though it isn't
             // Array/ArrayN/ArrayNExpr. Fixed-shape axes are compile-time shape
-            // metadata for `.size(.axis)`/GPU dispatch, not a competing
+            // metadata for the `a.axis` shape-query property/GPU dispatch, not a competing
             // fixed-array length, and dynamic-shape axes desugar to a plain
             // buffer + shadow fields — neither conflicts with 'unified/'global.
             unqualified if unqualified.as_labeled_array().is_some() => {

@@ -94,7 +94,7 @@ fn fmt_type(ty: &Type) -> String {
         Type::Uint32 => "uint32".into(),
         Type::Uint64 => "uint64".into(),
         Type::Uint128 => "uint128".into(),
-        Type::Float  => "float".into(),
+        Type::Float64  => "float".into(),
         Type::Bool   => "bool".into(),
         Type::Str    => "string".into(),
         Type::Void   => "void".into(),
@@ -109,7 +109,8 @@ fn fmt_type(ty: &Type) -> String {
 fn types_match_for_overload(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
-        (Int, Int) | (Uint, Uint) | (Uint8, Uint8) | (Float, Float) | (Bool, Bool) | (Str, Str) => true,
+        (Int, Int) | (Uint, Uint) | (Uint8, Uint8) | (Bool, Bool) | (Str, Str) => true,
+        (Float32, Float32) | (Float64, Float64) => true,
         (Int8, Int8) | (Int16, Int16) | (Int32, Int32) | (Int64, Int64) | (Int128, Int128) => true,
         (Uint16, Uint16) | (Uint32, Uint32) | (Uint64, Uint64) | (Uint128, Uint128) => true,
         (Named(x), Named(y)) => x == y,
@@ -126,7 +127,8 @@ fn types_match_for_overload(a: &Type, b: &Type) -> bool {
             "uint32" => matches!(t, Uint32),
             "uint64" => matches!(t, Uint64),
             "uint128" => matches!(t, Uint128),
-            "float"  => matches!(t, Float),
+            "float32" | "f32" => matches!(t, Float32),
+            "float" | "float64" | "f64" => matches!(t, Float64),
             "bool"   => matches!(t, Bool),
             "string" => matches!(t, Str),
             _ => false,
@@ -256,7 +258,9 @@ pub enum Value {
     Uint32(u32),
     Uint64(u64),
     Uint128(u128),
-    Float(f64),
+    /// 32-bit float — genuine `f32` storage/precision, not a label over Float64.
+    Float32(f32),
+    Float64(f64),
     Str(String),
     Array(Rc<Vec<Value>>),
     Tuple(Vec<Value>),
@@ -374,7 +378,7 @@ impl PartialEq for Value {
             (Value::Uint32(a), Value::Uint32(b)) => a == b,
             (Value::Uint64(a), Value::Uint64(b)) => a == b,
             (Value::Uint128(a), Value::Uint128(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Float64(a), Value::Float64(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
@@ -423,7 +427,8 @@ impl fmt::Debug for Value {
             Value::Uint32(n) => write!(f, "Uint32({:?})", n),
             Value::Uint64(n) => write!(f, "Uint64({:?})", n),
             Value::Uint128(n) => write!(f, "Uint128({:?})", n),
-            Value::Float(n) => write!(f, "Float({:?})", n),
+            Value::Float32(n) => write!(f, "Float32({:?})", n),
+            Value::Float64(n) => write!(f, "Float64({:?})", n),
             Value::Str(s) => write!(f, "Str({:?})", s),
             Value::Array(v) => write!(f, "Array({:?})", v),
             Value::Tuple(v) => write!(f, "Tuple({:?})", v),
@@ -479,7 +484,8 @@ impl Value {
             Value::Uint32(_) => "Uint32".into(),
             Value::Uint64(_) => "Uint64".into(),
             Value::Uint128(_) => "Uint128".into(),
-            Value::Float(_) => "Float".into(),
+            Value::Float32(_) => "Float32".into(),
+            Value::Float64(_) => "Float64".into(),
             Value::Str(_) => "String".into(),
             Value::Array(_) => "Array".into(),
             Value::Tuple(_) => "Tuple".into(),
@@ -527,7 +533,8 @@ impl fmt::Display for Value {
             Value::Uint32(n) => write!(f, "{}", n),
             Value::Uint64(n) => write!(f, "{}", n),
             Value::Uint128(n) => write!(f, "{}", n),
-            Value::Float(n) => write!(f, "{}", n),
+            Value::Float32(n) => write!(f, "{}", n),
+            Value::Float64(n) => write!(f, "{}", n),
             Value::Str(s) => write!(f, "{}", s),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -1017,9 +1024,17 @@ macro_rules! define_int_conv_builtin {
                     Value::Uint(n) => <$ty>::try_from(*n)
                         .map(Value::$variant)
                         .map_err(|_| err(format!("cannot convert Uint {} to {} (out of range)", n, $name), line)),
-                    Value::Float(f) => {
+                    Value::Float64(f) => {
                         if *f < <$ty>::MIN as f64 || *f > <$ty>::MAX as f64 {
                             Err(err(format!("cannot convert Float to {} (out of range)", $name), line))
+                        } else {
+                            Ok(Value::$variant(*f as $ty))
+                        }
+                    }
+                    Value::Float32(f) => {
+                        let fw = *f as f64;
+                        if fw < (<$ty>::MIN as f64) || fw > (<$ty>::MAX as f64) {
+                            Err(err(format!("cannot convert Float32 to {} (out of range)", $name), line))
                         } else {
                             Ok(Value::$variant(*f as $ty))
                         }
@@ -1028,6 +1043,50 @@ macro_rules! define_int_conv_builtin {
                         .map(Value::$variant)
                         .map_err(|_| err(format!("cannot convert '{}' to {}", s, $name), line)),
                     Value::Bool(b) => Ok(Value::$variant(if *b { 1 as $ty } else { 0 as $ty })),
+                    other => Err(err(format!("cannot convert {} to {}", other.type_name(), $name), line)),
+                }
+            },
+        });
+    };
+}
+
+/// Defines a global fixed-width float conversion builtin (`float32()`, `float64()`).
+/// Same role as `define_int_conv_builtin!` for the integer family, but floats have no
+/// `TryFrom`-based range check to reuse (`f32`/`f64` accept every finite input via a
+/// plain `as` narrowing, saturating on overflow — Rust's own `as f32` semantics,
+/// inherited unchanged per docs/float-width-types.md §4) — hence a separate macro
+/// rather than a generic parameter on the integer one above.
+macro_rules! define_float_conv_builtin {
+    ($e:expr, $name:literal, $variant:ident, $ty:ty) => {
+        $e.define($name, Value::NativeFn {
+            name: $name.into(),
+            func: |args, line| {
+                if args.len() != 1 {
+                    return Err(err(concat!($name, "() takes 1 argument"), line));
+                }
+                match &args[0] {
+                    // Both Float64 and Float32 are matched here — when `$variant` is
+                    // one of them, that arm alone already covers the identity case
+                    // (`*f as $ty` is a no-op cast to itself), so no separate
+                    // `Value::$variant(f) => Ok(Value::$variant(*f))` arm is needed.
+                    Value::Float64(f) => Ok(Value::$variant(*f as $ty)),
+                    Value::Float32(f) => Ok(Value::$variant(*f as $ty)),
+                    Value::Int(n)   => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint(n)  => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint8(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Int8(n)  => Ok(Value::$variant(*n as $ty)),
+                    Value::Int16(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Int32(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Int64(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Int128(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint16(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint32(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint64(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Uint128(n) => Ok(Value::$variant(*n as $ty)),
+                    Value::Bool(b)  => Ok(Value::$variant(if *b { 1.0 } else { 0.0 })),
+                    Value::Str(s) => s.trim().parse::<$ty>()
+                        .map(Value::$variant)
+                        .map_err(|_| err(format!("cannot convert '{}' to {}", s, $name), line)),
                     other => Err(err(format!("cannot convert {} to {}", other.type_name(), $name), line)),
                 }
             },
@@ -1212,7 +1271,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 Value::Uint32(n) => Ok(Value::Int(*n as i64)),
                 Value::Uint64(n) => Ok(Value::Int(*n as i64)),
                 Value::Uint128(n) => Ok(Value::Int(*n as i64)),
-                Value::Float(f) => Ok(Value::Int(*f as i64)),
+                Value::Float64(f) => Ok(Value::Int(*f as i64)),
                 Value::Str(s) => s.trim().parse::<i64>()
                     .map(Value::Int)
                     .map_err(|_| err(format!("cannot convert '{}' to Int", s), line)),
@@ -1259,7 +1318,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                     if *n < 0 { Err(err(format!("cannot convert negative Int128 {} to Uint", n), line)) }
                     else { Ok(Value::Uint(*n as u64)) }
                 }
-                Value::Float(f) => {
+                Value::Float64(f) => {
                     if *f < 0.0 { Err(err("cannot convert negative Float to Uint".to_string(), line)) }
                     else { Ok(Value::Uint(*f as u64)) }
                 }
@@ -1288,7 +1347,7 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                     if *n > 255 { Err(err(format!("cannot convert Uint {} to Uint8 (out of 0..=255 range)", n), line)) }
                     else { Ok(Value::Uint8(*n as u8)) }
                 }
-                Value::Float(f) => {
+                Value::Float64(f) => {
                     if *f < 0.0 || *f > 255.0 { Err(err("cannot convert Float to Uint8 (out of 0..=255 range)".to_string(), line)) }
                     else { Ok(Value::Uint8(*f as u8)) }
                 }
@@ -1318,27 +1377,30 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 return Err(err("float() takes 1 argument", line));
             }
             match &args[0] {
-                Value::Float(f) => Ok(Value::Float(*f)),
-                Value::Int(n)   => Ok(Value::Float(*n as f64)),
-                Value::Uint(n)  => Ok(Value::Float(*n as f64)),
-                Value::Uint8(n) => Ok(Value::Float(*n as f64)),
-                Value::Int8(n)  => Ok(Value::Float(*n as f64)),
-                Value::Int16(n) => Ok(Value::Float(*n as f64)),
-                Value::Int32(n) => Ok(Value::Float(*n as f64)),
-                Value::Int64(n) => Ok(Value::Float(*n as f64)),
-                Value::Int128(n) => Ok(Value::Float(*n as f64)),
-                Value::Uint16(n) => Ok(Value::Float(*n as f64)),
-                Value::Uint32(n) => Ok(Value::Float(*n as f64)),
-                Value::Uint64(n) => Ok(Value::Float(*n as f64)),
-                Value::Uint128(n) => Ok(Value::Float(*n as f64)),
-                Value::Bool(b)  => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                Value::Float64(f) => Ok(Value::Float64(*f)),
+                Value::Int(n)   => Ok(Value::Float64(*n as f64)),
+                Value::Uint(n)  => Ok(Value::Float64(*n as f64)),
+                Value::Uint8(n) => Ok(Value::Float64(*n as f64)),
+                Value::Int8(n)  => Ok(Value::Float64(*n as f64)),
+                Value::Int16(n) => Ok(Value::Float64(*n as f64)),
+                Value::Int32(n) => Ok(Value::Float64(*n as f64)),
+                Value::Int64(n) => Ok(Value::Float64(*n as f64)),
+                Value::Int128(n) => Ok(Value::Float64(*n as f64)),
+                Value::Uint16(n) => Ok(Value::Float64(*n as f64)),
+                Value::Uint32(n) => Ok(Value::Float64(*n as f64)),
+                Value::Uint64(n) => Ok(Value::Float64(*n as f64)),
+                Value::Uint128(n) => Ok(Value::Float64(*n as f64)),
+                Value::Bool(b)  => Ok(Value::Float64(if *b { 1.0 } else { 0.0 })),
                 Value::Str(s) => s.trim().parse::<f64>()
-                    .map(Value::Float)
+                    .map(Value::Float64)
                     .map_err(|_| err(format!("cannot convert '{}' to Float", s), line)),
                 other => Err(err(format!("cannot convert {} to Float", other.type_name()), line)),
             }
         },
     });
+
+    define_float_conv_builtin!(e, "float32", Float32, f32);
+    define_float_conv_builtin!(e, "float64", Float64, f64);
 
 }
 
@@ -1369,7 +1431,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match &args[0] {
                     Value::Array(arr) => Ok(arr.iter().min_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0 })),
@@ -1380,9 +1442,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x <= y { a } else { b }),
-                    (Value::Float(x), Value::Float(y)) => Ok(if x <= y { a } else { b }),
-                    (Value::Int(x), Value::Float(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
-                    (Value::Float(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
+                    (Value::Float64(x), Value::Float64(y)) => Ok(if x <= y { a } else { b }),
+                    (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) <= *y { a } else { b }),
+                    (Value::Float64(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
                     _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }
@@ -1395,7 +1457,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 match &args[0] {
                     Value::Array(arr) => Ok(arr.iter().max_by(|a, b| match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         _ => std::cmp::Ordering::Equal,
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0 })),
@@ -1405,9 +1467,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let b = args.get(1).cloned().unwrap_or(Value::Nil);
                 match (&a, &b) {
                     (Value::Int(x), Value::Int(y)) => Ok(if x >= y { a } else { b }),
-                    (Value::Float(x), Value::Float(y)) => Ok(if x >= y { a } else { b }),
-                    (Value::Int(x), Value::Float(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
-                    (Value::Float(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
+                    (Value::Float64(x), Value::Float64(y)) => Ok(if x >= y { a } else { b }),
+                    (Value::Int(x), Value::Float64(y)) => Ok(if (*x as f64) >= *y { a } else { b }),
+                    (Value::Float64(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0 })),
                 }
             }
@@ -1417,14 +1479,14 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "abs".into(),
         func: |args, line| match args.first() {
             Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
-            Some(Value::Float(f)) => Ok(Value::Float(f.abs())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.abs())),
             _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0 })),
         },
     });
     e.define("floor", Value::NativeFn {
         name: "floor".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Int(f.floor() as i64)),
+            Some(Value::Float64(f)) => Ok(Value::Int(f.floor() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "floor: expected number".into(), line, col: 0, len: 0 })),
         },
@@ -1432,7 +1494,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("ceil", Value::NativeFn {
         name: "ceil".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Int(f.ceil() as i64)),
+            Some(Value::Float64(f)) => Ok(Value::Int(f.ceil() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "ceil: expected number".into(), line, col: 0, len: 0 })),
         },
@@ -1440,7 +1502,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("round", Value::NativeFn {
         name: "round".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Int(f.round() as i64)),
+            Some(Value::Float64(f)) => Ok(Value::Int(f.round() as i64)),
             Some(Value::Int(n)) => Ok(Value::Int(*n)),
             _ => Err(Signal::Error(RuntimeError { message: "round: expected number".into(), line, col: 0, len: 0 })),
         },
@@ -1448,8 +1510,8 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("sqrt", Value::NativeFn {
         name: "sqrt".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.sqrt())),
-            Some(Value::Int(n)) => Ok(Value::Float((*n as f64).sqrt())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.sqrt())),
+            Some(Value::Int(n)) => Ok(Value::Float64((*n as f64).sqrt())),
             _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1472,87 +1534,87 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "pow".into(),
         func: |args, line| {
             let base = match args.first() {
-                Some(Value::Float(f)) => *f,
+                Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("pow: expected numeric base", line)),
             };
             let exp = match args.get(1) {
-                Some(Value::Float(f)) => *f,
+                Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("pow: expected numeric exponent", line)),
             };
-            Ok(Value::Float(base.powf(exp)))
+            Ok(Value::Float64(base.powf(exp)))
         },
     });
     e.define("log", Value::NativeFn {
         name: "log".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.ln())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).ln())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.ln())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).ln())),
             _ => Err(err("log: expected number", line)),
         },
     });
     e.define("log2", Value::NativeFn {
         name: "log2".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.log2())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).log2())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.log2())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log2())),
             _ => Err(err("log2: expected number", line)),
         },
     });
     e.define("log10", Value::NativeFn {
         name: "log10".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.log10())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).log10())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.log10())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).log10())),
             _ => Err(err("log10: expected number", line)),
         },
     });
     e.define("sin", Value::NativeFn {
         name: "sin".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.sin())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).sin())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.sin())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).sin())),
             _ => Err(err("sin: expected number", line)),
         },
     });
     e.define("cos", Value::NativeFn {
         name: "cos".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.cos())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).cos())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.cos())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).cos())),
             _ => Err(err("cos: expected number", line)),
         },
     });
     e.define("tan", Value::NativeFn {
         name: "tan".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.tan())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).tan())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.tan())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tan())),
             _ => Err(err("tan: expected number", line)),
         },
     });
     e.define("asin", Value::NativeFn {
         name: "asin".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.asin())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).asin())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.asin())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).asin())),
             _ => Err(err("asin: expected number", line)),
         },
     });
     e.define("acos", Value::NativeFn {
         name: "acos".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.acos())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).acos())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.acos())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).acos())),
             _ => Err(err("acos: expected number", line)),
         },
     });
     e.define("atan", Value::NativeFn {
         name: "atan".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.atan())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).atan())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.atan())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).atan())),
             _ => Err(err("atan: expected number", line)),
         },
     });
@@ -1560,31 +1622,31 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "atan2".into(),
         func: |args, line| {
             let y = match args.first() {
-                Some(Value::Float(f)) => *f,
+                Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("atan2: expected numeric y", line)),
             };
             let x = match args.get(1) {
-                Some(Value::Float(f)) => *f,
+                Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
                 _ => return Err(err("atan2: expected numeric x", line)),
             };
-            Ok(Value::Float(y.atan2(x)))
+            Ok(Value::Float64(y.atan2(x)))
         },
     });
     e.define("exp", Value::NativeFn {
         name: "exp".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.exp())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).exp())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.exp())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).exp())),
             _ => Err(err("exp: expected number", line)),
         },
     });
     e.define("tanh", Value::NativeFn {
         name: "tanh".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Float(f.tanh())),
-            Some(Value::Int(n))   => Ok(Value::Float((*n as f64).tanh())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.tanh())),
+            Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tanh())),
             _ => Err(err("tanh: expected number", line)),
         },
     });
@@ -1597,12 +1659,12 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 let mut is_float = false;
                 for v in arr.iter() {
                     match v {
-                        Value::Float(f) => { float_sum += f; is_float = true; }
+                        Value::Float64(f) => { float_sum += f; is_float = true; }
                         Value::Int(n)   => { int_sum += n; float_sum += *n as f64; }
                         _ => return Err(err("sum: array must contain numbers", line)),
                     }
                 }
-                if is_float { Ok(Value::Float(float_sum)) } else { Ok(Value::Int(int_sum)) }
+                if is_float { Ok(Value::Float64(float_sum)) } else { Ok(Value::Int(int_sum)) }
             }
             _ => Err(err("sum: expected array", line)),
         },
@@ -1610,14 +1672,14 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("bitsToFloat", Value::NativeFn {
         name: "bitsToFloat".into(),
         func: |args, line| match args.first() {
-            Some(Value::Int(n)) => Ok(Value::Float(f32::from_bits(*n as u32) as f64)),
+            Some(Value::Int(n)) => Ok(Value::Float64(f32::from_bits(*n as u32) as f64)),
             _ => Err(err("bitsToFloat: expected int", line)),
         },
     });
     e.define("floatToBits", Value::NativeFn {
         name: "floatToBits".into(),
         func: |args, line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Int((*f as f32).to_bits() as i64)),
+            Some(Value::Float64(f)) => Ok(Value::Int((*f as f32).to_bits() as i64)),
             Some(Value::Int(n))   => Ok(Value::Int((*n as f32).to_bits() as i64)),
             _ => Err(err("floatToBits: expected number", line)),
         },
@@ -1648,14 +1710,14 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "clamp".into(),
         func: |args, line| {
             match (args.first(), args.get(1), args.get(2)) {
-                (Some(Value::Float(x)), Some(Value::Float(lo)), Some(Value::Float(hi))) =>
-                    Ok(Value::Float(x.clamp(*lo, *hi))),
+                (Some(Value::Float64(x)), Some(Value::Float64(lo)), Some(Value::Float64(hi))) =>
+                    Ok(Value::Float64(x.clamp(*lo, *hi))),
                 (Some(Value::Int(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
                     Ok(Value::Int(*x.clamp(lo, hi))),
-                (Some(Value::Float(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
-                    Ok(Value::Float(x.clamp(*lo as f64, *hi as f64))),
-                (Some(Value::Int(x)), Some(Value::Float(lo)), Some(Value::Float(hi))) =>
-                    Ok(Value::Float((*x as f64).clamp(*lo, *hi))),
+                (Some(Value::Float64(x)), Some(Value::Int(lo)), Some(Value::Int(hi))) =>
+                    Ok(Value::Float64(x.clamp(*lo as f64, *hi as f64))),
+                (Some(Value::Int(x)), Some(Value::Float64(lo)), Some(Value::Float64(hi))) =>
+                    Ok(Value::Float64((*x as f64).clamp(*lo, *hi))),
                 _ => Err(err("clamp: expected (number, min, max)", line)),
             }
         },
@@ -1664,14 +1726,14 @@ fn register_string_and_math_builtins(e: &mut Env) {
         name: "sign".into(),
         func: |args, line| match args.first() {
             Some(Value::Int(n))   => Ok(Value::Int(n.signum())),
-            Some(Value::Float(f)) => Ok(Value::Float(f.signum())),
+            Some(Value::Float64(f)) => Ok(Value::Float64(f.signum())),
             _ => Err(err("sign: expected number", line)),
         },
     });
     e.define("isNaN", Value::NativeFn {
         name: "isNaN".into(),
         func: |args, _line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Bool(f.is_nan())),
+            Some(Value::Float64(f)) => Ok(Value::Bool(f.is_nan())),
             Some(Value::Int(_))   => Ok(Value::Bool(false)),
             _ => Ok(Value::Bool(false)),
         },
@@ -1679,7 +1741,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
     e.define("isInfinite", Value::NativeFn {
         name: "isInfinite".into(),
         func: |args, _line| match args.first() {
-            Some(Value::Float(f)) => Ok(Value::Bool(f.is_infinite())),
+            Some(Value::Float64(f)) => Ok(Value::Bool(f.is_infinite())),
             _                     => Ok(Value::Bool(false)),
         },
     });
@@ -1851,10 +1913,10 @@ fn register_result_and_args_builtins(e: &mut Env) {
 }
 
 fn register_misc_globals(e: &mut Env) {
-    e.define("PI",  Value::Float(std::f64::consts::PI));
-    e.define("E",   Value::Float(std::f64::consts::E));
-    e.define("INF", Value::Float(f64::INFINITY));
-    e.define("NAN", Value::Float(f64::NAN));
+    e.define("PI",  Value::Float64(std::f64::consts::PI));
+    e.define("E",   Value::Float64(std::f64::consts::E));
+    e.define("INF", Value::Float64(f64::INFINITY));
+    e.define("NAN", Value::Float64(f64::NAN));
 
     // ─── Native Rust types ────────────────────────────────────────────────────
     // These are pre-registered without any `use` statement.
@@ -1918,6 +1980,12 @@ pub struct Interpreter {
     /// Each frame maps type param name → concrete resolved Type.
     /// Frames are pushed on entry to a generic scope and popped on exit.
     pub(crate) type_param_stack: Vec<HashMap<String, Type>>,
+    /// Stack of the currently executing function/method's resolved declared return type
+    /// (one frame per `call_fn` invocation, pushed/popped around body execution). Lets
+    /// `Stmt::Return` resolve a `.Variant` return value against the right enum — see
+    /// `resolve_dot_ident_hint` — instead of eval_expr's ambiguous-scan fallback. `None`
+    /// entries are untyped (`def` with no return annotation) and never provide a hint.
+    pub(crate) return_ty_stack: Vec<Option<Type>>,
     /// True if the currently executing method was declared as `def` (mutating).
     /// False if declared as `req` (non-mutating). Used to enforce transient-field write rules.
     pub(crate) current_method_mutating: bool,
@@ -1991,7 +2059,12 @@ impl Interpreter {
         aliases.insert("uint32".into(),  Type::Uint32);
         aliases.insert("uint64".into(),  Type::Uint64);
         aliases.insert("uint128".into(), Type::Uint128);
-        aliases.insert("float".into(),  Type::Float);
+        // `float` is a pure alias of `float64` — not an independent type the way
+        // `int`/`uint` are independent of `int64`/`uint64` (docs/float-width-types.md
+        // §2). Every spelling below converges on the same two real Value variants.
+        aliases.insert("float".into(),   Type::Float64);
+        aliases.insert("float32".into(), Type::Float32);
+        aliases.insert("float64".into(), Type::Float64);
         aliases.insert("bool".into(),   Type::Bool);
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
         aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Stack));
@@ -2010,8 +2083,12 @@ impl Interpreter {
         aliases.insert("u64".into(),   Type::Uint64);
         aliases.insert("u128".into(),  Type::Uint128);
         aliases.insert("usize".into(), Type::Uint);
-        aliases.insert("f32".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
-        aliases.insert("f64".into(),   Type::Qualified(Box::new(Type::Float), OwnerQual::Stack));
+        // `f32`/`f64` are real, distinct types now (Type::Float32/Float64), not a
+        // label over one shared float — same plain (unqualified) treatment as
+        // `i8`/`u32`/etc. above, not the `Qualified(_, Stack)` wrapper this used to
+        // carry back when both spellings collapsed onto the same `Type::Float`.
+        aliases.insert("f32".into(),   Type::Float32);
+        aliases.insert("f64".into(),   Type::Float64);
         // Uppercase base-type aliases — resolve Named("String") etc. to the primitive type so
         // that explicit qualifications like `String'shared`, `Int'copy` work correctly.
         aliases.insert("String".into(), Type::Str);
@@ -2027,7 +2104,9 @@ impl Interpreter {
         aliases.insert("Uint32".into(),  Type::Uint32);
         aliases.insert("Uint64".into(),  Type::Uint64);
         aliases.insert("Uint128".into(), Type::Uint128);
-        aliases.insert("Float".into(),  Type::Float);
+        aliases.insert("Float".into(),   Type::Float64);
+        aliases.insert("Float32".into(), Type::Float32);
+        aliases.insert("Float64".into(), Type::Float64);
         aliases.insert("Bool".into(),   Type::Bool);
         let global = Env::new_global();
         Self {
@@ -2042,6 +2121,7 @@ impl Interpreter {
             kernel_context: false,
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
+            return_ty_stack: Vec::new(),
             current_method_mutating: true,  // default to mutating for top-level code
             in_init_body: false,
             type_var_store: HashMap::new(),
@@ -2080,6 +2160,7 @@ impl Interpreter {
             kernel_context: false,
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
+            return_ty_stack: Vec::new(),
             current_method_mutating: true,
             in_init_body: false,
             type_var_store: HashMap::new(),

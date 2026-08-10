@@ -239,7 +239,7 @@ fn test_use_math_namespace() {
     let src = r#"
 let _result = sqrt(4.0)
 "#;
-    assert_eq!(run_src(src), Value::Float(2.0));
+    assert_eq!(run_src(src), Value::Float64(2.0));
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn test_use_math_direct() {
     let src = r#"
 let _result = sqrt(9.0)
 "#;
-    assert_eq!(run_src(src), Value::Float(3.0));
+    assert_eq!(run_src(src), Value::Float64(3.0));
 }
 
 #[test]
@@ -333,7 +333,7 @@ fn test_selective_import_dot_form() {
     let src = r#"
 let _result = sqrt(16.0)
 "#;
-    assert_eq!(run_src(src), Value::Float(4.0));
+    assert_eq!(run_src(src), Value::Float64(4.0));
 }
 
 // ─── req / def mutability tests ──────────────────────────────────────────────
@@ -386,6 +386,135 @@ c.increment()
     assert!(msg.contains("cannot call mutating method"), "unexpected error: {}", msg);
 }
 
+// ─── mut-qualified enum variant field tests (docs/mut-type-modifier.md's
+// variant-field case, and docs/book.md's "Enum methods — req and def") ────────
+
+#[test]
+fn test_enum_mut_variant_field_def_mutates_through_match() {
+    // A variant field declared `mut Point` grants `def`-call permission on the
+    // match-bound name — and the mutation is real: it's visible when the same
+    // enum value is matched again afterward, not a disconnected copy (the
+    // interpreter shares the same Rc<RefCell<ObjectInner>>; the transpiler's
+    // enum method gets a genuine `&mut self`, see emit_top.rs's `is_enum_self`).
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+    req int getx(): self.x
+
+enum Holder:
+    Value(mut Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+                p.bump()
+
+mut h = Holder.Value(Point(x= 5))
+h.bumpit()
+let _result = match h:
+    Value(p): p.getx()
+"#;
+    assert_eq!(run_src(src), Value::Int(7));
+}
+
+#[test]
+fn test_enum_non_mut_variant_field_rejects_def_through_match() {
+    // Same shape, but the field is a plain (non-`mut`) `Point` — calling a
+    // `def` method through the match-bound name must still be rejected by
+    // both backends, exactly like a non-mut struct field one level down.
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+enum Holder:
+    Value(Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+
+mut h = Holder.Value(Point(x= 5))
+h.bumpit()
+"#;
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "expected a transpile error calling def through a non-mut variant field");
+    assert!(out.errors.iter().any(|e| e.message.contains("not declared `mut`")), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+
+    let mut interp = Interpreter::new();
+    let res = interp.exec_program(&program);
+    assert!(res.is_err(), "calling def through a non-mut variant field should error");
+    let msg = res.unwrap_err().message;
+    assert!(msg.contains("cannot call mutating method"), "unexpected error: {}", msg);
+}
+
+#[test]
+fn test_enum_with_mut_field_requires_mut_receiver_for_def() {
+    // An enum with a `mut`-qualified variant field now behaves like a struct
+    // for its OWN `def` methods too: the enum instance itself needs `mut`/`var
+    // mut` to call one, unlike an enum with no mut field at all (where `def`
+    // is always callable, docs/book.md's "Enum methods — req and def").
+    let src = r#"
+struct Point:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+enum Holder:
+    Value(mut Point p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+
+let h = Holder.Value(Point(x= 5))
+h.bumpit()
+"#;
+    let tokens = crate::lexer::lex(src).expect("lex error");
+    let program = crate::parser::parse(tokens).expect("parse error");
+
+    let out = crate::transpiler::transpile_with_config(&program, crate::transpiler::TranspileConfig::default());
+    assert!(!out.errors.is_empty(), "expected a transpile error calling def on a non-mut enum binding");
+    assert!(out.errors.iter().any(|e| e.message.contains("not declared `mut`")), "unexpected transpile errors: {:?}", out.errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_enum_without_mut_field_def_still_callable_on_let() {
+    // Control case: an enum with a variant field that is NOT `mut`-qualified
+    // keeps the historical behavior — `def` is always callable, even on a
+    // plain `let` binding, since there's genuinely nothing to mutate through
+    // `self` (docs/book.md's "Enum methods — req and def").
+    let src = r#"
+enum EColor:
+    Red
+    Green
+    Blue
+
+    def string ename():
+        match self:
+            Red: "red"
+            Green: "green"
+            Blue: "blue"
+
+let ec = EColor.Red
+let _result = ec.ename()
+"#;
+    assert_eq!(run_src(src), Value::Str("red".into()));
+}
+
 #[test]
 #[allow(clippy::approx_constant)] // 3.14159 is boring source text under test, not a PI stand-in
 fn test_req_as_property() {
@@ -401,7 +530,7 @@ let _result = c.area
 "#;
     // area = pi * 1 * 1 ≈ 3.14159
     let val = run_src(src);
-    if let Value::Float(f) = val {
+    if let Value::Float64(f) = val {
         assert!((f - 3.14159).abs() < 0.001, "expected ~3.14159, got {}", f);
     } else {
         panic!("expected Float, got {:?}", val);
@@ -470,7 +599,7 @@ struct Circle:
 let c = Circle(1.0)
 let _result = c.radius
 "#;
-    assert_eq!(run_src(src), Value::Float(1.0));
+    assert_eq!(run_src(src), Value::Float64(1.0));
 }
 
 #[test]
@@ -489,7 +618,7 @@ let c = Circle(2.0)
 let _result = c.area
 "#;
     let val = run_src(src);
-    if let Value::Float(f) = val {
+    if let Value::Float64(f) = val {
         assert!((f - 3.14159 * 4.0).abs() < 0.001, "expected ~12.566, got {}", f);
     } else {
         panic!("expected Float, got {:?}", val);

@@ -696,18 +696,37 @@ impl Transpiler {
         }
     }
 
-    /// True when `expr` is positively known to be a `[float]` array -- used to pick the
-    /// right turbofish type for `.sum()` (see emit_methods.rs). Conservatively `false`
-    /// (not "definitely an int array") for anything not confidently identifiable, since
-    /// the caller's default (`i64`) is the historically-safe choice for those cases.
-    pub(crate) fn expr_is_float_array(&self, expr: &Expr) -> bool {
-        fn is_float_ty(t: &Type) -> bool {
-            matches!(t, Type::Float) || matches!(t, Type::Named(n) if n == "float" || n == "f64" || n == "f32")
+    /// True when `expr` is positively known to be a `[float]`/`[float32]`/`[float64]`
+    /// array — used to pick the right turbofish type for `.sum()` (see emit_methods.rs),
+    /// returning which width ("f32"/"f64") so `.sum::<T>()` is correct for a `[float32]`
+    /// receiver instead of always assuming 64-bit (docs/float-width-types.md —
+    /// float32/float64 are distinct runtime types, `Sum<f32>` isn't implemented for
+    /// `f64` or vice versa). Conservatively `None` (not "definitely an int array") for
+    /// anything not confidently identifiable, since the caller's default (`i64`) is the
+    /// historically-safe choice for those cases.
+    pub(crate) fn float_array_elem_ty(&self, expr: &Expr) -> Option<&'static str> {
+        fn float_width(t: &Type) -> Option<&'static str> {
+            match t {
+                Type::Float64 => Some("f64"),
+                Type::Float32 => Some("f32"),
+                Type::Named(n) => match n.as_str() {
+                    "float" | "float64" | "f64" => Some("f64"),
+                    "float32" | "f32" => Some("f32"),
+                    _ => None,
+                },
+                _ => None,
+            }
         }
         match &expr.kind {
-            ExprKind::Var(v) => matches!(self.var_types.get(v.as_str()), Some(Type::Array(inner)) if is_float_ty(inner)),
-            ExprKind::Array(elems) => elems.first().is_some_and(|e| matches!(&e.kind, ExprKind::Float(_))),
-            _ => false,
+            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+                Some(Type::Array(inner)) => float_width(inner),
+                _ => None,
+            },
+            ExprKind::Array(elems) => elems.first().and_then(|e| match &e.kind {
+                ExprKind::Float(_) => Some("f64"),
+                _ => None,
+            }),
+            _ => None,
         }
     }
 

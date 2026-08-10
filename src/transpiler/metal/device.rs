@@ -550,18 +550,16 @@ impl DeviceEmitter {
         }
     }
 
-    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// `a.axis` — read-only shape-query property on a fixed-shape
+    /// `LabeledArray` field (dynamic-shape ones are already desugared to a
+    /// shadow field before codegen — see `desugar_labeled_array`). `a[width =
     /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
-    /// node, not a method call, so it's handled directly in `expr()`'s main
-    /// match instead of here.
-    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+    /// node, handled directly in `expr()`'s main match instead of here.
+    fn try_labeled_array_field_access(&mut self, obj: &Expr, field_name: &str) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
         let (_, axes) = field.ty.as_labeled_array()?;
-        if method != "size" { return None; }
-        let [arg] = args else { return None; };
-        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
-        labeled_array_dim_literal(axes, axis_label)
+        labeled_array_dim_literal(axes, field_name)
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────
@@ -626,8 +624,12 @@ impl DeviceEmitter {
                 resolved.unwrap_or_else(|| "/* unsupported labeled index */".to_string())
             }
             ExprKind::Field(obj, field) => {
-                let obj_s = self.expr(obj);
-                map_gpu_field(&obj_s, field)
+                if let Some(msl) = self.try_labeled_array_field_access(obj, field) {
+                    msl
+                } else {
+                    let obj_s = self.expr(obj);
+                    map_gpu_field(&obj_s, field)
+                }
             }
             ExprKind::Call(callee, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
@@ -645,9 +647,6 @@ impl DeviceEmitter {
                     }
                 }
                 if let Some(msl) = self.try_atomic_method_call(obj, method, &args_s) {
-                    return msl;
-                }
-                if let Some(msl) = self.try_labeled_array_method_call(obj, method, args) {
                     return msl;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -746,6 +745,14 @@ fn msl_unsupported_width(name: &str, fallback: &str) -> String {
     format!("{} /* ERROR: `{}` is not supported on --target metal (MSL has no 64/128-bit integers) */", fallback, name)
 }
 
+/// MSL has no native `double` (Apple GPUs don't support 64-bit float ALU ops) — same
+/// "flag it in a comment" convention as `msl_unsupported_width` above, with its own
+/// message rather than that function's integer-specific wording
+/// (docs/float-width-types.md §6).
+fn msl_unsupported_f64(fallback: &str) -> String {
+    format!("{} /* ERROR: `float64` is not supported on --target metal (MSL has no native double — use float32) */", fallback)
+}
+
 fn msl_type(ty: &Type) -> String {
     match ty {
         Type::Int              => "int64_t".into(),
@@ -761,7 +768,12 @@ fn msl_type(ty: &Type) -> String {
         Type::Uint64               => msl_unsupported_width("uint64", "uint64_t"),
         Type::Int128               => msl_unsupported_width("int128", "int64_t"),
         Type::Uint128               => msl_unsupported_width("uint128", "uint64_t"),
-        Type::Float            => "float".into(),
+        Type::Float32            => "float".into(),
+        // MSL has no native `double` — a `float64` (or plain `float`, its alias) kernel
+        // field used to be silently computed at 32-bit precision on-device with nothing
+        // telling the author (docs/float-width-types.md §6). Flagged the same way the
+        // unsupported integer widths above already are, instead of a silent narrowing lie.
+        Type::Float64            => msl_unsupported_f64("float"),
         Type::Bool             => "bool".into(),
         Type::Str              => "const char*".into(),
         Type::Nil | Type::Void => "void".into(),
@@ -769,7 +781,8 @@ fn msl_type(ty: &Type) -> String {
         Type::ArrayN(inner, n) => format!("{}[{}]", msl_type(inner), n),
         Type::LabeledArray(inner, _) => format!("{}*", msl_type(inner)),
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" | "f32" => "float".to_string(),
+            "float32" | "f32"       => "float".to_string(),
+            "float" | "float64" | "f64" => msl_unsupported_f64("float"),
             "int"                   => "int64_t".to_string(),
             "uint"                  => "uint64_t".to_string(),
             "uint8"                 => "uchar".to_string(),

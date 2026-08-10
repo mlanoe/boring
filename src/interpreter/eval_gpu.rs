@@ -234,7 +234,8 @@ pub(crate) enum ThreadValue {
     Uint32(u32),
     Uint64(u64),
     Uint128(u128),
-    Float(f64),
+    Float32(f32),
+    Float64(f64),
     Str(String),
     Array(Vec<ThreadValue>),
     Object { type_name: String, fields: Vec<(String, ThreadValue)> },
@@ -260,7 +261,7 @@ impl PartialEq for ThreadValue {
             (ThreadValue::Uint32(a), ThreadValue::Uint32(b)) => a == b,
             (ThreadValue::Uint64(a), ThreadValue::Uint64(b)) => a == b,
             (ThreadValue::Uint128(a), ThreadValue::Uint128(b)) => a == b,
-            (ThreadValue::Float(a), ThreadValue::Float(b)) => a == b,
+            (ThreadValue::Float64(a), ThreadValue::Float64(b)) => a == b,
             (ThreadValue::Str(a),   ThreadValue::Str(b))   => a == b,
             (ThreadValue::Array(a), ThreadValue::Array(b)) => a == b,
             (ThreadValue::Object { type_name: tn1, fields: f1 },
@@ -292,7 +293,8 @@ pub(crate) fn to_thread_value(v: &Value) -> Option<ThreadValue> {
         Value::Uint32(n)          => Some(ThreadValue::Uint32(*n)),
         Value::Uint64(n)          => Some(ThreadValue::Uint64(*n)),
         Value::Uint128(n)         => Some(ThreadValue::Uint128(*n)),
-        Value::Float(f)           => Some(ThreadValue::Float(*f)),
+        Value::Float32(f)           => Some(ThreadValue::Float32(*f)),
+        Value::Float64(f)           => Some(ThreadValue::Float64(*f)),
         Value::Str(s)             => Some(ThreadValue::Str(s.clone())),
         Value::Fn { decl, .. }    => Some(ThreadValue::Fn(Box::new(decl.clone()))),
         Value::Array(arr)         => {
@@ -335,7 +337,8 @@ pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
         ThreadValue::Uint32(n)        => Value::Uint32(n),
         ThreadValue::Uint64(n)        => Value::Uint64(n),
         ThreadValue::Uint128(n)       => Value::Uint128(n),
-        ThreadValue::Float(f)         => Value::Float(f),
+        ThreadValue::Float32(f)         => Value::Float32(f),
+        ThreadValue::Float64(f)         => Value::Float64(f),
         ThreadValue::Str(s)           => Value::Str(s),
         ThreadValue::Fn(decl)         => Value::Fn { decl: *decl, captured: Rc::clone(captured) },
         ThreadValue::Array(arr)       => Value::Array(
@@ -1174,9 +1177,9 @@ impl Interpreter {
                 } else if let Some((elem, _)) = field_decl.ty.as_labeled_array() {
                     // A fixed-shape LabeledArray field is represented the same
                     // as a flat ArrayN of the same total length — `LabeledIndex`/
-                    // `.size(.axis)` have already been lowered to a plain
-                    // `Index` into this same flat array (see
-                    // `lower_labeled_array_methods`), so no separate shape
+                    // an axis-property read (`a.width`) have already been
+                    // lowered to a plain `Index`/literal into this same flat
+                    // array (see `lower_labeled_array_methods`), so no separate shape
                     // tracking is needed at runtime. Only when every axis size
                     // is a literal int — a LabeledArray axis may be an
                     // arbitrary const-generic expression (`width = W`), which
@@ -1240,7 +1243,7 @@ impl Interpreter {
 
 // ─── Labeled multi-dim array lowering (fixed-shape kernel fields only) ─────
 //
-// Lowers `.at`-equivalent `LabeledIndex`/`.size(.axis)` calls on
+// Lowers `.at`-equivalent `LabeledIndex`/axis-property (`a.width`) reads on
 // `Type::LabeledArray` kernel fields (docs/array-multidim-types.md). By the
 // time this runs, any *dynamic*-shape LabeledArray field has already been
 // rewritten away by `desugar_labeled_array` (a whole-program pre-pass, run
@@ -1417,19 +1420,6 @@ fn lower_labeled_expr(e: &Expr, fields: &LabeledArrayFieldAxes) -> Expr {
             )
         }
         ExprKind::MethodCall(obj, method, args) => {
-            if method == "size" {
-                if let ExprKind::Var(name) = &obj.kind {
-                    if let Some(axes) = fields.get(name) {
-                        if let [arg] = args.as_slice() {
-                            if let ExprKind::DotIdent(axis) = &arg.value.kind {
-                                if let Some(resolved) = resolve_labeled_size_call(axes, axis) {
-                                    return resolved;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             ExprKind::MethodCall(Box::new(lower_labeled_expr(obj, fields)), method.clone(),
                 args.iter().map(|a| lower_labeled_arg(a, fields)).collect())
         }
@@ -1437,7 +1427,20 @@ fn lower_labeled_expr(e: &Expr, fields: &LabeledArrayFieldAxes) -> Expr {
         ExprKind::UnaryOp(op, v) => ExprKind::UnaryOp(op.clone(), Box::new(lower_labeled_expr(v, fields))),
         ExprKind::Assign(l, r) => ExprKind::Assign(Box::new(lower_labeled_expr(l, fields)), Box::new(lower_labeled_expr(r, fields))),
         ExprKind::QuestionAssign(l, r) => ExprKind::QuestionAssign(Box::new(lower_labeled_expr(l, fields)), Box::new(lower_labeled_expr(r, fields))),
-        ExprKind::Field(o, name) => ExprKind::Field(Box::new(lower_labeled_expr(o, fields)), name.clone()),
+        // `a.width`/`a.height` — read-only shape-query property for a
+        // fixed-shape kernel field (dynamic-shape ones are already desugared
+        // to a shadow `Var` before this pass runs — see this section's top
+        // comment).
+        ExprKind::Field(o, name) => {
+            if let ExprKind::Var(var_name) = &o.kind {
+                if let Some(axes) = fields.get(var_name) {
+                    if let Some(resolved) = resolve_labeled_axis_property(axes, name) {
+                        return resolved;
+                    }
+                }
+            }
+            ExprKind::Field(Box::new(lower_labeled_expr(o, fields)), name.clone())
+        }
         ExprKind::Index(a, i) => ExprKind::Index(Box::new(lower_labeled_expr(a, fields)), Box::new(lower_labeled_expr(i, fields))),
         ExprKind::Call(callee, args) => ExprKind::Call(Box::new(lower_labeled_expr(callee, fields)), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
         ExprKind::GenericCall(callee, tys, args) => ExprKind::GenericCall(Box::new(lower_labeled_expr(callee, fields)), tys.clone(), args.iter().map(|a| lower_labeled_arg(a, fields)).collect()),
@@ -1503,10 +1506,10 @@ fn labeled_index_offset(args: &[Arg], axes: &[crate::ast::LabeledAxis], fields: 
     flat
 }
 
-/// `.size(.axis)`'s resolved value for a fixed-shape field — its axis's
+/// `a.axis`'s resolved value for a fixed-shape field — its axis's
 /// literal/const-generic-expression size, cloned as-is. `None` if
 /// `axis_label` doesn't match any of `axes`.
-fn resolve_labeled_size_call(axes: &[crate::ast::LabeledAxis], axis_label: &str) -> Option<Expr> {
+fn resolve_labeled_axis_property(axes: &[crate::ast::LabeledAxis], axis_label: &str) -> Option<Expr> {
     use crate::ast::ConstExpr;
     let axis = axes.iter().find(|a| a.label == axis_label)?;
     let ConstExpr(boxed) = axis.size.as_ref()?;
@@ -1519,7 +1522,7 @@ fn resolve_labeled_size_call(axes: &[crate::ast::LabeledAxis], axis_label: &str)
 fn zero_value(ty: &crate::ast::Type) -> Value {
     use crate::ast::Type;
     match ty {
-        Type::Float => Value::Float(0.0),
+        Type::Float64 => Value::Float64(0.0),
         Type::Bool => Value::Bool(false),
         Type::Uint => Value::Uint(0),
         Type::Uint8 => Value::Uint8(0),

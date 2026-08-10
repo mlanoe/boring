@@ -143,7 +143,7 @@ impl Transpiler {
             && !val.starts_with("Arc::")
             && !val.starts_with("Rc::")
             && !val.starts_with("{ let __g")
-            && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool
+            && !matches!(s.ty.as_ref(), Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
         {
@@ -501,11 +501,11 @@ impl Transpiler {
             if let ExprKind::Cast(src_expr, dst_ty) = &s_value.kind {
                 let src_is_str = matches!(&src_expr.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
                     || matches!(&src_expr.kind, ExprKind::Var(v) if self.string_vars.contains(v.as_str()));
-                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float
+                let dst_is_numeric = matches!(dst_ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
                         | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                         | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
                     || matches!(dst_ty, Type::Named(n) if matches!(n.as_str(),
-                        "int" | "uint" | "uint8" | "float"
+                        "int" | "uint" | "uint8" | "float" | "float32" | "float64"
                         | "int8" | "int16" | "int32" | "int64" | "int128"
                         | "uint16" | "uint32" | "uint64" | "uint128"
                         | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -1067,9 +1067,11 @@ impl Transpiler {
             if let ExprKind::Cast(src, cast_ty) = &value.kind {
                 let src_s = self.emit_expr(src);
                 let cast_dst = self.emit_type(cast_ty);
-                let parse_ty = if matches!(cast_ty, Type::Float) || matches!(cast_ty, Type::Named(n) if n == "float") {
+                let parse_ty = if matches!(cast_ty, Type::Float64) || matches!(cast_ty, Type::Named(n) if n == "float" || n == "float64" || n == "f64") {
                     Some("f64".to_string())
-                } else if crate::transpiler::helpers::is_specific_numeric_type(&cast_dst) && cast_dst != "f32" && cast_dst != "f64" {
+                } else if matches!(cast_ty, Type::Float32) || matches!(cast_ty, Type::Named(n) if n == "float32" || n == "f32") {
+                    Some("f32".to_string())
+                } else if crate::transpiler::helpers::is_specific_numeric_type(&cast_dst) {
                     Some(cast_dst)
                 } else {
                     None
@@ -1327,7 +1329,7 @@ impl Transpiler {
         let is_nil = matches!(value.kind, ExprKind::Nil);
         // A Cast to a numeric type (or directly to Optional) already returns Option<T>
         let is_option_cast = matches!(&value.kind, ExprKind::Cast(_, ty)
-            if matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float
+            if matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
                 | Type::Named(_) | Type::Optional(_)));
@@ -1921,7 +1923,7 @@ impl Transpiler {
         for (i, b) in s.bindings.iter().enumerate() {
             if b.name == "_" { continue; }
             if needs_materialize[i] {
-                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float)));
+                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float64)));
                 let inner_ty = match &elem_ty {
                     Type::Qualified(inner, _) => super::emit_kernel::array_inner_type(inner),
                     other => super::emit_kernel::array_inner_type(other),
@@ -1935,7 +1937,7 @@ impl Transpiler {
                     name = b.name
                 ));
             } else if flags.get(i).copied().unwrap_or(false) {
-                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float)));
+                let elem_ty = elem_tys.get(i).cloned().unwrap_or_else(|| Type::Array(Box::new(Type::Float64)));
                 self.resident_call_vars.insert(b.name.clone(), elem_ty);
             }
         }

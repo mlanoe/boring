@@ -62,9 +62,18 @@ enum Value:
     Uint32(uint32 n)
     Uint64(uint64 n)
     Uint128(uint128 n)
-    Float(float f)
+    Float32(float32 f)
+    Float64(float64 f)
     Str(string s)
     Array([Value] elems)
+    # Labeled multi-dim array (docs/array-multidim-types.md) — a flat,
+    # row-major buffer (axis 0 = fastest-varying) plus its own concrete shape.
+    # Unlike the Rust compiler (whose checker/desugar pass erase this shape
+    # entirely before evaluation ever runs), this interpreter has no static
+    # pass, so the shape has to travel with the runtime value itself — dynamic
+    # and fixed axes are indistinguishable here, both are just a concrete int
+    # size by construction time.
+    LabeledArray([Value] elems, [(string, int)] axes)
     Tuple([Value] elems)
     Dict([(Value, Value)] pairs)
     Set([Value] elems)
@@ -99,9 +108,11 @@ enum Value:
             Value.Uint32(_): "uint32"
             Value.Uint64(_): "uint64"
             Value.Uint128(_): "uint128"
-            Value.Float(_): "float"
+            Value.Float32(_): "float32"
+            Value.Float64(_): "float64"
             Value.Str(_): "string"
             Value.Array(_): "array"
+            Value.LabeledArray(_, _): "array"
             Value.Tuple(_): "tuple"
             Value.Dict(_): "dict"
             Value.Set(_): "set"
@@ -132,7 +143,8 @@ bool is_copy_value(Value v):
         Value.Uint32(_): true
         Value.Uint64(_): true
         Value.Uint128(_): true
-        Value.Float(_): true
+        Value.Float32(_): true
+        Value.Float64(_): true
         Value.Nil: true
         Value.Void: true
         _: false

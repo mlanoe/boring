@@ -41,7 +41,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         ExprKind.Int(n):
             Value.Int(n)
         ExprKind.Float(f):
-            Value.Float(f)
+            Value.Float64(f)
         ExprKind.Str(s):
             Value.Str(s)
         ExprKind.Bool(b):
@@ -167,8 +167,10 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     match val:
                         Value.Int(n):
                             Value.Int(0 - n)
-                        Value.Float(f):
-                            Value.Float(0.0 - f)
+                        Value.Float64(f):
+                            Value.Float64(0.0 - f)
+                        Value.Float32(f):
+                            Value.Float32(0.0 - f)
                         Value.Object(neg_inner):
                             let neg_method_opt = interp.find_method(neg_inner.type_name, "neg")
                             if let _ = neg_method_opt:
@@ -320,6 +322,21 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                     let idx = eval_expr(interp, idx_expr)
                     get_index(interp, obj, idx)
 
+        # Labeled multi-dim array indexing: a[width = w, height = h]
+        # (docs/array-multidim-types.md). Order-free at the use site — labels
+        # are matched by name against the value's own axes, not by argument
+        # position.
+        ExprKind.LabeledIndex(obj_expr, args):
+            let obj = eval_expr(interp, obj_expr)
+            match obj:
+                Value.LabeledArray(elems, axes):
+                    let offset = labeled_flat_offset(interp, args, axes)
+                    if offset < 0 or offset >= elems.length:
+                        throw "labeled array index out of bounds (length {elems.length})"
+                    elems[offset]
+                _:
+                    throw "labeled index requires a labeled array, got {obj.type_name()}"
+
         # Array literal
         ExprKind.Array(elems):
             var vals = []
@@ -359,6 +376,67 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 env_define(interp, var_name, item, false)
                 result.push(eval_expr(interp, comp_expr))
             Value.Array(result)
+
+        # Labeled multi-dim array comprehension (docs/array-multidim-types.md)
+        # — both the chained-for form (`for w in ..W for h in ..H`) and the
+        # shape-only fill shorthand (`for width = w, height = h`) parse to
+        # this same node; clauses[0] is axis 0 (fastest-varying, matching
+        # row-major storage).
+        ExprKind.LabeledArrayComp(comp_expr, clauses):
+            var sizes = []
+            for c in clauses:
+                let cv = eval_expr(interp, c.1)
+                match cv:
+                    Value.Int(n): sizes.push(n)
+                    _: throw "labeled array comprehension count for '{c.0}' must be int, got {cv.type_name()}"
+            var total = 1
+            var si = 0
+            while si < sizes.length:
+                total = total * sizes[si]
+                si = si + 1
+            var elems = []
+            var flat = 0
+            while flat < total:
+                # Decompose the flat index back into per-axis indices —
+                # axis 0 fastest-varying — and bind each as the clause's own
+                # loop variable before evaluating one element.
+                var rem = flat
+                var ci = 0
+                while ci < clauses.length:
+                    let ax_size = sizes[ci]
+                    let ax_idx = rem % ax_size
+                    rem = rem / ax_size
+                    env_define(interp, clauses[ci].0, Value.Int(ax_idx), false)
+                    ci = ci + 1
+                elems.push(eval_expr(interp, comp_expr))
+                flat = flat + 1
+            var axes = []
+            var ai = 0
+            while ai < clauses.length:
+                axes.push((clauses[ai].0, sizes[ai]))
+                ai = ai + 1
+            Value.LabeledArray(elems, axes)
+
+        # Cross-label relabeling: `a as [line = width, column = height]`
+        # (docs/array-multidim-types.md, "Cross-label compatibility"). Shape
+        # is threaded positionally (matched against the SOURCE label, kept in
+        # the mapping's own target-label order) — never a copy, same buffer.
+        ExprKind.RelabelCast(inner_expr, pairs):
+            let inner = eval_expr(interp, inner_expr)
+            match inner:
+                Value.LabeledArray(elems, axes):
+                    var new_axes = []
+                    for pair in pairs:
+                        var found = false
+                        for ax in axes:
+                            if ax.0 == pair.1:
+                                new_axes.push((pair.0, ax.1))
+                                found = true
+                        if not found:
+                            throw "relabel cast: source label '{pair.1}' not found on array"
+                    Value.LabeledArray(elems, new_axes)
+                _:
+                    throw "relabel cast (`as [...]`) requires a labeled array, got {inner.type_name()}"
 
         # Tuple literal
         ExprKind.Tuple(elems):
@@ -603,19 +681,78 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         _:
             throw "unhandled expression kind"
 
-# DotIdent: .Variant — search all known enums for a matching variant
+# DotIdent: .Variant — search all known enums for a matching variant. Ambiguous when more
+# than one enum defines the same variant name — mirrors the Rust interpreter's ambiguous-
+# scan error (src/interpreter/eval_expr.rs) instead of silently returning whichever enum
+# happens to be registered first, which could resolve to the wrong enum with no warning.
 def Value eval_dot_ident(mut Interpreter interp, string variant_name):
+    var found = Value.Nil
+    var has_found = false
+    var ambiguous = false
     for ename, decl in interp.enum_decls:
         for variant in decl.variants:
             if variant.name == variant_name:
-                return Value.EnumVariant(ename, variant_name, [])
+                if has_found:
+                    ambiguous = true
+                found = Value.EnumVariant(ename, variant_name, [])
+                has_found = true
+    if ambiguous:
+        throw "ambiguous dot-prefix '.{variant_name}': multiple enums define this variant; use EnumName.{variant_name} instead"
+    if has_found:
+        return found
     throw "unknown dot-prefix variant '.{variant_name}'"
+
+# Resolve `.Variant` against a known expected type — a function/method parameter's
+# declared type, or the enclosing function's declared return type (see
+# Interpreter.current_return_ty) — instead of eval_dot_ident's ambiguous-scan default.
+# Returns nil when `hint_ty` doesn't name a known enum with this variant; callers fall
+# back to eval_dot_ident in that case, which still resolves the unambiguous case and
+# throws on a genuine unresolved collision. Mirrors resolve_dot_ident_hint
+# (src/interpreter/exec.rs).
+def Value? eval_dot_ident_hint(mut Interpreter interp, string variant_name, Type hint_ty):
+    let base_opt = match hint_ty:
+        Type.Named(n): some(n)
+        Type.Qualified(inner, _):
+            match inner:
+                Type.Named(n2): some(n2)
+                _: nil
+        _: nil
+    if let base = base_opt:
+        let decl_opt = interp.get_enum_decl(base)
+        if let decl = decl_opt:
+            for variant in decl.variants:
+                if variant.name == variant_name:
+                    return some(Value.EnumVariant(base, variant_name, []))
+    nil
 
 # Evaluate a list of call arguments
 def [Value] eval_args(mut Interpreter interp, [Arg] args):
+    eval_args_with_hints(interp, args, [])
+
+# Same as `eval_args`, but resolves a `.Variant` argument against a per-position expected
+# type (matched positionally, via eval_dot_ident_hint) instead of falling straight to
+# eval_expr's ambiguous-scan default. `hints` shorter than `args` (or empty, as eval_args
+# passes) just means later/all args get no hint and fall back to the plain path — mirrors
+# eval_args_with_hints (src/interpreter/eval_expr.rs).
+def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hints):
     var vals = []
-    for arg in args:
-        let v = eval_expr(interp, arg.value)
+    var i = 0
+    while i < args.length:
+        let arg = args[i]
+        var v = Value.Nil
+        var hinted = false
+        if i < hints.length:
+            let hint_opt = hints[i]
+            if let hint = hint_opt:
+                match arg.value.kind:
+                    ExprKind.DotIdent(variant_name):
+                        let resolved = eval_dot_ident_hint(interp, variant_name, hint)
+                        if let rv = resolved:
+                            v = rv
+                            hinted = true
+                    _: nil
+        if not hinted:
+            v = eval_expr(interp, arg.value)
         if arg.spread:
             # Spread: expand struct fields as labeled args
             match v:
@@ -629,6 +766,7 @@ def [Value] eval_args(mut Interpreter interp, [Arg] args):
                 vals.push(Value.Labeled(label, v))
             else:
                 vals.push(v)
+        i += 1
     vals
 
 # Binary operation dispatch
@@ -664,8 +802,11 @@ def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
                 _:
                     throw "left side of 'or' must be bool"
         _:
-            let l = eval_expr(interp, lhs)
-            let r = eval_expr(interp, rhs)
+            var l = eval_expr(interp, lhs)
+            var r = eval_expr(interp, rhs)
+            let coerced = coerce_float_literal_pair(l, r, lhs, rhs)
+            l = coerced.0
+            r = coerced.1
             # Operator overloading: dispatch to struct methods
             var string? ov_method = nil
             if op == BinOp.Add: ov_method = "add"
@@ -844,7 +985,12 @@ NumKind? num_kind_from_name(string name):
 Value? cast_numeric_generic(Value val, string type_name):
     guard let tk = num_kind_from_name(type_name) else: return nil
     match val:
-        Value.Float(f):
+        Value.Float64(f):
+            if not num_kind_signed(tk) and f < 0.0:
+                i128_to_kind(tk, 0)
+            else:
+                i128_to_kind(tk, f as int128)
+        Value.Float32(f):
             if not num_kind_signed(tk) and f < 0.0:
                 i128_to_kind(tk, 0)
             else:
@@ -907,14 +1053,31 @@ int128? value_as_i128(Value v):
         Value.Uint128(n): n as int128
         _: nil
 
-float? value_as_float_numeric(Value v):
+float64? value_as_float_numeric(Value v):
     match v:
-        Value.Float(f): f
+        Value.Float64(f): f
         _:
             if let iv = value_as_i128(v):
-                iv as float
+                iv as float64
             else:
                 nil
+
+float32? value_as_f32_numeric(Value v):
+    match v:
+        Value.Float32(f): f
+        _:
+            if let iv = value_as_i128(v):
+                iv as float32
+            else:
+                nil
+
+# Like `value_as_float_numeric`, but also accepts Float32 (widened to
+# float64) — used only by comparison/equality, which are deliberately more
+# permissive than arithmetic about mixing the two float widths.
+float64? value_as_float64_widened(Value v):
+    match v:
+        Value.Float32(f): f as float64
+        _: value_as_float_numeric(v)
 
 # Narrow an int128 staging value back into `k`'s native Value (truncating,
 # matching the wrapping semantics the old per-pair arms computed by hand).
@@ -973,25 +1136,103 @@ Value? apply_binop_numeric(BinOp op, Value l, Value r):
             i128_to_kind(result_kind, lv % rv)
         _: nil
 
-# Add/Sub/Mul/Div/Rem where at least one operand is Float and the other is
-# Float or any numeric int-kind.
+# ─── float32 / float64 literal mixing ────────────────────────────────────────
+#
+# Mirrors the Rust interpreter's `coerce_float_literal_pair` / `eval_expr.rs`
+# exactly (docs/float-width-types.md §3 and §8): `float` has no independent
+# flexible kind of its own the way `int`/`uint` do, so a bare untyped literal
+# is the only thing that mixes freely with either float32 or float64 — two
+# already-resolved values of the two widths must not mix implicitly. Since a
+# literal and a resolved value are otherwise indistinguishable once evaluated
+# to a `Value`, this looks at the *source expression* before dispatch.
+
+bool is_untyped_numeric_literal(Expr e):
+    match e.kind:
+        ExprKind.Float(_): true
+        ExprKind.Int(_): true
+        ExprKind.UnaryOp(op, inner):
+            if op == UnaryOp.Neg:
+                is_untyped_numeric_literal(inner)
+            else:
+                false
+        _: false
+
+(Value, Value) coerce_float_literal_pair(Value l, Value r, Expr lhs, Expr rhs):
+    match l:
+        Value.Float32(_):
+            match r:
+                Value.Float64(f):
+                    if is_untyped_numeric_literal(rhs):
+                        return (l, Value.Float32(f as float32))
+                    else:
+                        return (l, r)
+                _: nil
+        Value.Float64(f):
+            match r:
+                Value.Float32(_):
+                    if is_untyped_numeric_literal(lhs):
+                        return (Value.Float32(f as float32), r)
+                    else:
+                        return (l, r)
+                _: nil
+        _: nil
+    (l, r)
+
+# Add/Sub/Mul/Div/Rem between two float64 values, or a float64 and any
+# numeric int-kind (the bare int/uint kind mixes freely, same precedent as
+# the int-kind model above). float32 has its own sibling below — the two
+# widths never mix here (docs/float-width-types.md §3): `apply_binop_f32`
+# runs first (see `apply_binop`) and only falls through to this function when
+# neither operand is a `Value.Float32`, so a genuine float32/float64 mismatch
+# falls all the way through both to the caller's "cannot <op> X and Y" error.
 Value? apply_binop_float_mixed(BinOp op, Value l, Value r):
     let l_is_float = match l:
-        Value.Float(_): true
+        Value.Float64(_): true
         _: false
     let r_is_float = match r:
-        Value.Float(_): true
+        Value.Float64(_): true
         _: false
     if not (l_is_float or r_is_float):
         return nil
     guard let lf = value_as_float_numeric(l) else: return nil
     guard let rf = value_as_float_numeric(r) else: return nil
     match op:
-        BinOp.Add: Value.Float(lf + rf)
-        BinOp.Sub: Value.Float(lf - rf)
-        BinOp.Mul: Value.Float(lf * rf)
-        BinOp.Div: Value.Float(lf / rf)
-        BinOp.Rem: Value.Float(lf % rf)
+        BinOp.Add: Value.Float64(lf + rf)
+        BinOp.Sub: Value.Float64(lf - rf)
+        BinOp.Mul: Value.Float64(lf * rf)
+        BinOp.Div: Value.Float64(lf / rf)
+        BinOp.Rem: Value.Float64(lf % rf)
+        _: nil
+
+# float32 sibling of `apply_binop_float_mixed` — same shape, f32 precision
+# throughout. Bare `int`/`uint` values mix in freely here too.
+Value? apply_binop_f32_mixed(BinOp op, Value l, Value r):
+    let l_is_f32 = match l:
+        Value.Float32(_): true
+        _: false
+    let r_is_f32 = match r:
+        Value.Float32(_): true
+        _: false
+    if not (l_is_f32 or r_is_f32):
+        return nil
+    # Reject a genuine float64 on the other side outright — no implicit
+    # widening either direction (the literal-coercion pass in `eval_binop`
+    # is what makes a *literal* on the other side work; a real float64 value
+    # reaching here means the mix was never resolved and should error).
+    match l:
+        Value.Float64(_): return nil
+        _: nil
+    match r:
+        Value.Float64(_): return nil
+        _: nil
+    guard let lf = value_as_f32_numeric(l) else: return nil
+    guard let rf = value_as_f32_numeric(r) else: return nil
+    match op:
+        BinOp.Add: Value.Float32(lf + rf)
+        BinOp.Sub: Value.Float32(lf - rf)
+        BinOp.Mul: Value.Float32(lf * rf)
+        BinOp.Div: Value.Float32(lf / rf)
+        BinOp.Rem: Value.Float32(lf % rf)
         _: nil
 
 # BitAnd/BitOr/BitXor — same-kind only (matches the existing, stricter policy:
@@ -1034,6 +1275,8 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 result
             elif let result2 = apply_binop_float_mixed(op, l, r):
                 result2
+            elif let result3 = apply_binop_f32_mixed(op, l, r):
+                result3
             else:
                 match l:
                     Value.Str(a):
@@ -1058,6 +1301,8 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 result
             elif let result2 = apply_binop_float_mixed(op, l, r):
                 result2
+            elif let result3 = apply_binop_f32_mixed(op, l, r):
+                result3
             else:
                 throw "cannot subtract {r.type_name()} from {l.type_name()}"
         BinOp.Mul:
@@ -1065,6 +1310,8 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 result
             elif let result2 = apply_binop_float_mixed(op, l, r):
                 result2
+            elif let result3 = apply_binop_f32_mixed(op, l, r):
+                result3
             else:
                 throw "cannot multiply {l.type_name()} and {r.type_name()}"
         BinOp.Div:
@@ -1072,6 +1319,8 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 result
             elif let result2 = apply_binop_float_mixed(op, l, r):
                 result2
+            elif let result3 = apply_binop_f32_mixed(op, l, r):
+                result3
             else:
                 throw "cannot divide {l.type_name()} by {r.type_name()}"
         BinOp.Rem:
@@ -1079,6 +1328,8 @@ def Value apply_binop(BinOp op, Value l, Value r):
                 result
             elif let result2 = apply_binop_float_mixed(op, l, r):
                 result2
+            elif let result3 = apply_binop_f32_mixed(op, l, r):
+                result3
             else:
                 throw "cannot remainder {l.type_name()} by {r.type_name()}"
         BinOp.Eq:
@@ -1197,15 +1448,22 @@ def Value apply_binop(BinOp op, Value l, Value r):
 
 # Compare two values: returns negative/zero/positive
 req int compare_values(Value l, Value r):
+    # float32/float64 compare freely against each other and against any int
+    # kind (widened to float64) — deliberately more permissive than
+    # arithmetic's strict float32/float64 mixing rule, mirroring the existing
+    # precedent for comparing two distinct fixed-width int kinds below
+    # (docs/float-width-types.md §3).
     let l_is_float = match l:
-        Value.Float(_): true
+        Value.Float64(_): true
+        Value.Float32(_): true
         _: false
     let r_is_float = match r:
-        Value.Float(_): true
+        Value.Float64(_): true
+        Value.Float32(_): true
         _: false
     if l_is_float or r_is_float:
-        guard let lf = value_as_float_numeric(l) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
-        guard let rf = value_as_float_numeric(r) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+        guard let lf = value_as_float64_widened(l) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
+        guard let rf = value_as_float64_widened(r) else: throw "cannot compare {l.type_name()} and {r.type_name()}"
         if lf < rf: -1
         elif lf > rf: 1
         else: 0
@@ -1230,6 +1488,35 @@ req int compare_values(Value l, Value r):
                 else: 0
 
 # Field access on a value
+# Row-major flat offset for a `LabeledIndex`'s labeled arguments into
+# `axes` (axis 0 fastest-varying) — throws if a label is missing or its
+# index value isn't an Int (no static checker here to catch it earlier).
+def int labeled_flat_offset(mut Interpreter interp, [Arg] args, [(string, int)] axes):
+    var offset = 0
+    var stride = 1
+    var i = 0
+    while i < axes.length:
+        let axis_label = axes[i].0
+        let axis_size = axes[i].1
+        var found = false
+        var idx_val = 0
+        for a in args:
+            if let al = a.label:
+                if al == axis_label:
+                    let v = eval_expr(interp, a.value)
+                    match v:
+                        Value.Int(n):
+                            idx_val = n
+                            found = true
+                        _:
+                            throw "labeled array index for '{axis_label}' must be int, got {v.type_name()}"
+        if not found:
+            throw "missing label '{axis_label}' in labeled array index"
+        offset = offset + idx_val * stride
+        stride = stride * axis_size
+        i = i + 1
+    offset
+
 def Value get_tuple_field([Value] elems, string field_name):
     if field_name == "length":
         return Value.Int(elems.length)
@@ -1303,6 +1590,23 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
                 Value.Int(items.length)
             else:
                 throw "no field '{field_name}' on array"
+        Value.LabeledArray(items, axes):
+            if field_name == "length":
+                Value.Int(items.length)
+            else:
+                # a.width / a.height — read-only shape-query property, one
+                # per declared axis label (docs/array-multidim-types.md,
+                # "Shape queries").
+                var found = false
+                var found_size = 0
+                for ax in axes:
+                    if ax.0 == field_name:
+                        found_size = ax.1
+                        found = true
+                if found:
+                    Value.Int(found_size)
+                else:
+                    throw "no field '{field_name}' on labeled array"
         Value.Set(items):
             if field_name == "length":
                 Value.Int(items.length)
@@ -1331,6 +1635,11 @@ def Value get_index(mut Interpreter interp, Value obj, Value idx):
                     items[i]
                 _:
                     throw "array index must be Int, got {idx.type_name()}"
+        Value.LabeledArray(_, _):
+            # Labels are mandatory for a labeled array — no positional
+            # fallback (docs/array-multidim-types.md, "Indexing"). Reaching
+            # here means a bare `a[i]` was used instead of `a[label = i, ...]`.
+            throw "labeled array requires labeled indexing (a[width = w, ...]), not a bare index — use .flatten() first for positional access"
         Value.Dict(entries):
             for entry in entries:
                 if entry.0 == idx:
@@ -1417,8 +1726,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method, [Value]
             call_uint64_method(n, method, args)
         Value.Uint128(n):
             call_uint128_method(n, method, args)
-        Value.Float(f):
-            call_float_method(f, method, args)
+        Value.Float64(f):
+            call_float64_method(f, method, args)
+        Value.Float32(f):
+            call_float32_method(f, method, args)
         Value.Tuple(elems):
             call_tuple_method(interp, elems, method, args)
         _:
@@ -1610,7 +1921,7 @@ def Value call_string_method(string s, string method, [Value] args):
         "parse_float":
             let f = s.parse_float()
             if let v = f:
-                Value.Float(v)
+                Value.Float64(v)
             else:
                 Value.Nil
         _:
@@ -1705,7 +2016,7 @@ def Value call_int_method(int n, string method, [Value] args):
         "to_string":
             Value.Str("{n}")
         "as_float":
-            Value.Float(n as float)
+            Value.Float64(n as float64)
         _:
             throw "no method '{method}' on Int"
 
@@ -1717,7 +2028,7 @@ def Value call_uint_method(uint n, string method, [Value] args):
         "to_string":
             Value.Str("{n}")
         "as_float":
-            Value.Float(n as float)
+            Value.Float64(n as float64)
         "as_int":
             Value.Int(n as int)
         _:
@@ -1731,7 +2042,7 @@ def Value call_uint8_method(uint8 n, string method, [Value] args):
         "to_string":
             Value.Str("{n}")
         "as_float":
-            Value.Float(n as float)
+            Value.Float64(n as float64)
         "as_int":
             Value.Int(n as int)
         "as_uint":
@@ -1747,7 +2058,8 @@ def Value call_int8_method(int8 n, string method, [Value] args):
     match method:
         "abs": if n < 0: Value.Int8(0 - n) else: Value.Int8(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Int8"
 
@@ -1755,7 +2067,8 @@ def Value call_int16_method(int16 n, string method, [Value] args):
     match method:
         "abs": if n < 0: Value.Int16(0 - n) else: Value.Int16(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Int16"
 
@@ -1763,7 +2076,8 @@ def Value call_int32_method(int32 n, string method, [Value] args):
     match method:
         "abs": if n < 0: Value.Int32(0 - n) else: Value.Int32(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Int32"
 
@@ -1771,7 +2085,8 @@ def Value call_int64_method(int64 n, string method, [Value] args):
     match method:
         "abs": if n < 0: Value.Int64(0 - n) else: Value.Int64(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Int64"
 
@@ -1779,7 +2094,8 @@ def Value call_int128_method(int128 n, string method, [Value] args):
     match method:
         "abs": if n < 0: Value.Int128(0 - n) else: Value.Int128(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Int128"
 
@@ -1787,7 +2103,8 @@ def Value call_uint16_method(uint16 n, string method, [Value] args):
     match method:
         "abs": Value.Uint16(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Uint16"
 
@@ -1795,7 +2112,8 @@ def Value call_uint32_method(uint32 n, string method, [Value] args):
     match method:
         "abs": Value.Uint32(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Uint32"
 
@@ -1803,7 +2121,8 @@ def Value call_uint64_method(uint64 n, string method, [Value] args):
     match method:
         "abs": Value.Uint64(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Uint64"
 
@@ -1811,18 +2130,19 @@ def Value call_uint128_method(uint128 n, string method, [Value] args):
     match method:
         "abs": Value.Uint128(n)
         "to_string": Value.Str("{n}")
-        "as_float": Value.Float(n as float)
+        "as_float":
+            Value.Float64(n as float64)
         "as_int": Value.Int(n as int)
         _: throw "no method '{method}' on Uint128"
 
 # Call built-in float methods
-def Value call_float_method(float f, string method, [Value] args):
+def Value call_float64_method(float64 f, string method, [Value] args):
     match method:
         "abs":
             if f < 0.0:
-                Value.Float(0.0 - f)
+                Value.Float64(0.0 - f)
             else:
-                Value.Float(f)
+                Value.Float64(f)
         "floor":
             Value.Int(f.floor() as int)
         "ceil":
@@ -1832,9 +2152,31 @@ def Value call_float_method(float f, string method, [Value] args):
         "to_string":
             Value.Str("{f}")
         "sqrt":
-            Value.Float(f.sqrt())
+            Value.Float64(f.sqrt())
         _:
-            throw "no method '{method}' on Float"
+            throw "no method '{method}' on Float64"
+
+# float32 sibling of call_float64_method above — same small method set,
+# f32 precision throughout.
+def Value call_float32_method(float32 f, string method, [Value] args):
+    match method:
+        "abs":
+            if f < 0.0:
+                Value.Float32(0.0 - f)
+            else:
+                Value.Float32(f)
+        "floor":
+            Value.Int(f.floor() as int)
+        "ceil":
+            Value.Int(f.ceil() as int)
+        "round":
+            Value.Int(f.round() as int)
+        "to_string":
+            Value.Str("{f}")
+        "sqrt":
+            Value.Float32(f.sqrt())
+        _:
+            throw "no method '{method}' on Float32"
 
 # Try calling __as__<typename> method for explicit type conversions
 def Value? try_call_conversion_method(mut Interpreter interp, Value val, string type_name):
@@ -1863,7 +2205,8 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
     let type_name = match ty:
         Type.Named(name): name
         Type.Int: "int"
-        Type.Float: "float"
+        Type.Float32: "float32"
+        Type.Float64: "float64"
         Type.Bool: "bool"
         Type.Str: "string"
         Type.Uint: "uint"
@@ -1884,7 +2227,8 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Int(n): Value.Int(n)
                 Value.Uint(n): Value.Int(n as int)
                 Value.Uint8(n): Value.Int(n as int)
-                Value.Float(f): Value.Int(f as int)
+                Value.Float64(f): Value.Int(f as int)
+                Value.Float32(f): Value.Int(f as int)
                 Value.Bool(b): if b: Value.Int(1) else: Value.Int(0)
                 Value.Str(s):
                     let n = s.parse_int()
@@ -1897,16 +2241,17 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                         g
                     else:
                         Value.Nil
-        "float":
+        "float64":
             match val:
-                Value.Float(f): Value.Float(f)
-                Value.Int(n): Value.Float(n as float)
-                Value.Uint(n): Value.Float(n as float)
-                Value.Uint8(n): Value.Float(n as float)
+                Value.Float64(f): Value.Float64(f)
+                Value.Float32(f): Value.Float64(f as float64)
+                Value.Int(n): Value.Float64(n as float64)
+                Value.Uint(n): Value.Float64(n as float64)
+                Value.Uint8(n): Value.Float64(n as float64)
                 Value.Str(s):
                     let f = s.parse_float()
                     if let v = f:
-                        Value.Float(v)
+                        Value.Float64(v)
                     else:
                         Value.Nil
                 Value.Object(finner):
@@ -1917,7 +2262,34 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                     else:
                         Value.Nil
                 _:
-                    if let g = cast_numeric_generic(val, "float"):
+                    if let g = cast_numeric_generic(val, "float64"):
+                        g
+                    else:
+                        Value.Nil
+        # float32 sibling of the float64 branch above — real f32 narrowing
+        # (Rust `as f32` semantics, silent precision loss, inherited unchanged
+        # per docs/float-width-types.md §4), not a label over float64.
+        "float32":
+            match val:
+                Value.Float32(f): Value.Float32(f)
+                Value.Float64(f): Value.Float32(f as float32)
+                Value.Int(n): Value.Float32(n as float32)
+                Value.Uint(n): Value.Float32(n as float32)
+                Value.Uint8(n): Value.Float32(n as float32)
+                Value.Str(s):
+                    let f = s.parse_float()
+                    if let v = f:
+                        Value.Float32(v as float32)
+                    else:
+                        Value.Nil
+                Value.Object(f32inner):
+                    let f32conv_opt = try_call_conversion_method(interp, Value.Object(f32inner), "float32")
+                    if let f32v = f32conv_opt:
+                        f32v
+                    else:
+                        Value.Nil
+                _:
+                    if let g = cast_numeric_generic(val, "float32"):
                         g
                     else:
                         Value.Nil
@@ -1987,7 +2359,8 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Uint(n): Value.Uint(n)
                 Value.Uint8(n): Value.Uint(n as uint)
                 Value.Int(n): Value.Uint(n as uint)
-                Value.Float(f): Value.Uint(f as uint)
+                Value.Float64(f): Value.Uint(f as uint)
+                Value.Float32(f): Value.Uint(f as uint)
                 Value.Object(uint_inner):
                     let uv_opt = uint_inner.get_field("value")
                     if let uv = uv_opt:
@@ -2004,7 +2377,8 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                 Value.Uint8(n): Value.Uint8(n)
                 Value.Uint(n): Value.Uint8(n as uint8)
                 Value.Int(n): Value.Uint8(n as uint8)
-                Value.Float(f): Value.Uint8(f as uint8)
+                Value.Float64(f): Value.Uint8(f as uint8)
+                Value.Float32(f): Value.Uint8(f as uint8)
                 Value.Object(uint8_inner):
                     let u8v_opt = uint8_inner.get_field("value")
                     if let u8v = u8v_opt:
@@ -2067,9 +2441,13 @@ req bool value_is_type(Interpreter interp, Value val, TypeRef ty) throws:
             match val:
                 Value.Int(_): true
                 _: false
-        "float":
+        "float" | "float64":
             match val:
-                Value.Float(_): true
+                Value.Float64(_): true
+                _: false
+        "float32":
+            match val:
+                Value.Float32(_): true
                 _: false
         "string":
             match val:
@@ -2130,13 +2508,23 @@ req string format_value(Interpreter interp, Value val, string spec):
                 raw = "{nv}"
             if flag_plus and nv >= 0:
                 raw = "+" + raw
-        Value.Float(fv):
+        Value.Float64(fv):
             if type_char == "e":
                 raw = float_to_scientific(fv, precision)
             elif precision >= 0:
                 raw = float_to_fixed(fv, precision)
             else:
                 raw = "{fv}"
+            if flag_plus and fv >= 0.0:
+                raw = "+" + raw
+        Value.Float32(fv32):
+            let fv = fv32 as float64
+            if type_char == "e":
+                raw = float_to_scientific(fv, precision)
+            elif precision >= 0:
+                raw = float_to_fixed(fv, precision)
+            else:
+                raw = "{fv32}"
             if flag_plus and fv >= 0.0:
                 raw = "+" + raw
         _:
@@ -2263,9 +2651,19 @@ req string display_value(Interpreter interp, Value val):
         Value.Uint32(n): "{n}"
         Value.Uint64(n): "{n}"
         Value.Uint128(n): "{n}"
-        Value.Float(f): "{f}"
+        Value.Float64(f): "{f}"
+        Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(items):
+            var result = "["
+            var i = 0
+            while i < items.length:
+                if i > 0:
+                    result = result + ", "
+                result = result + display_value(interp, items[i])
+                i = i + 1
+            result + "]"
+        Value.LabeledArray(items, _):
             var result = "["
             var i = 0
             while i < items.length:
@@ -2562,7 +2960,7 @@ req [Binding]? try_match_pattern(Interpreter interp, Value subject, Pattern pat)
         Pattern.Lit(lit):
             let lit_val = match lit:
                 LitPattern.Int(n): Value.Int(n)
-                LitPattern.Float(f): Value.Float(f)
+                LitPattern.Float(f): Value.Float64(f)
                 LitPattern.Str(s): Value.Str(s)
                 LitPattern.Bool(b): Value.Bool(b)
                 LitPattern.Nil: Value.Nil
@@ -2753,6 +3151,17 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
                     assign_target(interp, obj_expr, Value.Dict(new_entries))
                 _:
                     throw "cannot index-assign into {obj.type_name()}"
+        ExprKind.LabeledIndex(obj_expr, args):
+            let obj = eval_expr(interp, obj_expr)
+            match obj:
+                Value.LabeledArray(items, axes):
+                    let offset = labeled_flat_offset(interp, args, axes)
+                    if offset < 0 or offset >= items.length:
+                        throw "labeled array index out of bounds (length {items.length})"
+                    items[offset] = val
+                    assign_target(interp, obj_expr, Value.LabeledArray(items, axes))
+                _:
+                    throw "labeled index requires a labeled array, got {obj.type_name()}"
         _:
             throw "invalid assignment target"
 

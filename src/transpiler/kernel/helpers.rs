@@ -96,8 +96,11 @@ impl KernelTranspiler {
             Type::Uint32 => "u32".into(),
             Type::Uint64 => "u64".into(),
             Type::Uint128 => "u128".into(),
-            // float is forbidden in kernel code; emit a comment as a fallback
-            Type::Float => "/* float forbidden */ f64".into(),
+            // float32/float64 are forbidden in kernel code (FPU disabled); emit a
+            // comment as a fallback — the validator (src/validator/kernel.rs) is
+            // what actually rejects these before codegen is reached.
+            Type::Float32 => "/* float32 forbidden */ f32".into(),
+            Type::Float64 => "/* float64 forbidden */ f64".into(),
             Type::Str   => "kernel::str::CString".into(),
             Type::Bool  => "bool".into(),
             Type::Nil | Type::Void => "()".into(),
@@ -116,7 +119,9 @@ impl KernelTranspiler {
                 "uint32" => "u32".into(),
                 "uint64" => "u64".into(),
                 "uint128" => "u128".into(),
-                "float"  => "/* float forbidden */ f64".into(),
+                "float32" => "/* float32 forbidden */ f32".into(),
+                "float" | "float64" | "f64" => "/* float64 forbidden */ f64".into(),
+                "f32"    => "/* float32 forbidden */ f32".into(),
                 "bool"   => "bool".into(),
                 "string" | "str" => "kernel::str::CString".into(),
                 "void"   => "()".into(),

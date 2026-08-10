@@ -859,18 +859,16 @@ impl DeviceEmitter {
         }
     }
 
-    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// `a.axis` — read-only shape-query property on a fixed-shape
+    /// `LabeledArray` field (dynamic-shape ones are already desugared to a
+    /// shadow field before codegen — see `desugar_labeled_array`). `a[width =
     /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
-    /// node, not a method call, so it's handled directly in `expr()`'s main
-    /// match instead of here.
-    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+    /// node, handled directly in `expr()`'s main match instead of here.
+    fn try_labeled_array_field_access(&mut self, obj: &Expr, field_name: &str) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
         let (_, axes) = field.ty.as_labeled_array()?;
-        if method != "size" { return None; }
-        let [arg] = args else { return None; };
-        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
-        labeled_array_dim_literal(axes, axis_label)
+        labeled_array_dim_literal(axes, field_name)
     }
 
     /// `let name = arr[idx].min/max/swap/cas(...)` (or `name = ...` via
@@ -1005,8 +1003,12 @@ impl DeviceEmitter {
                 }
             }
             ExprKind::Field(obj, field) => {
-                let obj_s = self.expr(obj);
-                map_gpu_field(&obj_s, field)
+                if let Some(wgsl) = self.try_labeled_array_field_access(obj, field) {
+                    wgsl
+                } else {
+                    let obj_s = self.expr(obj);
+                    map_gpu_field(&obj_s, field)
+                }
             }
             ExprKind::Call(callee, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
@@ -1037,9 +1039,6 @@ impl DeviceEmitter {
                     }
                 }
                 if let Some(wgsl) = self.try_atomic_method_call(obj, method, &args_s) {
-                    return wgsl;
-                }
-                if let Some(wgsl) = self.try_labeled_array_method_call(obj, method, args) {
                     return wgsl;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -1162,6 +1161,14 @@ fn wgsl_unsupported_width(name: &str, fallback: &str) -> String {
     format!("/* ERROR: `{}` is not supported on --target wgpu (WGSL has no 8/16/64/128-bit integers) */ {}", name, fallback)
 }
 
+/// WGSL has no 64-bit float type at all — unlike the integer widths above, there is no
+/// narrowing fallback to reach for (Metal at least has a 32-bit `float` to narrow into;
+/// WGSL's widest float is `f32`, so a `float64`/`float` kernel field genuinely has no
+/// representation here). docs/float-width-types.md §6.
+fn wgsl_unsupported_f64(fallback: &str) -> String {
+    format!("/* ERROR: `float64` is not supported on --target wgpu (WGSL has no 64-bit float type — use float32) */ {}", fallback)
+}
+
 fn wgsl_scalar(ty: &Type) -> String {
     match ty {
         Type::Int              => "i32".into(),
@@ -1176,13 +1183,15 @@ fn wgsl_scalar(ty: &Type) -> String {
         Type::Uint64              => wgsl_unsupported_width("uint64", "u32"),
         Type::Int128              => wgsl_unsupported_width("int128", "i32"),
         Type::Uint128              => wgsl_unsupported_width("uint128", "u32"),
-        Type::Float            => "f32".into(),
+        Type::Float32            => "f32".into(),
+        Type::Float64            => wgsl_unsupported_f64("f32"),
         // bool is not allowed in storage/uniform buffers in WGSL — use u32.
         Type::Bool             => "u32".into(),
         Type::Named(n) => match n.as_str() {
             "int"   | "i32" => "i32".to_string(),
             "uint"  | "u32" => "u32".to_string(),
-            "float" | "f32" | "f64" => "f32".to_string(),
+            "float32" | "f32" => "f32".to_string(),
+            "float" | "float64" | "f64" => wgsl_unsupported_f64("f32"),
             "bool"                  => "u32".to_string(),
             "uint8"                 => wgsl_unsupported_width("uint8", "u32"),
             "int8"                  => wgsl_unsupported_width("int8", "i32"),
@@ -1217,7 +1226,7 @@ fn wgsl_type(ty: &Type) -> String {
 /// Zero-value literal for a WGSL scalar type.
 fn wgsl_zero(ty: &Type) -> &'static str {
     match ty {
-        Type::Float | Type::Named(_) => "0.0",
+        Type::Float32 | Type::Float64 | Type::Named(_) => "0.0",
         Type::Bool  => "0u",
         _           => "0",
     }

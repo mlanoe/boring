@@ -210,6 +210,39 @@ def Expr parse_comp_count(mut Parser p) throws:
         _:
             throw "expected `..n` or `0..n` in array comprehension"
 
+# Like parse_comp_count, but also accepts a bare count with no `..` prefix —
+# the array-FILL shorthand (`[value for n]`, docs/array-multidim-types.md)
+# has no loop variable to justify demanding explicit range syntax, unlike a
+# real comprehension's `for i in ..n`.
+def Expr parse_fill_count(mut Parser p) throws:
+    if parser_eat(p, "DotDot"):
+        return parse_or(p)
+    let expr = parse_or(p)
+    match expr.kind:
+        ExprKind.Range(start, end, false):
+            match start.kind:
+                ExprKind.Int(0):
+                    return end
+                _:
+                    throw "array fill range must start at 0 — use `..n`, `0..n`, or a bare `n`"
+        ExprKind.Range(_, _, true):
+            throw "array fill does not accept inclusive range (`..=`)"
+        _:
+            return expr
+
+# Collects axis clauses for a chained multi-dim comprehension
+# (docs/array-multidim-types.md) — `first_var`/`first_count` is the clause
+# already parsed by the caller; each further `for var in ..count` chained
+# clause is one more axis. clauses[0] is axis 1 (fastest-varying).
+def [(string, Expr)] parse_chained_for_clauses(mut Parser p, string first_var, Expr first_count) throws:
+    var clauses = [(first_var, first_count)]
+    while parser_eat(p, "For"):
+        let var_name = parser_expect_ident(p)
+        parser_expect(p, "In")
+        let count = parse_comp_count(p)
+        clauses.push((var_name, count))
+    clauses
+
 def Expr parse_or(mut Parser p) throws:
     var lhs = parse_and(p)
     while parser_check(p, "Or"):
@@ -421,25 +454,36 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_optional_field(expr, field, line)
         elif parser_check(p, "LBracket"):
             parser_advance(p)
-            # Slice with no start: a[..N], a[..=N], a[..]
-            let idx = if parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
-                let inclusive = parser_check(p, "DotDotEq")
-                parser_advance(p)
-                let end_expr = if parser_check(p, "RBracket"): make_hole(line) else parse_expr(p)
-                make_slice_range(make_hole(line), end_expr, inclusive, line)
+            if parser_peek_is_labeled_start(p):
+                # Labeled index: a[width = w, height = h] (docs/array-multidim-types.md).
+                # Labels are mandatory for 2+ axes and order-free at the use site —
+                # both enforced at eval time, not here (this interpreter has no
+                # static checker to enforce them earlier).
+                var args = [parse_arg(p)]
+                while parser_eat(p, "Comma"):
+                    args.push(parse_arg(p))
+                parser_expect(p, "RBracket")
+                expr = make_labeled_index(expr, args, line)
             else:
-                let inner = parse_expr(p)
-                # parse_expr may have consumed M..N as Range — convert to SliceRange
-                # M.. (open-ended) is caught by the DotDot postfix arm below
-                match inner.kind:
-                    ExprKind.Range(start, end, inclusive):
-                        make_slice_range(start, end, inclusive, line)
-                    ExprKind.SliceRange(s, e, inc):
-                        inner
-                    _:
-                        inner
-            parser_expect(p, "RBracket")
-            expr = make_index(expr, idx, line)
+                # Slice with no start: a[..N], a[..=N], a[..]
+                let idx = if parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
+                    let inclusive = parser_check(p, "DotDotEq")
+                    parser_advance(p)
+                    let end_expr = if parser_check(p, "RBracket"): make_hole(line) else parse_expr(p)
+                    make_slice_range(make_hole(line), end_expr, inclusive, line)
+                else:
+                    let inner = parse_expr(p)
+                    # parse_expr may have consumed M..N as Range — convert to SliceRange
+                    # M.. (open-ended) is caught by the DotDot postfix arm below
+                    match inner.kind:
+                        ExprKind.Range(start, end, inclusive):
+                            make_slice_range(start, end, inclusive, line)
+                        ExprKind.SliceRange(s, e, inc):
+                            inner
+                        _:
+                            inner
+                parser_expect(p, "RBracket")
+                expr = make_index(expr, idx, line)
         elif parser_check(p, "LParen"):
             if parser_peek_is_trailing_closure(p):
                 let args = parse_trailing_closure(p, [])
@@ -459,8 +503,27 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_call(expr, args, line)
         elif parser_check(p, "As"):
             parser_advance(p)
-            let ty = parse_type(p)
-            expr = make_cast(expr, ty, line)
+            # Cross-label array mapping: `img as [line = width, column = height]`
+            # (docs/array-multidim-types.md, "Cross-label compatibility") — the
+            # bracket contents are a `target_label = source_label` mapping table,
+            # not a type (`parse_type()` can't parse this: `line` alone parses as
+            # `Type.Named("line")`, then hits `=` and fails) — so it needs its own
+            # lookahead and its own node, not Cast. A real cast to a labeled-array
+            # type (`x as [float, width, height]`) starts with a *type* token
+            # (`float`, not `label =`), so this never misfires on that.
+            let is_relabel = parser_check(p, "LBracket") and parser_token_at_offset_is(p, 1, "Ident") and parser_token_at_offset_is(p, 2, "Eq")
+            if is_relabel:
+                parser_advance(p)
+                var pairs = [parse_relabel_pair(p)]
+                while parser_eat(p, "Comma"):
+                    if parser_check(p, "RBracket"):
+                        break
+                    pairs.push(parse_relabel_pair(p))
+                parser_expect(p, "RBracket")
+                expr = make_relabel_cast(expr, pairs, line)
+            else:
+                let ty = parse_type(p)
+                expr = make_cast(expr, ty, line)
         elif parser_check(p, "DotDot") or parser_check(p, "DotDotEq"):
             let inclusive = parser_check(p, "DotDotEq")
             parser_advance(p)
@@ -641,12 +704,19 @@ def Expr parse_primary(mut Parser p) throws:
         if not parser_check(p, "RBracket") and not parser_check(p, "Eof"):
             let first = parse_expr(p)
             if parser_eat(p, "For"):
-                # Comprehension: `[v for ..n]` or `[f(i) for i in ..n]`
+                # Comprehension: `[v for ..n]` or `[f(i) for i in ..n]` — or,
+                # chained (docs/array-multidim-types.md), `[f(w,h) for w in ..W
+                # for h in ..H]`, a labeled multi-dim array (2+ axes).
                 if parser_check(p, "Ident") and parser_check2(p, "In"):
                     let var_name = parser_expect_ident(p)
                     parser_expect(p, "In")
                     if parser_check(p, "DotDot"):
                         let count = parse_comp_count(p)
+                        if parser_check(p, "For"):
+                            let clauses = parse_chained_for_clauses(p, var_name, count)
+                            parser_skip_newlines_and_indent(p)
+                            parser_expect(p, "RBracket")
+                            return make_labeled_array_comp(first, clauses, line)
                         parser_skip_newlines_and_indent(p)
                         parser_expect(p, "RBracket")
                         return make_array_comp(first, var_name, count, line)
@@ -655,6 +725,11 @@ def Expr parse_primary(mut Parser p) throws:
                         ExprKind.Range(start, end, false):
                             match start.kind:
                                 ExprKind.Int(0):
+                                    if parser_check(p, "For"):
+                                        let clauses = parse_chained_for_clauses(p, var_name, end)
+                                        parser_skip_newlines_and_indent(p)
+                                        parser_expect(p, "RBracket")
+                                        return make_labeled_array_comp(first, clauses, line)
                                     parser_skip_newlines_and_indent(p)
                                     parser_expect(p, "RBracket")
                                     return make_array_comp(first, var_name, end, line)
@@ -663,11 +738,29 @@ def Expr parse_primary(mut Parser p) throws:
                         ExprKind.Range(_, _, true):
                             throw "array comprehension does not accept inclusive range (`..=`)"
                         _:
+                            if parser_check(p, "For"):
+                                throw "chained multi-axis comprehension requires a `..N` range on every axis, not a generic iterable"
                             parser_skip_newlines_and_indent(p)
                             parser_expect(p, "RBracket")
                             return make_array_comp_iter(first, var_name, source, line)
+                elif parser_peek_is_labeled_start(p):
+                    # Labeled shape-only fill: `[0.0 for width = w, height = h]`
+                    # — labels here are purely descriptive of shape, never bound
+                    # as usable variables in `first` (docs/array-multidim-types.md).
+                    let l1 = parser_expect_ident(p)
+                    parser_expect(p, "Eq")
+                    let c1 = parse_or(p)
+                    var clauses = [(l1, c1)]
+                    while parser_eat(p, "Comma"):
+                        let l2 = parser_expect_ident(p)
+                        parser_expect(p, "Eq")
+                        let c2 = parse_or(p)
+                        clauses.push((l2, c2))
+                    parser_skip_newlines_and_indent(p)
+                    parser_expect(p, "RBracket")
+                    return make_labeled_array_comp(first, clauses, line)
                 else:
-                    let count = parse_comp_count(p)
+                    let count = parse_fill_count(p)
                     parser_skip_newlines_and_indent(p)
                     parser_expect(p, "RBracket")
                     return make_array_fill(first, count, line)
@@ -744,6 +837,12 @@ def [Arg] parse_call_args(mut Parser p) throws:
     parser_expect(p, "RParen")
     parser_set_allow_trailing_closure(p, saved_tc)
     args
+
+def (string, string) parse_relabel_pair(mut Parser p) throws:
+    let target = parser_expect_ident(p)
+    parser_expect(p, "Eq")
+    let source = parser_expect_ident(p)
+    (target, source)
 
 def Arg parse_arg(mut Parser p) throws:
     if parser_eat(p, "DotDot"):

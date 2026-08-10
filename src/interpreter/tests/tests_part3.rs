@@ -65,7 +65,7 @@ def f32 half(f32 x):
 
 let _result = half(3.14)
 "#;
-    let Value::Float(v) = run_src(src) else { panic!("expected float") };
+    let Value::Float64(v) = run_src(src) else { panic!("expected float") };
     assert!((v - 1.57).abs() < 1e-5);
 }
 
@@ -321,7 +321,7 @@ let b = Vec2(3.0, 4.0)
 let c = a + b
 let _result = c.x
 "#;
-    assert_eq!(run_src(src), Value::Float(4.0));
+    assert_eq!(run_src(src), Value::Float64(4.0));
 }
 
 #[test]
@@ -340,7 +340,7 @@ let b = Vec2(3.0, 4.0)
 let c = a + b
 let _result = c.y
 "#;
-    assert_eq!(run_src(src), Value::Float(6.0));
+    assert_eq!(run_src(src), Value::Float64(6.0));
 }
 
 #[test]
@@ -359,7 +359,7 @@ let b = Vec2(3.0, 4.0)
 let c = a - b
 let _result = c.x
 "#;
-    assert_eq!(run_src(src), Value::Float(2.0));
+    assert_eq!(run_src(src), Value::Float64(2.0));
 }
 
 #[test]
@@ -377,7 +377,7 @@ let a = Vec2(2.0, 3.0)
 let b = a * 4.0
 let _result = b.x
 "#;
-    assert_eq!(run_src(src), Value::Float(8.0));
+    assert_eq!(run_src(src), Value::Float64(8.0));
 }
 
 #[test]
@@ -395,7 +395,7 @@ let a = Vec2(1.0, 2.0)
 let b = -a
 let _result = b.x
 "#;
-    assert_eq!(run_src(src), Value::Float(-1.0));
+    assert_eq!(run_src(src), Value::Float64(-1.0));
 }
 
 #[test]
@@ -1990,7 +1990,7 @@ mut float f = 1.0
 f = 3.14
 let _result = f
 "#;
-    assert_eq!(run_src(src), Value::Float(3.14));
+    assert_eq!(run_src(src), Value::Float64(3.14));
 }
 
 #[test]
@@ -2150,8 +2150,8 @@ let _result = m
     assert_eq!(
         run_src(src),
         Value::Array(vec![
-            Value::Array(vec![Value::Float(1.0), Value::Float(2.0)].into()),
-            Value::Array(vec![Value::Float(3.0), Value::Float(4.0)].into()),
+            Value::Array(vec![Value::Float64(1.0), Value::Float64(2.0)].into()),
+            Value::Array(vec![Value::Float64(3.0), Value::Float64(4.0)].into()),
         ].into())
     );
 }
@@ -2162,7 +2162,7 @@ fn test_nested_array_double_index() {
 let m = [[1.0, 2.0], [3.0, 4.0]]
 let _result = m[0][1]
 "#;
-    assert_eq!(run_src(src), Value::Float(2.0));
+    assert_eq!(run_src(src), Value::Float64(2.0));
 }
 
 #[test]
@@ -2174,9 +2174,9 @@ let _result = rows
     assert_eq!(
         run_src(src),
         Value::Array(vec![
-            Value::Array(vec![Value::Float(0.0), Value::Float(0.0), Value::Float(0.0), Value::Float(0.0)].into()),
-            Value::Array(vec![Value::Float(0.0), Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)].into()),
-            Value::Array(vec![Value::Float(0.0), Value::Float(2.0), Value::Float(4.0), Value::Float(6.0)].into()),
+            Value::Array(vec![Value::Float64(0.0), Value::Float64(0.0), Value::Float64(0.0), Value::Float64(0.0)].into()),
+            Value::Array(vec![Value::Float64(0.0), Value::Float64(1.0), Value::Float64(2.0), Value::Float64(3.0)].into()),
+            Value::Array(vec![Value::Float64(0.0), Value::Float64(2.0), Value::Float64(4.0), Value::Float64(6.0)].into()),
         ].into())
     );
 }
@@ -2313,9 +2313,9 @@ let _result = all_ids
 #[test]
 fn test_scientific_notation_float() {
     // 1e-10 should lex as Float, not (Ident "1e") - Int(10)
-    assert_eq!(run_src("let _result = 1e-10"), Value::Float(1e-10));
-    assert_eq!(run_src("let _result = 2.5e3"), Value::Float(2500.0));
-    assert_eq!(run_src("let _result = 1e10"), Value::Float(1e10));
+    assert_eq!(run_src("let _result = 1e-10"), Value::Float64(1e-10));
+    assert_eq!(run_src("let _result = 2.5e3"), Value::Float64(2500.0));
+    assert_eq!(run_src("let _result = 1e10"), Value::Float64(1e10));
 }
 
 #[test]

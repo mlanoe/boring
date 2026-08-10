@@ -47,7 +47,7 @@ kernel Grid:
     assert!(matches!(&k.fields[0].ty, Type::Array(inner) if matches!(&**inner, Type::Named(n) if n == "float")));
     // Type::Int, not Uint — see desugar_kernel_decl's own note (matches a
     // shadow value's typical `int`-typed source, and the Int/Int bounds a
-    // `for i in 0..field.size(.axis)` range requires).
+    // `for i in 0..field.width` range requires).
     assert!(matches!(k.fields[1].ty, Type::Int));
     assert!(matches!(k.fields[1].binding, FieldBinding::Let));
     assert!(matches!(k.fields[1].qual, GpuQual::Const));
@@ -93,12 +93,12 @@ kernel Grid:
 }
 
 #[test]
-fn size_call_in_kernel_method_resolves_to_shadow_var() {
+fn axis_property_in_kernel_method_resolves_to_shadow_var() {
     let src = r#"
 kernel Grid:
     mut [float, width, height]'unified img
     def ():
-        let uint w = img.size(.width)
+        let uint w = img.width
 "#;
     let program = desugared(src);
     let k = only_kernel(&program);
@@ -187,7 +187,7 @@ let b = a as [line = width, column = height]
 let _result = b[line = 1, column = 2]
 "#;
     // a[width=1,height=2] = 1 + 2*10 = 21.0, and b addresses the same buffer.
-    assert_eq!(run_desugared(src), Value::Float(21.0));
+    assert_eq!(run_desugared(src), Value::Float64(21.0));
 }
 
 // ─── End-to-end execution (real row-major math + D2 ordering) ─────────────
@@ -198,19 +198,19 @@ fn comprehension_then_labeled_index_round_trips_row_major() {
 let [float, width, height] a = [width + height * 10.0 for width in ..3 for height in ..4]
 let _result = a[width = 2, height = 3]
 "#;
-    assert_eq!(run_desugared(src), Value::Float(32.0));
+    assert_eq!(run_desugared(src), Value::Float64(32.0));
 }
 
 #[test]
-fn size_call_on_local_returns_correct_axis_value() {
+fn axis_property_on_local_returns_correct_axis_value() {
     let src = r#"
 let [float, width, height] a = [0.0 for width in ..3 for height in ..4]
-let _result = a.size(.height)
+let _result = a.height
 "#;
     // Value::Int, not Uint — dynamic-shape shadow bindings are Type::Int
     // (see desugar_kernel_decl's note: matches a shadow value's typical
     // int/uint-mixed source uniformly, and the Int/Int bounds a `for i in
-    // 0..field.size(.axis)` range requires).
+    // 0..field.width` range requires).
     assert_eq!(run_desugared(src), Value::Int(4));
 }
 
@@ -231,7 +231,7 @@ fn fixed_shape_local_labeled_index_resolves_at_desugar_time() {
 let [float, width = 3, height = 4] a = [width + height * 10.0 for width in ..3 for height in ..4]
 let _result = a[width = 2, height = 3]
 "#;
-    assert_eq!(run_desugared(src), Value::Float(32.0));
+    assert_eq!(run_desugared(src), Value::Float64(32.0));
 }
 
 // ─── Kernel field construction sugar: `field = flat.reshape(...)` ─────────
@@ -301,7 +301,7 @@ let n = 4
 let a = [7.0 for n]
 let _result = a[2]
 "#;
-    assert_eq!(run_desugared(src), Value::Float(7.0));
+    assert_eq!(run_desugared(src), Value::Float64(7.0));
 }
 
 #[test]
@@ -314,14 +314,14 @@ let _result = a[width = 2, height = 3]
     // this also exercises the shape (width=3, height=4) actually being
     // threaded through correctly (shadow bindings synthesized from the
     // clause counts, same as the general chained-for comprehension).
-    assert_eq!(run_desugared(src), Value::Float(9.0));
+    assert_eq!(run_desugared(src), Value::Float64(9.0));
 }
 
 #[test]
 fn labeled_shape_fill_shorthand_infers_correct_axis_sizes() {
     let src = r#"
 let a = [0.0 for width = 3, height = 4]
-let _result = a.size(.height)
+let _result = a.height
 "#;
     assert_eq!(run_desugared(src), Value::Int(4));
 }

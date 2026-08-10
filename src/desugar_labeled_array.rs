@@ -36,8 +36,9 @@
 //! - Plain `let`-declared locals (free functions, methods, top-level) with
 //!   an explicit `LabeledArray` type annotation: same flat-buffer-plus-
 //!   shadow-bindings treatment for dynamic shape; fixed-shape `.at`-
-//!   equivalent/`.size(.axis)` calls fold directly into `Index`/a literal at
-//!   this pass, since the axis sizes are already compile-time-known.
+//!   equivalent/`a.axis` shape-query property reads fold directly into
+//!   `Index`/a literal at this pass, since the axis sizes are already
+//!   compile-time-known.
 //! - `[f(w,h) for w in ..W for h in ..H]` (`ExprKind::LabeledArrayComp`) —
 //!   lowered to an `ArrayAlloc` + nested `for` loops (innermost = axis 1 =
 //!   `clauses[0]`, per its own doc comment) writing into the flat buffer.
@@ -62,12 +63,12 @@
 //!   needs call-site shadow-argument threading, a capability `Image`/
 //!   `Volume` never needed either (its dynamic form was only ever a kernel
 //!   field). Not exercised by any real `.br` file today.
-//! - `LabeledIndex`/`.size(.axis)` on an object this pass can't trace back to
-//!   a `let`-tracked declaration (e.g. flowing through an untracked function
-//!   parameter or return value) — best-effort only: left unresolved rather
-//!   than guessed, matching the checker's own "never a false positive, just
-//!   possibly a missed check" limitation for the same reason
-//!   (`Checker::static_labeled_array_type`).
+//! - `LabeledIndex`/an axis-property read (`a.width`) on an object this pass
+//!   can't trace back to a `let`-tracked declaration (e.g. flowing through an
+//!   untracked function parameter or return value) — best-effort only: left
+//!   unresolved rather than guessed, matching the checker's own "never a
+//!   false positive, just possibly a missed check" limitation for the same
+//!   reason (`Checker::static_labeled_array_type`).
 
 use crate::ast::*;
 use std::collections::HashMap;
@@ -191,7 +192,7 @@ fn desugar_kernel_decl(decl: &mut KernelDecl) {
                         // (e.g. `nf`, `nfreq` in a real kernel constructor
                         // call) — matching that exactly avoids a type
                         // mismatch at every level (interpreter, transpiled
-                        // Rust, *and* `for i in 0..field.size(.axis)`, whose
+                        // Rust, *and* `for i in 0..field.width`, whose
                         // range requires both bounds to be Int — confirmed
                         // via a real interpreter crash otherwise: "range
                         // requires Int bounds, got Int and Uint"). Sizes are
@@ -363,7 +364,7 @@ fn desugar_let(mut s: LetStmt, scope: &mut ArrayScope) -> Vec<LetStmt> {
                 // the source expression's own type isn't guaranteed (an
                 // `int` OR a `uint` param both appear in real code) — the
                 // cast normalizes either into a definite Int value, which
-                // both `for i in 0..field.size(.axis)`'s range (requires
+                // both `for i in 0..field.width`'s range (requires
                 // Int on both sides) and the shadow field's own declared
                 // type need unconditionally, regardless of the source.
                 ty: Some(Type::Int),
@@ -438,7 +439,7 @@ fn desugar_reassign_stmt(e: Expr, scope: &mut ArrayScope) -> Vec<Stmt> {
         // Explicit `as int` — see desugar_let's identical note: the source
         // expression's type isn't guaranteed (int or uint both appear in
         // real kernel `init`/method params), and the shadow field's own
-        // Type::Int declaration plus `for i in 0..field.size(.axis)`'s
+        // Type::Int declaration plus `for i in 0..field.width`'s
         // range (requires Int on both sides) both need a definite Int
         // value regardless of the source.
         let value_d = Expr {
@@ -617,10 +618,10 @@ fn labeled_index_offset(args: &[Arg], info: &LabeledInfo, line: usize, col: usiz
     flat
 }
 
-/// `.size(.axis)`'s resolved value for a known name — the axis's shadow
-/// `Var` (dynamic shape) or its literal size expression (fixed shape).
-/// `None` if `axis_label` doesn't match any of `info`'s axes.
-fn resolve_size_call(info: &LabeledInfo, axis_label: &str, line: usize, col: usize) -> Option<Expr> {
+/// `a.axis`'s resolved value for a known name — the axis's shadow `Var`
+/// (dynamic shape) or its literal size expression (fixed shape). `None` if
+/// `axis_label` doesn't match any of `info`'s axes.
+fn resolve_axis_property(info: &LabeledInfo, axis_label: &str, line: usize, col: usize) -> Option<Expr> {
     let i = info.axes.iter().position(|a| a.label == axis_label)?;
     Some(info.axis_size_expr(i, line, col))
 }
@@ -662,19 +663,6 @@ fn desugar_expr(e: Expr, scope: &ArrayScope) -> Expr {
             if method == "reshape" || method == "flatten" {
                 return obj_d;
             }
-            if method == "size" {
-                if let ExprKind::Var(name) = &obj_d.kind {
-                    if let Some(info) = scope.get(name) {
-                        if let [arg] = args.as_slice() {
-                            if let ExprKind::DotIdent(axis) = &arg.value.kind {
-                                if let Some(resolved) = resolve_size_call(info, axis, line, col) {
-                                    return resolved;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             let args_d = args.into_iter().map(|a| desugar_arg(a, scope)).collect();
             ExprKind::MethodCall(Box::new(obj_d), method, args_d)
         }
@@ -692,7 +680,23 @@ fn desugar_expr(e: Expr, scope: &ArrayScope) -> Expr {
         ExprKind::UnaryOp(op, v) => ExprKind::UnaryOp(op, Box::new(desugar_expr(*v, scope))),
         ExprKind::Assign(l, r) => ExprKind::Assign(Box::new(desugar_expr(*l, scope)), Box::new(desugar_expr(*r, scope))),
         ExprKind::QuestionAssign(l, r) => ExprKind::QuestionAssign(Box::new(desugar_expr(*l, scope)), Box::new(desugar_expr(*r, scope))),
-        ExprKind::Field(o, name) => ExprKind::Field(Box::new(desugar_expr(*o, scope)), name),
+        ExprKind::Field(o, name) => {
+            let o_d = desugar_expr(*o, scope);
+            // `a.width`/`a.height` — read-only shape-query property, sugar
+            // over the same per-axis resolution `.size(.axis)` used to
+            // require spelling out explicitly (docs/array-multidim-types.md,
+            // "Shape queries"). Same best-effort, name-based, scope-tracked-
+            // locals-only limitation as everywhere else in this pass — see
+            // this module's doc comment.
+            if let ExprKind::Var(var_name) = &o_d.kind {
+                if let Some(info) = scope.get(var_name) {
+                    if let Some(resolved) = resolve_axis_property(info, &name, line, col) {
+                        return resolved;
+                    }
+                }
+            }
+            ExprKind::Field(Box::new(o_d), name)
+        }
         ExprKind::OptionalField(o, name) => ExprKind::OptionalField(Box::new(desugar_expr(*o, scope)), name),
         ExprKind::Index(a, i) => ExprKind::Index(Box::new(desugar_expr(*a, scope)), Box::new(desugar_expr(*i, scope))),
         ExprKind::Call(callee, args) => ExprKind::Call(

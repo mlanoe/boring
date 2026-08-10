@@ -42,7 +42,7 @@ fn dynamic_labeled_array_type() {
     match let_ty(&program) {
         ast::Type::LabeledArray(elem, axes) => {
             // `float` is a lowercase alias — parses as Named("float"), resolved
-            // to Type::Float later (see book.md's "Common types" table).
+            // to Type::Float64 later (see book.md's "Common types" table).
             assert!(matches!(&**elem, ast::Type::Named(n) if n == "float"));
             assert_eq!(axes.len(), 2);
             assert_eq!(axes[0].label, "width");

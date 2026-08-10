@@ -2436,7 +2436,8 @@ fn rust_type(ty: &Type) -> String {
         Type::Uint32          => "u32".into(),
         Type::Uint64          => "u64".into(),
         Type::Uint128         => "u128".into(),
-        Type::Float          => "f64".into(),
+        Type::Float32          => "f32".into(),
+        Type::Float64          => "f64".into(),
         Type::Bool           => "bool".into(),
         Type::Str            => "String".into(),
         Type::Nil            => "()".into(),
@@ -2506,7 +2507,8 @@ fn emit_scalar_default(expr: &Expr) -> String {
 /// Returns the size in bytes of a scalar element type for shared-memory calculations.
 fn elem_size_bytes(ty: &Type) -> usize {
     match ty {
-        Type::Float                          => 8, // f64 / double
+        Type::Float32                          => 4, // f32
+        Type::Float64                          => 8, // f64 / double
         Type::Int | Type::Uint               => 8, // isize / usize
         Type::Uint8 | Type::Int8              => 1,
         Type::Int16 | Type::Uint16            => 2,

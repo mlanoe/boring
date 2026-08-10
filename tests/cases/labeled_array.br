@@ -1,0 +1,37 @@
+# Labeled multi-dimensional arrays (docs/array-multidim-types.md)
+
+# Chained-for comprehension (dynamic shape) — width is axis 0 (fastest-varying)
+let a = [width + height * 10 for width in ..3 for height in ..2]
+print a[width = 2, height = 1]
+print a[height = 1, width = 2]   # order-free at the use site
+print a.width
+print a.height
+
+# Labeled shape-only fill shorthand
+let b = [0.0 for width = 2, height = 3]
+print b.width
+print b.height
+
+# Labeled index assignment (mutation)
+var c = [0 for width = 2, height = 2]
+c[width = 1, height = 0] = 9
+print c[width = 1, height = 0]
+print c[width = 0, height = 0]
+
+# Fixed shape declaration
+let [float, width = 2, height = 2] d = [1.0, 2.0, 3.0, 4.0]
+print d[width = 1, height = 1]
+print d.width
+
+# reshape() / flatten() round trip
+let flat = [1, 2, 3, 4, 5, 6]
+let e = flat.reshape(width = 3, height = 2)
+print e[width = 2, height = 1]
+print e.width
+let back = e.flatten()
+print back[5]
+
+# Cross-label rename (same axis order — a safe relabel, not a transpose)
+let g = flat.reshape(width = 3, height = 2)
+let f = g as [w = width, h = height]
+print f[w = 2, h = 1]

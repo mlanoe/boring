@@ -430,18 +430,16 @@ impl DeviceEmitter {
         }
     }
 
-    /// `.size(.axis)` on a fixed-shape `LabeledArray` field. `a[width =
+    /// `a.axis` — read-only shape-query property on a fixed-shape
+    /// `LabeledArray` field (dynamic-shape ones are already desugared to a
+    /// shadow field before codegen — see `desugar_labeled_array`). `a[width =
     /// w, height = h]`-style indexing is a distinct `ExprKind::LabeledIndex`
-    /// node, not a method call, so it's handled directly in `expr()`'s main
-    /// match instead of here.
-    fn try_labeled_array_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+    /// node, handled directly in `expr()`'s main match instead of here.
+    fn try_labeled_array_field_access(&mut self, obj: &Expr, field_name: &str) -> Option<String> {
         let ExprKind::Var(name) = &obj.kind else { return None; };
         let field = self.current_fields.iter().find(|f| &f.name == name)?;
         let (_, axes) = field.ty.as_labeled_array()?;
-        if method != "size" { return None; }
-        let [arg] = args else { return None; };
-        let ExprKind::DotIdent(axis_label) = &arg.value.kind else { return None; };
-        labeled_array_dim_literal(axes, axis_label)
+        labeled_array_dim_literal(axes, field_name)
     }
 
     /// Emit a `print "..."` statement as a CUDA `printf(...)` call.
@@ -559,8 +557,12 @@ impl DeviceEmitter {
                 resolved.unwrap_or_else(|| "/* unsupported labeled index */".to_string())
             }
             ExprKind::Field(obj, field) => {
-                let obj_s = self.expr(obj);
-                map_gpu_field(&obj_s, field)
+                if let Some(s) = self.try_labeled_array_field_access(obj, field) {
+                    s
+                } else {
+                    let obj_s = self.expr(obj);
+                    map_gpu_field(&obj_s, field)
+                }
             }
             ExprKind::Call(callee, args) => {
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
@@ -582,9 +584,6 @@ impl DeviceEmitter {
                     }
                 }
                 if let Some(call) = self.try_atomic_method_call(obj, method, &args_s) {
-                    return call;
-                }
-                if let Some(call) = self.try_labeled_array_method_call(obj, method, args) {
                     return call;
                 }
                 if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
@@ -721,7 +720,8 @@ fn c_type(ty: &Type) -> String {
         Type::Uint32             => "uint32_t".into(),
         Type::Uint64             => "uint64_t".into(),
         Type::Uint128             => "unsigned __int128 /* GCC/NVCC extension */".into(),
-        Type::Float            => "double".into(),
+        Type::Float32            => "float".into(),
+        Type::Float64            => "double".into(),
         Type::Bool             => "int".into(),
         Type::Str              => "const char*".into(),
         Type::Nil | Type::Void => "void".into(),
@@ -730,7 +730,8 @@ fn c_type(ty: &Type) -> String {
         Type::LabeledArray(inner, _) => format!("{}*", c_type(inner)),
         // Named primitives — the kernel field parser may store raw keyword strings.
         Type::Named(n) => match n.as_str() {
-            "float" | "f64" | "f32" => "double".to_string(),
+            "float32" | "f32" => "float".to_string(),
+            "float" | "float64" | "f64" => "double".to_string(),
             "int"   | "i64"         => "int64_t".to_string(),
             "uint"  | "u64"         => "uint64_t".to_string(),
             "uint8"                  => "uint8_t".to_string(),

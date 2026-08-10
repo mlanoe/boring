@@ -132,7 +132,8 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
 /// (see `emit_fn`).
 fn is_float_array_param(ty: &Type) -> bool {
     fn is_float(ty: &Type) -> bool {
-        matches!(ty, Type::Float) || matches!(ty, Type::Named(n) if n == "float" || n == "f32" || n == "f64")
+        matches!(ty, Type::Float32 | Type::Float64)
+            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float32" | "float64" | "f32" | "f64"))
     }
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => is_float(inner),
@@ -2811,8 +2812,12 @@ fn general_host_elem_type(ty: &Type) -> String {
         Type::Array(inner) | Type::ArrayN(inner, _) => general_host_elem_type(inner),
         Type::LabeledArray(inner, _) => general_host_elem_type(inner),
         Type::Qualified(inner, _) => general_host_elem_type(inner),
-        Type::Float => "f64".into(),
-        Type::Named(n) if n == "float" || n == "f32" || n == "f64" => "f64".into(),
+        // `float32` keeps its own real width here — only the bare `float`/`float64`
+        // spelling follows this function's "general pass" f64 convention.
+        Type::Float32 => "f32".into(),
+        Type::Float64 => "f64".into(),
+        Type::Named(n) if n == "float32" || n == "f32" => "f32".into(),
+        Type::Named(n) if n == "float" || n == "float64" || n == "f64" => "f64".into(),
         other => rust_type(other),
     }
 }
@@ -2831,7 +2836,13 @@ fn rust_type(ty: &Type) -> String {
         Type::Uint32          => "u32".into(),
         Type::Uint64          => "u64".into(),
         Type::Uint128         => "u128".into(),
-        Type::Float          => "f32".into(),
+        // Both widths narrow to `f32` on the host side here — Metal device code is
+        // 32-bit-float-only in practice (MSL has no native `double`, see
+        // `msl_unsupported_width` in metal/device.rs), so this file's own convention
+        // keeps a single host representation for both, unchanged from before for
+        // Float64 and now extended to cover the new Float32 type too.
+        Type::Float32          => "f32".into(),
+        Type::Float64          => "f32".into(),
         Type::Bool           => "bool".into(),
         Type::Str            => "String".into(),
         Type::Nil            => "()".into(),
@@ -2881,7 +2892,7 @@ fn rust_type(ty: &Type) -> String {
 
 fn elem_size_bytes(ty: &Type) -> usize {
     match ty {
-        Type::Float                               => 4,
+        Type::Float32 | Type::Float64                => 4,
         Type::Int | Type::Uint                    => 8,
         Type::Uint8 | Type::Int8                   => 1,
         Type::Int16 | Type::Uint16                 => 2,

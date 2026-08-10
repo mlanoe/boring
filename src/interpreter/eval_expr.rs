@@ -133,6 +133,46 @@ fn i128_to_kind(kind: NumKind, x: i128) -> Value {
     }
 }
 
+// ─── float32 / float64 literal mixing ────────────────────────────────────────
+//
+// Unlike `int`/`uint`, `float` has no independent, pointer-width-style flexible
+// type of its own — `float` IS `float64` (docs/float-width-types.md §2), so there
+// is no separate "bare" Value variant the way `Value::Int` is separate from
+// `Value::Int64`. The design still wants a bare, untyped float *literal* to mix
+// freely with either width (§3: `float32 a = 1.0; a + 3.14` must work), while two
+// already-resolved `float32`/`float64` values must not mix implicitly. Since a
+// literal and a resolved value are otherwise indistinguishable once evaluated to
+// a `Value`, the coercion has to look at the *source expression* before it's
+// evaluated — done once, in `eval_binop`, ahead of dispatch to any operator.
+
+/// True for `ExprKind::Float`/`ExprKind::Int` (optionally unary-negated) — the
+/// untyped-literal shapes eligible to resolve to whichever float width the other
+/// operand already has, mirroring how a bare `int`/`uint` *value* (not just a
+/// literal) already mixes freely with any fixed-width integer via `NumKind`.
+fn is_untyped_numeric_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Float(_) | ExprKind::Int(_) => true,
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => is_untyped_numeric_literal(inner),
+        _ => false,
+    }
+}
+
+/// If exactly one side is `Float32` and the other `Float64`, and the `Float64`
+/// side's own expression is an untyped literal, narrow that literal to `f32` so
+/// same-kind arithmetic proceeds normally. Otherwise returns `(l, r)` unchanged —
+/// in particular, two *resolved* `float32`/`float64` values are left mismatched,
+/// which every operator's match falls through to its existing "cannot <op> X and
+/// Y" error for, exactly as two distinct fixed-width int types already do.
+fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Value, Value) {
+    match (&l, &r) {
+        (Value::Float32(_), Value::Float64(f)) if is_untyped_numeric_literal(rhs) =>
+            (l, Value::Float32(*f as f32)),
+        (Value::Float64(f), Value::Float32(_)) if is_untyped_numeric_literal(lhs) =>
+            (Value::Float32(*f as f32), r),
+        _ => (l, r),
+    }
+}
+
 /// Generic fallback for a binary numeric op between two *different* numeric kinds,
 /// used from the catch-all arm of each arithmetic/bitwise operator's match — after
 /// the hand-written same-kind and legacy `Int`/`Uint`/`Uint8` arms have already had
@@ -515,7 +555,22 @@ impl Interpreter {
         for arg in args.iter() {
             Self::check_no_owned_extract(&arg.value, &env, line)?;
         }
-        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+        // `Value::Fn` (a single, non-overloaded function) has its declared param types
+        // available here — pass them so a `.Variant` arg resolves against the right enum
+        // instead of eval_args's plain ambiguous-scan fallback. `OverloadedFn` doesn't have
+        // one settled FnDecl yet (the actual overload is only picked from the evaluated
+        // args below), but merged_overload_param_hints can still give a safe hint wherever
+        // every candidate agrees on the same type at that position.
+        let arg_vals = match &callee {
+            Value::Fn { decl, .. } => self.eval_args_with_hints(args, Rc::clone(&env),
+                &decl.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>())?,
+            Value::OverloadedFn { variants, .. } => {
+                let candidates: Vec<FnDecl> = variants.iter().map(|(d, _)| d.clone()).collect();
+                let hints = self.merged_overload_param_hints(&candidates, args.len());
+                self.eval_args_with_hints(args, Rc::clone(&env), &hints)?
+            }
+            _ => self.eval_args(args, Rc::clone(&env))?,
+        };
         let result = self.call_value(callee.clone(), arg_vals, line, false)?;
         // Write back mutated `var` params to their caller variables.
         if let Value::Fn { ref decl, .. } = callee {
@@ -759,29 +814,39 @@ impl Interpreter {
                 }
             }
         }
-        // Check for double-use of owned args before evaluating
-        if let Value::Object(inner_rc) = &obj {
+        // Check for double-use of owned args before evaluating. Also collect every method
+        // with this name (there may be several — overloads) so `.Variant` args below can
+        // get a hint wherever every arity-compatible candidate agrees on the same param
+        // type there (merged_overload_param_hints); the double-use check itself still only
+        // looks at the first candidate, same as before this collected the rest too.
+        let method_candidates: Vec<FnDecl> = if let Value::Object(inner_rc) = &obj {
             let type_name = inner_rc.borrow().type_name.clone();
-            let decl_opt = {
-                let g = self.global.borrow();
-                if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
-                    decl.methods.iter().find(|m| m.name == *method).cloned()
-                } else { None }
-            };
-            if let Some(fn_decl) = decl_opt {
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
-                    if param.owned {
-                        if let ExprKind::Var(name) = &arg.value.kind {
-                            if !seen.insert(name.clone()) {
-                                return Err(err(format!("'{}' moved twice in the same call", name), line));
-                            }
+            let g = self.global.borrow();
+            if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                decl.methods.iter().filter(|m| m.name == *method).cloned().collect()
+            } else { Vec::new() }
+        } else { Vec::new() };
+        if let Some(fn_decl) = method_candidates.first() {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (param, arg) in fn_decl.params.iter().zip(args.iter()) {
+                if param.owned {
+                    if let ExprKind::Var(name) = &arg.value.kind {
+                        if !seen.insert(name.clone()) {
+                            return Err(err(format!("'{}' moved twice in the same call", name), line));
                         }
                     }
                 }
             }
         }
-        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+        let arg_vals = match method_candidates.as_slice() {
+            [] => self.eval_args(args, Rc::clone(&env))?,
+            [only] => self.eval_args_with_hints(args, Rc::clone(&env),
+                &only.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>())?,
+            many => {
+                let hints = self.merged_overload_param_hints(many, args.len());
+                self.eval_args_with_hints(args, Rc::clone(&env), &hints)?
+            }
+        };
         let mut modified_self: Option<Value> = None;
         let result = self.call_method(obj.clone(), method, arg_vals, line, &mut modified_self)?;
         // Write back modified self to source variable (force: mut method on let binding is OK)
@@ -1015,7 +1080,7 @@ impl Interpreter {
         let len = expr.len;
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
-            ExprKind::Float(f) => Ok(Value::Float(*f)),
+            ExprKind::Float(f) => Ok(Value::Float64(*f)),
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Nil => Ok(Value::Nil),
@@ -1101,7 +1166,8 @@ impl Interpreter {
                 match op {
                     UnaryOp::Neg => match val {
                         Value::Int(n) => Ok(Value::Int(-n)),
-                        Value::Float(f) => Ok(Value::Float(-f)),
+                        Value::Float64(f) => Ok(Value::Float64(-f)),
+                        Value::Float32(f) => Ok(Value::Float32(-f)),
                         Value::Object(ref inner_rc) => {
                             let type_name = inner_rc.borrow().type_name.clone();
                             if self.has_method(&type_name, "neg") {
@@ -1559,10 +1625,14 @@ impl Interpreter {
         'arms: for arm in &s.arms {
             for pattern in &arm.patterns {
                 let mut bindings = HashMap::new();
-                if self.match_pattern(pattern, &subject, &mut bindings) {
+                let mut mut_names = std::collections::HashSet::new();
+                if self.match_pattern(pattern, &subject, &mut bindings, &mut mut_names) {
                     let child = Env::child(Rc::clone(&env));
                     for (k, v) in bindings {
                         child.borrow_mut().define(&k, v);
+                        if mut_names.contains(&k) {
+                            child.borrow_mut().mark_content_mutable(&k);
+                        }
                     }
                     // Evaluate optional guard in the child env (bindings already in scope)
                     if let Some(guard_expr) = &arm.guard {
@@ -1674,6 +1744,7 @@ impl Interpreter {
 
         let l = self.eval_expr(lhs, Rc::clone(&env))?;
         let r = self.eval_expr(rhs, env)?;
+        let (l, r) = coerce_float_literal_pair(l, r, lhs, rhs);
 
         match op {
             // Each arithmetic/bitwise op is dispatched to its own method rather than inlined
@@ -1826,9 +1897,12 @@ impl Interpreter {
             (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_add(b))),
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_add(b))),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_add(b))),
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
+            (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
+            (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a + b as f64)),
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a + b)),
+            (Value::Int(a), Value::Float32(b)) => Ok(Value::Float32(a as f32 + b)),
+            (Value::Float32(a), Value::Int(b)) => Ok(Value::Float32(a + b as f32)),
             (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
             (Value::Array(a), Value::Array(b)) => {
                 let mut new_vec = Rc::try_unwrap(a).unwrap_or_else(|rc| (*rc).clone());
@@ -1900,9 +1974,12 @@ impl Interpreter {
             (Value::Uint128(a), Value::Uint128(b)) => {
                 if b > a { Err(err_span("uint128 subtraction underflow", line, rcol, rlen)) } else { Ok(Value::Uint128(a - b)) }
             }
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
-            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
+            (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
+            (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a - b as f64)),
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a - b)),
+            (Value::Int(a), Value::Float32(b)) => Ok(Value::Float32(a as f32 - b)),
+            (Value::Float32(a), Value::Int(b)) => Ok(Value::Float32(a - b as f32)),
             (a, b) => {
                 if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Sub, line, rcol, rlen) {
                     return result;
@@ -1941,9 +2018,12 @@ impl Interpreter {
             (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.wrapping_mul(b))),
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.wrapping_mul(b))),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.wrapping_mul(b))),
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
-            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
+            (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
+            (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a * b as f64)),
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a * b)),
+            (Value::Int(a), Value::Float32(b)) => Ok(Value::Float32(a as f32 * b)),
+            (Value::Float32(a), Value::Int(b)) => Ok(Value::Float32(a * b as f32)),
             (a, b) => {
                 if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Mul, line, rcol, rlen) {
                     return result;
@@ -1993,9 +2073,12 @@ impl Interpreter {
             (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
             (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
             (Value::Uint128(a), Value::Uint128(b)) => Ok(Value::Uint128(a.checked_div(b).ok_or_else(|| err_span("division by zero", line, rcol, rlen))?)),
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
-            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a / b)),
+            (Value::Int(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 / b)),
+            (Value::Float64(a), Value::Int(b)) => Ok(Value::Float64(a / b as f64)),
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a / b)),
+            (Value::Int(a), Value::Float32(b)) => Ok(Value::Float32(a as f32 / b)),
+            (Value::Float32(a), Value::Int(b)) => Ok(Value::Float32(a / b as f32)),
             (a, b) => {
                 if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Div, line, rcol, rlen) {
                     return result;
@@ -2063,9 +2146,12 @@ impl Interpreter {
             (Value::Uint128(a), Value::Uint128(b)) => {
                 if b == 0 { Err(err_span("remainder by zero", line, rcol, rlen)) } else { Ok(Value::Uint128(a % b)) }
             }
-            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
-            (Value::Int(a),   Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
-            (Value::Float(a), Value::Int(b))   => Ok(Value::Float(a % (b as f64))),
+            (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a % b)),
+            (Value::Int(a),   Value::Float64(b)) => Ok(Value::Float64((a as f64) % b)),
+            (Value::Float64(a), Value::Int(b))   => Ok(Value::Float64(a % (b as f64))),
+            (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a % b)),
+            (Value::Int(a),   Value::Float32(b)) => Ok(Value::Float32((a as f32) % b)),
+            (Value::Float32(a), Value::Int(b))   => Ok(Value::Float32(a % (b as f32))),
             (a, b) => {
                 if let Some(result) = eval_numeric_mixed(&a, &b, &BinOp::Rem, line, rcol, rlen) {
                     return result;
@@ -2205,14 +2291,25 @@ impl Interpreter {
     // `compare_values` applies for `<`/`>`/etc. — otherwise derived PartialEq treats
     // e.g. Value::Int(5) and Value::Uint(5) as unequal since they're different variants.
     pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
-        // Float mixed with any integer kind — compare as f64 (generalizes the old
-        // Int/Uint/Uint8-only arms to all 12 numeric kinds, fixing the pre-existing gap
-        // where Uint8 vs Float wasn't wired in here).
-        if let Value::Float(a) = l {
+        // float32/float64 against each other, or against any integer kind — compared
+        // as f64. This is deliberately more permissive than arithmetic's strict
+        // float32/float64 mixing rule (docs/float-width-types.md §3, `+`/`-`/etc.
+        // require an explicit cast): comparisons already had this precedent for
+        // distinct-width integers below (Int8 == Int32 compares numerically, not a
+        // type error), and floats simply extend the same existing precedent.
+        if let (Value::Float32(a), Value::Float64(b)) = (l, r) { return *a as f64 == *b; }
+        if let (Value::Float64(a), Value::Float32(b)) = (l, r) { return *a == *b as f64; }
+        if let Value::Float64(a) = l {
             if let Some(b) = value_as_i128(r) { return *a == b as f64; }
         }
-        if let Value::Float(b) = r {
+        if let Value::Float64(b) = r {
             if let Some(a) = value_as_i128(l) { return a as f64 == *b; }
+        }
+        if let Value::Float32(a) = l {
+            if let Some(b) = value_as_i128(r) { return *a as f64 == b as f64; }
+        }
+        if let Value::Float32(b) = r {
+            if let Some(a) = value_as_i128(l) { return a as f64 == *b as f64; }
         }
         // Two different integer kinds — compare via i128 staging (same-kind pairs fall
         // through to the derived `l == r` below, which handles full-width Uint128/Int128).
@@ -2227,16 +2324,32 @@ impl Interpreter {
     }
 
     pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
-        let ord = if let (Value::Float(a), Value::Float(b)) = (&l, &r) {
+        let ord = if let (Value::Float64(a), Value::Float64(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-        } else if let Value::Float(a) = &l {
+        } else if let (Value::Float32(a), Value::Float32(b)) = (&l, &r) {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float32(a), Value::Float64(b)) = (&l, &r) {
+            (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let (Value::Float64(a), Value::Float32(b)) = (&l, &r) {
+            a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        } else if let Value::Float64(a) = &l {
             match value_as_i128(&r) {
                 Some(b) => a.partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal),
                 None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
             }
-        } else if let Value::Float(b) = &r {
+        } else if let Value::Float64(b) = &r {
             match value_as_i128(&l) {
                 Some(a) => (a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else if let Value::Float32(a) = &l {
+            match value_as_i128(&r) {
+                Some(b) => (*a as f64).partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
+            }
+        } else if let Value::Float32(b) = &r {
+            match value_as_i128(&l) {
+                Some(a) => (a as f64).partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
                 None => return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col)),
             }
         } else if let (Value::Str(a), Value::Str(b)) = (&l, &r) {
@@ -2257,9 +2370,28 @@ impl Interpreter {
     }
 
     pub(crate) fn eval_args(&mut self, args: &[Arg], env: EnvRef) -> Result<Vec<Value>, Signal> {
+        self.eval_args_with_hints(args, env, &[])
+    }
+
+    /// Same as `eval_args`, but resolves a `.Variant` argument against a per-position
+    /// expected type (matched positionally) instead of falling straight to `eval_expr`'s
+    /// ambiguous-scan path — see `resolve_dot_ident_hint`. `hints` shorter than `args` (or
+    /// empty, as `eval_args` passes) just means later/all args get no hint and fall back to
+    /// the plain path, same as today. Takes resolved `Option<Type>` slots rather than
+    /// `&[Param]` directly so callers can pass either a single non-overloaded FnDecl's
+    /// param types, or a merged hint built across several overload candidates (see
+    /// `merged_overload_param_hints`) — there is no single `FnDecl` in the latter case.
+    pub(crate) fn eval_args_with_hints(&mut self, args: &[Arg], env: EnvRef, hints: &[Option<Type>]) -> Result<Vec<Value>, Signal> {
         let mut vals = Vec::new();
-        for arg in args {
-            let v = self.eval_expr(&arg.value, Rc::clone(&env))?;
+        for (i, arg) in args.iter().enumerate() {
+            let hinted = match (&arg.value.kind, hints.get(i).and_then(|h| h.as_ref())) {
+                (ExprKind::DotIdent(name), Some(ty)) => self.resolve_dot_ident_hint(name, ty),
+                _ => None,
+            };
+            let v = match hinted {
+                Some(v) => v,
+                None => self.eval_expr(&arg.value, Rc::clone(&env))?,
+            };
             if arg.spread {
                 // `..expr` — expand all fields of the source struct as labeled args.
                 // Explicit labeled args that come after will override these via HashMap::insert.

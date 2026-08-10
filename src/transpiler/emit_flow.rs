@@ -81,6 +81,12 @@ impl Transpiler {
                         // Strict mode T'new / T' return: wrap in Box::new().
                         let inner = self.emit_expr_owned(e);
                         if inner.starts_with("Box::new(") { inner } else { format!("Box::new({})", inner) }
+                    } else if matches!(&e.kind, ExprKind::DotIdent(_)) {
+                        // `return .Left` — resolve the enum shorthand against the function's
+                        // own declared return type instead of falling through to
+                        // emit_expr_owned's flat "last enum registered wins" DotIdent lookup,
+                        // which can silently pick the wrong enum when variant names collide.
+                        self.emit_let_value(Some(ret_ty), e)
                     } else {
                         self.emit_expr_owned(e)
                     }
@@ -177,6 +183,20 @@ impl Transpiler {
                         self.line(&make_err(&format!("Box::new(BoringError::String({}::<str>::from({})))", self.str_ptr(), arc_inner)));
                     }
                     _ => {
+                        // Fixed-width scalar throws (int8..int128, uint8..uint128,
+                        // float32, float64) route through BoringError::Scalar
+                        // (docs/float-width-types.md §7) — checked before the
+                        // is_typed_error/String fallback below, which would otherwise
+                        // stringify the value via BoringError::String, losing the type
+                        // information `catch Int8:`/`catch Float32:` need to dispatch on.
+                        let scalar_ctor = crate::transpiler::helpers::infer_overload_expr_type(
+                            e, &self.var_types, &self.fn_return_types, &self.struct_fields,
+                        ).as_ref().and_then(crate::transpiler::helpers::scalar_ctor_name);
+                        if let Some(ctor) = scalar_ctor {
+                            let val = self.emit_expr(e);
+                            self.line(&make_err(&format!("Box::new(BoringError::{}({}))", ctor, val)));
+                            return;
+                        }
                         // Constructor / enum variant calls implement Error directly via the
                         // `typed_error_enums` path — use .into() for those.
                         // Everything else (variables, call results) wraps as BoringError::Str.
@@ -394,6 +414,10 @@ impl Transpiler {
                     "Uint", "uint", "Uint8", "uint8",
                     "Int8", "int8", "Int16", "int16", "Int32", "int32", "Int64", "int64", "Int128", "int128",
                     "Uint16", "uint16", "Uint32", "uint32", "Uint64", "uint64", "Uint128", "uint128",
+                    // The two float widths route through BoringError::Scalar, same as the
+                    // fixed-width ints above (docs/float-width-types.md §7) — `Float`/`float`
+                    // (bare) above stays on its own BoringError::Float fast path, unaffected.
+                    "Float32", "float32", "f32", "Float64", "float64", "f64",
                 ];
                 let prim_clauses: Vec<_> = typed_clauses.iter()
                     .filter(|c| c.types.iter().any(|t| PRIM_TYPES.contains(&t.as_str())))
@@ -417,10 +441,10 @@ impl Transpiler {
                         let body_stmts = clause.body.clone();
                         for ty_name in &clause.types {
                             if PRIM_TYPES.contains(&ty_name.as_str()) {
-                                for (arm_pat, error_bind) in boring_type_to_boring_val_arms(ty_name) {
+                                for (arm_pat, error_ty, error_bind) in boring_type_to_boring_val_arms(ty_name) {
                                     self.line(&format!("{} => {{", arm_pat));
                                     self.indent += 1;
-                                    self.line(&format!("let error: Arc<str> = {};", error_bind));
+                                    self.line(&format!("let error: {} = {};", error_ty, error_bind));
                                     self.emit_loop_body(&body_stmts);
                                     self.line("None");
                                     self.indent -= 1;

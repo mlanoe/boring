@@ -1201,7 +1201,11 @@ pub enum Type {
     Uint32,
     Uint64,
     Uint128,
-    Float,
+    /// 32-bit floating-point (Rust `f32`) — distinct from `Float64`.
+    Float32,
+    /// 64-bit floating-point (Rust `f64`). `float` is a pure alias of this
+    /// variant, resolved at the alias table — see docs/float-width-types.md.
+    Float64,
     Str,
     Bool,
     Nil,
@@ -1335,7 +1339,7 @@ impl Type {
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+                | Type::Float32 | Type::Float64 | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
             Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
@@ -1369,7 +1373,7 @@ impl Type {
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                | Type::Float | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+                | Type::Float32 | Type::Float64 | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Fn(..) => true,
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),

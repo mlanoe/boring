@@ -158,6 +158,45 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                         Type.Int8 | Type.Int16 | Type.Int32 | Type.Int64 | Type.Int128 | Type.Uint16 | Type.Uint32 | Type.Uint64 | Type.Uint128:
                             if num_kind_of(val) != type_to_num_kind(declared_ty):
                                 val = cast_value(interp, val, declared_ty)
+                        # float has no independent flexible kind of its own the way
+                        # int/uint do (docs/float-width-types.md §2) — a bare literal
+                        # defaults to Value.Float64, so `let float32 x = 1.0` needs
+                        # the same narrowing coercion int8..int128 above get, keyed
+                        # directly off the Value variant instead of NumKind (which
+                        # floats deliberately aren't part of).
+                        Type.Float32:
+                            match val:
+                                Value.Float32(_): nil
+                                _: val = cast_value(interp, val, Type.Float32)
+                        Type.Float64:
+                            match val:
+                                Value.Float64(_): nil
+                                _: val = cast_value(interp, val, Type.Float64)
+                        # A fixed-shape `let [T, width = W, height = H] a = [...]`
+                        # annotation is the only place a labeled array's shape can
+                        # come from a bare array literal (a comprehension or
+                        # `.reshape()` initializer already produces a real
+                        # Value.LabeledArray on its own — see eval.br). Dynamic-
+                        # shape annotations (`let [T, width, height] a`) have no
+                        # sizes to attach here; those stay Value.Array until a
+                        # later `.reshape()`/assignment gives them a shape.
+                        Type.LabeledArray(_, axes):
+                            var pairs = []
+                            var all_fixed = true
+                            var total = 1
+                            for ax in axes:
+                                if let sz = ax.size:
+                                    pairs.push((ax.label, sz))
+                                    total = total * sz
+                                else:
+                                    all_fixed = false
+                            if all_fixed:
+                                match val:
+                                    Value.Array(items):
+                                        if items.length != total:
+                                            throw "labeled array length mismatch — buffer has {items.length} elements, shape needs {total}"
+                                        val = Value.LabeledArray(items, pairs)
+                                    _: nil
                         _: nil
             if s.is_lazy:
                 interp.current_env.define_lazy(s.name)
@@ -182,7 +221,22 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
         Return(s):
             var val = Nil
             if let expr = s.value:
-                val = eval_expr(interp, expr)
+                # `return .Left` — resolve against the enclosing function's own declared
+                # return type (current_return_ty, pushed by call_fn) instead of
+                # eval_dot_ident's ambiguous-scan default, mirroring the Rust
+                # interpreter's exec.rs Stmt::Return fix.
+                var hinted = false
+                match expr.kind:
+                    ExprKind.DotIdent(variant_name):
+                        let hint_opt = interp.current_return_ty()
+                        if let hint = hint_opt:
+                            let resolved = eval_dot_ident_hint(interp, variant_name, hint)
+                            if let rv = resolved:
+                                val = rv
+                                hinted = true
+                    _: nil
+                if not hinted:
+                    val = eval_expr(interp, expr)
                 if interp.has_pending_throw:
                     return ThrowSignal(interp.take_pending_throw())
             ReturnSignal(val)
@@ -642,7 +696,7 @@ def Signal? exec_match_stmt(mut Interpreter interp, MatchStmt s):
 def Value expr_to_value_literal(Expr expr):
     match expr.kind:
         ExprKind.Int(n): Value.Int(n)
-        ExprKind.Float(f): Value.Float(f)
+        ExprKind.Float(f): Value.Float64(f)
         ExprKind.Str(s): Value.Str(s)
         ExprKind.Bool(b): Value.Bool(b)
         ExprKind.Nil: Value.Nil
@@ -682,7 +736,8 @@ def bool match_pattern(Value val, Pattern pattern, Env'actor env):
                         _: false
                 LitPattern.Float(f):
                     match val:
-                        Value.Float(v): v == f
+                        Value.Float64(v): v == f
+                        Value.Float32(v): (v as float64) == f
                         _: false
                 LitPattern.Str(s):
                     match val:
@@ -880,12 +935,19 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
                 fn_env.define(param.name, val)
     let prev_env = interp.current_env
     interp.current_env = fn_env
+    # Push this call's declared return type so `return .Left` (exec_stmt's Return case)
+    # can resolve the enum shorthand via eval_dot_ident_hint instead of eval_dot_ident's
+    # ambiguous-scan default — mirrors the Rust interpreter's return_ty_stack
+    # (src/interpreter/call.rs / exec.rs).
+    interp.push_return_ty(decl.return_ty)
     if decl.is_stream:
         # Stream function: collect all yielded values into an array
         let stream_result = exec_stream_fn(interp, decl.body)
+        interp.pop_return_ty()
         interp.current_env = prev_env
         return Value.Array(stream_result)
     let sig = exec_block_fn(interp, decl.body)
+    interp.pop_return_ty()
     interp.current_env = prev_env
     match sig:
         nil: Nil
@@ -979,6 +1041,8 @@ def string normalize_type_name(string name):
     if name == "String": "string"
     else if name == "Int": "int"
     else if name == "Float": "float"
+    else if name == "Float32": "float32"
+    else if name == "Float64": "float64"
     else if name == "Bool": "bool"
     else if name == "Nil": "nil"
     else: name
@@ -1006,9 +1070,11 @@ def string value_type_name(Value val):
         Uint32(_): "uint32"
         Uint64(_): "uint64"
         Uint128(_): "uint128"
-        Float(_): "float"
+        Float32(_): "float32"
+        Float64(_): "float"
         Str(_): "string"
         Array(_): "array"
+        LabeledArray(_, _): "array"
         Tuple(_): "tuple"
         Dict(_): "dict"
         Set(_): "set"
@@ -1031,7 +1097,8 @@ def string value_to_string(Value val):
         Void: ""
         Bool(b): if b: "true" else: "false"
         Int(n): "{n}"
-        Float(f): "{f}"
+        Float32(f): "{f}"
+        Float64(f): "{f}"
         Str(s): s
         _: value_type_name(val)
 
@@ -1053,9 +1120,18 @@ def bool value_equals(Value a, Value b):
             match b:
                 Int(y): x == y
                 _: false
-        Float(x):
+        # float32/float64 compare freely against each other here too — same
+        # permissive precedent as `values_equal` in stdlib.br
+        # (docs/float-width-types.md §3).
+        Float64(x):
             match b:
-                Float(y): x == y
+                Float64(y): x == y
+                Float32(y): x == (y as float64)
+                _: false
+        Float32(x):
+            match b:
+                Float32(y): x == y
+                Float64(y): (x as float64) == y
                 _: false
         Str(x):
             match b:
@@ -1085,9 +1161,13 @@ def Value value_add(Value a, Value b):
             match b:
                 Int(y): Int(x + y)
                 _: throw "type error in +="
-        Float(x):
+        Float64(x):
             match b:
-                Float(y): Float(x + y)
+                Float64(y): Float64(x + y)
+                _: throw "type error in +="
+        Float32(x):
+            match b:
+                Float32(y): Float32(x + y)
                 _: throw "type error in +="
         Str(x):
             match b:
@@ -1101,9 +1181,13 @@ def Value value_sub(Value a, Value b):
             match b:
                 Int(y): Int(x - y)
                 _: throw "type error in -="
-        Float(x):
+        Float64(x):
             match b:
-                Float(y): Float(x - y)
+                Float64(y): Float64(x - y)
+                _: throw "type error in -="
+        Float32(x):
+            match b:
+                Float32(y): Float32(x - y)
                 _: throw "type error in -="
         _: throw "type error in -="
 
@@ -1113,9 +1197,13 @@ def Value value_mul(Value a, Value b):
             match b:
                 Int(y): Int(x * y)
                 _: throw "type error in *="
-        Float(x):
+        Float64(x):
             match b:
-                Float(y): Float(x * y)
+                Float64(y): Float64(x * y)
+                _: throw "type error in *="
+        Float32(x):
+            match b:
+                Float32(y): Float32(x * y)
                 _: throw "type error in *="
         _: throw "type error in *="
 
@@ -1125,9 +1213,13 @@ def Value value_div(Value a, Value b):
             match b:
                 Int(y): Int(x / y)
                 _: throw "type error in /="
-        Float(x):
+        Float64(x):
             match b:
-                Float(y): Float(x / y)
+                Float64(y): Float64(x / y)
+                _: throw "type error in /="
+        Float32(x):
+            match b:
+                Float32(y): Float32(x / y)
                 _: throw "type error in /="
         _: throw "type error in /="
 

@@ -197,7 +197,18 @@ impl Interpreter {
                 let val = match &s.value {
                     Some(e) => {
                         Self::check_no_owned_extract(e, &env, s.line)?;
-                        self.eval_expr(e, Rc::clone(&env))?
+                        // `return .Left` — resolve against the enclosing function's own
+                        // declared return type (return_ty_stack, pushed by call_fn) instead
+                        // of eval_expr's ambiguous-scan fallback, mirroring emit_flow.rs's
+                        // transpiler-side fix for the same case.
+                        let hinted = match (&e.kind, self.return_ty_stack.last()) {
+                            (ExprKind::DotIdent(name), Some(Some(ty))) => self.resolve_dot_ident_hint(name, ty),
+                            _ => None,
+                        };
+                        match hinted {
+                            Some(v) => v,
+                            None => self.eval_expr(e, Rc::clone(&env))?,
+                        }
                     }
                     None => Value::Nil,
                 };
@@ -429,11 +440,15 @@ impl Interpreter {
                 CondClause::LetPat(pat, expr) => {
                     let val = self.eval_expr(expr, Rc::clone(child))?;
                     let mut bindings = std::collections::HashMap::new();
-                    if !self.match_pattern(pat, &val, &mut bindings) {
+                    let mut mut_names = std::collections::HashSet::new();
+                    if !self.match_pattern(pat, &val, &mut bindings, &mut mut_names) {
                         return Ok(false);
                     }
                     for (k, v) in bindings {
                         child.borrow_mut().define(&k, v);
+                        if mut_names.contains(&k) {
+                            child.borrow_mut().mark_content_mutable(&k);
+                        }
                     }
                 }
                 CondClause::Expr(expr) => {
@@ -513,10 +528,14 @@ impl Interpreter {
         'arms: for arm in &s.arms {
             for pattern in &arm.patterns {
                 let mut bindings = HashMap::new();
-                if self.match_pattern(pattern, &subject, &mut bindings) {
+                let mut mut_names = std::collections::HashSet::new();
+                if self.match_pattern(pattern, &subject, &mut bindings, &mut mut_names) {
                     let child = Env::child(Rc::clone(&env));
                     for (k, v) in bindings {
                         child.borrow_mut().define(&k, v);
+                        if mut_names.contains(&k) {
+                            child.borrow_mut().mark_content_mutable(&k);
+                        }
                     }
                     // Evaluate optional guard in the child env (bindings already in scope)
                     if let Some(guard_expr) = &arm.guard {
@@ -559,9 +578,13 @@ impl Interpreter {
             if let Some(pat) = &s.pattern {
                 // `while let Some(x) = expr:` — pattern form
                 let mut bindings = std::collections::HashMap::new();
-                if !self.match_pattern(pat, &val, &mut bindings) { break; }
+                let mut mut_names = std::collections::HashSet::new();
+                if !self.match_pattern(pat, &val, &mut bindings, &mut mut_names) { break; }
                 for (k, v) in bindings {
                     child.borrow_mut().define(&k, v);
+                    if mut_names.contains(&k) {
+                        child.borrow_mut().mark_content_mutable(&k);
+                    }
                 }
             } else {
                 // `while let name = expr:` — simple nil-check binding
@@ -878,7 +901,8 @@ impl Interpreter {
             match ty {
                 Type::Uint | Type::Uint8
                     | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
-                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Some(ty.clone()),
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
+                    | Type::Float32 | Type::Float64 => Some(ty.clone()),
                 Type::Qualified(inner, _) => base(inner),
                 _ => None,
             }
@@ -928,6 +952,26 @@ impl Interpreter {
                 Value::Int(n) if n >= 0 => Value::Uint128(n as u128),
                 other => other,
             },
+            // A bare `int` literal (e.g. `let float32 x = 1`) or an untyped `float`
+            // literal (which evaluates to Value::Float64 by default, since float has
+            // no independent flexible kind of its own — docs/float-width-types.md §2)
+            // narrows to match the declared width at the binding site. This is
+            // deliberately narrower in scope than full strict-mixing enforcement:
+            // it coerces at declaration time (`let float32 x = float64_expr`), while
+            // two independently-typed variables mixing in an *expression*
+            // (`float32_var + float64_var`) is rejected by `eval_binop`'s stricter
+            // check, which does have the source-expression context to distinguish
+            // a literal from a resolved value and this function does not.
+            Some(Type::Float32) => match val {
+                Value::Int(n) => Value::Float32(n as f32),
+                Value::Float64(f) => Value::Float32(f as f32),
+                other => other,
+            },
+            Some(Type::Float64) => match val {
+                Value::Int(n) => Value::Float64(n as f64),
+                Value::Float32(f) => Value::Float64(f as f64),
+                other => other,
+            },
             _ => val,
         }
     }
@@ -943,6 +987,68 @@ impl Interpreter {
             Type::Qualified(inner, _) => Self::type_base_name(inner),
             _ => None,
         }
+    }
+
+    /// Resolve `.Variant` against a known expected type — a function/method parameter's
+    /// declared type, or the enclosing function's declared return type — instead of
+    /// `eval_expr`'s `ExprKind::DotIdent` arm, which scans every enum registered globally
+    /// and errors out as "ambiguous" the moment two enums share a variant name. This gives
+    /// `boring run` the same param-type/return-type disambiguation the transpiler already
+    /// does via `emit_let_value` (see `struct_method_param_types` in emit_methods.rs).
+    /// Returns `None` when `hint_ty` doesn't name a known enum with this variant — callers
+    /// fall back to the plain `eval_expr` path in that case, which still resolves the
+    /// unambiguous case and errors on a genuine unresolved collision.
+    pub(crate) fn resolve_dot_ident_hint(&self, name: &str, hint_ty: &Type) -> Option<Value> {
+        let resolved = self.resolve_type(hint_ty);
+        let base = Self::type_base_name(&resolved)?;
+        if !self.enums.contains_key(&base) { return None; }
+        let global = self.global.borrow();
+        match global.get(&base) {
+            Some(Value::EnumNamespace { variants, .. }) => variants.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Build a per-position `.Variant` hint (see `resolve_dot_ident_hint`) for a call whose
+    /// callee resolves to several same-named candidate `FnDecl`s (an overloaded free
+    /// function or struct method). The right candidate is normally picked by
+    /// `find_best_method`/`Value::OverloadedFn`'s dispatch in `call_value` — but that
+    /// selection needs the *evaluated* argument `Value`s, which don't exist yet while we're
+    /// still evaluating them.
+    ///
+    /// Position `i` gets a hint only when the arity-compatible candidates agree on a single
+    /// enum there. "Agree" means: among candidates whose declared type at `i` is a *known
+    /// enum*, there is exactly one such enum. A candidate with a non-enum type there (an
+    /// `int` overload alongside a `TrafficLight` one, say) is simply irrelevant — a
+    /// `.Variant` argument could never resolve against it anyway, so it doesn't block the
+    /// hint. Two *different* enums both appearing at `i` is genuine ambiguity — picking one
+    /// would silently guess which overload gets called — so that still yields no hint,
+    /// falling back to the ambiguous-scan default exactly as before this method existed.
+    pub(crate) fn merged_overload_param_hints(&self, candidates: &[FnDecl], arg_count: usize) -> Vec<Option<Type>> {
+        let applicable: Vec<&FnDecl> = candidates.iter()
+            .filter(|d| {
+                let min_a = d.params.iter().filter(|p| p.default.is_none()).count();
+                let max_a = d.params.len();
+                arg_count >= min_a && arg_count <= max_a
+            })
+            .collect();
+        let mut hints: Vec<Option<Type>> = vec![None; arg_count];
+        if applicable.is_empty() { return hints; }
+        for (i, hint) in hints.iter_mut().enumerate() {
+            let mut distinct_enums: Vec<(String, Type)> = Vec::new();
+            for d in &applicable {
+                let Some(ty) = d.params.get(i).and_then(|p| p.ty.as_ref()) else { continue };
+                let Some(base) = Self::type_base_name(&self.resolve_type(ty)) else { continue };
+                if !self.enums.contains_key(&base) { continue; }
+                if !distinct_enums.iter().any(|(b, _)| *b == base) {
+                    distinct_enums.push((base, ty.clone()));
+                }
+            }
+            if distinct_enums.len() == 1 {
+                *hint = Some(distinct_enums.remove(0).1);
+            }
+        }
+        hints
     }
 
     // ─── Type display ────────────────────────────────────────────────────────
@@ -962,7 +1068,8 @@ impl Interpreter {
             Type::Uint32 => "uint32".into(),
             Type::Uint64 => "uint64".into(),
             Type::Uint128 => "uint128".into(),
-            Type::Float  => "float".into(),
+            Type::Float32  => "float32".into(),
+            Type::Float64  => "float64".into(),
             Type::Str    => "string".into(),
             Type::Bool   => "bool".into(),
             Type::Nil    => "nil".into(),
@@ -1088,7 +1195,8 @@ impl Interpreter {
             Type::Uint32 => matches!(val, Value::Uint32(_)) || matches!(val, Value::Int(n) if (0..=u32::MAX as i64).contains(n)),
             Type::Uint64 => matches!(val, Value::Uint64(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Uint128 => matches!(val, Value::Uint128(_)) || matches!(val, Value::Int(n) if *n >= 0),
-            Type::Float  => matches!(val, Value::Float(_)),
+            Type::Float32  => matches!(val, Value::Float32(_)),
+            Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
             Type::Nil    => matches!(val, Value::Nil),
@@ -1226,7 +1334,7 @@ impl Interpreter {
             Type::Int    => matches!(val, Value::Int(_)),
             Type::Uint   => matches!(val, Value::Uint(_)),
             Type::Uint8  => matches!(val, Value::Uint8(_)),
-            Type::Float  => matches!(val, Value::Float(_)),
+            Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
             Type::Optional(_) => matches!(val, Value::Nil) || self.value_matches_type(val, ty),
@@ -1235,7 +1343,7 @@ impl Interpreter {
                 "int"    => matches!(val, Value::Int(_)),
                 "uint"   => matches!(val, Value::Uint(_)),
                 "uint8"  => matches!(val, Value::Uint8(_)),
-                "float"  => matches!(val, Value::Float(_)),
+                "float"  => matches!(val, Value::Float64(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),
                 _ => self.value_matches_type(val, ty),
@@ -1415,13 +1523,13 @@ impl Interpreter {
             match v {
                 Value::Int(n)   => Ok(*n),
                 Value::Uint(n)  => Ok(*n as i64),
-                Value::Float(f) => Ok(*f as i64),
+                Value::Float64(f) => Ok(*f as i64),
                 _ => Err(err(format!("format '{spec}' requires an integer"), line)),
             }
         };
         let to_float = |v: &Value| -> Result<f64, Signal> {
             match v {
-                Value::Float(f) => Ok(*f),
+                Value::Float64(f) => Ok(*f),
                 Value::Int(n)   => Ok(*n as f64),
                 Value::Uint(n)  => Ok(*n as f64),
                 _ => Err(err(format!("format '{spec}' requires a number"), line)),
@@ -1488,7 +1596,7 @@ impl Interpreter {
             match &val {
                 Value::Int(n) if *n >= 0 => format!("+{body}"),
                 Value::Uint(_) => format!("+{body}"),
-                Value::Float(f) if *f >= 0.0 => format!("+{body}"),
+                Value::Float64(f) if *f >= 0.0 => format!("+{body}"),
                 _ => body,
             }
         } else { body };
@@ -1582,7 +1690,7 @@ impl Interpreter {
             val,
             Value::Int(_)
                 | Value::Uint(_)
-                | Value::Float(_)
+                | Value::Float64(_)
                 | Value::Bool(_)
                 | Value::Str(_)
                 | Value::Nil

@@ -172,30 +172,49 @@ let v = a[width = w, height = h, depth = d]
   the benefit of either. This mirrors how named function arguments and
   `fill = v`-style keyword args already behave elsewhere in the language.
 
-## Shape queries: `.size(.axis)`
+## Shape queries: `a.axis`
 
-A single method replaces `.width()` / `.height()` / `.depth()`, taking a
-compiler-synthesized enum of that array type's axis labels:
+Each declared axis label is exposed directly as a read-only property —
+`a.width`, `a.height` — the same no-parens convention every other
+argument-free, computed value already uses in Boring (a struct/enum `req`
+getter, `arr.length` on a plain collection):
 
 ```boring
-a.size(.width)
-a.size(.height)
+a.width
+a.height
 ```
 
-This needs no new language feature. Boring already supports leading-dot
-shorthand for enum variants and static methods, resolved from the expected
-type at the call site (`spec/grammar.bnf`, `docs/book.md`, e.g. `.North`
-resolving to `Direction.North`, `.fromSecs(5)` resolving to
-`Duration.fromSecs(5)`). Declaring `[T, width, height]` synthesizes an
-axis-selector enum whose variants are the declared labels; `.size(...)`'s
-parameter type supplies the inference context exactly like
-`Duration.fromSecs` does for `wait(.fromSecs(5))`.
+This needs no new language feature. It's the same `Field`-access path
+`arr.length` already goes through — the compiler recognizes, for a
+`[T, ...]`-typed receiver, that a field name matching one of that type's own
+declared axis labels resolves to that axis's size rather than an ordinary
+struct field (there is no ordinary field to shadow: arrays have no
+user-visible fields other than these axis properties and the built-in
+`.length`/`.count`/`.len`).
 
-`.size(...)` is kept separate from indexing — indexing always uses bare
-labels (`a[width = w, ...]`), never the dot form (`a[.width = w, ...]`) —
-so a given label has exactly one lexical form per role (bare identifier for
-values/positions, dot-prefixed for the shape-selector enum), rather than two
-competing spellings for "the same" label.
+`a.axis` is read-only — `a.width = ...` is not assignable, matching
+`arr.length`'s own read-only status; a labeled array's shape is fixed at
+construction (see "Construction" above) and changes only through
+`.reshape()`, never through a property write.
+
+`a.axis` is kept separate from indexing — indexing always uses bare labels
+as *keyword arguments* (`a[width = w, ...]`), never as a receiver-less
+property (`a[.width = w, ...]`) — so a given label has exactly one lexical
+form per role (bare identifier for values/positions, dotted-property for the
+shape query), rather than two competing spellings for "the same" label.
+
+> **History.** An earlier revision of this design exposed shape queries as
+> `a.size(.axis)`, a method call taking a compiler-synthesized "axis
+> selector" enum, modeled on Boring's leading-dot enum-variant shorthand.
+> That mechanism was never actually needed: every real call site (this repo
+> and `whisper-boring`, its one consumer) passed a literal `.axis` argument,
+> never a value carried through a variable or function boundary — and the
+> implementation could not have supported that anyway, since `.size(.axis)`
+> was resolved by pattern-matching the literal AST node at the call site, not
+> through a real runtime enum value. With no parametric use case to justify
+> the extra method-call indirection, `a.axis` — direct, read-only, no
+> parentheses — replaced it outright rather than keeping both spellings for
+> the same query.
 
 ## Converting to and from a 1D buffer
 
@@ -323,21 +342,16 @@ shapes happen to match numerically.
   closing bracket), so stacked forms like `'actor'unified` carry over
   exactly as they work on flat `[T]` fields.
 - **Beyond 3 axes**: CPU-side arrays have no limit — the label list, the
-  fixed declaration order, the `.size(.axis)` enum, and `.reshape()` /
-  `.flatten()` all generalize to any number of axes without change. A 4D
-  `[T, batch, channel, width, height]` is exactly as well-formed as a 2D
-  one. GPU-side kernel fields are capped at 3, same as `Volume<T,X,Y,Z>`
-  always was — CUDA/Metal/wgpu thread and block indices only go up to
-  `x`/`y`/`z`, and automatic grid-size inference at dispatch has nowhere to
-  put a 4th axis. For GPU-resident data with more than 3 logical axes, the
-  pattern is to manually collapse the extra axes into one of the three GPU
-  axes (e.g. fold `channel` into `height` at construction time) and recover
-  the individual indices inside the kernel body.
-- **`.size(.axis)`'s leading-dot shorthand** is not a new language feature —
-  it's the existing leading-dot enum/static-method shorthand
-  (`spec/grammar.bnf`, `docs/book.md`), applied to a compiler-synthesized
-  per-array-type enum. Nothing here depends on that shorthand being
-  extended or documented any further as a general-purpose feature.
+  fixed declaration order, the `a.axis` shape-query properties, and
+  `.reshape()` / `.flatten()` all generalize to any number of axes without
+  change. A 4D `[T, batch, channel, width, height]` is exactly as
+  well-formed as a 2D one. GPU-side kernel fields are capped at 3, same as
+  `Volume<T,X,Y,Z>` always was — CUDA/Metal/wgpu thread and block indices
+  only go up to `x`/`y`/`z`, and automatic grid-size inference at dispatch
+  has nowhere to put a 4th axis. For GPU-resident data with more than 3
+  logical axes, the pattern is to manually collapse the extra axes into one
+  of the three GPU axes (e.g. fold `channel` into `height` at construction
+  time) and recover the individual indices inside the kernel body.
 
 ## See also
 

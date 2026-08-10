@@ -1756,7 +1756,7 @@ let [float, width, height] a = [ 0.0 for width = 3, height = 4 ]  # dynamic shap
 let [float, width = 3, height = 4] b                              # fixed shape
 
 let v = a[width = 1, height = 2]   # order-free — a[height = 2, width = 1] is identical
-let w = a.size(.width)             # 3
+let w = a.width                    # 3 — read-only shape-query property
 ```
 
 - `[T, width, height]` (no `=`) — dynamic shape, sized at construction.
@@ -1768,8 +1768,8 @@ let w = a.size(.width)             # 3
 - `a[label = value, ...]` indexing requires every axis to be labeled — there
   is no positional form — and reads correctly regardless of the order the
   labels are written in.
-- `a.size(.label)` replaces a family of per-axis accessor methods with one
-  method plus a compiler-synthesized selector per array type.
+- `a.label` — each declared axis is a read-only property, same no-parens
+  convention as `arr.length` or a struct's `req` getter.
 - `flat.reshape(width = W, height = H)` / `a.flatten()` convert to and from
   a plain `[T]` explicitly — never implicitly.
 
@@ -2595,17 +2595,20 @@ let ed = EDirection.South
 print ed.label             # "sud" — req getter, no parens needed
 ```
 
-Unlike on structs, `def` and `req` are **interchangeable** on an enum: enum
-variants carry no mutable fields, so there is no `self.field = x` for `def`
-to unlock, and both keywords transpile to `&self`. Neither requires the
-receiver's type to carry `mut`/`var mut` — `ec` and `ed` above are plain
-`let` bindings and both calls above compile and run. The choice between them
-is documentation intent only, exactly like `req`/`def` on top-level free
-functions ([§8](#8-structs)): use `req` for a pure accessor (`label`), `def`
-if the method reads as an action even though it can't actually mutate
-(`ename`). A future compiler version may tighten this and reject `def` on
-enums outright, since it currently promises a mutation guarantee it cannot
-enforce — prefer `req` in new code unless mirroring existing `def` usage.
+By default `def` and `req` are **interchangeable** on an enum: `EColor` and
+`EDirection` above have no variant field declared `mut` (see the next
+section), so there is no `self.field = x` for `def` to unlock, and both
+keywords transpile to `&self`. Neither requires the receiver's type to carry
+`mut`/`var mut` — `ec` and `ed` above are plain `let` bindings and both calls
+compile and run. The choice between them is documentation intent only,
+exactly like `req`/`def` on top-level free functions ([§8](#8-structs)): use
+`req` for a pure accessor (`label`), `def` if the method reads as an action
+even though it can't actually mutate (`ename`). A future compiler version may
+tighten this and reject `def` on such enums outright, since it currently
+promises a mutation guarantee it cannot enforce there — prefer `req` in new
+code unless mirroring existing `def` usage. (An enum with a `mut`-qualified
+variant field, next section, is the one case where this interchangeability
+*doesn't* hold — `def` there is real.)
 
 **Rust equivalent**
 ```rust
@@ -2615,6 +2618,72 @@ impl EColor {
             EColor::Red => "red".into(),
             EColor::Green => "green".into(),
             EColor::Blue => "blue".into(),
+        }
+    }
+}
+```
+
+### Enum variant fields — `mut Type`
+
+A variant field can itself carry `mut`, the same modifier a tuple slot,
+struct field, or collection element can ([mut-type-modifier.md](mut-type-modifier.md)).
+This is the one case where an enum's own `def` method is a *real* mutation,
+not just documentation intent — it needs (and gets) a genuine `&mut self`,
+and the enum instance itself needs `mut`/`var mut` to call it, exactly like a
+struct:
+
+```boring
+struct Point:
+    var int x = 0
+
+    def bump(): x += 1
+    req int getx(): x
+
+enum Holder:
+    Value(mut Point p)     # this field grants content mutation
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()    # `p` is bound `&mut Point` here — no `mut`/`ref mut`
+                            # needed on the pattern itself (see below)
+
+mut h = Holder.Value(Point(x = 5))
+h.bumpit()
+match h:
+    Value(p): print p.getx()   # 6 — the mutation is real, not a disconnected copy
+
+# let h2 = Holder.Value(Point(x = 0))
+# h2.bumpit()   # ERROR — h2 is not declared `mut`, same rule as a struct
+
+# enum Holder2:
+#     Value(Point p)        # no `mut` on the field
+#     def bumpit(): ...      # back to the previous section: def == req, `&self`
+```
+
+Matching bare `self` inside a `&mut self` method always matches a reference
+(`&mut Self` in the generated Rust) — Rust's own match ergonomics then bind
+`p` as `&mut Point` automatically, with no `mut p`/`ref mut p` annotation
+needed or accepted (writing `mut p` there is a hard compile error: "cannot
+mutably bind by value within an implicitly-borrowing pattern"). This only
+applies to matching `self` itself; matching a plain owned local of enum type
+elsewhere still needs the usual `mut` promotion to call a `def` method
+through a bound field, same as any owned match subject.
+
+Whether `def` gets `&mut self` is decided **per enum type**, not per method
+body: if the enum has a `mut`-qualified field anywhere, every `def` method on
+it gets `&mut self`, even one that never touches that field. Use `req` for a
+method that only reads, to avoid requiring a `mut` receiver unnecessarily.
+
+**Rust equivalent**
+```rust
+enum Holder {
+    Value(Point),
+}
+impl Holder {
+    fn bumpit(&mut self) {
+        match self {
+            Holder::Value(p) => { p.bump(); }
         }
     }
 }

@@ -38,7 +38,7 @@ fn run_with_labeled_array_desugar(src: &str) -> Value {
 }
 
 #[test]
-fn labeled_index_and_size_lower_correctly_on_fixed_shape_field() {
+fn labeled_index_and_axis_property_lower_correctly_on_fixed_shape_field() {
     // Mirrors test_image_at_width_height_lower_correctly (tests_gpu.rs) —
     // same shape, LabeledArray syntax instead of Image<T,C,R>.
     let src = r#"
@@ -54,8 +54,8 @@ kernel Tile:
         tile[width = 1, height = 2] = 5.0
         out[0] = tile[width = 0, height = 0]
         out[1] = tile[width = 1, height = 2]
-        out[2] = float(tile.size(.width))
-        out[3] = float(tile.size(.height))
+        out[2] = float(tile.width)
+        out[3] = float(tile.height)
 
 let data = [0.0, 0.0, 0.0, 0.0]
 mut k = Tile(data)
@@ -68,7 +68,7 @@ let _result = k.out
     let val = get_var(&interp, "_result");
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(1.0), Value::Float(5.0), Value::Float(4.0), Value::Float(4.0)].into())
+        Value::Array(vec![Value::Float64(1.0), Value::Float64(5.0), Value::Float64(4.0), Value::Float64(4.0)].into())
     );
 }
 
@@ -96,7 +96,7 @@ let _result = k.out
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float(9.0)].into()));
+    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float64(9.0)].into()));
 }
 
 #[test]
@@ -122,7 +122,7 @@ let _result = k.out
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float(7.0)].into()));
+    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float64(7.0)].into()));
 }
 
 #[test]
@@ -153,16 +153,17 @@ let _result = k.out
     let (interp, result) = run(src);
     result.expect("runtime error");
     // tile is zero everywhere it was never written, so out == input.
-    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(0.0), Value::Float(0.0)].into()));
+    assert_eq!(get_var(&interp, "_result"), Value::Array(vec![Value::Float64(1.0), Value::Float64(2.0), Value::Float64(0.0), Value::Float64(0.0)].into()));
 }
 
 #[test]
 fn dynamic_shape_kernel_field_end_to_end_through_full_pipeline() {
     // Full pipeline test: desugar_labeled_array injects the shadow fields and
-    // lowers LabeledIndex/.size() for the DYNAMIC-shape case (unlike the
-    // fixed-shape tests above, this one can't rely on exec_kernel_decl's
-    // self-contained lowering alone — the shadow fields have to already
-    // exist on the KernelDecl by the time the kernel is even constructed).
+    // lowers LabeledIndex/the axis-property read for the DYNAMIC-shape case
+    // (unlike the fixed-shape tests above, this one can't rely on
+    // exec_kernel_decl's self-contained lowering alone — the shadow fields
+    // have to already exist on the KernelDecl by the time the kernel is even
+    // constructed).
     let src = r#"
 kernel Grid:
     let [float, width, height]'global  src
@@ -174,7 +175,7 @@ kernel Grid:
 
     def ():
         let tid = gpu.thread.x
-        let w = src.size(.width)
+        let w = src.width
         let row = tid / w
         let col = tid % w
         out[tid] = src[width = col, height = row] * 2.0
@@ -188,8 +189,8 @@ let _result = k.out
     assert_eq!(
         run_with_labeled_array_desugar(src),
         Value::Array(vec![
-            Value::Float(2.0), Value::Float(4.0), Value::Float(6.0),
-            Value::Float(8.0), Value::Float(10.0), Value::Float(12.0),
+            Value::Float64(2.0), Value::Float64(4.0), Value::Float64(6.0),
+            Value::Float64(8.0), Value::Float64(10.0), Value::Float64(12.0),
         ].into())
     );
 }
@@ -221,7 +222,7 @@ kernel Grid:
         src = s.reshape(width = w, height = h)
 
     def ():
-        let w = src.size(.width)
+        let w = src.width
         let tid = gpu.thread.x
         if tid < w:
             pass

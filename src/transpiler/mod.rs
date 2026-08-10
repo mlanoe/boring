@@ -1077,7 +1077,8 @@ impl Transpiler {
 
     fn estimate_size_inner(ty: &Type, program: &Program, visiting: &mut std::collections::HashSet<String>) -> Option<usize> {
         match ty {
-            Type::Int | Type::Uint | Type::Float => Some(8),
+            Type::Int | Type::Uint | Type::Float64 => Some(8),
+            Type::Float32 => Some(4),
             Type::Uint8 | Type::Int8 => Some(1),
             Type::Int16 | Type::Uint16 => Some(2),
             Type::Int32 | Type::Uint32 => Some(4),
@@ -1088,7 +1089,11 @@ impl Transpiler {
             Type::Nil | Type::Void => Some(0),
             // Primitive type names that may appear as Named() from init-param parsing
             Type::Named(n) if matches!(n.as_str(), "int" | "uint" | "isize" | "usize" | "i64" | "u64") => Some(8),
-            Type::Named(n) if matches!(n.as_str(), "float" | "f64") => Some(8),
+            // "f32" used to fall through to the catch-all below with no entry at all
+            // (a pre-existing gap) — fixed alongside adding float32/float64 as real
+            // types (docs/float-width-types.md).
+            Type::Named(n) if matches!(n.as_str(), "float32" | "f32") => Some(4),
+            Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64") => Some(8),
             Type::Named(n) if matches!(n.as_str(), "uint8" | "int8" | "u8" | "i8") => Some(1),
             Type::Named(n) if matches!(n.as_str(), "int16" | "uint16" | "i16" | "u16") => Some(2),
             Type::Named(n) if matches!(n.as_str(), "int32" | "uint32" | "i32" | "u32") => Some(4),
@@ -1393,6 +1398,35 @@ impl Transpiler {
              // BoringError — typed exception wrapper so `catch String:` / `catch Int:` / `catch MyError:` can dispatch.\n\
              // `Other(TypeId, error)` identifies the thrown type uniquely across modules via std::any::TypeId::of::<T>(),\n\
              // which requires no instance — fully collision-free even when two modules define identically-named types.\n\
+             //\n\
+             // `Scalar(ScalarKind, u128)` is the fixed-width numeric family's own path —\n\
+             // int8..int128, uint8..uint128, float32, float64 — kept OUT of `Other` on\n\
+             // purpose (docs/float-width-types.md §7): the compiler already knows,\n\
+             // statically, that a thrown value here is exactly one of twelve small Copy\n\
+             // kinds, so paying for a heap allocation + `dyn Any` downcast the way `Other`\n\
+             // does for arbitrary user enums/structs would be pure overhead. The raw bits\n\
+             // are reinterpreted per `kind` in `Display` below and at each `catch` arm —\n\
+             // sign/zero-extended into the shared `u128` slot on the way in, truncated (or\n\
+             // bit-reinterpreted, for the two float kinds) back to the exact original type\n\
+             // on the way out; this round-trips exactly, it never touches `Other`'s TypeId\n\
+             // machinery at all. `Other` still exists, narrowed to what only it can do:\n\
+             // genuine user-defined enums/structs the compiler can't enumerate in advance.\n\
+             #[derive(Debug, Clone, Copy, PartialEq)]\n\
+             enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32, Float64 }\n\
+             impl BoringError {\n\
+             \x20   fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }\n\
+             \x20   fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }\n\
+             \x20   fn scalar_i32(v: i32) -> Self { BoringError::Scalar(ScalarKind::Int32, v as i128 as u128) }\n\
+             \x20   fn scalar_i64(v: i64) -> Self { BoringError::Scalar(ScalarKind::Int64, v as i128 as u128) }\n\
+             \x20   fn scalar_i128(v: i128) -> Self { BoringError::Scalar(ScalarKind::Int128, v as u128) }\n\
+             \x20   fn scalar_u8(v: u8) -> Self { BoringError::Scalar(ScalarKind::Uint8, v as u128) }\n\
+             \x20   fn scalar_u16(v: u16) -> Self { BoringError::Scalar(ScalarKind::Uint16, v as u128) }\n\
+             \x20   fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }\n\
+             \x20   fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }\n\
+             \x20   fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }\n\
+             \x20   fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }\n\
+             \x20   fn scalar_f64(v: f64) -> Self { BoringError::Scalar(ScalarKind::Float64, v.to_bits() as u128) }\n\
+             }\n\
              #[derive(Debug)]\n\
              enum BoringError {\n\
              \x20   Int(i64),\n\
@@ -1400,6 +1434,7 @@ impl Transpiler {
              \x20   Bool(bool),\n\
              \x20   Str(&'static str),\n\
              \x20   String(Arc<str>),\n\
+             \x20   Scalar(ScalarKind, u128),\n\
              \x20   Other(std::any::TypeId, std::boxed::Box<dyn BoringVal + Send + Sync>),\n\
              }\n\
              impl std::fmt::Display for BoringError {\n\
@@ -1410,6 +1445,20 @@ impl Transpiler {
              \x20           BoringError::Bool(b)        => write!(f, \"{}\", b),\n\
              \x20           BoringError::Str(s)         => write!(f, \"{}\", s),\n\
              \x20           BoringError::String(s)      => write!(f, \"{}\", s),\n\
+             \x20           BoringError::Scalar(k, bits) => match k {\n\
+             \x20               ScalarKind::Int8    => write!(f, \"{}\", *bits as i128 as i8),\n\
+             \x20               ScalarKind::Int16   => write!(f, \"{}\", *bits as i128 as i16),\n\
+             \x20               ScalarKind::Int32   => write!(f, \"{}\", *bits as i128 as i32),\n\
+             \x20               ScalarKind::Int64   => write!(f, \"{}\", *bits as i128 as i64),\n\
+             \x20               ScalarKind::Int128  => write!(f, \"{}\", *bits as i128),\n\
+             \x20               ScalarKind::Uint8   => write!(f, \"{}\", *bits as u8),\n\
+             \x20               ScalarKind::Uint16  => write!(f, \"{}\", *bits as u16),\n\
+             \x20               ScalarKind::Uint32  => write!(f, \"{}\", *bits as u32),\n\
+             \x20               ScalarKind::Uint64  => write!(f, \"{}\", *bits as u64),\n\
+             \x20               ScalarKind::Uint128 => write!(f, \"{}\", *bits),\n\
+             \x20               ScalarKind::Float32 => write!(f, \"{}\", f32::from_bits(*bits as u32)),\n\
+             \x20               ScalarKind::Float64 => write!(f, \"{}\", f64::from_bits(*bits as u64)),\n\
+             \x20           },\n\
              \x20           BoringError::Other(_, e)    => write!(f, \"{}\", e),\n\
              \x20       }\n\
              \x20   }\n\
@@ -1815,11 +1864,11 @@ impl Transpiler {
     fn top_level_let_is_const_safe(&self, s: &LetStmt) -> bool {
         fn is_scalar(t: &Type) -> bool {
             match t {
-                Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool => true,
+                Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => true,
                 Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
                 Type::Named(n) => matches!(n.as_str(),
-                    "int" | "uint" | "uint8" | "float" | "bool"
+                    "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
                     | "int8" | "int16" | "int32" | "int64" | "int128"
                     | "uint16" | "uint32" | "uint64" | "uint128"
                     | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -2467,6 +2516,23 @@ impl Transpiler {
                         if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
                             let key = format!("{}::{}", e.name, m.name);
                             self.struct_getters.insert(key);
+                        }
+                    }
+                    // Track req (non-mutating) / task methods, same as structs
+                    // (pre_scan_struct_item, mirrored above) — needed so
+                    // `method_is_req_or_task` answers correctly for enum methods too,
+                    // not just struct ones. Most enums never consult this (`def`==`req`
+                    // there, docs/book.md's "Enum methods" section), but an enum with a
+                    // `mut`-qualified variant field (docs/mut-type-modifier.md) now gets
+                    // the same non-mut-binding `def`-call diagnostic as a struct — see
+                    // `enum_has_mut_field`'s callers — and that diagnostic needs to tell
+                    // a real `req` getter apart from a mutating `def` on such an enum.
+                    for m in &e.methods {
+                        if !m.mutating {
+                            self.struct_req_methods.insert(format!("{}::{}", e.name, m.name));
+                        }
+                        if m.task {
+                            self.struct_task_methods.insert(format!("{}::{}", e.name, m.name));
                         }
                     }
                     // Register enum `as T:` conversion targets.

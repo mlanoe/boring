@@ -165,10 +165,26 @@ impl Transpiler {
         }).collect::<Vec<_>>().join(" && ")
     }
 
-    /// Return the set of variable names from `bound` that are mutated (index-assigned or
-    /// directly assigned) anywhere in `stmts`. Used to decide which pattern bindings need `mut`.
-    fn collect_mutated_bindings(bound: &[String], stmts: &[Stmt]) -> std::collections::HashSet<String> {
-        fn expr_mutated(bound: &[String], e: &Expr, out: &mut std::collections::HashSet<String>) {
+    /// Return the set of variable names from `bound` that are mutated (index-assigned,
+    /// directly assigned, or have a `def`/mutating method called through them) anywhere in
+    /// `stmts`. Used to decide which pattern bindings need `mut` on the Rust side.
+    ///
+    /// `bound_structs` maps a bound name to its struct type name (only populated when that
+    /// type is known — e.g. a variant field typed `mut Point`, see
+    /// `docs/mut-type-modifier.md`) — needed to resolve a method call's `def`/`req` status
+    /// via `method_is_req_or_task`. Names bound to a non-struct or unresolved type never
+    /// need `mut` for this reason (they can still need it via direct assignment above).
+    ///
+    /// `subject_is_self` disables ONLY the method-call-triggered detection: matching bare
+    /// `self` always matches a reference (`&Self`/`&mut Self`), which puts every bound name
+    /// in Rust's implicit `ref`/`ref mut` binding mode — an explicit `mut` modifier there is
+    /// a hard compile error ("cannot mutably bind by value within an implicitly-borrowing
+    /// pattern"), and it's also unneeded: a field bound that way is already `&mut T` inside
+    /// a `&mut self` method (see `emit_top.rs`'s `is_enum_self`), so `p.def_method()` works
+    /// on the bare binding with no annotation at all. A non-`self` owned local still needs
+    /// the promotion — there the bound field is an owned value moved out of the match.
+    fn collect_mutated_bindings(&self, bound: &[String], bound_structs: &std::collections::HashMap<String, String>, subject_is_self: bool, stmts: &[Stmt]) -> std::collections::HashSet<String> {
+        fn expr_mutated(t: &Transpiler, bound: &[String], bound_structs: &std::collections::HashMap<String, String>, subject_is_self: bool, e: &Expr, out: &mut std::collections::HashSet<String>) {
             match &e.kind {
                 ExprKind::Assign(target, rhs) => {
                     // Direct assign: `name = val` — the bound var itself is mutated.
@@ -181,41 +197,59 @@ impl Transpiler {
                             if bound.contains(v) { out.insert(v.clone()); }
                         }
                     }
-                    expr_mutated(bound, rhs, out);
+                    expr_mutated(t, bound, bound_structs, subject_is_self, rhs, out);
+                }
+                ExprKind::MethodCall(obj, method, args) => {
+                    // `p.def_method()` on a bound name whose struct type's method is
+                    // mutating — needs a `mut` Rust binding to call through (except when
+                    // matching `self` — see this function's doc).
+                    if !subject_is_self {
+                        if let ExprKind::Var(v) = &obj.kind {
+                            if bound.contains(v) {
+                                if let Some(struct_name) = bound_structs.get(v) {
+                                    if !t.method_is_req_or_task(struct_name, method) {
+                                        out.insert(v.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    expr_mutated(t, bound, bound_structs, subject_is_self, obj, out);
+                    for a in args { expr_mutated(t, bound, bound_structs, subject_is_self, &a.value, out); }
                 }
                 ExprKind::BinOp(_, l, r) => {
-                    expr_mutated(bound, l, out); expr_mutated(bound, r, out);
+                    expr_mutated(t, bound, bound_structs, subject_is_self, l, out); expr_mutated(t, bound, bound_structs, subject_is_self, r, out);
                 }
                 ExprKind::Call(callee, args) => {
-                    expr_mutated(bound, callee, out);
-                    for a in args { expr_mutated(bound, &a.value, out); }
+                    expr_mutated(t, bound, bound_structs, subject_is_self, callee, out);
+                    for a in args { expr_mutated(t, bound, bound_structs, subject_is_self, &a.value, out); }
                 }
                 ExprKind::If(s) => {
                     for (_, b) in &s.branches {
-                        for st in b { stmt_mutated(bound, st, out); }
+                        for st in b { stmt_mutated(t, bound, bound_structs, subject_is_self, st, out); }
                     }
                     if let Some(eb) = &s.else_body {
-                        for st in eb { stmt_mutated(bound, st, out); }
+                        for st in eb { stmt_mutated(t, bound, bound_structs, subject_is_self, st, out); }
                     }
                 }
                 _ => {}
             }
         }
-        fn stmt_mutated(bound: &[String], s: &Stmt, out: &mut std::collections::HashSet<String>) {
+        fn stmt_mutated(t: &Transpiler, bound: &[String], bound_structs: &std::collections::HashMap<String, String>, subject_is_self: bool, s: &Stmt, out: &mut std::collections::HashSet<String>) {
             match s {
-                Stmt::Expr(e) => expr_mutated(bound, e, out),
-                Stmt::Let(l) => { if let Some(v) = &l.value { expr_mutated(bound, v, out); } }
+                Stmt::Expr(e) => expr_mutated(t, bound, bound_structs, subject_is_self, e, out),
+                Stmt::Let(l) => { if let Some(v) = &l.value { expr_mutated(t, bound, bound_structs, subject_is_self, v, out); } }
                 Stmt::For(f) => {
-                    for st in &f.body { stmt_mutated(bound, st, out); }
+                    for st in &f.body { stmt_mutated(t, bound, bound_structs, subject_is_self, st, out); }
                 }
                 Stmt::While(w) => {
-                    for st in &w.body { stmt_mutated(bound, st, out); }
+                    for st in &w.body { stmt_mutated(t, bound, bound_structs, subject_is_self, st, out); }
                 }
                 Stmt::Match(m) => {
                     for arm in &m.arms {
                         match &arm.body {
-                            MatchBody::Block(stmts) => { for st in stmts { stmt_mutated(bound, st, out); } }
-                            MatchBody::Expr(e) => expr_mutated(bound, e, out),
+                            MatchBody::Block(stmts) => { for st in stmts { stmt_mutated(t, bound, bound_structs, subject_is_self, st, out); } }
+                            MatchBody::Expr(e) => expr_mutated(t, bound, bound_structs, subject_is_self, e, out),
                         }
                     }
                 }
@@ -223,7 +257,7 @@ impl Transpiler {
             }
         }
         let mut out = std::collections::HashSet::new();
-        for s in stmts { stmt_mutated(bound, s, &mut out); }
+        for s in stmts { stmt_mutated(self, bound, bound_structs, subject_is_self, s, &mut out); }
         out
     }
 
@@ -795,10 +829,22 @@ impl Transpiler {
         } else {
             subj
         };
+        // Bare `self` is always a reference in Rust (&Self/&mut Self) — matching it
+        // triggers match ergonomics (implicit `ref`/`ref mut` binding mode), under which
+        // an explicit `mut` binding modifier on a sub-pattern is a hard compile error
+        // ("cannot mutably bind by value within an implicitly-borrowing pattern"). It's
+        // also unnecessary there: a variant field bound this way is already `&mut T`
+        // (inside a `&mut self` method — see `enum_has_mut_field`/`is_enum_self` in
+        // emit_top.rs), so calling a `def` method straight through it needs no `mut` at
+        // all. `emit_match_arm` uses this to skip its method-call-triggered `mut`
+        // promotion in exactly that one case; a plain owned local (not `self`, not a
+        // by-reference parameter) still needs it, since there the bound field is an owned
+        // value moved out of the match, and Rust requires `let mut` to take `&mut` of it.
+        let subject_is_self = subj == "self";
         self.line(&format!("match {} {{", subj));
         self.indent += 1;
         for arm in arms_ref {
-            self.emit_match_arm(arm, use_value_body);
+            self.emit_match_arm(arm, use_value_body, subject_is_self);
         }
         self.indent -= 1;
         self.line("}");
@@ -831,6 +877,20 @@ impl Transpiler {
                         return Some(tname.to_string());
                     }
                 }
+            }
+        }
+
+        // Strategy 1b: subject is a struct field access — explicit (`self.signal`,
+        // `obj.field`) or implicit (`signal` inside a method, meaning `self.signal`).
+        // Strategy 1 above only looks at `var_types`, which never has an entry for a
+        // field name (only for actual local bindings), so a match on a field whose enum
+        // type has variant names shared with another enum previously fell straight
+        // through to Strategy 4's ambiguous-intersection check and then to emit_pattern's
+        // "last enum registered wins" fallback. resolve_expr_struct_type already knows
+        // how to walk field chains and the same implicit-self-field rule emit_expr uses.
+        if let Some(tname) = self.resolve_expr_struct_type(subject) {
+            if self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", tname))) {
+                return Some(tname);
             }
         }
 
@@ -891,15 +951,33 @@ impl Transpiler {
         }
     }
 
-    pub(crate) fn emit_match_arm(&mut self, arm: &MatchArm, use_value_body: bool) {
+    pub(crate) fn emit_match_arm(&mut self, arm: &MatchArm, use_value_body: bool, subject_is_self: bool) {
         // Collect bound variable names first so we can detect mutations in the arm body.
         let mut bound: Vec<String> = Vec::new();
         for p in &arm.patterns {
             Self::collect_pattern_bindings(p, &mut bound);
         }
-        // Detect which bound vars are mutated (index-assigned or directly assigned) in the body.
+        // Infer types for match-arm bound variables from enum variant field types, ahead of
+        // mutation detection below — resolving a bound name's struct type (e.g. a variant
+        // field declared `mut Point`, docs/mut-type-modifier.md) is needed there to tell a
+        // `def` method call apart from a `req` one.
+        // e.g. `Value.Int(a)` → var_types["a"] = Type::Int; `Value.Float(f)` → Type::Float64.
+        let mut bound_types: Vec<(String, Type)> = Vec::new();
+        for p in &arm.patterns {
+            Self::collect_pattern_var_types(p, &self.enum_variant_field_types, self.match_subject_enum.as_deref(), &mut bound_types);
+        }
+        let mut bound_struct_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (name, ty) in &bound_types {
+            if let Type::Named(struct_name) = ty.without_mut() {
+                if self.struct_fields.contains_key(struct_name.as_str()) {
+                    bound_struct_map.insert(name.clone(), struct_name.clone());
+                }
+            }
+        }
+        // Detect which bound vars are mutated (index-assigned, directly assigned, or have a
+        // `def` method called through them) in the body.
         let mutated = match &arm.body {
-            MatchBody::Block(stmts) => Self::collect_mutated_bindings(&bound, stmts),
+            MatchBody::Block(stmts) => self.collect_mutated_bindings(&bound, &bound_struct_map, subject_is_self, stmts),
             MatchBody::Expr(_) => std::collections::HashSet::new(),
         };
         // Detect nested Box<T> variant sub-patterns and rewrite them to temp bindings.
@@ -926,14 +1004,18 @@ impl Transpiler {
         for b in &bound {
             self.known_local_vars.insert(b.clone());
         }
-        // Infer types for match-arm bound variables from enum variant field types.
-        // e.g. `Value.Int(a)` → var_types["a"] = Type::Int; `Value.Float(f)` → Type::Float.
-        let mut bound_types: Vec<(String, Type)> = Vec::new();
-        for p in &arm.patterns {
-            Self::collect_pattern_var_types(p, &self.enum_variant_field_types, self.match_subject_enum.as_deref(), &mut bound_types);
-        }
         let mut bound_structs: Vec<String> = Vec::new();
         let mut bound_optionals: Vec<String> = Vec::new();
+        // Content-mutation bookkeeping for struct-typed bound names — mirrors `let`'s
+        // unconditional `mut_checked_local_vars` + conditional `content_mutable_local_vars`
+        // (emit_let.rs:880-888): once a bound name's struct type is known, it's always
+        // "checked" (so `emit_method_call_fallback`'s def-on-non-mut diagnostic can fire for
+        // an un-qualified variant field, exactly like it already does for a plain struct
+        // field one level down — emit_methods.rs's "One level down" comment), and separately
+        // "content-mutable" only when the variant field's declared type actually grants it
+        // (`mut Type`, docs/mut-type-modifier.md). Both scoped to this arm body and removed
+        // afterward, like `bound_structs`.
+        let mut bound_mut_checked: Vec<String> = Vec::new();
         for (name, ty) in &bound_types {
             self.var_types.insert(name.clone(), ty.clone());
             if Self::is_string_type(ty) {
@@ -945,10 +1027,15 @@ impl Transpiler {
                 bound_optionals.push(name.clone());
             }
             // Register struct-typed pattern vars so field accesses aren't mistaken for JoinHandle
-            if let Type::Named(struct_name) = ty {
+            if let Type::Named(struct_name) = ty.without_mut() {
                 if self.struct_fields.contains_key(struct_name.as_str()) {
                     self.var_struct_types.insert(name.clone(), struct_name.clone());
                     bound_structs.push(name.clone());
+                    self.mut_checked_local_vars.insert(name.clone());
+                    bound_mut_checked.push(name.clone());
+                    if ty.grants_mut() {
+                        self.content_mutable_local_vars.insert(name.clone());
+                    }
                 }
             }
         }
@@ -1092,6 +1179,10 @@ impl Transpiler {
         }
         for name in &bound_structs {
             self.var_struct_types.remove(name.as_str());
+        }
+        for name in &bound_mut_checked {
+            self.mut_checked_local_vars.remove(name.as_str());
+            self.content_mutable_local_vars.remove(name.as_str());
         }
         for name in &bound_optionals {
             self.optional_vars.remove(name.as_str());

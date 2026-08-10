@@ -477,7 +477,8 @@ impl Transpiler {
                         Type::Uint32 => Some("u32".to_string()),
                         Type::Uint64 => Some("u64".to_string()),
                         Type::Uint128 => Some("u128".to_string()),
-                        Type::Float => Some("f64".to_string()),
+                        Type::Float32 => Some("f32".to_string()),
+                        Type::Float64 => Some("f64".to_string()),
                         Type::Bool  => Some("bool".to_string()),
                         Type::Str   => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                         Type::Named(n) => match n.as_str() {
@@ -493,7 +494,10 @@ impl Transpiler {
                             "uint32" | "u32" => Some("u32".to_string()),
                             "uint64" | "u64" => Some("u64".to_string()),
                             "uint128" | "u128" => Some("u128".to_string()),
-                            "float" | "f64" | "f32" => Some("f64".to_string()),
+                            // Pre-existing bug fixed alongside float32/float64: "f32" used to
+                            // return "f64" here regardless (docs/float-width-types.md).
+                            "float32" | "f32" => Some("f32".to_string()),
+                            "float" | "float64" | "f64" => Some("f64".to_string()),
                             "bool"   => Some("bool".to_string()),
                             "string" | "str" => Some(if self.use_rc_str() { "Rc<str>" } else { "Arc<str>" }.to_string()),
                             _ => None,
@@ -545,7 +549,7 @@ impl Transpiler {
                 });
                 let inner_ty = unqualified.as_ref()
                     .map(super::emit_kernel::array_inner_type)
-                    .unwrap_or(Type::Float);
+                    .unwrap_or(Type::Float64);
                 let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
                 format!("{}: BoringGpuArg<{}>", p.name, host_ty)
             } else {
@@ -559,10 +563,20 @@ impl Transpiler {
                 // The T'actor Arc<Mutex<T>> wrapping is handled at call sites via .lock().await.
                 // Exception: inside a trait impl block, mutating task methods must match the
                 // trait signature (which uses &mut self), since calls go through .lock().await.
-                // Enum methods: enums don't have mutable fields, so always use &self even for
-                // `def` (mutating) methods — otherwise the method can't be called on non-mut vars.
+                // Enum methods: by default enums have no mutable fields, so always use
+                // &self even for `def` (mutating) methods — otherwise the method can't be
+                // called on non-mut vars (docs/book.md's "Enum methods — req and def").
+                // Exception: an enum with at least one variant field declared `mut Type`
+                // (docs/mut-type-modifier.md) behaves like a struct for `def` — it needs
+                // real `&mut self` to reach into that field mutably through `match self:
+                // ...`; match ergonomics then binds the matched field as `&mut T`
+                // automatically, no extra codegen needed. Checked per enum TYPE, not per
+                // method body — a `def` method that happens not to touch the mut field
+                // still gets `&mut self` if its enum has one anywhere (conservative but
+                // simple; callers needing only `req`-style access should use `req`).
                 let is_enum_self = self_ty.map(|t| {
-                    self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", t)))
+                    let is_enum = self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", t)));
+                    is_enum && !self.enum_has_mut_field(t)
                 }).unwrap_or(false);
                 // Validate: an external `task fn` declaration (`def T.method()` outside the
                 // struct body) relies on the receiver being accessed through `Arc<Self>`.
@@ -1402,10 +1416,10 @@ impl Transpiler {
             // bare builtin variants — match both forms.
             ExprKind::Var(v) if matches!(
                 self.var_types.get(v.as_str()),
-                Some(Type::Int | Type::Uint | Type::Float | Type::Bool)
+                Some(Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)
             ) || matches!(
                 self.var_types.get(v.as_str()),
-                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "bool")
+                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "float32" | "float64" | "bool")
             ) => format!("&{}", v),
             ExprKind::Var(v) => format!("&*{}", v), // Arc<str> → &str via Deref
             _ => {
@@ -1960,6 +1974,44 @@ impl Transpiler {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::ActorTask))
     }
 
+    /// True if `enum_name` has at least one variant with a field declared `mut Type`
+    /// (docs/mut-type-modifier.md — an enum variant field can carry `mut` the same way a
+    /// tuple slot or collection element can). Such an enum behaves like a struct for its
+    /// own `def` methods: it gets a real `&mut self` receiver (see this file's
+    /// `compute_fn_all_params`, `is_enum_self`) and its instances need `mut`/`var mut` to
+    /// call a `def` method, exactly like a struct (see `emit_methods.rs`'s non-mut-binding
+    /// diagnostic). Returns `false` for a plain struct name or an unknown type — this is
+    /// enum-specific, not a general "has a mut field" query.
+    pub(crate) fn enum_has_mut_field(&self, enum_name: &str) -> bool {
+        let prefix = format!("{}::", enum_name);
+        self.enum_variant_field_types.iter()
+            .filter(|(k, _)| k.starts_with(prefix.as_str()))
+            .any(|(_, fields)| fields.iter().any(|ty| ty.grants_mut()))
+    }
+
+    /// Resolves a local var's struct/enum type name for the non-mut-binding `def`-call
+    /// diagnostic, same intent as the `.or_else` fallback in `emit_method_call_fallback` —
+    /// but also needed by `try_emit_rwlock_method`/`try_emit_mutex_method`, whose receiver
+    /// is `'guard`/`'actor`-qualified, not a bare struct/enum type. `var_struct_types` is
+    /// only ever populated from a bare `TypeName(args)` constructor call
+    /// (`emit_let.rs`'s `try_emit_qualified_let`) — an enum-variant constructor
+    /// (`Holder::Value(...)`, parsed as a `Field` callee, not a bare `Var`) never reaches
+    /// it, so an `'actor`/`'guard`-qualified enum local falls through to `var_types`
+    /// instead, where the declared type is still qualifier-wrapped
+    /// (`Type::Qualified(Named("Holder"), Actor)`) — one more unwrap than the plain
+    /// `.without_mut()` idiom handles, hence this dedicated helper.
+    pub(crate) fn resolve_receiver_type_name(&self, v: &str) -> String {
+        self.var_struct_types.get(v).cloned().unwrap_or_else(|| {
+            self.var_types.get(v).and_then(|t| {
+                let inner = match t.without_mut() {
+                    Type::Qualified(inner, _) => inner.without_mut(),
+                    other => other,
+                };
+                if let Type::Named(n) = inner { Some(n.clone()) } else { None }
+            }).unwrap_or_default()
+        })
+    }
+
     /// True if calling `method` on a `struct_name` receiver is known NOT to
     /// require content-mutation permission (a `req` method, or a `task`
     /// method — see `struct_task_methods`'s callers). Checks the struct's own
@@ -2239,16 +2291,19 @@ impl Transpiler {
     /// Determines whether a `transient` field should use `Cell<T>` (Copy) or `RefCell<T>` (!Copy).
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool | Type::Nil | Type::Void => true,
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool | Type::Nil | Type::Void => true,
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             // Lowercase aliases: `int`, `float`, `bool`, `uint` parse as Named in the user source.
+            // `f32`/`f64` are included here too — a pre-existing gap (this list covered
+            // every fixed-width int alias but not the float ones) closed alongside
+            // adding float32/float64 (docs/float-width-types.md).
             Type::Named(n) => matches!(n.as_str(),
-                "int" | "uint" | "uint8" | "float" | "bool"
+                "int" | "uint" | "uint8" | "float" | "float32" | "float64" | "bool"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"),
+                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64"),
             Type::Optional(inner) => Self::is_copy_type(inner),
             Type::Mut(inner) => Self::is_copy_type(inner),
             _ => false,
@@ -2275,7 +2330,8 @@ impl Transpiler {
             Type::Uint32 => "u32".into(),
             Type::Uint64 => "u64".into(),
             Type::Uint128 => "u128".into(),
-            Type::Float => "f64".into(),
+            Type::Float32 => "f32".into(),
+            Type::Float64 => "f64".into(),
             Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },
             Type::Bool  => "bool".into(),
             Type::Nil | Type::Void => "()".into(),

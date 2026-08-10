@@ -1544,13 +1544,17 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         // GPU buffers always use 32-bit elements (WGSL narrows int→i32, uint→u32, float→f32).
         Type::Int   => "i32",
         Type::Uint  => "u32",
-        Type::Float => "f32",
+        Type::Float32 => "f32",
         Type::Bool  => "bool",
         // Explicit fixed-width fields keep their own exact width in the host-side buffer —
         // WGSL itself can't represent 8/16/64/128-bit ints (see `wgsl_scalar` in device.rs,
         // which emits a clear compile error for those widths); the host Rust type still
         // reflects the declared width so the mismatch is visible on the device side, not
         // silently mis-typed here too (the previous behavior for `Uint8`, which fell to `i64`).
+        // `float64` gets the same treatment — it used to silently narrow to `f32` here,
+        // masking the very WGSL-has-no-f64 error `wgsl_unsupported_f64` now raises on the
+        // device side (docs/float-width-types.md §6).
+        Type::Float64 => "f64",
         Type::Uint8 => "u8",
         Type::Int8   => "i8",
         Type::Int16  => "i16",
@@ -1564,7 +1568,8 @@ fn host_scalar_type(ty: &Type) -> &'static str {
         Type::Named(n) => match n.as_str() {
             "int" | "i32"   => "i32",
             "uint" | "u32"  => "u32",
-            "float" | "f64" | "f32" => "f32",
+            "float32" | "f32" => "f32",
+            "float" | "float64" | "f64" => "f64",
             "bool"                  => "bool",
             "uint8"                 => "u8",
             "int8"                  => "i8",

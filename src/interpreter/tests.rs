@@ -459,7 +459,7 @@ struct Fahrenheit:
 let c = Celsius(100.0)
 let _result = c as float
 "#;
-    assert_eq!(run_src(src), Value::Float(100.0));
+    assert_eq!(run_src(src), Value::Float64(100.0));
 }
 
 #[test]
@@ -715,7 +715,7 @@ let _result = weight + 1.0
 "#;
     let (interp, res) = run(src);
     res.expect("no runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Float(73.5));
+    assert_eq!(get_var(&interp, "_result"), Value::Float64(73.5));
 }
 
 #[test]
@@ -945,7 +945,7 @@ let f = 42 as bool
     res.expect("cast returns nil on failure");
     assert_eq!(get_var(&interp, "a"), Value::Int(42));
     assert_eq!(get_var(&interp, "b"), Value::Nil);
-    assert_eq!(get_var(&interp, "c"), Value::Float(3.14));
+    assert_eq!(get_var(&interp, "c"), Value::Float64(3.14));
     assert_eq!(get_var(&interp, "d"), Value::Nil);
     assert_eq!(get_var(&interp, "e"), Value::Int(1));
     assert_eq!(get_var(&interp, "f"), Value::Nil);
@@ -1541,7 +1541,7 @@ let _a = c.area
     let (interp, res) = run(src);
     res.expect("no runtime error");
     // area = 3.14159 * 2.0 * 2.0 = 12.56636
-    if let Value::Float(f) = get_var(&interp, "_a") {
+    if let Value::Float64(f) = get_var(&interp, "_a") {
         assert!((f - 12.56636).abs() < 0.001, "expected ~12.566, got {}", f);
     } else {
         panic!("expected Float, got {:?}", get_var(&interp, "_a"));
@@ -1884,7 +1884,7 @@ let s = c as string
 "#;
     let (interp, res) = run(src);
     res.expect("no error");
-    assert_eq!(get_var(&interp, "f"), Value::Float(100.0));
+    assert_eq!(get_var(&interp, "f"), Value::Float64(100.0));
     assert_eq!(get_var(&interp, "s"), Value::Str("100°C".into()));
 }
 

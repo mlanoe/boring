@@ -20,6 +20,12 @@ struct Interpreter:
     var [Value] stream_yields = []
     var bool in_kernel_context = false
     var [string] cli_args = []
+    # Stack of the currently executing function/method's declared return type (one frame
+    # per call_fn invocation, pushed/popped around body execution — see push_return_ty/
+    # pop_return_ty below). Lets exec_stmt's Stmt.Return case resolve a `.Variant` return
+    # value via eval_dot_ident_hint instead of eval_dot_ident's ambiguous-scan default —
+    # mirrors the Rust interpreter's return_ty_stack (src/interpreter/mod.rs).
+    var mut [Type?] return_ty_stack = []
 
     def void set_pending_return(Value v):
         has_pending_return = true
@@ -34,6 +40,19 @@ struct Interpreter:
         let v = pending_throw_val
         pending_throw_val = Value.Nil
         v
+
+    def void push_return_ty(Type? ty):
+        return_ty_stack.push(ty)
+
+    def void pop_return_ty():
+        if return_ty_stack.length > 0:
+            return_ty_stack.remove(return_ty_stack.length - 1)
+
+    req Type? current_return_ty():
+        let n = return_ty_stack.length
+        if n > 0:
+            return return_ty_stack[n - 1]
+        nil
 
     req FnDecl? find_method(string type_name, string method_name):
         let methods_opt = struct_methods.get(type_name)
@@ -93,9 +112,23 @@ def string val_to_string(Value v):
         Value.Uint32(n): "{n}"
         Value.Uint64(n): "{n}"
         Value.Uint128(n): "{n}"
-        Value.Float(f): "{f}"
+        Value.Float64(f): "{f}"
+        Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(elems):
+            var parts = ["["]
+            var first = true
+            for e in elems:
+                if not first:
+                    parts.push(", ")
+                parts.push(val_to_string(e))
+                first = false
+            parts.push("]")
+            var string result = ""
+            for p in parts:
+                result = "{result}{p}"
+            result
+        Value.LabeledArray(elems, _):
             var parts = ["["]
             var first = true
             for e in elems:
@@ -187,7 +220,8 @@ def bool val_to_bool(Value v):
         Value.Uninitialized: false
         Value.Bool(b): b
         Value.Int(n): n != 0
-        Value.Float(f): f != 0.0
+        Value.Float64(f): f != 0.0
+        Value.Float32(f): f != 0.0
         Value.Str(s): s != ""
         Value.Array(elems): elems.length != 0
         Value.Dict(pairs): pairs.length != 0
@@ -211,11 +245,21 @@ def bool values_equal(Value a, Value b):
             match b:
                 Value.Bool(y): x == y
                 _: false
-        Value.Float(x):
+        # float32/float64 compare freely against each other and against any
+        # int kind (widened to float64) — deliberately more permissive than
+        # arithmetic's strict mixing rule, same precedent as the int-kind
+        # cross-comparison in the fallback arm below
+        # (docs/float-width-types.md §3).
+        Value.Float64(x):
             match b:
-                Value.Float(y): x == y
+                Value.Float64(y): x == y
                 _:
-                    if let yv = value_as_float_numeric(b): x == yv else: false
+                    if let yv = value_as_float64_widened(b): x == yv else: false
+        Value.Float32(x):
+            match b:
+                Value.Float32(y): x == y
+                _:
+                    if let yv = value_as_float64_widened(b): (x as float64) == yv else: false
         Value.Str(x):
             match b:
                 Value.Str(y): x == y
@@ -232,6 +276,25 @@ def bool values_equal(Value a, Value b):
                             if not values_equal(xs[i], ys[i]):
                                 eq = false
                             i = i + 1
+                        eq
+                _: false
+        Value.LabeledArray(xs, xaxes):
+            match b:
+                Value.LabeledArray(ys, yaxes):
+                    if xaxes.length != yaxes.length or xs.length != ys.length:
+                        false
+                    else:
+                        var eq = true
+                        var ai = 0
+                        while ai < xaxes.length:
+                            if xaxes[ai].0 != yaxes[ai].0 or xaxes[ai].1 != yaxes[ai].1:
+                                eq = false
+                            ai = ai + 1
+                        var ei = 0
+                        while ei < xs.length:
+                            if not values_equal(xs[ei], ys[ei]):
+                                eq = false
+                            ei = ei + 1
                         eq
                 _: false
         Value.Tuple(xs):
@@ -277,8 +340,8 @@ def bool values_equal(Value a, Value b):
             guard let av = value_as_i128(a) else: return false
             if let bv = value_as_i128(b):
                 av == bv
-            elif let bf = value_as_float_numeric(b):
-                (av as float) == bf
+            elif let bf = value_as_float64_widened(b):
+                (av as float64) == bf
             else:
                 false
 
@@ -436,8 +499,8 @@ def void register_stdlib(mut Interpreter interp):
     let assert_neq_fn = Value.NativeFn("assert_neq", Value.Nil)
     env_define(env, "assert_neq", assert_neq_fn, false)
 
-    env_define(env, "PI", Value.Float(3.141592653589793), false)
-    env_define(env, "E", Value.Float(2.718281828459045), false)
+    env_define(env, "PI", Value.Float64(3.141592653589793), false)
+    env_define(env, "E", Value.Float64(2.718281828459045), false)
 
     for math_fn in ["sin", "cos", "tan", "round", "floor", "ceil", "pow", "log", "ln", "log2", "log10"]:
         env_define(env, math_fn, Value.NativeFn(math_fn, Value.Nil), false)

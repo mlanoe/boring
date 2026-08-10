@@ -70,7 +70,7 @@ pub(crate) fn is_scalar_let_value(val: &Expr, ty: Option<&Type>) -> bool {
         }
     }
     is_scalar_literal(val)
-        || ty.map(|t| matches!(t, Type::Int | Type::Uint | Type::Float | Type::Bool)).unwrap_or(false)
+        || ty.map(|t| matches!(t, Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)).unwrap_or(false)
 }
 
 /// Rust source for boring's built-in `Dimension` type, used by 2-D kernels.
@@ -195,8 +195,8 @@ pub(crate) fn labeled_array_at_index(axes: &[crate::ast::LabeledAxis], args: &[(
 }
 
 /// Stringified value of a fixed-shape `LabeledArray`'s axis, by label — for
-/// `.size(.axis)` lowering. `None` if `axis_label` doesn't match any of
-/// `axes`.
+/// `a.axis`'s shape-query property lowering. `None` if `axis_label` doesn't
+/// match any of `axes`.
 pub(crate) fn labeled_array_dim_literal(axes: &[crate::ast::LabeledAxis], axis_label: &str) -> Option<String> {
     let axis = axes.iter().find(|a| a.label == axis_label)?;
     let crate::ast::ConstExpr(boxed) = axis.size.as_ref()?;
@@ -386,7 +386,10 @@ pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
         "uint32"  | "Uint32"  => "u32".into(),
         "uint64"  | "Uint64"  => "u64".into(),
         "uint128" | "Uint128" => "u128".into(),
-        "float"  | "Float"  => "f64".into(),
+        // `float`/`Float` are pure aliases of `float64` (docs/float-width-types.md §2) —
+        // fold into the same "f64" bucket "float64"/"Float64" resolve to.
+        "float32" | "Float32" => "f32".into(),
+        "float"   | "Float" | "float64" | "Float64" => "f64".into(),
         "bool"   | "Bool"   => "bool".into(),
         "void"   | "Void"   => "()".into(),
         "nil"    | "Nil"    => "()".into(),
@@ -527,35 +530,81 @@ pub(crate) fn map_field(name: &str) -> &str {
     }
 }
 
-/// Map a Boring type name to a BoringError match arm pattern and the `error: Arc<str>` binding.
-/// Returns (arm_pattern, error_binding_expr).
-/// Returns (arm_pattern, error_arc_binding) for each BoringError variant that matches `ty`.
-/// String types produce two entries (Str for literals, String for dynamic).
-pub(crate) fn boring_type_to_boring_val_arms(ty: &str) -> Vec<(String, String)> {
+/// Map a Boring type name to its BoringError match arm(s): `(arm_pattern, error_rust_type,
+/// error_binding_expr)`. String types produce two entries (Str for literals, String for
+/// dynamic). Every non-scalar prim (String/Int/Float/Bool) keeps its established
+/// `Arc<str>`-stringified binding, unchanged.
+///
+/// The twelve fixed-width kinds (int8..int128, uint8..uint128, float32, float64) are
+/// different: they bind the *native* Rust type (`i8`, `u32`, `f32`, …), reconstructed
+/// from `BoringError::Scalar`'s `(ScalarKind, u128)` payload (docs/float-width-types.md
+/// §7) — real values, not stringified, since the whole point of `Scalar` over `Other`
+/// is that the compiler already knows the exact concrete type at every one of these
+/// call sites. This ALSO fixes a real bug, not just a missed optimization: every one of
+/// these twelve type names used to fall into the generic `other` arm below, which
+/// compiled to a **bare `ref __boring_other` binding pattern** — despite its
+/// `/* unreachable catch {ty} */` comment, that pattern matches *any* `BoringError`
+/// value unconditionally, so `catch Int8:` was silently catching every thrown error of
+/// every type, not just `Int8`.
+pub(crate) fn boring_type_to_boring_val_arms(ty: &str) -> Vec<(String, String, String)> {
+    macro_rules! scalar_arm {
+        ($kind:literal, $rust_ty:literal, $reinterp:literal) => {
+            vec![(
+                format!("BoringError::Scalar(ScalarKind::{}, __boring_bits)", $kind),
+                $rust_ty.to_string(),
+                format!("__boring_bits {}", $reinterp),
+            )]
+        };
+    }
     match ty {
         "String" | "string" | "cstring" | "tstring" => vec![
             // &'static str literal
-            ("BoringError::Str(__boring_s)".to_string(),
+            ("BoringError::Str(__boring_s)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_s.to_string())".to_string()),
             // Arc<str> from interpolation or re-throw
-            ("BoringError::String(ref __boring_s)".to_string(),
+            ("BoringError::String(ref __boring_s)".to_string(), "Arc<str>".to_string(),
              "__boring_s.clone()".to_string()),
         ],
         "Int" | "int" => vec![
-            ("BoringError::Int(__boring_n)".to_string(),
+            ("BoringError::Int(__boring_n)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_n.to_string())".to_string()),
         ],
         "Float" | "float" => vec![
-            ("BoringError::Float(__boring_f)".to_string(),
+            ("BoringError::Float(__boring_f)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_f.to_string())".to_string()),
         ],
         "Bool" | "bool" => vec![
-            ("BoringError::Bool(__boring_b)".to_string(),
+            ("BoringError::Bool(__boring_b)".to_string(), "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_b.to_string())".to_string()),
         ],
+        "Int8" | "int8"     => scalar_arm!("Int8", "i8", "as i128 as i8"),
+        "Int16" | "int16"   => scalar_arm!("Int16", "i16", "as i128 as i16"),
+        "Int32" | "int32"   => scalar_arm!("Int32", "i32", "as i128 as i32"),
+        "Int64" | "int64"   => scalar_arm!("Int64", "i64", "as i128 as i64"),
+        "Int128" | "int128" => scalar_arm!("Int128", "i128", "as i128"),
+        "Uint8" | "uint8"     => scalar_arm!("Uint8", "u8", "as u8"),
+        "Uint16" | "uint16"   => scalar_arm!("Uint16", "u16", "as u16"),
+        "Uint32" | "uint32"   => scalar_arm!("Uint32", "u32", "as u32"),
+        "Uint64" | "uint64"   => scalar_arm!("Uint64", "u64", "as u64"),
+        "Uint128" | "uint128" => vec![(
+            "BoringError::Scalar(ScalarKind::Uint128, __boring_bits)".to_string(),
+            "u128".to_string(),
+            "__boring_bits".to_string(),
+        )],
+        "Float32" | "float32" | "f32" => vec![(
+            "BoringError::Scalar(ScalarKind::Float32, __boring_bits)".to_string(),
+            "f32".to_string(),
+            "f32::from_bits(__boring_bits as u32)".to_string(),
+        )],
+        "Float64" | "float64" | "f64" => vec![(
+            "BoringError::Scalar(ScalarKind::Float64, __boring_bits)".to_string(),
+            "f64".to_string(),
+            "f64::from_bits(__boring_bits as u64)".to_string(),
+        )],
         other => vec![
             // Unknown type: will be handled by the named-clause path (BoringError::Other)
             (format!("/* unreachable catch {} */ ref __boring_other", other),
+             "Arc<str>".to_string(),
              "Arc::<str>::from(__boring_other.to_string())".to_string()),
         ],
     }
@@ -1283,6 +1332,46 @@ pub(crate) fn collect_pattern_variants(pat: &Pattern, out: &mut Vec<String>) {
     }
 }
 
+/// Maps a resolved fixed-width numeric `Type` (int8..int128, uint8..uint128, float32,
+/// float64 — the twelve `ScalarKind`/`BoringError::scalar_*` kinds, see
+/// docs/float-width-types.md §7) to the name of its `BoringError::scalar_*`
+/// constructor, for `throw`-value emission. `None` for the flexible `int`/`uint`/
+/// `float` kinds (they already have their own `BoringError::Int`/`Float` fast path,
+/// unaffected by this) and for every non-numeric type.
+pub(crate) fn scalar_ctor_name(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Int8 => Some("scalar_i8"),
+        Type::Int16 => Some("scalar_i16"),
+        Type::Int32 => Some("scalar_i32"),
+        Type::Int64 => Some("scalar_i64"),
+        Type::Int128 => Some("scalar_i128"),
+        Type::Uint8 => Some("scalar_u8"),
+        Type::Uint16 => Some("scalar_u16"),
+        Type::Uint32 => Some("scalar_u32"),
+        Type::Uint64 => Some("scalar_u64"),
+        Type::Uint128 => Some("scalar_u128"),
+        Type::Float32 => Some("scalar_f32"),
+        Type::Float64 => Some("scalar_f64"),
+        Type::Qualified(inner, _) => scalar_ctor_name(inner),
+        Type::Named(n) => match n.as_str() {
+            "int8" | "i8" => Some("scalar_i8"),
+            "int16" | "i16" => Some("scalar_i16"),
+            "int32" | "i32" => Some("scalar_i32"),
+            "int64" | "i64" => Some("scalar_i64"),
+            "int128" | "i128" => Some("scalar_i128"),
+            "uint8" | "u8" => Some("scalar_u8"),
+            "uint16" | "u16" => Some("scalar_u16"),
+            "uint32" | "u32" => Some("scalar_u32"),
+            "uint64" | "u64" => Some("scalar_u64"),
+            "uint128" | "u128" => Some("scalar_u128"),
+            "float32" | "f32" => Some("scalar_f32"),
+            "float64" | "f64" => Some("scalar_f64"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Returns true if the Rust type string is a specific numeric type that may need coercion.
 pub(crate) fn is_specific_numeric_type(ty: &str) -> bool {
     matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -1613,7 +1702,8 @@ pub(crate) fn mangle_type_name(ty: &Type) -> String {
     match ty {
         Type::Int                  => "int".into(),
         Type::Uint                 => "uint".into(),
-        Type::Float                => "float".into(),
+        Type::Float32                => "float32".into(),
+        Type::Float64                => "float64".into(),
         Type::Bool                 => "bool".into(),
         Type::Str                  => "string".into(),
         Type::Void                 => "void".into(),
@@ -1652,7 +1742,7 @@ pub(crate) fn infer_overload_expr_type(
 ) -> Option<Type> {
     match &expr.kind {
         ExprKind::Int(_)                              => Some(Type::Int),
-        ExprKind::Float(_)                            => Some(Type::Float),
+        ExprKind::Float(_)                            => Some(Type::Float64),
         ExprKind::Bool(_)                             => Some(Type::Bool),
         ExprKind::Nil                                 => Some(Type::Optional(Box::new(Type::Void))),
         ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Type::Str),
@@ -1685,7 +1775,8 @@ pub(crate) fn types_compatible(expected: &Type, actual: &Type) -> bool {
     match (expected, actual) {
         (Type::Int,   Type::Int)   => true,
         (Type::Uint,  Type::Uint)  => true,
-        (Type::Float, Type::Float) => true,
+        (Type::Float32, Type::Float32) => true,
+        (Type::Float64, Type::Float64) => true,
         (Type::Bool,  Type::Bool)  => true,
         (Type::Str,   Type::Str)   => true,
         (Type::Void,  Type::Void)  => true,
@@ -1693,7 +1784,8 @@ pub(crate) fn types_compatible(expected: &Type, actual: &Type) -> bool {
         (Type::Named(n), t) | (t, Type::Named(n)) => match n.as_str() {
             "int"    => matches!(t, Type::Int),
             "uint"   => matches!(t, Type::Uint),
-            "float"  => matches!(t, Type::Float),
+            "float32" | "f32" => matches!(t, Type::Float32),
+            "float" | "float64" | "f64" => matches!(t, Type::Float64),
             "bool"   => matches!(t, Type::Bool),
             "string" => matches!(t, Type::Str),
             _ => false,

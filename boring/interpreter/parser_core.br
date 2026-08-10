@@ -195,6 +195,14 @@ def bool parser_peek_is_ident(mut Parser p):
 def bool parser_peek_is_int(mut Parser p):
     parser_check(p, "Int")
 
+# `label = ...` lookahead — Ident followed by a single `Eq`, not `==` (which
+# this lexer tokenizes as two consecutive `Eq` tokens, hence the offset-2
+# check). Same 3-token lookahead `parse_arg` already uses inline for named
+# call arguments; factored out here so labeled-array indexing/fill can reuse
+# it without duplicating the `==` disambiguation subtlety.
+def bool parser_peek_is_labeled_start(mut Parser p):
+    parser_peek_is_ident(p) and parser_check2(p, "Eq") and not parser_token_at_is_eq(p, 2)
+
 def bool parser_is_newline(mut Parser p):
     parser_check(p, "Newline") or parser_check(p, "Semicolon")
 
@@ -553,6 +561,39 @@ def Type parse_type(mut Parser p) throws:
     else:
         parse_type_qualifier(p, base)
 
+# Labeled multi-dim array axes (docs/array-multidim-types.md), called right
+# after the comma in `[T, ...]` once the next token is a bare `Ident` — the
+# ONLY thing that slot could mean here, since the plain `[T, N]` case just
+# below hard-requires an `Int` literal. Unlike the Rust compiler's own
+# `try_parse_labeled_axes`, there's no legacy meaning to roll back to and so
+# no save/restore of the parser position is needed.
+def [LabeledAxis] parse_labeled_axes(mut Parser p) throws:
+    var axes = [LabeledAxis]{}
+    var expect_fixed = false
+    var first = true
+    while true:
+        let label = parser_expect_ident(p)
+        let has_eq = parser_eat(p, "Eq")
+        if first:
+            expect_fixed = has_eq
+            first = false
+        elif has_eq != expect_fixed:
+            throw "labeled array axes must be all dynamic ([T, a, b]) or all fixed ([T, a = A, b = B]) — mixing the two is not supported"
+        var int? size = nil
+        if has_eq:
+            if not parser_peek_is_int(p):
+                throw "expected integer literal for a fixed labeled-array axis size"
+            size = parser_peek_int(p)
+            p.advance()
+        axes.push(LabeledAxis(label= label, size= size))
+        if not parser_eat(p, "Comma"):
+            break
+        if parser_check(p, "RBracket"):
+            break
+    if axes.length < 2:
+        throw "labeled array types need at least 2 axes — add another axis label, or remove the label to use a plain [T, N] array"
+    axes
+
 def Type parse_type_base(mut Parser p) throws:
     match p.peek():
         TokenKind.Ident(s):
@@ -570,7 +611,9 @@ def Type parse_type_base(mut Parser p) throws:
                 "uint32":  Type.Uint32
                 "uint64":  Type.Uint64
                 "uint128": Type.Uint128
-                "float": Type.Float
+                "float32": Type.Float32
+                "float": Type.Float64
+                "float64": Type.Float64
                 "string": Type.Str
                 "bool":  Type.Bool
                 "void":  Type.Void
@@ -593,12 +636,17 @@ def Type parse_type_base(mut Parser p) throws:
             p.advance()
             let inner = parse_type(p)
             if p.eat(TokenKind.Comma):
-                if token_kind_name(p.peek()) != "Int":
-                    throw "expected integer literal for fixed-size array length"
-                let n = parser_peek_int(p)
-                p.advance()
-                p.expect(TokenKind.RBracket)
-                Type.ArrayN(inner, n)
+                if parser_check(p, "Ident"):
+                    let axes = parse_labeled_axes(p)
+                    p.expect(TokenKind.RBracket)
+                    Type.LabeledArray(inner, axes)
+                else:
+                    if token_kind_name(p.peek()) != "Int":
+                        throw "expected integer literal for fixed-size array length"
+                    let n = parser_peek_int(p)
+                    p.advance()
+                    p.expect(TokenKind.RBracket)
+                    Type.ArrayN(inner, n)
             else:
                 p.expect(TokenKind.RBracket)
                 Type.Array(inner)
@@ -1777,6 +1825,14 @@ def Expr make_array_comp(Expr expr, string varname, Expr count, int line):
 def Expr make_array_comp_iter(Expr expr, string varname, Expr iter, int line):
     Expr(kind= ExprKind.ArrayCompIter(expr, varname, iter), line= line)
 
+def Expr make_labeled_index(Expr expr, [Arg] args, int line):
+    Expr(kind= ExprKind.LabeledIndex(expr, args), line= line)
+
+def Expr make_labeled_array_comp(Expr expr, [(string, Expr)] clauses, int line):
+    Expr(kind= ExprKind.LabeledArrayComp(expr, clauses), line= line)
+
+def Expr make_relabel_cast(Expr expr, [(string, string)] pairs, int line):
+    Expr(kind= ExprKind.RelabelCast(expr, pairs), line= line)
 
 def Expr make_dict([(Expr, Expr)] pairs, int line):
     Expr(kind= ExprKind.Dict(pairs), line= line)

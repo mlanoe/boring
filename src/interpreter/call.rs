@@ -134,6 +134,11 @@ impl Interpreter {
         // ── Resolve return type now, while the type-param stack is still live ────
         let resolved_ret = decl.return_ty.as_ref().map(|t| self.resolve_type(t));
 
+        // Push this call's resolved return type so `Stmt::Return` (exec.rs) can hint
+        // `.Variant` return values — popped right after `result` is computed, below,
+        // alongside the other per-call context restores.
+        self.return_ty_stack.push(resolved_ret.clone());
+
         let prev_task_ctx = self.task_context;
         // `main` is always treated as a task context — there is no caller that
         // needs to know, so `def main():` works the same as `task main():`.
@@ -213,6 +218,7 @@ impl Interpreter {
 
         // Restore caller's context flags now that the tail expression and all
         // deferred blocks have finished executing.
+        self.return_ty_stack.pop();
         self.task_context = prev_task_ctx;
         self.current_method_mutating = prev_mutating;
 
@@ -734,8 +740,8 @@ impl Interpreter {
                                     "X"  => if let Value::Int(n) = val { format!("{:X}", n) } else { format!("{}", val) },
                                     "b"  => if let Value::Int(n) = val { format!("{:b}", n) } else { format!("{}", val) },
                                     "o"  => if let Value::Int(n) = val { format!("{:o}", n) } else { format!("{}", val) },
-                                    "e"  => if let Value::Float(f) = val { format!("{:e}", f) } else { format!("{}", val) },
-                                    "E"  => if let Value::Float(f) = val { format!("{:E}", f) } else { format!("{}", val) },
+                                    "e"  => if let Value::Float64(f) = val { format!("{:e}", f) } else { format!("{}", val) },
+                                    "E"  => if let Value::Float64(f) = val { format!("{:E}", f) } else { format!("{}", val) },
                                     _ => format!("{}", val),   // ignore unknown specifiers
                                 };
                                 result.push_str(&formatted);

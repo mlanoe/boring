@@ -4,13 +4,26 @@ use super::helpers::*;
 
 impl Transpiler {
     /// Resolve the user struct type name of an expression, walking `self`/local-var roots
-    /// and field chains (`self.encoder`, `a.b.c`). Returns None for anything else (locals of
-    /// non-struct type, method-call results, etc.) — callers should treat that as "not a
-    /// known user struct".
+    /// and field chains (`self.encoder`, `a.b.c`). Also resolves bare implicit-self-field
+    /// names (`signal` inside a method meaning `self.signal`) the same way `emit_expr`'s
+    /// `ExprKind::Var` arm lowers them — otherwise callers relying on this helper see a
+    /// field access as an unresolvable local, even though `emit_expr` will emit `self.<name>`
+    /// for the exact same expression a few lines later. Returns None for anything else
+    /// (locals of non-struct type, method-call results, etc.) — callers should treat that
+    /// as "not a known user struct".
     pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned().or_else(|| {
+                if self.known_local_vars.contains(v.as_str()) { return None; }
+                let struct_name = self.self_type.as_ref()?;
+                let (_, fty) = self.struct_fields.get(struct_name.as_str())?
+                    .iter().find(|(fname, _)| fname == v)?;
+                match fty {
+                    Type::Named(n) => Some(n.clone()),
+                    _ => None,
+                }
+            }),
             ExprKind::Field(inner, field) => {
                 let inner_ty = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(inner_ty.as_str())?
@@ -47,6 +60,26 @@ impl Transpiler {
             }
             _ => None,
         }
+    }
+
+    /// Does `expected` name an enum that actually has a variant called `variant`? Used by
+    /// overload resolution (here and in emit_expr.rs's free-function overload lookup) to
+    /// judge a `.Variant` argument against a candidate's declared param type.
+    /// `infer_overload_expr_type` has no case for `ExprKind::DotIdent` — it returns `None`,
+    /// and the overload predicate's `None => true` then "optimistically" treats `.Variant`
+    /// as compatible with *every* candidate, so the first one in declaration order wins
+    /// regardless of whether its param type actually has that variant. This gives that
+    /// predicate a real answer for the `.Variant` case instead of the optimistic default.
+    pub(crate) fn dotident_matches_enum_type(&self, variant: &str, expected: &Type) -> bool {
+        let base = match expected {
+            Type::Named(n) => n.as_str(),
+            Type::Qualified(inner, _) => match inner.as_ref() {
+                Type::Named(n) => n.as_str(),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.enum_variant_fields.contains_key(&format!("{}::{}", base, variant))
     }
 
     /// Built-in `fs`/`GPU` module namespace calls, and property access on a tracked
@@ -325,7 +358,7 @@ impl Transpiler {
                 let is_task = self.var_rwlock_task_types.contains(v.as_str());
                 let (rust_method, extra_wrap) = map_method(method, args.len());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
-                let struct_name = self.var_struct_types.get(v.as_str()).cloned().unwrap_or_default();
+                let struct_name = self.resolve_receiver_type_name(v.as_str());
                 let is_req = self.method_is_req_or_task(&struct_name, method);
                 // `'guard` (RwLock) gets no exception from the general rule —
                 // docs/mut-type-modifier.md §1: mutation goes through the lock
@@ -339,8 +372,11 @@ impl Transpiler {
                     && self.mut_checked_local_vars.contains(v.as_str())
                     // Permissive when the receiver's struct type couldn't even
                     // be resolved — see the matching comment in
-                    // `try_emit_mutex_method`.
-                    && self.struct_fields.contains_key(struct_name.as_str())
+                    // `try_emit_mutex_method`. A struct always gets this check;
+                    // an enum only when it has a `mut`-qualified variant field
+                    // (`enum_has_mut_field`) — see this file's general fallback
+                    // diagnostic for the non-actor/guard case.
+                    && (self.struct_fields.contains_key(struct_name.as_str()) || self.enum_has_mut_field(struct_name.as_str()))
                 {
                     self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
                 }
@@ -413,15 +449,17 @@ impl Transpiler {
                     && !self.content_mutable_local_vars.contains(v.as_str())
                     && self.mut_checked_local_vars.contains(v.as_str())
                 {
-                    let struct_name = self.var_struct_types.get(v.as_str()).cloned().unwrap_or_default();
+                    let struct_name = self.resolve_receiver_type_name(v.as_str());
                     // If we can't even resolve the receiver's struct type (a
                     // real inference gap independent of this diagnostic — e.g.
                     // an inferred `let cur = interp.current_env` chained field
                     // read), we have no basis to call it mutating either;
                     // don't guess. Same permissive-on-unknown shape as the
                     // general local-binding check in `emit_method_call_fallback`
-                    // (gated on `self.struct_fields.contains_key(sn)`).
-                    if self.struct_fields.contains_key(struct_name.as_str())
+                    // (gated on `self.struct_fields.contains_key(sn)`). A struct
+                    // always gets this check; an enum only when it has a
+                    // `mut`-qualified variant field (`enum_has_mut_field`).
+                    if (self.struct_fields.contains_key(struct_name.as_str()) || self.enum_has_mut_field(struct_name.as_str()))
                         && !self.method_is_req_or_task(&struct_name, method)
                     {
                         self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
@@ -1260,7 +1298,7 @@ impl Transpiler {
         // known to be a float array.
         if method == "sum" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            let elem_ty = if self.expr_is_float_array(obj) { "f64" } else { "i64" };
+            let elem_ty = self.float_array_elem_ty(obj).unwrap_or("i64");
             return Some(format!("{}.iter().cloned().sum::<{}>()", obj_s, elem_ty));
         }
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
@@ -1306,14 +1344,14 @@ impl Transpiler {
             ExprKind::Int(_)   => true,
             ExprKind::Var(v) => matches!(
                 self.var_types.get(v.as_str()),
-                Some(crate::ast::Type::Float) | Some(crate::ast::Type::Int) | Some(crate::ast::Type::Uint)
+                Some(crate::ast::Type::Float32) | Some(crate::ast::Type::Float64) | Some(crate::ast::Type::Int) | Some(crate::ast::Type::Uint)
                 | Some(crate::ast::Type::Uint8)
                 | Some(crate::ast::Type::Int8) | Some(crate::ast::Type::Int16) | Some(crate::ast::Type::Int32)
                 | Some(crate::ast::Type::Int64) | Some(crate::ast::Type::Int128)
                 | Some(crate::ast::Type::Uint16) | Some(crate::ast::Type::Uint32)
                 | Some(crate::ast::Type::Uint64) | Some(crate::ast::Type::Uint128)
             ),
-            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float | crate::ast::Type::Int | crate::ast::Type::Uint
+            ExprKind::Cast(_, ty) => matches!(*ty, crate::ast::Type::Float32 | crate::ast::Type::Float64 | crate::ast::Type::Int | crate::ast::Type::Uint
                 | crate::ast::Type::Uint8
                 | crate::ast::Type::Int8 | crate::ast::Type::Int16 | crate::ast::Type::Int32
                 | crate::ast::Type::Int64 | crate::ast::Type::Int128
@@ -1461,6 +1499,9 @@ impl Transpiler {
                     if let crate::ast::Type::Named(n) = ty { Some(n.clone()) } else { None }
                 });
                 if let Some(sn) = struct_name {
+                    // A struct always gets this check (unchanged); an enum only when it has
+                    // at least one `mut`-qualified variant field — see this function's other
+                    // branch below, and `enum_has_mut_field`'s doc.
                     if self.struct_fields.contains_key(sn.as_str()) {
                         let req_key = format!("{}::{}", sn, method);
                         let is_req = self.struct_req_methods.contains(&req_key);
@@ -1469,6 +1510,10 @@ impl Transpiler {
                             let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
                             self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, method, sn, v));
                         }
+                    } else if self.enum_has_mut_field(sn.as_str()) && !self.method_is_req_or_task(sn.as_str(), method) {
+                        let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                        let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                        self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, method, sn, v));
                     }
                 }
             } else if v != "self"
@@ -1493,9 +1538,13 @@ impl Transpiler {
                         if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                     }));
                 if let Some(sn) = struct_name {
-                    if self.struct_fields.contains_key(sn.as_str())
-                        && !self.method_is_req_or_task(sn.as_str(), method)
-                    {
+                    // A struct always gets this check; an enum only when it has at least
+                    // one `mut`-qualified variant field (`enum_has_mut_field`) — every
+                    // other enum keeps `def` == `req` (docs/book.md's "Enum methods"),
+                    // so gating those would reject calls that work fine today.
+                    let is_gated_type = self.struct_fields.contains_key(sn.as_str())
+                        || self.enum_has_mut_field(sn.as_str());
+                    if is_gated_type && !self.method_is_req_or_task(sn.as_str(), method) {
                         self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, sn, v, sn, v));
                     }
                 }
@@ -1608,35 +1657,52 @@ impl Transpiler {
             if self.set_vars.contains(v.as_str()));
         let receiver_is_dict_var = matches!(&obj.kind, ExprKind::Var(v)
             if self.dict_vars.contains(v.as_str()));
+        // Declared param types of the struct method actually being called, used below to
+        // resolve `.Variant` enum shorthand args by the *parameter's* type rather than
+        // falling back to the transpiler's flat "last enum registered wins" lookup — see
+        // resolve_expr_struct_type / struct_method_overload_decls for the same struct-type
+        // resolution used by overload matching just below.
+        let mut struct_method_param_types: Vec<Option<Type>> = Vec::new();
         let (rust_method, extra_wrap) = if is_user_struct_receiver {
             // Check for overloaded struct methods — pick the best-matching overload.
-            let struct_type_opt = match &obj.kind {
-                ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
-                _ => None,
-            };
-            let overloaded_name = struct_type_opt.and_then(|type_name| {
+            let struct_type_opt = self.resolve_expr_struct_type(obj);
+            let chosen_decl = struct_type_opt.as_ref().and_then(|type_name| {
                 let key = format!("{}::{}", type_name, method);
-                if !self.overloaded_method_keys.contains(&key) { return None; }
                 let overloads = self.struct_method_overload_decls.get(&key)?;
-                // Find best matching overload by arity and inferred arg types
-                let chosen = overloads.iter().find(|decl| {
-                    let min_a = decl.params.iter().filter(|p| p.default.is_none()).count();
-                    let max_a = decl.params.len();
-                    if args.len() < min_a || args.len() > max_a { return false; }
-                    decl.params.iter().zip(args.iter()).all(|(p, a)| {
-                        match &p.ty {
-                            None => true,
-                            Some(expected) => {
-                                match infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types, &self.struct_fields) {
-                                    Some(actual) => types_compatible(expected, &actual),
-                                    None => true,
+                if self.overloaded_method_keys.contains(&key) {
+                    // Find best matching overload by arity and inferred arg types
+                    Some(overloads.iter().find(|decl| {
+                        let min_a = decl.params.iter().filter(|p| p.default.is_none()).count();
+                        let max_a = decl.params.len();
+                        if args.len() < min_a || args.len() > max_a { return false; }
+                        decl.params.iter().zip(args.iter()).all(|(p, a)| {
+                            match &p.ty {
+                                None => true,
+                                Some(expected) => {
+                                    if let ExprKind::DotIdent(variant) = &a.value.kind {
+                                        self.dotident_matches_enum_type(variant, expected)
+                                    } else {
+                                        match infer_overload_expr_type(&a.value, &self.var_types, &self.fn_return_types, &self.struct_fields) {
+                                            Some(actual) => types_compatible(expected, &actual),
+                                            None => true,
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    })
-                }).or_else(|| overloads.first());
-                chosen.map(|decl| mangle_overload_name(method, &decl.params))
+                        })
+                    }).unwrap_or_else(|| overloads.first().unwrap()))
+                } else {
+                    overloads.first()
+                }
             });
+            struct_method_param_types = chosen_decl
+                .map(|decl| decl.params.iter().map(|p| p.ty.clone()).collect())
+                .unwrap_or_default();
+            let overloaded_name = chosen_decl.filter(|_| {
+                struct_type_opt.as_ref()
+                    .map(|t| self.overloaded_method_keys.contains(&format!("{}::{}", t, method)))
+                    .unwrap_or(false)
+            }).map(|decl| mangle_overload_name(method, &decl.params));
             (overloaded_name.unwrap_or_else(|| method.to_string()), None)
         } else if receiver_is_set_var && method == "add" {
             ("insert".to_string(), None)
@@ -1664,7 +1730,19 @@ impl Transpiler {
         } else if is_user_struct_receiver {
             // User-defined struct methods: coerce string literals to Arc<str> to match
             // generated method signatures (Boring `string` params map to `Arc<str>`).
-            args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
+            // `.Variant` enum shorthand args are resolved against the method's own
+            // declared param type (struct_method_param_types) instead of falling through
+            // to emit_expr_owned's flat "last enum registered wins" DotIdent lookup —
+            // this is what lets `obj.method(.Left)` pick the right enum when multiple
+            // enums share a `Left` variant.
+            args.iter().enumerate().map(|(i, a)| {
+                if matches!(&a.value.kind, ExprKind::DotIdent(_)) {
+                    if let Some(Some(param_ty)) = struct_method_param_types.get(i) {
+                        return self.emit_let_value(Some(param_ty), &a.value);
+                    }
+                }
+                self.emit_expr_owned(&a.value)
+            }).collect()
         } else if (rust_method == "push" || rust_method == "extend") && {
             // Use emit_expr_owned for any vec push so non-Copy values (e.g. Value enum) are cloned.
             match &obj.kind {
@@ -3037,7 +3115,7 @@ fn is_unqualified_actor_source_param(ty: Option<&Type>, actor_source_types: &std
 /// Returns true when param_ty is a primitive Copy type that never needs .clone().
 fn param_ty_is_copy(ty: Option<&Type>) -> bool {
     matches!(ty,
-        Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool
+        Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128) |
         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))

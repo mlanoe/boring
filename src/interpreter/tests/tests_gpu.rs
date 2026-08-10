@@ -81,7 +81,7 @@ let _result = k.buf[0]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Float(10.0));
+    assert_eq!(get_var(&interp, "_result"), Value::Float64(10.0));
 }
 
 // ─── atomic min/max/swap/cas — read-modify-write, returns the OLD value ──────
@@ -179,8 +179,8 @@ let _r1 = k.buf[1]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_r0"), Value::Float(11.0));
-    assert_eq!(get_var(&interp, "_r1"), Value::Float(21.0));
+    assert_eq!(get_var(&interp, "_r0"), Value::Float64(11.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float64(21.0));
 }
 
 #[test]
@@ -202,7 +202,7 @@ let _result = k.buf[0]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_result"), Value::Float(10.0));
+    assert_eq!(get_var(&interp, "_result"), Value::Float64(10.0));
 }
 
 // ─── kernel simulation — element-wise operation ──────────────────────────────
@@ -232,10 +232,10 @@ let _result = k.buf
     assert_eq!(
         val,
         Value::Array(vec![
-            Value::Float(2.0),
-            Value::Float(4.0),
-            Value::Float(6.0),
-            Value::Float(8.0),
+            Value::Float64(2.0),
+            Value::Float64(4.0),
+            Value::Float64(6.0),
+            Value::Float64(8.0),
         ].into()),
         "each element should be doubled"
     );
@@ -266,9 +266,9 @@ let _result = k.buf
     assert_eq!(
         val,
         Value::Array(vec![
-            Value::Float(6.0),
-            Value::Float(12.0),
-            Value::Float(18.0),
+            Value::Float64(6.0),
+            Value::Float64(12.0),
+            Value::Float64(18.0),
         ].into())
     );
 }
@@ -446,9 +446,9 @@ let _a2 = k.arr[2]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_a0"), Value::Float(1.0));
-    assert_eq!(get_var(&interp, "_a1"), Value::Float(2.0));
-    assert_eq!(get_var(&interp, "_a2"), Value::Float(3.0));
+    assert_eq!(get_var(&interp, "_a0"), Value::Float64(1.0));
+    assert_eq!(get_var(&interp, "_a1"), Value::Float64(2.0));
+    assert_eq!(get_var(&interp, "_a2"), Value::Float64(3.0));
 }
 
 // ─── kernel method called from entry point ───────────────────────────────────
@@ -480,7 +480,7 @@ let _result = k.buf
     let val = get_var(&interp, "_result");
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(10.0), Value::Float(20.0)].into())
+        Value::Array(vec![Value::Float64(10.0), Value::Float64(20.0)].into())
     );
 }
 
@@ -519,7 +519,7 @@ let _result = k.out
     // tile[tid] defaults to 0.0, so out == input unchanged.
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(3.0), Value::Float(4.0)].into())
+        Value::Array(vec![Value::Float64(1.0), Value::Float64(2.0), Value::Float64(3.0), Value::Float64(4.0)].into())
     );
 }
 
@@ -558,7 +558,7 @@ let _result = k.buf
     // (1+1)*2=4, (2+1)*2=6, (3+1)*2=8
     assert_eq!(
         val,
-        Value::Array(vec![Value::Float(4.0), Value::Float(6.0), Value::Float(8.0)].into())
+        Value::Array(vec![Value::Float64(4.0), Value::Float64(6.0), Value::Float64(8.0)].into())
     );
 }
 
@@ -595,8 +595,8 @@ let _out255 = k.out[255]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_out0"), Value::Float(1.0));
-    assert_eq!(get_var(&interp, "_out255"), Value::Float(1.0));
+    assert_eq!(get_var(&interp, "_out0"), Value::Float64(1.0));
+    assert_eq!(get_var(&interp, "_out255"), Value::Float64(1.0));
 }
 
 // ─── explicit `grid =` must be honored, not silently re-inferred ───────────
@@ -641,9 +641,9 @@ let _mark_1023 = k.marks[1023]
     // block=256, grid=1 (explicit) -> exactly 256 threads (indices 0..255
     // marked). Length-inference from `big` (1000 elements) would instead give
     // ceil(1000/256)=4 blocks — 1024 threads, marking indices up to 1023 too.
-    assert_eq!(get_var(&interp, "_mark_255"), Value::Float(1.0));
-    assert_eq!(get_var(&interp, "_mark_256"), Value::Float(0.0));
-    assert_eq!(get_var(&interp, "_mark_1023"), Value::Float(0.0));
+    assert_eq!(get_var(&interp, "_mark_255"), Value::Float64(1.0));
+    assert_eq!(get_var(&interp, "_mark_256"), Value::Float64(0.0));
+    assert_eq!(get_var(&interp, "_mark_1023"), Value::Float64(0.0));
 }
 
 // ─── 3D block/grid dispatch: gpu.thread.z / gpu.block.z are real ───────────
@@ -674,10 +674,10 @@ let _r3 = k.out[3]
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_r0"), Value::Float(0.0));
-    assert_eq!(get_var(&interp, "_r1"), Value::Float(10.0));
-    assert_eq!(get_var(&interp, "_r2"), Value::Float(20.0));
-    assert_eq!(get_var(&interp, "_r3"), Value::Float(30.0));
+    assert_eq!(get_var(&interp, "_r0"), Value::Float64(0.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float64(10.0));
+    assert_eq!(get_var(&interp, "_r2"), Value::Float64(20.0));
+    assert_eq!(get_var(&interp, "_r3"), Value::Float64(30.0));
 }
 
 // ─── end-to-end: element-wise multiply ──────────────────────────────────────
@@ -712,10 +712,10 @@ let _r3 = k.out[3]
     let (interp, result) = run(src);
     result.expect("runtime error");
     // 1*4=4, 2*3=6, 3*2=6, 4*1=4
-    assert_eq!(get_var(&interp, "_r0"), Value::Float(4.0));
-    assert_eq!(get_var(&interp, "_r1"), Value::Float(6.0));
-    assert_eq!(get_var(&interp, "_r2"), Value::Float(6.0));
-    assert_eq!(get_var(&interp, "_r3"), Value::Float(4.0));
+    assert_eq!(get_var(&interp, "_r0"), Value::Float64(4.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float64(6.0));
+    assert_eq!(get_var(&interp, "_r2"), Value::Float64(6.0));
+    assert_eq!(get_var(&interp, "_r3"), Value::Float64(4.0));
 }
 
 // ─── end-to-end: two-kernel pipeline (scale then shift) ─────────────────────
@@ -759,9 +759,9 @@ let _r2 = k2.buf[2]
     let (interp, result) = run(src);
     result.expect("runtime error");
     // scale: [2, 4, 6], shift: [12, 14, 16]
-    assert_eq!(get_var(&interp, "_r0"), Value::Float(12.0));
-    assert_eq!(get_var(&interp, "_r1"), Value::Float(14.0));
-    assert_eq!(get_var(&interp, "_r2"), Value::Float(16.0));
+    assert_eq!(get_var(&interp, "_r0"), Value::Float64(12.0));
+    assert_eq!(get_var(&interp, "_r1"), Value::Float64(14.0));
+    assert_eq!(get_var(&interp, "_r2"), Value::Float64(16.0));
 }
 
 // ─── memory qualifiers ───────────────────────────────────────────────────────
@@ -789,7 +789,7 @@ let _result = k.buf
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(3.0), Value::Float(6.0), Value::Float(9.0)].into())
+        Value::Array(vec![Value::Float64(3.0), Value::Float64(6.0), Value::Float64(9.0)].into())
     );
 }
 
@@ -819,7 +819,7 @@ let _result = k.out
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(5.0), Value::Float(10.0), Value::Float(20.0)].into())
+        Value::Array(vec![Value::Float64(5.0), Value::Float64(10.0), Value::Float64(20.0)].into())
     );
 }
 
@@ -848,7 +848,7 @@ let _result = k.out
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(0.0), Value::Float(10.0), Value::Float(20.0)].into())
+        Value::Array(vec![Value::Float64(0.0), Value::Float64(10.0), Value::Float64(20.0)].into())
     );
 }
 
@@ -877,7 +877,7 @@ let _result = k.buf
     result.expect("runtime error");
     assert_eq!(
         get_var(&interp, "_result"),
-        Value::Array(vec![Value::Float(1.0), Value::Float(2.0), Value::Float(4.0)].into())
+        Value::Array(vec![Value::Float64(1.0), Value::Float64(2.0), Value::Float64(4.0)].into())
     );
 }
 
@@ -1097,8 +1097,8 @@ let _w2 = k2.dim.width
 "#;
     let (interp, result) = run(src);
     result.expect("runtime error");
-    assert_eq!(get_var(&interp, "_z1"), Value::Float(3.5));
-    assert_eq!(get_var(&interp, "_z2"), Value::Float(3.5));
+    assert_eq!(get_var(&interp, "_z1"), Value::Float64(3.5));
+    assert_eq!(get_var(&interp, "_z2"), Value::Float64(3.5));
     assert_eq!(get_var(&interp, "_w2"), Value::Uint(4));
 }
 
@@ -1160,10 +1160,10 @@ let _r11 = k.out[3]
         .spawn(move || {
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
-            assert_eq!(get_var(&interp, "_r00"), Value::Float(19.0));
-            assert_eq!(get_var(&interp, "_r01"), Value::Float(22.0));
-            assert_eq!(get_var(&interp, "_r10"), Value::Float(43.0));
-            assert_eq!(get_var(&interp, "_r11"), Value::Float(50.0));
+            assert_eq!(get_var(&interp, "_r00"), Value::Float64(19.0));
+            assert_eq!(get_var(&interp, "_r01"), Value::Float64(22.0));
+            assert_eq!(get_var(&interp, "_r10"), Value::Float64(43.0));
+            assert_eq!(get_var(&interp, "_r11"), Value::Float64(50.0));
         })
         .unwrap()
         .join()
@@ -1219,10 +1219,10 @@ let _r11 = k.out[3]
         .spawn(move || {
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
-            assert_eq!(get_var(&interp, "_r00"), Value::Float(58.0));
-            assert_eq!(get_var(&interp, "_r01"), Value::Float(64.0));
-            assert_eq!(get_var(&interp, "_r10"), Value::Float(139.0));
-            assert_eq!(get_var(&interp, "_r11"), Value::Float(154.0));
+            assert_eq!(get_var(&interp, "_r00"), Value::Float64(58.0));
+            assert_eq!(get_var(&interp, "_r01"), Value::Float64(64.0));
+            assert_eq!(get_var(&interp, "_r10"), Value::Float64(139.0));
+            assert_eq!(get_var(&interp, "_r11"), Value::Float64(154.0));
         })
         .unwrap()
         .join()
@@ -1280,7 +1280,7 @@ let _r3 = k.out[3]
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
             let check = |v: Value| {
-                if let Value::Float(f) = v { (f - 0.25).abs() < 1e-9 }
+                if let Value::Float64(f) = v { (f - 0.25).abs() < 1e-9 }
                 else { false }
             };
             assert!(check(get_var(&interp, "_r0")), "expected 0.25");
@@ -1333,10 +1333,10 @@ let _other = k.out[0]
         .spawn(move || {
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
-            if let Value::Float(peak) = get_var(&interp, "_peak") {
+            if let Value::Float64(peak) = get_var(&interp, "_peak") {
                 assert!(peak > 0.999, "peak should be near 1, got {}", peak);
             } else { panic!("expected float"); }
-            if let Value::Float(other) = get_var(&interp, "_other") {
+            if let Value::Float64(other) = get_var(&interp, "_other") {
                 assert!(other < 0.001, "other should be near 0, got {}", other);
             } else { panic!("expected float"); }
         })
@@ -1472,10 +1472,10 @@ let _o11 = mm.out[3]
         .spawn(move || {
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
-            assert_eq!(get_var(&interp, "_o00"), Value::Float(2.0));
-            assert_eq!(get_var(&interp, "_o01"), Value::Float(3.0));
-            assert_eq!(get_var(&interp, "_o10"), Value::Float(2.0));
-            assert_eq!(get_var(&interp, "_o11"), Value::Float(3.0));
+            assert_eq!(get_var(&interp, "_o00"), Value::Float64(2.0));
+            assert_eq!(get_var(&interp, "_o01"), Value::Float64(3.0));
+            assert_eq!(get_var(&interp, "_o10"), Value::Float64(2.0));
+            assert_eq!(get_var(&interp, "_o11"), Value::Float64(3.0));
         })
         .unwrap()
         .join()
@@ -1546,7 +1546,7 @@ let _o3 = k.out[3]
                              0.447211806656309,   1.3416354199689269];
             for (i, &exp) in expected.iter().enumerate() {
                 let name = ["_o0", "_o1", "_o2", "_o3"][i];
-                if let Value::Float(got) = get_var(&interp, name) {
+                if let Value::Float64(got) = get_var(&interp, name) {
                     assert!((got - exp).abs() < 1e-9, "{}: expected {}, got {}", name, exp, got);
                 } else { panic!("{}: expected float", name); }
             }
@@ -1606,10 +1606,10 @@ let _o3 = k.out[3]
         .spawn(move || {
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
-            if let Value::Float(o0) = get_var(&interp, "_o0") {
+            if let Value::Float64(o0) = get_var(&interp, "_o0") {
                 assert!((o0 - (-1.6832708399378538)).abs() < 1e-9, "o0={}", o0);
             } else { panic!("expected float"); }
-            if let Value::Float(o3) = get_var(&interp, "_o3") {
+            if let Value::Float64(o3) = get_var(&interp, "_o3") {
                 assert!((o3 - 3.6832708399378538).abs() < 1e-9, "o3={}", o3);
             } else { panic!("expected float"); }
         })
@@ -1664,17 +1664,17 @@ let _o3 = k.out[3]
             let (interp, result) = run(&src_str);
             result.expect("runtime error");
             // gelu(0) = 0
-            assert_eq!(get_var(&interp, "_o0"), Value::Float(0.0));
+            assert_eq!(get_var(&interp, "_o0"), Value::Float64(0.0));
             // gelu(1) ≈ 0.8412
-            if let Value::Float(v) = get_var(&interp, "_o1") {
+            if let Value::Float64(v) = get_var(&interp, "_o1") {
                 assert!((v - 0.8411919906082768).abs() < 1e-9, "gelu(1)={}", v);
             } else { panic!("expected float"); }
             // gelu(-1) ≈ -0.1588  (antisymmetric around 0)
-            if let Value::Float(v) = get_var(&interp, "_o2") {
+            if let Value::Float64(v) = get_var(&interp, "_o2") {
                 assert!((v - (-0.15880800939172324)).abs() < 1e-9, "gelu(-1)={}", v);
             } else { panic!("expected float"); }
             // gelu(2) ≈ 1.9546
-            if let Value::Float(v) = get_var(&interp, "_o3") {
+            if let Value::Float64(v) = get_var(&interp, "_o3") {
                 assert!((v - 1.954597694087775).abs() < 1e-9, "gelu(2)={}", v);
             } else { panic!("expected float"); }
         })
@@ -1787,7 +1787,7 @@ let _o3 = lin2.out[3]
             ];
             for (i, &exp) in expected.iter().enumerate() {
                 let name = ["_o0", "_o1", "_o2", "_o3"][i];
-                if let Value::Float(got) = get_var(&interp, name) {
+                if let Value::Float64(got) = get_var(&interp, name) {
                     assert!((got - exp).abs() < 1e-9, "{}: expected {}, got {}", name, exp, got);
                 } else { panic!("{}: expected float", name); }
             }

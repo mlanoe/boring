@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 impl Interpreter {
@@ -182,65 +182,132 @@ impl Interpreter {
                     return Ok(result);
                 }
             }
-            Value::Float(f) => {
+            Value::Float64(f) => {
                 let result = match method {
-                    "sqrt"  => Some(Value::Float(f.sqrt())),
-                    "cbrt"  => Some(Value::Float(f.cbrt())),
-                    "abs"   => Some(Value::Float(f.abs())),
-                    "floor" => Some(Value::Float(f.floor())),
-                    "ceil"  => Some(Value::Float(f.ceil())),
-                    "round" => Some(Value::Float(f.round())),
-                    "exp"   => Some(Value::Float(f.exp())),
-                    "exp2"  => Some(Value::Float(f.exp2())),
-                    "ln"    => Some(Value::Float(f.ln())),
-                    "log2"  => Some(Value::Float(f.log2())),
-                    "log10" => Some(Value::Float(f.log10())),
-                    "sin"   => Some(Value::Float(f.sin())),
-                    "cos"   => Some(Value::Float(f.cos())),
-                    "tan"   => Some(Value::Float(f.tan())),
-                    "asin"  => Some(Value::Float(f.asin())),
-                    "acos"  => Some(Value::Float(f.acos())),
-                    "atan"  => Some(Value::Float(f.atan())),
-                    "sinh"  => Some(Value::Float(f.sinh())),
-                    "cosh"  => Some(Value::Float(f.cosh())),
-                    "tanh"  => Some(Value::Float(f.tanh())),
-                    "sign" | "signum" => Some(Value::Float(f.signum())),
+                    "sqrt"  => Some(Value::Float64(f.sqrt())),
+                    "cbrt"  => Some(Value::Float64(f.cbrt())),
+                    "abs"   => Some(Value::Float64(f.abs())),
+                    "floor" => Some(Value::Float64(f.floor())),
+                    "ceil"  => Some(Value::Float64(f.ceil())),
+                    "round" => Some(Value::Float64(f.round())),
+                    "exp"   => Some(Value::Float64(f.exp())),
+                    "exp2"  => Some(Value::Float64(f.exp2())),
+                    "ln"    => Some(Value::Float64(f.ln())),
+                    "log2"  => Some(Value::Float64(f.log2())),
+                    "log10" => Some(Value::Float64(f.log10())),
+                    "sin"   => Some(Value::Float64(f.sin())),
+                    "cos"   => Some(Value::Float64(f.cos())),
+                    "tan"   => Some(Value::Float64(f.tan())),
+                    "asin"  => Some(Value::Float64(f.asin())),
+                    "acos"  => Some(Value::Float64(f.acos())),
+                    "atan"  => Some(Value::Float64(f.atan())),
+                    "sinh"  => Some(Value::Float64(f.sinh())),
+                    "cosh"  => Some(Value::Float64(f.cosh())),
+                    "tanh"  => Some(Value::Float64(f.tanh())),
+                    "sign" | "signum" => Some(Value::Float64(f.signum())),
                     "isNaN" | "is_nan" => Some(Value::Bool(f.is_nan())),
                     "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
                     "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
                     "toInt" | "int" => Some(Value::Int(*f as i64)),
                     "pow" | "powf" => {
-                        let exp = args.first().cloned().unwrap_or(Value::Float(1.0));
+                        let exp = args.first().cloned().unwrap_or(Value::Float64(1.0));
                         let e = match exp {
-                            Value::Float(e) => e,
+                            Value::Float64(e) => e,
                             Value::Int(n)   => n as f64,
                             _ => return Err(err("pow: argument must be a number", line)),
                         };
-                        Some(Value::Float(f.powf(e)))
+                        Some(Value::Float64(f.powf(e)))
                     }
                     "log" => {
-                        let base = args.first().cloned().unwrap_or(Value::Float(std::f64::consts::E));
+                        let base = args.first().cloned().unwrap_or(Value::Float64(std::f64::consts::E));
                         let b = match base {
-                            Value::Float(b) => b,
+                            Value::Float64(b) => b,
                             Value::Int(n)   => n as f64,
                             _ => return Err(err("log: base must be a number", line)),
                         };
-                        Some(Value::Float(f.log(b)))
+                        Some(Value::Float64(f.log(b)))
                     }
                     "atan2" => {
-                        let other = args.first().cloned().unwrap_or(Value::Float(0.0));
+                        let other = args.first().cloned().unwrap_or(Value::Float64(0.0));
                         let o = match other {
-                            Value::Float(o) => o,
+                            Value::Float64(o) => o,
                             Value::Int(n)   => n as f64,
                             _ => return Err(err("atan2: argument must be a number", line)),
                         };
-                        Some(Value::Float(f.atan2(o)))
+                        Some(Value::Float64(f.atan2(o)))
                     }
                     "clamp" => {
                         if args.len() < 2 { return Err(err("clamp: requires two arguments (min, max)", line)); }
-                        let lo = match &args[0] { Value::Float(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: min must be a number", line)) };
-                        let hi = match &args[1] { Value::Float(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: max must be a number", line)) };
-                        Some(Value::Float(f.clamp(lo, hi)))
+                        let lo = match &args[0] { Value::Float64(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: min must be a number", line)) };
+                        let hi = match &args[1] { Value::Float64(v) => *v, Value::Int(n) => *n as f64, _ => return Err(err("clamp: max must be a number", line)) };
+                        Some(Value::Float64(f.clamp(lo, hi)))
+                    }
+                    _ => None,
+                };
+                if let Some(v) = result { return Ok(v); }
+            }
+            // Mirror of the Float64 block above, at f32 precision throughout —
+            // Rust's f32 has the identical method surface to f64, so this is a
+            // direct port, not new algorithm design (docs/float-width-types.md §8).
+            Value::Float32(f) => {
+                let result = match method {
+                    "sqrt"  => Some(Value::Float32(f.sqrt())),
+                    "cbrt"  => Some(Value::Float32(f.cbrt())),
+                    "abs"   => Some(Value::Float32(f.abs())),
+                    "floor" => Some(Value::Float32(f.floor())),
+                    "ceil"  => Some(Value::Float32(f.ceil())),
+                    "round" => Some(Value::Float32(f.round())),
+                    "exp"   => Some(Value::Float32(f.exp())),
+                    "exp2"  => Some(Value::Float32(f.exp2())),
+                    "ln"    => Some(Value::Float32(f.ln())),
+                    "log2"  => Some(Value::Float32(f.log2())),
+                    "log10" => Some(Value::Float32(f.log10())),
+                    "sin"   => Some(Value::Float32(f.sin())),
+                    "cos"   => Some(Value::Float32(f.cos())),
+                    "tan"   => Some(Value::Float32(f.tan())),
+                    "asin"  => Some(Value::Float32(f.asin())),
+                    "acos"  => Some(Value::Float32(f.acos())),
+                    "atan"  => Some(Value::Float32(f.atan())),
+                    "sinh"  => Some(Value::Float32(f.sinh())),
+                    "cosh"  => Some(Value::Float32(f.cosh())),
+                    "tanh"  => Some(Value::Float32(f.tanh())),
+                    "sign" | "signum" => Some(Value::Float32(f.signum())),
+                    "isNaN" | "is_nan" => Some(Value::Bool(f.is_nan())),
+                    "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
+                    "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
+                    "toInt" | "int" => Some(Value::Int(*f as i64)),
+                    "pow" | "powf" => {
+                        let exp = args.first().cloned().unwrap_or(Value::Float32(1.0));
+                        let e = match exp {
+                            Value::Float32(e) => e,
+                            Value::Int(n)   => n as f32,
+                            _ => return Err(err("pow: argument must be a number", line)),
+                        };
+                        Some(Value::Float32(f.powf(e)))
+                    }
+                    "log" => {
+                        let base = args.first().cloned().unwrap_or(Value::Float32(std::f32::consts::E));
+                        let b = match base {
+                            Value::Float32(b) => b,
+                            Value::Int(n)   => n as f32,
+                            _ => return Err(err("log: base must be a number", line)),
+                        };
+                        Some(Value::Float32(f.log(b)))
+                    }
+                    "atan2" => {
+                        let other = args.first().cloned().unwrap_or(Value::Float32(0.0));
+                        let o = match other {
+                            Value::Float32(o) => o,
+                            Value::Int(n)   => n as f32,
+                            _ => return Err(err("atan2: argument must be a number", line)),
+                        };
+                        Some(Value::Float32(f.atan2(o)))
+                    }
+                    "clamp" => {
+                        if args.len() < 2 { return Err(err("clamp: requires two arguments (min, max)", line)); }
+                        let lo = match &args[0] { Value::Float32(v) => *v, Value::Int(n) => *n as f32, _ => return Err(err("clamp: min must be a number", line)) };
+                        let hi = match &args[1] { Value::Float32(v) => *v, Value::Int(n) => *n as f32, _ => return Err(err("clamp: max must be a number", line)) };
+                        Some(Value::Float32(f.clamp(lo, hi)))
                     }
                     _ => None,
                 };
@@ -449,7 +516,8 @@ impl Interpreter {
             Type::Uint32 => matches!(val, Value::Uint32(_)),
             Type::Uint64 => matches!(val, Value::Uint64(_)),
             Type::Uint128 => matches!(val, Value::Uint128(_)),
-            Type::Float  => matches!(val, Value::Float(_)),
+            Type::Float32  => matches!(val, Value::Float32(_)),
+            Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
             Type::Bool   => matches!(val, Value::Bool(_)),
             Type::Qualified(inner, _) => Self::value_matches_type_static(val, inner),
@@ -466,7 +534,8 @@ impl Interpreter {
                 "uint32" => matches!(val, Value::Uint32(_)),
                 "uint64" => matches!(val, Value::Uint64(_)),
                 "uint128" => matches!(val, Value::Uint128(_)),
-                "float"  => matches!(val, Value::Float(_)),
+                "float32" | "f32" => matches!(val, Value::Float32(_)),
+                "float" | "float64" | "f64" => matches!(val, Value::Float64(_)),
                 "bool"   => matches!(val, Value::Bool(_)),
                 "string" => matches!(val, Value::Str(_)),
                 _ => true, // Unknown named type — don't reject
@@ -555,7 +624,7 @@ impl Interpreter {
             }
             "parseFloat" => {
                 match s.trim().parse::<f64>() {
-                    Ok(f) => Ok(Some(Value::Float(f))),
+                    Ok(f) => Ok(Some(Value::Float64(f))),
                     Err(_) => Ok(Some(Value::Nil)),
                 }
             }
@@ -599,7 +668,8 @@ impl Interpreter {
                 new_arr.sort_by(|a, b| {
                     match (a, b) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Str(x), Value::Str(y)) => x.cmp(y),
                         _ => std::cmp::Ordering::Equal,
                     }
@@ -619,9 +689,12 @@ impl Interpreter {
                 keyed.sort_by(|(ka, _), (kb, _)| {
                     match (ka, kb) {
                         (Value::Int(a), Value::Int(b))     => a.cmp(b),
-                        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-                        (Value::Int(a), Value::Float(b))   => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-                        (Value::Float(a), Value::Int(b))   => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Int(a), Value::Float64(b))   => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(a), Value::Int(b))   => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Int(a), Value::Float32(b))   => (*a as f32).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(a), Value::Int(b))   => a.partial_cmp(&(*b as f32)).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Str(a), Value::Str(b))     => a.cmp(b),
                         _                                   => std::cmp::Ordering::Equal,
                     }
@@ -802,7 +875,8 @@ impl Interpreter {
             "min" => {
                 let result = arr.iter().min_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     _ => std::cmp::Ordering::Equal,
                 }).cloned().unwrap_or(Value::Nil);
                 Ok(Some(result))
@@ -810,7 +884,8 @@ impl Interpreter {
             "max" => {
                 let result = arr.iter().max_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     _ => std::cmp::Ordering::Equal,
                 }).cloned().unwrap_or(Value::Nil);
                 Ok(Some(result))
@@ -822,12 +897,13 @@ impl Interpreter {
                 for item in arr.iter() {
                     match item {
                         Value::Int(n) => int_sum += n,
-                        Value::Float(f) => { float_sum += f; has_float = true; }
+                        Value::Float64(f) => { float_sum += f; has_float = true; }
+                        Value::Float32(f) => { float_sum += *f as f64; has_float = true; }
                         _ => {}
                     }
                 }
                 if has_float {
-                    Ok(Some(Value::Float(int_sum as f64 + float_sum)))
+                    Ok(Some(Value::Float64(int_sum as f64 + float_sum)))
                 } else {
                     Ok(Some(Value::Int(int_sum)))
                 }
@@ -842,7 +918,8 @@ impl Interpreter {
                 let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.sort_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                    (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
@@ -877,7 +954,8 @@ impl Interpreter {
                 indices.sort_by(|&i, &j| {
                     match (&keys[i], &keys[j]) {
                         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+                        (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Str(x), Value::Str(y)) => x.cmp(y),
                         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
                         _ => std::cmp::Ordering::Equal,
@@ -1783,8 +1861,16 @@ impl Interpreter {
                                     "X"  => if let Value::Int(n) = val { format!("{:X}", n) } else { format!("{}", val) },
                                     "b"  => if let Value::Int(n) = val { format!("{:b}", n) } else { format!("{}", val) },
                                     "o"  => if let Value::Int(n) = val { format!("{:o}", n) } else { format!("{}", val) },
-                                    "e"  => if let Value::Float(f) = val { format!("{:e}", f) } else { format!("{}", val) },
-                                    "E"  => if let Value::Float(f) = val { format!("{:E}", f) } else { format!("{}", val) },
+                                    "e"  => match val {
+                                        Value::Float64(f) => format!("{:e}", f),
+                                        Value::Float32(f) => format!("{:e}", f),
+                                        _ => format!("{}", val),
+                                    },
+                                    "E"  => match val {
+                                        Value::Float64(f) => format!("{:E}", f),
+                                        Value::Float32(f) => format!("{:E}", f),
+                                        _ => format!("{}", val),
+                                    },
                                     _ => format!("{}", val),
                                 };
                                 result.push_str(&formatted);
@@ -1896,8 +1982,11 @@ impl Interpreter {
                             Value::Uint32(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
                             Value::Uint64(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
                             Value::Uint128(n) => <$ty>::try_from(n).map(Value::$Variant).unwrap_or(Value::Nil),
-                            Value::Float(f) => {
+                            Value::Float64(f) => {
                                 if f >= <$ty>::MIN as f64 && f <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
+                            }
+                            Value::Float32(f) => {
+                                if f as f64 >= <$ty>::MIN as f64 && f as f64 <= <$ty>::MAX as f64 { Value::$Variant(f as $ty) } else { Value::Nil }
                             }
                             Value::Str(ref s) => s.trim().parse::<$ty>().map(Value::$Variant).unwrap_or(Value::Nil),
                             Value::Bool(b) => Value::$Variant(if b { 1 as $ty } else { 0 as $ty }),
@@ -1921,21 +2010,43 @@ impl Interpreter {
                     _ => unreachable!(),
                 }
             }
-            Type::Float => match val {
-                Value::Float(f) => Ok(Value::Float(f)),
-                Value::Int(n) => Ok(Value::Float(n as f64)),
-                Value::Uint(n) => Ok(Value::Float(n as f64)),
-                Value::Uint8(n) => Ok(Value::Float(n as f64)),
-                Value::Int8(n) => Ok(Value::Float(n as f64)),
-                Value::Int16(n) => Ok(Value::Float(n as f64)),
-                Value::Int32(n) => Ok(Value::Float(n as f64)),
-                Value::Int64(n) => Ok(Value::Float(n as f64)),
-                Value::Int128(n) => Ok(Value::Float(n as f64)),
-                Value::Uint16(n) => Ok(Value::Float(n as f64)),
-                Value::Uint32(n) => Ok(Value::Float(n as f64)),
-                Value::Uint64(n) => Ok(Value::Float(n as f64)),
-                Value::Uint128(n) => Ok(Value::Float(n as f64)),
-                Value::Str(s) => Ok(s.trim().parse::<f64>().map(Value::Float).unwrap_or(Value::Nil)),
+            Type::Float64 => match val {
+                Value::Float64(f) => Ok(Value::Float64(f)),
+                Value::Float32(f) => Ok(Value::Float64(f as f64)),
+                Value::Int(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint8(n) => Ok(Value::Float64(n as f64)),
+                Value::Int8(n) => Ok(Value::Float64(n as f64)),
+                Value::Int16(n) => Ok(Value::Float64(n as f64)),
+                Value::Int32(n) => Ok(Value::Float64(n as f64)),
+                Value::Int64(n) => Ok(Value::Float64(n as f64)),
+                Value::Int128(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint16(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint32(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint64(n) => Ok(Value::Float64(n as f64)),
+                Value::Uint128(n) => Ok(Value::Float64(n as f64)),
+                Value::Str(s) => Ok(s.trim().parse::<f64>().map(Value::Float64).unwrap_or(Value::Nil)),
+                _ => Ok(Value::Nil),
+            },
+            // `as float32` — bit-truncating narrowing from float64 (Rust `as f32`
+            // semantics: silent precision loss, overflow saturates to infinity —
+            // docs/float-width-types.md §4, no stricter checked narrowing invented here).
+            Type::Float32 => match val {
+                Value::Float32(f) => Ok(Value::Float32(f)),
+                Value::Float64(f) => Ok(Value::Float32(f as f32)),
+                Value::Int(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint8(n) => Ok(Value::Float32(n as f32)),
+                Value::Int8(n) => Ok(Value::Float32(n as f32)),
+                Value::Int16(n) => Ok(Value::Float32(n as f32)),
+                Value::Int32(n) => Ok(Value::Float32(n as f32)),
+                Value::Int64(n) => Ok(Value::Float32(n as f32)),
+                Value::Int128(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint16(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint32(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint64(n) => Ok(Value::Float32(n as f32)),
+                Value::Uint128(n) => Ok(Value::Float32(n as f32)),
+                Value::Str(s) => Ok(s.trim().parse::<f32>().map(Value::Float32).unwrap_or(Value::Nil)),
                 _ => Ok(Value::Nil),
             },
             Type::Str => Ok(Value::Str(format!("{}", val))),
@@ -1949,7 +2060,18 @@ impl Interpreter {
         }
     }
 
-    pub(crate) fn match_pattern(&self, pattern: &Pattern, value: &Value, bindings: &mut HashMap<String, Value>) -> bool {
+    /// Matches `pattern` against `value`, collecting bound names into `bindings`.
+    ///
+    /// `mut_names` collects the subset of those names that are bound directly
+    /// to an enum variant field declared `mut Type` (see docs/mut-type-modifier.md
+    /// for the modifier itself) — the caller should `mark_content_mutable` each
+    /// one on the arm's child env once bound, so `def` methods can be called
+    /// through them (mirrors how `let`/param binding already does this for a
+    /// `mut`-qualified type). Struct destructuring (`Point(x, y)`) never adds to
+    /// `mut_names` — struct fields don't parse `mut Type` yet, only enum variant
+    /// fields do (an accidental side effect of the generic `mut`-prefix type
+    /// parser, not yet a deliberately supported struct feature).
+    pub(crate) fn match_pattern(&self, pattern: &Pattern, value: &Value, bindings: &mut HashMap<String, Value>, mut_names: &mut HashSet<String>) -> bool {
         match pattern {
             Pattern::Wildcard => true,
             Pattern::Bind(name) => {
@@ -1959,7 +2081,8 @@ impl Interpreter {
             Pattern::Lit(lit) => match (lit, value) {
                 (LitPattern::Int(n), Value::Int(v)) => n == v,
                 // For NaN: treat NaN == NaN as true (pattern matching, not arithmetic).
-                (LitPattern::Float(f), Value::Float(v)) => (f.is_nan() && v.is_nan()) || f == v,
+                (LitPattern::Float(f), Value::Float64(v)) => (f.is_nan() && v.is_nan()) || f == v,
+                (LitPattern::Float(f), Value::Float32(v)) => (f.is_nan() && v.is_nan()) || *f == *v as f64,
                 (LitPattern::Str(s), Value::Str(v)) => s == v,
                 (LitPattern::Bool(b), Value::Bool(v)) => b == v,
                 (LitPattern::Nil, Value::Nil) => true,
@@ -1974,7 +2097,7 @@ impl Interpreter {
                         if variant == "Some" || variant == "some" =>
                     {
                         if fields.len() == 1 {
-                            self.match_pattern(inner, &fields[0], bindings)
+                            self.match_pattern(inner, &fields[0], bindings, mut_names)
                         } else if fields.is_empty() {
                             // Bare variant Some (no payload) — wildcard always matches
                             matches!(inner.as_ref(), Pattern::Wildcard)
@@ -1985,7 +2108,7 @@ impl Interpreter {
                     // Boring Optional: nil does not match Some
                     Value::Nil => false,
                     // Any other non-nil value: unwrap into inner pattern
-                    _ => self.match_pattern(inner, value, bindings),
+                    _ => self.match_pattern(inner, value, bindings, mut_names),
                 }
             }
             Pattern::Variant(name, sub_pats) => {
@@ -2000,7 +2123,7 @@ impl Interpreter {
                         return if matches!(value, Value::Nil) {
                             false
                         } else {
-                            self.match_pattern(&sub_pats[0], value, bindings)
+                            self.match_pattern(&sub_pats[0], value, bindings, mut_names)
                         };
                     }
                     if (name == "None" || name == "none") && sub_pats.is_empty() {
@@ -2022,8 +2145,19 @@ impl Interpreter {
                         // Without this, `Color.Red` would match `Red(1, 2)` — wrong.
                         if sub_pats.is_empty() && !fields.is_empty() { return false; }
                         if !sub_pats.is_empty() && sub_pats.len() != fields.len() { return false; }
-                        for (pat, field_val) in sub_pats.iter().zip(fields.iter()) {
-                            if !self.match_pattern(pat, field_val, bindings) {
+                        // Declared field types for this variant, if the enum is known —
+                        // used only to flag `mut`-qualified fields bound bare (`Pattern::Bind`)
+                        // directly at this level into `mut_names`.
+                        let field_decls = self.enums.get(type_name.as_str())
+                            .and_then(|decl| decl.variants.iter().find(|v| &v.name == variant))
+                            .map(|v| &v.fields);
+                        for (i, (pat, field_val)) in sub_pats.iter().zip(fields.iter()).enumerate() {
+                            if let (Pattern::Bind(bname), Some(fields_decl)) = (pat, field_decls) {
+                                if fields_decl.get(i).map(|f| f.ty.grants_mut()).unwrap_or(false) {
+                                    mut_names.insert(bname.clone());
+                                }
+                            }
+                            if !self.match_pattern(pat, field_val, bindings, mut_names) {
                                 return false;
                             }
                         }
@@ -2036,7 +2170,7 @@ impl Interpreter {
                         if inner.type_name != *name { return false; }
                         if sub_pats.len() != inner.fields.len() && !sub_pats.is_empty() { return false; }
                         for (pat, (_, field_val)) in sub_pats.iter().zip(inner.fields.iter()) {
-                            if !self.match_pattern(pat, field_val, bindings) {
+                            if !self.match_pattern(pat, field_val, bindings, mut_names) {
                                 return false;
                             }
                         }
@@ -2053,7 +2187,7 @@ impl Interpreter {
                 };
                 if sub_pats.len() != elems.len() { return false; }
                 for (pat, elem) in sub_pats.iter().zip(elems.iter()) {
-                    if !self.match_pattern(pat, elem, bindings) {
+                    if !self.match_pattern(pat, elem, bindings, mut_names) {
                         return false;
                     }
                 }
@@ -2097,7 +2231,7 @@ impl Interpreter {
             Type::Nil | Type::Void | Type::Never => Ok(()),
 
             // Bare primitive types: stack-allocated by default, always valid.
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Bool => Ok(()),
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64 | Type::Bool => Ok(()),
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Ok(()),
             // Bare String without qualifier: requires explicit qualification.
@@ -2206,7 +2340,8 @@ impl Interpreter {
             Value::Uint32(_) => Type::Uint32,
             Value::Uint64(_) => Type::Uint64,
             Value::Uint128(_) => Type::Uint128,
-            Value::Float(_) => Type::Float,
+            Value::Float32(_) => Type::Float32,
+            Value::Float64(_) => Type::Float64,
             Value::Str(_)   => Type::Str,
             Value::Bool(_)  => Type::Bool,
             Value::Nil      => Type::Nil,
@@ -2339,7 +2474,7 @@ impl Interpreter {
             let base = strip_qualifiers(concrete_ty);
             // Primitives are assumed to satisfy any constraint
             match base {
-                Type::Int | Type::Uint | Type::Uint8 | Type::Float | Type::Str | Type::Bool => continue,
+                Type::Int | Type::Uint | Type::Uint8 | Type::Float64 | Type::Str | Type::Bool => continue,
                 Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => continue,
                 _ => {}
@@ -2553,3 +2688,4 @@ impl Interpreter {
         }
     }
 }
+

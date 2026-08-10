@@ -577,7 +577,7 @@ impl Transpiler {
                         } else {
                             // Zero-initialize numeric/bool fields
                             let zero = match &f.ty {
-                                Type::Float => "0.0".to_string(),
+                                Type::Float32 | Type::Float64 => "0.0".to_string(),
                                 Type::Bool  => "false".to_string(),
                                 Type::Str   => "Arc::<str>::from(\"\")".to_string(),
                                 _           => "Default::default()".to_string(),
@@ -595,7 +595,7 @@ impl Transpiler {
                 // Wrap in a local `let mut __self = ...` pattern.
                 let zero_fields: Vec<String> = fields.iter().map(|f| {
                     let zero = match &f.ty {
-                        Type::Float => "0.0".to_string(),
+                        Type::Float32 | Type::Float64 => "0.0".to_string(),
                         Type::Bool  => "false".to_string(),
                         Type::Str   => "Arc::<str>::from(\"\")".to_string(),
                         _           => "Default::default()".to_string(),

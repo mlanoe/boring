@@ -184,3 +184,28 @@ enum EShape:
 
 let esh = EShape.Triangle
 print esh.sides()
+
+# enum with mut-qualified variant field — def method mutates through match,
+# and the mutation is visible when the same value is matched again afterward
+struct EPoint:
+    var int x
+
+    def bump():
+        self.x = self.x + 1
+
+    req int getx(): self.x
+
+enum EHolder:
+    Value(mut EPoint p)
+
+    def bumpit():
+        match self:
+            Value(p):
+                p.bump()
+                p.bump()
+
+mut eh = EHolder.Value(EPoint(x= 5))
+eh.bumpit()
+match eh:
+    Value(p):
+        print p.getx()

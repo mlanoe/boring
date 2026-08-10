@@ -876,7 +876,16 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
         Type::Uint32 => "u32",
         Type::Uint64 => "u64",
         Type::Uint128 => "u128",
-        Type::Float => "f32",
+        // Both widths keep their own real size now — no more silent GPU-buffer
+        // narrowing to f32 for a declared float64 (docs/float-width-types.md §6:
+        // this used to disagree with `kernel_host_element_type` below, which always
+        // kept f64 on the host side, so a `float`/`float64` buffer was 32-bit on the
+        // GPU and 64-bit on the host, silently). CUDA/ROCm support native `double`;
+        // Metal/wgpu already reject `float64` device-side via their own validators
+        // (`msl_unsupported_width` / `wgsl_unsupported_f64`), so this function
+        // disagreeing with them is no longer possible either.
+        Type::Float32 => "f32",
+        Type::Float64 => "f64",
         Type::Bool  => "bool",
         Type::Named(n) => match n.as_str() {
             "int"                    => "i32",
@@ -891,7 +900,8 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
             "uint32"                 => "u32",
             "uint64"                 => "u64",
             "uint128"                => "u128",
-            "float"                  => "f32",
+            "float32"                => "f32",
+            "float" | "float64"     => "f64",
             "bool"                   => "bool",
             _                        => "i64",
         },
@@ -918,7 +928,8 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
         Type::Uint32 => "u32",
         Type::Uint64 => "u64",
         Type::Uint128 => "u128",
-        Type::Float => "f64",
+        Type::Float32 => "f32",
+        Type::Float64 => "f64",
         Type::Bool => "bool",
         Type::Named(n) => match n.as_str() {
             "int" | "uint" => "i64",
@@ -932,7 +943,8 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
             "uint32"       => "u32",
             "uint64"       => "u64",
             "uint128"      => "u128",
-            "float"        => "f64",
+            "float32"      => "f32",
+            "float" | "float64" => "f64",
             "bool"         => "bool",
             _              => "i64",
         },

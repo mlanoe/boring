@@ -77,9 +77,23 @@ impl KernelValidator {
 
     fn check_type(&mut self, ty: &Type, line: usize) {
         match ty {
-            // Rule 1 — float type
-            Type::Float => {
-                self.error(line, "float is not allowed in kernel context — FPU is disabled");
+            // Rule 1 — float types (float/float64 and float32 alike — narrower
+            // storage doesn't change whether the FPU exists)
+            Type::Float32 => {
+                self.error(line, "float32 is not allowed in kernel context — FPU is disabled");
+            }
+            Type::Float64 => {
+                self.error(line, "float64 is not allowed in kernel context — FPU is disabled");
+            }
+            // Lowercase spellings reach this pass unresolved (this validator runs
+            // directly on the parsed AST, with no alias-table resolution pass of
+            // its own) — matched by name for the same reason `checker::mod.rs`'s
+            // `is_scalar_type` matches `Type::Named` spellings directly.
+            Type::Named(n) if matches!(n.as_str(), "float32" | "f32") => {
+                self.error(line, "float32 is not allowed in kernel context — FPU is disabled");
+            }
+            Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64") => {
+                self.error(line, "float64 is not allowed in kernel context — FPU is disabled");
             }
             // Rule 6 — T'shared in kernel context always maps to Arc<T> (no Rc in kernel)
             Type::Qualified(inner, OwnerQual::Shared) => {

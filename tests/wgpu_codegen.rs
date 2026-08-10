@@ -1279,7 +1279,7 @@ kernel Img:
 }
 
 #[test]
-fn device_labeled_size_lowers_to_literals() {
+fn device_labeled_axis_property_lowers_to_literals() {
     let (wgsl, _) = wgpu_codegen("labeled_width_height", r#"
 kernel Img:
     mut [float, width = 4, height = 8]'unified img
@@ -1288,11 +1288,11 @@ kernel Img:
     def ():
         let c = gpu.thread.x
         let r = gpu.thread.y
-        if c < img.size(.width) and r < img.size(.height):
+        if c < img.width and r < img.height:
             img[width = c, height = r] = 0.0
 "#);
-    assert!(wgsl.contains("c < 4"), "expected .size(.width) to lower to the literal 4;\ngot:\n{wgsl}");
-    assert!(wgsl.contains("r < 8"), "expected .size(.height) to lower to the literal 8;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("c < 4"), "expected img.width to lower to the literal 4;\ngot:\n{wgsl}");
+    assert!(wgsl.contains("r < 8"), "expected img.height to lower to the literal 8;\ngot:\n{wgsl}");
 }
 
 #[test]

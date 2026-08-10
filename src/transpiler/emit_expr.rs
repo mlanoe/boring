@@ -33,8 +33,8 @@ impl Transpiler {
                                 // Only in read (RHS) context — not when the field is being assigned to.
                                 // Do NOT clone collections (dict/array/set/vec) — they are mutated
                                 // in-place via method calls on self; cloning would make mutations no-ops.
-                                let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float | Type::Bool)
-                                    || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "bool" | "usize" | "isize"));
+                                let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)
+                                    || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "float32" | "float64" | "bool" | "usize" | "isize"));
                                 let is_collection = matches!(fty, Type::Dict(..) | Type::Array(_) | Type::Set(_));
                                 let needs_clone = !is_primitive && !is_collection && !self.in_lhs_assign.get();
                                 return if needs_clone {
@@ -197,12 +197,20 @@ impl Transpiler {
                     let dv = self.emit_expr_owned(default);
                     let dst_ty = self.emit_type(ty);
                     return match ty {
-                        Type::Float => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
+                        Type::Float64 => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
+                        Type::Float32 => format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
                         Type::Bool => format!("({} == \"true\")", src),
-                        Type::Named(n) if n == "float" =>
+                        Type::Named(n) if n == "float" || n == "float64" || n == "f64" =>
                             format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
+                        Type::Named(n) if n == "float32" || n == "f32" =>
+                            format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
-                        _ if crate::transpiler::helpers::is_specific_numeric_type(&dst_ty) && dst_ty != "f32" && dst_ty != "f64" =>
+                        // `f32`/`f64` used to be excluded here (routed to the generic
+                        // `.unwrap_or()` fallback below, with no real parse-and-validate
+                        // behavior at all) — now real types with their own arms above,
+                        // so this guard is dead for them and only applies to genuinely
+                        // "not a specific numeric type" targets.
+                        _ if crate::transpiler::helpers::is_specific_numeric_type(&dst_ty) =>
                             format!("{}.trim().parse::<{}>().unwrap_or({})", src, dst_ty, dv),
                         _ => format!("{}.unwrap_or({})", self.emit_expr(e), dv),
                     };
@@ -872,9 +880,11 @@ impl Transpiler {
         // Cast to Optional type: `s as int?` → parse().ok(), not unwrap_or.
         if let Type::Optional(inner) = ty {
             let inner_dst = self.emit_type(inner);
-            let parse_ty = if matches!(inner.as_ref(), Type::Float) || matches!(inner.as_ref(), Type::Named(n) if n == "float") {
+            let parse_ty = if matches!(inner.as_ref(), Type::Float64) || matches!(inner.as_ref(), Type::Named(n) if n == "float" || n == "float64" || n == "f64") {
                 Some("f64".to_string())
-            } else if crate::transpiler::helpers::is_specific_numeric_type(&inner_dst) && inner_dst != "f32" && inner_dst != "f64" {
+            } else if matches!(inner.as_ref(), Type::Float32) || matches!(inner.as_ref(), Type::Named(n) if n == "float32" || n == "f32") {
+                Some("f32".to_string())
+            } else if crate::transpiler::helpers::is_specific_numeric_type(&inner_dst) {
                 Some(inner_dst)
             } else {
                 None
@@ -894,13 +904,17 @@ impl Transpiler {
         let src_is_bool_lit = matches!(&e.kind, ExprKind::Bool(_));
         let src_is_numeric_var = matches!(&e.kind, ExprKind::Var(v)
             if !self.string_vars.contains(v.as_str()));
-        let is_float_ty = matches!(ty, Type::Float)
-            || matches!(ty, Type::Named(n) if n == "float");
+        // Covers both float32 and float64 — the emitted cast always uses `dst`
+        // (`self.emit_type(ty)`, "f32" or "f64" as appropriate), never a hardcoded
+        // "f64", so this one flag serves both widths correctly.
+        let is_float_ty = matches!(ty, Type::Float64 | Type::Float32)
+            || matches!(ty, Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "float32" | "f32" | "f64"));
         // Every fixed-width/pointer-width integer target (isize/usize/u8/i8/../u128/i128)
         // resolves through `dst` (== self.emit_type(ty)), which already normalizes both
         // the dedicated Type variants and the lowercase `Type::Named` aliases — so this
         // check covers all 12 numeric kinds without hand-listing each one. Kept separate
-        // from is_float_ty: an integer cast must emit `as <dst>`, never `as f64`.
+        // from is_float_ty: floats are handled by the flag above instead, since two
+        // distinct widths ("f32" vs "f64") both need to flow through unchanged as `dst`.
         let is_fixed_int_ty = crate::transpiler::helpers::is_specific_numeric_type(&dst)
             && dst != "f32" && dst != "f64";
         let is_bool_ty = matches!(ty, Type::Bool)
@@ -911,7 +925,7 @@ impl Transpiler {
             ExprKind::BinOp(_, _, _) | ExprKind::Call(_, _) | ExprKind::UnaryOp(_, _)
             | ExprKind::MethodCall(_, _, _));
         if src_is_expr && is_float_ty {
-            return format!("({} as f64)", src);
+            return format!("({} as {})", src, dst);
         }
         if src_is_expr && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
@@ -919,11 +933,11 @@ impl Transpiler {
         // Known-numeric variable (tracked in var_types as Int/Float/Uint/...) → cast with `as T`
         let src_var_is_numeric = matches!(&e.kind, ExprKind::Var(v) if {
             let vt = self.var_types.get(v.as_str());
-            matches!(vt, Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float
+            matches!(vt, Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
             || matches!(vt, Some(Type::Named(n)) if matches!(n.as_str(),
-                "int" | "uint" | "uint8" | "float"
+                "int" | "uint" | "uint8" | "float" | "float32" | "float64"
                 | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint16" | "uint32" | "uint64" | "uint128"
                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
@@ -931,7 +945,7 @@ impl Transpiler {
                 | "f32" | "f64"))
         });
         if src_var_is_numeric && is_float_ty {
-            return format!("({} as f64)", src);
+            return format!("({} as {})", src, dst);
         }
         if src_var_is_numeric && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
@@ -943,7 +957,7 @@ impl Transpiler {
         }
         // int/float literal → float: use `as f64`, not .parse()
         if src_is_numeric_lit && is_float_ty {
-            return format!("({} as f64)", src);
+            return format!("({} as {})", src, dst);
         }
         if src_is_numeric_lit && is_fixed_int_ty {
             // Suffix the literal (`300i64`, not bare `300`) before the `as` cast.
@@ -962,7 +976,7 @@ impl Transpiler {
         }
         // Non-string (numeric var) → float/int: use `as T` cast, not .parse()
         if src_is_numeric_var && is_float_ty {
-            return format!("({} as f64)", src);
+            return format!("({} as {})", src, dst);
         }
         if src_is_numeric_var && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
@@ -2153,15 +2167,23 @@ impl Transpiler {
                         match &param.ty {
                             None => true,
                             Some(expected_ty) => {
-                                let inferred = infer_overload_expr_type(
-                                    &arg.value,
-                                    &self.var_types,
-                                    &self.fn_return_types,
-                                    &self.struct_fields,
-                                );
-                                match inferred {
-                                    Some(inferred_ty) => types_compatible(expected_ty, &inferred_ty),
-                                    None => true, // can't determine — optimistically match
+                                // `infer_overload_expr_type` has no case for `.Variant` —
+                                // check it against this candidate's actual enum directly
+                                // instead of falling into the optimistic-match default,
+                                // which used to accept `.Variant` against every candidate.
+                                if let ExprKind::DotIdent(variant) = &arg.value.kind {
+                                    self.dotident_matches_enum_type(variant, expected_ty)
+                                } else {
+                                    let inferred = infer_overload_expr_type(
+                                        &arg.value,
+                                        &self.var_types,
+                                        &self.fn_return_types,
+                                        &self.struct_fields,
+                                    );
+                                    match inferred {
+                                        Some(inferred_ty) => types_compatible(expected_ty, &inferred_ty),
+                                        None => true, // can't determine — optimistically match
+                                    }
                                 }
                             }
                         }

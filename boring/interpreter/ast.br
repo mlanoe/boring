@@ -442,6 +442,10 @@ enum ExprKind:
     ArrayFill(Expr value, Expr count)
     ArrayComp(Expr expr, string varname, Expr count)
     ArrayCompIter(Expr expr, string varname, Expr iter)
+    # Labeled multi-dim arrays (docs/array-multidim-types.md).
+    LabeledIndex(Expr expr, [Arg] args)                    # a[width = w, height = h]
+    LabeledArrayComp(Expr expr, [(string, Expr)] clauses)  # [f(w,h) for w in ..W for h in ..H]
+    RelabelCast(Expr expr, [(string, string)] pairs)       # a as [line = width, column = height]
     Tuple([Expr] elems)
     Dict([(Expr, Expr)] pairs)
     Set([Expr] elems)
@@ -534,7 +538,8 @@ enum Type:
     Uint32
     Uint64
     Uint128
-    Float
+    Float32
+    Float64
     Str
     Bool
     Nil
@@ -555,3 +560,15 @@ enum Type:
     Generic(string name, [Type] args)
     SelfAssoc(string name)
     AssocOf(Type base, string name)
+    LabeledArray(Type elem, [LabeledAxis] axes)
+
+# One axis of a labeled multi-dim array type (docs/array-multidim-types.md).
+# `size` is nil for a dynamic axis (`width`), set for a fixed one
+# (`width = 4`) — this interpreter has no const-generic machinery, so unlike
+# the Rust compiler's `ConstExpr`, only an integer-literal fixed size is
+# representable here; a fixed axis using a named const-generic parameter
+# isn't supported (matches this file's pre-existing `Type.ArrayN`, whose own
+# size is a plain `int`, not an expression — see parser_core.br).
+struct LabeledAxis:
+    string label
+    int? size
