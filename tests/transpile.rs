@@ -164,6 +164,96 @@ macro_rules! transpile_test {
 #[allow(dead_code)]
 fn _keep_run_transpile_case(name: &str) { run_transpile_case(name); }
 
+// ── Project-mode cases (need a real external Cargo dependency) ─────────────────────────
+//
+// `run_transpile_case_with_config` above always runs `boring build <file.br> --output-dir
+// <dir>` (single-file mode), which never reads a `boring.toml` -- only the no-file
+// "project mode" path (`boring build` with the working directory set to a project
+// containing one) merges a `[dependencies]` section into the generated Cargo.toml (see
+// `main.rs`'s `build_project_with_config` vs. `emit_rust_to_dir`'s other call sites,
+// which always pass `extra_deps: &[]`). A case that needs a real external crate --
+// tests/cases/ext_const_promotion, exercising a top-level `let` whose initializer calls
+// into an external/opaque type (tests/cases/fixtures/ext_geom stands in for something
+// like `bevy`/`glam`) -- has to go through that path instead.
+fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let project_dir = Path::new("tests/cases").join(name);
+    let expected_file = Path::new("tests/cases").join(format!("{}.expected", name));
+
+    // Mirrors `rust_dir_name_full` (src/main.rs) for `main = "src/main.br"` projects: the
+    // generated Cargo project lands at `<project_dir>/src/main_rust[_managed][_single]`.
+    let rust_dir_name = match (mode_str, threading_str) {
+        ("strict",  "multi")  => "main_rust",
+        ("strict",  "single") => "main_rust_single",
+        ("managed", "multi")  => "main_rust_managed",
+        ("managed", "single") => "main_rust_managed_single",
+        _ => panic!("[{}] unknown mode/threading combo: {}+{}", name, mode_str, threading_str),
+    };
+    let rust_dir = project_dir.join("src").join(rust_dir_name);
+
+    // ── Step 1: emit Rust (project mode: no file arg, cwd = the project dir) ───────────
+    let emit = Command::new(bin)
+        .arg("build")
+        .arg("--mode").arg(mode_str)
+        .arg("--threading").arg(threading_str)
+        .current_dir(&project_dir)
+        .output()
+        .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke boring: {}", name, mode_str, threading_str, e));
+
+    assert!(
+        emit.status.success(),
+        "[{}@{}+{}] boring build failed:\n{}",
+        name, mode_str, threading_str,
+        String::from_utf8_lossy(&emit.stderr)
+    );
+
+    // ── Step 2: cargo run ─────────────────────────────────────────────────────
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(rust_dir.join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke cargo: {}", name, mode_str, threading_str, e));
+
+    assert!(
+        run.status.success(),
+        "[{}@{}+{}] cargo run failed:\n--- stderr ---\n{}",
+        name, mode_str, threading_str,
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // ── Step 3: compare output ────────────────────────────────────────────────
+    let actual   = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    let expected = std::fs::read_to_string(&expected_file)
+        .unwrap_or_else(|_| panic!("[{}] missing expected file: {}", name, expected_file.display()))
+        .replace("\r\n", "\n");
+
+    assert_eq!(
+        actual.trim_end(),
+        expected.trim_end(),
+        "[{}@{}+{}] output mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
+        name, mode_str, threading_str,
+        expected.trim_end(),
+        actual.trim_end()
+    );
+}
+
+macro_rules! transpile_project_test {
+    ($name:ident) => {
+        mod $name {
+            use super::*;
+            #[test]
+            fn strict_multi()   { run_transpile_project_case(stringify!($name), "strict",  "multi"); }
+            #[test]
+            fn strict_single()  { run_transpile_project_case(stringify!($name), "strict",  "single"); }
+            #[test]
+            fn managed_multi()  { run_transpile_project_case(stringify!($name), "managed", "multi"); }
+            #[test]
+            fn managed_single() { run_transpile_project_case(stringify!($name), "managed", "single"); }
+        }
+    };
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 // One entry per interpreter test that has a .expected file.
 // Error/rejection tests are excluded (they test compile-time checks, not output).
@@ -251,5 +341,25 @@ transpile_test!(pointee);
 // importing it. `pub_module_const.rs` is the test that actually exercises that
 // (a hand-written sibling file in a real two-file crate, built with `cargo build`).
 transpile_test!(pub_top_level_const);
+// A top-level `let` whose initializer calls into an external/opaque type -- one hand-
+// verified as a `const fn` (`Duration.from_secs`/`from_millis`, see
+// `Transpiler::KNOWN_EXTERNAL_CONST_FNS`) -- promotes as a plain `const`, same as a
+// scalar literal. Companion to `ext_const_promotion` below, which covers the `static`
+// fallback for a constructor NOT on that list.
+transpile_test!(const_promotion_known_fn);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
+
+// Two related bugs, both only reachable with a genuinely external (non-Boring) type --
+// see tests/cases/ext_const_promotion/src/main.br's own doc comment for the full
+// writeup, and tests/cases/fixtures/ext_geom for the stand-in external crate:
+//   1. A top-level `let` calling into an external type's (non-const-fn) constructor used
+//      to stay a `fn main()` local instead of being promoted to module scope, dropped
+//      out of scope for every other function that referenced it (E0425 in real Rust,
+//      even though `boring run`'s interpreter resolved it fine).
+//   2. Field access on such a promoted value (`PADDLE_SIZE.x`) used to mis-emit as a
+//      type-level path lookup (`PADDLE_SIZE::x`) instead of a real field access.
+// Needs project mode (a real `boring.toml` + `[dependencies]`), not the single-file
+// `run_transpile_case_with_config` every other case above uses — see
+// `run_transpile_project_case`'s doc for why.
+transpile_project_test!(ext_const_promotion);

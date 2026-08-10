@@ -1700,12 +1700,17 @@ impl Transpiler {
                 // which is invisible to every other function/method. When
                 // `global_lets_used_elsewhere` (computed in `pre_scan`) says this
                 // constant IS referenced from outside that synthesized `main()`, it must
-                // be promoted to a real module-level `const` instead -- otherwise the
-                // emitted Rust simply doesn't compile (E0425 "cannot find value").
-                // Gated on actual cross-scope usage, unlike the GPU branch above, so
-                // ordinary top-level scripting `let`s -- including same-named shadowing
-                // re-declarations -- keep behaving as sequential locals in `main()`.
-                Item::Let(s) if self.top_level_let_is_const_safe(s)
+                // be promoted to real module scope instead -- otherwise the emitted Rust
+                // simply doesn't compile (E0425 "cannot find value"). `top_level_let_is_promotable`
+                // (broader than the scalar-only `top_level_let_is_const_safe` used by the GPU
+                // branch above) also admits a call into an external/opaque type
+                // (`Color.srgb(...)`, `Vec2.new(...)`) -- `emit_item`'s `Item::Let` arm picks
+                // `const` vs a lazily-initialized `static` for those, see
+                // `top_level_let_external_call`'s doc. Gated on actual cross-scope usage,
+                // unlike the GPU branch above, so ordinary top-level scripting `let`s --
+                // including same-named shadowing re-declarations -- keep behaving as
+                // sequential locals in `main()`.
+                Item::Let(s) if self.top_level_let_is_promotable(s)
                     && self.global_lets_used_elsewhere.contains(&s.name) => {
                     self.emit_item(item);
                     self.blank();
@@ -1940,6 +1945,72 @@ impl Transpiler {
             }
         }
         s.value.as_ref().map(is_scalar_literal).unwrap_or(false)
+    }
+
+    /// Whether a top-level `let`'s initializer is a call into an external/opaque type --
+    /// `Color.srgb(0.8, 0.8, 0.8)`, `Vec2.new(120.0, 20.0)` -- rather than one of this
+    /// file's own structs/enums (`self.user_types`, populated before this ever runs --
+    /// see `pre_scan`'s dedicated pass for why that has to happen first). Boring parses
+    /// `Type.method(args)` as `MethodCall(Var(Type), method, args)` (see
+    /// `try_emit_type_method_call`'s identical shape), so this only needs to look at the
+    /// receiver, not the whole call. Returns `(type_name, method)` so callers can both
+    /// name the promoted item's Rust type (see `top_level_let_promoted_type`) and check
+    /// `is_known_external_const_fn` for the const-vs-static decision (`emit_item`'s
+    /// `Item::Let` arm).
+    fn top_level_let_external_call(&self, s: &LetStmt) -> Option<(String, String)> {
+        let ExprKind::MethodCall(obj, method, _) = &s.value.as_ref()?.kind else { return None };
+        let ExprKind::Var(type_name) = &obj.kind else { return None };
+        if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && !self.user_types.contains(type_name.as_str())
+        {
+            Some((type_name.clone(), method.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Whether a top-level `let` can be promoted out of the synthesized `fn main()` into
+    /// real module scope at all -- the scalar case (`top_level_let_is_const_safe`, always
+    /// a `const`) plus a call into an external/opaque type (`top_level_let_external_call`,
+    /// `const` or a lazily-initialized `static` depending on `is_known_external_const_fn`
+    /// -- see `emit_item`'s `Item::Let` arm for that split). Anything else (an array/
+    /// dict/set/string value, a call into one of the file's own struct/enum constructors,
+    /// a kernel constructor call) has no module-scope Rust representation this transpiler
+    /// can emit yet and stays a `fn main()` local, same as before this function existed.
+    fn top_level_let_is_promotable(&self, s: &LetStmt) -> bool {
+        self.top_level_let_is_const_safe(s) || self.top_level_let_external_call(s).is_some()
+    }
+
+    /// Hand-verified external associated functions that ARE `const fn` in their defining
+    /// crate -- used by `emit_item`'s `Item::Let` arm to decide `const` vs a lazily-
+    /// initialized `static` for a promoted `let` whose initializer calls into an
+    /// external/opaque type (`top_level_let_external_call`). Deliberately small: getting
+    /// this wrong in the "yes, it's const" direction emits invalid Rust (E0015, "cannot
+    /// call non-const fn in const context") that only surfaces at `cargo build` time,
+    /// long after `boring build` reported success -- far worse than the always-valid
+    /// `static` fallback just being slightly less idiomatic for a constructor that
+    /// happens to be const and wasn't recognized. Extend this list as more such
+    /// constructors (e.g. from `glam`/`bevy`) are hand-verified against their source.
+    const KNOWN_EXTERNAL_CONST_FNS: &[(&str, &str)] = &[
+        ("Duration", "from_secs"), ("Duration", "from_millis"),
+        ("Duration", "from_micros"), ("Duration", "from_nanos"),
+        ("Vec2", "new"), ("Vec2", "splat"),
+        ("Vec3", "new"), ("Vec3", "splat"),
+        ("Vec3A", "new"), ("Vec3A", "splat"),
+        ("Vec4", "new"), ("Vec4", "splat"),
+    ];
+
+    fn is_known_external_const_fn(type_name: &str, method: &str) -> bool {
+        Self::KNOWN_EXTERNAL_CONST_FNS.iter().any(|&(t, m)| t == type_name && m == method)
+    }
+
+    /// The Rust type to declare a promoted external-call `let` with (see
+    /// `top_level_let_external_call`) -- an explicit Boring type annotation
+    /// (`let Vec2 PADDLE_SIZE = ...`) wins when present, otherwise falls back to the
+    /// call's own receiver name (`Vec2.new(...)` → `Vec2`), the standard Rust convention
+    /// for a constructor-style associated function returning `Self`.
+    fn top_level_let_promoted_type(&self, s: &LetStmt, external_type_name: &str) -> String {
+        s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| external_type_name.to_string())
     }
 
     /// Mirrors `Checker::collect_gpu_arg_params` (checker/mod.rs) — same fixed-point
@@ -2504,30 +2575,38 @@ impl Transpiler {
         }
 
         // ── Collect user-defined type names (for managed mode wrapping) ────────
-        // Candidate top-level immutable `let` scalar constants (per
-        // `top_level_let_is_const_safe`) — whether each one actually gets promoted to a
-        // Rust `const` is decided below, once cross-scope usage is known (see
-        // `global_lets_used_elsewhere`).
-        let mut const_let_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Run this as its own pass, before the `Item::Let` classification below, so a
+        // struct/enum declared LATER in source order than a `let` that constructs it is
+        // still in `user_types` by the time `top_level_let_is_promotable` asks "is this
+        // call's receiver one of the file's own types, or an external/opaque one?" --
+        // a single interleaved pass would wrongly call such a call "external" for any
+        // `let` appearing above its own type's declaration.
         for item in &program.items {
             match item {
                 Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
                 Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
-                Item::Let(s)    => {
-                    self.user_top_level_names.insert(s.name.clone());
-                    // Populated here (before any emission) rather than inline where the
-                    // `const` is actually emitted, so a function appearing earlier in
-                    // source order than the `let` it references still sees the name in
-                    // this set -- Rust doesn't care about const declaration order, but
-                    // this scan does, being a single pass over `program.items`.
-                    if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
-                        self.gpu_top_level_const_names.insert(s.name.clone());
-                    }
-                    if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_const_safe(s) {
-                        const_let_candidates.insert(s.name.clone());
-                    }
-                }
                 _ => {}
+            }
+        }
+        // Candidate top-level immutable `let` constants promotable to module scope (per
+        // `top_level_let_is_promotable`) — whether each one actually gets promoted to a
+        // Rust `const`/`static` is decided below, once cross-scope usage is known (see
+        // `global_lets_used_elsewhere`).
+        let mut const_let_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &program.items {
+            if let Item::Let(s) = item {
+                self.user_top_level_names.insert(s.name.clone());
+                // Populated here (before any emission) rather than inline where the
+                // `const` is actually emitted, so a function appearing earlier in
+                // source order than the `let` it references still sees the name in
+                // this set -- Rust doesn't care about const declaration order, but
+                // this scan does, being a single pass over `program.items`.
+                if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
+                    self.gpu_top_level_const_names.insert(s.name.clone());
+                }
+                if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_promotable(s) {
+                    const_let_candidates.insert(s.name.clone());
+                }
             }
         }
 

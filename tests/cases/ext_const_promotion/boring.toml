@@ -1,0 +1,7 @@
+[project]
+name = "ext_const_promotion"
+version = "0.1.0"
+main = "src/main.br"
+
+[dependencies]
+ext_geom = { path = "../../../fixtures/ext_geom" }

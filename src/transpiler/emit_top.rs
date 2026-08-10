@@ -38,46 +38,76 @@ impl Transpiler {
                 // `fn main()` (`global_lets_used_elsewhere`) -- see that same
                 // classification's third `Item::Let` arm.
                 if s.is_static || self.is_gpu_target || self.global_lets_used_elsewhere.contains(&s.name) {
-                    // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
-                    // where the compiler can infer it. Without an explicit boring type
-                    // annotation, infer one from a scalar literal initializer (the only
-                    // shape `top_level_let_is_const_safe`, in `emit_program_items`, allows
-                    // through without a declared type) -- unwrapping a leading unary op
-                    // first, same as `top_level_let_is_const_safe` itself, so a negative
-                    // constant (`let x = -450.0`) still infers `f64` instead of falling
-                    // through to the invalid `_` placeholder.
-                    fn literal_ty_str(v: &Expr) -> Option<&'static str> {
-                        match &v.kind {
-                            ExprKind::Int(_)   => Some("i64"),
-                            ExprKind::Float(_) => Some("f64"),
-                            ExprKind::Bool(_)  => Some("bool"),
-                            ExprKind::UnaryOp(_, inner) => literal_ty_str(inner),
-                            _ => None,
-                        }
-                    }
-                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
-                        s.value.as_ref().and_then(literal_ty_str).unwrap_or("_").to_string()
-                    });
-                    let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
-                    // GPU targets: uppercase the Rust identifier. A fn parameter whose name
-                    // matches an in-scope `const` is parsed by Rust as a refutable pattern
-                    // matching that constant's *value*, not a fresh binding -- a hard type
-                    // error the moment the types differ (E0308, "interpreted as a constant,
-                    // not a new binding"). Kernel constructors commonly use `width`/`height`
-                    // as parameter names (see `wgpu::host::emit_kernel_new`), which collides
-                    // with exactly the top-level names the docs' own examples use
-                    // (`let width = 800`, see examples/game_of_life.br). `map_builtin_var`
-                    // does the matching read-side rewrite via `gpu_top_level_const_names`.
-                    let const_name = if self.is_gpu_target {
-                        s.name.to_uppercase()
-                    } else {
-                        s.name.clone()
-                    };
-                    // `pub let` at module scope → `pub const`, mirroring `pub struct`/`pub def`/
-                    // `pub enum` above. A bare `let` (no `pub`) keeps emitting a private const,
-                    // matching prior behavior for code that never intended cross-module access.
+                    // Non-GPU only: a call into an external/opaque type (`Color.srgb(...)`,
+                    // `Vec2.new(...)`) that isn't itself scalar-safe -- `top_level_let_is_const_safe`
+                    // still declines it, so `top_level_let_is_promotable`'s only other way to
+                    // reach here is `top_level_let_external_call`. GPU/kernel targets never take
+                    // this branch: `no_std` kernel code has no `std::sync::LazyLock` to fall
+                    // back to, and `emit_program_items`'s GPU branch already filters every
+                    // non-scalar `let` out via `top_level_let_is_const_safe` before this arm
+                    // is ever reached for one.
+                    // `pub let` at module scope → `pub const`/`pub static`, mirroring `pub
+                    // struct`/`pub def`/`pub enum` elsewhere. A bare `let` (no `pub`) keeps
+                    // emitting a private item, matching prior behavior for code that never
+                    // intended cross-module access.
                     let vis = if s.is_pub { "pub " } else { "" };
-                    self.line(&format!("{}const {}: {} = {};", vis, const_name, ty_str, val_str));
+                    let external_call = if self.is_gpu_target { None } else { self.top_level_let_external_call(s) };
+                    if let Some((type_name, method)) = external_call.filter(|_| !self.top_level_let_is_const_safe(s)) {
+                        let rust_ty = self.top_level_let_promoted_type(s, &type_name);
+                        let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
+                        if Self::is_known_external_const_fn(&type_name, &method) {
+                            self.line(&format!("{}const {}: {} = {};", vis, s.name, rust_ty, val_str));
+                        } else {
+                            // Not a hand-verified const fn -- `std::sync::LazyLock` compiles
+                            // regardless of whether the external call actually is const, unlike
+                            // guessing `const` and being wrong (E0015). Already imported: the
+                            // prelude always emits `use std::sync::{Mutex, RwLock};` for the
+                            // multi-threaded fast path and other cases pull in `std::sync::Arc`,
+                            // so fully qualifying here (`std::sync::LazyLock`) rather than adding
+                            // yet another conditional prelude import is simplest.
+                            self.line(&format!(
+                                "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
+                                vis, s.name, rust_ty, val_str
+                            ));
+                        }
+                    } else {
+                        // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
+                        // where the compiler can infer it. Without an explicit boring type
+                        // annotation, infer one from a scalar literal initializer (the only
+                        // shape `top_level_let_is_const_safe`, in `emit_program_items`, allows
+                        // through without a declared type) -- unwrapping a leading unary op
+                        // first, same as `top_level_let_is_const_safe` itself, so a negative
+                        // constant (`let x = -450.0`) still infers `f64` instead of falling
+                        // through to the invalid `_` placeholder.
+                        fn literal_ty_str(v: &Expr) -> Option<&'static str> {
+                            match &v.kind {
+                                ExprKind::Int(_)   => Some("i64"),
+                                ExprKind::Float(_) => Some("f64"),
+                                ExprKind::Bool(_)  => Some("bool"),
+                                ExprKind::UnaryOp(_, inner) => literal_ty_str(inner),
+                                _ => None,
+                            }
+                        }
+                        let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
+                            s.value.as_ref().and_then(literal_ty_str).unwrap_or("_").to_string()
+                        });
+                        let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
+                        // GPU targets: uppercase the Rust identifier. A fn parameter whose name
+                        // matches an in-scope `const` is parsed by Rust as a refutable pattern
+                        // matching that constant's *value*, not a fresh binding -- a hard type
+                        // error the moment the types differ (E0308, "interpreted as a constant,
+                        // not a new binding"). Kernel constructors commonly use `width`/`height`
+                        // as parameter names (see `wgpu::host::emit_kernel_new`), which collides
+                        // with exactly the top-level names the docs' own examples use
+                        // (`let width = 800`, see examples/game_of_life.br). `map_builtin_var`
+                        // does the matching read-side rewrite via `gpu_top_level_const_names`.
+                        let const_name = if self.is_gpu_target {
+                            s.name.to_uppercase()
+                        } else {
+                            s.name.clone()
+                        };
+                        self.line(&format!("{}const {}: {} = {};", vis, const_name, ty_str, val_str));
+                    }
                 } else {
                     self.emit_let(s, false);
                 }

@@ -1491,7 +1491,16 @@ impl Transpiler {
         }
         // Type-level access: `Counter.MAX` → `Counter::MAX`, `Counter.count` → `Counter::count()`
         if let ExprKind::Var(type_name) = &obj.kind {
-            if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            // A top-level `let` constant (`PADDLE_SIZE`, `WALL_COLOR`) is a VALUE, never a
+            // type -- even though Boring constants conventionally use UPPER_SNAKE_CASE and
+            // would otherwise trip the uppercase-heuristic branch below. `.field` on one of
+            // these (`PADDLE_SIZE.x`) is a genuine instance field access, not a type-level
+            // path lookup: it must fall through to the plain `obj.field` emission further
+            // down, not return `PADDLE_SIZE::x` (invalid Rust -- there is no such associated
+            // item). See `top_level_let_external_call`'s doc for the promotion this pairs
+            // with -- a `let` promoted that way is exactly the shape that needs this.
+            let is_top_level_let_value = self.user_top_level_names.contains(type_name.as_str());
+            if !is_top_level_let_value && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                 let key = format!("{}::{}", type_name, field);
                 if self.struct_type_var_names.contains(&key) {
                     // type let → associated const (UPPER_CASE in Rust)
@@ -1766,9 +1775,12 @@ impl Transpiler {
         //   (b) it is a lowercase Var NOT in known_local_vars and NOT `self`
         //       (e.g. `mpsc`, `tokio` — module names imported but not declared as locals)
         //   (c) the emitted receiver already contains `::` (cascaded path: `tokio::time`)
+        // A top-level `let` constant is never a path receiver regardless of case (see the
+        // matching guard in the "Type-level access" block above, near the top of this
+        // function, for why `PADDLE_SIZE.x` must stay `.x`).
         let is_path_receiver = match &obj.kind {
             ExprKind::Var(v) => {
-                if v == "self" { false }
+                if v == "self" || self.user_top_level_names.contains(v.as_str()) { false }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else { !self.known_local_vars.contains(v.as_str()) }
             }

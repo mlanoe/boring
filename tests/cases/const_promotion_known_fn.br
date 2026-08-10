@@ -1,0 +1,15 @@
+# Regression test for the `const`-vs-`static` promotion decision when a top-level `let`'s
+# initializer calls into an external/opaque type: `Duration.from_secs`/`from_millis` are
+# hand-verified `const fn`s (see `Transpiler::KNOWN_EXTERNAL_CONST_FNS` in
+# src/transpiler/mod.rs), so these promote as plain `const` items rather than falling back
+# to a lazily-initialized `static` -- unlike tests/cases/ext_const_promotion/, which covers
+# the fallback for a constructor NOT on that list.
+let SPAWN_DELAY = Duration.from_secs(5)
+let TICK = Duration.from_millis(250)
+
+def report():
+    print "{SPAWN_DELAY.as_secs()}"
+    print "{TICK.as_millis()}"
+
+def main():
+    report()

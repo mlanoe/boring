@@ -1,0 +1,31 @@
+# Regression test for two related transpiler bugs (see src/transpiler/mod.rs's
+# `top_level_let_external_call`/`top_level_let_is_promotable` and emit_expr.rs's
+# `is_top_level_let_value` guard):
+#
+#   1. A top-level `let` whose initializer calls into an external/opaque type
+#      (`Point2.new(...)`, not one of this file's own structs) used to stay stuck
+#      inside the auto-generated `fn main()` instead of being promoted to module scope
+#      -- invisible to `paddle_scale()` below in the real compiled Rust, even though
+#      `boring run`'s interpreter resolves it fine via its own dynamic global scope.
+#   2. Field access on such a promoted value (`PADDLE_SIZE.x`) used to mis-emit as a
+#      type-level path lookup (`PADDLE_SIZE::x`) instead of a real field access.
+#
+# `ext_geom.Point2` (tests/cases/fixtures/ext_geom) stands in for a real external crate
+# type (e.g. `bevy::math::Vec2`) -- see that crate's own doc comment for why its
+# constructor is deliberately not a `const fn`, exercising the `static ... LazyLock`
+# fallback rather than the `const` path `LEFT_WALL` below already used before this fix.
+use ext_geom.Point2
+
+let LEFT_WALL = -450.0
+let PADDLE_SIZE = Point2.new(120.0, 20.0)
+
+def wall_report():
+    print "{LEFT_WALL}"
+
+def paddle_scale():
+    print "{PADDLE_SIZE.x}"
+    print "{PADDLE_SIZE.y}"
+
+def main():
+    wall_report()
+    paddle_scale()

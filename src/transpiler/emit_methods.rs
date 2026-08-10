@@ -263,10 +263,13 @@ impl Transpiler {
     fn try_emit_type_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(type_name) = &obj.kind else { return None };
         // A known local variable that happens to start with an uppercase letter
-        // (e.g. `var Qh = []`) is still a local, not a type/module path -- must fall
-        // through to ordinary instance-method dispatch further down, not the
-        // `TypeName::method(...)` treatment below.
+        // (e.g. `var Qh = []`), or a top-level `let` constant (`PADDLE_SIZE`,
+        // conventionally UPPER_SNAKE_CASE) -- is still a value, not a type/module path --
+        // must fall through to ordinary instance-method dispatch further down, not the
+        // `TypeName::method(...)` treatment below. See `emit_expr.rs`'s matching guard on
+        // the field-access side (`is_top_level_let_value`) for the same reasoning.
         let is_type = !self.known_local_vars.contains(type_name.as_str())
+            && !self.user_top_level_names.contains(type_name.as_str())
             && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
         if !is_type { return None; }
         let is_variant = method.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
@@ -1450,11 +1453,11 @@ impl Transpiler {
         // but NOT call results: `Path::new(x).exists()` uses `.` (result is a value).
         let is_path_receiver = match &obj.kind {
             ExprKind::Var(v) => {
-                // `self`, and any known local variable that happens to start with an
-                // uppercase letter (e.g. `var Qh = []`), are still locals, not type/module
-                // paths, and must dispatch as `.method()` -- checked before the uppercase
-                // heuristic below.
-                if v == "self" || self.known_local_vars.contains(v.as_str()) { false }
+                // `self`, any known local variable that happens to start with an
+                // uppercase letter (e.g. `var Qh = []`), and a top-level `let` constant
+                // (`PADDLE_SIZE`) are still values, not type/module paths, and must
+                // dispatch as `.method()` -- checked before the uppercase heuristic below.
+                if v == "self" || self.known_local_vars.contains(v.as_str()) || self.user_top_level_names.contains(v.as_str()) { false }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else {
                     // Struct fields accessed without `self.` in method bodies are NOT path receivers.
