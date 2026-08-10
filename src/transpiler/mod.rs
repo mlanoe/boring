@@ -569,6 +569,16 @@ struct Transpiler {
     pub(crate) global_var_inits: std::collections::HashMap<String, String>,
     /// Set of global var names that functions access — these are emitted as LazyLock<Mutex<T>>.
     pub(crate) global_vars_used_in_fns: std::collections::HashSet<String>,
+    /// Top-level *immutable* `let` bindings (scalar-const-safe per
+    /// `top_level_let_is_const_safe`) that are referenced from inside a function body OR
+    /// a struct/enum/ext method body. Such a `let` cannot stay a local inside the
+    /// synthesized `fn main()` — the referencing function/method has no way to see it —
+    /// so `emit_program_items` promotes it to a module-level `const` instead (mirroring
+    /// what GPU targets already do unconditionally for every scalar-safe top-level `let`,
+    /// see the `is_gpu_target` branch there). Gated on actual cross-scope usage (unlike the
+    /// GPU case) so ordinary top-level scripting `let`s — including same-named shadowing
+    /// re-declarations — keep behaving as sequential locals in `main()`.
+    pub(crate) global_lets_used_elsewhere: std::collections::HashSet<String>,
     /// Variables that hold `Option<numeric>` (int/uint/float) — from string-to-numeric casts.
     /// Used in `else` coalescing: when the optional is numeric but default is String, use map_or_else.
     pub(crate) optional_numeric_vars: std::collections::HashSet<String>,
@@ -950,6 +960,7 @@ impl Transpiler {
             global_var_types: std::collections::HashMap::new(),
             global_var_inits: std::collections::HashMap::new(),
             global_vars_used_in_fns: std::collections::HashSet::new(),
+            global_lets_used_elsewhere: std::collections::HashSet::new(),
             optional_numeric_vars: std::collections::HashSet::new(),
             always_none_vars: std::collections::HashSet::new(),
             fn_type_aliases: std::collections::HashMap::new(),
@@ -1669,6 +1680,21 @@ impl Transpiler {
                     self.emit_item(item);
                     self.blank();
                 }
+                // Non-GPU targets: a plain top-level `let` normally becomes a local
+                // inside the synthesized `fn main()` (see the `stmts` fallback below),
+                // which is invisible to every other function/method. When
+                // `global_lets_used_elsewhere` (computed in `pre_scan`) says this
+                // constant IS referenced from outside that synthesized `main()`, it must
+                // be promoted to a real module-level `const` instead -- otherwise the
+                // emitted Rust simply doesn't compile (E0425 "cannot find value").
+                // Gated on actual cross-scope usage, unlike the GPU branch above, so
+                // ordinary top-level scripting `let`s -- including same-named shadowing
+                // re-declarations -- keep behaving as sequential locals in `main()`.
+                Item::Let(s) if self.top_level_let_is_const_safe(s)
+                    && self.global_lets_used_elsewhere.contains(&s.name) => {
+                    self.emit_item(item);
+                    self.blank();
+                }
                 Item::Let(_) => stmts.push(item),
                 Item::Fn(f) if f.qualifier.is_none() => {
                     // Build a unique signature key: name + param types.
@@ -1885,11 +1911,20 @@ impl Transpiler {
         if let Some(ty) = &s.ty {
             return is_scalar(ty);
         }
-        // No declared type -- only trust a bare scalar literal initializer.
-        matches!(
-            s.value.as_ref().map(|v| &v.kind),
-            Some(ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_))
-        )
+        // No declared type -- only trust a bare scalar literal initializer, unwrapping a
+        // single leading unary op first (`-450.0` parses as `UnaryOp(Neg, Float(450.0))`,
+        // not a bare `Float` literal -- without this, every negative numeric constant,
+        // starting with this exact bug report's own `LEFT_WALL = -450.0` example, would
+        // silently fail this check and never get promoted to a Rust `const` at all).
+        // `-`/`!`/`~` all still compile fine as a `const` initializer in Rust.
+        fn is_scalar_literal(v: &Expr) -> bool {
+            match &v.kind {
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+                ExprKind::UnaryOp(_, inner) => is_scalar_literal(inner),
+                _ => false,
+            }
+        }
+        s.value.as_ref().map(is_scalar_literal).unwrap_or(false)
     }
 
     /// Mirrors `Checker::collect_gpu_arg_params` (checker/mod.rs) — same fixed-point
@@ -2445,6 +2480,11 @@ impl Transpiler {
         }
 
         // ── Collect user-defined type names (for managed mode wrapping) ────────
+        // Candidate top-level immutable `let` scalar constants (per
+        // `top_level_let_is_const_safe`) — whether each one actually gets promoted to a
+        // Rust `const` is decided below, once cross-scope usage is known (see
+        // `global_lets_used_elsewhere`).
+        let mut const_let_candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
         for item in &program.items {
             match item {
                 Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
@@ -2458,6 +2498,9 @@ impl Transpiler {
                     // this scan does, being a single pass over `program.items`.
                     if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
                         self.gpu_top_level_const_names.insert(s.name.clone());
+                    }
+                    if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_const_safe(s) {
+                        const_let_candidates.insert(s.name.clone());
                     }
                 }
                 _ => {}
@@ -2676,6 +2719,31 @@ impl Transpiler {
                         }
                     }
                 }
+            }
+        }
+
+        // Third pass: which top-level *immutable* `let` scalar constants
+        // (`const_let_candidates`, collected above) are referenced from inside a
+        // function body OR a struct/enum/ext method body. Those can't stay a local
+        // inside the synthesized `fn main()` -- the referencing function/method has no
+        // way to see it -- see `global_lets_used_elsewhere`'s doc comment for how this
+        // result is used. Unlike `top_var_names` above (mutable top-level `var`s,
+        // `Item::Fn` bodies only), this must also cover struct/enum/ext methods: an
+        // enum `req`/`def` method body referencing a top-level constant is exactly the
+        // shape that motivated this scan.
+        for item in &program.items {
+            match item {
+                Item::Fn(f) => collect_const_let_usage(&const_let_candidates, &f.params, &f.body, &mut self.global_lets_used_elsewhere),
+                Item::Struct(s) => for m in &s.methods {
+                    collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
+                },
+                Item::Enum(e) => for m in &e.methods {
+                    collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
+                },
+                Item::Ext(x) => for m in &x.methods {
+                    collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
+                },
+                _ => {}
             }
         }
 

@@ -1,0 +1,36 @@
+let LEFT_WALL = -450.0
+let RIGHT_WALL = 450.0
+let MAX_SPEED = 88.0
+
+struct Point:
+    float x
+    float y
+
+struct Car:
+    float speed
+
+    req bool is_speeding():
+        speed > MAX_SPEED
+
+enum WallLocation:
+    Left
+    Right
+
+    req Point coords():
+        match self:
+            Left:  Point(x = LEFT_WALL, y = 0.0)
+            Right: Point(x = RIGHT_WALL, y = 0.0)
+
+float speed_limit():
+    MAX_SPEED
+
+def main():
+    print "{speed_limit()}"
+    let c = Car(speed = 100.0)
+    print "{c.is_speeding()}"
+    let WallLocation left = .Left
+    let WallLocation right = .Right
+    let lp = left.coords()
+    let rp = right.coords()
+    print "{lp.x}, {lp.y}"
+    print "{rp.x}, {rp.y}"

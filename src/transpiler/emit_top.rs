@@ -33,20 +33,30 @@ impl Transpiler {
                 // Top-level `static let` → emit as `const` at module scope. GPU targets
                 // treat every top-level `let` this way too -- see `emit_program_items`'s
                 // classification of `Item::Let` (gated on `is_gpu_target`, not on
-                // `kernel_decls` being non-empty).
-                if s.is_static || self.is_gpu_target {
+                // `kernel_decls` being non-empty). Non-GPU targets do the same, but only
+                // for a constant `pre_scan` found referenced outside the synthesized
+                // `fn main()` (`global_lets_used_elsewhere`) -- see that same
+                // classification's third `Item::Let` arm.
+                if s.is_static || self.is_gpu_target || self.global_lets_used_elsewhere.contains(&s.name) {
                     // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
                     // where the compiler can infer it. Without an explicit boring type
                     // annotation, infer one from a scalar literal initializer (the only
                     // shape `top_level_let_is_const_safe`, in `emit_program_items`, allows
-                    // through without a declared type).
-                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
-                        match s.value.as_ref().map(|v| &v.kind) {
-                            Some(ExprKind::Int(_))   => "i64".to_string(),
-                            Some(ExprKind::Float(_)) => "f64".to_string(),
-                            Some(ExprKind::Bool(_))  => "bool".to_string(),
-                            _ => "_".to_string(),
+                    // through without a declared type) -- unwrapping a leading unary op
+                    // first, same as `top_level_let_is_const_safe` itself, so a negative
+                    // constant (`let x = -450.0`) still infers `f64` instead of falling
+                    // through to the invalid `_` placeholder.
+                    fn literal_ty_str(v: &Expr) -> Option<&'static str> {
+                        match &v.kind {
+                            ExprKind::Int(_)   => Some("i64"),
+                            ExprKind::Float(_) => Some("f64"),
+                            ExprKind::Bool(_)  => Some("bool"),
+                            ExprKind::UnaryOp(_, inner) => literal_ty_str(inner),
+                            _ => None,
                         }
+                    }
+                    let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
+                        s.value.as_ref().and_then(literal_ty_str).unwrap_or("_").to_string()
                     });
                     let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
                     // GPU targets: uppercase the Rust identifier. A fn parameter whose name

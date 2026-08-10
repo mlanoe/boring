@@ -736,6 +736,24 @@ pub(crate) fn collect_var_names(expr: &Expr) -> Vec<String> {
     out
 }
 
+/// Collects every name a match-arm pattern binds (`Pattern::Bind`, recursively through
+/// `Variant`/`Tuple`/`Some` sub-patterns). Used by `collect_vars_in`/`collect_vars_in_stmt`'s
+/// `Match` handling to keep a pattern-bound name (e.g. `MInner(v)`'s `v`) from being reported
+/// as a reference to some unrelated outer `v` of the same name — without this, a top-level
+/// scripting `let v = ...` and an unrelated `match ...: Variant(v): v` elsewhere in the same
+/// file collide: the arm's own tail-expression read of its bound `v` looks, to a naive
+/// free-variable scan, identical to a genuine reference to the top-level `v`.
+pub(crate) fn collect_pattern_bind_names(pats: &[Pattern], out: &mut std::collections::HashSet<String>) {
+    for p in pats {
+        match p {
+            Pattern::Bind(name) => { out.insert(name.clone()); }
+            Pattern::Variant(_, sub) | Pattern::Tuple(sub) => collect_pattern_bind_names(sub, out),
+            Pattern::Some(inner) => collect_pattern_bind_names(std::slice::from_ref(inner.as_ref()), out),
+            Pattern::Wildcard | Pattern::Lit(_) | Pattern::None => {}
+        }
+    }
+}
+
 pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
     match &expr.kind {
         ExprKind::Var(name)                 => out.push(name.clone()),
@@ -854,17 +872,24 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
             }
         }
 
-        // match expression — walk subject and each arm (guard + body)
+        // match expression — walk subject and each arm (guard + body). Each arm's own
+        // pattern-bound names (see `collect_pattern_bind_names`) are excluded from what
+        // that arm's guard/body contribute -- they're local to the arm, not references
+        // to an outer variable of the same name.
         ExprKind::Match(match_stmt) => {
             collect_vars_in(&match_stmt.subject, out);
             for arm in &match_stmt.arms {
-                if let Some(guard) = &arm.guard { collect_vars_in(guard, out); }
+                let mut bound = std::collections::HashSet::new();
+                collect_pattern_bind_names(&arm.patterns, &mut bound);
+                let mut arm_vars: Vec<String> = Vec::new();
+                if let Some(guard) = &arm.guard { collect_vars_in(guard, &mut arm_vars); }
                 match &arm.body {
-                    MatchBody::Expr(e) => collect_vars_in(e, out),
+                    MatchBody::Expr(e) => collect_vars_in(e, &mut arm_vars),
                     MatchBody::Block(stmts) => {
-                        for s in stmts { collect_vars_in_stmt(s, out); }
+                        for s in stmts { collect_vars_in_stmt(s, &mut arm_vars); }
                     }
                 }
+                out.extend(arm_vars.into_iter().filter(|v| !bound.contains(v)));
             }
         }
 
@@ -947,13 +972,19 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
         Stmt::Match(m) => {
             collect_vars_in(&m.subject, out);
             for arm in &m.arms {
-                if let Some(guard) = &arm.guard { collect_vars_in(guard, out); }
+                // Same arm-local pattern-bind exclusion as `collect_vars_in`'s
+                // `ExprKind::Match` case — see `collect_pattern_bind_names`'s doc comment.
+                let mut bound = std::collections::HashSet::new();
+                collect_pattern_bind_names(&arm.patterns, &mut bound);
+                let mut arm_vars: Vec<String> = Vec::new();
+                if let Some(guard) = &arm.guard { collect_vars_in(guard, &mut arm_vars); }
                 match &arm.body {
-                    MatchBody::Expr(e) => collect_vars_in(e, out),
+                    MatchBody::Expr(e) => collect_vars_in(e, &mut arm_vars),
                     MatchBody::Block(stmts) => {
-                        for s in stmts { collect_vars_in_stmt(s, out); }
+                        for s in stmts { collect_vars_in_stmt(s, &mut arm_vars); }
                     }
                 }
+                out.extend(arm_vars.into_iter().filter(|v| !bound.contains(v)));
             }
         }
         _ => {}
@@ -1012,6 +1043,36 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
                 for c in &t.catch_clauses { collect_local_decl_names(&c.body, out); }
             }
             _ => {}
+        }
+    }
+}
+
+/// Records which of `candidates` (top-level immutable `let` scalar-constant names,
+/// per `Transpiler::top_level_let_is_const_safe`) are referenced as free variables
+/// inside `body` — a function or struct/enum/ext method body — and inserts each into
+/// `out`. Mirrors the `Item::Fn`-only free-variable scan `pre_scan` already runs for
+/// mutable top-level `var`s (see `global_vars_used_in_fns`), but is called for every
+/// method body too (not just top-level functions), since a top-level `let` referenced
+/// only from inside a struct/enum method — the shape the module-constant transpiler bug
+/// this was written for actually reproduced with — is otherwise invisible to that scan.
+pub(crate) fn collect_const_let_usage(
+    candidates: &std::collections::HashSet<String>,
+    params: &[Param],
+    body: &[Stmt],
+    out: &mut std::collections::HashSet<String>,
+) {
+    if candidates.is_empty() { return; }
+    let param_names: std::collections::HashSet<String> = params.iter()
+        .map(|p| p.name.clone()).collect();
+    let mut local_decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_local_decl_names(body, &mut local_decls);
+    let mut body_vars: Vec<String> = Vec::new();
+    for stmt in body {
+        collect_vars_in_stmt(stmt, &mut body_vars);
+    }
+    for v in &body_vars {
+        if candidates.contains(v) && !param_names.contains(v) && !local_decls.contains(v) {
+            out.insert(v.clone());
         }
     }
 }

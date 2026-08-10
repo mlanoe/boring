@@ -211,6 +211,7 @@ interp_test!(ref_identity);
 interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
 interp_test!(float32_math_builtins);
+interp_test!(top_level_const);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

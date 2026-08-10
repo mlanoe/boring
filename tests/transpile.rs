@@ -229,5 +229,13 @@ transpile_test!(ref_identity);
 transpile_test!(mut_scalar);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
+// Top-level `let` constants referenced from a free function, a struct method, AND an
+// enum method — regression test for the transpiler silently dropping the `const`
+// declaration for a module-scope `let` whenever nothing but a function/method body
+// referenced it (the reference compiled fine under `boring run`, since the tree-walk
+// interpreter tracks globals directly, but `boring build`'s emitted Rust failed with
+// E0425 "cannot find value" -- this case's real value is the `cargo run` compile this
+// harness performs, not just the interpreter comparison `tests/run.rs` also runs here).
+transpile_test!(top_level_const);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.

@@ -2773,6 +2773,7 @@ impl Transpiler {
             global_var_types: self.global_var_types.clone(),
             global_var_inits: self.global_var_inits.clone(),
             global_vars_used_in_fns: self.global_vars_used_in_fns.clone(),
+            global_lets_used_elsewhere: self.global_lets_used_elsewhere.clone(),
             optional_numeric_vars: self.optional_numeric_vars.clone(),
             always_none_vars: self.always_none_vars.clone(),
             fn_type_aliases: self.fn_type_aliases.clone(),
