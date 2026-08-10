@@ -2427,10 +2427,45 @@ def FnDecl lookup_fn_decl(Interpreter interp, string name):
         return decl
     throw "lookup_fn_decl: function '{name}' not found"
 
+# Resolves which free-function overload to actually invoke for a `Value.OverloadedFn`
+# call — mirrors `Interpreter.find_best_method` (stdlib.br): arity (accounting for
+# default params) plus a static param-type check against the evaluated `args`, falling
+# back to the first-registered variant when no candidate matches exactly (same
+# fallback the Rust reference and find_best_method both use). Each element of
+# `variants` is a `Value.Fn(key, captured)` produced by register_free_fn (stdlib.br) —
+# `key` may be a synthesized "{name}#{index}" rather than the plain function name, so
+# its FnDecl is looked up via that key, not `decl.name`.
 def Value resolve_overload(Interpreter interp, [Value] variants, [Value] args):
     match variants.length:
         0: throw "no overloads for call"
-        _: variants[0]
+        1: variants[0]
+        _:
+            var i = 0
+            while i < variants.length:
+                let decl_opt = match variants[i]:
+                    Value.Fn(vname, _): interp.get_fn_decl(vname)
+                    _: nil
+                if let decl = decl_opt:
+                    let max_args = decl.params.length
+                    var min_args = 0
+                    var pi = 0
+                    while pi < decl.params.length:
+                        if decl.params[pi].default == nil:
+                            min_args = min_args + 1
+                        pi = pi + 1
+                    if args.length >= min_args and args.length <= max_args:
+                        var all_match = true
+                        var j = 0
+                        while j < decl.params.length and j < args.length:
+                            let p = decl.params[j]
+                            if let pty = p.ty:
+                                if not value_matches_type_static(args[j], pty):
+                                    all_match = false
+                            j = j + 1
+                        if all_match:
+                            return variants[i]
+                i = i + 1
+            variants[0]
 
 def Value call_native(Interpreter interp, string name, Value func, [Value] args):
     if name == "write":

@@ -177,6 +177,21 @@ struct Env:
             else:
                 nil
 
+    # Local-scope-only lookup — unlike `get` above, never walks `parent`. Used by
+    # register_free_fn (stdlib.br) to decide whether a `def` upgrades an
+    # already-registered same-named function into a Value.OverloadedFn: that decision
+    # must only ever consider names bound in *this* scope, never one inherited from an
+    # enclosing scope (a nested `def` must never merge into an unrelated outer
+    # function sharing its name).
+    req bool has_local(string name):
+        self.vars.has(name)
+
+    req Value? get_local(string name):
+        if self.vars.has(name):
+            self.vars[name]
+        else:
+            nil
+
     def bool set(string name, Value value):
         if self.vars.has(name):
             if self.lazy_vars.contains(name):

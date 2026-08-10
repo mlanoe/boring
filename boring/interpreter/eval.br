@@ -191,14 +191,14 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Function/constructor call
         ExprKind.Call(callee_expr, args):
             let callee = eval_expr(interp, callee_expr)
-            let hints = call_hint_types(interp, callee)
+            let hints = call_hint_types(interp, callee, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
             call_value(interp, callee, arg_vals)
 
         ExprKind.GenericCall(callee_expr2, _type_args, gen_args):
             # Ignore type args — evaluate as a regular call
             let gen_callee = eval_expr(interp, callee_expr2)
-            let gen_hints = call_hint_types(interp, gen_callee)
+            let gen_hints = call_hint_types(interp, gen_callee, gen_args.length)
             let gen_arg_vals = eval_args_with_hints(interp, gen_args, gen_hints)
             call_value(interp, gen_callee, gen_arg_vals)
 
@@ -790,11 +790,12 @@ def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hin
 
 # Per-position `.Variant` hints (see eval_dot_ident_hint) for a free-function call, built
 # from the callee's own declared param types. `Value.OverloadedFn` doesn't have one
-# settled FnDecl — resolve_overload always just returns the first candidate today (it
-# doesn't consider argument types at all yet, a separate pre-existing gap), so the first
-# candidate's params are exactly what will actually run. Closures, native fns, and
-# constructors get no hints, same as before this existed.
-def [Type?] call_hint_types(mut Interpreter interp, Value callee):
+# settled FnDecl — the real overload is only picked by resolve_overload once the args
+# are evaluated — so it collects every arity-compatible variant's FnDecl and defers to
+# merged_overload_hint_types for the same arity-filtered, enum-only-consensus hint
+# struct/enum method overloads already get via method_hint_types. Closures, native fns,
+# and constructors get no hints, same as before this existed.
+def [Type?] call_hint_types(mut Interpreter interp, Value callee, int arg_count):
     match callee:
         Value.Fn(name, _):
             let decl_opt = interp.get_fn_decl(name)
@@ -802,8 +803,18 @@ def [Type?] call_hint_types(mut Interpreter interp, Value callee):
                 return decl.params.map((p): p.ty)
             []
         Value.OverloadedFn(_, variants):
-            if variants.length > 0:
-                return call_hint_types(interp, variants[0])
+            var [FnDecl] candidates = []
+            for v in variants:
+                match v:
+                    Value.Fn(vname, _):
+                        let d_opt = interp.get_fn_decl(vname)
+                        if let d = d_opt:
+                            candidates.push(d)
+                    _: nil
+            if candidates.length == 1:
+                return candidates[0].params.map((p): p.ty)
+            if candidates.length > 1:
+                return merged_overload_hint_types(interp, candidates, arg_count)
             []
         _: []
 

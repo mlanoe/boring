@@ -125,6 +125,7 @@ itest!(with_stmt);
 itest!(generics);
 itest!(operators);
 itest!(method_overloading);
+itest!(free_fn_overloading);
 itest!(macros);
 itest!(defer);
 itest!(do_block);

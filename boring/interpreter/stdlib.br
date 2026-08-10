@@ -618,15 +618,71 @@ def Interpreter'actor new_interpreter():
     register_stdlib(interp)
     interp
 
+# ─── register_free_fn ──────────────────────────────────────────────────────────
+#
+# Registers a free-function `decl` under `decl.name` in `target_env`'s *local* scope
+# (never a parent scope — `target_env.vars.has` rather than `.get`, so a nested `def`
+# never accidentally merges into an unrelated same-named function further up the
+# environment chain). If the name is already bound to a plain `Value.Fn` (or to a
+# `Value.OverloadedFn` from an earlier call to this function), upgrades/extends it into
+# a `Value.OverloadedFn` instead of silently overwriting — mirrors the "upgrade to
+# OverloadedFn" step in src/interpreter/mod.rs's `Item::Fn` handling, bringing free
+# functions to parity with struct/enum method overloads (find_best_method).
+#
+# Each overload variant needs its own independently-resolvable FnDecl, but `fn_decls`
+# is a single-value `{string=FnDecl}` map (one entry per name) and `Value.Fn` only
+# carries a name string (no embedded decl, unlike the Rust reference's
+# `Value::Fn { decl, captured }`) — so each variant beyond the first is registered
+# under a synthesized `"{name}#{index}"` key instead of the bare name. `#` can't appear
+# in a real identifier (the lexer reads it as a comment), so these keys never collide
+# with an actual declared function. `fn_decls[name]` itself is left pointing at the
+# first-declared variant for callers that look functions up by bare name outside the
+# OverloadedFn path (e.g. the `|>` pipe operator's `interp.get_fn_decl(method)`).
+def void register_free_fn(mut Interpreter interp, mut Env'actor target_env, FnDecl decl):
+    let fn_name = decl.name
+    let existing_opt = target_env.get_local(fn_name)
+    if let existing = existing_opt:
+        match existing:
+            Value.Fn(_, existing_captured):
+                let existing_decl_opt = interp.get_fn_decl(fn_name)
+                if let existing_decl = existing_decl_opt:
+                    let key0 = "{fn_name}#0"
+                    let key1 = "{fn_name}#1"
+                    interp.set_fn_decl(key0, existing_decl)
+                    interp.set_fn_decl(key1, decl)
+                    let variants = [Value.Fn(key0, existing_captured), Value.Fn(key1, target_env.clone())]
+                    target_env.define(fn_name, Value.OverloadedFn(fn_name, variants))
+                else:
+                    interp.set_fn_decl(fn_name, decl)
+                    target_env.define(fn_name, Value.Fn(fn_name, target_env.clone()))
+            Value.OverloadedFn(_, existing_variants):
+                let idx = existing_variants.length
+                let key = "{fn_name}#{idx}"
+                interp.set_fn_decl(key, decl)
+                var new_variants = [Value]{}
+                for v in existing_variants:
+                    new_variants.push(v)
+                new_variants.push(Value.Fn(key, target_env.clone()))
+                target_env.define(fn_name, Value.OverloadedFn(fn_name, new_variants))
+            _:
+                interp.set_fn_decl(fn_name, decl)
+                target_env.define(fn_name, Value.Fn(fn_name, target_env.clone()))
+    else:
+        interp.set_fn_decl(fn_name, decl)
+        target_env.define(fn_name, Value.Fn(fn_name, target_env.clone()))
+
 # ─── exec_item ────────────────────────────────────────────────────────────────
 
 def void exec_item(mut Interpreter interp, Item item):
     match item:
         Item.Fn(decl):
-            let fn_name = decl.name
-            interp.set_fn_decl(fn_name, decl)
-            let fn_val = Value.Fn(fn_name, interp.global_env)
-            env_define(interp.global_env, fn_name, fn_val, false)
+            # `interp.global_env` is read into its own statement first, not inlined as a
+            # call argument — the transpiled Rust temporary MutexGuard from reading a
+            # `mut Interpreter` field lives for the whole enclosing statement, and
+            # register_free_fn separately locks `interp` internally; inlining the two
+            # would self-deadlock on Interpreter's own mutex.
+            mut genv = interp.global_env
+            register_free_fn(interp, genv, decl)
         Item.Struct(decl):
             let sname = decl.name
             interp.set_struct_decl(sname, decl)

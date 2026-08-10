@@ -1,0 +1,6 @@
+int: 42
+str: hi
+go
+stop
+nested int 1
+nested string world

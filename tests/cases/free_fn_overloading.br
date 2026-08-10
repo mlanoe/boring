@@ -1,0 +1,39 @@
+string handle(int x):
+    "int: {x}"
+
+string handle(string s):
+    "str: {s}"
+
+enum TrafficLight:
+    Red
+    Yellow
+    Green
+
+string handle(TrafficLight light):
+    match light:
+        TrafficLight.Red: "stop"
+        TrafficLight.Yellow: "caution"
+        TrafficLight.Green: "go"
+
+print handle(42)
+print handle("hi")
+print handle(TrafficLight.Green)
+
+# `.Variant` shorthand — call_hint_types must merge every arity-compatible overload's
+# param types to know position 0 means TrafficLight here (the int/string overloads at
+# the same position aren't enums, so they don't block the hint).
+print handle(.Red)
+
+# Overloading a function local to another function's body — resolved against its own
+# scope only (register_free_fn checks the local scope, not the enclosing one).
+def use_nested():
+    def string greet(int x):
+        "nested int {x}"
+
+    def string greet(string s):
+        "nested string {s}"
+
+    print greet(1)
+    print greet("world")
+
+use_nested()

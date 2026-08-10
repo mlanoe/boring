@@ -349,11 +349,14 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
             exec_while_let(interp, s)
 
         Fn(decl):
-            # Nested function declaration — register in current scope
-            let fn_name = decl.name
-            interp.set_fn_decl(fn_name, decl)
-            let fn_val = Value.Fn(fn_name, interp.current_env)
-            interp.current_env.define(fn_name, fn_val)
+            # Nested function declaration — register in current scope. Upgrades to a
+            # Value.OverloadedFn when a same-named function already exists in this
+            # local scope (see register_free_fn, stdlib.br). `interp.current_env` is
+            # read into its own statement first — see the matching comment at
+            # stdlib.br's Item.Fn case for why inlining it as a call argument
+            # self-deadlocks.
+            mut cenv = interp.current_env
+            register_free_fn(interp, cenv, decl)
             nil
 
         Struct(decl):
