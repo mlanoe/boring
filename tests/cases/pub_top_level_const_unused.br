@@ -1,0 +1,18 @@
+# Regression case: a `pub let` at module scope with ZERO in-file consumers --
+# neither a function, struct method, enum method, nor ext method anywhere in
+# this file reads `SCOREBOARD_FONT_SIZE` or `SCOREBOARD_TEXT_PADDING`. This is
+# the actual bug-report shape: constants moved into a `.br` file purely so a
+# hand-written Rust sibling module can read them. Promotion to a real
+# module-level `pub const` must not depend on in-file usage -- `pub` alone is
+# the signal, exactly like `pub struct`/`pub def`/`pub enum`.
+#
+# `UNUSED_PRIVATE` is the control: a bare (non-`pub`) top-level `let` with
+# equally zero in-file consumers must still be left un-promoted (a private,
+# unused constant has no reason to exist as a real Rust item) -- see
+# `pub_module_const.rs`'s cross-module test for the actual proof of both halves.
+pub let float32 SCOREBOARD_FONT_SIZE = 33.0
+pub let float32 SCOREBOARD_TEXT_PADDING = 5.0
+let float32 UNUSED_PRIVATE = 1.0
+
+def main():
+    print "ok"

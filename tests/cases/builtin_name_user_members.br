@@ -1,0 +1,116 @@
+# Regression test: a user-declared method/field named after a well-known Rust
+# Iterator/Vec adapter (`position`, `count`, ...) must dispatch to the user's own
+# declaration, never to the transpiler's builtin name tables (`map_method`/`map_field`
+# in src/transpiler/helpers.rs). Those tables used to fire purely on name, with no check
+# for a real declared member on the receiver's own type -- and enums were entirely
+# invisible to that check (only `struct_fields` was consulted), so EVERY enum method
+# call whose name collided with a builtin (not just `position`) silently mis-emitted,
+# e.g. `b.position()` -> `b.cloned().position()` (E0599: no method `cloned` on the enum).
+#
+# This is a transpiler-only ("boring build" + `cargo run`) case, not in tests/run.rs:
+# `boring run`'s tree-walk interpreter resolves member names dynamically and would
+# never reproduce a codegen-only bug like this one, so this file's real value is the
+# real `cargo build` compile tests/transpile.rs performs, not an interpreter comparison.
+
+enum Bar:
+    A
+    B
+
+    pub req int position():
+        match self:
+            A: 1
+            B: 2
+
+# Method call on a plain by-value enum parameter -- the exact shape from the original
+# bug report (calling `.position()` as a direct method on a plain parameter).
+pub def int use_enum_param(Bar b):
+    b.position()
+
+struct Foo:
+    let int tag
+
+    pub req int position():
+        tag * 10
+
+# Same collision, but on a struct -- structs already worked before this fix; kept here
+# so the enum and struct cases are tested side by side, per the task's own audit request.
+pub def int use_struct_param(Foo f):
+    f.position()
+
+print "{use_enum_param(Bar.A)}"
+print "{use_enum_param(Bar.B)}"
+print "{use_struct_param(Foo(tag = 3))}"
+
+# A struct FIELD literally named `count` -- the field-access analog of the same bug
+# class (map_field unconditionally maps `count`/`length` -> `len() as isize`).
+struct Counter:
+    let int count
+
+def int use_counter_param(Counter c):
+    c.count
+
+print "{use_counter_param(Counter(count = 7))}"
+
+# Enum method named `count()` (parens, not a bare getter) -- a second builtin name
+# besides `position`, confirming the fix isn't special-cased to one identifier.
+enum Bucket:
+    Empty
+    Full(int n)
+
+    pub req int count():
+        match self:
+            Empty: 0
+            Full(n): n
+
+def int use_bucket_param(Bucket b):
+    b.count()
+
+print "{use_bucket_param(Bucket.Empty)}"
+print "{use_bucket_param(Bucket.Full(5))}"
+
+# A plain local variable (not a function parameter) bound to an enum value, and a
+# for-loop variable iterating an array of enums -- both populate the transpiler's
+# var-type tracking through code paths separate from the parameter case above, so
+# they exercise the fix independently.
+let bar_local = Bar.B
+print "{bar_local.position()}"
+
+let [Bar] bars = [Bar.A, Bar.B]
+for bb in bars:
+    print "{bb.position()}"
+
+# Two more of the same bug class, found by auditing every other name-only special case
+# in the method-call dispatch chain (not just `map_method`'s table):
+#   - `try_emit_clone_and_task_method`'s `.done()` (JoinHandle non-blocking poll) used to
+#     fall through unconditionally to a `tokio::time::timeout(...)` rewrite for ANY
+#     receiver once the tracked task/join-handle-var check missed -- including a struct/
+#     enum with its own zero-arg `done()` status method.
+#   - `try_emit_special_case_method`'s array `.filter(closure)` rewrite had no receiver-
+#     type guard at all (unlike its dict/set/array siblings), so a struct/enum's own
+#     `filter(closure)` method was rewritten into `.iter().cloned().filter(...)`.
+enum Job:
+    Pending
+    Finished
+
+    pub req bool done():
+        match self:
+            Pending: false
+            Finished: true
+
+def bool use_job_param(Job j):
+    j.done()
+
+print "{use_job_param(Job.Pending)}"
+print "{use_job_param(Job.Finished)}"
+
+struct NumberBox:
+    let int n
+
+    pub req bool filter(bool pred(int)):
+        pred(n)
+
+def bool use_box_filter(NumberBox b):
+    b.filter((x): x > 0)
+
+print "{use_box_filter(NumberBox(n = 5))}"
+print "{use_box_filter(NumberBox(n = -3))}"

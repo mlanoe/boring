@@ -407,12 +407,16 @@ impl Transpiler {
                 }
             }
         }
-        // Track variables bound to user struct constructors for getter dispatch on non-self receivers.
-        // Also handle type method calls: `let c2 = Counter2.zero()` → c2 is Counter2.
+        // Track variables bound to user struct/enum constructors for getter and method dispatch
+        // on non-self receivers. Also handle type method calls: `let c2 = Counter2.zero()` →
+        // c2 is Counter2; and enum variant refs: `let ec = EColor.Red` → ec is EColor (parsed
+        // identically — a bare unit variant is a zero-arg MethodCall, see `constructor_type_name`'s
+        // doc comment above). `is_known_user_type` (not `struct_fields` alone) so an enum-typed
+        // var is recognized for method dispatch (`is_user_struct_receiver`) the same as a struct.
         if let ExprKind::MethodCall(callee_obj, _, _) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee_obj.kind {
                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                    && self.struct_fields.contains_key(type_name.as_str()) {
+                    && self.is_known_user_type(type_name.as_str()) {
                         self.var_struct_types.insert(s.name.clone(), type_name.clone());
                     }
             }
@@ -420,7 +424,7 @@ impl Transpiler {
         if let ExprKind::Call(callee, _) = &s_value.kind {
             if let ExprKind::Var(type_name) = &callee.kind {
                 if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    if self.struct_fields.contains_key(type_name.as_str()) {
+                    if self.is_known_user_type(type_name.as_str()) {
                         self.var_struct_types.insert(s.name.clone(), type_name.clone());
                     }
                     // Track newtype vars: `let id = UserId(42)` → id is a UserId.
@@ -433,9 +437,10 @@ impl Transpiler {
                     if let Some(ret_ty) = self.fn_return_types.get(type_name.as_str()).cloned() {
                         match &ret_ty {
                             Type::Optional(_) => { self.optional_vars.insert(s.name.clone()); }
-                            // Track function calls returning a named struct type so field access
-                            // Optional detection works (prevents double-wrapping in struct literals).
-                            Type::Named(n) if self.struct_fields.contains_key(n.as_str()) => {
+                            // Track function calls returning a named struct/enum type so field
+                            // access Optional detection works (prevents double-wrapping in
+                            // struct literals) and method dispatch recognizes the enum case too.
+                            Type::Named(n) if self.is_known_user_type(n.as_str()) => {
                                 self.var_struct_types.insert(s.name.clone(), n.clone());
                             }
                             // Track all Named return types (including enums) in var_types so

@@ -28,5 +28,36 @@ tests/cases/ext_const_promotion/src/main_rust/
 tests/cases/ext_const_promotion/src/main_rust_single/
 tests/cases/ext_const_promotion/src/main_rust_managed/
 tests/cases/ext_const_promotion/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `ext_tuple_construct` case
+# (tests/cases/fixtures/ext_tuple, Mesh2d/MeshMaterial2d tuple-struct-construction fix).
+tests/cases/ext_tuple_construct/src/main_rust/
+tests/cases/ext_tuple_construct/src/main_rust_single/
+tests/cases/ext_tuple_construct/src/main_rust_managed/
+tests/cases/ext_tuple_construct/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `ext_enum_const_promotion`
+# case (tests/cases/fixtures/ext_geom's FontSize/TextLabel, external-enum-tuple-variant
+# const-promotion fix).
+tests/cases/ext_enum_const_promotion/src/main_rust/
+tests/cases/ext_enum_const_promotion/src/main_rust_single/
+tests/cases/ext_enum_const_promotion/src/main_rust_managed/
+tests/cases/ext_enum_const_promotion/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `ext_res_field` case
+# (tests/cases/fixtures/ext_res, Res<T>/ResMut<T> field-resolution fix, task_791a91d0).
+tests/cases/ext_res_field/src/main_rust/
+tests/cases/ext_res_field/src/main_rust_single/
+tests/cases/ext_res_field/src/main_rust_managed/
+tests/cases/ext_res_field/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `text_color_construct`
+# case (tests/cases/fixtures/ext_tuple, TextColor tuple-struct-construction fix).
+tests/cases/text_color_construct/src/main_rust/
+tests/cases/text_color_construct/src/main_rust_single/
+tests/cases/text_color_construct/src/main_rust_managed/
+tests/cases/text_color_construct/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `clear_color_construct`
+# case (tests/cases/fixtures/ext_tuple, ClearColor tuple-struct-construction fix).
+tests/cases/clear_color_construct/src/main_rust/
+tests/cases/clear_color_construct/src/main_rust_single/
+tests/cases/clear_color_construct/src/main_rust_managed/
+tests/cases/clear_color_construct/src/main_rust_managed_single/
 Cargo.lock
 .claude/worktrees/

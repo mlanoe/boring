@@ -496,29 +496,6 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
     }
 }
 
-/// Returns true when an expression is likely to produce an `Option<T>` value,
-/// used to avoid wrapping Option-chain methods in `.iter().cloned().collect()`.
-pub(crate) fn is_option_expr(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::MethodCall(recv, method, _) | ExprKind::Pipe(recv, method, _) => {
-            // Unambiguously Option-producing (not Vec methods):
-            const OPTION_ONLY: &[&str] = &["and_then", "or_else", "flatten", "as_ref", "as_deref"];
-            if OPTION_ONLY.contains(&method.as_str()) { return true; }
-            // Ambiguous (exists on both Vec and Option): propagate — only treat as
-            // Option if the receiver is itself Option-like.
-            const MAYBE_OPTION: &[&str] = &[
-                "filter", "map", "next", "cloned", "copied",
-                "find", "first", "last", "get", "pop",
-            ];
-            if MAYBE_OPTION.contains(&method.as_str()) {
-                return is_option_expr(recv);
-            }
-            false
-        }
-        ExprKind::Var(name) => name.ends_with('?'),
-        _ => false,
-    }
-}
 
 /// Map boring field names to Rust field names.
 pub(crate) fn map_field(name: &str) -> &str {

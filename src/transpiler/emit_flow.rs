@@ -27,7 +27,7 @@ impl Transpiler {
                 // Check if the declared return type is a known trait → wrap value in Box::new().
                 let _is_trait_return = matches!(&self.fn_return_ty, Some(Type::Named(n))
                     if self.trait_method_names.contains_key(n.as_str()));
-                let val = if is_optional_return && !is_option_expr(e) {
+                let val = if is_optional_return && !self.is_option_expr(e) {
                     let inner = self.emit_expr_owned(e);
                     // Check if the return expression is already an Option.
                     let already_opt = inner.starts_with("Some(") || inner == "None"

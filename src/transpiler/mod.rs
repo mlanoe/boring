@@ -307,6 +307,12 @@ struct Transpiler {
     /// Used to determine qualifier inference eligibility, separate from `type_sizes` which only
     /// stores structs with known sizes (for boxing/stack-size decisions).
     pub(crate) all_struct_types: std::collections::HashSet<String>,
+    /// All user-defined enum names. Mirrors `all_struct_types` — used by `is_known_user_type`
+    /// so method-call/field-access dispatch treats a receiver of enum type the same as one of
+    /// struct type ("does this type have its own declared member?") instead of falling through
+    /// to the builtin Iterator/collection name tables (`map_method`/`map_field`), which used to
+    /// fire unconditionally for any enum receiver since only `struct_fields` was consulted.
+    pub(crate) all_enum_types: std::collections::HashSet<String>,
     /// Struct name → assoc type name → concrete type (for `T.AssocName` resolution).
     pub(crate) struct_assoc_types: std::collections::HashMap<String, std::collections::HashMap<String, Type>>,
     /// Top-level functions that declare `throws`.
@@ -882,6 +888,7 @@ impl Transpiler {
             qualified_struct_types: std::collections::HashSet::new(),
             actor_source_types: std::collections::HashSet::new(),
             all_struct_types: std::collections::HashSet::new(),
+            all_enum_types: std::collections::HashSet::new(),
             struct_assoc_types: std::collections::HashMap::new(),
             fn_throws: std::collections::HashSet::new(),
             typed_error_enums: std::collections::HashSet::new(),
@@ -1706,12 +1713,19 @@ impl Transpiler {
                 // branch above) also admits a call into an external/opaque type
                 // (`Color.srgb(...)`, `Vec2.new(...)`) -- `emit_item`'s `Item::Let` arm picks
                 // `const` vs a lazily-initialized `static` for those, see
-                // `top_level_let_external_call`'s doc. Gated on actual cross-scope usage,
-                // unlike the GPU branch above, so ordinary top-level scripting `let`s --
-                // including same-named shadowing re-declarations -- keep behaving as
-                // sequential locals in `main()`.
+                // `top_level_let_external_call`'s doc. A `pub` let ALSO always takes this
+                // branch regardless of `global_lets_used_elsewhere` -- `pub` at module scope
+                // is a declaration of public API, exactly like `pub struct`/`pub def`/`pub
+                // enum`, which promote unconditionally with no "is it used elsewhere in this
+                // file" check at all. Gating a `pub let` on in-file usage would silently drop
+                // (or, worse, mis-emit as an invalid local `pub let` inside `fn main()`, see
+                // `emit_let`) a constant whose entire purpose is to be read from a sibling
+                // module/crate that this file's own pre_scan can never see. A bare
+                // (non-`pub`) `let` keeps the old behavior: gated on actual cross-scope usage,
+                // so ordinary top-level scripting `let`s -- including same-named shadowing
+                // re-declarations -- keep behaving as sequential locals in `main()`.
                 Item::Let(s) if self.top_level_let_is_promotable(s)
-                    && self.global_lets_used_elsewhere.contains(&s.name) => {
+                    && (s.is_pub || self.global_lets_used_elsewhere.contains(&s.name)) => {
                     self.emit_item(item);
                     self.blank();
                 }
@@ -1948,15 +1962,17 @@ impl Transpiler {
     }
 
     /// Whether a top-level `let`'s initializer is a call into an external/opaque type --
-    /// `Color.srgb(0.8, 0.8, 0.8)`, `Vec2.new(120.0, 20.0)` -- rather than one of this
+    /// `Color.srgb(0.8, 0.8, 0.8)`, `Vec2.new(120.0, 20.0)`, or an external enum's
+    /// tuple-variant dot-shorthand (`FontSize.Px(33.0)`) -- rather than one of this
     /// file's own structs/enums (`self.user_types`, populated before this ever runs --
     /// see `pre_scan`'s dedicated pass for why that has to happen first). Boring parses
-    /// `Type.method(args)` as `MethodCall(Var(Type), method, args)` (see
-    /// `try_emit_type_method_call`'s identical shape), so this only needs to look at the
-    /// receiver, not the whole call. Returns `(type_name, method)` so callers can both
-    /// name the promoted item's Rust type (see `top_level_let_promoted_type`) and check
-    /// `is_known_external_const_fn` for the const-vs-static decision (`emit_item`'s
-    /// `Item::Let` arm).
+    /// both `Type.method(args)` and `Type.Variant(args)` as the same
+    /// `MethodCall(Var(Type), method, args)` shape (see `try_emit_type_method_call`'s
+    /// identical match), so this only needs to look at the receiver, not the whole call
+    /// or which of the two it is. Returns `(type_name, method)` so callers can both name
+    /// the promoted item's Rust type (see `top_level_let_promoted_type`) and check
+    /// `is_known_external_const_fn`/`is_external_enum_variant_construction` for the
+    /// const-vs-static decision (`emit_item`'s `Item::Let` arm).
     fn top_level_let_external_call(&self, s: &LetStmt) -> Option<(String, String)> {
         let ExprKind::MethodCall(obj, method, _) = &s.value.as_ref()?.kind else { return None };
         let ExprKind::Var(type_name) = &obj.kind else { return None };
@@ -1991,6 +2007,23 @@ impl Transpiler {
     /// `static` fallback just being slightly less idiomatic for a constructor that
     /// happens to be const and wasn't recognized. Extend this list as more such
     /// constructors (e.g. from `glam`/`bevy`) are hand-verified against their source.
+    ///
+    /// The `bevy_color::Color` entries below are hand-verified against
+    /// `crates/bevy_color/src/color.rs` in bevyengine/bevy (main branch) -- every listed
+    /// constructor is `pub const fn`. Deliberately NOT listed: `srgb_u32`/`srgba_u32`,
+    /// which are plain `pub fn` in that same source (not const).
+    ///
+    /// A promoted `let` that stays a `static ... LazyLock<T>` (i.e. its call isn't on
+    /// this list) auto-derefs to `T` at a method-call receiver or a `.field` read --
+    /// `PADDLE_SIZE.x`, `SPAWN_DELAY.as_secs()` -- because Rust's method/field lookup
+    /// walks the `Deref` chain on its own. It does NOT auto-deref at a struct-literal
+    /// field value, a by-value function argument, or a return position -- those need an
+    /// exact `T`, and Rust never inserts `Deref` coercion for owned values, only for
+    /// references. Using the identifier bare there (`Sprite { color: PADDLE_COLOR, .. }`)
+    /// is a real `cargo build` type error (E0308) that `boring build` cannot catch --
+    /// write `PADDLE_COLOR.pointee` (see `.pointee` postfix deref) at that call site
+    /// instead. See `docs/book.md`'s "External-typed top-level constants" section and
+    /// `tests/cases/ext_const_promotion/src/main.br` for a worked example of both paths.
     const KNOWN_EXTERNAL_CONST_FNS: &[(&str, &str)] = &[
         ("Duration", "from_secs"), ("Duration", "from_millis"),
         ("Duration", "from_micros"), ("Duration", "from_nanos"),
@@ -1998,10 +2031,127 @@ impl Transpiler {
         ("Vec3", "new"), ("Vec3", "splat"),
         ("Vec3A", "new"), ("Vec3A", "splat"),
         ("Vec4", "new"), ("Vec4", "splat"),
+        // bevy_color::Color -- see doc comment above for the source hand-verified against.
+        ("Color", "srgb"), ("Color", "srgba"),
+        ("Color", "srgb_from_array"), ("Color", "srgb_u8"), ("Color", "srgba_u8"),
+        ("Color", "linear_rgb"), ("Color", "linear_rgba"),
+        ("Color", "hsl"), ("Color", "hsla"),
+        ("Color", "hsv"), ("Color", "hsva"),
+        ("Color", "hwb"), ("Color", "hwba"),
+        ("Color", "lab"), ("Color", "laba"),
+        ("Color", "lch"), ("Color", "lcha"),
+        ("Color", "oklab"), ("Color", "oklaba"),
+        ("Color", "oklch"), ("Color", "oklcha"),
+        ("Color", "xyz"), ("Color", "xyza"),
     ];
 
     fn is_known_external_const_fn(type_name: &str, method: &str) -> bool {
         Self::KNOWN_EXTERNAL_CONST_FNS.iter().any(|&(t, m)| t == type_name && m == method)
+    }
+
+    /// Whether `top_level_let_external_call`'s `(type_name, method)` is actually an
+    /// external *enum tuple-variant* construction (`FontSize.Px(33.0)` →
+    /// `FontSize::Px(33.0)`) rather than an associated-function call (`Color.srgb(...)`).
+    /// Unlike `KNOWN_EXTERNAL_CONST_FNS`, this needs no allowlist: constructing an enum
+    /// variant is a plain data constructor in Rust, always usable in a `const`
+    /// initializer no matter which enum or variant it is — there is no equivalent of a
+    /// non-`const fn` to guess wrong about. `try_emit_type_method_call`
+    /// (emit_methods.rs) uses the exact same signal (a capitalized `method` on a type it
+    /// doesn't recognize as a registered enum) to decide this is a variant rather than a
+    /// method, and emits it verbatim (case-preserved) for the same reason — a real Rust
+    /// method name is never capitalized, so a capitalized `method` reaching either check
+    /// can only be a variant (or associated constant, which this call shape — always
+    /// with parens/args per `top_level_let_external_call`'s `MethodCall` match — never
+    /// produces).
+    fn is_external_enum_variant_construction(method: &str) -> bool {
+        method.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    }
+
+    /// Hand-verified external types that ARE plain tuple structs with all-`pub` fields in
+    /// their defining crate -- consulted by `emit_constructor_inner`'s positional-args
+    /// fallback (emit_expr.rs) to decide between a literal tuple-struct call `Type(args)`
+    /// and `Type::new(args)`. Same rationale as `KNOWN_EXTERNAL_CONST_FNS` just above:
+    /// deliberately small, because getting this wrong in the "yes, it's a tuple struct"
+    /// direction emits invalid Rust (calling `Type::new` on a plain tuple struct with no
+    /// inherent `new()` -- E0599) that only surfaces at `cargo build` time, long after
+    /// `boring build` reported success. `Mesh2d`/`MeshMaterial2d` (bevy 0.19,
+    /// `bevy_mesh`/`bevy_sprite_render`) are both `pub struct Foo(pub Handle<T>);` with no
+    /// inherent `new()` -- the motivating case (see `boring/breakout.br`'s ball-spawning
+    /// code). Extend this list as more such bevy/glam types are hand-verified against
+    /// their source. Do NOT add a type here on the assumption it "should" be a tuple
+    /// struct -- unlike the const-fn list, a wrong entry here means Boring emits
+    /// `Type(args)` for a type that is NOT a tuple struct, which is just as broken as the
+    /// bug this list fixes, only inverted.
+    ///
+    /// A fully general fix (try the literal-call form whenever the callee resolves to a
+    /// type rather than a function, since the two forms are never both valid for the same
+    /// external identifier) isn't feasible without this list turning into real semantic
+    /// resolution against the dependency's own Rust source -- Boring's transpiler has no
+    /// symbol table for imported external items at all (see `emit_call`, emit_expr.rs:
+    /// any capitalized callee is routed to `emit_constructor` purely on capitalization,
+    /// whether or not a type by that name actually exists), so there is no "resolves to a
+    /// type" signal to test in the first place; the entire outcome of this branch is
+    /// always a guess between the two call forms, made by matching a bare identifier
+    /// string. Flipping the *default* the other way (prefer `Type(args)`) would just trade
+    /// one guess for its opposite -- it breaks `Box(v)` (tests/cases/pointee.br, a compiler
+    /// lang item with no tuple-struct fields to call positionally) and every bevy type
+    /// confirmed *not* to match this shape below (e.g. `BoxShadow`, `TextSpan` -- both real
+    /// tuple structs but with a genuine inherent `new()`; `BorderColor`/`Outline`/
+    /// `BorderRadius` -- named-field structs, not tuple structs at all in bevy 0.19). Hence
+    /// this stays an explicit, hand-verified allowlist rather than a general check.
+    ///
+    /// Bevy 0.19.0 entries below were audited directly against
+    /// `~/.cargo/registry/src/.../bevy_{text,ui}-0.19.0/src/{text.rs,ui_node.rs,
+    /// gradients.rs}` (version pin confirmed against `breakout-boring/Cargo.lock`, which
+    /// pins `bevy`/`bevy_text`/`bevy_ui` etc. all to exactly 0.19.0) -- each is a plain
+    /// `pub struct Foo(pub T);` with no inherent `fn new(...)` anywhere in its defining
+    /// crate (an `impl Foo` block with only associated *consts* like `BLACK`/`WHITE`/
+    /// `DEFAULT` doesn't count as a constructor and doesn't block this):
+    ///   - `TextColor`/`TextBackgroundColor`/`StrikethroughColor`/`UnderlineColor`
+    ///     (`bevy_text::text`) -- `TextColor` is the motivating case (`Type(args)` used to
+    ///     emit invalid `TextColor::new(args)`, blocking `breakout-boring/src/lib.rs`'s
+    ///     `spawn_scoreboard_ui` from moving to Boring; `TextBackgroundColor`/
+    ///     `StrikethroughColor`/`UnderlineColor` are the same wrapper shape in the same
+    ///     file).
+    ///   - `BackgroundColor`/`OuterColor`/`ZIndex`/`GlobalZIndex`/`UiTargetCamera`/
+    ///     `ScrollPosition`/`IgnoreScroll` (`bevy_ui::ui_node`).
+    ///   - `BackgroundGradient`/`BorderGradient` (`bevy_ui::gradients`).
+    ///   - `ClearColor` (`bevy_camera::clear_color`, re-exported via `bevy::prelude`) --
+    ///     audited against `~/.cargo/registry/src/.../bevy_camera-0.19.0/src/
+    ///     clear_color.rs` (same version pin as above): `pub struct ClearColor(pub
+    ///     Color);` with only a `Default` impl, no inherent `new()`. Motivating case:
+    ///     `breakout-boring/src/lib.rs`'s `BACKGROUND_COLOR` constant moving to a genuine
+    ///     Boring `Startup` system (`commands.insert_resource(ClearColor(BACKGROUND_COLOR))`)
+    ///     instead of hand-written Rust -- same failure shape as `TextColor`
+    ///     (`ClearColor::new(args)`, E0599).
+    /// NOT added despite looking similar -- confirmed wrong by reading source, do not
+    /// re-add without re-verifying against the actual bevy version in use:
+    ///   - `BorderColor`/`Outline`/`BorderRadius` -- named-field structs in bevy 0.19, not
+    ///     tuple structs (`BorderColor` was suggested as a candidate for this list; it
+    ///     isn't one -- it has `top`/`right`/`bottom`/`left` fields).
+    ///   - `BoxShadow`/`TextSpan` -- real tuple structs but each has a genuine inherent
+    ///     `new()`, so the existing `Type::new(args)` default is already correct for them.
+    const KNOWN_EXTERNAL_TUPLE_STRUCTS: &[&str] = &[
+        "Mesh2d",
+        "MeshMaterial2d",
+        "TextColor",
+        "TextBackgroundColor",
+        "StrikethroughColor",
+        "UnderlineColor",
+        "BackgroundColor",
+        "OuterColor",
+        "ZIndex",
+        "GlobalZIndex",
+        "UiTargetCamera",
+        "ScrollPosition",
+        "IgnoreScroll",
+        "BackgroundGradient",
+        "BorderGradient",
+        "ClearColor",
+    ];
+
+    fn is_known_external_tuple_struct(type_name: &str) -> bool {
+        Self::KNOWN_EXTERNAL_TUPLE_STRUCTS.contains(&type_name)
     }
 
     /// The Rust type to declare a promoted external-call `let` with (see
@@ -2627,6 +2777,11 @@ impl Transpiler {
                     }
                 }
                 _ => {}
+            }
+        }
+        for item in &program.items {
+            if let Item::Enum(e) = item {
+                self.all_enum_types.insert(e.name.clone());
             }
         }
 

@@ -75,6 +75,23 @@ struct HostEmitter {
     /// Declared struct AND enum names (both, despite the field name) — a
     /// `Type::Named(n)` parameter is by-ref-worthy when `n` names either.
     struct_names: std::collections::HashSet<String>,
+    /// Struct name → declared field names. Used to guard the `.length`/`.count`
+    /// array-length shortcut (below, in `expr`'s `Field` case) from shadowing a
+    /// real user-declared field of the same name on `self` — mirrors the fix
+    /// already applied to the general/std transpiler (`emit_expr.rs`'s
+    /// `emit_expr_field` / `emit_top.rs`'s `emit_expr_owned`, both of which give
+    /// a real declared field priority over this builtin).
+    struct_field_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Struct name → declared method names. Same rationale as
+    /// `struct_field_names`, but for the `.length()`/`.count()` method-call
+    /// form (below, in `expr`'s `MethodCall` case).
+    struct_method_names: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// The struct type of `self` while emitting the body of one of its
+    /// methods (`None` at top level or inside a free function). Used with
+    /// `struct_field_names`/`struct_method_names` to resolve `self.count` /
+    /// `self.count()` against a real declared member before falling back to
+    /// the `.len() as isize` builtin.
+    self_type: Option<String>,
     /// The CURRENTLY-being-emitted function's own by-ref-typed parameter names
     /// (reset per `emit_fn` call). A bare read of one of these (`Stmt::For`'s
     /// iterable, `ExprKind::Index`, or forwarding it as an argument to something
@@ -156,6 +173,9 @@ impl HostEmitter {
             variant_to_enum: std::collections::HashMap::new(),
             fn_ref_params: std::collections::HashMap::new(),
             struct_names: std::collections::HashSet::new(),
+            struct_field_names: std::collections::HashMap::new(),
+            struct_method_names: std::collections::HashMap::new(),
+            self_type: None,
             ref_params: std::collections::HashSet::new(),
             in_resident_return: false,
             fn_returns_resident: std::collections::HashMap::new(),
@@ -247,6 +267,14 @@ impl HostEmitter {
                         self.dict_fields.insert(f.name.clone());
                     }
                 }
+                self.struct_field_names.insert(
+                    s.name.clone(),
+                    s.fields.iter().map(|f| f.name.clone()).collect(),
+                );
+                self.struct_method_names.insert(
+                    s.name.clone(),
+                    s.methods.iter().map(|m| m.name.clone()).collect(),
+                );
             }
             if let Item::Fn(f) = item {
                 if f.throws {
@@ -1261,6 +1289,8 @@ impl HostEmitter {
         }
         self.line(&format!("{} {{", sig));
         self.indent += 1;
+        let outer_self_type = self.self_type.take();
+        self.self_type = self_ty.map(|s| s.to_string());
         let outer_in_throws = self.in_throws;
         self.in_throws = f.throws;
         let outer_in_resident_return = self.in_resident_return;
@@ -1308,6 +1338,7 @@ impl HostEmitter {
                 self.emit_stmt(stmt);
             }
         }
+        self.self_type = outer_self_type;
         self.in_throws = outer_in_throws;
         self.in_resident_return = outer_in_resident_return;
         self.ref_params = outer_ref_params;
@@ -1706,6 +1737,9 @@ impl HostEmitter {
             variant_to_enum: self.variant_to_enum.clone(),
             fn_ref_params: self.fn_ref_params.clone(),
             struct_names: self.struct_names.clone(),
+            struct_field_names: self.struct_field_names.clone(),
+            struct_method_names: self.struct_method_names.clone(),
+            self_type: self.self_type.clone(),
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return,
             fn_returns_resident: self.fn_returns_resident.clone(),
@@ -1718,6 +1752,17 @@ impl HostEmitter {
             if i == last { sub.emit_stmt_last(st); } else { sub.emit_stmt(st); }
         }
         format!("{{ {} }}", sub.out.trim())
+    }
+
+    /// True when `obj.member` (`obj` being `self`) resolves to a real declared
+    /// field or method of `self`'s own struct type — see `metal::host`'s
+    /// identical function for the full rationale.
+    fn is_real_self_member(&self, obj: &Expr, member: &str) -> bool {
+        matches!(&obj.kind, ExprKind::Var(v) if v == "self")
+            && self.self_type.as_deref().is_some_and(|t| {
+                self.struct_field_names.get(t).is_some_and(|f| f.contains(member))
+                    || self.struct_method_names.get(t).is_some_and(|m| m.contains(member))
+            })
     }
 
     // ── Expressions ────────────────────────────────────────────────────────────
@@ -1832,8 +1877,11 @@ impl HostEmitter {
                     }
                 }
                 let o = self.expr(obj);
-                // `.length` as a field (Boring style) → Rust `.len() as isize`
-                if field == "length" || field == "count" {
+                // `.length` as a field (Boring style) → Rust `.len() as isize`,
+                // unless `self` declares a real field by that name (see
+                // `struct_field_names`'s doc — mirrors the general/std
+                // transpiler's identical guard).
+                if (field == "length" || field == "count") && !self.is_real_self_member(obj, field) {
                     return format!("{}.len() as isize", o);
                 }
                 format!("{}.{}", o, field)
@@ -1977,8 +2025,11 @@ impl HostEmitter {
                     "done" => format!("{}.done()", o),
                     // `.chars()` — collect to Vec<char> so indexing and .len() work
                     "chars" if args.is_empty() => format!("{}.chars().collect::<Vec<char>>()", o),
-                    // `.length` / `.count` — map to .len() as isize
-                    "length" | "count" if args.is_empty() => format!("{}.len() as isize", o),
+                    // `.length()` / `.count()` — map to .len() as isize, unless `self`
+                    // declares a real method (or field) by that name (see
+                    // `struct_field_names`'s doc — mirrors the `Field` case above).
+                    "length" | "count" if args.is_empty() && !self.is_real_self_member(obj, method) =>
+                        format!("{}.len() as isize", o),
                     // `.add(x)` / `.insert(x)` — Vec push
                     "add" | "insert" if args.len() == 1 => format!("{}.push({})", o, args_s[0]),
                     // `.map(closure)` on an array isn't a real `Vec` method — go through

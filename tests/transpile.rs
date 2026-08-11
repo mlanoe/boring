@@ -341,16 +341,43 @@ transpile_test!(pointee);
 // importing it. `pub_module_const.rs` is the test that actually exercises that
 // (a hand-written sibling file in a real two-file crate, built with `cargo build`).
 transpile_test!(pub_top_level_const);
+// Same caveat as `pub_top_level_const` above -- this single-crate run only proves
+// `pub let SCOREBOARD_FONT_SIZE`/`SCOREBOARD_TEXT_PADDING` (zero in-file consumers,
+// the actual bug-report shape) still compile and run inside their own crate. It
+// can't observe promotion-vs-not on its own, since nothing in this file needs to
+// see them either way -- that's exactly `pub_module_const.rs`'s
+// `pub_let_with_no_in_file_consumer_is_visible_across_modules` test's job: a real
+// two-file crate where a hand-written sibling module reads the constant, which
+// only compiles if it was promoted to a real `pub const` despite never being
+// referenced anywhere in the `.br` file itself.
+transpile_test!(pub_top_level_const_unused);
 // A top-level `let` whose initializer calls into an external/opaque type -- one hand-
 // verified as a `const fn` (`Duration.from_secs`/`from_millis`, see
 // `Transpiler::KNOWN_EXTERNAL_CONST_FNS`) -- promotes as a plain `const`, same as a
 // scalar literal. Companion to `ext_const_promotion` below, which covers the `static`
 // fallback for a constructor NOT on that list.
 transpile_test!(const_promotion_known_fn);
+// A struct field literally named `count` used to be hijacked by the
+// `.length`/`.count` -> `.len() as isize` collection-length builtin in BOTH
+// `emit_expr_field` and its owned-context twin `emit_expr_owned` (their
+// `is_user_field` guard resolved the receiver's struct type only for the
+// literal `self` receiver, so a function parameter, a local `let`, and a
+// field-of-field chain all fell through to the builtin) -- `Thing` here has
+// no `.len()` method at all, so this used to fail to compile outright; this
+// case's real value is exactly that real `cargo run` compile, same rationale
+// as `top_level_const` above.
+transpile_test!(struct_count_field);
+// A user-declared method/field whose name collides with a builtin Rust Iterator/Vec
+// adapter (`position`, `count`) must dispatch to the user's own declaration, on both
+// a struct AND an enum -- see the file's own doc comment for the full writeup of the
+// bug this guards against (an enum receiver was invisible to the "is this a real user
+// type" check, so `map_method`/`map_field` fired unconditionally regardless of what the
+// enum actually declared).
+transpile_test!(builtin_name_user_members);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 
-// Two related bugs, both only reachable with a genuinely external (non-Boring) type --
+// Three related bugs, all only reachable with a genuinely external (non-Boring) type --
 // see tests/cases/ext_const_promotion/src/main.br's own doc comment for the full
 // writeup, and tests/cases/fixtures/ext_geom for the stand-in external crate:
 //   1. A top-level `let` calling into an external type's (non-const-fn) constructor used
@@ -359,7 +386,70 @@ transpile_test!(const_promotion_known_fn);
 //      even though `boring run`'s interpreter resolved it fine).
 //   2. Field access on such a promoted value (`PADDLE_SIZE.x`) used to mis-emit as a
 //      type-level path lookup (`PADDLE_SIZE::x`) instead of a real field access.
+//   3. Using such a promoted value at a struct-literal field VALUE position
+//      (`Sprite(color = PADDLE_COLOR)`) -- unlike a `.field` read or method-call
+//      receiver, this needs the exact type `T`, not `LazyLock<T>` (Rust never
+//      auto-derefs an owned value there). Covers both the fix (a hand-verified
+//      `const fn` call promotes straight to `const`, already exactly `T`) and the
+//      documented escape valve for a call that stays `static ... LazyLock<T>`
+//      (explicit `.pointee`).
 // Needs project mode (a real `boring.toml` + `[dependencies]`), not the single-file
 // `run_transpile_case_with_config` every other case above uses — see
 // `run_transpile_project_case`'s doc for why.
 transpile_project_test!(ext_const_promotion);
+
+// Companion to `ext_const_promotion` just above, covering a different initializer
+// shape into the same const-promotion decision: a top-level `let` calling into an
+// external *enum's* tuple variant via the dot-shorthand (`FontSize.Px(33.0)`) rather
+// than an external struct's associated function (`Color.srgb(...)`). Boring parses
+// both shapes identically (`MethodCall(Var(Type), method, args)`), but the const-vs-
+// static decision used to only recognize the hand-verified-const-fn allowlist
+// (`Transpiler::KNOWN_EXTERNAL_CONST_FNS`), so an enum tuple-variant construction
+// always fell back to `static ... LazyLock<T>` -- valid Rust at a `.field` read, but a
+// real `cargo build` E0308 at a struct-literal field-VALUE position (the position
+// `ext_enum_const_promotion/src/main.br`'s `make_label` actually exercises), same
+// failure mode as `ext_const_promotion`'s `PADDLE_COLOR`/`PADDLE_SIZE` before their own
+// fix. See `Transpiler::is_external_enum_variant_construction` (src/transpiler/mod.rs)
+// for the fix -- unlike `KNOWN_EXTERNAL_CONST_FNS`, this needs no allowlist at all,
+// since constructing an enum variant is unconditionally const-evaluable in Rust
+// regardless of which enum/variant. Needs project mode for the same reason as
+// `ext_const_promotion` (a real `[dependencies]` path crate).
+transpile_project_test!(ext_enum_const_promotion);
+
+// Bare `Type(args)` construction of a genuinely external/opaque tuple struct with no
+// inherent `new()` (e.g. bevy's `Mesh2d`/`MeshMaterial2d`) used to unconditionally
+// rewrite to `Type::new(args)`, which doesn't compile (E0599) -- see tests/cases/
+// ext_tuple_construct/src/main.br's own doc comment, tests/cases/fixtures/ext_tuple for
+// the stand-in external crate, and `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`'s doc in
+// src/transpiler/mod.rs for the fix. Needs project mode for the same reason as
+// `ext_const_promotion` just above (a real `[dependencies]` path crate).
+transpile_project_test!(ext_tuple_construct);
+
+// task_791a91d0: the field-resolution guard `struct_count_field` added (a real struct
+// field named `count`/`length` must win over the `.len() as isize` builtin) only
+// resolved the receiver's struct type for a *plain* `Named` parameter -- a Bevy system
+// parameter declared through the `Res<T>`/`ResMut<T>` deref-transparent wrapper (the
+// realistic, common shape for a Bevy resource read) still fell through to the builtin
+// on the same field name. See tests/cases/ext_res_field/src/main.br's own doc comment,
+// tests/cases/fixtures/ext_res for the stand-in `Res`/`ResMut` crate, and
+// `TRANSPARENT_WRAPPER_GENERICS`'s doc in src/transpiler/emit_methods.rs for the fix.
+// Needs project mode for the same reason as `ext_const_promotion` above (a real
+// `[dependencies]` path crate) -- and specifically a real `cargo run`, not just
+// `boring run`: the interpreter resolves field access dynamically and never hits this
+// codegen-only bug.
+transpile_project_test!(ext_res_field);
+
+// `TextColor` specifically (bevy::prelude::TextColor, bevy_text 0.19) -- the concrete
+// case that motivated auditing/extending `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`
+// beyond `Mesh2d`/`MeshMaterial2d` above; see tests/cases/text_color_construct/src/
+// main.br's own doc comment. Reuses the `ext_tuple` fixture crate (extended with a
+// stand-in `TextColor`), same reason as `ext_tuple_construct`.
+transpile_project_test!(text_color_construct);
+
+// `ClearColor` specifically (bevy::prelude::ClearColor, bevy_camera 0.19) -- found
+// migrating `breakout-boring/src/lib.rs`'s `BACKGROUND_COLOR` constant to a genuine
+// Boring `Startup` system; third instance of the same `KNOWN_EXTERNAL_TUPLE_STRUCTS`
+// gap after `Mesh2d`/`MeshMaterial2d` and `TextColor` above. See tests/cases/
+// clear_color_construct/src/main.br's own doc comment. Reuses the `ext_tuple` fixture
+// crate (extended with a stand-in `ClearColor`), same reason as `ext_tuple_construct`.
+transpile_project_test!(clear_color_construct);

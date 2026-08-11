@@ -88,6 +88,85 @@ pub fn use_left_wall() -> f32 {
     );
 }
 
+/// `pub let` promotion must not depend on whether anything *inside the same file*
+/// references the constant -- `SCOREBOARD_FONT_SIZE`/`SCOREBOARD_TEXT_PADDING` in
+/// `pub_top_level_const_unused.br` have zero in-file consumers (no function,
+/// struct/enum method reads them anywhere), which is the actual bug-report shape:
+/// constants moved into a `.br` file purely so a hand-written Rust sibling module
+/// can read them. Before the fix, promotion was gated entirely on an in-file
+/// "referenced elsewhere" scan, so a `pub` constant with no in-file reader stayed
+/// a local inside the synthesized `fn main()` -- invisible to any other module,
+/// and `pub` on a local binding isn't even valid Rust in the first place. This
+/// test's `emit_gen_module` step alone would have caught that second half (a
+/// compile error emitting the bare module), but only the cross-module `cargo
+/// build` below proves the constant was actually promoted to a *real* module-level
+/// item, as opposed to just not crashing.
+#[test]
+fn pub_let_with_no_in_file_consumer_is_visible_across_modules() {
+    let case_br = Path::new("tests/cases/pub_top_level_const_unused.br");
+    let dir: PathBuf = Path::new("tests/cases/pub_top_level_const_unused_cross_module_rust").join("pub_ok");
+    emit_gen_module(case_br, &dir);
+    write_crate(
+        &dir,
+        "pub_ok",
+        r#"
+pub mod gen;
+
+// Hand-written sibling code reading constants that are never referenced
+// anywhere inside the `.br` file itself -- the only thing that marks them as
+// public API is the `pub` keyword on their declaration.
+pub fn use_scoreboard_constants() -> f32 {
+    gen::SCOREBOARD_FONT_SIZE + gen::SCOREBOARD_TEXT_PADDING
+}
+"#,
+    );
+
+    let out = cargo_build(&dir.join("Cargo.toml"));
+    assert!(
+        out.status.success(),
+        "expected cross-module access to unreferenced `pub let` constants to compile, but it failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Control case for `pub_let_with_no_in_file_consumer_is_visible_across_modules`:
+/// `UNUSED_PRIVATE` (bare `let`, zero in-file consumers, same file) must stay
+/// un-promoted entirely -- a private, unused constant has no reason to exist as
+/// a real Rust item. Unlike `bare_let_const_stays_private_across_modules` below
+/// (whose `PRIVATE_SPEED` control IS promoted, just as a private `const`, so the
+/// sibling module hits E0603 "private"), this one was never emitted at module
+/// scope at all -- the identifier doesn't exist there, so the failure mode is
+/// "cannot find value" (E0425)/unresolved-name, not a privacy error.
+#[test]
+fn unused_bare_let_is_not_promoted_across_modules() {
+    let case_br = Path::new("tests/cases/pub_top_level_const_unused.br");
+    let dir: PathBuf = Path::new("tests/cases/pub_top_level_const_unused_cross_module_rust").join("priv_blocked");
+    emit_gen_module(case_br, &dir);
+    write_crate(
+        &dir,
+        "priv_blocked",
+        r#"
+pub mod gen;
+
+pub fn use_unused_private() -> f32 {
+    gen::UNUSED_PRIVATE
+}
+"#,
+    );
+
+    let out = cargo_build(&dir.join("Cargo.toml"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "expected cross-module access to the never-promoted `UNUSED_PRIVATE` const to fail to compile, but it succeeded"
+    );
+    assert!(
+        stderr.contains("cannot find") || stderr.contains("E0425") || stderr.contains("unresolved"),
+        "expected a name-resolution error referencing `UNUSED_PRIVATE`, got:\n{}",
+        stderr
+    );
+}
+
 /// A bare (non-`pub`) top-level `let` must keep emitting a *private* `const` --
 /// this is the control case proving the fix didn't just make everything `pub`.
 #[test]

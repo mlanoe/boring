@@ -33,11 +33,17 @@ impl Transpiler {
                 // Top-level `static let` → emit as `const` at module scope. GPU targets
                 // treat every top-level `let` this way too -- see `emit_program_items`'s
                 // classification of `Item::Let` (gated on `is_gpu_target`, not on
-                // `kernel_decls` being non-empty). Non-GPU targets do the same, but only
-                // for a constant `pre_scan` found referenced outside the synthesized
-                // `fn main()` (`global_lets_used_elsewhere`) -- see that same
-                // classification's third `Item::Let` arm.
-                if s.is_static || self.is_gpu_target || self.global_lets_used_elsewhere.contains(&s.name) {
+                // `kernel_decls` being non-empty). Non-GPU targets do the same, either for
+                // a constant `pre_scan` found referenced outside the synthesized `fn
+                // main()` (`global_lets_used_elsewhere`) or -- unconditionally, regardless
+                // of in-file usage -- for any `pub let` (public API by declaration, same as
+                // `pub struct`/`pub def`/`pub enum`) -- see that same classification's
+                // third `Item::Let` arm, which this condition must stay in sync with: that
+                // arm is the only caller that reaches this point with neither `is_static`
+                // nor `is_gpu_target` true, so if its condition ever admits a case this one
+                // doesn't, the `else` branch below silently emits an invalid local `pub
+                // let` (or drops the item) instead of a module-level item.
+                if s.is_static || self.is_gpu_target || s.is_pub || self.global_lets_used_elsewhere.contains(&s.name) {
                     // Non-GPU only: a call into an external/opaque type (`Color.srgb(...)`,
                     // `Vec2.new(...)`) that isn't itself scalar-safe -- `top_level_let_is_const_safe`
                     // still declines it, so `top_level_let_is_promotable`'s only other way to
@@ -55,16 +61,20 @@ impl Transpiler {
                     if let Some((type_name, method)) = external_call.filter(|_| !self.top_level_let_is_const_safe(s)) {
                         let rust_ty = self.top_level_let_promoted_type(s, &type_name);
                         let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
-                        if Self::is_known_external_const_fn(&type_name, &method) {
+                        if Self::is_known_external_const_fn(&type_name, &method)
+                            || Self::is_external_enum_variant_construction(&method)
+                        {
                             self.line(&format!("{}const {}: {} = {};", vis, s.name, rust_ty, val_str));
                         } else {
-                            // Not a hand-verified const fn -- `std::sync::LazyLock` compiles
-                            // regardless of whether the external call actually is const, unlike
-                            // guessing `const` and being wrong (E0015). Already imported: the
-                            // prelude always emits `use std::sync::{Mutex, RwLock};` for the
-                            // multi-threaded fast path and other cases pull in `std::sync::Arc`,
-                            // so fully qualifying here (`std::sync::LazyLock`) rather than adding
-                            // yet another conditional prelude import is simplest.
+                            // Neither a hand-verified const fn nor an enum tuple-variant
+                            // construction (see `is_external_enum_variant_construction`) --
+                            // `std::sync::LazyLock` compiles regardless of whether the external
+                            // call actually is const, unlike guessing `const` and being wrong
+                            // (E0015). Already imported: the prelude always emits `use
+                            // std::sync::{Mutex, RwLock};` for the multi-threaded fast path and
+                            // other cases pull in `std::sync::Arc`, so fully qualifying here
+                            // (`std::sync::LazyLock`) rather than adding yet another conditional
+                            // prelude import is simplest.
                             self.line(&format!(
                                 "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
                                 vis, s.name, rust_ty, val_str
@@ -1154,11 +1164,12 @@ impl Transpiler {
                         self.throws_fn_params.insert(p.name.clone());
                     }
                 }
-                // Plain Named struct params → var_struct_types (direct field/method dispatch).
+                // Plain Named struct/enum params → var_struct_types (direct field/method
+                // dispatch — `is_known_user_type` covers both, see its doc comment).
                 // Smart-pointer-qualified types (T'auto, T'weak, etc.) are excluded here;
                 // they have their own dispatch path.
                 if let crate::ast::Type::Named(tname) = ty {
-                    if self.struct_fields.contains_key(tname.as_str()) {
+                    if self.is_known_user_type(tname.as_str()) {
                         self.var_struct_types.insert(p.name.clone(), tname.clone());
                     }
                     // Newtype params: `fn f(UserId id)` → track so `id as uint` → `id.0`.
@@ -1727,18 +1738,15 @@ impl Transpiler {
                         }
                     }
                 }
-                // Don't apply map_field to known user struct fields (same logic as emit_expr).
-                let field_s = if let ExprKind::Var(v) = &obj.kind {
-                    let is_user_field = (v == "self")
-                        .then_some(self.self_type.as_deref())
-                        .flatten()
-                        .and_then(|t| self.struct_fields.get(t))
-                        .map(|fields| fields.iter().any(|(fname, _)| fname == field))
-                        .unwrap_or(false);
-                    if is_user_field { field.as_str() } else { map_field(field) }
-                } else {
-                    map_field(field)
-                };
+                // Don't apply map_field to known user struct fields (same logic as
+                // emit_expr's `emit_expr_field` -- see that function's comment for why
+                // this must resolve the receiver's struct type via
+                // `resolve_expr_struct_type` rather than only matching `self`).
+                let is_user_field = self.resolve_expr_struct_type(obj)
+                    .and_then(|t| self.struct_fields.get(t.as_str()))
+                    .map(|fields| fields.iter().any(|(fname, _)| fname == field))
+                    .unwrap_or(false);
+                let field_s = if is_user_field { field.as_str() } else { map_field(field) };
                 let result = if (obj_s == "self" || field.chars().all(|c| c.is_ascii_digit())) && !field_s.ends_with(')') {
                     // self.field or tuple index .0/.1/... — always clone in owned context (value semantics)
                     format!("{}.{}.clone()", obj_s, field_s)

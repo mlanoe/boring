@@ -1,0 +1,19 @@
+# Regression test for bevy::prelude::TextColor specifically -- the concrete case that
+# motivated auditing/extending `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS` beyond
+# `Mesh2d`/`MeshMaterial2d` (see tests/cases/ext_tuple_construct, the original fix).
+# `TextColor` is `pub struct TextColor(pub Color);` in real bevy 0.19
+# (bevy_text-0.19.0/src/text.rs:1066) with no inherent `new()` -- bare `TextColor(...)`
+# construction used to unconditionally rewrite to the nonexistent `TextColor::new(...)`,
+# blocking `breakout-boring/src/lib.rs`'s `spawn_scoreboard_ui` from moving to Boring
+# even after the `Mesh2d`/`MeshMaterial2d` fix unblocked `spawn_ball`. Confirmed against
+# real bevy 0.19 separately (a real `cargo build` of the transpiler's own emitted Rust,
+# not part of this test) -- this is a `transpile_project_test!` case specifically so a
+# real `cargo run` exercises the generated Rust, not just a transpile-and-diff, the same
+# reason `ext_tuple_construct` uses it. `ext_tuple.TextColor` (tests/cases/fixtures/
+# ext_tuple) stands in for the real bevy type -- see that crate's own doc comment for why
+# it deliberately keeps an inherent `impl` block (associated consts only, no `new()`).
+use ext_tuple.TextColor
+
+def main():
+    let c = TextColor(5)
+    print "{c.0}"

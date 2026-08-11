@@ -1792,18 +1792,20 @@ impl Transpiler {
             return format!("{}::{}", obj_s, field);
         }
         // Don't apply map_field to user-defined struct fields (e.g. a field named
-        // `count` should not be remapped to `len()` on a user struct).
-        let mapped = if let ExprKind::Var(v) = &obj.kind {
-            let is_user_field = (v == "self")
-                .then_some(self.self_type.as_deref())
-                .flatten()
-                .and_then(|t| self.struct_fields.get(t))
-                .map(|fields| fields.iter().any(|(fname, _)| fname == field))
-                .unwrap_or(false);
-            if is_user_field { field.as_str() } else { map_field(field) }
-        } else {
-            map_field(field)
-        };
+        // `count` should not be remapped to `len()` on a user struct). This used to
+        // only resolve the receiver's struct type for the literal `self` receiver
+        // (`(v == "self").then_some(...)` short-circuited to `None`/`false` for
+        // every other variable), so a plain parameter or local of struct type
+        // (`t.count` where `t: Thing`) fell straight through to the builtin
+        // `.len()` remap below. `resolve_expr_struct_type` resolves the receiver's
+        // struct type uniformly -- `self`, any other `Var`, AND a field-of-field
+        // chain (`self.item.count`) -- so this now covers every receiver shape,
+        // not just `self`.
+        let is_user_field = self.resolve_expr_struct_type(obj)
+            .and_then(|t| self.struct_fields.get(t.as_str()))
+            .map(|fields| fields.iter().any(|(fname, _)| fname == field))
+            .unwrap_or(false);
+        let mapped = if is_user_field { field.as_str() } else { map_field(field) };
         // If the accessed field is Arc-qualified (actor/guard/shared), add .clone()
         // so the value is not moved out of the struct — Arc::clone is cheap.
         let field_is_arc = if let ExprKind::Var(v) = &obj.kind {
@@ -3057,8 +3059,13 @@ impl Transpiler {
                 let args_s = self.emit_args(args);
                 return format!("{}::{}({})", enum_name, name, args_s);
             }
-            // Fallback: call ::new(args) (requires a new() function to exist)
+            // Fallback: literal tuple-struct call for hand-verified external types (see
+            // `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`'s doc in src/transpiler/mod.rs),
+            // else ::new(args) (requires a new() function to exist).
             let args_s = self.emit_args(args);
+            if Self::is_known_external_tuple_struct(name) {
+                return format!("{}({})", name, args_s);
+            }
             // Semaphore::new and similar tokio primitives expect usize, but Boring's
             // `uint` maps to u64. Cast the first argument to usize automatically.
             if matches!(name, "Semaphore" | "RwLock") {

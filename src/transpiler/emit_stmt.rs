@@ -183,7 +183,7 @@ impl Transpiler {
                         &self.fn_return_ty,
                         Some(Type::Optional(_))
                     );
-                    let s = if is_optional_return && !is_option_expr(e) {
+                    let s = if is_optional_return && !self.is_option_expr(e) {
                         // Function returns Option<T>; expression is not already Option-typed.
                         // Wrap scalar/integer/variable values in Some() so Rust is happy.
                         // Use emit_expr_owned so string literals become Arc::<str>::from("...")

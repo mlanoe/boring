@@ -1,0 +1,7 @@
+[project]
+name = "ext_res_field"
+version = "0.1.0"
+main = "src/main.br"
+
+[dependencies]
+ext_res = { path = "../../../fixtures/ext_res" }

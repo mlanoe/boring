@@ -6863,6 +6863,47 @@ Arguments are resolved left-to-right — later entries override earlier ones. Th
 let prod = Config { host: "prod.example.com".to_string(), tls: true, ..defaults.clone() };
 ```
 
+### Advanced — External-typed top-level constants
+
+A top-level `let` whose initializer is a scalar literal always transpiles to a plain Rust `const`:
+
+```boring
+let float32 LEFT_WALL = -450.0
+```
+```rust
+const LEFT_WALL: f32 = -450.0;
+```
+
+A top-level `let` whose initializer calls into an external/opaque type — `Color.srgb(...)`, `Vec2.new(...)`, anything that isn't one of this file's own `struct`/`enum` constructors — is promoted the same way *when* the transpiler can be sure the call is a Rust `const fn`. A small hand-verified list (`Duration.from_secs`/`from_millis`/`from_micros`/`from_nanos`, `Vec2`/`Vec3`/`Vec3A`/`Vec4`'s `new`/`splat`, and `bevy_color::Color`'s constructors — `srgb`, `hsl`, `oklch`, etc.) drives this. A call on that list promotes cleanly:
+
+```boring
+let PADDLE_COLOR = Color.srgb(0.3, 0.3, 0.7)
+```
+```rust
+const PADDLE_COLOR: Color = Color::srgb(0.3, 0.3, 0.7);
+```
+
+A call that **isn't** on that list falls back to a lazily-initialized `static`, since guessing `const` and being wrong is a `cargo build` error (`E0015`) that only surfaces long after `boring build` already reported success:
+
+```rust
+static PADDLE_SIZE: std::sync::LazyLock<Point2> = std::sync::LazyLock::new(|| Point2::new(120.0, 20.0));
+```
+
+**The trap**: `LazyLock<T>` implements `Deref<Target = T>`, so Rust auto-derefs it for free at a method-call receiver or a `.field` read — `PADDLE_SIZE.x`, `SPAWN_DELAY.as_secs()` work with no changes. It does **not** auto-deref at a struct-literal field value, a by-value function argument, or a return position — those need the exact type `T`, and Rust never inserts a `Deref` coercion for an owned value, only for references. Using the bare identifier there compiles under `boring build` but fails a real `cargo build`:
+
+```rust
+commands.spawn(Sprite { color: PADDLE_SIZE, ..Default::default() });
+//                              ^^^^^^^^^^^ expected `Point2`, found `LazyLock<Point2>`
+```
+
+Reach for the `.pointee` postfix deref at exactly that call site:
+
+```boring
+commands.spawn(Sprite(color = PADDLE_SIZE.pointee, _))
+```
+
+The most reliable way to sidestep this entirely is to check whether the external constructor you're using is on the hand-verified `const fn` list above (or add it, once verified against the defining crate's own source) — a `const`-promoted value is already the exact type `T` everywhere, so `.pointee` is never needed for it.
+
 ### Advanced — `thiserror` integration
 
 When any enum variant carries an `@error` attribute, the transpiler automatically adds `#[derive(Debug, thiserror::Error)]` to the enum and `thiserror = "1"` to the generated `Cargo.toml`. No `@derive(thiserror::Error)` is needed on the enum itself.

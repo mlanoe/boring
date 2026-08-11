@@ -1,4 +1,4 @@
-# Regression test for two related transpiler bugs (see src/transpiler/mod.rs's
+# Regression test for three related transpiler bugs (see src/transpiler/mod.rs's
 # `top_level_let_external_call`/`top_level_let_is_promotable` and emit_expr.rs's
 # `is_top_level_let_value` guard):
 #
@@ -9,15 +9,37 @@
 #      `boring run`'s interpreter resolves it fine via its own dynamic global scope.
 #   2. Field access on such a promoted value (`PADDLE_SIZE.x`) used to mis-emit as a
 #      type-level path lookup (`PADDLE_SIZE::x`) instead of a real field access.
+#   3. A promoted `let` used at a struct-literal field VALUE position (`Sprite(color =
+#      PADDLE_COLOR)`, not a `.field` read or a method-call receiver) needs the exact
+#      type `T`, not `LazyLock<T>` -- Rust never auto-derefs an owned value there. This
+#      is invisible to both `boring run` (no `LazyLock`/deref distinction in the
+#      interpreter) and to the `PADDLE_SIZE.x`/`PADDLE_SIZE.y` field reads in
+#      `paddle_scale()` above (those DO auto-deref, since Rust's field/method lookup
+#      walks the `Deref` chain -- only struct-literal fields, by-value args, and return
+#      positions don't). `make_sprite()` below is the fix: `Color.srgb(...)` is a
+#      hand-verified `const fn` (`Transpiler::KNOWN_EXTERNAL_CONST_FNS`), so `PADDLE_COLOR`
+#      promotes straight to a plain `const` -- already the exact type `Color`, no deref
+#      needed at all. `make_shape()` covers the same position for a call that is NOT on
+#      that list (`Point2.new`, staying a `static ... LazyLock<Point2>`) -- there, the
+#      explicit `.pointee` postfix deref (see tests/cases/pointee.br) is the required
+#      escape valve; using `PADDLE_SIZE` bare there would be a real `cargo build` E0308
+#      that `boring build` itself cannot catch. See `docs/book.md`'s "External-typed
+#      top-level constants" section for the write-up this test backs.
 #
-# `ext_geom.Point2` (tests/cases/fixtures/ext_geom) stands in for a real external crate
-# type (e.g. `bevy::math::Vec2`) -- see that crate's own doc comment for why its
-# constructor is deliberately not a `const fn`, exercising the `static ... LazyLock`
-# fallback rather than the `const` path `LEFT_WALL` below already used before this fix.
+# `ext_geom.Point2`/`ext_geom.Shape` (tests/cases/fixtures/ext_geom) stand in for a real
+# external crate type/component (e.g. `bevy::math::Vec2`, `Transform { translation, .. }`)
+# -- see that crate's own doc comments for why `Point2::new` is deliberately not a
+# `const fn`, exercising the `static ... LazyLock` fallback rather than the `const` path
+# `LEFT_WALL`/`PADDLE_COLOR` below use. `ext_geom.Color`/`ext_geom.Sprite` mirror
+# `bevy_color::Color::srgb` and `Sprite { color: Color, .. }`, both genuinely const.
 use ext_geom.Point2
+use ext_geom.Shape
+use ext_geom.Color
+use ext_geom.Sprite
 
 let LEFT_WALL = -450.0
 let PADDLE_SIZE = Point2.new(120.0, 20.0)
+let PADDLE_COLOR = Color.srgb(0.3, 0.3, 0.7)
 
 def wall_report():
     print "{LEFT_WALL}"
@@ -26,6 +48,16 @@ def paddle_scale():
     print "{PADDLE_SIZE.x}"
     print "{PADDLE_SIZE.y}"
 
+def make_sprite():
+    let s = Sprite(color = PADDLE_COLOR)
+    print "{s.color.r}"
+
+def make_shape():
+    let sh = Shape(pos = PADDLE_SIZE.pointee)
+    print "{sh.pos.x}"
+
 def main():
     wall_report()
     paddle_scale()
+    make_sprite()
+    make_shape()

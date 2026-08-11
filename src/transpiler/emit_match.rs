@@ -1026,9 +1026,13 @@ impl Transpiler {
                 self.optional_vars.insert(name.clone());
                 bound_optionals.push(name.clone());
             }
-            // Register struct-typed pattern vars so field accesses aren't mistaken for JoinHandle
+            // Register struct/enum-typed pattern vars so field accesses aren't mistaken for
+            // JoinHandle, and so method dispatch recognizes an enum-typed variant field the
+            // same way a struct-typed one already was (`is_known_user_type` covers both) —
+            // e.g. `match wrap: W(b): b.position()` where `b`'s variant field type is itself
+            // an enum with a `position()` method.
             if let Type::Named(struct_name) = ty.without_mut() {
-                if self.struct_fields.contains_key(struct_name.as_str()) {
+                if self.is_known_user_type(struct_name.as_str()) {
                     self.var_struct_types.insert(name.clone(), struct_name.clone());
                     bound_structs.push(name.clone());
                     self.mut_checked_local_vars.insert(name.clone());
@@ -1128,7 +1132,7 @@ impl Transpiler {
                 // If the enclosing function returns Option<T>, wrap non-optional arm
                 // expressions in Some() so the caller doesn't need explicit `some(...)`.
                 let expr_s = if matches!(&self.fn_return_ty, Some(Type::Optional(_)))
-                    && !is_option_expr(e)
+                    && !self.is_option_expr(e)
                     && expr_s != "None"
                     && !expr_s.starts_with("Some(")
                     && !matches!(&e.kind, ExprKind::Nil)

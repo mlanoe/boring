@@ -653,6 +653,96 @@ print "{k1.buf[0]}"
         "expected the k2 constructor call to use the real copy helper, not a bare Buffer::clone() retain;\ngot:\n{rs}");
 }
 
+// ─── host — struct `count`/`length` field & method shadowing ─────────────────
+//
+// A plain (non-kernel) struct's own methods are only ever custom-emitted by
+// this backend's `HostEmitter` (as opposed to the already-correct general/std
+// pipeline splice) for a `Screen`-driven program — see `metal::mod`'s doc
+// comment. That's the one path that exercises the `self.count`/`self.count()`
+// guard added to `host.rs`'s `expr()` (`Field` and `MethodCall` cases): before
+// the fix, a real user field or method literally named `count`/`length`
+// (Boring's builtin array-length shortcut) was unconditionally rewritten to
+// `.len() as isize` even on `self`, producing `self.len() as isize` — nonsense
+// Rust, since `self` has no such method. Mirrors the identical, already-fixed
+// guard in the general transpiler (`emit_expr.rs`'s `emit_expr_field` /
+// `emit_top.rs`'s `emit_expr_owned`).
+
+#[test]
+fn screen_struct_self_count_field_not_shadowed_by_len_builtin() {
+    let (_, rs) = metal_codegen("screen_self_count_field", r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "Test")
+
+struct Counter:
+    int count
+    req int get():
+        self.count
+
+kernel Noop:
+    mut [uint]'surface pixels
+    init():
+        pixels = [0 for ..width * height]
+    def ():
+        let tid = gpu.thread.x
+        pixels[tid] = 0
+
+var k = Noop()
+let c = Counter(5)
+print "{c.get()}"
+
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        break
+"#);
+    assert!(rs.contains("fn get(&self) -> isize {\n        self.count\n    }"),
+        "expected `self.count` to read the real declared field, not the `.length`/`.count` \
+         array-length builtin;\ngot:\n{rs}");
+    assert!(!rs.contains("self.len() as isize"),
+        "`self.count` must not be shadowed by the `.len() as isize` builtin shortcut;\ngot:\n{rs}");
+}
+
+#[test]
+fn screen_struct_self_count_method_not_shadowed_by_len_builtin() {
+    let (_, rs) = metal_codegen("screen_self_count_method", r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "Test")
+
+struct Ledger:
+    int total
+    req int count():
+        self.total
+    req int double_count():
+        self.count() * 2
+
+kernel Noop:
+    mut [uint]'surface pixels
+    init():
+        pixels = [0 for ..width * height]
+    def ():
+        let tid = gpu.thread.x
+        pixels[tid] = 0
+
+var k = Noop()
+let ledger = Ledger(10)
+print "{ledger.double_count()}"
+
+kernel:
+    loop:
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        break
+"#);
+    assert!(rs.contains("(self.count() * 2)"),
+        "expected `self.count()` to call the real declared method, not the `.length`/`.count` \
+         array-length builtin;\ngot:\n{rs}");
+    assert!(!rs.contains("self.len() as isize"),
+        "`self.count()` must not be shadowed by the `.len() as isize` builtin shortcut;\ngot:\n{rs}");
+}
+
 // ─── infrastructure — Cargo.toml ─────────────────────────────────────────────
 
 #[test]

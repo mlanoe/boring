@@ -1,0 +1,37 @@
+# Regression test for a top-level `let` initialized via an *external enum's*
+# tuple-variant dot-shorthand (`FontSize.Px(33.0)`) not getting the same `const`
+# promotion `ext_const_promotion` (sibling directory) already gives an external
+# struct's associated-function call (`Color.srgb(...)`). Real-world motivation: this
+# is exactly the shape `whisper-boring`/`breakout-boring`'s
+# `SCOREBOARD_FONT_SIZE = FontSize.Px(33.0)` used before the fix.
+#
+# `top_level_let_external_call` (src/transpiler/mod.rs) parses both `Type.method(args)`
+# and `Type.Variant(args)` identically (`MethodCall(Var(Type), method, args)`), so
+# either shape reaches the same const-vs-static decision in `emit_item`'s `Item::Let`
+# arm. Before this fix, that decision only recognized a hand-verified `const fn`
+# (`Transpiler::KNOWN_EXTERNAL_CONST_FNS`) as const-safe, so `SCOREBOARD_FONT_SIZE`
+# fell back to `static ... LazyLock<FontSize>` -- fine at a `.field`/method-call read
+# (Rust auto-derefs there), but a real `cargo build` E0308 ("expected FontSize, found
+# LazyLock<FontSize>") at `make_label` below's struct-literal field-VALUE position,
+# which never auto-derefs an owned value. `Transpiler::is_external_enum_variant_construction`
+# is the fix: any external enum tuple-variant construction is unconditionally
+# const-evaluable in Rust (a plain data constructor, not a function call that could be
+# non-const), so no allowlist entry is needed the way `KNOWN_EXTERNAL_CONST_FNS`
+# requires per hand-verified associated function.
+#
+# `ext_geom.FontSize`/`ext_geom.TextLabel` (tests/cases/fixtures/ext_geom) stand in for
+# `bevy_text::FontSize`/`bevy_text::TextFont` -- see that crate's own doc comments.
+use ext_geom.FontSize
+use ext_geom.TextLabel
+
+let SCOREBOARD_FONT_SIZE = FontSize.Px(33.0)
+
+def make_label():
+    # Struct-literal field-VALUE position -- the position that's actually broken
+    # (not just a bare `.field` read, which auto-derefs through `LazyLock` fine even
+    # without this fix).
+    let t = TextLabel(font_size = SCOREBOARD_FONT_SIZE)
+    print "label created"
+
+def main():
+    make_label()

@@ -1,0 +1,41 @@
+# Regression test: task_791a91d0, the follow-up to task_2c7649cf
+# (tests/cases/struct_count_field.br). That earlier fix made `resolve_expr_struct_type`
+# resolve a receiver's struct type uniformly across `self`, plain parameters, and locals
+# -- so a real declared field named `count`/`length` always wins over the transpiler's
+# `.count`/`.length` -> `.len() as isize` collection-length shortcut (`map_field`).
+#
+# But it still only saw through a *plain* `Named` parameter type. A Bevy system reading a
+# resource almost never takes the resource by plain value -- it takes it through the
+# `Res<T>`/`ResMut<T>` system-param wrapper (`Res<Score> score`, not `Score score`), which
+# `resolve_expr_struct_type` resolved to `None` (the receiver's declared type is the
+# *wrapper* `Res`/`ResMut`, not `Score`) -- so `score.count` fell straight back through to
+# the same `.len() as isize` builtin, on the exact same field name, one level of wrapping
+# away from the case that was supposedly fixed.
+#
+# `ext_res.Res`/`ext_res.ResMut` (tests/cases/fixtures/ext_res) stand in for real bevy's
+# `Res<T>`/`ResMut<T>` -- both are `Deref`/`DerefMut`-transparent wrappers around a real
+# `T`, so `score.count` is a genuine field access on `Score` via Rust's auto-deref, and
+# must compile and read the real field -- not `.len() as isize`, which doesn't compile at
+# all here (neither `Res<Score>` nor `Score` has a `.len()` method), so this is a
+# `transpile_project_test!` case specifically for a real `cargo run` against the
+# generated Rust: `boring run`'s interpreter resolves field access dynamically and can't
+# reproduce a codegen-only bug like this one.
+use ext_res.Res
+use ext_res.ResMut
+
+struct Score:
+    pub var int count = 0
+    pub var int highscore = 0
+
+def read_score(Res<Score> score):
+    print "{score.count}"
+
+def read_highscore(ResMut<Score> score):
+    print "{score.highscore}"
+
+def main():
+    let s1 = Score(count = 42, highscore = 7)
+    read_score(Res(s1))
+
+    let s2 = Score(count = 3, highscore = 99)
+    read_highscore(ResMut(s2))

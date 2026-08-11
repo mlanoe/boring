@@ -1,0 +1,7 @@
+[project]
+name = "text_color_construct"
+version = "0.1.0"
+main = "src/main.br"
+
+[dependencies]
+ext_tuple = { path = "../../../fixtures/ext_tuple" }

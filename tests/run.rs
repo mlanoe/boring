@@ -214,6 +214,12 @@ interp_test!(int_float_literal_compare);
 interp_test!(float32_math_builtins);
 interp_test!(top_level_const);
 interp_test!(pub_top_level_const);
+interp_test!(pub_top_level_const_unused);
+// A struct field literally named `count` -- must never be hijacked by the
+// `.length`/`.count` collection-length builtin. The interpreter's `get_field`
+// was never affected (its Array/Set/Dict shortcuts are gated by value type,
+// never reached for a struct/Object); this is here to lock that in.
+interp_test!(struct_count_field);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

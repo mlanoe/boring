@@ -2,6 +2,36 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+/// Bevy system-param/deref wrapper generics that transparently carry a real value of
+/// their first type argument (`Res<T>`, `ResMut<T>`, `Mut<T>`) or of a filtered slot
+/// where the first type argument is still the value type (`Single<T, Filter>`) — all
+/// implement `Deref`/`DerefMut` straight through to `T`, so `res.count` at the Rust
+/// level is a field access on `T` via auto-deref, not on the wrapper itself. Deliberately
+/// a fixed whitelist, not "peel any `Type::Generic`'s first argument": an arbitrary
+/// user-defined generic struct (`Container<Score>`) is NOT deref-transparent to its type
+/// argument, and treating `container.count` as `Score`'s field would be wrong — Container
+/// has its own, unrelated fields. Only wrappers Boring/Bevy itself guarantees are
+/// deref-transparent belong here.
+const TRANSPARENT_WRAPPER_GENERICS: &[&str] = &["Res", "ResMut", "Single", "Mut"];
+
+/// If `ty` is one of `TRANSPARENT_WRAPPER_GENERICS`, returns the `Type::Named` name
+/// carried by its first type argument (stripping one level of `mut`/borrow-qualifier,
+/// e.g. `Single<mut Transform&, With<Paddle>>`'s first argument). `None` for anything
+/// else, including a wrapper whose first argument isn't (or doesn't resolve to) a bare
+/// named type.
+fn transparent_wrapper_inner_name(ty: &Type) -> Option<&str> {
+    let Type::Generic(name, args) = ty else { return None };
+    if !TRANSPARENT_WRAPPER_GENERICS.contains(&name.as_str()) { return None }
+    match args.first()?.without_mut() {
+        Type::Named(n) => Some(n.as_str()),
+        Type::Qualified(inner, OwnerQual::Borrow | OwnerQual::BorrowMut
+            | OwnerQual::BorrowOption | OwnerQual::BorrowOptionMut) => {
+            if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
+        }
+        _ => None,
+    }
+}
+
 impl Transpiler {
     /// Resolve the user struct type name of an expression, walking `self`/local-var roots
     /// and field chains (`self.encoder`, `a.b.c`). Also resolves bare implicit-self-field
@@ -11,10 +41,21 @@ impl Transpiler {
     /// for the exact same expression a few lines later. Returns None for anything else
     /// (locals of non-struct type, method-call results, etc.) — callers should treat that
     /// as "not a known user struct".
+    ///
+    /// Also sees through `Res<T>`/`ResMut<T>`/`Single<T, F>`/`Mut<T>` (see
+    /// `TRANSPARENT_WRAPPER_GENERICS`) to `T` — a Bevy system parameter declared
+    /// `Res<Score> score` resolves to `Score`, not to the unresolvable wrapper name
+    /// `Res`, so `score.count` finds `Score`'s real `count` field instead of falling
+    /// through to the `.count`/`.length` builtin.
     pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
             ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned().or_else(|| {
+                if let Some(inner) = self.var_types.get(v.as_str())
+                    .and_then(transparent_wrapper_inner_name)
+                {
+                    return Some(inner.to_string());
+                }
                 if self.known_local_vars.contains(v.as_str()) { return None; }
                 let struct_name = self.self_type.as_ref()?;
                 let (_, fty) = self.struct_fields.get(struct_name.as_str())?
@@ -59,6 +100,95 @@ impl Transpiler {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Is `name` a real user-declared type (struct or enum)? The shared "is this receiver a
+    /// user type with its own members, or should builtin Iterator/collection name tables
+    /// apply?" check — used by both method-call dispatch (`is_user_struct_receiver` below)
+    /// and field-access dispatch (`map_field` call sites in emit_expr.rs/emit_top.rs) so a
+    /// user method/field named `position`, `count`, `find`, etc. always wins over the
+    /// same-named builtin adapter, on structs AND enums alike. Before this existed, every
+    /// such check consulted `struct_fields` alone, so an enum receiver (which is never a key
+    /// in `struct_fields`) silently fell through to the builtin tables no matter what it
+    /// actually declared.
+    pub(crate) fn is_known_user_type(&self, name: &str) -> bool {
+        self.struct_fields.contains_key(name) || self.all_enum_types.contains(name)
+    }
+
+    /// Resolves whether `obj`'s receiver type is a known user struct/enum — i.e. whether the
+    /// call should dispatch through its own declared members rather than any of the
+    /// Vec/HashMap/HashSet/String/Iterator-name-only special cases (`try_emit_array_special_method`
+    /// and `emit_method_call_fallback`'s `is_user_struct_receiver`). Shared between the two so a
+    /// user struct/enum method named `min`/`max`/`sum`/`count`/`indexOf`/`position`/etc. is never
+    /// hijacked by a same-named builtin adapter that runs earlier in the dispatch chain and, unlike
+    /// `try_emit_dict_method`/`try_emit_set_method`/`try_emit_string_method`, used to have no
+    /// receiver-type guard of its own at all — it fired on method name (and sometimes arg shape)
+    /// alone, for any receiver.
+    pub(crate) fn expr_receiver_is_known_user_type(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Var(v) => {
+                if v == "self" {
+                    // Inside a method body, self_type names the current struct/enum.
+                    self.self_type.as_deref()
+                        .map(|t| self.is_known_user_type(t))
+                        .unwrap_or(false)
+                } else {
+                    // `var_struct_types` is the primary source (also gates the
+                    // mut/content-mutation diagnostics), but it's only reliably populated for
+                    // *struct*-typed vars in some binding shapes -- an enum bound via a bare
+                    // unit-variant reference (`let b = Bar.B`, parsed as `ExprKind::Field`, not
+                    // `MethodCall` -- see `parse_postfix_inner`) is never routed through any of
+                    // the `var_struct_types.insert` call sites, only through `var_types`
+                    // (emit_let.rs's "Track enum type for variables initialized from enum
+                    // constructors"). Fall back to `var_types` for exactly that case, mirroring
+                    // the same struct-then-enum fallback emit_expr.rs's field-access `is_getter`
+                    // check already uses.
+                    let type_name = self.var_struct_types.get(v.as_str()).cloned()
+                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                            if let Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
+                        }));
+                    type_name.map(|t| self.is_known_user_type(t.as_str())).unwrap_or(false)
+                }
+            }
+            ExprKind::Field(..) | ExprKind::Index(..) => self.resolve_expr_struct_type(obj)
+                .map(|t| self.is_known_user_type(t.as_str()))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Returns true when an expression is likely to produce an `Option<T>` value,
+    /// used to avoid wrapping Option-chain methods in `.iter().cloned().collect()`
+    /// (`try_emit_option_chain_method`). Was a free function in helpers.rs; moved to a
+    /// `&self` method (and given the `expr_receiver_is_known_user_type` guard below) once
+    /// a user struct/enum method sharing one of these names (`and_then`, `map`, `filter`,
+    /// ...) was found to be misidentified as an Option chain purely by name — e.g. a
+    /// struct with its own `.and_then()` had `x.and_then(f).map(g)` treated as an Option
+    /// chain regardless of `x`'s actual type.
+    pub(crate) fn is_option_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::MethodCall(recv, method, _) | ExprKind::Pipe(recv, method, _) => {
+                // A call whose own receiver is a known user struct/enum is never guessed to
+                // be Option-shaped from name alone — its methods are real declared members,
+                // not Option's, whatever they happen to be named.
+                if self.expr_receiver_is_known_user_type(recv) { return false; }
+                // Unambiguously Option-producing (not Vec methods):
+                const OPTION_ONLY: &[&str] = &["and_then", "or_else", "flatten", "as_ref", "as_deref"];
+                if OPTION_ONLY.contains(&method.as_str()) { return true; }
+                // Ambiguous (exists on both Vec and Option): propagate — only treat as
+                // Option if the receiver is itself Option-like.
+                const MAYBE_OPTION: &[&str] = &[
+                    "filter", "map", "next", "cloned", "copied",
+                    "find", "first", "last", "get", "pop",
+                ];
+                if MAYBE_OPTION.contains(&method.as_str()) {
+                    return self.is_option_expr(recv);
+                }
+                false
+            }
+            ExprKind::Var(name) => name.ends_with('?'),
+            _ => false,
         }
     }
 
@@ -160,6 +290,14 @@ impl Transpiler {
                         v
                     ));
                 }
+            }
+            // Fallback below covers a JoinHandle/Future reached through a field
+            // (`self.handle.done()`) or another expression not tracked in the var-level
+            // sets above — but never a known user struct/enum with its own zero-arg
+            // `done()` method (e.g. a `Job.done()` status check), which must dispatch
+            // through its own declared method instead.
+            if self.expr_receiver_is_known_user_type(obj) {
+                return None;
             }
             let obj_s = self.emit_expr(obj);
             return Some(format!(
@@ -327,6 +465,21 @@ impl Transpiler {
             let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
             let _ = is_setter;
             return Some(format!("{}::{}({})", type_name, rust_name, vals.join(", ")));
+        }
+        // `is_variant` (computed above) is true but the type wasn't found in
+        // `enum_variant_fields` -- this is a *genuinely external* enum's tuple
+        // variant (`FontSize.Px(33.0)` → `FontSize::Px(33.0)`), one Boring never
+        // parsed a declaration for (e.g. from a `use bevy.prelude.*`-style
+        // import), so it has no entry to look up. A real Rust method name is
+        // never capitalized, so a capitalized `method` here can only ever be a
+        // variant (or associated constant) — emit it verbatim. Applying
+        // camelCase→snake_case below would silently mangle it (`Px` → `px`,
+        // a method that doesn't exist) and only ever produce a bad Rust name,
+        // since a genuine external method call never reaches this branch
+        // capitalized in the first place.
+        if is_variant {
+            let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            return Some(format!("{}::{}({})", type_name, method, vals.join(", ")));
         }
         // Fallback for any uppercase type not registered in the transpiler
         // (external types like Duration, File, Path, BufReader, etc.):
@@ -653,7 +806,7 @@ impl Transpiler {
         // temporary String buffer then assign back.
         // tokio BufReader (local var) → async (.await.unwrap_or(0))
         // std::io::stdin() (call result) → sync (.unwrap_or(0), no await)
-        if method == "read_line" {
+        if method == "read_line" && !self.expr_receiver_is_known_user_type(obj) {
             if let Some(arg) = args.first() {
                 if let ExprKind::Var(v) = &arg.value.kind {
                     if self.string_arc_vars.contains(v.as_str()) {
@@ -692,7 +845,12 @@ impl Transpiler {
         // `.clone()` rebind so `n` inside the body is an owned T, not a &T.
         // Only applies to array filter — not Option::filter (handled below) and not
         // dict::filter (handled in the recv_is_dict block below with a 2-param closure).
-        if method == "filter" && !is_option_expr(obj) && !self.expr_is_dict(obj) {
+        // Also never applies to a user struct/enum's own `filter(closure)` method — this
+        // used to have no receiver-type check at all (unlike try_emit_dict_method/
+        // try_emit_set_method/try_emit_array_special_method, each gated on their own
+        // `expr_is_*`/`expr_receiver_is_known_user_type` check).
+        if method == "filter" && !self.is_option_expr(obj) && !self.expr_is_dict(obj)
+            && !self.expr_receiver_is_known_user_type(obj) {
             if let Some(first_arg) = args.first() {
                 if let ExprKind::Closure(params, _, body, _, _) = &first_arg.value.kind {
                     if let Some(param) = params.first() {
@@ -1099,6 +1257,15 @@ impl Transpiler {
     /// `joined`/`join`, `any`/`all`/`flatMap`/`count` (closure form), `sortBy`/`sortedBy`/
     /// `sorted`, `flat`, `zip`, `enumerate`, `slice`/`take`/`drop`, `min`/`max`/`sum`, `indexOf`.
     fn try_emit_array_special_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        // Unlike try_emit_dict_method/try_emit_set_method/try_emit_string_method (each gated on
+        // `expr_is_dict`/`expr_is_set`/`expr_is_string_receiver`), the cases below used to have no
+        // receiver-type guard at all — `min`/`max`/`sum`/`count`/`indexOf`/`any`/`all`/etc. fired
+        // on method name alone. A user struct/enum method sharing one of those names must dispatch
+        // through emit_method_call_fallback's own-member resolution instead; see
+        // `expr_receiver_is_known_user_type`'s doc.
+        if self.expr_receiver_is_known_user_type(obj) {
+            return None;
+        }
         // `future.value()` and `future.wait()` — method-call syntax for task results.
         // Equivalent to the field-access forms `future.value` / `future.wait`.
         // Delegate to emit_expr for the Field variant, which has the full
@@ -1329,7 +1496,7 @@ impl Transpiler {
     /// otherwise add for `Vec` receivers.
     fn try_emit_option_chain_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         const OPTION_CHAIN_METHODS: &[&str] = &["map", "filter", "or", "or_else", "flatten", "and_then"];
-        if !(OPTION_CHAIN_METHODS.contains(&method) && is_option_expr(obj)) { return None; }
+        if !(OPTION_CHAIN_METHODS.contains(&method) && self.is_option_expr(obj)) { return None; }
         let obj_s = self.emit_expr(obj);
         let closure_args: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
         let call = format!("{}.{}({})", obj_s, method, closure_args.join(", "));
@@ -1635,27 +1802,7 @@ impl Transpiler {
         // Field chains (e.g. `self.encoder`, a struct field holding another struct instance)
         // are resolved the same way so args to `self.encoder.forward(mel)` get the owned/clone
         // treatment struct methods expect, not the bare emit_expr fallback.
-        let is_user_struct_receiver = match &obj.kind {
-            ExprKind::Var(v) => {
-                if v == "self" {
-                    // Inside a method body, self_type names the current struct.
-                    self.self_type.as_deref()
-                        .map(|t| self.struct_fields.contains_key(t))
-                        .unwrap_or(false)
-                } else {
-                    self.var_struct_types.get(v.as_str())
-                        .map(|t| self.struct_fields.contains_key(t.as_str()))
-                        .unwrap_or(false)
-                }
-            }
-            ExprKind::Field(..) => self.resolve_expr_struct_type(obj)
-                .map(|t| self.struct_fields.contains_key(t.as_str()))
-                .unwrap_or(false),
-            ExprKind::Index(..) => self.resolve_expr_struct_type(obj)
-                .map(|t| self.struct_fields.contains_key(t.as_str()))
-                .unwrap_or(false),
-            _ => false,
-        };
+        let is_user_struct_receiver = self.expr_receiver_is_known_user_type(obj);
         // Map boring method names → Rust equivalents
         // For HashSet vars, `add` maps to `insert` (not Vec::push).
         // For dict vars, `contains` maps to `contains_key` (HashMap has no `contains`).
@@ -2695,6 +2842,7 @@ impl Transpiler {
             qualified_struct_types: self.qualified_struct_types.clone(),
             actor_source_types: self.actor_source_types.clone(),
             all_struct_types: self.all_struct_types.clone(),
+            all_enum_types: self.all_enum_types.clone(),
             struct_assoc_types: self.struct_assoc_types.clone(),
             fn_throws: self.fn_throws.clone(),
             typed_error_enums: self.typed_error_enums.clone(),

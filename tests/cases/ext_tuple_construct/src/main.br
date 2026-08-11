@@ -1,0 +1,27 @@
+# Regression test for a transpiler bug found migrating `boring/breakout.br`'s
+# ball-spawning code: bare `Type(args)` construction of a genuinely external/opaque
+# type used to unconditionally rewrite to `Type::new(args)`, even when the real type
+# is a plain tuple struct with no inherent `new()` (e.g. bevy's `Mesh2d`/
+# `MeshMaterial2d`) -- `cargo build` then fails with E0599 ("no function or associated
+# item named `new`"), even though `boring build`'s own `--emit-rust` check reports
+# success. `ext_tuple.Mesh2d`/`ext_tuple.MeshMaterial2d` (tests/cases/fixtures/ext_tuple)
+# stand in for the real bevy types -- see that crate's own doc comment. This is a
+# `transpile_project_test!` case specifically so a real `cargo run` exercises the
+# generated Rust, not just a transpile-and-diff -- see `Transpiler::
+# KNOWN_EXTERNAL_TUPLE_STRUCTS`'s doc in src/transpiler/mod.rs for the fix itself.
+#
+# `mat`'s explicit `MeshMaterial2d<int>` annotation sidesteps an unrelated, pre-existing
+# transpiler bug: a local `let` with no annotation of its own that initializes from a
+# `Type(args)` call picks up an inferred-qualifier type annotation (emit_let.rs's
+# `compute_let_ty_and_value`, priority-5 branch) built from the bare callee name alone,
+# dropping any generic parameters -- `let mat = MeshMaterial2d(7)` would mis-emit as
+# `let mat: MeshMaterial2d = MeshMaterial2d(7);` (E0107, missing generics). Out of scope
+# for this fix; tracked separately.
+use ext_tuple.Mesh2d
+use ext_tuple.MeshMaterial2d
+
+def main():
+    let mesh = Mesh2d(42)
+    let MeshMaterial2d<int> mat = MeshMaterial2d(7)
+    print "{mesh.0}"
+    print "{mat.0}"

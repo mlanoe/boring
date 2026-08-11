@@ -101,7 +101,10 @@ impl Transpiler {
                 _ => None,
             };
             match &elem_ty {
-                Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str()) => {
+                // `is_known_user_type` (not `struct_fields` alone) so iterating a `[SomeEnum]`
+                // array (`for w in walls: w.position()`) also gets the loop var registered for
+                // method dispatch — matches the struct case exactly, enums just have no fields.
+                Some(Type::Named(n)) if self.is_known_user_type(n.as_str()) => {
                     self.var_struct_types.insert(s.vars[0].clone(), n.clone());
                 }
                 // Primitive element types: `int`/`uint`/`float`/`bool` parse as `Type::Named`

@@ -1,0 +1,21 @@
+# Regression test for bevy::prelude::ClearColor specifically -- found migrating
+# `breakout-boring/src/lib.rs`'s last remaining hand-written-Rust constant
+# (`BACKGROUND_COLOR`) into a genuine Boring `Startup` system
+# (`commands.insert_resource(ClearColor(BACKGROUND_COLOR))`), the same pattern as
+# `spawn_camera` etc. in `breakout-boring/boring/breakout.br`. `ClearColor` is
+# `pub struct ClearColor(pub Color);` in real bevy 0.19 (bevy_camera-0.19.0/src/
+# clear_color.rs:55) with no inherent `new()` (only a `Default` impl) -- bare
+# `ClearColor(...)` construction used to unconditionally rewrite to the nonexistent
+# `ClearColor::new(...)`, the same failure shape as `Mesh2d`/`MeshMaterial2d`
+# (tests/cases/ext_tuple_construct) and `TextColor` (tests/cases/text_color_construct)
+# before them. Confirmed against real bevy 0.19 separately (a real `cargo build` of
+# the transpiler's own emitted Rust, not part of this test) -- this is a
+# `transpile_project_test!` case specifically so a real `cargo run` exercises the
+# generated Rust, not just a transpile-and-diff, same reason as the other two.
+# `ext_tuple.ClearColor` (tests/cases/fixtures/ext_tuple) stands in for the real bevy
+# type -- see that crate's own doc comment.
+use ext_tuple.ClearColor
+
+def main():
+    let c = ClearColor(9)
+    print "{c.0}"
