@@ -13,7 +13,22 @@ impl Transpiler {
             "AtomicI8", "AtomicI16", "AtomicI32", "AtomicI64", "AtomicBool",
         ];
         let has_derive = s.attrs.iter().any(|a| a.name == "derive");
-        if !has_derive {
+        // Header protocols (`struct X as Trait1, Trait2:`) that are known derive macros
+        // (built-in `KNOWN_DERIVABLE_TRAITS` or the project's `boring.toml` `[derives]`
+        // supplement) are routed into the derive list below instead of the header-conformance
+        // `impl Trait for X { ... }` loop further down — see `is_known_derivable_trait`'s doc
+        // comment for why (no method body exists for a proc-macro-derived trait to attach to).
+        let (proto_derive_names, proto_impl_names): (Vec<String>, Vec<String>) = s.protocols
+            .iter()
+            .cloned()
+            .partition(|p| self.is_known_derivable_trait(p));
+        let mut derive_names: Vec<String> = if has_derive {
+            // Merge every explicit `@derive(...)` attr's args verbatim (preserves user order).
+            s.attrs.iter()
+                .filter(|a| a.name == "derive")
+                .flat_map(|a| a.args.iter().cloned())
+                .collect()
+        } else {
             let has_non_clone_field = s.fields.iter().any(|f| {
                 matches!(&f.ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
             });
@@ -34,15 +49,31 @@ impl Transpiler {
             // see `helpers::collect_default_rest_targets`) → that call lowers to a trailing
             // `..Default::default()`, so the struct needs `Default` too.
             let needs_default = self.structs_needing_default.contains(&s.name);
+            let mut names = vec!["Debug".to_string()];
             if has_non_clone_field {
-                self.line(if needs_default { "#[derive(Debug, Default)]" } else { "#[derive(Debug)]" });
+                if needs_default { names.push("Default".to_string()); }
             } else if has_custom_cmp || has_sync_mutex_field {
-                self.line(if needs_default { "#[derive(Debug, Clone, Default)]" } else { "#[derive(Debug, Clone)]" });
+                names.push("Clone".to_string());
+                if needs_default { names.push("Default".to_string()); }
             } else {
-                self.line(if needs_default { "#[derive(Debug, Clone, Default, PartialEq)]" } else { "#[derive(Debug, Clone, PartialEq)]" });
+                names.push("Clone".to_string());
+                if needs_default { names.push("Default".to_string()); }
+                names.push("PartialEq".to_string());
+            }
+            names
+        };
+        for name in &proto_derive_names {
+            if !derive_names.contains(name) {
+                derive_names.push(name.clone());
             }
         }
+        if !derive_names.is_empty() {
+            self.line(&format!("#[derive({})]", derive_names.join(", ")));
+        }
+        // Any other explicit attrs (not `derive`, already folded into `derive_names` above)
+        // still emit verbatim, unchanged.
         for attr in &s.attrs {
+            if attr.name == "derive" { continue; }
             let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
             self.line(&format!("#[{}{}]", attr.name, args_s));
         }
@@ -277,7 +308,10 @@ impl Transpiler {
 
         // Protocol conformances declared in header: `struct X as Trait1, Trait2:`.
         // Emit `impl Trait for X { methods... }` so all trait methods are fulfilled.
-        for proto in &s.protocols {
+        // Whitelisted derive-macro names (`proto_derive_names`) were already folded into the
+        // `#[derive(...)]` line above and are excluded here — only genuine
+        // manually-implemented conformances reach this loop.
+        for proto in &proto_impl_names {
             {
                 self.blank();
                 self.line(&format!("impl{} {} for {}{} {{", tp, proto, s.name, tp_use));
@@ -784,6 +818,45 @@ impl Transpiler {
                 self.line("#[derive(thiserror::Error)]");
             }
         }
+        // Header protocols (`enum X as Trait1, Trait2:`) that are known derive macros
+        // (built-in `KNOWN_DERIVABLE_TRAITS` or the project's `boring.toml` `[derives]`
+        // supplement) are routed into an extra `#[derive(...)]` line here instead of the
+        // header-conformance `impl Trait for X { ... }` loop further down — same rationale
+        // as the struct path (see `is_known_derivable_trait`'s doc comment). Rust allows
+        // multiple stacked `#[derive(...)]` attributes, so this is a pure addition on top of
+        // the (intentionally untouched) derive logic above — it never rewrites those lines,
+        // it only tracks which names they already cover so nothing gets derived twice.
+        let (proto_derive_names, proto_impl_names): (Vec<String>, Vec<String>) = e.protocols
+            .iter()
+            .cloned()
+            .partition(|p| self.is_known_derivable_trait(p));
+        let mut emitted_derives: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if !has_clone_derive {
+            let thiserror_will_add_debug = has_variant_error_attr && !has_debug_derive;
+            if is_unit_enum {
+                if !thiserror_will_add_debug { emitted_derives.insert("Debug".to_string()); }
+                emitted_derives.extend(["Clone", "Copy", "PartialEq", "Eq", "Hash"].map(String::from));
+            } else if has_actor_field {
+                if !thiserror_will_add_debug { emitted_derives.insert("Debug".to_string()); }
+                emitted_derives.insert("Clone".to_string());
+            } else {
+                if !thiserror_will_add_debug { emitted_derives.insert("Debug".to_string()); }
+                emitted_derives.extend(["Clone", "PartialEq"].map(String::from));
+            }
+        }
+        if has_variant_error_attr && !already_has_thiserror {
+            emitted_derives.insert("thiserror::Error".to_string());
+            if !has_debug_derive { emitted_derives.insert("Debug".to_string()); }
+        }
+        for a in e.attrs.iter().filter(|a| a.name == "derive") {
+            emitted_derives.extend(a.args.iter().cloned());
+        }
+        let extra_derives: Vec<String> = proto_derive_names.into_iter()
+            .filter(|p| !emitted_derives.contains(p))
+            .collect();
+        if !extra_derives.is_empty() {
+            self.line(&format!("#[derive({})]", extra_derives.join(", ")));
+        }
         for attr in &e.attrs {
             let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
             self.line(&format!("#[{}{}]", attr.name, args_s));
@@ -967,7 +1040,10 @@ impl Transpiler {
             }
         }
 
-        for proto in &e.protocols {
+        // Whitelisted derive-macro names (`proto_derive_names`) were already folded into an
+        // extra `#[derive(...)]` line above and are excluded here — only genuine
+        // manually-implemented conformances reach this loop.
+        for proto in &proto_impl_names {
             self.blank();
             self.line(&format!("impl{} {} for {}{} {{", tp, proto, e.name, tp_use));
             self.indent += 1;
@@ -1140,8 +1216,23 @@ impl Transpiler {
             self.line(&format!("impl{} {} {{", generics, full_type));
         } else {
             // Multiple traits: emit one impl per trait, only including methods for that trait.
-            for (i, trait_name) in e.traits.iter().enumerate() {
-                if i > 0 { self.blank(); }
+            let mut emitted_count = 0;
+            for trait_name in &e.traits {
+                // A derive-macro name (`Component`, `Debug`, ...) has no valid translation
+                // here: Rust can't retroactively attach `#[derive(...)]` to a struct/enum
+                // defined by a separate item, which is exactly what an `ext` block is. Report
+                // it instead of falling into the "unknown trait → emit every method" fallback
+                // below, which would silently produce nonsense (or invalid) Rust for it.
+                if self.is_known_derivable_trait(trait_name) {
+                    self.push_error(e.line, e.col, format!(
+                        "'{}' is a derive macro and cannot be added via 'ext {} as {}:' — \
+                         declare 'as {}' (or '@derive({})') on {}'s own struct/enum definition instead",
+                        trait_name, e.type_name, trait_name, trait_name, trait_name, e.type_name
+                    ));
+                    continue;
+                }
+                if emitted_count > 0 { self.blank(); }
+                emitted_count += 1;
                 self.line(&format!("impl{} {} for {} {{", generics, trait_name, full_type));
                 self.indent += 1;
                 // Emit associated type definitions

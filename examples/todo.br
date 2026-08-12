@@ -5,8 +5,7 @@ use tokio.io.AsyncBufReadExt, AsyncWriteExt, BufReader
 use tokio.time.Duration, timeout
 use std.path.Path
 
-@derive(Debug, Clone)
-struct Task:
+struct Task as Debug, Clone:
     uint id
     string description
     bool completed
@@ -39,8 +38,7 @@ trait AsyncTaskManager:
     task delete_task(uint id) throws string
     task req save_to_file(str& path) throws io.Error
     task load_from_file(str& path) throws io.Error
-@derive(Debug)
-struct TodoList as AsyncTaskManager:
+struct TodoList as AsyncTaskManager, Debug:
     [Task] tasks = []
     uint next_id = 0
 

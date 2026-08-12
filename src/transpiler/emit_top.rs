@@ -61,7 +61,7 @@ impl Transpiler {
                     if let Some((type_name, method)) = external_call.filter(|_| !self.top_level_let_is_const_safe(s)) {
                         let rust_ty = self.top_level_let_promoted_type(s, &type_name);
                         let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
-                        if Self::is_known_external_const_fn(&type_name, &method)
+                        if self.is_known_external_const_fn(&type_name, &method)
                             || Self::is_external_enum_variant_construction(&method)
                         {
                             self.line(&format!("{}const {}: {} = {};", vis, s.name, rust_ty, val_str));

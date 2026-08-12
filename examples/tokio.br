@@ -1,5 +1,4 @@
-@derive Debug, Clone
-struct User:
+struct User as Debug, Clone:
     uint id
     string name
     string email

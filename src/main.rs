@@ -130,22 +130,66 @@ struct BoringToml {
     /// copied verbatim into the generated Cargo.toml's own `[dependencies]` section — see
     /// `Self::parse`'s doc comment for why this stays text, not a real TOML value.
     dependencies: Vec<String>,
+    /// `[external_types]` `tuple_structs = [...]` entries — project-declared supplement to
+    /// the transpiler's built-in `KNOWN_EXTERNAL_TUPLE_STRUCTS` (see that const's doc
+    /// comment in `transpiler/mod.rs`). Threaded into `TranspileConfig::external_tuple_structs`
+    /// by `build_project_with_config`.
+    external_tuple_structs: Vec<String>,
+    /// `[external_types]` `const_fns = [...]` entries, each written `"Type::method"` and
+    /// split here into `(type, method)` pairs — project-declared supplement to
+    /// `KNOWN_EXTERNAL_CONST_FNS`. Threaded into `TranspileConfig::external_const_fns`.
+    external_const_fns: Vec<(String, String)>,
+    /// `[external_types]` `include = [...]` entries — paths (relative to this `boring.toml`'s
+    /// own directory) to other files with their own `[external_types]` section, folded into
+    /// `external_tuple_structs`/`external_const_fns` above by `resolve_external_types_includes`.
+    /// Lets several sibling projects (e.g. multiple Bevy games) share one canonical
+    /// declarations file instead of each repeating the same entries. Consumed and drained by
+    /// `resolve_external_types_includes` — empty again once `load_project_toml` returns.
+    external_types_includes: Vec<String>,
+    /// `[derives]` `traits = [...]` entries — project-declared supplement to the
+    /// transpiler's built-in `KNOWN_DERIVABLE_TRAITS` (see that const's doc comment in
+    /// `transpiler/mod.rs`). A name in this list, when it appears in a struct/enum's header
+    /// `as Trait1, Trait2:` list, is routed into `#[derive(...)]` instead of requiring a
+    /// manual `impl Trait for X { ... }` — e.g. Bevy's `Component`/`Resource`. Threaded into
+    /// `TranspileConfig::known_derives` by `build_project_with_config`.
+    derive_traits: Vec<String>,
+    /// `[derives]` `include = [...]` entries — same shape and semantics as
+    /// `external_types_includes`, but for `derive_traits`. Consumed and drained by
+    /// `resolve_derive_includes` — empty again once `load_project_toml` returns.
+    derive_includes: Vec<String>,
 }
 
 impl BoringToml {
     /// Parse a `boring.toml` file.  No external dependency â€” the format is tiny: flat
-    /// `key = value` lines, plus one recognized section header, `[dependencies]`, whose
-    /// body lines are kept as opaque text (not parsed) and spliced verbatim into the
-    /// generated Cargo.toml's `[dependencies]` section by `emit_rust_to_dir`. This is the
-    /// only way today to add an external Cargo dependency (e.g. `bevy`) without hand-editing
-    /// the generated project after `boring build` — Boring itself has no opinion on the
+    /// `key = value` lines, plus two recognized section headers. `[dependencies]`'s body
+    /// lines are kept as opaque text (not parsed) and spliced verbatim into the generated
+    /// Cargo.toml's `[dependencies]` section by `emit_rust_to_dir`. This is the only way
+    /// today to add an external Cargo dependency (e.g. `bevy`) without hand-editing the
+    /// generated project after `boring build` — Boring itself has no opinion on the
     /// value's syntax (inline tables, feature arrays, etc. all pass through as-is).
+    /// `[external_types]`'s recognized keys (`tuple_structs`/`const_fns`, each a plain
+    /// inline string array, plus `include`, an array of paths to other files with their own
+    /// `[external_types]` section — see `resolve_external_types_includes`) *are* interpreted,
+    /// unlike `[dependencies]` — they're project-declared supplements to the transpiler's own
+    /// hand-verified `KNOWN_EXTERNAL_TUPLE_STRUCTS`/`KNOWN_EXTERNAL_CONST_FNS` (see those
+    /// consts' doc comments in `transpiler/mod.rs`), which the transpiler needs as actual data
+    /// (a type name, or a `(type, method)` pair), not opaque text to copy elsewhere. Always
+    /// additive: a project can only add entries, never remove or override a built-in one.
+    /// `[derives]` (`traits`/`include`) follows the exact same shape and rationale, for
+    /// `KNOWN_DERIVABLE_TRAITS` instead — see `resolve_derive_includes`.
     fn parse(src: &str) -> Self {
         let mut name    = String::new();
         let mut version = "0.1.0".to_string();
         let mut main    = "main.br".to_string();
         let mut dependencies = Vec::new();
+        let mut external_tuple_structs = Vec::new();
+        let mut external_const_fns = Vec::new();
+        let mut external_types_includes = Vec::new();
+        let mut derive_traits = Vec::new();
+        let mut derive_includes = Vec::new();
         let mut in_dependencies = false;
+        let mut in_external_types = false;
+        let mut in_derives = false;
 
         for line in src.lines() {
             let line = line.trim();
@@ -154,10 +198,29 @@ impl BoringToml {
             }
             if line.starts_with('[') {
                 in_dependencies = line == "[dependencies]";
+                in_external_types = line == "[external_types]";
+                in_derives = line == "[derives]";
                 continue;
             }
             if in_dependencies {
                 dependencies.push(line.to_string());
+            } else if in_external_types {
+                if let Some(rest) = line.strip_prefix("tuple_structs") {
+                    external_tuple_structs = Self::extract_array(rest);
+                } else if let Some(rest) = line.strip_prefix("const_fns") {
+                    external_const_fns = Self::extract_array(rest)
+                        .into_iter()
+                        .filter_map(|entry| entry.split_once("::").map(|(t, m)| (t.to_string(), m.to_string())))
+                        .collect();
+                } else if let Some(rest) = line.strip_prefix("include") {
+                    external_types_includes = Self::extract_array(rest);
+                }
+            } else if in_derives {
+                if let Some(rest) = line.strip_prefix("traits") {
+                    derive_traits = Self::extract_array(rest);
+                } else if let Some(rest) = line.strip_prefix("include") {
+                    derive_includes = Self::extract_array(rest);
+                }
             } else if let Some(rest) = line.strip_prefix("name") {
                 if let Some(v) = Self::extract_value(rest) { name = v; }
             } else if let Some(rest) = line.strip_prefix("version") {
@@ -166,7 +229,53 @@ impl BoringToml {
                 if let Some(v) = Self::extract_value(rest) { main = v; }
             }
         }
-        BoringToml { name, version, main, dependencies }
+        BoringToml {
+            name, version, main, dependencies,
+            external_tuple_structs, external_const_fns, external_types_includes,
+            derive_traits, derive_includes,
+        }
+    }
+
+    /// Resolves this `boring.toml`'s `[external_types]` `include` paths (each relative to
+    /// `boring_toml_dir`, i.e. this `boring.toml`'s own directory), folding each included
+    /// file's own `tuple_structs`/`const_fns` into this project's own lists — this is what
+    /// lets several sibling projects (e.g. multiple Bevy games) share one canonical
+    /// declarations file instead of each repeating the same entries (see `boring-bevylib`'s
+    /// `external_types.toml` for a real example). Single-level only: an included file's own
+    /// `include` key, if it has one, is silently ignored rather than followed recursively —
+    /// deliberately simple, no cycle detection needed as a result. Drains
+    /// `external_types_includes` as it goes (idempotent: calling this twice is a no-op the
+    /// second time). Returns an error message (rather than exiting directly) on the first
+    /// unreadable include path, so this stays independently unit-testable.
+    fn resolve_external_types_includes(&mut self, boring_toml_dir: &Path) -> Result<(), String> {
+        for include_path in std::mem::take(&mut self.external_types_includes) {
+            let resolved = boring_toml_dir.join(&include_path);
+            let included_src = std::fs::read_to_string(&resolved).map_err(|e| {
+                format!("cannot read external_types include '{}': {}", resolved.display(), e)
+            })?;
+            let included = Self::parse(&included_src);
+            self.external_tuple_structs.extend(included.external_tuple_structs);
+            self.external_const_fns.extend(included.external_const_fns);
+        }
+        Ok(())
+    }
+
+    /// Resolves this `boring.toml`'s `[derives]` `include` paths the same way
+    /// `resolve_external_types_includes` resolves `[external_types]`'s — same relative-to-dir
+    /// resolution, same single-level (no recursion into a nested `include`), same
+    /// additive-only fold into `derive_traits`, same idempotent drain-based design, and same
+    /// `Result<(), String>` return so this stays independently unit-testable rather than
+    /// exiting directly.
+    fn resolve_derive_includes(&mut self, boring_toml_dir: &Path) -> Result<(), String> {
+        for include_path in std::mem::take(&mut self.derive_includes) {
+            let resolved = boring_toml_dir.join(&include_path);
+            let included_src = std::fs::read_to_string(&resolved).map_err(|e| {
+                format!("cannot read derives include '{}': {}", resolved.display(), e)
+            })?;
+            let included = Self::parse(&included_src);
+            self.derive_traits.extend(included.derive_traits);
+        }
+        Ok(())
     }
 
     /// Extract the value from `= "value"` or `= value`.
@@ -179,6 +288,20 @@ impl BoringToml {
         } else {
             None
         }
+    }
+
+    /// Extract a plain inline string array from `= ["a", "b"]` — used for
+    /// `[external_types]`'s `tuple_structs`/`const_fns` keys. Not general TOML array
+    /// parsing (no nesting, no non-string elements) — matches this parser's "the format is
+    /// tiny" philosophy (see `Self::parse`'s doc comment).
+    fn extract_array(rest: &str) -> Vec<String> {
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+        let inner = rest.trim_start_matches('[').trim_end_matches(']');
+        inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 }
 
@@ -213,6 +336,196 @@ mod boring_toml_tests {
         assert_eq!(toml.name, "demo");
         assert_eq!(toml.dependencies, vec!["bevy = \"0.19\"".to_string()]);
     }
+
+    #[test]
+    fn external_types_section_parses_tuple_structs_and_const_fns() {
+        let src = "[project]\nname = \"demo\"\n\n[external_types]\ntuple_structs = [\"Mesh2d\", \"OuterColor\"]\nconst_fns = [\"Vec3::new\", \"Duration::from_secs\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_tuple_structs, vec!["Mesh2d".to_string(), "OuterColor".to_string()]);
+        assert_eq!(toml.external_const_fns, vec![
+            ("Vec3".to_string(), "new".to_string()),
+            ("Duration".to_string(), "from_secs".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn no_external_types_section_is_empty() {
+        let src = "[project]\nname = \"demo\"\n";
+        let toml = BoringToml::parse(src);
+        assert!(toml.external_tuple_structs.is_empty());
+        assert!(toml.external_const_fns.is_empty());
+    }
+
+    #[test]
+    fn external_types_const_fns_without_double_colon_are_skipped() {
+        // A malformed entry (no `Type::method` shape) is silently dropped rather than
+        // panicking or corrupting the pair list — same "always-valid fallback over an
+        // optimistic guess" philosophy as `is_known_external_const_fn` itself.
+        let src = "[external_types]\nconst_fns = [\"NotAPair\", \"Vec3::new\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_const_fns, vec![("Vec3".to_string(), "new".to_string())]);
+    }
+
+    #[test]
+    fn external_types_include_parses_to_raw_paths() {
+        let src = "[external_types]\ninclude = [\"../shared/external_types.toml\"]\ntuple_structs = [\"LocalOnly\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_types_includes, vec!["../shared/external_types.toml".to_string()]);
+        assert_eq!(toml.external_tuple_structs, vec!["LocalOnly".to_string()]);
+    }
+
+    #[test]
+    fn resolve_external_types_includes_folds_in_shared_declarations() {
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_include_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shared_external_types.toml"),
+            "[external_types]\ntuple_structs = [\"Shared1\", \"Shared2\"]\nconst_fns = [\"Vec3::new\"]\n",
+        ).unwrap();
+
+        let mut toml = BoringToml::parse(
+            "[external_types]\ninclude = [\"shared_external_types.toml\"]\ntuple_structs = [\"LocalOnly\"]\n",
+        );
+        toml.resolve_external_types_includes(&dir).unwrap();
+
+        assert_eq!(toml.external_tuple_structs, vec!["LocalOnly".to_string(), "Shared1".to_string(), "Shared2".to_string()]);
+        assert_eq!(toml.external_const_fns, vec![("Vec3".to_string(), "new".to_string())]);
+        // Drained after resolving — calling again is a no-op, not a double-fold.
+        assert!(toml.external_types_includes.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_external_types_includes_reports_missing_file_without_exiting() {
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_include_missing_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut toml = BoringToml::parse("[external_types]\ninclude = [\"does_not_exist.toml\"]\n");
+        let result = toml.resolve_external_types_includes(&dir);
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_external_types_includes_does_not_recurse() {
+        // An included file's own `include` key is ignored, not followed — deliberately
+        // single-level, see `resolve_external_types_includes`'s doc comment.
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_include_no_recurse_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("level1.toml"),
+            "[external_types]\ninclude = [\"level2.toml\"]\ntuple_structs = [\"Level1\"]\n",
+        ).unwrap();
+        std::fs::write(
+            dir.join("level2.toml"),
+            "[external_types]\ntuple_structs = [\"Level2\"]\n",
+        ).unwrap();
+
+        let mut toml = BoringToml::parse("[external_types]\ninclude = [\"level1.toml\"]\n");
+        toml.resolve_external_types_includes(&dir).unwrap();
+
+        assert_eq!(toml.external_tuple_structs, vec!["Level1".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn derives_section_parses_traits() {
+        let src = "[project]\nname = \"demo\"\n\n[derives]\ntraits = [\"Component\", \"Resource\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.derive_traits, vec!["Component".to_string(), "Resource".to_string()]);
+    }
+
+    #[test]
+    fn no_derives_section_is_empty() {
+        let src = "[project]\nname = \"demo\"\n";
+        let toml = BoringToml::parse(src);
+        assert!(toml.derive_traits.is_empty());
+    }
+
+    #[test]
+    fn derives_include_parses_to_raw_paths() {
+        let src = "[derives]\ninclude = [\"../shared/derives.toml\"]\ntraits = [\"LocalOnly\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.derive_includes, vec!["../shared/derives.toml".to_string()]);
+        assert_eq!(toml.derive_traits, vec!["LocalOnly".to_string()]);
+    }
+
+    #[test]
+    fn resolve_derive_includes_folds_in_shared_declarations() {
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_derives_include_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shared_derives.toml"),
+            "[derives]\ntraits = [\"Shared1\", \"Shared2\"]\n",
+        ).unwrap();
+
+        let mut toml = BoringToml::parse(
+            "[derives]\ninclude = [\"shared_derives.toml\"]\ntraits = [\"LocalOnly\"]\n",
+        );
+        toml.resolve_derive_includes(&dir).unwrap();
+
+        assert_eq!(toml.derive_traits, vec!["LocalOnly".to_string(), "Shared1".to_string(), "Shared2".to_string()]);
+        // Drained after resolving — calling again is a no-op, not a double-fold.
+        assert!(toml.derive_includes.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_derive_includes_reports_missing_file_without_exiting() {
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_derives_include_missing_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut toml = BoringToml::parse("[derives]\ninclude = [\"does_not_exist.toml\"]\n");
+        let result = toml.resolve_derive_includes(&dir);
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_derive_includes_does_not_recurse() {
+        // An included file's own `include` key is ignored, not followed — deliberately
+        // single-level, see `resolve_derive_includes`'s doc comment.
+        let dir = std::env::temp_dir().join(format!(
+            "boring_toml_derives_no_recurse_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("level1.toml"),
+            "[derives]\ninclude = [\"level2.toml\"]\ntraits = [\"Level1\"]\n",
+        ).unwrap();
+        std::fs::write(
+            dir.join("level2.toml"),
+            "[derives]\ntraits = [\"Level2\"]\n",
+        ).unwrap();
+
+        let mut toml = BoringToml::parse("[derives]\ninclude = [\"level1.toml\"]\n");
+        toml.resolve_derive_includes(&dir).unwrap();
+
+        assert_eq!(toml.derive_traits, vec!["Level1".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Load `boring.toml` from the current directory, or exit with an error.
@@ -226,9 +539,21 @@ fn load_project_toml() -> (BoringToml, PathBuf) {
             process::exit(1);
         }
     };
-    let toml = BoringToml::parse(&src);
+    let mut toml = BoringToml::parse(&src);
     if toml.name.is_empty() {
         eprintln!("error: boring.toml is missing a `name` field");
+        process::exit(1);
+    }
+    // `[external_types]` `include` paths are resolved relative to boring.toml's own
+    // directory (CWD here, since `toml_path` is always the bare "boring.toml" above) —
+    // not relative to whatever directory `boring build` happens to be run from otherwise.
+    let toml_dir = toml_path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = toml.resolve_external_types_includes(toml_dir) {
+        eprintln!("error: {}", e);
+        process::exit(1);
+    }
+    if let Err(e) = toml.resolve_derive_includes(toml_dir) {
+        eprintln!("error: {}", e);
         process::exit(1);
     }
     (toml, toml_path)
@@ -461,6 +786,16 @@ fn run_project() {
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
 fn build_project_with_config(config: transpiler::TranspileConfig) {
     let (toml, _) = load_project_toml();
+    // Merge `boring.toml`'s `[external_types]` supplement into the CLI-flag-derived config
+    // — same "layer project config on top" shape as `config_with_dir` below in
+    // `emit_rust_to_dir`, just at the `boring.toml`-loading point instead of the
+    // source-file-loading point.
+    let config = transpiler::TranspileConfig {
+        external_tuple_structs: toml.external_tuple_structs.clone(),
+        external_const_fns: toml.external_const_fns.clone(),
+        known_derives: toml.derive_traits.clone(),
+        ..config
+    };
     emit_rust_with_version_and_config(&toml.main, &toml.version, config, &toml.dependencies);
 }
 
@@ -677,13 +1012,26 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false };
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new() };
 
     if emit_rust {
         match file {
             Some(path) => print_rust(path, config),
             None => {
                 let (toml, _) = load_project_toml();
+                // Same `[external_types]` merge as `build_project_with_config` — needed
+                // here too since `boring build --emit-rust` (no file arg) is a real,
+                // separate project-mode entry point that also loads `boring.toml` but
+                // previously skipped this merge (`--emit-rust` only prints transpiled Rust
+                // text, it never touches Cargo.toml, so `toml.dependencies` genuinely
+                // doesn't apply here — but `external_tuple_structs`/`external_const_fns`
+                // affect the emitted Rust text itself, so they do).
+                let config = transpiler::TranspileConfig {
+                    external_tuple_structs: toml.external_tuple_structs.clone(),
+                    external_const_fns: toml.external_const_fns.clone(),
+                    known_derives: toml.derive_traits.clone(),
+                    ..config
+                };
                 print_rust(&toml.main, config);
             }
         }

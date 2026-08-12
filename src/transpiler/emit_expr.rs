@@ -3063,7 +3063,7 @@ impl Transpiler {
             // `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`'s doc in src/transpiler/mod.rs),
             // else ::new(args) (requires a new() function to exist).
             let args_s = self.emit_args(args);
-            if Self::is_known_external_tuple_struct(name) {
+            if self.is_known_external_tuple_struct(name) {
                 return format!("{}({})", name, args_s);
             }
             // Semaphore::new and similar tokio primitives expect usize, but Boring's

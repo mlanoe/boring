@@ -6904,6 +6904,71 @@ commands.spawn(Sprite(color = PADDLE_SIZE.pointee, _))
 
 The most reliable way to sidestep this entirely is to check whether the external constructor you're using is on the hand-verified `const fn` list above (or add it, once verified against the defining crate's own source) — a `const`-promoted value is already the exact type `T` everywhere, so `.pointee` is never needed for it.
 
+**Extending the list from your own project**: rather than patching the compiler, declare your own hand-verified entries in `boring.toml`'s `[external_types]` section — this supplements the built-in list above (and the tuple-struct list used for plain `Type(args)` construction, e.g. bevy's `Mesh2d`/`TextColor`), it never overrides or removes an entry from it:
+
+```toml
+[external_types]
+tuple_structs = ["MyBevyMarker"]     # Type(args) instead of Type::new(args)
+const_fns = ["Vec3::new", "MyExternalType::from_parts"]  # "Type::method" pairs
+```
+
+Same rule applies as for the built-in lists: only add an entry once you've verified against the defining crate's source that it's actually a plain tuple struct (no inherent `new()`) or actually a `const fn` — a wrong entry produces invalid Rust that `boring build` won't catch, only `cargo build` will (`E0599`/`E0015`).
+
+Several sibling projects can also share one canonical declarations file instead of each repeating the same entries, via `include`:
+
+```toml
+[external_types]
+include = ["../shared/external_types.toml"]   # path relative to this boring.toml
+```
+
+The included file has its own `[external_types]` section, folded into this project's lists (additive, single-level — a nested `include` inside the included file is not followed). See `boring-bevylib/external_types.toml` in the `boring`-adjacent Bevy-game projects for a real example.
+
+### Advanced — derive-trait whitelist (`as Trait:` routed into `#[derive(...)]`)
+
+`struct Foo as Trait1, Trait2:` / `enum Foo as Trait1, Trait2:` normally means trait *conformance*: Boring emits `impl Trait for Foo { ...only the methods Trait requires... }`, expecting the struct/enum body to provide those methods itself.
+
+Some names in that position aren't traits you'd ever implement by hand — they're Rust derive macros (`Debug`, `Clone`, or a third-party one like Bevy's `Component`), which generate their `impl` entirely mechanically and have no method body for Boring code to provide. A name recognized as a derive macro is routed into `#[derive(...)]` instead — merged into the struct/enum's existing derive line (or, for an enum, an additional stacked `#[derive(...)]` line) rather than emitting a broken `impl` block:
+
+```boring
+@derive(Component, Debug, Clone)     # still works — explicit, unconditional escape hatch
+pub struct Velocity:
+    float x
+    float y
+
+# once Component is registered (see below), this is equivalent:
+pub struct Velocity as Component, Debug, Clone:
+    float x
+    float y
+```
+
+...**almost** equivalent, actually — see the auto-default caveat right below before mechanically converting an existing `@derive(...)` to a header.
+
+Built into the compiler: `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default` — zero-Cargo-dependency std traits only. `Serialize`/`Deserialize`/`thiserror::Error` are deliberately **not** on this list even though they're also pure derive macros: they already have their own compiler-tracked auto-dependency injection (serde only when `json()`/`fromJson()` are used; thiserror only via `@error` variant attrs — see the section below), and routing them through this generic whitelist wouldn't wire that up. Keep using `@derive(Serialize, Deserialize)` / rely on `@error` for those.
+
+**Why `@derive(...)` is still worth reaching for, even for whitelisted names: it's what turns off the auto-default.** Every struct/enum with *no* explicit `@derive(...)` attribute at all gets an automatic `Debug`/`Clone`/`PartialEq` (plus `Default` when needed — see this section's own `#[derive(Debug, Clone, PartialEq)]` default earlier in this doc), independently of any header `as Trait:` list. A header only *adds* its whitelisted names on top of that default — it never disables it, because there's nothing about writing `as Trait:` that says "this is now the exhaustive list." Converting `@derive(Component, Debug)` (no `Clone`, no `PartialEq`) to `struct X as Component, Debug:` therefore silently gains `Clone`/`PartialEq` it didn't have before. Usually harmless — but not always: a type that relies on *not* having a method (e.g. a `#[derive(Deref)]` wrapper whose `.clone()` is meant to auto-deref to the wrapped field's own `Clone`, not clone the wrapper itself) breaks the moment the wrapper gains its own `Clone`, since Rust's method resolution always prefers an exact-type match over `Deref`-based lookup.
+
+An **empty `@derive()`** (or bare `@derive` with no arguments) sidesteps this: it still counts as "this struct declared an explicit derive list" (so the auto-default never runs), while a header `as Trait:` list keeps contributing its whitelisted names on top of it — giving an *exact*, non-broadened derive set with header syntax:
+
+```boring
+@derive()                              # suppresses the auto-default entirely
+pub struct Paddle as Component, Debug:  # header still routes Component/Debug into #[derive(...)]
+    pass
+```
+
+This transpiles to exactly `#[derive(Component, Debug)]` — no `Clone`, no `PartialEq` snuck in. Reach for this whenever a struct/enum's original, hand-picked `@derive(...)` list was narrower than what the auto-default alone would produce and you still want header syntax for the whitelisted names.
+
+**Extending the list from your own project** — same shape as `[external_types]`:
+
+```toml
+[derives]
+traits = ["Component", "Resource"]            # Bevy derive macros, for example
+include = ["../boring-bevylib/derives.toml"]  # shared declarations, same additive/single-level rules
+```
+
+If you add `Serialize`/`Deserialize`/similar here yourself, you're responsible for also declaring the matching `[dependencies]` entry — this mechanism only decides *how to emit* a name, it doesn't manage Cargo dependencies.
+
+**`ext Foo as Trait:` cannot use a derive-macro name.** An `ext` block attaches to a type defined elsewhere — Rust has no way to retroactively add `#[derive(...)]` to an already-declared `struct`/`enum`. Declare the derive on the type's own `struct`/`enum` header (or via `@derive(...)`) instead; `boring build` rejects the `ext` form with an error rather than silently emitting a broken `impl`.
+
 ### Advanced — `thiserror` integration
 
 When any enum variant carries an `@error` attribute, the transpiler automatically adds `#[derive(Debug, thiserror::Error)]` to the enum and `thiserror = "1"` to the generated `Cargo.toml`. No `@derive(thiserror::Error)` is needed on the enum itself.

@@ -99,6 +99,27 @@ pub struct TranspileConfig {
     /// construction convention a render-loop kernel commonly uses, so trying anyway
     /// would panic rather than silently duplicate already-correct behavior.
     pub gpu_top_level_handled_by_host: bool,
+    /// Project-declared supplement to `KNOWN_EXTERNAL_TUPLE_STRUCTS` (see that const's doc
+    /// comment below), sourced from `boring.toml`'s `[external_types]` `tuple_structs`
+    /// array. Lets a project register its own hand-verified external types (e.g. a bevy
+    /// type not yet audited into this compiler's built-in list) without a PR against
+    /// `boring` itself. Always additive, never overrides the built-in list. Empty unless
+    /// `boring build` populated it from `BoringToml`.
+    pub external_tuple_structs: Vec<String>,
+    /// Project-declared supplement to `KNOWN_EXTERNAL_CONST_FNS`, `(type_name, method)`
+    /// pairs sourced from `boring.toml`'s `[external_types]` `const_fns` array (each entry
+    /// written `"Type::method"`). Same additive-only relationship to the built-in list as
+    /// `external_tuple_structs`.
+    pub external_const_fns: Vec<(String, String)>,
+    /// Project-declared supplement to `KNOWN_DERIVABLE_TRAITS` (see that const's doc comment
+    /// below), sourced from `boring.toml`'s `[derives]` `traits` array. A name in this list,
+    /// when it appears in a struct/enum's header `as Trait1, Trait2:` list (or is pulled in
+    /// via `[derives]`'s own `include`), is routed into `#[derive(...)]` instead of requiring
+    /// a manual `impl Trait for X { ... }` — this is how project-specific derive macros with
+    /// no method body (Bevy's `Component`/`Resource`/etc.) get registered without a PR
+    /// against `boring` itself. Always additive, never overrides the built-in list. Empty
+    /// unless `boring build` populated it from `BoringToml`.
+    pub known_derives: Vec<String>,
 }
 
 impl Default for TranspileConfig {
@@ -113,6 +134,9 @@ impl Default for TranspileConfig {
             gpu_kernels: Vec::new(),
             is_gpu_target: false,
             gpu_top_level_handled_by_host: false,
+            external_tuple_structs: Vec::new(),
+            external_const_fns: Vec::new(),
+            known_derives: Vec::new(),
         }
     }
 }
@@ -2045,8 +2069,13 @@ impl Transpiler {
         ("Color", "xyz"), ("Color", "xyza"),
     ];
 
-    fn is_known_external_const_fn(type_name: &str, method: &str) -> bool {
+    /// Consults the built-in hand-verified list first, then `self.config.external_const_fns`
+    /// (the project's own `boring.toml` `[external_types]` supplement — see
+    /// `TranspileConfig::external_const_fns`'s doc comment). The project list is purely
+    /// additive: it can never remove or override a built-in entry.
+    fn is_known_external_const_fn(&self, type_name: &str, method: &str) -> bool {
         Self::KNOWN_EXTERNAL_CONST_FNS.iter().any(|&(t, m)| t == type_name && m == method)
+            || self.config.external_const_fns.iter().any(|(t, m)| t == type_name && m == method)
     }
 
     /// Whether `top_level_let_external_call`'s `(type_name, method)` is actually an
@@ -2150,8 +2179,50 @@ impl Transpiler {
         "ClearColor",
     ];
 
-    fn is_known_external_tuple_struct(type_name: &str) -> bool {
+    /// Consults the built-in hand-verified list first, then
+    /// `self.config.external_tuple_structs` (the project's own `boring.toml`
+    /// `[external_types]` supplement — see `TranspileConfig::external_tuple_structs`'s doc
+    /// comment). The project list is purely additive: it can never remove or override a
+    /// built-in entry.
+    fn is_known_external_tuple_struct(&self, type_name: &str) -> bool {
+        if self.config.external_tuple_structs.iter().any(|s| s == type_name) {
+            return true;
+        }
         Self::KNOWN_EXTERNAL_TUPLE_STRUCTS.contains(&type_name)
+    }
+
+    /// Rust traits that are always safe to route into `#[derive(...)]` when named in a
+    /// struct/enum's header `as Trait1, Trait2:` list, instead of emitting a manual
+    /// `impl Trait for X { ... }` — because these are proc-macro-derived with no method body
+    /// for Boring code to ever provide (there is nothing a `def`/`req` in the struct body
+    /// could be routed to). Limited to zero-Cargo-dependency std traits: `Serialize`/
+    /// `Deserialize`/`thiserror::Error` are deliberately NOT pre-populated here even though
+    /// they're also pure derive macros, because those three already have their own
+    /// compiler-tracked auto-dependency injection (serde is added only when the `json()`/
+    /// `fromJson()` builtins are used — see the `json`/`fromJson` doc section; thiserror is
+    /// added only via `@error` variant attrs, `emit_enum`'s `already_has_thiserror` handling
+    /// below) — routing them through this generic, unconditional whitelist would derive them
+    /// without ever wiring up the matching Cargo dependency. A project can still add
+    /// `Serialize`/`Deserialize`/etc. to its own `boring.toml` `[derives]` `traits = [...]`
+    /// list, but is then responsible for also declaring the matching `[dependencies]` entry
+    /// itself.
+    ///
+    /// Bevy-style project-specific derive macros (`Component`, `Resource`, `Event`,
+    /// `States`, ...) are NOT pre-populated here either — see `TranspileConfig::known_derives`
+    /// / `boring.toml`'s `[derives]` section (mirrors `[external_types]`) for how a project
+    /// supplements this list.
+    const KNOWN_DERIVABLE_TRAITS: &[&str] = &[
+        "Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default",
+    ];
+
+    /// Consults the built-in list first, then `self.config.known_derives` (the project's own
+    /// `boring.toml` `[derives]` supplement — see `TranspileConfig::known_derives`'s doc
+    /// comment). Purely additive, same relationship as `is_known_external_tuple_struct`.
+    fn is_known_derivable_trait(&self, name: &str) -> bool {
+        if self.config.known_derives.iter().any(|s| s == name) {
+            return true;
+        }
+        Self::KNOWN_DERIVABLE_TRAITS.contains(&name)
     }
 
     /// The Rust type to declare a promoted external-call `let` with (see
@@ -3639,5 +3710,98 @@ def sys(Query<(mut A&, mut B&)> query):\n    for a, b in query:\n        a.x = a
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("tokio::spawn("),
             "multi mode: task should emit tokio::spawn, got:\n{}", code);
+    }
+
+    // ── Derive-trait whitelist (`as Trait:` routed into `#[derive(...)]`) ─────────────
+
+    #[test]
+    fn struct_header_mixes_builtin_derive_and_user_trait() {
+        // `Hash`/`Eq` are in the built-in KNOWN_DERIVABLE_TRAITS whitelist (not part of the
+        // struct's own auto-default Debug/Clone/PartialEq) and should merge into ONE derive
+        // line; `Named` is a real Boring trait and must still get its own `impl` block with
+        // only its own method.
+        let src = "\
+trait Named:\n    req string name()\n\n\
+struct Point as Hash, Eq, Named:\n    int x\n    int y\n\n    req string name():\n        \"point\"\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("#[derive(Debug, Clone, PartialEq, Hash, Eq)]"),
+            "whitelisted names should merge into the struct's single derive line, got:\n{}", code);
+        assert!(code.contains("impl Named for Point {"),
+            "user-declared trait must still get a manual impl block, got:\n{}", code);
+        assert!(!code.contains("impl Hash for Point") && !code.contains("impl Eq for Point"),
+            "whitelisted derive names must NOT also get an impl block, got:\n{}", code);
+    }
+
+    #[test]
+    fn struct_header_derive_name_extended_via_config() {
+        // A project-declared name (boring.toml's `[derives]`, threaded via
+        // `TranspileConfig::known_derives`) is routed exactly like a built-in one.
+        let src = "struct Velocity as Component:\n    float x\n    float y\n";
+        let config = TranspileConfig { known_derives: vec!["Component".to_string()], ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("#[derive(Debug, Clone, PartialEq, Component)]"),
+            "project-registered derive name should merge into the derive line, got:\n{}", code);
+        assert!(!code.contains("impl Component for Velocity"),
+            "project-registered derive name must NOT get an impl block, got:\n{}", code);
+    }
+
+    #[test]
+    fn struct_header_derive_name_not_duplicated_against_explicit_attr() {
+        // Explicit `@derive(...)` and a whitelisted header name both naming `Clone` must not
+        // produce two `Clone` entries (which rustc would reject as a duplicate impl).
+        let src = "@derive(Debug, Clone)\nstruct Point as Clone:\n    int x\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("#[derive(Debug, Clone)]"),
+            "whitelisted name already present in the explicit @derive list must not repeat, got:\n{}", code);
+    }
+
+    #[test]
+    fn empty_derive_attr_suppresses_auto_default_alongside_header() {
+        // An explicit `@derive()` (empty args) still counts as "has_derive" — it disables
+        // the struct's auto-default Debug/Clone/PartialEq entirely, while a header `as
+        // Trait, ...:` list still routes its whitelisted names into the (now otherwise
+        // empty) derive line. This is the intended way to combine `as Trait:` syntax with
+        // an exact, non-broadened derive set (no accidental Clone/PartialEq) — see
+        // docs/book.md's "derive-trait whitelist" section.
+        let src = "@derive()\nstruct Paddle as Component, Debug:\n    pass\n";
+        let config = TranspileConfig { known_derives: vec!["Component".to_string()], ..TranspileConfig::default() };
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("#[derive(Component, Debug)]"),
+            "empty @derive() should suppress the auto-default entirely, leaving only the \
+             header's whitelisted names, got:\n{}", code);
+        assert!(!code.contains("impl Component for Paddle"),
+            "Component must still be routed to derive, not a manual impl, got:\n{}", code);
+    }
+
+    #[test]
+    fn enum_header_derive_name_merges_as_extra_derive_line() {
+        // A non-unit enum's auto-default is only Debug/Clone/PartialEq (unlike the
+        // unit-only-variants case, which already includes Hash/Eq/Copy) — `Hash` here is
+        // genuinely new and must appear in its own extra `#[derive(...)]` line.
+        let src = "enum Shape as Hash:\n    Circle(int)\n    Square(int, int)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("#[derive(Debug, Clone, PartialEq)]"),
+            "existing auto-derive line should be untouched, got:\n{}", code);
+        assert!(code.contains("#[derive(Hash)]"),
+            "whitelisted enum header name not already covered by the auto-derive line \
+             should get its own extra #[derive(...)] line, got:\n{}", code);
+    }
+
+    #[test]
+    fn ext_block_rejects_whitelisted_derive_name() {
+        // Rust can't retroactively attach #[derive(...)] to a type defined elsewhere — an
+        // `ext ... as <whitelisted>:` must be a hard transpile error, not silently emit
+        // `impl <Trait> for X { <every ext method> }`.
+        let src = "\
+struct Foo:\n    int x\n\n\
+ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
+        let tokens = crate::lexer::lex(src).expect("lex error");
+        let program = crate::parser::parse(tokens).expect("parse error");
+        let out = transpile_with_config(&program, TranspileConfig::default());
+        assert!(!out.errors.is_empty(), "expected a transpile error for 'ext Foo as Debug:'");
+        assert!(out.errors.iter().any(|e| e.message.contains("derive macro")),
+            "error should explain Debug is a derive macro, got: {:?}", out.errors);
+        assert!(!out.code.contains("impl Debug for Foo"),
+            "must not emit an impl block for a derive-macro name via ext, got:\n{}", out.code);
     }
 }
