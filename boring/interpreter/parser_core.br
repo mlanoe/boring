@@ -36,9 +36,6 @@ struct Parser:
             return self.advance()
         throw "expected {token_kind_name(k)}, got {token_kind_name(self.peek())}"
 
-    req bool at_end():
-        self.peek() == TokenKind.Eof
-
     req int current_line():
         self.tokens[self.pos].line
 
@@ -1647,9 +1644,6 @@ def LetStmt make_let_stmt(bool mutable, bool is_pub, bool is_static, string name
 def Param make_param(string name, Type? ty, bool mutable):
     Param(name= name, ty= ty, mutable= mutable, owned= false, variadic= false, default= nil, line= 0)
 
-def FieldDecl make_field(string name, Type ty, bool mutable, Expr? default, int line):
-    FieldDecl(name= name, is_pub= false, ty= ty, mutable= mutable, is_transient= false, default= default, line= line)
-
 def (ThrowsTask, ClosureBody) infer_throws_task(ClosureBody body):
     var bool can_throw = false
     var bool is_task = false
@@ -1792,9 +1786,6 @@ def WithStmt make_with_stmt([string] names, [Stmt] body, int line):
 def MatchStmt make_match_stmt(Expr subject, [MatchArm] arms, int line):
     MatchStmt(subject= subject, arms= arms, line= line)
 
-def LoopStmt make_loop_stmt([Stmt] body, int line):
-    LoopStmt(body= body, line= line)
-
 def LetDestructureStmt make_let_destructure_stmt(bool mutable, [DestructureBinding] bindings, Expr value, int line):
     LetDestructureStmt(mutable= mutable, bindings= bindings, value= value, line= line)
 
@@ -1931,9 +1922,6 @@ def string int_to_string(int n):
 def string string_trim(string s):
     s.trim()
 
-def string string(Value v):
-    val_to_string(v)
-
 def Type type_named(string name):
     Type.Named(name)
 
@@ -1941,12 +1929,6 @@ static let int MAX_EXPR_DEPTH = 200
 
 def TryStmt make_try_stmt([Stmt] body, [CatchClause] catch_clauses, int line):
     TryStmt(body= body, catch_clauses= catch_clauses, line= line)
-
-def [Arg] map_args([Expr] exprs):
-    var result = []
-    for e in exprs:
-        result.push(make_arg(nil, e, false, false))
-    result
 
 def [Param] elems_to_params([Expr] elems, int line):
     var result = []
@@ -1963,19 +1945,6 @@ def [Stmt] unwrap_block_or_wrap(Expr expr):
     match expr.kind:
         ExprKind.Block(stmts): stmts
         _: [stmt_expr(expr, expr.line)]
-
-def string? shorthand_binop_from_peek(mut Parser p):
-    let k = parser_peek_kind(p)
-    match k:
-        "PlusEq": "Plus"
-        "MinusEq": "Minus"
-        "StarEq": "Star"
-        "SlashEq": "Slash"
-        "PercentEq": "Percent"
-        "AmpersandEq": "Ampersand"
-        "PipeEq": "Pipe"
-        "CaretEq": "Caret"
-        _: nil
 
 # Binary-operator continuation for `:field op expr` colon closures, e.g. `:length > 3`.
 def string? colon_closure_binop_from_peek(mut Parser p):

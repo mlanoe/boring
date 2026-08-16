@@ -7,7 +7,6 @@ enum Signal:
     BreakSignal(Value val)
     ContinueSignal
     ThrowSignal(Value error)
-    ErrorSignal(string message, int line)
     YieldSignal(Value val, int line)
 
 # ─── Binding ──────────────────────────────────────────────────────────────────
@@ -46,16 +45,12 @@ struct ObjectInner:
             i = i + 1
         self.fields.push((name, val))
 
-struct TypeRef:
-    string name
-
 # ─── Value ────────────────────────────────────────────────────────────────────
 
 enum Value:
     Nil
     Void
     Uninitialized
-    Moved(string name)
     Bool(bool v)
     Int(int n)
     Uint(uint n)
@@ -94,14 +89,12 @@ enum Value:
     Labeled(string label, Value val)
     StructDef(string name)
     EnumDef(string name)
-    KernelHandle(Value result)
 
     req string type_name():
         match self:
             Value.Nil: "nil"
             Value.Void: "void"
             Value.Uninitialized: "uninitialized"
-            Value.Moved(_): "moved"
             Value.Bool(_): "bool"
             Value.Int(_): "int"
             Value.Uint(_): "uint"
@@ -133,28 +126,6 @@ enum Value:
             Value.Labeled(_, _): "labeled"
             Value.StructDef(n): "struct:{n}"
             Value.EnumDef(n): "enum:{n}"
-            Value.KernelHandle(_): "kernel-handle"
-
-bool is_copy_value(Value v):
-    match v:
-        Value.Bool(_): true
-        Value.Int(_): true
-        Value.Uint(_): true
-        Value.Uint8(_): true
-        Value.Int8(_): true
-        Value.Int16(_): true
-        Value.Int32(_): true
-        Value.Int64(_): true
-        Value.Int128(_): true
-        Value.Uint16(_): true
-        Value.Uint32(_): true
-        Value.Uint64(_): true
-        Value.Uint128(_): true
-        Value.Float32(_): true
-        Value.Float64(_): true
-        Value.Nil: true
-        Value.Void: true
-        _: false
 
 # ─── Env ──────────────────────────────────────────────────────────────────────
 
@@ -162,10 +133,6 @@ struct Env:
     var {string=Value} vars
     {string} mutable_vars
     {string} lazy_vars
-    {string} owned_collections
-    {string} task_safe_vars
-    {string} owned_vars
-    {string} shared_bindings
     Env'actor? parent
 
     req Value? get(string name):
@@ -230,11 +197,6 @@ struct Env:
         self.vars.set(name, value)
         self.mutable_vars.add(name)
 
-    def void define_shared_mut(string name, Value value):
-        self.vars.set(name, value)
-        self.mutable_vars.add(name)
-        self.shared_bindings.add(name)
-
     def bool force_set(string name, Value value):
         if self.vars.has(name):
             self.vars.set(name, value)
@@ -254,58 +216,11 @@ struct Env:
             else:
                 true
 
-    req bool is_shared(string name):
-        if self.vars.has(name):
-            self.shared_bindings.contains(name)
-        else:
-            if let p = self.parent:
-                p.is_shared(name)
-            else:
-                false
-
-    req bool is_task_safe_var(string name):
-        if self.task_safe_vars.contains(name):
-            true
-        else:
-            if let p = self.parent:
-                p.is_task_safe_var(name)
-            else:
-                false
-
-    req bool is_owned_collection(string name):
-        if self.owned_collections.contains(name):
-            true
-        else:
-            if let p = self.parent:
-                p.is_owned_collection(name)
-            else:
-                false
-
-    def void invalidate(string name):
-        if self.vars.has(name):
-            self.vars.remove(name)
-            self.mutable_vars.remove(name)
-            self.lazy_vars.remove(name)
-            self.owned_collections.remove(name)
-            self.task_safe_vars.remove(name)
-            self.owned_vars.remove(name)
-            self.shared_bindings.remove(name)
-        else:
-            if let p = self.parent:
-                p.invalidate(name)
-
     req Env'actor? parent_opt():
         if let p = self.parent:
             p
         else:
             nil
-
-    req [string] all_names():
-        var names = self.vars.keys()
-        if let p = self.parent:
-            for n in p.all_names():
-                names.push(n)
-        names
 
 # ─── new_env ──────────────────────────────────────────────────────────────────
 
@@ -314,10 +229,6 @@ def Env'actor new_env(Env? parent):
         vars = {=},
         mutable_vars = {},
         lazy_vars = {},
-        owned_collections = {},
-        task_safe_vars = {},
-        owned_vars = {},
-        shared_bindings = {},
         parent = parent
     )
     e

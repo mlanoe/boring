@@ -696,16 +696,6 @@ def Signal? exec_match_stmt(mut Interpreter interp, MatchStmt s):
 
 # ─── match_pattern ────────────────────────────────────────────────────────────
 
-def Value expr_to_value_literal(Expr expr):
-    match expr.kind:
-        ExprKind.Int(n): Value.Int(n)
-        ExprKind.Float(f): Value.Float64(f)
-        ExprKind.Str(s): Value.Str(s)
-        ExprKind.Bool(b): Value.Bool(b)
-        ExprKind.Nil: Value.Nil
-        ExprKind.Void: Value.Nil
-        _: Value.Nil
-
 # Looks up the declared EnumVariant for a runtime EnumVariant value's (type, variant)
 # pair, so match_pattern can tell whether a given field position was declared `mut Type`
 # (docs/mut-type-modifier.md, `VariantField.is_mut`) and bind it content-mutable
@@ -890,14 +880,7 @@ def Signal? exec_kernel_block(mut Interpreter interp, [Stmt] stmts):
                 if interp.has_pending_throw:
                     result = ThrowSignal(interp.take_pending_throw())
                 else:
-                    # If the call returned a KernelHandle, write the merged
-                    # result back to the variable that holds the kernel object.
-                    match val:
-                        Value.KernelHandle(merged):
-                            let var_name = kernel_expr_var_name(expr)
-                            if let vname = var_name:
-                                interp.current_env.force_set(vname, merged)
-                        _: nil
+                    nil
             _:
                 let sig = exec_stmt(interp, stmt)
                 if sig != nil:
@@ -1143,19 +1126,6 @@ def string value_type_name(Value val):
         Labeled(_, _): "labeled"
         StructDef(n): "struct:{n}"
         EnumDef(n): "enum:{n}"
-        KernelHandle(_): "kernel-handle"
-        Moved(_): "moved"
-
-def string value_to_string(Value val):
-    match val:
-        Nil: "nil"
-        Void: ""
-        Bool(b): if b: "true" else: "false"
-        Int(n): "{n}"
-        Float32(f): "{f}"
-        Float64(f): "{f}"
-        Str(s): s
-        _: value_type_name(val)
 
 def bool value_equals(Value a, Value b):
     match a:
@@ -1210,78 +1180,3 @@ def bool value_equals(Value a, Value b):
                 _: false
         _: false
 
-def Value value_add(Value a, Value b):
-    match a:
-        Int(x):
-            match b:
-                Int(y): Int(x + y)
-                _: throw "type error in +="
-        Float64(x):
-            match b:
-                Float64(y): Float64(x + y)
-                _: throw "type error in +="
-        Float32(x):
-            match b:
-                Float32(y): Float32(x + y)
-                _: throw "type error in +="
-        Str(x):
-            match b:
-                Str(y): Str("{x}{y}")
-                _: throw "type error in +="
-        _: throw "type error in +="
-
-def Value value_sub(Value a, Value b):
-    match a:
-        Int(x):
-            match b:
-                Int(y): Int(x - y)
-                _: throw "type error in -="
-        Float64(x):
-            match b:
-                Float64(y): Float64(x - y)
-                _: throw "type error in -="
-        Float32(x):
-            match b:
-                Float32(y): Float32(x - y)
-                _: throw "type error in -="
-        _: throw "type error in -="
-
-def Value value_mul(Value a, Value b):
-    match a:
-        Int(x):
-            match b:
-                Int(y): Int(x * y)
-                _: throw "type error in *="
-        Float64(x):
-            match b:
-                Float64(y): Float64(x * y)
-                _: throw "type error in *="
-        Float32(x):
-            match b:
-                Float32(y): Float32(x * y)
-                _: throw "type error in *="
-        _: throw "type error in *="
-
-def Value value_div(Value a, Value b):
-    match a:
-        Int(x):
-            match b:
-                Int(y): Int(x / y)
-                _: throw "type error in /="
-        Float64(x):
-            match b:
-                Float64(y): Float64(x / y)
-                _: throw "type error in /="
-        Float32(x):
-            match b:
-                Float32(y): Float32(x / y)
-                _: throw "type error in /="
-        _: throw "type error in /="
-
-def Value value_mod(Value a, Value b):
-    match a:
-        Int(x):
-            match b:
-                Int(y): Int(x % y)
-                _: throw "type error in %="
-        _: throw "type error in %="

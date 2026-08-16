@@ -2,9 +2,6 @@
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def string lex_ident_chars(string first, [string] chars, int pos):
-    throw "use the Lexer method instead"
-
 def int hex_digit_val(string c):
     if c == "0": 0
     elif c == "1": 1
@@ -55,9 +52,6 @@ def int measure_indent(string line):
     if spaces > 0 and tabs > 0:
         throw "inconsistent indentation (mixed tabs and spaces)"
     return spaces + tabs * 4
-
-def int comment_start_index([string] chars):
-    throw "use the Lexer method instead"
 
 # ── Preprocess triple strings ────────────────────────────────────────────────
 
@@ -229,29 +223,6 @@ struct Lexer:
 
     req bool at_end():
         self.pos >= self.chars.length
-
-    req string? peek_char():
-        if self.pos < self.chars.length:
-            self.chars[self.pos]
-        else:
-            nil
-
-    req string? peek_char_at(int offset):
-        let idx = self.pos + offset
-        if idx < self.chars.length:
-            self.chars[idx]
-        else:
-            nil
-
-    def string advance():
-        let ch = self.chars[self.pos]
-        self.pos += 1
-        if ch == "\n":
-            self.line += 1
-            self.col = 1
-        else:
-            self.col += 1
-        return ch
 
     req bool match_char(string expected):
         if self.pos < self.chars.length and self.chars[self.pos] == expected:

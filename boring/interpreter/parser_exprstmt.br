@@ -819,9 +819,6 @@ def Expr parse_primary(mut Parser p) throws:
         return make_var_expr("wait", line)
     throw "unexpected token in expression: {parser_peek_debug(p)}"
 
-def [Arg] parse_arg_list(mut Parser p) throws:
-    parse_call_args(p)
-
 # `field: expr` labeled args parse as a disguised single-param closure (see
 # `parse_arg`'s note) — matches the check `emit_constructor_inner` (the Rust
 # transpiler) makes when deciding whether a call is "all named fields".
@@ -1659,17 +1656,6 @@ def TryStmt parse_try_stmt(mut Parser p) throws:
         else:
             break
     make_try_stmt(body, catch_clauses, line)
-
-def Stmt parse_print_stmt(mut Parser p) throws:
-    let line = parser_line(p)
-    parser_expect(p, "Print")
-    var args = []
-    while not parser_is_newline(p) and not parser_check(p, "Eof"):
-        args.push(parse_or(p))
-        if not parser_eat(p, "Comma"):
-            break
-    parser_expect_newline_soft(p)
-    stmt_expr(make_call(make_var_expr("print", line), map_args(args), line), line)
 
 def [Stmt] parse_else_body_stmts(mut Parser p) throws:
     parser_eat(p, "Colon")
