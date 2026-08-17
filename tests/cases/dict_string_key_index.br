@@ -1,0 +1,68 @@
+# Regression test: `dict[key]` indexing (read via `else`, write via `=`) with a
+# non-integer (string) key, for every shape the transpiler dispatches
+# differently:
+#   - a `{string=int}` function PARAMETER (both `mut` and `var`)
+#   - a `{string=int}` struct field accessed via IMPLICIT self (no `self.`
+#     prefix) inside a `req`/`def` method
+#
+# Two separate transpiler bugs, both only visible in the `--emit-rust` output
+# (never caught by `boring run`'s untyped interpreter):
+#
+# Bug A — `dict[key]` always cast the key `as usize` (correct for `[T]`/Vec,
+# invalid for a `HashMap<Arc<str>, _>` key) whenever the dict-typed receiver
+# wasn't recognized as a dict. `dict_vars` (the set the transpiler consults to
+# tell a dict apart from an array) was populated only from local `let`/`var`
+# declarations (see emit_let.rs) -- never from function PARAMETERS -- so a
+# dict-typed parameter fell through to the Vec-shaped `(key) as usize` path
+# and produced invalid Rust (`(id) as usize` where `id: Arc<str>` has no such
+# cast). Separately, `expr_is_dict`/`is_dict_field`'s struct-field lookup
+# matched `Type::Dict(..)` directly, missing every `mut`/`var mut` dict field
+# -- `var mut {K=V} field` wraps the field's type in `Type::Mut(..)` at parse
+# time (`wrap_type_mut`), so the field's `table: HashMap<K, V>` was invisible
+# to it and the dict field was (wrongly) treated as an array-like receiver too.
+#
+# Bug B — `table[id] = v` inside a struct method with `table` referenced via
+# IMPLICIT self (no explicit `self.` prefix) dropped the `self.` prefix
+# entirely on the assignment target: `table[(id) as usize] = v.clone();` --
+# `table` is not a local in that scope, so this doesn't compile ("cannot find
+# value `table`"). The read path (`emit_expr`'s `ExprKind::Var` arm) already
+# resolved implicit self correctly; the index-assignment-target path
+# (`emit_expr_assign`'s `ExprKind::Index` handling) was a separate/duplicate
+# resolution that was never taught to check `self_type`/`struct_fields` the
+# way the read path was.
+#
+# See src/transpiler/emit_top.rs (dict_vars now seeded from params),
+# src/transpiler/emit_expr.rs (`.without_mut()` on the struct-field Dict
+# checks, plus the new implicit-self branches in `emit_expr_assign`), and
+# src/transpiler/emit_methods.rs (`expr_is_dict`'s `.without_mut()`).
+
+# ── Free function, `var` param (changes visible at the call site) ───────────
+def set_in(var {string=int} table, string k, int v):
+    table[k] = v
+
+def int get_in(var {string=int} table, string k):
+    table[k] else -1
+
+var {string=int} scores = {=}
+set_in(scores, "alice", 10)
+set_in(scores, "bob", 20)
+print get_in(scores, "alice")
+print get_in(scores, "bob")
+print get_in(scores, "carol")
+
+# ── Struct field, implicit self (no `self.` prefix) ──────────────────────────
+struct ScoreBoard:
+    var mut {string=int} table
+
+    req int get(string id):
+        table[id] else -1
+
+    def set(string id, int v):
+        table[id] = v
+
+mut board = ScoreBoard(table = {=})
+board.set("x", 100)
+board.set("y", 200)
+print board.get("x")
+print board.get("y")
+print board.get("z")

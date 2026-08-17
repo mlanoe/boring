@@ -1,12 +1,16 @@
 # GPU matrix multiplication — Boring with CUDA/Metal backend
 # 32x32 for simulation; increase to 1024x1024 for boring build --target cuda
+#
+# Uses float32 throughout (not the bare `float`/`float64` alias) — MSL has no
+# native `double`, so a `--target metal` build requires float32 buffers (same
+# reasoning as examples/saxpy.br).
 
 kernel MatrixMul:
-    let  Image<float, 32, 32>'global   a
-    let  Image<float, 32, 32>'global   b
-    mut  Image<float, 32, 32>'unified  c
+    let  [float32, width = 32, height = 32]'global   a
+    let  [float32, width = 32, height = 32]'global   b
+    mut  [float32, width = 32, height = 32]'unified  c
 
-    init(Image<float, 32, 32>'global input_a, Image<float, 32, 32>'global input_b):
+    init([float32, width = 32, height = 32]'global input_a, [float32, width = 32, height = 32]'global input_b):
         a = input_a
         b = input_b
         # c is zero-initialized automatically — no assignment needed.
@@ -14,24 +18,24 @@ kernel MatrixMul:
     def ():
         let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
         let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
-        if row < a.height() and col < a.width():
-            var float sum = 0.0
-            for i in 0..a.width():
-                sum += a.at(i, row) * b.at(col, i)
-            c.at(col, row) = sum
+        if row < a.height and col < a.width:
+            var float32 sum = 0.0
+            for i in 0..a.width:
+                sum += a[width = i, height = row] * b[width = col, height = i]
+            c[width = col, height = row] = sum
 
 let width = 32
 let size = width * width
-var [float] host_a = [float(i % 100) / 100.0 for i in 0..size]
-var [float] host_b = [float(i % 50)  / 50.0  for i in 0..size]
+var [float32] host_a = [float32(i % 100) / 100.0 for i in 0..size]
+var [float32] host_b = [float32(i % 50)  / 50.0  for i in 0..size]
 
-var k = MatrixMul(host_a, host_b)
+var k = MatrixMul(host_a.reshape(width = width, height = width), host_b.reshape(width = width, height = width))
 kernel:
     # `grid=` is passed explicitly here rather than relying on auto-inference —
-    # `boring run`'s interpreter simulation doesn't yet read a 2D `Image`
+    # `boring run`'s interpreter simulation doesn't yet read a labeled 2D array
     # field's shape when `grid=` is omitted (a known interpreter limitation;
     # `boring build`'s real generated code infers it correctly). See
-    # docs/image-volume-types.md's "Dispatch and grid sizing" section.
+    # docs/array-multidim-types.md's "GPU dispatch axis mapping" section.
     k(block = (16, 16), grid = (2, 2))
 
 # `k.c[...]` alone would read the whole result buffer back from the GPU on every
@@ -39,7 +43,14 @@ kernel:
 # `with` block materializes it exactly once instead — see
 # docs/scoped-access-blocks.md. The `'gpu'unified` qualifier is inferred here
 # from `k.c` itself being declared `'unified` above; no annotation needed.
-let c = k.c
+# `.flatten()` drops back to a plain `[float32]` first: labeled (`c[width = ...,
+# height = ...]`) indexing straight on a *fixed-shape* kernel-field alias inside
+# a `with` block isn't lowered by the interpreter yet (an "internal error:
+# labeled multi-dim array expression reached the evaluator without being
+# desugared first" — `lower_labeled_array_methods`, eval_gpu.rs, only covers
+# fixed-shape access from inside the kernel body itself, not host-side reads
+# through a `with` alias); flat indexing after `.flatten()` sidesteps it.
+let c = k.c.flatten()
 with c:
     for i in 0..10:
         for j in 0..10:

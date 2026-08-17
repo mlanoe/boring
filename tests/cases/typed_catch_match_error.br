@@ -1,0 +1,48 @@
+# Regression test: `catch TypeName:` (a typed catch on a user-defined error
+# enum, no specific `.Variant` named) followed by `match error:` dispatching
+# on the enum's variants inside the catch body.
+#
+# By the time the catch body runs, `error` has already been downcast to a
+# concrete `&TypeName` reference (see emit_flow.rs's typed-catch dispatch) —
+# it is not a `Box<dyn Error>`/`BoringError` anymore. `emit_match`'s special
+# case for a `match error:` subject used to unconditionally re-downcast via
+# `error.downcast_ref::<BoringError>()`, assuming `error` was still boxed.
+# That produced Rust that doesn't compile (E0599/E0614: no `downcast_ref` on
+# `&MyErr`, `TypeId`/`dyn BoringVal` cannot be dereferenced) — reproduces
+# identically with the builtin `Error` enum, since it's the same codegen path.
+
+enum MyErr:
+    Bad
+    Worse
+
+def check(int n) throws:
+    if n > 100:
+        throw MyErr.Worse
+    print "ok {n}"
+
+def main() throws:
+    try:
+        check(200)
+    catch MyErr:
+        match error:
+            MyErr.Bad:   print "bad"
+            MyErr.Worse: print "worse"
+            _:           print "other"
+
+    # Same pattern again with a variant that DOES match `Bad`, and with the
+    # builtin `Error` enum instead of a user-defined one.
+    try:
+        throw MyErr.Bad
+    catch MyErr:
+        match error:
+            MyErr.Bad:   print "bad"
+            MyErr.Worse: print "worse"
+            _:           print "other"
+
+    try:
+        throw Error.InvalidInput
+    catch Error:
+        match error:
+            Error.InvalidInput:  print "invalid input"
+            Error.OutOfBounds:   print "out of bounds"
+            _:                   print "other error"

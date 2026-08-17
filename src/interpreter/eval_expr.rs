@@ -447,6 +447,7 @@ impl Interpreter {
                     resized: Rc::new(RefCell::new(false)),
                     keys:    Rc::new(RefCell::new(vec![])),
                     pixels:  Rc::new(RefCell::new(vec![])),
+                    created_at: std::time::Instant::now(),
                 });
             }
             // GPU(n) — built-in GPU device handle (simulation mode).
@@ -665,6 +666,20 @@ impl Interpreter {
                         line,
                     ));
                 }
+                // `Enum.make()` — a `type def`/`type req`/`type set` factory/static
+                // method on an enum. Mirrors the `Value::Struct` branch above; see
+                // docs/known-issues-biguint-spike.md item 5. Only checked once the
+                // struct branch above and the variant-constructor path elsewhere
+                // have had their chance, so this never shadows `Enum.Variant(args)`
+                // construction (variants are matched separately, not through this
+                // `Value::EnumNamespace` arm at all).
+                if let Some(Value::EnumNamespace { name, type_methods, captured, .. }) = struct_val {
+                    let tm = type_methods.iter().find(|m| m.name == *method).cloned();
+                    if let Some(type_method) = tm {
+                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        return self.call_type_method(&name.clone(), &type_method, arg_vals, Rc::clone(&captured), line);
+                    }
+                }
             }
         }
         // Fast path: `var_name.mutatingArrayMethod(args)` on a plain local
@@ -711,7 +726,21 @@ impl Interpreter {
                             // `task` methods take Arc<Self> — not &mut self — so never count as mutating.
                             decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
                                 .unwrap_or(true)
-                        } else { true }
+                        } else {
+                            // Not a Boring-declared struct — an opaque external/RustType
+                            // object (Path, Semaphore, AtomicUsize, ...). Boring has no
+                            // method-mutability info for these (there's no `def`/`req`
+                            // declaration to consult), so don't guess "mutating" by
+                            // default: that produced false positives for every external
+                            // type whose real Rust methods take `&self` despite having
+                            // interior mutability (`Semaphore::acquire(&self)`,
+                            // `AtomicUsize::fetch_add(&self, ...)` — confirmed via
+                            // examples/todo.br). The transpiler already passes these
+                            // calls through unchecked the same way; matching that here
+                            // keeps the interpreter from being *stricter* than build for
+                            // a case it can't actually verify either way.
+                            false
+                        }
                     };
                     let is_interior_mutable = env.borrow().is_actor(binding_name);
                     // Content-mutation permission comes from the resolved *type*
@@ -753,7 +782,21 @@ impl Interpreter {
                         if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
                             decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
                                 .unwrap_or(true)
-                        } else { true }
+                        } else {
+                            // Not a Boring-declared struct — an opaque external/RustType
+                            // object (Path, Semaphore, AtomicUsize, ...). Boring has no
+                            // method-mutability info for these (there's no `def`/`req`
+                            // declaration to consult), so don't guess "mutating" by
+                            // default: that produced false positives for every external
+                            // type whose real Rust methods take `&self` despite having
+                            // interior mutability (`Semaphore::acquire(&self)`,
+                            // `AtomicUsize::fetch_add(&self, ...)` — confirmed via
+                            // examples/todo.br). The transpiler already passes these
+                            // calls through unchecked the same way; matching that here
+                            // keeps the interpreter from being *stricter* than build for
+                            // a case it can't actually verify either way.
+                            false
+                        }
                     };
                     if is_mutating {
                         if let ExprKind::Var(_recv_name) = &inner_obj.kind {
@@ -795,7 +838,21 @@ impl Interpreter {
                         if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
                             decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task)
                                 .unwrap_or(true)
-                        } else { true }
+                        } else {
+                            // Not a Boring-declared struct — an opaque external/RustType
+                            // object (Path, Semaphore, AtomicUsize, ...). Boring has no
+                            // method-mutability info for these (there's no `def`/`req`
+                            // declaration to consult), so don't guess "mutating" by
+                            // default: that produced false positives for every external
+                            // type whose real Rust methods take `&self` despite having
+                            // interior mutability (`Semaphore::acquire(&self)`,
+                            // `AtomicUsize::fetch_add(&self, ...)` — confirmed via
+                            // examples/todo.br). The transpiler already passes these
+                            // calls through unchecked the same way; matching that here
+                            // keeps the interpreter from being *stricter* than build for
+                            // a case it can't actually verify either way.
+                            false
+                        }
                     };
                     if is_mutating {
                         if let ExprKind::Var(coll_name) = &inner_obj.kind {
@@ -1080,6 +1137,12 @@ impl Interpreter {
         let len = expr.len;
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
+            // A literal that overflows `i64` but fits `u64` (see docs/known-issues-biguint-spike.md
+            // item 1) evaluates directly to a real `Uint64`, preserving its true magnitude —
+            // any subsequent `as <Type>` cast goes through the normal checked `cast_value`
+            // path from there (e.g. `18446744073709551615 as uint64` now round-trips exactly;
+            // `as uint32` correctly yields `nil`, same as any other out-of-range numeric cast).
+            ExprKind::UInt64(n) => Ok(Value::Uint64(*n)),
             ExprKind::Float(f) => Ok(Value::Float64(*f)),
             ExprKind::Str(s) => Ok(Value::Str(s.clone())),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
@@ -1166,6 +1229,17 @@ impl Interpreter {
                 match op {
                     UnaryOp::Neg => match val {
                         Value::Int(n) => Ok(Value::Int(-n)),
+                        // Sized *signed* integers are negatable, same as the
+                        // generic `Value::Int` above — see
+                        // docs/known-issues-biguint-spike.md item 7. Only the
+                        // signed family gets a case: negating an unsigned
+                        // (`Value::Uint*`) legitimately stays an error, falling
+                        // through to the catch-all arm below.
+                        Value::Int8(n) => Ok(Value::Int8(-n)),
+                        Value::Int16(n) => Ok(Value::Int16(-n)),
+                        Value::Int32(n) => Ok(Value::Int32(-n)),
+                        Value::Int64(n) => Ok(Value::Int64(-n)),
+                        Value::Int128(n) => Ok(Value::Int128(-n)),
                         Value::Float64(f) => Ok(Value::Float64(-f)),
                         Value::Float32(f) => Ok(Value::Float32(-f)),
                         Value::Object(ref inner_rc) => {
@@ -1455,9 +1529,17 @@ impl Interpreter {
             ExprKind::Range { start, end, inclusive } => {
                 let s = self.eval_expr(start, Rc::clone(&env))?;
                 let e = self.eval_expr(end, Rc::clone(&env))?;
-                match (s, e) {
-                    (Value::Int(a), Value::Int(b)) => Ok(Value::Range { start: a, end: b, inclusive: *inclusive }),
-                    (a, b) => Err(err(format!("range requires Int bounds, got {} and {}", a.type_name(), b.type_name()), line)),
+                // Accept any integer-kind bound (Int/Uint/fixed-width), not just a bare
+                // `Value::Int` on both sides — `for i in 0..count:` where `count` is a
+                // `uint` parameter (a very ordinary length/count value) used to be
+                // rejected outright here even though both sides are plainly integers;
+                // `expect_int` already normalizes every integer Value variant to i64
+                // and is the same widening every other numeric builtin here uses.
+                let s_name = s.type_name();
+                let e_name = e.type_name();
+                match (self.expect_int(s, line), self.expect_int(e, line)) {
+                    (Ok(a), Ok(b)) => Ok(Value::Range { start: a, end: b, inclusive: *inclusive }),
+                    _ => Err(err(format!("range requires Int bounds, got {} and {}", s_name, e_name), line)),
                 }
             }
 
@@ -1620,6 +1702,44 @@ impl Interpreter {
         Ok(Value::Nil)
     }
 
+    /// `if let x = expr: A else: B` evaluated as a value-producing expression.
+    /// Mirrors `exec_if_let` (src/interpreter/exec.rs) but evaluates each
+    /// chosen branch's body with `eval_block_as_expr` instead of `exec_block`,
+    /// so the branch's tail expression becomes the `if let`'s value — exactly
+    /// like `eval_if_expr` already does for a plain `if`/`else`.
+    ///
+    /// Before this, `if let` had no expression-producing form at all: only
+    /// `eval_tail_stmt`/`eval_block_as_expr`'s "is this the tail statement?"
+    /// dispatch handled `Stmt::If`/`Stmt::Match` specially, never
+    /// `Stmt::IfLet` — which silently fell through to plain `exec_stmt`
+    /// (`exec_if_let`, which returns `()`, not a value). That produced two
+    /// symptoms documented in docs/known-issues-biguint-spike.md item 6: as
+    /// the literal top-level tail statement of a function, the `then`/`else`
+    /// bodies were run via ordinary `exec_stmt`, so a bare-call tail
+    /// expression (e.g. `Foo(v = 2)`) tripped the unrelated "return value
+    /// discarded" must-use check; nested one level deeper (inside another
+    /// `if`'s body, a `match` arm, etc.), the surrounding
+    /// `eval_block_as_expr` block just kept its already-initialized `last =
+    /// Value::Nil` regardless of which branch actually ran, silently
+    /// discarding the real result.
+    pub(crate) fn eval_if_let_expr(&mut self, s: &IfLetStmt, env: EnvRef) -> Eval {
+        let child = Env::child(Rc::clone(&env));
+        if self.eval_cond_clauses(&s.clauses, &child)? {
+            return self.eval_block_as_expr(&s.then_body, child);
+        }
+        for branch in &s.elif_branches {
+            let elif_child = Env::child(Rc::clone(&env));
+            if self.eval_cond_clauses(&branch.clauses, &elif_child)? {
+                return self.eval_block_as_expr(&branch.body, elif_child);
+            }
+        }
+        if let Some(else_body) = &s.else_body {
+            let else_child = Env::child(Rc::clone(&env));
+            return self.eval_block_as_expr(else_body, else_child);
+        }
+        Ok(Value::Nil)
+    }
+
     pub(crate) fn eval_match_expr(&mut self, s: &MatchStmt, env: EnvRef) -> Eval {
         let subject = self.eval_expr(&s.subject, Rc::clone(&env))?;
         'arms: for arm in &s.arms {
@@ -1670,6 +1790,9 @@ impl Interpreter {
                     Stmt::If(s) => {
                         return self.eval_if_expr(s, Rc::clone(&env));
                     }
+                    Stmt::IfLet(s) => {
+                        return self.eval_if_let_expr(s, Rc::clone(&env));
+                    }
                     Stmt::Match(s) => {
                         return self.eval_match_expr(s, env);
                     }
@@ -1710,6 +1833,7 @@ impl Interpreter {
                 }
             }
             Stmt::If(s)    => self.eval_if_expr(s, env),
+            Stmt::IfLet(s) => self.eval_if_let_expr(s, env),
             Stmt::Match(s) => self.eval_match_expr(s, env),
             _ => {
                 self.exec_stmt(stmt, Rc::clone(&env))?;
@@ -2510,6 +2634,15 @@ impl Interpreter {
                     Some(Value::Str(s)) => Ok(Value::Str(s)),
                     _ => Ok(Value::Str(String::new())),
                 }
+            }
+            // std::sync::atomic::Atomic{Usize,Isize,U8,...,Bool} — interpreter has no
+            // real threading, so these are modeled as a single-field Object holding
+            // the current value; see `call_atomic_method` (methods.rs) for
+            // fetch_add/load/store/etc. dispatch.
+            "AtomicUsize" | "AtomicIsize" | "AtomicU8" | "AtomicU16" | "AtomicU32" | "AtomicU64"
+            | "AtomicI8" | "AtomicI16" | "AtomicI32" | "AtomicI64" | "AtomicBool" => {
+                let initial = args.into_iter().next().unwrap_or(Value::Int(0));
+                Ok(make_object(name.to_string(), vec![("value".to_string(), initial)]))
             }
             // Any other Rust type → opaque Object
             _ => Ok(make_object(name.to_string(), vec![])),

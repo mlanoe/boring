@@ -1,0 +1,54 @@
+# Regression test for docs/known-issues-biguint-spike.md item 6 — the most
+# dangerous of the four: a two-branch `if let x = expr: A else: B` used as a
+# value-producing expression that is NOT the literal, unnested tail statement
+# of a function used to silently always evaluate to `B`, even when the
+# condition was genuinely `Some(...)`. No compile error — just a silently
+# wrong runtime value. Also covers the tail-position sibling bug: the same
+# shape as the *direct* tail statement of a function used to fail with an
+# unrelated "return value discarded" error instead of working.
+int? maybe(bool ok):
+    if ok: 1 else: nil
+
+# (b) nested one level deep inside another `if`'s body — used to always
+# print "nil", even for test(true) where maybe(true) is genuinely Some(1).
+int? test(bool flag):
+    if flag:
+        if let i = maybe(true):
+            i
+        else:
+            nil
+    else:
+        nil
+
+# Nested inside a `match` arm body — same shape, confirmed separately broken
+# in the doc.
+enum K:
+    A(bool)
+
+int? test_match(K k):
+    match k:
+        A(v):
+            if let i = maybe(v):
+                i
+            else:
+                nil
+
+struct Foo:
+    int v
+
+# (a) the direct top-level tail statement of a function — used to fail to
+# compile with "return value discarded — bind it with 'let', discard with
+# '_ = f()'" pointing at the `else` branch's bare-call expression.
+Foo make(bool ok):
+    if let i = maybe(ok):
+        Foo(v = i)
+    else:
+        Foo(v = 2)
+
+def main():
+    print test(true)
+    print test(false)
+    print test_match(K.A(true))
+    print test_match(K.A(false))
+    print make(true).v
+    print make(false).v

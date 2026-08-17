@@ -1,0 +1,47 @@
+# Regression test: docs/known-issues-biguint-spike.md #11.
+#
+# A narrowing numeric `as` cast (`int128 as int64`, also `int64 as int32`)
+# used as the scrutinee of `if let`/`guard let` used to transpile its
+# *pattern* correctly (`if let Some(n) = ...` / `let Some(n) = ... else`),
+# but the right-hand side stayed a bare, infallible `(v as i64)` cast --
+# not `Option<i64>` -- which doesn't type-check against the `Some(...)`
+# pattern. A bare narrowing cast used outside `if let`/`guard let` was
+# already fine (unaffected, not touched by this fix).
+
+int64 checked_i128_to_i64(int128 v):
+    if let n = (v as int64):
+        n
+    else:
+        (0 as int64) - (1 as int64)
+
+int32 checked_i64_to_i32_guard(int64 v):
+    guard let n = (v as int32) else:
+        return (0 as int32) - (1 as int32)
+    n
+
+def run():
+    let int128 small = 42
+    let int128 i64_max = 9223372036854775807 as int128
+    let int128 too_big = i64_max + (1000 as int128)
+
+    # Fits -- if let takes the "then" branch.
+    print "{checked_i128_to_i64(small)}"
+    # Overflows int64 -- if let takes the "else" branch.
+    print "{checked_i128_to_i64(too_big)}"
+
+    let int64 small64 = 7
+    let int64 i32_max64 = 2147483647 as int64
+    let int64 too_big32 = i32_max64 + (1 as int64)
+
+    # Fits -- guard let does NOT take the early return.
+    print "{checked_i64_to_i32_guard(small64)}"
+    # Overflows int32 -- guard let DOES take the early return.
+    print "{checked_i64_to_i32_guard(too_big32)}"
+
+    # A bare narrowing cast outside if let/guard let is unaffected by this fix.
+    let int64 plain = 1000
+    let int32 truncated = plain as int32
+    print "{truncated}"
+
+def main():
+    run()

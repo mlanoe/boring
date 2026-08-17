@@ -114,3 +114,28 @@ def bool use_box_filter(NumberBox b):
 
 print "{use_box_filter(NumberBox(n = 5))}"
 print "{use_box_filter(NumberBox(n = -3))}"
+
+# Same bug class again, this time in `emit_method_call_fallback`'s arg-coercion chain
+# rather than the name-table dispatch above: `rust_method == "contains"` was checked
+# there with no `is_user_struct_receiver` guard, so a user struct's own `contains`
+# method -- even though its *name* was already correctly preserved by the
+# `is_user_struct_receiver` branch just above it -- had its arguments coerced as if it
+# were `Vec`/`HashSet::contains` (which takes `&T`), emitting `&id, &weight` against a
+# declared signature of owned `Arc<str>`/`isize` params: `expected Arc<str>, found
+# &Arc<str>`. Real `Vec`/`HashSet`/`str`/dict `.contains()` calls (tests/cases/
+# collections.br, strings.br) are unaffected -- they're dispatched by receiver type,
+# not by this fallback's name-only branch.
+struct Registry:
+    let string label
+
+    pub req bool contains(string id, int weight):
+        if label == id:
+            weight > 0
+        else:
+            false
+
+def bool use_registry_contains(Registry r, string id, int weight):
+    r.contains(id, weight)
+
+print "{use_registry_contains(Registry(label = "a"), "a", 1)}"
+print "{use_registry_contains(Registry(label = "a"), "z", 1)}"

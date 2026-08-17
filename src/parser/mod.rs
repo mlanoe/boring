@@ -1109,8 +1109,39 @@ impl Parser {
                     if let Some(tok) = self.tokens.get(i) {
                         match &tok.kind {
                             TokenKind::Ident(q) if q == "auto"   => { i += 1; qual_is_auto_or_shared = true; }
-                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap" | "actor") => { i += 1; }
-                            TokenKind::Guard => { i += 1; qual_is_auto_or_shared = true; }
+                            TokenKind::Ident(q) if matches!(q.as_str(), "const" | "stack" | "heap") => { i += 1; }
+                            // `[T]'actor` may be followed by `'task` → `[T]'actor'task`
+                            // (Arc<tokio::sync::Mutex<Vec<T>>>) — mirrors the named-type
+                            // arm above (`TokenKind::Ident(s)` case's own `"actor"` match).
+                            // This arm used to just consume `actor` and stop, leaving the
+                            // following `'task`'s tick unconsumed; since `qual_is_auto_or_shared`
+                            // was also never set for `actor` here (unlike the named-type arm),
+                            // the whole lookahead fell through and reported "not a type start"
+                            // for e.g. `var [User]'actor'task all_users = []`, which then
+                            // misparsed `var` as an inferred-type binding and choked on the
+                            // `[` where it expected the variable name (confirmed via
+                            // examples/tokio.br).
+                            TokenKind::Ident(q) if q == "actor" => {
+                                i += 1;
+                                qual_is_auto_or_shared = true;
+                                if i < self.tokens.len()
+                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
+                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                                {
+                                    i += 2; // consume `'task`
+                                }
+                            }
+                            // `[T]'guard'task` — same reasoning as `'actor'task` above.
+                            TokenKind::Guard => {
+                                i += 1;
+                                qual_is_auto_or_shared = true;
+                                if i < self.tokens.len()
+                                    && matches!(self.tokens[i].kind, TokenKind::Tick)
+                                    && matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Task))
+                                {
+                                    i += 2;
+                                }
+                            }
                             TokenKind::Ident(q) if q == "weak" => { i += 1; }
                             TokenKind::Task => { i += 1; qual_is_auto_or_shared = true; }
                             TokenKind::New => { i += 1; }
@@ -1774,12 +1805,12 @@ impl Parser {
         if self.check(&TokenKind::Pass) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line, col });
+            return Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], type_methods: vec![], attrs, line, col });
         }
         if self.check(&TokenKind::Native) {
             self.advance();
             self.expect_newline_soft();
-            return Ok(EnumDecl { name, is_pub, is_native: true, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], attrs, line, col });
+            return Ok(EnumDecl { name, is_pub, is_native: true, type_params, protocols, variants: vec![], methods: vec![], setters: vec![], conversions: vec![], type_methods: vec![], attrs, line, col });
         }
         self.expect_newline()?;
         self.expect(&TokenKind::Indent)?;
@@ -1787,6 +1818,7 @@ impl Parser {
         let mut methods = Vec::new();
         let mut setters = Vec::new();
         let mut conversions = Vec::new();
+        let mut type_methods = Vec::new();
         loop {
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) { break; }
@@ -1809,6 +1841,25 @@ impl Parser {
                 }
                 TokenKind::Set => {
                     setters.push(self.parse_set_decl(false)?);
+                }
+                // `type def`/`type req`/`type set` — type-level factory/static
+                // methods, same production `struct` bodies already use
+                // (`parse_type_member`). See docs/known-issues-biguint-spike.md
+                // item 5. `type var`/`type let` (associated type-level
+                // variables) are not yet supported on enums — `parse_type_member`
+                // can still return that variant, so reject it with a clear
+                // error rather than silently dropping it.
+                TokenKind::Type => {
+                    match self.parse_type_member(false)? {
+                        TypeMemberKind::Method(m) => type_methods.push(m),
+                        TypeMemberKind::Var(v) => return Err(ParseError::Generic {
+                            msg: format!(
+                                "type var/let ('{}') is not yet supported inside an enum body — only type def/req/set are",
+                                v.name
+                            ),
+                            line: v.line, col: v.col, len: 1,
+                        }),
+                    }
                 }
                 TokenKind::Pub => {
                     let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
@@ -1834,9 +1885,21 @@ impl Parser {
                     } else if matches!(next, Some(TokenKind::As)) {
                         // parse_as_decl eats `pub` itself
                         conversions.push(self.parse_as_decl()?);
+                    } else if matches!(next, Some(TokenKind::Type)) {
+                        self.advance(); // consume `pub`
+                        match self.parse_type_member(true)? {
+                            TypeMemberKind::Method(m) => type_methods.push(m),
+                            TypeMemberKind::Var(v) => return Err(ParseError::Generic {
+                                msg: format!(
+                                    "type var/let ('{}') is not yet supported inside an enum body — only type def/req/set are",
+                                    v.name
+                                ),
+                                line: v.line, col: v.col, len: 1,
+                            }),
+                        }
                     } else {
                         return Err(ParseError::Generic {
-                            msg: "expected 'def', 'req', 'set', or 'as' after 'pub' in enum body".into(),
+                            msg: "expected 'def', 'req', 'set', 'type', or 'as' after 'pub' in enum body".into(),
                             line: self.line(), col: self.col(), len: self.tok_len(),
                         });
                     }
@@ -1850,7 +1913,7 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
-        Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants, methods, setters, conversions, attrs, line, col })
+        Ok(EnumDecl { name, is_pub, is_native: false, type_params, protocols, variants, methods, setters, conversions, type_methods, attrs, line, col })
     }
 
     fn parse_mod_decl(&mut self, _is_pub: bool) -> Result<ModDecl, ParseError> {

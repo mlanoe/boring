@@ -763,9 +763,16 @@ impl Interpreter {
 
         if let Some(exc_val) = outcome {
             let exc_type = exc_val.type_name().to_string();
+            // Actual variant name, when the thrown value is an enum variant — used
+            // below to disambiguate `catch EnumName.VariantA:` from a sibling
+            // `catch EnumName.VariantB:` clause on the same enum.
+            let exc_variant = match &exc_val {
+                Value::EnumVariant { variant, .. } => Some(variant.as_str()),
+                _ => None,
+            };
             let mut handled = false;
             for clause in &s.catch_clauses {
-                let matches = clause.types.is_empty()
+                let type_matches = clause.types.is_empty()
                     || clause.types.iter().any(|t| {
                         t == &exc_type
                             // `Float64` is accepted as a spelling of `Float` here —
@@ -776,6 +783,16 @@ impl Interpreter {
                             // §2 — float/Float/float64/Float64 are all Type::Float64).
                             || (exc_type == "Float" && t == "Float64")
                     });
+                // A clause naming a specific variant (`catch EnumName.Variant:`) only
+                // matches when the thrown value actually carries that variant —
+                // previously this was ignored entirely, so with several such clauses
+                // on the same enum the first one always matched regardless of which
+                // variant was thrown.
+                let matches = type_matches
+                    && clause
+                        .variant
+                        .as_deref()
+                        .is_none_or(|v| exc_variant == Some(v));
                 if matches {
                     let cenv = Env::child(Rc::clone(&env));
                     cenv.borrow_mut().define("error", exc_val.clone());
@@ -806,9 +823,17 @@ impl Interpreter {
                         return self.resolve_type(bound);
                     }
                 }
-                // Then check aliases
+                // Then check aliases — recurse (like the type_param_stack branch just
+                // above) so a chained alias (`use Score as int`, where `int` is itself
+                // a builtin alias for `Type::Int` — see `register_misc_globals`) fully
+                // resolves to the primitive, not just one level to `Named("int")`. That
+                // half-resolved `Named("int")` doesn't match `Value::Int` in
+                // `value_matches_type` (which only recognizes the real `Type::Int`
+                // variant, not an arbitrary `Named` string), so `let Score top = 100`
+                // failed with a bogus "cannot assign Int to 'top': expected int" even
+                // though the value and the fully-resolved type agree exactly.
                 if let Some(expanded) = self.aliases.get(name) {
-                    expanded.clone()
+                    self.resolve_type(expanded)
                 } else {
                     ty.clone()
                 }
@@ -905,7 +930,38 @@ impl Interpreter {
     /// Negative integers are intentionally NOT coerced: `Int(-1)` remains `Int(-1)` so
     /// that the subsequent `value_matches_type` check fails and the caller emits a proper
     /// type error rather than silently wrapping -1 to 18446744073709551615.
+    ///
+    /// Recurses elementwise into `Value::Array`/`Value::Set` when the declared type is an
+    /// array/set of a fixed-width numeric type (`Type::Array`/`ArrayN`/`LabeledArray`/`Set`)
+    /// — an array-comprehension literal like `[0.0 for ..N]` evaluates its elements with no
+    /// knowledge of the binding's declared element type, so it always produces untyped
+    /// `Int`/`Float64` elements (`eval_expr` has no target-type hint to thread through a
+    /// comprehension). Without this, `let [float32]'gpu'unified x = [0.0 for ..N]` left every
+    /// element a `Float64`, which `value_matches_type`'s per-element check then rejected
+    /// outright (`cannot assign Array to 'x': expected [float32]'gpu'unified`) since neither
+    /// this function's scalar-only `base()` dispatch below nor `cast_value` (also scalar-only)
+    /// ever looked inside the array to narrow its elements — confirmed via examples/saxpy.br.
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
+        fn strip_wrapper(ty: &Type) -> &Type {
+            match ty {
+                Type::Qualified(inner, _) | Type::Mut(inner) => strip_wrapper(inner),
+                _ => ty,
+            }
+        }
+        match (strip_wrapper(ty), &val) {
+            (Type::Array(elem_ty), Value::Array(elems))
+                | (Type::ArrayN(elem_ty, _), Value::Array(elems))
+                | (Type::LabeledArray(elem_ty, _), Value::Array(elems)) => {
+                return Value::Array(std::rc::Rc::new(
+                    elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect(),
+                ));
+            }
+            (Type::Set(elem_ty), Value::Set(elems)) => {
+                return Value::Set(elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect());
+            }
+            _ => {}
+        }
+
         fn base(ty: &Type) -> Option<Type> {
             match ty {
                 Type::Uint | Type::Uint8
@@ -1704,6 +1760,25 @@ impl Interpreter {
                 | Value::Str(_)
                 | Value::Nil
                 | Value::Void
+                // Every sized/tagged numeric variant is Copy in the emitted Rust
+                // (i8..i128/u8..u128/f32/f64 are all Copy) exactly like the
+                // generic `Value::Int`/`Value::Uint`/`Value::Float64` above —
+                // book.md documents ALL primitive numeric types as Copy. Before
+                // this, only the generic untyped variants were exempted here,
+                // so a `let t = n` on an `int64`/`int128` (etc.) scalar was
+                // wrongly treated as a move. See
+                // docs/known-issues-biguint-spike.md item 8.
+                | Value::Int8(_)
+                | Value::Int16(_)
+                | Value::Int32(_)
+                | Value::Int64(_)
+                | Value::Int128(_)
+                | Value::Uint8(_)
+                | Value::Uint16(_)
+                | Value::Uint32(_)
+                | Value::Uint64(_)
+                | Value::Uint128(_)
+                | Value::Float32(_)
         )
     }
 

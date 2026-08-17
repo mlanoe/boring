@@ -796,6 +796,15 @@ impl Checker {
 
     fn check_enum(&mut self, e: &EnumDecl) {
         for m in &e.methods { self.check_fn(m); }
+        // `type def`/`type req`/`type set` factory/static methods — mirrors
+        // `check_struct`'s identical loop. See
+        // docs/known-issues-biguint-spike.md item 5.
+        for m in &e.type_methods {
+            self.push_scope();
+            for p in &m.params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }
+            for stmt in &m.body { self.check_stmt(stmt); }
+            self.pop_scope();
+        }
     }
 
     fn check_ext(&mut self, e: &ExtDecl) {
@@ -1220,7 +1229,7 @@ impl Checker {
             ExprKind::Var(name) => self.check_gpu_opacity(name, expr.line, expr.col),
 
             // Leaves — nothing to recurse into.
-            ExprKind::Int(_) | ExprKind::Float(_)
+            ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
             | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil
             | ExprKind::Void | ExprKind::DotIdent(_) => {}
         }

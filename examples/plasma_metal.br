@@ -34,7 +34,7 @@ kernel Plasma:
             # BGRA byte order: A=0xFF, R, G, B packed as 0xAARRGGBB little-endian
             pixels[row * dim.width + col] = 0xFF000000 | (r << 16) | (g << 8) | b
 
-var k = Plasma(Dimension(width, height))
+var mut k = Plasma(Dimension(width, height))
 
 kernel:
     loop:

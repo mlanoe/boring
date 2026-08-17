@@ -163,9 +163,11 @@ print <span class="s">"Hello, <span class="si">{name}</span>!"</span></code></pr
 <hr>
 <h2 id="2-variables-and-mutability">2. Variables and Mutability</h2>
 <p>Boring separates two orthogonal concepts:</p>
-<ul><li><strong>Rebindable</strong>: can the variable point to a different instance?</li><li><strong>Mutable</strong>: can the pointed instance be modified?</li></ul>
-<p>Four keywords control this:</p>
-<table><thead><tr><th>Keyword</th><th>Rebindable</th><th>Mutable</th></tr></thead><tbody><tr><td><code>let</code></td><td>no</td><td>no</td></tr><tr><td><code>mut</code></td><td>no</td><td>yes</td></tr><tr><td><code>var</code></td><td>yes</td><td>depends on qualifier</td></tr><tr><td><code>lazy</code></td><td>no</td><td>no — deferred init via <code>?=</code>, immutable after first assignment</td></tr></tbody></table>
+<ul><li><strong>Rebindable</strong>: can the variable point to a different instance?</li><li><strong>Mutable</strong> (content-mutable): can the pointed instance be modified — <code>def</code> calls, field writes, structural collection mutation?</li></ul>
+<p>Unlike many languages, these two axes are controlled <strong>independently</strong>, and <code>mut</code> lives in the <strong>type</strong>, not just the binding keyword — <code>mut Type</code>/<code>mut Type&amp;</code> compose the same way anywhere a type appears (a tuple slot, a struct field, an array element, a generic argument), not only at the top of a variable declaration. Four combinations exist for a local binding:</p>
+<table><thead><tr><th>Form</th><th>Rebindable</th><th>Mutable</th></tr></thead><tbody><tr><td><code>let Type a</code></td><td>no</td><td>no</td></tr><tr><td><code>mut Type a</code> (≡ <code>let mut Type a</code>)</td><td>no</td><td>yes</td></tr><tr><td><code>var Type a</code></td><td>yes</td><td>no</td></tr><tr><td><code>var mut Type a</code></td><td>yes</td><td>yes</td></tr></tbody></table>
+<p><code>lazy</code> is a fifth, orthogonal keyword: a deferred, write-once binding — no rebind, no mutation, assigned exactly once via <code>?=</code>.</p>
+<p><strong><code>mut</code> never implies <code>var</code>, and <code>var</code> never implies <code>mut</code></strong> — this is deliberate and has no exceptions (not even for <code>&#x27;actor</code>/<code>&#x27;guard</code>-qualified types, where the underlying <code>Arc&lt;Mutex&lt;T&gt;&gt;</code>/<code>Arc&lt;RwLock&lt;T&gt;&gt;</code> would technically permit mutation through the lock regardless — Boring&#x27;s own bookkeeping still gates it on the binding, matching every other type). <code>mut x = 42; x = 43</code> is a compile error — that&#x27;s the whole point of writing <code>mut</code> instead of <code>var</code> in the first place.</p>
 <h3 id="immutable-bindings--let">Immutable bindings — <code>let</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
@@ -174,37 +176,75 @@ print <span class="s">"Hello, <span class="si">{name}</span>!"</span></code></pr
 
 <span class="kw">let</span> Counter c = <span class="fn">Counter</span>()
 c.<span class="fn">get</span>()          <span class="co"># ok — req methods work on let</span>
-<span class="co"># c.inc()        # ERROR — def requires mut or var</span>
+<span class="co"># c.inc()        # ERROR — def requires the type to carry mut</span>
 <span class="co"># c = Counter()  # ERROR — let cannot be rebound</span></code></pre></div>
 <p>Fixed binding, immutable instance. Neither the binding nor the instance can change.</p>
 <h3 id="fixed-mutable-bindings--mut">Fixed mutable bindings — <code>mut</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> Counter c = <span class="fn">Counter</span>()
-c.<span class="fn">inc</span>()          <span class="co"># ok — def methods work on mut</span>
+c.<span class="fn">inc</span>()          <span class="co"># ok — def methods work: c&#x27;s type is mut Counter</span>
 c.<span class="fn">inc</span>()
 c.<span class="fn">get</span>()          <span class="co"># 2</span>
 <span class="co"># c = Counter()  # ERROR — mut cannot be rebound</span></code></pre></div>
-<p>Fixed binding, mutable instance. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that <code>var</code> prevents.</p>
+<p>Fixed binding, content-mutable instance. <code>mut Counter c</code> is exactly <code>let mut Counter c</code> — the bare keyword is sugar for that, always, with no other reading. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that <code>var</code> prevents.</p>
 <p><code>let</code> and <code>var</code> are sufficient to write correct code. <code>mut</code> is an optional precision when you know the binding will never be rebound.</p>
-<p>For structs, <code>mut</code> means non-rebindable mutable instance. For primitives (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>), since there is no concept of &quot;mutating in place&quot; (they are always copied), <code>mut</code> means rebindable — equivalent to <code>var</code>:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> a = <span class="nb">0</span>        <span class="co"># ok — rebindable scalar (equivalent to var)</span>
-<span class="kw">mut</span> <span class="kt">int</span> a = <span class="nb">0</span>    <span class="co"># ok — rebindable scalar</span>
-a = <span class="nb">1</span>            <span class="co"># ok — rebind</span>
-<span class="kw">mut</span> Counter c = <span class="fn">Counter</span>()  <span class="co"># ok — fixed binding, mutable instance</span>
-<span class="co"># c = Counter()  # still an error — mut on struct is non-rebindable</span></code></pre></div>
-<h3 id="rebindable-mutable-bindings--var">Rebindable mutable bindings — <code>var</code></h3>
+<p><strong><code>mut</code> on a scalar is a compile error</strong>, not a silent downgrade to <code>var</code>. Primitives (<code>int</code>, <code>uint</code>, <code>float</code>, <code>bool</code>) expose no <code>def</code> methods, so there&#x27;s nothing for <code>mut</code> to unlock:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># mut a = 0        # ERROR — no def methods exist on int; use `var` for a rebindable scalar</span>
+<span class="kw">var</span> a = <span class="nb">0</span>          <span class="co"># ok — rebindable scalar</span>
+a = <span class="nb">1</span>              <span class="co"># ok — rebind</span>
+<span class="kw">mut</span> Counter c = <span class="fn">Counter</span>()  <span class="co"># ok — fixed binding, content-mutable instance</span>
+<span class="co"># c = Counter()    # still an error — mut on struct is non-rebindable</span></code></pre></div>
+<p>(An earlier version of Boring treated <code>mut</code> on a scalar as equivalent to <code>var</code> — that shortcut is retired.)</p>
+<h3 id="rebindable-bindings--var">Rebindable bindings — <code>var</code></h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> Counter c = <span class="fn">Counter</span>()
-c.<span class="fn">inc</span>()          <span class="co"># ok — def methods work</span>
-c = <span class="fn">Counter</span>()    <span class="co"># ok — rebind to a fresh instance</span>
+<span class="co"># c.inc()          # ERROR — var alone does not grant content mutation</span>
+c = <span class="fn">Counter</span>()      <span class="co"># ok — rebind to a fresh instance</span>
+c.<span class="fn">get</span>()            <span class="co"># 0</span></code></pre></div>
+<p>Rebindable binding — the variable can point to a different instance. On its own, <code>var</code> grants <strong>only</strong> rebinding, not content mutation — write <code>var mut</code> for both:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> <span class="kw">mut</span> Counter c = <span class="fn">Counter</span>()
+c.<span class="fn">inc</span>()          <span class="co"># ok — both rebindable and content-mutable</span>
+c = <span class="fn">Counter</span>()    <span class="co"># ok — rebind</span>
 c.<span class="fn">get</span>()          <span class="co"># 0 — started over</span></code></pre></div>
-<p>Rebindable binding — the variable can point to a different instance. Mutability depends on the type.</p>
-<p>The difference between <code>mut</code> and <code>var</code> is visible when rebinding matters:</p>
+<p>The difference between <code>mut</code> and <code>var mut</code> is rebindability:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> Counter a = <span class="fn">Counter</span>()
-<span class="kw">var</span> Counter b = <span class="fn">Counter</span>()
+<span class="kw">var</span> <span class="kw">mut</span> Counter b = <span class="fn">Counter</span>()
 
 a.<span class="fn">inc</span>()          <span class="co"># ok</span>
 b.<span class="fn">inc</span>()          <span class="co"># ok</span>
 <span class="co"># a = Counter()  # ERROR — mut cannot be rebound</span>
-b = <span class="fn">Counter</span>()    <span class="co"># ok — var can</span></code></pre></div>
+b = <span class="fn">Counter</span>()    <span class="co"># ok — var mut can</span></code></pre></div>
+<h3 id="mut-composes-into-any-type-position"><code>mut</code> composes into any type position</h3>
+<p>Since <code>mut</code> is a modifier on the <strong>type</strong>, not a fifth binding keyword, it nests anywhere a type can appear — a tuple slot, a struct field (see <a href="#8-structs">§8</a>), an array element or dict value (see <a href="#7-collections">§7</a>), or a generic argument:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> (<span class="kw">mut</span> Point, <span class="kt">string</span>) t = (<span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>), <span class="s">"origin"</span>)   <span class="co"># slot 0 is content-mutable, slot 1 isn&#x27;t</span>
+t.<span class="nb">0.</span><span class="fn">move_to</span>(<span class="nb">1</span>, <span class="nb">1</span>)   <span class="co"># ok</span>
+<span class="co"># t.1 = &quot;elsewhere&quot; # ERROR — the tuple binding itself isn&#x27;t `var`/reassignable at that slot</span>
+
+Query&lt;(Position&amp;, <span class="kw">mut</span> Velocity&amp;)&gt;   <span class="co"># a borrowed tuple slot can carry mut too — see below</span></code></pre></div>
+<p><code>mut Type</code> (no <code>&amp;</code>) is only accepted where the checker can attach a stable, addressable permission to it — a tuple slot, a struct field, an array element, or a dict value. It&#x27;s rejected on a scalar (above), on <code>&#x27;shared</code> (no interior mutability to unlock), on a whole tuple as a block (<code>mut (T1, T2) t</code> — no in-place mutation surface for a tuple <em>as a whole</em>, only per-slot), on a <code>&#x27;weak</code> reference (nothing but <code>.upgrade()</code>/<code>.clone()</code> to call on it), and on a set element (<code>HashSet&lt;T&gt;</code> has no mutable element access in Rust).</p>
+<h3 id="the-borrow-form--mut-type">The borrow form — <code>mut Type&amp;</code></h3>
+<p><code>Type&amp;</code> is a borrow (<code>&amp;Type</code> in Rust); <code>mut Type&amp;</code> is a mutable borrow (<code>&amp;mut Type</code>). Because it&#x27;s a genuine, distinct Rust type — unlike the owned <code>mut Type</code> form above — it composes freely into tuples and generic arguments, which is exactly what a Bevy-ECS-style query needs:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Position: <span class="kw">var</span> <span class="kt">float</span> x; <span class="kw">var</span> <span class="kt">float</span> y
+<span class="kw">struct</span> Velocity: <span class="kw">var</span> <span class="kt">float</span> dx; <span class="kw">var</span> <span class="kt">float</span> dy
+
+<span class="kw">var</span> p = <span class="fn">Position</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>)
+<span class="kw">var</span> v = <span class="fn">Velocity</span>(dx = <span class="nb">1.0</span>, dy = <span class="nb">0.0</span>)
+<span class="kw">let</span> (Position&amp;, <span class="kw">mut</span> Velocity&amp;) pair = (p, v)
+pair.<span class="nb">1.</span>dx = pair.<span class="nb">1.</span>dx + <span class="nb">1.0</span>   <span class="co"># ok — slot 1 is a mutable borrow</span>
+<span class="co"># pair.0.x = 5.0              # ERROR — slot 0 is a plain (immutable) borrow</span></code></pre></div>
+<p>There&#x27;s no sigil for this (<code>Type!</code>/<code>Type*</code> were both considered and dropped) — <code>mut Type&amp;</code> stays consistent with the rest of Boring&#x27;s spelled-out-keyword surface syntax.</p>
+<h3 id="coercion-is-one-way">Coercion is one-way</h3>
+<p>A <code>mut Type</code> value carries strictly more permission than a plain <code>Type</code> value, so it&#x27;s always safe to use where only <code>Type</code> is expected, and never safe the other way:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">readOnly</span>(Point p): ...
+<span class="kw">def</span> <span class="fn">mutate</span>(<span class="kw">mut</span> Point p): p.x = <span class="nb">1</span>
+
+<span class="kw">mut</span> Point a = <span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>)
+<span class="kw">let</span> Point b = <span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>)
+
+<span class="fn">readOnly</span>(a)   <span class="co"># ok — mut Point widens to Point</span>
+<span class="fn">mutate</span>(a)     <span class="co"># ok — a already is mut Point</span>
+<span class="co"># mutate(b)   # ERROR — Point cannot be used where mut Type is required</span></code></pre></div>
+<p>Inference follows the same direction: a variable&#x27;s type inferred from another variable&#x27;s value always resolves to the <strong>plain</strong> type, never to <code>mut Type</code>, even when the source is <code>mut</code>-typed — <code>mut</code>-ness is requested explicitly at each binding site, never inherited implicitly through aliasing.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> Point b = <span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>)
+<span class="kw">let</span> a = b       <span class="co"># a&#x27;s inferred type is Point, NOT mut Point</span></code></pre></div>
 <h3 id="compound-assignment-operators">Compound assignment operators</h3>
 <p>The operators <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code> and <code>%=</code> update a variable in place. They are statements only (not expressions).</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">var</span> x = <span class="nb">10</span>
@@ -269,8 +309,9 @@ print a            <span class="co"># error: use of moved value &#x27;a&#x27;: t
 <hr>
 <h2 id="3-data-types">3. Data Types</h2>
 <h3 id="scalar-types">Scalar types</h3>
-<table><thead><tr><th>Boring</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>isize</code></td><td>pointer-width signed integer</td></tr><tr><td><code>uint</code></td><td><code>usize</code></td><td>pointer-width unsigned integer</td></tr><tr><td><code>int8</code></td><td><code>i8</code></td><td>8-bit signed integer</td></tr><tr><td><code>int16</code></td><td><code>i16</code></td><td>16-bit signed integer</td></tr><tr><td><code>int32</code></td><td><code>i32</code></td><td>32-bit signed integer</td></tr><tr><td><code>int64</code></td><td><code>i64</code></td><td>64-bit signed integer</td></tr><tr><td><code>int128</code></td><td><code>i128</code></td><td>128-bit signed integer</td></tr><tr><td><code>uint8</code></td><td><code>u8</code></td><td>8-bit unsigned integer</td></tr><tr><td><code>uint16</code></td><td><code>u16</code></td><td>16-bit unsigned integer</td></tr><tr><td><code>uint32</code></td><td><code>u32</code></td><td>32-bit unsigned integer</td></tr><tr><td><code>uint64</code></td><td><code>u64</code></td><td>64-bit unsigned integer</td></tr><tr><td><code>uint128</code></td><td><code>u128</code></td><td>128-bit unsigned integer</td></tr><tr><td><code>float</code></td><td><code>f64</code></td><td>64-bit floating-point</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code></td></tr><tr><td><code>string</code></td><td><code>&amp;str</code> (literal) / <code>Rc&lt;str&gt;</code> · <code>Arc&lt;str&gt;</code> (stored/computed)</td><td>Literals stay <code>&amp;str</code>; the transpiler promotes to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread) when the context requires it</td></tr></tbody></table>
-<p>The Rust-style spellings <code>i8</code>/<code>i16</code>/<code>i32</code>/<code>i64</code>/<code>i128</code>/<code>isize</code> and <code>u8</code>/<code>u16</code>/<code>u32</code>/<code>u64</code>/<code>u128</code>/<code>usize</code> are accepted as aliases for the corresponding Boring name (<code>i32</code> ≡ <code>int32</code>, <code>isize</code> ≡ <code>int</code>, etc.) and transpile identically.</p>
+<table><thead><tr><th>Boring</th><th>Rust</th><th>Notes</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>isize</code></td><td>pointer-width signed integer</td></tr><tr><td><code>uint</code></td><td><code>usize</code></td><td>pointer-width unsigned integer</td></tr><tr><td><code>int8</code></td><td><code>i8</code></td><td>8-bit signed integer</td></tr><tr><td><code>int16</code></td><td><code>i16</code></td><td>16-bit signed integer</td></tr><tr><td><code>int32</code></td><td><code>i32</code></td><td>32-bit signed integer</td></tr><tr><td><code>int64</code></td><td><code>i64</code></td><td>64-bit signed integer</td></tr><tr><td><code>int128</code></td><td><code>i128</code></td><td>128-bit signed integer</td></tr><tr><td><code>uint8</code></td><td><code>u8</code></td><td>8-bit unsigned integer</td></tr><tr><td><code>uint16</code></td><td><code>u16</code></td><td>16-bit unsigned integer</td></tr><tr><td><code>uint32</code></td><td><code>u32</code></td><td>32-bit unsigned integer</td></tr><tr><td><code>uint64</code></td><td><code>u64</code></td><td>64-bit unsigned integer</td></tr><tr><td><code>uint128</code></td><td><code>u128</code></td><td>128-bit unsigned integer</td></tr><tr><td><code>float32</code></td><td><code>f32</code></td><td>32-bit floating-point</td></tr><tr><td><code>float64</code></td><td><code>f64</code></td><td>64-bit floating-point (<code>float</code> is a pure alias of this — see below)</td></tr><tr><td><code>bool</code></td><td><code>bool</code></td><td><code>true</code> / <code>false</code></td></tr><tr><td><code>string</code></td><td><code>&amp;str</code> (literal) / <code>Rc&lt;str&gt;</code> · <code>Arc&lt;str&gt;</code> (stored/computed)</td><td>Literals stay <code>&amp;str</code>; the transpiler promotes to <code>Rc&lt;str&gt;</code> (single-thread) or <code>Arc&lt;str&gt;</code> (multi-thread) when the context requires it</td></tr></tbody></table>
+<p>The Rust-style spellings <code>i8</code>/<code>i16</code>/<code>i32</code>/<code>i64</code>/<code>i128</code>/<code>isize</code>, <code>u8</code>/<code>u16</code>/<code>u32</code>/<code>u64</code>/<code>u128</code>/<code>usize</code>, and <code>f32</code>/<code>f64</code> are accepted as aliases for the corresponding Boring name (<code>i32</code> ≡ <code>int32</code>, <code>isize</code> ≡ <code>int</code>, <code>f32</code> ≡ <code>float32</code>, etc.) and transpile identically.</p>
+<p><strong><code>float</code> is <code>float64</code>, not a third type.</strong> Unlike <code>int</code>/<code>uint</code> (which map to pointer-width <code>isize</code>/<code>usize</code>, independent of <code>int64</code>/<code>uint64</code>), <code>float</code> has no independent identity — write <code>float</code>, get exactly <code>float64</code>, indistinguishable at every stage after parsing. This is why the table above lists <code>float32</code>/<code>float64</code> as the two real members of the family rather than giving <code>float</code> its own row.</p>
 <h3 id="fixed-width-integers">Fixed-width integers</h3>
 <p>Each fixed-width type is a distinct type at runtime — mixing two <em>different</em> explicit fixed-width types in one expression (<code>a_uint16 + a_int32</code>) is a type error, same as Rust&#x27;s own refusal to implicitly coerce between distinct integer types. Cast explicitly instead:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> <span class="kt">uint16</span> a = <span class="nb">100</span>
@@ -281,8 +322,18 @@ print a            <span class="co"># error: use of moved value &#x27;a&#x27;: t
 <span class="kw">let</span> bigger = count + <span class="nb">1</span>     <span class="co"># fine — `1` is the flexible `int` literal kind</span></code></pre></div>
 <p>Casting to a narrower type checks the range and produces <code>nil</code> (or errors, depending on context) if the value doesn&#x27;t fit — same as the existing <code>uint8</code> behavior (<code>300 as uint8</code> is out of range).</p>
 <p><strong>GPU targets.</strong> Each GPU backend&#x27;s own numeric type system limits which widths a <code>kernel</code> struct field can use:</p>
-<table><thead><tr><th>Width</th><th><code>--target wgpu</code> (WGSL)</th><th><code>--target cuda</code> (CUDA C)</th><th><code>--target rocm</code> (HIP C++)</th><th><code>--target metal</code> (MSL)</th></tr></thead><tbody><tr><td>8-bit</td><td>not supported (compile error)</td><td>full support (<code>uint8_t</code>/<code>int8_t</code>)</td><td>full support (<code>uint8_t</code>/<code>int8_t</code>)</td><td>full support (<code>uchar</code>/<code>char</code>)</td></tr><tr><td>16-bit</td><td>not supported (compile error)</td><td>full support</td><td>full support</td><td>full support (<code>ushort</code>/<code>short</code>)</td></tr><tr><td>32-bit</td><td>full support (<code>i32</code>/<code>u32</code>)</td><td>full support</td><td>full support</td><td>full support (<code>int</code>/<code>uint</code>)</td></tr><tr><td>64-bit</td><td>not supported (compile error)</td><td>full support</td><td>full support</td><td>not supported (compile error)</td></tr><tr><td>128-bit</td><td>not supported (compile error)</td><td>supported via the non-standard <code>__int128</code> GCC/NVCC extension</td><td>supported via the non-standard <code>__int128</code> GCC/HIP-clang extension</td><td>not supported (compile error)</td></tr></tbody></table>
-<p>WGSL has no native integer type below or above 32 bits; MSL has no native 64/128-bit integer (Apple GPUs historically lack native 64-bit integer ALU ops). ROCm&#x27;s HIP C++ mirrors CUDA C&#x27;s numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support. Using an unsupported width on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data.</p>
+<table><thead><tr><th>Width</th><th><code>--target wgpu</code> (WGSL)</th><th><code>--target cuda</code> (CUDA C)</th><th><code>--target rocm</code> (HIP C++)</th><th><code>--target metal</code> (MSL)</th></tr></thead><tbody><tr><td>8-bit</td><td>not supported (compile error)</td><td>full support (<code>uint8_t</code>/<code>int8_t</code>)</td><td>full support (<code>uint8_t</code>/<code>int8_t</code>)</td><td>full support (<code>uchar</code>/<code>char</code>)</td></tr><tr><td>16-bit</td><td>not supported (compile error)</td><td>full support</td><td>full support</td><td>full support (<code>ushort</code>/<code>short</code>)</td></tr><tr><td>32-bit</td><td>full support (<code>i32</code>/<code>u32</code>)</td><td>full support</td><td>full support</td><td>full support (<code>int</code>/<code>uint</code>)</td></tr><tr><td>64-bit</td><td>not supported (compile error)</td><td>full support</td><td>full support</td><td>not supported (compile error)</td></tr><tr><td>128-bit</td><td>not supported (compile error)</td><td>supported via the non-standard <code>__int128</code> GCC/NVCC extension</td><td>supported via the non-standard <code>__int128</code> GCC/HIP-clang extension</td><td>not supported (compile error)</td></tr><tr><td>32-bit float (<code>float32</code>)</td><td>full support (native <code>f32</code>)</td><td>full support (<code>float</code>)</td><td>full support (<code>float</code>)</td><td>full support (native <code>float</code>)</td></tr><tr><td>64-bit float (<code>float64</code>/<code>float</code>)</td><td>not supported (compile error — no <code>f64</code> in WGSL at all)</td><td>full support (<code>double</code>)</td><td>full support (<code>double</code>)</td><td>not supported (compile error — MSL has no native <code>double</code>)</td></tr></tbody></table>
+<p>WGSL has no native integer type below or above 32 bits, and no 64-bit float type at all; MSL has no native 64/128-bit integer and no native <code>double</code> (Apple GPUs historically lack native 64-bit ALU ops, for both integers and floats). ROCm&#x27;s HIP C++ mirrors CUDA C&#x27;s numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support, floats included. Using an unsupported width — or <code>float64</code>/<code>float</code> on Metal or wgpu — on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data; use <code>float32</code> there instead.</p>
+<h3 id="fixed-width-floats">Fixed-width floats</h3>
+<p><code>float32</code>/<code>float64</code> follow the exact same strict-mixing rule as the fixed-width integers above — two different widths never mix implicitly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> float32 a = <span class="nb">1.0</span>
+<span class="kw">let</span> float64 b = <span class="nb">2.0</span>
+<span class="kw">let</span> c = a + b               <span class="co"># ERROR — cannot mix float32 and float64</span>
+<span class="kw">let</span> c = (a <span class="kw">as</span> float64) + b  <span class="co"># OK — explicit cast</span></code></pre></div>
+<p>An untyped float literal mixes freely with either width, resolved from context — the same precedent as an untyped int literal mixing with any fixed-width integer:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> float32 a = <span class="nb">1.0</span>
+<span class="kw">let</span> c = a + <span class="nb">3.14</span>   <span class="co"># OK — 3.14 resolves to float32 here</span></code></pre></div>
+<p><code>float</code> is <code>float64</code>&#x27;s alias (see &quot;Scalar types&quot; above), so it participates in this rule exactly as <code>float64</code> would — <code>a_float32_var + a_float_var</code> is exactly as much a type error as mixing two explicit <code>float32</code>/<code>float64</code> values.</p>
 <h3 id="integer-literals">Integer literals</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a = <span class="nb">42</span>
 <span class="kw">let</span> b = <span class="nb">-7</span></code></pre></div>
@@ -381,13 +432,34 @@ write <span class="s">"<span class="si">{}</span> / <span class="si">{}</span>"<
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> (<span class="kt">int</span>, <span class="kt">string</span>) t = (<span class="nb">0</span>, <span class="s">"hello"</span>)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> t: (isize, <span class="kw">Arc</span>&lt;str&gt;) = (<span class="nb">0i</span>size, <span class="kw">Arc</span>::<span class="fn">from</span>(<span class="s">&quot;hello&quot;</span>));</code></pre></div>
+<p>A tuple <em>as a whole</em> has no in-place mutation surface — no user-definable methods on the tuple itself — so <code>mut</code> on a typed tuple <strong>variable</strong> is rejected at check time (whether the tuple type is explicit or only inferred from a literal initializer): there is no operation <code>mut</code> on the whole tuple would unlock that <code>let</code> doesn&#x27;t already allow. <code>var</code> remains valid and meaningful — it allows reassigning <code>t</code> to a whole new tuple:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> (<span class="kt">int</span>, <span class="kt">string</span>) t = (<span class="nb">0</span>, <span class="s">"hello"</span>)   <span class="co"># fixed, read-only — fine</span>
+<span class="kw">var</span> (<span class="kt">int</span>, <span class="kt">string</span>) t = (<span class="nb">0</span>, <span class="s">"hello"</span>)   <span class="co"># reassignable — fine</span>
+t = (<span class="nb">1</span>, <span class="s">"world"</span>)
+
+<span class="co"># mut (int, string) t = (0, &quot;hello&quot;)   # ERROR — tuples have no in-place mutation</span>
+<span class="co"># mut t = (0, &quot;hello&quot;)                 # ERROR too — same rule, inferred type</span></code></pre></div>
+<p><strong>Individual slots are a different matter.</strong> <code>mut</code> composes into a tuple&#x27;s <em>element</em> positions — each slot is fixed and addressable (<code>t.0</code>, <code>t.1</code>), exactly like a struct field, so a slot&#x27;s <code>mut</code>-ness controls whether <code>def</code> can be called on whatever it holds:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point: <span class="kw">var</span> <span class="kt">int</span> x; <span class="kw">var</span> <span class="kt">int</span> y
+
+<span class="kw">let</span> (<span class="kw">mut</span> Point, <span class="kt">string</span>) t = (<span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>), <span class="s">"origin"</span>)
+t.<span class="nb">0.</span><span class="fn">move_to</span>(<span class="nb">5</span>, <span class="nb">5</span>)     <span class="co"># ok — slot 0&#x27;s type is `mut Point`</span>
+<span class="co"># t.1 = &quot;elsewhere&quot;   # ERROR — slot 1 isn&#x27;t reassignable (the binding is `let`)</span></code></pre></div>
+<p>This does not conflict with the whole-tuple rejection above — <code>mut</code> <em>before</em> the tuple&#x27;s parentheses (<code>mut (T1, T2) t</code>) governs the whole tuple and stays rejected; <code>mut</code> <em>inside</em> the parentheses (<code>(mut T1, T2) t</code>) is a different grammar position, governing one slot.</p>
 <h4 id="destructuring">Destructuring</h4>
-<p>All four forms are equivalent:</p>
+<p>Each destructured element may carry its own explicit <code>let</code>/<code>mut</code>/<code>var</code>/<code>var mut</code> keyword. An unmarked element&#x27;s default depends on whether the destructure is parenthesised:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = t                    <span class="co"># bare — a: let, b: let (bare always defaults to let)</span>
+<span class="kw">let</span> (a, b) = t                   <span class="co"># parenthesised — a: let, b: let (inherits the group&#x27;s `let`)</span>
+<span class="kw">let</span> <span class="kw">mut</span> a, b = t                 <span class="co"># bare — a: mut, b: LET — b does NOT inherit `mut`</span>
+<span class="kw">let</span> <span class="kw">mut</span> (a, b) = t                <span class="co"># parenthesised — a: mut, b: mut (both inherit the group&#x27;s `mut`)</span>
+<span class="kw">let</span> (<span class="kw">mut</span> a, b) = t                 <span class="co"># parenthesised — a: mut (explicit), b: let (inherits the group&#x27;s `let`)</span></code></pre></div>
+<p><strong>This is a real readability trap on the bare form specifically</strong>: <code>let mut a, b = t</code> reads, at a glance, like the keyword phrase governs the whole line — it doesn&#x27;t; <code>b</code> quietly defaults to plain <code>let</code>. The rule is unambiguous once learned (bare defaults to <code>let</code> unconditionally, per element, regardless of a sibling&#x27;s own keyword; parenthesised inherits the group&#x27;s own leading keyword instead) but is exactly the kind of thing worth double-checking — the compiler emits a lint warning for precisely this shape (an unmarked bare element right after a differently-keyworded one).</p>
+<p>Every statement that uses a single keyword throughout, marked or not, means exactly what it always did — only the <em>mixed</em> case above is new:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> a, b = t               <span class="co"># bare</span>
 <span class="kw">let</span> (a, b) = t             <span class="co"># parenthesised</span>
 <span class="kw">let</span> <span class="kt">int</span> a, <span class="kt">string</span> b = t    <span class="co"># bare with per-variable types</span>
 <span class="kw">let</span> (<span class="kt">int</span> a, <span class="kt">string</span> b) = t  <span class="co"># parenthesised with per-variable types</span></code></pre></div>
-<p>In the last two forms, each variable gets its own type annotation; types on one variable do <strong>not</strong> apply to the others.</p>
+<p>In these, each variable gets its own type annotation; types on one variable do <strong>not</strong> apply to the others.</p>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> (a, b) = t;   <span class="co">// types inferred from tuple</span></code></pre></div>
 <h4 id="tuple-return-type">Tuple return type</h4>
@@ -981,6 +1053,19 @@ print <span class="s">"after: <span class="si">{msg}</span>"</span>   <span clas
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> numbers: <span class="kw">Vec</span>&lt;isize&gt; = <span class="fm">vec!</span>[<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>, <span class="nb">4</span>, <span class="nb">5</span>];
 <span class="kw">let</span> empty: <span class="kw">Vec</span>&lt;isize&gt; = <span class="kw">Vec</span>::<span class="fn">new</span>();</code></pre></div>
+<h4 id="element-mutability--mut-t-vs-mut-t">Element mutability — <code>[mut T]</code> vs <code>mut [T]</code></h4>
+<p><code>mut</code> on the collection&#x27;s own type (<code>mut [Point] arr</code>) and <code>mut</code> on the <strong>element</strong> type (<code>[mut Point] arr</code>) control two independent things — see <a href="#2-variables-and-mutability">§2</a>:</p>
+<ul><li><strong><code>[mut Point] arr</code></strong> — the array itself can&#x27;t grow/shrink/reassign entries (unless also <code>mut</code>/<code>var mut</code>, see below), but every element already in it can have <code>def</code> called on it: <code>arr[0].move_to(...)</code>.</li><li><strong><code>mut [Point] arr</code></strong> — the reverse: <code>arr</code> supports structural mutation (<code>push</code>, <code>insert</code>, index-assign), but elements are plain <code>Point</code> — no <code>def</code> calls through an index read.</li><li><strong><code>mut [mut Point] arr</code></strong> — both.</li></ul>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point: <span class="kw">var</span> <span class="kt">int</span> x; <span class="kw">var</span> <span class="kt">int</span> y
+
+<span class="kw">let</span> [<span class="kw">mut</span> Point] a = [<span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>), <span class="fn">Point</span>(<span class="nb">1</span>, <span class="nb">1</span>)]
+a[<span class="nb">0</span>].x = <span class="nb">5</span>           <span class="co"># ok — element type is mut Point</span>
+a[<span class="nb">0</span>].<span class="fn">move_to</span>(<span class="nb">1</span>, <span class="nb">1</span>)   <span class="co"># ok</span>
+
+<span class="kw">let</span> [Point] b = [<span class="fn">Point</span>(<span class="nb">0</span>, <span class="nb">0</span>)]
+<span class="co"># b[0].x = 5         # ERROR — element type is plain Point, not mut Point</span>
+<span class="co"># b[0].move_to(1, 1) # ERROR — same reason</span></code></pre></div>
+<p>This is checked for a bare <code>Var</code> collection with an explicit type annotation (an inferred-type collection&#x27;s element permission isn&#x27;t tracked).</p>
 <h4 id="array-fill-and-comprehension">Array fill and comprehension</h4>
 <p>Two shorthand forms create arrays without listing every element:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> zeros  = [<span class="nb">0</span> <span class="kw">for</span> ..<span class="nb">10</span>]             <span class="co"># fill: 10 zeros</span>
@@ -1009,15 +1094,15 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <span class="kw">let</span> [<span class="kt">float</span>, width = <span class="nb">3</span>, height = <span class="nb">4</span>] b                              <span class="co"># fixed shape</span>
 
 <span class="kw">let</span> v = a[width = <span class="nb">1</span>, height = <span class="nb">2</span>]   <span class="co"># order-free — a[height = 2, width = 1] is identical</span>
-<span class="kw">let</span> w = a.<span class="fn">size</span>(.width)             <span class="co"># 3</span></code></pre></div>
+<span class="kw">let</span> w = a.width                    <span class="co"># 3 — read-only shape-query property</span></code></pre></div>
 <ul><li><code>[T, width, height]</code> (no <code>=</code>) — dynamic shape, sized at construction.</li><li><code>[T, width = W, height = H]</code> — fixed shape, compile-time sizes (<code>W</code>/<code>H</code> may</li></ul>
 <p>  be integer literals or const-generic expressions).</p>
 <ul><li>The <strong>first label declared is the fastest-varying axis</strong> in memory</li></ul>
 <p>  (row-major storage) — <code>[T, width, height]</code> and <code>[T, height, width]</code> are   different (transposed) types.</p>
 <ul><li><code>a[label = value, ...]</code> indexing requires every axis to be labeled — there</li></ul>
 <p>  is no positional form — and reads correctly regardless of the order the   labels are written in.</p>
-<ul><li><code>a.size(.label)</code> replaces a family of per-axis accessor methods with one</li></ul>
-<p>  method plus a compiler-synthesized selector per array type.</p>
+<ul><li><code>a.label</code> — each declared axis is a read-only property, same no-parens</li></ul>
+<p>  convention as <code>arr.length</code> or a struct&#x27;s <code>req</code> getter.</p>
 <ul><li><code>flat.reshape(width = W, height = H)</code> / <code>a.flatten()</code> convert to and from</li></ul>
 <p>  a plain <code>[T]</code> explicitly — never implicitly.</p>
 <p>Chained <code>for</code> clauses build one directly, one clause per axis:</p>
@@ -1050,6 +1135,7 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> scores: <span class="kw">HashMap</span>&lt;<span class="kw">Arc</span>&lt;str&gt;, isize&gt; = <span class="kw">HashMap</span>::<span class="fn">from</span>([...]); <span class="co">// literals coerced via .to_arc()</span>
 <span class="kw">let</span> empty_map: <span class="kw">HashMap</span>&lt;isize, isize&gt; = <span class="kw">HashMap</span>::<span class="fn">new</span>();</code></pre></div>
+<p><code>mut</code> on the <strong>value</strong> position — <code>{K = mut V}</code> — is the dict analogue of <code>[mut T]</code>: it controls whether <code>def</code> calls work on values fetched via <code>d[k]</code> or iteration, independent of <code>mut {K=V} d</code> (structural <code>d[k]=v</code>/insertion/removal on the dict itself). Keys never accept <code>mut</code> — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust <code>HashMap</code>.</p>
 <h4 id="dictionary-methods">Dictionary methods</h4>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>d.keys()</code></td><td><code>d.keys().cloned().collect()</code></td></tr><tr><td><code>d.values()</code></td><td><code>d.values().cloned().collect()</code></td></tr><tr><td><code>d.contains(k)</code></td><td><code>d.contains_key(&amp;k)</code></td></tr><tr><td><code>d.remove(k)</code></td><td><code>d.remove(&amp;k)</code></td></tr><tr><td><code>d.length</code></td><td><code>d.len()</code></td></tr><tr><td><code>d.isEmpty()</code></td><td><code>d.is_empty()</code></td></tr><tr><td><code>d.map((k,v): expr)</code></td><td><code>d.iter().map(|(k,v)| expr).collect()</code></td></tr><tr><td><code>d.filter((k,v): cond)</code></td><td><code>d.into_iter().filter(|(k,v)| cond).collect()</code></td></tr></tbody></table>
 <h3 id="sets--t">Sets — <code>{T}</code></h3>
@@ -1058,6 +1144,7 @@ print m.data[<span class="nb">0</span>]                       <span class="co">#
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> unique: <span class="kw">HashSet</span>&lt;isize&gt; = <span class="kw">HashSet</span>::<span class="fn">from</span>([<span class="nb">1</span>, <span class="nb">2</span>, <span class="nb">3</span>]);
 <span class="kw">let</span> empty_set: <span class="kw">HashSet</span>&lt;isize&gt; = <span class="kw">HashSet</span>::<span class="fn">new</span>();</code></pre></div>
+<p><code>{mut T}</code> (element-<code>mut</code> on a set) is rejected outright — not a Boring design choice, a hard Rust limitation: <code>HashSet&lt;T&gt;</code> deliberately exposes no mutable element access at all (no <code>iter_mut()</code>, no <code>get_mut()</code>), because mutating an element in place could change its <code>Hash</code>/<code>Eq</code> behavior and silently corrupt the set&#x27;s buckets. <code>mut {T}</code> (mutable on the <em>set itself</em> — structural <code>add</code>/<code>remove</code>) is unaffected and works normally.</p>
 <h4 id="set-methods">Set methods</h4>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>s.contains(v)</code></td><td><code>s.contains(&amp;v)</code></td></tr><tr><td><code>s.add(v)</code></td><td><code>s.insert(v)</code></td></tr><tr><td><code>s.remove(v)</code></td><td><code>s.remove(&amp;v)</code></td></tr><tr><td><code>s.length</code></td><td><code>s.len()</code></td></tr><tr><td><code>s.isEmpty()</code></td><td><code>s.is_empty()</code></td></tr></tbody></table>
 <h3 id="index--opaque-collection-cursor">Index — opaque collection cursor</h3>
@@ -1142,6 +1229,16 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
         <span class="fm">write!</span>(f, <span class="s">&quot;({}, {})&quot;</span>, <span class="kw">self</span>.x, <span class="kw">self</span>.y)
     }
 }</code></pre></div>
+<h3 id="empty-structs--pass">Empty structs — <code>pass</code></h3>
+<p>A struct with no fields and no methods uses <code>pass</code> as a placeholder body, either inline or indented — both are equivalent:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Empty: <span class="kw">pass</span>
+
+<span class="kw">struct</span> AlsoEmpty:
+    <span class="kw">pass</span>
+
+<span class="kw">let</span> e = <span class="fn">Empty</span>()</code></pre></div>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">struct</span> <span class="kt">Empty</span>;</code></pre></div>
 <h3 id="constructors">Constructors</h3>
 <p>Without an explicit <code>init</code>, structs are constructed with named fields:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> v = <span class="fn">Vec2</span>(x = <span class="nb">3.0</span>, y = <span class="nb">4.0</span>)</code></pre></div>
@@ -1180,15 +1277,28 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
     }
 }</code></pre></div>
 <h3 id="mutable-fields">Mutable fields</h3>
-<p>Fields are immutable by default. Use <code>var</code> to make a field mutable:</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
-    <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
+<p>Fields get the same four-way as local bindings (<a href="#2-variables-and-mutability">§2</a>) — <code>var</code> (reassignment, <code>self.field = x</code>) and <code>mut</code> (content mutation, <code>self.field.method()</code>) are independent axes, not one flag:</p>
+<table><thead><tr><th>Field</th><th>Reassignable (<code>self.field = x</code>)</th><th>Content-mutable (<code>self.field.method()</code>)</th></tr></thead><tbody><tr><td><code>let Point p</code> (default, no keyword)</td><td>no</td><td>no</td></tr><tr><td><code>mut Point p</code> (≡ <code>let mut Point p</code>)</td><td>no</td><td>yes</td></tr><tr><td><code>var Point p</code></td><td>yes</td><td>no</td></tr><tr><td><code>var mut Point p</code></td><td>yes</td><td>yes</td></tr></tbody></table>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Inner:
+    <span class="kw">var</span> <span class="kt">int</span> n = <span class="nb">0</span>
+    <span class="kw">def</span> <span class="fn">bump</span>(): n += <span class="nb">1</span>
 
-    <span class="kw">def</span> <span class="fn">inc</span>():
-        <span class="kw">self</span>.value += <span class="nb">1</span></code></pre></div>
+<span class="kw">struct</span> Outer:
+    <span class="kw">mut</span> Inner a       <span class="co"># content-mutable only</span>
+    <span class="kw">var</span> <span class="kw">mut</span> Inner b    <span class="co"># both</span>
+    <span class="kw">let</span> Inner c         <span class="co"># neither</span>
+
+<span class="kw">mut</span> o = <span class="fn">Outer</span>(a = <span class="fn">Inner</span>(), b = <span class="fn">Inner</span>(), c = <span class="fn">Inner</span>())
+o.a.<span class="fn">bump</span>()     <span class="co"># ok — a&#x27;s type is mut Inner</span>
+o.b.<span class="fn">bump</span>()     <span class="co"># ok — b&#x27;s type is mut Inner too (var mut includes mut)</span>
+o.b = <span class="fn">Inner</span>()  <span class="co"># ok — b is reassignable (var)</span>
+<span class="co"># o.a = Inner() # ERROR — a isn&#x27;t reassignable</span>
+<span class="co"># o.c.bump()    # ERROR — c grants neither</span></code></pre></div>
+<p>A field&#x27;s <em>own</em> <code>mut</code>/<code>var</code> only matters once the containing binding (<code>o</code> above) already permits reaching it at all — <code>o</code> itself still needs <code>mut</code>/<code>var mut</code> to read or write <strong>any</strong> field this way, exactly like calling a method on <code>o</code> directly would; a plain <code>let o</code> or <code>var o</code> (without the second <code>mut</code>) blocks every field access above regardless of each field&#x27;s own keyword.</p>
+<p>Scalar (primitive) fields work the same as scalar local bindings: <code>mut</code> on one is a checker error (nothing to unlock), so a plain non-struct field only ever needs <code>var</code> if it should be reassignable.</p>
 <h3 id="req-vs-def"><code>req</code> vs <code>def</code></h3>
-<p><code>req</code> (&quot;request&quot;) declares a <strong>read-only</strong> method — it does not mutate the object and can be called on both <code>let</code> and <code>var</code> bindings. <code>def</code> declares a <strong>mutating</strong> method — it may modify the object and can only be called on a <code>var</code> binding.</p>
-<table><thead><tr><th>Boring keyword</th><th>Mutates <code>self</code></th><th>Callable on</th><th>Rust receiver</th></tr></thead><tbody><tr><td><code>req</code></td><td>no</td><td><code>let</code> + <code>var</code></td><td><code>&amp;self</code></td></tr><tr><td><code>def</code></td><td>yes</td><td><code>var</code> only</td><td><code>&amp;mut self</code></td></tr></tbody></table>
+<p><code>req</code> (&quot;request&quot;) declares a <strong>read-only</strong> method — it does not mutate the object and can be called on any receiver. <code>def</code> declares a <strong>mutating</strong> method — it may modify the object and can only be called on a receiver whose <em>type</em> carries <code>mut</code> (<code>mut Type</code>/<code>var mut Type</code> — plain <code>var Type</code> is <strong>not</strong> enough on its own).</p>
+<table><thead><tr><th>Boring keyword</th><th>Mutates <code>self</code></th><th>Callable on</th><th>Rust receiver</th></tr></thead><tbody><tr><td><code>req</code></td><td>no</td><td>any binding</td><td><code>&amp;self</code></td></tr><tr><td><code>def</code></td><td>yes</td><td><code>mut</code>/<code>var mut</code> only</td><td><code>&amp;mut self</code></td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
@@ -1199,12 +1309,15 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
         <span class="kw">self</span>.value += <span class="nb">1</span>
 
 <span class="kw">let</span> c = <span class="fn">Counter</span>()
-c.<span class="fn">get</span>()    <span class="co"># ok — req on let binding</span>
-<span class="co"># c.inc()  # error — def requires var</span>
+c.<span class="fn">get</span>()    <span class="co"># ok — req on any binding</span>
+<span class="co"># c.inc()  # error — def requires the type to carry mut</span>
 
 <span class="kw">var</span> mc = <span class="fn">Counter</span>()
-mc.<span class="fn">inc</span>()   <span class="co"># ok — def on var binding</span>
-mc.<span class="fn">get</span>()   <span class="co"># ok — req works on var too</span></code></pre></div>
+<span class="co"># mc.inc()   # error — var alone does not grant content mutation</span>
+
+<span class="kw">var</span> <span class="kw">mut</span> mc2 = <span class="fn">Counter</span>()
+mc2.<span class="fn">inc</span>()   <span class="co"># ok — var mut grants both</span>
+mc2.<span class="fn">get</span>()   <span class="co"># ok — req works on any binding</span></code></pre></div>
 <p><strong><code>req</code> and <code>def</code> for top-level functions</strong></p>
 <p>Both keywords are also valid for top-level free functions (outside any struct). At the top level there is no <code>self</code>, so both produce the same <code>fn</code> in Rust — the distinction is <strong>documentation intent</strong>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> <span class="kt">bool</span> <span class="fn">positive</span>(<span class="kt">int</span> n): n &gt; <span class="nb">0</span>        <span class="co"># pure, no side effects — use req</span>
@@ -1254,7 +1367,7 @@ mc.<span class="fn">get</span>()   <span class="co"># ok — req works on var to
     <span class="kw">set</span> <span class="fn">fahrenheit</span>(<span class="kt">float</span> f):
         <span class="kw">self</span>.celsius = (f - <span class="nb">32.0</span>) * <span class="nb">5.0</span> / <span class="nb">9.0</span>
 
-<span class="kw">var</span> t = <span class="fn">Temperature</span>(celsius = <span class="nb">0.0</span>)
+<span class="kw">var</span> <span class="kw">mut</span> t = <span class="fn">Temperature</span>(celsius = <span class="nb">0.0</span>)   <span class="co"># a setter call content-mutates — needs mut/var mut</span>
 print <span class="s">"<span class="si">{t.fahrenheit}</span>"</span>         <span class="co"># 32.0  — getter via req</span>
 t.fahrenheit = <span class="nb">212.0</span>           <span class="co"># setter via set</span>
 print <span class="s">"<span class="si">{t.celsius}</span>"</span>            <span class="co"># 100.0</span></code></pre></div>
@@ -1454,6 +1567,89 @@ print <span class="fn">label</span>(.South)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// No direct equivalent — Rust requires the full path Direction::North.</span>
 <span class="co">// The transpiler resolves .North to Direction::North using the type context.</span></code></pre></div>
+<h3 id="enum-methods--req-and-def">Enum methods — <code>req</code> and <code>def</code></h3>
+<p>Enums can declare methods with the same <code>req</code>/<code>def</code> keywords as structs (<a href="#8-structs">§8</a>, <a href="#req-vs-def">`req` vs `def`</a>) — inside the body, after the variants:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> EColor:
+    Red
+    Green
+    Blue
+
+    <span class="kw">def</span> <span class="kt">string</span> <span class="fn">ename</span>():        <span class="co"># mutating keyword, but nothing to mutate</span>
+        <span class="kw">match</span> <span class="kw">self</span>:
+            Red: <span class="s">"red"</span>
+            Green: <span class="s">"green"</span>
+            Blue: <span class="s">"blue"</span>
+
+<span class="kw">enum</span> EDirection:
+    North
+    South
+    East
+    West
+
+    <span class="kw">req</span> <span class="kt">string</span> <span class="fn">label</span>():        <span class="co"># read-only getter</span>
+        <span class="kw">match</span> <span class="kw">self</span>:
+            North: <span class="s">"nord"</span>
+            South: <span class="s">"sud"</span>
+            East: <span class="s">"est"</span>
+            _: <span class="s">"ouest"</span>
+
+<span class="kw">let</span> ec = EColor.Red
+print ec.<span class="fn">ename</span>()          <span class="co"># &quot;red&quot; — def works on a plain let binding</span>
+
+<span class="kw">let</span> ed = EDirection.South
+print ed.label             <span class="co"># &quot;sud&quot; — req getter, no parens needed</span></code></pre></div>
+<p>By default <code>def</code> and <code>req</code> are <strong>interchangeable</strong> on an enum: <code>EColor</code> and <code>EDirection</code> above have no variant field declared <code>mut</code> (see the next section), so there is no <code>self.field = x</code> for <code>def</code> to unlock, and both keywords transpile to <code>&amp;self</code>. Neither requires the receiver&#x27;s type to carry <code>mut</code>/<code>var mut</code> — <code>ec</code> and <code>ed</code> above are plain <code>let</code> bindings and both calls compile and run. The choice between them is documentation intent only, exactly like <code>req</code>/<code>def</code> on top-level free functions (<a href="#8-structs">§8</a>): use <code>req</code> for a pure accessor (<code>label</code>), <code>def</code> if the method reads as an action even though it can&#x27;t actually mutate (<code>ename</code>). A future compiler version may tighten this and reject <code>def</code> on such enums outright, since it currently promises a mutation guarantee it cannot enforce there — prefer <code>req</code> in new code unless mirroring existing <code>def</code> usage. (An enum with a <code>mut</code>-qualified variant field, next section, is the one case where this interchangeability <em>doesn&#x27;t</em> hold — <code>def</code> there is real.)</p>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">impl</span> <span class="kt">EColor</span> {
+    <span class="kw">fn</span> <span class="fn">ename</span>(&amp;<span class="kw">self</span>) -&gt; <span class="kw">Rc</span>&lt;str&gt; {
+        <span class="kw">match</span> <span class="kw">self</span> {
+            <span class="kt">EColor</span>::<span class="kt">Red</span> =&gt; <span class="s">&quot;red&quot;</span>.<span class="fn">into</span>(),
+            <span class="kt">EColor</span>::<span class="kt">Green</span> =&gt; <span class="s">&quot;green&quot;</span>.<span class="fn">into</span>(),
+            <span class="kt">EColor</span>::<span class="kt">Blue</span> =&gt; <span class="s">&quot;blue&quot;</span>.<span class="fn">into</span>(),
+        }
+    }
+}</code></pre></div>
+<h3 id="enum-variant-fields--mut-type">Enum variant fields — <code>mut Type</code></h3>
+<p>A variant field can itself carry <code>mut</code>, the same modifier a tuple slot, struct field, or collection element can (<a href="mut-type-modifier.html">mut-type-modifier.md</a>). This is the one case where an enum&#x27;s own <code>def</code> method is a <em>real</em> mutation, not just documentation intent — it needs (and gets) a genuine <code>&amp;mut self</code>, and the enum instance itself needs <code>mut</code>/<code>var mut</code> to call it, exactly like a struct:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Point:
+    <span class="kw">var</span> <span class="kt">int</span> x = <span class="nb">0</span>
+
+    <span class="kw">def</span> <span class="fn">bump</span>(): x += <span class="nb">1</span>
+    <span class="kw">req</span> <span class="kt">int</span> <span class="fn">getx</span>(): x
+
+<span class="kw">enum</span> Holder:
+    <span class="fn">Value</span>(<span class="kw">mut</span> Point p)     <span class="co"># this field grants content mutation</span>
+
+    <span class="kw">def</span> <span class="fn">bumpit</span>():
+        <span class="kw">match</span> <span class="kw">self</span>:
+            <span class="fn">Value</span>(p):
+                p.<span class="fn">bump</span>()    <span class="co"># `p` is bound `&amp;mut Point` here — no `mut`/`ref mut`</span>
+                            <span class="co"># needed on the pattern itself (see below)</span>
+
+<span class="kw">mut</span> h = Holder.<span class="fn">Value</span>(<span class="fn">Point</span>(x = <span class="nb">5</span>))
+h.<span class="fn">bumpit</span>()
+<span class="kw">match</span> h:
+    <span class="fn">Value</span>(p): print p.<span class="fn">getx</span>()   <span class="co"># 6 — the mutation is real, not a disconnected copy</span>
+
+<span class="co"># let h2 = Holder.Value(Point(x = 0))</span>
+<span class="co"># h2.bumpit()   # ERROR — h2 is not declared `mut`, same rule as a struct</span>
+
+<span class="co"># enum Holder2:</span>
+<span class="co">#     Value(Point p)        # no `mut` on the field</span>
+<span class="co">#     def bumpit(): ...      # back to the previous section: def == req, `&amp;self`</span></code></pre></div>
+<p>Matching bare <code>self</code> inside a <code>&amp;mut self</code> method always matches a reference (<code>&amp;mut Self</code> in the generated Rust) — Rust&#x27;s own match ergonomics then bind <code>p</code> as <code>&amp;mut Point</code> automatically, with no <code>mut p</code>/<code>ref mut p</code> annotation needed or accepted (writing <code>mut p</code> there is a hard compile error: &quot;cannot mutably bind by value within an implicitly-borrowing pattern&quot;). This only applies to matching <code>self</code> itself; matching a plain owned local of enum type elsewhere still needs the usual <code>mut</code> promotion to call a <code>def</code> method through a bound field, same as any owned match subject.</p>
+<p>Whether <code>def</code> gets <code>&amp;mut self</code> is decided <strong>per enum type</strong>, not per method body: if the enum has a <code>mut</code>-qualified field anywhere, every <code>def</code> method on it gets <code>&amp;mut self</code>, even one that never touches that field. Use <code>req</code> for a method that only reads, to avoid requiring a <code>mut</code> receiver unnecessarily.</p>
+<p><strong>Rust equivalent</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">enum</span> <span class="kt">Holder</span> {
+    <span class="fn">Value</span>(<span class="kt">Point</span>),
+}
+<span class="kw">impl</span> <span class="kt">Holder</span> {
+    <span class="kw">fn</span> <span class="fn">bumpit</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>) {
+        <span class="kw">match</span> <span class="kw">self</span> {
+            <span class="kt">Holder</span>::<span class="fn">Value</span>(p) =&gt; { p.<span class="fn">bump</span>(); }
+        }
+    }
+}</code></pre></div>
 <h3 id="leading-dot-static-method-calls">Leading-dot static method calls</h3>
 <p>The same shorthand works for <strong>static method calls</strong> on external types when the expected type is known. Instead of writing the full <code>TypeName.method(args)</code>, use <code>.method(args)</code>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Full form</span>
@@ -1708,9 +1904,9 @@ print <span class="fn">label</span>(.South)</code></pre></div>
 
     <span class="kw">type</span> Item&lt;&amp;a&gt; = <span class="kt">int</span>         <span class="co"># concrete definition at struct body level</span>
 
-    <span class="kw">as</span> Producer:
-        <span class="kw">req</span> Item&lt;&amp;a&gt; <span class="fn">next</span>():
-            <span class="kw">self</span>.value + <span class="nb">1</span>
+<span class="kw">ext</span> Counter <span class="kw">as</span> Producer:
+    <span class="kw">req</span> Item&lt;&amp;a&gt; <span class="fn">next</span>():
+        <span class="kw">self</span>.value + <span class="nb">1</span>
 
 <span class="kw">let</span> c = <span class="fn">Counter</span>(value = <span class="nb">10</span>)
 print c.<span class="fn">next</span>()                  <span class="co"># 11</span></code></pre></div>
@@ -2264,7 +2460,7 @@ words.<span class="fn">filter</span>(:length == <span class="nb">5</span>)      
 <span class="kw">let</span> cities = employees.<span class="fn">map</span>(:address.city)    <span class="co"># (e): e.address.city</span></code></pre></div>
 <p>The <code>:field op expr</code> form covers only a single operator. For compound conditions, use the named-param form:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># compound condition — use named param</span>
-words.<span class="fn">filter</span>(w: w.length &gt; <span class="nb">3</span> &amp;&amp; w.length &lt; <span class="nb">8</span>)</code></pre></div>
+words.<span class="fn">filter</span>(w: w.length &gt; <span class="nb">3</span> <span class="kw">and</span> w.length &lt; <span class="nb">8</span>)</code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>people.<span class="fn">iter</span>().<span class="fn">map</span>(|p| p.name.<span class="fn">clone</span>()).collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
 people.<span class="fn">iter</span>().<span class="fn">filter</span>(|p| p.age &gt;= <span class="nb">18</span>).<span class="fn">cloned</span>().collect::&lt;<span class="kw">Vec</span>&lt;_&gt;&gt;();
@@ -2887,13 +3083,14 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 boring build --threading single|multi  # concurrency model (default: multi)</code></pre></div>
 <p><code>--threading</code> is not available for the <code>--target kernel</code> target.</p>
 <h3 id="binding--qualifier-combinations">Binding × qualifier combinations</h3>
-<p>Each qualifier imposes constraints on <code>mut</code>. <code>mut</code> is forbidden with <code>&#x27;shared</code> — it is a compile error.</p>
-<table><thead><tr><th>Binding</th><th><code>&#x27;shared</code></th><th><code>&#x27;actor</code></th><th><code>&#x27;guard</code></th><th><code>&#x27;stack</code></th><th><code>&#x27;heap</code></th></tr></thead><tbody><tr><td><code>let</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>mut</code></td><td><strong>error</strong></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>var</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>lazy</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr></tbody></table>
+<p>Each qualifier imposes constraints on <code>mut</code>. <code>mut</code>/<code>var mut</code> are forbidden with <code>&#x27;shared</code> — it is a compile error (no interior mutability to unlock).</p>
+<p><code>&#x27;actor</code>/<code>&#x27;guard</code> get no special case in the table below — they&#x27;re checked exactly like every other type (<a href="#2-variables-and-mutability">§2</a>): <code>var</code> alone is rebind-only, never content-mutable, full stop. (An earlier revision of Boring let <code>var T&#x27;actor x</code> unlock <code>def</code> calls on the strength of the qualifier alone; that exception is retired — see <code>var mut</code>.)</p>
+<table><thead><tr><th>Binding</th><th><code>&#x27;shared</code></th><th><code>&#x27;actor</code></th><th><code>&#x27;guard</code></th><th><code>&#x27;stack</code></th><th><code>&#x27;heap</code></th></tr></thead><tbody><tr><td><code>let</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>mut</code></td><td><strong>error</strong></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>var</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>var mut</code></td><td><strong>error</strong></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr><tr><td><code>lazy</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr></tbody></table>
 <p>Qualifiers carry three kinds of information: Rust mapping, passing semantics, and mutability constraints:</p>
 <table><thead><tr><th>Qualifier</th><th>Passing semantics</th><th>Mutability</th></tr></thead><tbody><tr><td><code>&#x27;shared</code></td><td>by reference (<code>&amp;Arc&lt;T&gt;</code>) — no refcount increment</td><td>forbidden — immutable shared ref</td></tr><tr><td><code>&#x27;actor</code></td><td>by reference (<code>&amp;Arc&lt;Mutex&lt;T&gt;&gt;</code>) — no refcount increment</td><td>interior mutability — exclusive lock (Mutex)</td></tr><tr><td><code>&#x27;guard</code></td><td>by reference (<code>&amp;Arc&lt;RwLock&lt;T&gt;&gt;</code>) — no refcount increment</td><td>interior mutability — shared reads / exclusive writes (RwLock)</td></tr><tr><td><code>&#x27;stack</code></td><td>move</td><td>determined by <code>let</code>/<code>mut</code>/<code>var</code></td></tr><tr><td><code>&#x27;heap</code></td><td>move</td><td>determined by <code>let</code>/<code>mut</code>/<code>var</code></td></tr></tbody></table>
 <h3 id="let-mut-var-with-tshared-and-tactor"><code>let</code>, <code>mut</code>, <code>var</code> with <code>T&#x27;shared</code> and <code>T&#x27;actor</code></h3>
-<p><code>var</code> on a reference-counted type allows <strong>reassigning the pointer</strong> but never unlocks <code>def</code> method calls — the shared value stays read-only. For mutation: hold the value with <code>mut</code> + plain ownership, or use <code>T&#x27;actor</code> for shared mutable state.</p>
-<table><thead><tr><th>Declaration</th><th>Reassign</th><th><code>req</code> methods</th><th><code>def</code> methods</th></tr></thead><tbody><tr><td><code>let T&#x27;shared x</code> / <code>let x&#x27;shared</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>var T&#x27;shared x</code> / <code>var x&#x27;shared</code></td><td>✓</td><td>✓</td><td>✗ — use <code>&#x27;actor</code> or <code>&#x27;guard</code> for mutation</td></tr><tr><td><code>let T&#x27;actor x</code> / <code>let x&#x27;actor</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>mut T&#x27;actor x</code> / <code>mut x&#x27;actor</code></td><td>✗</td><td>✓</td><td>✓</td></tr><tr><td><code>var T&#x27;actor x</code> / <code>var x&#x27;actor</code></td><td>✓</td><td>✓</td><td>✓</td></tr><tr><td><code>let T&#x27;guard x</code> / <code>let x&#x27;guard</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>mut T&#x27;guard x</code> / <code>mut x&#x27;guard</code></td><td>✗</td><td>✓</td><td>✓</td></tr><tr><td><code>var T&#x27;guard x</code> / <code>var x&#x27;guard</code></td><td>✓</td><td>✓</td><td>✓</td></tr></tbody></table>
+<p><code>var</code> on a reference-counted type allows <strong>reassigning the pointer</strong> but never unlocks <code>def</code> method calls on its own — the shared value stays read-only unless the type also carries <code>mut</code>. For mutation: hold the value with <code>mut</code>/<code>var mut</code> + plain ownership, or use <code>T&#x27;actor</code>/<code>T&#x27;guard</code> (with <code>mut</code>/<code>var mut</code>) for shared mutable state.</p>
+<table><thead><tr><th>Declaration</th><th>Reassign</th><th><code>req</code> methods</th><th><code>def</code> methods</th></tr></thead><tbody><tr><td><code>let T&#x27;shared x</code> / <code>let x&#x27;shared</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>var T&#x27;shared x</code> / <code>var x&#x27;shared</code></td><td>✓</td><td>✓</td><td>✗ — <code>&#x27;shared</code> has no interior mutability, <code>mut</code>/<code>var mut</code> are compile errors on it</td></tr><tr><td><code>let T&#x27;actor x</code> / <code>let x&#x27;actor</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>mut T&#x27;actor x</code> / <code>mut x&#x27;actor</code></td><td>✗</td><td>✓</td><td>✓</td></tr><tr><td><code>var T&#x27;actor x</code> / <code>var x&#x27;actor</code></td><td>✓</td><td>✓</td><td>✗ — <code>var</code> alone no longer suffices; use <code>var mut</code></td></tr><tr><td><code>var mut T&#x27;actor x</code></td><td>✓</td><td>✓</td><td>✓</td></tr><tr><td><code>let T&#x27;guard x</code> / <code>let x&#x27;guard</code></td><td>✗</td><td>✓</td><td>✗</td></tr><tr><td><code>mut T&#x27;guard x</code> / <code>mut x&#x27;guard</code></td><td>✗</td><td>✓</td><td>✓</td></tr><tr><td><code>var T&#x27;guard x</code> / <code>var x&#x27;guard</code></td><td>✓</td><td>✓</td><td>✗ — same as <code>&#x27;actor</code> above</td></tr><tr><td><code>var mut T&#x27;guard x</code></td><td>✓</td><td>✓</td><td>✓</td></tr></tbody></table>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Counter:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
     <span class="kw">def</span> <span class="fn">inc</span>(): <span class="kw">self</span>.value += <span class="nb">1</span>
@@ -2903,8 +3100,12 @@ boring build --threading single|multi  # concurrency model (default: multi)</cod
 <span class="kw">var</span> c2<span class="lf">&#x27;shared</span> = <span class="fn">Counter</span>()
 c = c2        <span class="co"># OK — reassign the Arc/Rc pointer</span>
 c.<span class="fn">get</span>()       <span class="co"># OK — req (non-mutating) methods work fine</span>
-<span class="co"># c.inc()     # ERROR — def methods are forbidden on T&#x27;shared even with var</span>
-              <span class="co">#         use T&#x27;actor for shared mutable state</span></code></pre></div>
+<span class="co"># c.inc()     # ERROR — def methods are forbidden on T&#x27;shared regardless of mut/var</span>
+              <span class="co">#         use T&#x27;actor (with mut/var mut) for shared mutable state</span>
+
+<span class="kw">var</span> <span class="kw">mut</span> d<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>()
+d.<span class="fn">inc</span>()       <span class="co"># OK — var mut grants both rebind and content mutation</span>
+d = <span class="fn">Counter</span>() <span class="co"># OK — rebind</span></code></pre></div>
 <h3 id="explicit-borrow-syntax--t">Explicit borrow syntax — <code>T&amp;</code></h3>
 <blockquote><strong>You rarely need this.</strong> Structs and enums are already passed by reference automatically (see <a href="#pass-by-reference--automatic">Pass-by-reference — automatic</a>). Reach for <code>T&amp;</code> only when you need an explicit lifetime annotation or must lock in the borrow convention regardless of how the function body evolves.</blockquote>
 <p>Borrows are written with <code>&amp;</code> directly after the type name. The binding keyword defines what the callee can do with the reference:</p>
@@ -2969,7 +3170,7 @@ print <span class="fn">describe</span>(w1)   <span class="co"># resource: config
     <span class="kw">def</span> <span class="fn">increment</span>():
         value += <span class="nb">1</span>
 
-<span class="kw">var</span> c<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
+<span class="kw">var</span> <span class="kw">mut</span> c<span class="lf">&#x27;actor</span> = <span class="fn">Counter</span>(<span class="nb">0</span>)
 
 <span class="kw">with</span> c:
     c.<span class="fn">increment</span>()
@@ -2987,7 +3188,7 @@ print c.value   <span class="co"># 3</span></code></pre></div>
 <span class="fm">println!</span>(<span class="s">&quot;{}&quot;</span>, c.<span class="fn">lock</span>().<span class="fn">unwrap</span>().value);</code></pre></div>
 <p>Existing per-call locking is unchanged for code that doesn&#x27;t use <code>with</code> — this is purely additive.</p>
 <p><code>with</code> is one keyword, not a read/write pair — the access level is decided per block:</p>
-<ul><li><strong><code>let</code>-bound name</strong> — always read-only (mutation on a <code>let</code> binding is already a compile error, so there is nothing to scan for).</li><li><strong><code>mut</code>/<code>var</code>-bound name</strong> — the compiler scans the block&#x27;s own body (recursing into <code>if</code>/<code>while</code>/<code>for</code>/<code>match</code>/closures nested inside it, but never into a called function&#x27;s own body) for a direct assignment, an index/field assignment, or a <code>def</code> (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.</li></ul>
+<ul><li><strong><code>let</code>/<code>var</code>-bound name (no <code>mut</code>)</strong> — always read-only (<code>var</code> alone doesn&#x27;t grant content mutation either — see <a href="#2-variables-and-mutability">§2</a> — so there is nothing to scan for).</li><li><strong><code>mut</code>/<code>var mut</code>-bound name</strong> — the compiler scans the block&#x27;s own body (recursing into <code>if</code>/<code>while</code>/<code>for</code>/<code>match</code>/closures nested inside it, but never into a called function&#x27;s own body) for a direct assignment, an index/field assignment, or a <code>def</code> (mutating) method call on the name. Found → the block gets write access; not found → read-only, even though the binding could support a mutation elsewhere in the program.</li></ul>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Cell:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
 
@@ -2997,7 +3198,7 @@ print c.value   <span class="co"># 3</span></code></pre></div>
     <span class="kw">def</span> <span class="fn">bump</span>():
         value += <span class="nb">1</span>
 
-<span class="kw">var</span> b<span class="lf">&#x27;guard</span> = <span class="fn">Cell</span>(<span class="nb">10</span>)
+<span class="kw">var</span> <span class="kw">mut</span> b<span class="lf">&#x27;guard</span> = <span class="fn">Cell</span>(<span class="nb">10</span>)
 
 <span class="kw">with</span> b:
     print b.<span class="fn">peek</span>()   <span class="co"># read-only block — RwLock::read()</span>
@@ -3301,7 +3502,8 @@ Data <span class="fn">compress</span>(Data d):
 }</code></pre></div>
 <p>A plain struct (without <code>&#x27;shared</code>) cannot be used with <code>task w.method()</code> — the interpreter will reject the capture at runtime, and the generated Rust would not compile (<code>tokio::spawn</code> requires <code>&#x27;static</code> bounds that a borrowed <code>&amp;self</code> cannot satisfy).</p>
 <h3 id="shared-mutable-state--tactor--tactortask">Shared mutable state — <code>T&#x27;actor</code> / <code>T&#x27;actor&#x27;task</code></h3>
-<p><code>T&#x27;shared</code> gives read-only shared access (<code>Arc&lt;T&gt;</code>). When multiple tasks need to <strong>read and write</strong> the same struct, use <strong><code>T&#x27;actor</code></strong> — this wraps the value in <code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> and inserts <code>.lock().unwrap()</code> automatically at every field access and method call. The qualifier works with both <code>let</code> and <code>var</code>; no explicit locking is ever written in Boring source.</p>
+<p><code>T&#x27;shared</code> gives read-only shared access (<code>Arc&lt;T&gt;</code>). When multiple tasks need to <strong>read and write</strong> the same struct, use <strong><code>T&#x27;actor</code></strong> — this wraps the value in <code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> and inserts <code>.lock().unwrap()</code> automatically at every field access and method call. No explicit locking is ever written in Boring source.</p>
+<p>Mutation goes through the lock, not through <code>&amp;mut self</code> on the binding — but Boring still gates it on the binding itself, with <strong>no exception</strong> for <code>&#x27;actor</code>/<code>&#x27;guard</code> (<a href="#2-variables-and-mutability">§2</a>): <code>mut</code>/<code>var mut</code> unlock <code>def</code> calls, plain <code>var</code> (no <code>mut</code>) only allows reassigning the pointer, and <code>let</code> gives a <strong>read-only</strong> handle — <code>req</code> methods and field reads work, but <code>def</code> calls are rejected, exactly as for any other type. Use <code>mut</code>/<code>var mut</code> when the binding itself needs to mutate the shared value; use <code>let</code> (or plain <code>var</code>, if it also needs reassigning) to hand out a read-only view of the same underlying lock.</p>
 <p>In an <strong>async context</strong> (inside a <code>task</code> function), use <strong><code>T&#x27;actor&#x27;task</code></strong> instead — this uses <code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> and inserts <code>.lock().await</code> so the lock can be held across <code>.await</code> points.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> SharedCount:
     <span class="kw">var</span> <span class="kt">int</span> value = <span class="nb">0</span>
@@ -3311,24 +3513,24 @@ Data <span class="fn">compress</span>(Data d):
         <span class="kw">self</span>.value
 
 <span class="kw">def</span> <span class="fn">main</span>():
-    <span class="kw">let</span> c<span class="lf">&#x27;actor</span> = <span class="fn">SharedCount</span>()
+    <span class="kw">mut</span> c<span class="lf">&#x27;actor</span> = <span class="fn">SharedCount</span>()
     c.<span class="fn">inc</span>()                    <span class="co"># → c.lock().unwrap().inc()</span>
     c.<span class="fn">inc</span>()
     print <span class="s">"count = <span class="si">{c.value}</span>"</span>  <span class="co"># → c.lock().unwrap().value</span>
 
 <span class="kw">task</span> <span class="fn">async_main</span>():
-    <span class="kw">let</span> c<span class="lf">&#x27;actor</span><span class="lf">&#x27;task</span> = <span class="fn">SharedCount</span>()
+    <span class="kw">mut</span> c<span class="lf">&#x27;actor</span><span class="lf">&#x27;task</span> = <span class="fn">SharedCount</span>()
     c.<span class="fn">inc</span>()                    <span class="co"># → c.lock().await.inc()</span>
     c.<span class="fn">inc</span>()
     print <span class="s">"count = <span class="si">{c.value}</span>"</span>  <span class="co"># → c.lock().await.value</span></code></pre></div>
 <p><strong>Rust equivalent (sync)</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> c: <span class="kw">Arc</span>&lt;std::sync::<span class="kt">Mutex</span>&lt;<span class="kt">SharedCount</span>&gt;&gt; =
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> c: <span class="kw">Arc</span>&lt;std::sync::<span class="kt">Mutex</span>&lt;<span class="kt">SharedCount</span>&gt;&gt; =
     <span class="kw">Arc</span>::<span class="fn">new</span>(std::sync::<span class="kt">Mutex</span>::<span class="fn">new</span>(<span class="kt">SharedCount</span>::<span class="fn">new</span>()));
 c.<span class="fn">lock</span>().<span class="fn">unwrap</span>().<span class="fn">inc</span>();
 c.<span class="fn">lock</span>().<span class="fn">unwrap</span>().<span class="fn">inc</span>();
 <span class="fm">println!</span>(<span class="s">&quot;count = {}&quot;</span>, c.<span class="fn">lock</span>().<span class="fn">unwrap</span>().value);</code></pre></div>
 <p><strong>Rust equivalent (async)</strong></p>
-<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> c: <span class="kw">Arc</span>&lt;tokio::sync::<span class="kt">Mutex</span>&lt;<span class="kt">SharedCount</span>&gt;&gt; =
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> <span class="kw">mut</span> c: <span class="kw">Arc</span>&lt;tokio::sync::<span class="kt">Mutex</span>&lt;<span class="kt">SharedCount</span>&gt;&gt; =
     <span class="kw">Arc</span>::<span class="fn">new</span>(tokio::sync::<span class="kt">Mutex</span>::<span class="fn">new</span>(<span class="kt">SharedCount</span>::<span class="fn">new</span>()));
 c.<span class="fn">lock</span>().<span class="kw">await</span>.<span class="fn">inc</span>();
 c.<span class="fn">lock</span>().<span class="kw">await</span>.<span class="fn">inc</span>();
@@ -3353,7 +3555,7 @@ c.<span class="fn">lock</span>().<span class="kw">await</span>.<span class="fn">
         <span class="kw">self</span>.value += <span class="nb">1</span>
 
 <span class="kw">task</span> <span class="fn">run</span>():
-    <span class="kw">let</span> c<span class="lf">&#x27;guard</span><span class="lf">&#x27;task</span> = <span class="fn">Counter</span>()
+    <span class="kw">mut</span> c<span class="lf">&#x27;guard</span><span class="lf">&#x27;task</span> = <span class="fn">Counter</span>()
     c.<span class="fn">inc</span>()                   <span class="co"># → c.write().await.inc()</span>
     c.<span class="fn">inc</span>()
     print <span class="s">"count = <span class="si">{c.get()}</span>"</span> <span class="co"># → c.read().await.get()</span></code></pre></div>
@@ -3557,7 +3759,7 @@ log::<span class="fm">trace!</span>(<span class="s">&quot;entering parse_expr&qu
 <h3 id="declarations">Declarations</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>let x = v</code></td><td><code>let x = v;</code></td></tr><tr><td><code>var x = v</code></td><td><code>let mut x = v;</code></td></tr><tr><td><code>let T x = v</code></td><td><code>let x: T = v;</code></td></tr><tr><td><code>let x&#x27;q = v</code></td><td><code>let x: Q&lt;T&gt; = Q::new(v);</code> — qualifier on name, type inferred</td></tr><tr><td><code>req R f(T a):  body</code></td><td><code>fn f(&amp;self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>def R f(T a):  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; R { body }</code></td></tr><tr><td><code>R f(T a):  body</code></td><td>same as <code>def R f(T a): body</code> — <code>def</code> implicit when return type is present</td></tr><tr><td><code>req R ():  body</code></td><td><code>fn __call__(&amp;self) -&gt; R { body }</code> — anonymous call, callable on <code>let</code>/<code>var</code></td></tr><tr><td><code>def ():  body</code></td><td><code>fn __call__(&amp;mut self) { body }</code> — anonymous call, callable on <code>var</code> only</td></tr><tr><td><code>set prop(T v): body</code></td><td><code>fn set_prop(&amp;mut self, v: T) { body }</code></td></tr><tr><td><code>def R f(T a) throws:  body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td><code>def R f(T a) throws E.T: body</code></td><td><code>fn f(&amp;mut self, a: T) -&gt; Result&lt;R, E::T&gt;</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td><code>async fn f(a: T) -&gt; R</code></td></tr><tr><td><code>task R f(T a):  body</code></td><td>same as <code>task R f(T a): body</code> — <code>def</code> always optional when return type is present</td></tr><tr><td><code>task req R f(T a):  body</code></td><td><code>async fn f(&amp;self, a: T) -&gt; R</code></td></tr><tr><td><code>task set prop(T v):  body</code></td><td><code>async fn set_prop(&amp;mut self, v: T)</code></td></tr><tr><td><code>def R f(T vals...):  body</code></td><td><code>fn f(&amp;mut self, vals: Vec&lt;T&gt;) -&gt; R</code></td></tr><tr><td><code>type N as T</code></td><td><code>struct N(T)</code> + <code>From&lt;T&gt;</code>, <code>From&lt;N&gt;</code>, <code>Display</code> impls</td></tr><tr><td><code>struct S:  fields</code></td><td><code>struct S { fields }</code> + <code>impl S { ... }</code></td></tr><tr><td><code>S(..base, field = v)</code></td><td><code>S { field: v, ..base }</code> — struct update syntax</td></tr><tr><td><code>field</code> (bare name in method body)</td><td><code>self.field</code> — implicit self; local variables shadow fields</td></tr><tr><td><code>as T:  expr</code> (in struct body)</td><td><code>fn into_t(&amp;self) -&gt; T { expr }</code> inside <code>impl S</code>; if body is <code>self.field</code>, also <code>fn into_t_mut(&amp;mut self) -&gt; &amp;mut T</code></td></tr><tr><td><code>enum E:  variants</code></td><td><code>enum E { variants }</code> (always <code>#[derive(Clone)]</code>)</td></tr><tr><td><code>trait T:  req methods</code></td><td><code>trait T { fn methods; }</code></td></tr><tr><td><code>ext S:  methods</code></td><td><code>impl S { methods }</code></td></tr><tr><td><code>ext S as T:  methods</code></td><td><code>impl T for S { methods }</code></td></tr><tr><td><code>def S.f(T a):  body</code></td><td><code>impl S { fn f(&amp;mut self, a: T) { body } }</code></td></tr><tr><td><code>mod m:  items</code></td><td><code>mod m { items }</code></td></tr><tr><td><code>pub def …</code></td><td><code>pub fn …</code></td></tr><tr><td><code>@attr(…)</code></td><td><code>#[attr(…)]</code></td></tr></tbody></table>
 <h3 id="types">Types</h3>
-<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;stack</code></td><td><code>isize</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;stack</code></td><td><code>usize</code></td></tr><tr><td><code>float</code></td><td><code>Float&#x27;stack</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;stack</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (literal)</td><td>—</td><td><code>&amp;str</code> — zero allocation; promoted to <code>Rc&lt;str&gt;</code>/<code>Arc&lt;str&gt;</code> when stored</td></tr><tr><td><code>string</code> (stored/computed)</td><td>—</td><td><code>Rc&lt;str&gt;</code> (single-thread) / <code>Arc&lt;str&gt;</code> (multi-thread)</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td>—</td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>T?&amp;</code></td><td>—</td><td><code>&amp;Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code> — dynamic array</td></tr><tr><td><code>[T, N]</code></td><td>—</td><td><code>[T; N]</code> — fixed-size stack array</td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;stack</code></td><td>—</td><td><code>T</code> — stack (read only), copied on pass</td></tr><tr><td><code>T&#x27;shared</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, sync lock</td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, async lock</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (sync)</td></tr><tr><td><code>T&#x27;guard&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (async)</td></tr><tr><td><code>T&#x27;shared&#x27;weak</code></td><td>—</td><td><code>Weak&lt;T&gt;</code> — weak ref to <code>Arc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td>—</td><td><code>Weak&lt;Mutex&lt;T&gt;&gt;</code> — weak ref to actor</td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td>—</td><td><code>Weak&lt;RwLock&lt;T&gt;&gt;</code> — weak ref to guard</td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (bare)</td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;Trait&gt;</code></td><td>—</td><td><code>impl Trait</code> — static dispatch, no allocation</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: isize</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
+<table><thead><tr><th>Boring</th><th>Alias for</th><th>Rust</th></tr></thead><tbody><tr><td><code>int</code></td><td><code>Int&#x27;stack</code></td><td><code>isize</code></td></tr><tr><td><code>uint</code></td><td><code>Uint&#x27;stack</code></td><td><code>usize</code></td></tr><tr><td><code>float</code></td><td><code>Float64&#x27;stack</code></td><td><code>f64</code> (pure alias of <code>float64</code>)</td></tr><tr><td><code>float32</code></td><td><code>Float32&#x27;stack</code></td><td><code>f32</code></td></tr><tr><td><code>float64</code></td><td><code>Float64&#x27;stack</code></td><td><code>f64</code></td></tr><tr><td><code>bool</code></td><td><code>Bool&#x27;stack</code></td><td><code>bool</code></td></tr><tr><td><code>string</code> (literal)</td><td>—</td><td><code>&amp;str</code> — zero allocation; promoted to <code>Rc&lt;str&gt;</code>/<code>Arc&lt;str&gt;</code> when stored</td></tr><tr><td><code>string</code> (stored/computed)</td><td>—</td><td><code>Rc&lt;str&gt;</code> (single-thread) / <code>Arc&lt;str&gt;</code> (multi-thread)</td></tr><tr><td><code>T</code></td><td><code>T&#x27;stack</code></td><td><code>T</code> (stack, Rust default)</td></tr><tr><td><code>T&#x27;</code></td><td><code>T&#x27;heap</code></td><td><code>Box&lt;T&gt;</code></td></tr><tr><td><code>T?</code></td><td>—</td><td><code>Option&lt;T&gt;</code></td></tr><tr><td><code>T?&amp;</code></td><td>—</td><td><code>&amp;Option&lt;T&gt;</code></td></tr><tr><td><code>[T]</code></td><td><code>Vec&lt;T&gt;</code></td><td><code>Vec&lt;T&gt;</code> — dynamic array</td></tr><tr><td><code>[T, N]</code></td><td>—</td><td><code>[T; N]</code> — fixed-size stack array</td></tr><tr><td><code>{K=V}</code></td><td><code>Dict&lt;K,V&gt;</code></td><td><code>HashMap&lt;K, V&gt;</code></td></tr><tr><td><code>{T}</code></td><td><code>Set&lt;T&gt;</code></td><td><code>HashSet&lt;T&gt;</code></td></tr><tr><td><code>(T1, T2)</code></td><td>—</td><td><code>(T1, T2)</code></td></tr><tr><td><code>T&#x27;stack</code></td><td>—</td><td><code>T</code> — stack (read only), copied on pass</td></tr><tr><td><code>T&#x27;shared</code></td><td>—</td><td><code>Arc&lt;T&gt;</code> (multi) / <code>Rc&lt;T&gt;</code> (single)</td></tr><tr><td><code>T&#x27;actor</code></td><td>—</td><td><code>Arc&lt;std::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, sync lock</td></tr><tr><td><code>T&#x27;actor&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::Mutex&lt;T&gt;&gt;</code> — shared mutable, async lock</td></tr><tr><td><code>T&#x27;guard</code></td><td>—</td><td><code>Arc&lt;std::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (sync)</td></tr><tr><td><code>T&#x27;guard&#x27;task</code></td><td>—</td><td><code>Arc&lt;tokio::sync::RwLock&lt;T&gt;&gt;</code> — concurrent reads, exclusive writes (async)</td></tr><tr><td><code>T&#x27;shared&#x27;weak</code></td><td>—</td><td><code>Weak&lt;T&gt;</code> — weak ref to <code>Arc&lt;T&gt;</code></td></tr><tr><td><code>T&#x27;actor&#x27;weak</code></td><td>—</td><td><code>Weak&lt;Mutex&lt;T&gt;&gt;</code> — weak ref to actor</td></tr><tr><td><code>T&#x27;guard&#x27;weak</code></td><td>—</td><td><code>Weak&lt;RwLock&lt;T&gt;&gt;</code> — weak ref to guard</td></tr><tr><td><code>Index&lt;T&gt;</code></td><td>—</td><td><code>Option&lt;usize&gt;</code> (array/set) or <code>Option&lt;K&gt;</code> (dict)</td></tr><tr><td><code>Trait</code> (bare)</td><td>—</td><td><code>Box&lt;dyn Trait&gt;</code> — dynamic dispatch, heap</td></tr><tr><td><code>&lt;Trait&gt;</code></td><td>—</td><td><code>impl Trait</code> — static dispatch, no allocation</td></tr><tr><td><code>&lt;uint N&gt;</code> in generic list</td><td>—</td><td><code>const N: usize</code> — const generic parameter</td></tr><tr><td><code>&lt;int N&gt;</code> in generic list</td><td>—</td><td><code>const N: isize</code></td></tr><tr><td><code>&lt;bool B&gt;</code> in generic list</td><td>—</td><td><code>const B: bool</code></td></tr></tbody></table>
 <h3 id="expressions">Expressions</h3>
 <table><thead><tr><th>Boring</th><th>Rust</th></tr></thead><tbody><tr><td><code>&quot;Hello, {name}!&quot;</code></td><td><code>format!(&quot;Hello, {}!&quot;, name)</code></td></tr><tr><td><code>&quot;&quot;&quot;…&quot;&quot;&quot;</code></td><td>multi-line string — dedented at lex time, same interpolation rules</td></tr><tr><td><code>{{</code> / <code>}}</code>  in a string</td><td>literal <code>{</code> / <code>}</code> (both in <code>&quot;…&quot;</code> and <code>&quot;&quot;&quot;…&quot;&quot;&quot;</code>)</td></tr><tr><td><code>1_000_000</code> / <code>0xFF_AA_00</code></td><td>digit separator <code>_</code> — stripped at lex time, any base</td></tr><tr><td><code>nil</code></td><td><code>None</code></td></tr><tr><td><code>val else default</code></td><td><code>val.unwrap_or(default)</code></td></tr><tr><td><code>expr as T</code></td><td><code>expr as T</code> / <code>expr.parse::&lt;T&gt;().ok()</code> / <code>expr.into_t()</code> (user-defined) / <code>expr.0</code> (newtype unwrap)</td></tr><tr><td><code>(expr as T) else default</code></td><td><code>expr.parse::&lt;T&gt;().unwrap_or(default)</code></td></tr><tr><td><code>a === b</code></td><td><code>Arc::ptr_eq(&amp;a, &amp;b)</code> — reference identity (bypasses user-defined <code>==</code>)</td></tr><tr><td><code>x += n</code> / <code>-=</code> / <code>*=</code> / <code>/=</code> / <code>%=</code></td><td><code>x += n</code> etc. (numeric types only)</td></tr><tr><td><code>x ?= expr</code></td><td><code>x = x.unwrap_or_else(|| expr)</code> — assign if nil</td></tr><tr><td><code>let x = …</code> (name already in scope)</td><td><code>let x = …</code> — Rust shadowing; type may change freely</td></tr><tr><td><code>1..=5</code></td><td><code>1isize..=5</code></td></tr><tr><td><code>1..4</code></td><td><code>1isize..5</code></td></tr><tr><td><code>x?.field</code></td><td><code>x.map(|v| v.field)</code></td></tr><tr><td><code>task fn(args)</code></td><td><code>tokio::spawn(async move { fn(args).await })</code></td></tr><tr><td><code>future.value</code></td><td><code>future.await.unwrap()</code></td></tr><tr><td><code>future.wait</code></td><td><code>future.await.unwrap()</code> (result discarded)</td></tr><tr><td><code>drop(x)</code></td><td><code>drop(x)</code></td></tr><tr><td><code>name!(args)</code></td><td><code>name!(args)</code> (pass-through)</td></tr><tr><td><code>f(args) (p): body</code></td><td><code>f(args, |p| body)</code> — trailing closure, explicit params</td></tr><tr><td><code>f(args) p: body</code></td><td><code>f(args, |p| body)</code> — trailing closure, no-paren single param</td></tr><tr><td><code>f(args): body</code></td><td><code>f(args, || body)</code> — zero-arg trailing body</td></tr><tr><td><code>f(args) expr</code></td><td><code>f(args, || expr)</code> — zero-arg trailing body (no separator)</td></tr><tr><td><code>f(args) do (p, q): body</code></td><td><code>f(args, |p, q| body)</code> — unambiguous <code>do</code> trailing, multi-param</td></tr><tr><td><code>f(args) do p: body</code></td><td><code>f(args, |p| body)</code> — unambiguous <code>do</code> trailing, no-paren</td></tr><tr><td><code>f(args) do: body</code></td><td><code>f(args, || body)</code> — unambiguous <code>do</code> trailing, zero-arg</td></tr><tr><td><code>f(args) do expr</code></td><td><code>f(args, || expr)</code> — unambiguous <code>do</code> trailing, zero-arg no separator</td></tr><tr><td><code>wait(dur)</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>wait(instant)</code></td><td><code>tokio::time::sleep_until(instant).await</code></td></tr><tr><td><code>timeout(dur): f()</code></td><td><code>tokio::time::timeout(dur, f()).await?</code></td></tr><tr><td><code>timeout(instant): f()</code></td><td><code>tokio::time::timeout_at(instant, f()).await?</code></td></tr><tr><td><code>:field</code> / <code>:method()</code></td><td><code>|x| x.field</code> / <code>|x| x.method()</code>  (closure shorthand)</td></tr><tr><td><code>.Variant</code></td><td><code>Enum::Variant</code> — enum variant shorthand, type inferred from context</td></tr><tr><td><code>.method(args)</code></td><td><code>Type::method(args)</code> — static method shorthand, type inferred from context</td></tr><tr><td><code>val |&gt; f(args)</code></td><td><code>f(val, args)</code> (known function) or <code>val.f(args)</code> (method)</td></tr><tr><td><code>for x in stream_fn():</code></td><td><code>while let Some(x) = stream.next().await {</code> (pinned)</td></tr><tr><td><code>channel&lt;T&gt;(n)</code> / <code>let T tx, rx = channel(n)</code></td><td><code>tokio::sync::mpsc::channel::&lt;T&gt;(n)</code></td></tr><tr><td><code>tx.send(v)</code></td><td><code>tx.send(v).await.unwrap()</code></td></tr><tr><td><code>for msg in rx:</code></td><td><code>while let Some(msg) = rx.recv().await {</code></td></tr><tr><td><code>oneshot&lt;T&gt;()</code></td><td><code>tokio::sync::oneshot::channel::&lt;T&gt;()</code></td></tr><tr><td><code>rx.value</code> / <code>rx.recv()</code> (oneshot)</td><td><code>rx.await.unwrap()</code></td></tr><tr><td><code>broadcast&lt;T&gt;(cap)</code></td><td><code>tokio::sync::broadcast::channel::&lt;T&gt;(cap)</code></td></tr><tr><td><code>for msg in rx:</code> (broadcast)</td><td><code>while let Ok(msg) = rx.recv().await {</code></td></tr><tr><td><code>tx.subscribe()</code></td><td><code>tx.subscribe()</code> — new broadcast receiver</td></tr><tr><td><code>watch&lt;T&gt;(init)</code></td><td><code>tokio::sync::watch::channel::&lt;T&gt;(init)</code></td></tr><tr><td><code>rx.value</code> (watch)</td><td><code>rx.borrow().clone()</code> — current value, no wait</td></tr><tr><td><code>rx.recv()</code> (watch)</td><td><code>rx.changed().await.ok(); rx.borrow().clone()</code></td></tr><tr><td><code>for val in rx:</code> (watch)</td><td><code>while rx.changed().await.is_ok() { let val = rx.borrow().clone();</code></td></tr><tr><td><code>tx.send(v)</code> (oneshot / broadcast / watch)</td><td><code>tx.send(v).ok()</code> — non-async</td></tr><tr><td><code>json(v)</code></td><td><code>serde_json::to_string(&amp;v).unwrap_or_default()</code> — auto-adds <code>serde</code>+<code>serde_json</code> deps</td></tr><tr><td><code>fromJson&lt;T&gt;(s)</code></td><td><code>serde_json::from_str::&lt;T&gt;(&amp;s).ok()</code> (plain) / <code>?</code> in <code>throws</code> context</td></tr><tr><td><code>let f = task: expr</code></td><td><code>let f = tokio::spawn(async move { expr.await })</code></td></tr><tr><td><code>f.value</code></td><td><code>f.await.unwrap()</code> (or <code>f.await?</code> in <code>throws</code> context)</td></tr><tr><td><code>f.done</code></td><td><code>tokio::time::timeout(Duration::ZERO, f).await.is_ok()</code></td></tr><tr><td><code>f.cancel()</code></td><td><code>__cancel_f.cancel()</code> — signals the spawned task via its token</td></tr><tr><td><code>let a, b = join(f1, f2)</code></td><td><code>let (__jh0, __jh1) = tokio::join!(f1, f2); let a = __jh0.unwrap(); …</code></td></tr><tr><td><code>wait dur</code></td><td><code>tokio::time::sleep(dur).await</code></td></tr><tr><td><code>task(dur): body</code></td><td><code>tokio::spawn(async move { tokio::time::timeout(dur, async move { body }).await? })</code></td></tr></tbody></table>
 <h3 id="control-flow">Control flow</h3>
@@ -3686,7 +3888,7 @@ print host             <span class="co"># localhost</span></code></pre></div>
 x ?= <span class="fn">compute_value</span>()   <span class="co"># first call — initialises x</span>
 x ?= <span class="fn">compute_value</span>()   <span class="co"># subsequent calls — no-op</span></code></pre></div>
 <h4 id="binding-table-extended">Binding table (extended)</h4>
-<table><thead><tr><th>Binding</th><th>Rebindable</th><th>Mutable</th><th>Initialisation</th></tr></thead><tbody><tr><td><code>let</code></td><td>no</td><td>no</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>mut</code></td><td>no</td><td>yes</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>var</code></td><td>yes</td><td>yes</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>lazy</code></td><td>no</td><td>no</td><td>deferred — <code>?=</code> required, immutable after first assignment</td></tr></tbody></table>
+<table><thead><tr><th>Binding</th><th>Rebindable</th><th>Mutable</th><th>Initialisation</th></tr></thead><tbody><tr><td><code>let</code></td><td>no</td><td>no</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>mut</code></td><td>no</td><td>yes</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>var</code></td><td>yes</td><td>no</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>var mut</code></td><td>yes</td><td>yes</td><td>immediate — <code>=</code> required</td></tr><tr><td><code>lazy</code></td><td>no</td><td>no</td><td>deferred — <code>?=</code> required, immutable after first assignment</td></tr></tbody></table>
 <h4 id="rules-2">Rules</h4>
 <ul><li><strong>Declaration</strong>: <code>lazy T name</code> — no <code>=</code> and no value at the declaration site.</li><li><strong>Initialisation</strong>: <code>name ?= expr</code> — evaluates <code>expr</code> and assigns it; if already initialised, <code>expr</code> is not evaluated and the call is a no-op.</li><li><strong>Plain <code>=</code> is forbidden</strong>: assigning a <code>lazy</code> binding with <code>=</code> is a compile-time error (transpiler) or a runtime error (interpreter).</li><li><strong>Qualifiers</strong>: <code>lazy</code> is incompatible with <code>mut</code> and <code>var</code> — the binding is always immutable once set.</li></ul>
 <h4 id="typical-use--one-time-computed-constant">Typical use — one-time computed constant</h4>
@@ -3711,6 +3913,78 @@ weights.<span class="fn">get_or_init</span>(|| <span class="fn">load_weights</sp
 <ul><li><code>Config(..defaults, host = &quot;prod&quot;)</code> — spread first, then override specific fields ✓</li><li><code>Config(host = &quot;prod&quot;, ..defaults)</code> — spread overwrites the earlier <code>host</code></li></ul>
 <p><strong>Rust equivalent</strong> — translates to Rust&#x27;s struct update syntax:</p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> prod = <span class="kt">Config</span> { host: <span class="s">&quot;prod.example.com&quot;</span>.<span class="fn">to_string</span>(), tls: <span class="kw">true</span>, ..defaults.<span class="fn">clone</span>() };</code></pre></div>
+<h3 id="advanced--external-typed-top-level-constants">Advanced — External-typed top-level constants</h3>
+<p>A top-level <code>let</code> whose initializer is a scalar literal always transpiles to a plain Rust <code>const</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> float32 LEFT_WALL = <span class="nb">-450.0</span></code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">const</span> <span class="kt">LEFT_WALL</span>: f32 = -<span class="nb">450.0</span>;</code></pre></div>
+<p>A top-level <code>let</code> whose initializer calls into an external/opaque type — <code>Color.srgb(...)</code>, <code>Vec2.new(...)</code>, anything that isn&#x27;t one of this file&#x27;s own <code>struct</code>/<code>enum</code> constructors — is promoted the same way <em>when</em> the transpiler can be sure the call is a Rust <code>const fn</code>. A small hand-verified list (<code>Duration.from_secs</code>/<code>from_millis</code>/<code>from_micros</code>/<code>from_nanos</code>, <code>Vec2</code>/<code>Vec3</code>/<code>Vec3A</code>/<code>Vec4</code>&#x27;s <code>new</code>/<code>splat</code>, and <code>bevy_color::Color</code>&#x27;s constructors — <code>srgb</code>, <code>hsl</code>, <code>oklch</code>, etc.) drives this. A call on that list promotes cleanly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> PADDLE_COLOR = Color.<span class="fn">srgb</span>(<span class="nb">0.3</span>, <span class="nb">0.3</span>, <span class="nb">0.7</span>)</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">const</span> <span class="kt">PADDLE_COLOR</span>: <span class="kt">Color</span> = <span class="kt">Color</span>::<span class="fn">srgb</span>(<span class="nb">0.3</span>, <span class="nb">0.3</span>, <span class="nb">0.7</span>);</code></pre></div>
+<p>A call that <strong>isn&#x27;t</strong> on that list falls back to a lazily-initialized <code>static</code>, since guessing <code>const</code> and being wrong is a <code>cargo build</code> error (<code>E0015</code>) that only surfaces long after <code>boring build</code> already reported success:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">static</span> <span class="kt">PADDLE_SIZE</span>: std::sync::<span class="kt">LazyLock</span>&lt;<span class="kt">Point2</span>&gt; = std::sync::<span class="kt">LazyLock</span>::<span class="fn">new</span>(|| <span class="kt">Point2</span>::<span class="fn">new</span>(<span class="nb">120.0</span>, <span class="nb">20.0</span>));</code></pre></div>
+<p><strong>The trap</strong>: <code>LazyLock&lt;T&gt;</code> implements <code>Deref&lt;Target = T&gt;</code>, so Rust auto-derefs it for free at a method-call receiver or a <code>.field</code> read — <code>PADDLE_SIZE.x</code>, <code>SPAWN_DELAY.as_secs()</code> work with no changes. It does <strong>not</strong> auto-deref at a struct-literal field value, a by-value function argument, or a return position — those need the exact type <code>T</code>, and Rust never inserts a <code>Deref</code> coercion for an owned value, only for references. Using the bare identifier there compiles under <code>boring build</code> but fails a real <code>cargo build</code>:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>commands.<span class="fn">spawn</span>(<span class="kt">Sprite</span> { color: <span class="kt">PADDLE_SIZE</span>, ..<span class="kt">Default</span>::<span class="fn">default</span>() });
+<span class="co">//                              ^^^^^^^^^^^ expected `Point2`, found `LazyLock&lt;Point2&gt;`</span></code></pre></div>
+<p>Reach for the <code>.pointee</code> postfix deref at exactly that call site:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>commands.<span class="fn">spawn</span>(<span class="fn">Sprite</span>(color = PADDLE_SIZE.pointee, _))</code></pre></div>
+<p>The most reliable way to sidestep this entirely is to check whether the external constructor you&#x27;re using is on the hand-verified <code>const fn</code> list above (or add it, once verified against the defining crate&#x27;s own source) — a <code>const</code>-promoted value is already the exact type <code>T</code> everywhere, so <code>.pointee</code> is never needed for it.</p>
+<p><strong>Extending the list from your own project</strong>: rather than patching the compiler, declare your own hand-verified entries in <code>boring.toml</code>&#x27;s <code>[external_types]</code> section — this supplements the built-in list above (and the tuple-struct list used for plain <code>Type(args)</code> construction, e.g. bevy&#x27;s <code>Mesh2d</code>/<code>TextColor</code>), it never overrides or removes an entry from it:</p>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>[external_types]
+tuple_structs = [&quot;MyBevyMarker&quot;]     # Type(args) instead of Type::new(args)
+const_fns = [&quot;Vec3::new&quot;, &quot;MyExternalType::from_parts&quot;]  # &quot;Type::method&quot; pairs</code></pre></div>
+<p>Same rule applies as for the built-in lists: only add an entry once you&#x27;ve verified against the defining crate&#x27;s source that it&#x27;s actually a plain tuple struct (no inherent <code>new()</code>) or actually a <code>const fn</code> — a wrong entry produces invalid Rust that <code>boring build</code> won&#x27;t catch, only <code>cargo build</code> will (<code>E0599</code>/<code>E0015</code>).</p>
+<p>Several sibling projects can also share one canonical declarations file instead of each repeating the same entries, via <code>include</code>:</p>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>[external_types]
+include = [&quot;../shared/external_types.toml&quot;]   # path relative to this boring.toml</code></pre></div>
+<p>The included file has its own <code>[external_types]</code> section, folded into this project&#x27;s lists (additive, single-level — a nested <code>include</code> inside the included file is not followed). See <code>boring-bevylib/external_types.toml</code> in the <code>boring</code>-adjacent Bevy-game projects for a real example.</p>
+<h3 id="advanced--string-literals-as-external-call-arguments-known-limitation">Advanced — String literals as external call arguments (known limitation)</h3>
+<p>A string literal passed <strong>directly</strong> as an argument to a method or function call on an <strong>external type</strong> (a Rust type defined outside the <code>.br</code> file — a hand-written struct, a third-party crate type, anything Boring never parsed a <code>struct</code>/<code>enum</code> declaration for) transpiles as a raw <code>&amp;&#x27;static str</code>, <em>not</em> <code>string</code>&#x27;s usual <code>Rc&lt;str&gt;</code>/<code>Arc&lt;str&gt;</code> representation:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="kt">bool</span> <span class="fn">direct_external_call</span>(Sb3Block blk):
+    blk.<span class="fn">opcode_is</span>(<span class="s">"literal_direct"</span>)</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">direct_external_call</span>(blk: <span class="kt">Sb3Block</span>) -&gt; bool {
+    blk.<span class="fn">opcode_is</span>(<span class="s">&quot;literal_direct&quot;</span>)   <span class="co">// &amp;&#x27;static str, NOT Arc::&lt;str&gt;::from(...)</span>
+}</code></pre></div>
+<p>This compiles fine when the external method&#x27;s Rust signature takes <code>&amp;str</code> (<code>&amp;&#x27;static str</code> is a subtype of <code>&amp;str</code> — the common case for idiomatic Rust APIs) but fails to compile (<code>E0308: expected Arc&lt;str&gt;, found &amp;&#x27;static str</code>) when the signature takes an owned <code>Arc&lt;str&gt;</code>/<code>Rc&lt;str&gt;</code> — which does happen, e.g. a hand-written type that stores the value or hands it to another owned-<code>Arc&lt;str&gt;</code> API.</p>
+<p><strong>Why</strong>: the promotion from a bare literal to <code>Arc::&lt;str&gt;::from(&quot;...&quot;)</code> (<code>emit_expr_owned</code>, used e.g. for arguments to a Boring-declared function/method, where the callee&#x27;s <code>string</code> parameter type is known from its own signature) only happens where the transpiler has an actual Boring-level parameter type to coerce toward. A call into an external type has, by definition, no such signature for Boring to consult — there is no way to distinguish &quot;this external method wants <code>&amp;str</code>&quot; from &quot;this external method wants <code>Arc&lt;str&gt;</code>&quot; from the <code>.br</code> source alone, so the argument falls back to the same representation as any other bare expression (<code>emit_expr</code>, not <code>emit_expr_owned</code>).</p>
+<p><strong>This is not going to become a safe default to change</strong>: emitting <code>Arc::&lt;str&gt;::from(...)</code> unconditionally for every literal argument to an external call would fix the <code>Arc&lt;str&gt;</code>- parameter case above, but silently break the (more common) <code>&amp;str</code>-parameter case — an owned <code>Arc&lt;str&gt;</code>/<code>Rc&lt;str&gt;</code> value does not coerce to <code>&amp;str</code> at a by-value argument position (<code>Deref</code> coercion only applies through an actual reference, e.g. <code>&amp;Arc&lt;str&gt;</code> → <code>&amp;str</code>; there is no reference here to coerce through). Since Boring cannot see the external signature, it cannot pick the right representation automatically, and defaulting either way trades one working case for a different broken one.</p>
+<p><strong>Workarounds</strong>, in order of preference:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># 1. `as string` cast at the call site — the lightest fix, one call, no new function:</span>
+blk.<span class="fn">opcode_is</span>(<span class="s">"literal_direct"</span> <span class="kw">as</span> <span class="kt">string</span>)
+
+<span class="co"># 2. Route through a Boring-declared function/method with a `string`-typed parameter —</span>
+<span class="co">#    useful when the same literal (or several) needs the conversion repeatedly, since the</span>
+<span class="co">#    parameter&#x27;s known `string` type is what drives the coercion, not the cast:</span>
+<span class="kw">def</span> <span class="kt">bool</span> <span class="fn">block_opcode_is</span>(Sb3Block blk, <span class="kt">string</span> op):
+    blk.<span class="fn">opcode_is</span>(op)   <span class="co"># `op` is already `Arc&lt;str&gt;` here — this call is fine as-is</span>
+
+<span class="fn">block_opcode_is</span>(blk, <span class="s">"operator_add"</span>)</code></pre></div>
+<p>Either form works today with no compiler changes; a computed/interpolated string (<code>&quot;{x}&quot;</code>) or a value already bound to a <code>string</code> variable passed to an external call is unaffected by this gap — only a <em>bare literal</em> used directly as the argument expression hits it.</p>
+<h3 id="advanced--derive-trait-whitelist-as-trait-routed-into-derive">Advanced — derive-trait whitelist (<code>as Trait:</code> routed into <code>#[derive(...)]</code>)</h3>
+<p><code>struct Foo as Trait1, Trait2:</code> / <code>enum Foo as Trait1, Trait2:</code> normally means trait <em>conformance</em>: Boring emits <code>impl Trait for Foo { ...only the methods Trait requires... }</code>, expecting the struct/enum body to provide those methods itself.</p>
+<p>Some names in that position aren&#x27;t traits you&#x27;d ever implement by hand — they&#x27;re Rust derive macros (<code>Debug</code>, <code>Clone</code>, or a third-party one like Bevy&#x27;s <code>Component</code>), which generate their <code>impl</code> entirely mechanically and have no method body for Boring code to provide. A name recognized as a derive macro is routed into <code>#[derive(...)]</code> instead — merged into the struct/enum&#x27;s existing derive line (or, for an enum, an additional stacked <code>#[derive(...)]</code> line) rather than emitting a broken <code>impl</code> block:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@derive</span>(Component, Debug, Clone)     <span class="co"># still works — explicit, unconditional escape hatch</span>
+<span class="kw">pub</span> <span class="kw">struct</span> Velocity:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+
+<span class="co"># once Component is registered (see below), this is equivalent:</span>
+<span class="kw">pub</span> <span class="kw">struct</span> Velocity <span class="kw">as</span> Component, Debug, Clone:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y</code></pre></div>
+<p>...<strong>almost</strong> equivalent, actually — see the auto-default caveat right below before mechanically converting an existing <code>@derive(...)</code> to a header.</p>
+<p>Built into the compiler: <code>Debug</code>, <code>Clone</code>, <code>Copy</code>, <code>PartialEq</code>, <code>Eq</code>, <code>PartialOrd</code>, <code>Ord</code>, <code>Hash</code>, <code>Default</code> — zero-Cargo-dependency std traits only. <code>Serialize</code>/<code>Deserialize</code>/<code>thiserror::Error</code> are deliberately <strong>not</strong> on this list even though they&#x27;re also pure derive macros: they already have their own compiler-tracked auto-dependency injection (serde only when <code>json()</code>/<code>fromJson()</code> are used; thiserror only via <code>@error</code> variant attrs — see the section below), and routing them through this generic whitelist wouldn&#x27;t wire that up. Keep using <code>@derive(Serialize, Deserialize)</code> / rely on <code>@error</code> for those.</p>
+<p><strong>Why <code>@derive(...)</code> is still worth reaching for, even for whitelisted names: it&#x27;s what turns off the auto-default.</strong> Every struct/enum with <em>no</em> explicit <code>@derive(...)</code> attribute at all gets an automatic <code>Debug</code>/<code>Clone</code>/<code>PartialEq</code> (plus <code>Default</code> when needed — see this section&#x27;s own <code>#[derive(Debug, Clone, PartialEq)]</code> default earlier in this doc), independently of any header <code>as Trait:</code> list. A header only <em>adds</em> its whitelisted names on top of that default — it never disables it, because there&#x27;s nothing about writing <code>as Trait:</code> that says &quot;this is now the exhaustive list.&quot; Converting <code>@derive(Component, Debug)</code> (no <code>Clone</code>, no <code>PartialEq</code>) to <code>struct X as Component, Debug:</code> therefore silently gains <code>Clone</code>/<code>PartialEq</code> it didn&#x27;t have before. Usually harmless — but not always: a type that relies on <em>not</em> having a method (e.g. a <code>#[derive(Deref)]</code> wrapper whose <code>.clone()</code> is meant to auto-deref to the wrapped field&#x27;s own <code>Clone</code>, not clone the wrapper itself) breaks the moment the wrapper gains its own <code>Clone</code>, since Rust&#x27;s method resolution always prefers an exact-type match over <code>Deref</code>-based lookup.</p>
+<p>An <strong>empty <code>@derive()</code></strong> (or bare <code>@derive</code> with no arguments) sidesteps this: it still counts as &quot;this struct declared an explicit derive list&quot; (so the auto-default never runs), while a header <code>as Trait:</code> list keeps contributing its whitelisted names on top of it — giving an <em>exact</em>, non-broadened derive set with header syntax:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@derive</span>()                              <span class="co"># suppresses the auto-default entirely</span>
+<span class="kw">pub</span> <span class="kw">struct</span> Paddle <span class="kw">as</span> Component, Debug:  <span class="co"># header still routes Component/Debug into #[derive(...)]</span>
+    <span class="kw">pass</span></code></pre></div>
+<p>This transpiles to exactly <code>#[derive(Component, Debug)]</code> — no <code>Clone</code>, no <code>PartialEq</code> snuck in. Reach for this whenever a struct/enum&#x27;s original, hand-picked <code>@derive(...)</code> list was narrower than what the auto-default alone would produce and you still want header syntax for the whitelisted names.</p>
+<p><strong>Extending the list from your own project</strong> — same shape as <code>[external_types]</code>:</p>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>[derives]
+traits = [&quot;Component&quot;, &quot;Resource&quot;]            # Bevy derive macros, for example
+include = [&quot;../boring-bevylib/derives.toml&quot;]  # shared declarations, same additive/single-level rules</code></pre></div>
+<p>If you add <code>Serialize</code>/<code>Deserialize</code>/similar here yourself, you&#x27;re responsible for also declaring the matching <code>[dependencies]</code> entry — this mechanism only decides <em>how to emit</em> a name, it doesn&#x27;t manage Cargo dependencies.</p>
+<p><strong><code>ext Foo as Trait:</code> cannot use a derive-macro name.</strong> An <code>ext</code> block attaches to a type defined elsewhere — Rust has no way to retroactively add <code>#[derive(...)]</code> to an already-declared <code>struct</code>/<code>enum</code>. Declare the derive on the type&#x27;s own <code>struct</code>/<code>enum</code> header (or via <code>@derive(...)</code>) instead; <code>boring build</code> rejects the <code>ext</code> form with an error rather than silently emitting a broken <code>impl</code>.</p>
 <h3 id="advanced--thiserror-integration">Advanced — <code>thiserror</code> integration</h3>
 <p>When any enum variant carries an <code>@error</code> attribute, the transpiler automatically adds <code>#[derive(Debug, thiserror::Error)]</code> to the enum and <code>thiserror = &quot;1&quot;</code> to the generated <code>Cargo.toml</code>. No <code>@derive(thiserror::Error)</code> is needed on the enum itself.</p>
 <p>The <code>@error</code> message supports thiserror&#x27;s <code>{0}</code>, <code>{1}</code> field references and named field syntax.</p>
@@ -3803,6 +4077,41 @@ weights.<span class="fn">get_or_init</span>(|| <span class="fn">load_weights</sp
 <span class="kw">let</span> r2 = <span class="fn">checked_divide</span>(<span class="nb">10</span>, <span class="nb">0</span>).<span class="fn">unwrap_or_else</span>(|_| -<span class="nb">1</span>);   <span class="co">// -1</span></code></pre></div>
 <p>The <code>TypeId</code> uniquely identifies <code>CalcError</code> at the catch site regardless of module — two types with the same name in different modules are never confused.</p>
 <table><thead><tr><th></th><th>Untyped <code>throws</code></th><th>Typed <code>throws CalcError</code></th></tr></thead><tbody><tr><td>Return type</td><td><code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code></td><td><code>Result&lt;T, Box&lt;dyn Error&gt;&gt;</code></td></tr><tr><td>Throw wrapping</td><td><code>BoringError::Str</code> / <code>BoringError::String</code></td><td><code>BoringError::Other(TypeId::of::&lt;CalcError&gt;(), …)</code></td></tr><tr><td><code>catch:</code> (untyped)</td><td>✓ catches everything</td><td>✓ catches unmatched errors</td></tr><tr><td><code>catch CalcError:</code></td><td>✗</td><td>✓ dispatches via <code>TypeId</code></td></tr><tr><td><code>try … else</code></td><td>✓</td><td>✓</td></tr><tr><td>Propagate with <code>?</code></td><td>✓</td><td>✓ (unwrapped at the catching <code>try:</code> block)</td></tr></tbody></table>
+<h4 id="enum-error-types-are-always-typed-even-from-untyped-throws">Enum error types are always typed, even from untyped <code>throws</code></h4>
+<p><code>BoringError::Other</code> routing (previous section) is <strong>not</strong> limited to functions that declare <code>throws EnumName:</code> themselves. Any user-defined enum that is the direct target of a <code>throw</code> <em>anywhere</em> in the program — even from a plain untyped <code>throws:</code> function — is automatically registered as a typed error type, and gets the same <code>Display</code>/<code>Error</code> impls and <code>BoringError::Other(TypeId, …)</code> wrapping as if every one of its throw sites had declared <code>throws EnumName:</code> explicitly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> StopSignal:
+    Stop
+
+<span class="kw">def</span> <span class="fn">exec</span>(<span class="kt">int</span> n) <span class="kw">throws</span>:            <span class="co"># untyped — no `throws StopSignal:` here</span>
+    <span class="kw">if</span> n &gt; <span class="nb">0</span>:
+        <span class="kw">throw</span> StopSignal.Stop
+
+<span class="kw">try</span>:
+    <span class="fn">exec</span>(<span class="nb">1</span>)
+<span class="kw">catch</span> StopSignal.Stop:             <span class="co"># still dispatches correctly via TypeId</span>
+    print <span class="s">"stopped"</span></code></pre></div>
+<p>This matters because, without it, <code>throw StopSignal.Stop</code> from an untyped <code>throws:</code> function would stringify the value via <code>Display</code> into <code>BoringError::String</code> — discarding which variant it was — and <code>catch StopSignal.Stop:</code> anywhere else in the program could never downcast back out of it. That failure mode used to be silent at the Boring level: the generated Rust either failed to compile with a plain &quot;<code>StopSignal</code> doesn&#x27;t implement <code>Display</code>&quot; (if the enum had no <code>Display</code> impl of its own), or, once a hand-written <code>as string:</code> papered over that, compiled cleanly and only failed at runtime — the <code>catch</code> clause never fired, and the error surfaced instead as an unhandled-error panic. Registering <em>any</em> thrown enum as typed, independent of which function&#x27;s <code>throws</code> clause mentions it, closes this gap: there is no untyped/typed distinction left for enums to fall into by accident. (Discovered implementing scratch-boring&#x27;s <code>control_stop</code>, where the fix originally required declaring <code>throws StopSignal:</code> explicitly, before this guarantee existed at the compiler level.)</p>
+<p>One consequence: a hand-written <code>as string:</code> on an enum that is ever thrown now always conflicts with the auto-generated <code>Display</code> impl (<code>E0119</code>, duplicate <code>impl Display</code>) — the same trade-off <code>throws EnumName:</code> already made before this fix. Remove the <code>as string:</code>; the auto-generated <code>Display</code> (delegating to <code>Debug</code>) covers the same need.</p>
+<h4 id="fixed-width-scalar-throws--boringerrorscalar">Fixed-width scalar throws — <code>BoringError::Scalar</code></h4>
+<p><code>int8</code>..<code>int128</code>, <code>uint8</code>..<code>uint128</code>, <code>float32</code>, and <code>float64</code> route through their own <code>BoringError::Scalar(ScalarKind, u128)</code> variant, not <code>BoringError::Other</code>. The compiler already knows, statically, that a thrown value here is exactly one of twelve small <code>Copy</code> kinds — <code>Other</code>&#x27;s <code>TypeId</code> + heap-allocated <code>Box&lt;dyn Any&gt;</code> machinery exists for arbitrary user-defined enums/structs the compiler <em>can&#x27;t</em> enumerate in advance, and paying that cost for a plain <code>i8</code> or <code>f32</code> would be pure overhead.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">risky</span>(<span class="kt">bool</span> asFloat) <span class="kw">throws</span>:
+    <span class="kw">if</span> asFloat:
+        <span class="kw">let</span> float32 f = <span class="nb">3.5</span>
+        <span class="kw">throw</span> f
+    <span class="kw">let</span> <span class="kt">int8</span> x = <span class="nb">5</span>
+    <span class="kw">throw</span> x</code></pre></div>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">fn</span> <span class="fn">risky</span>(as_float: bool) -&gt; <span class="kw">Result</span>&lt;(), <span class="kw">Box</span>&lt;<span class="kw">dyn</span> std::error::<span class="kt">Error</span> + <span class="kt">Send</span> + <span class="kt">Sync</span>&gt;&gt; {
+    <span class="kw">if</span> as_float {
+        <span class="kw">let</span> f: f32 = <span class="nb">3.5</span>;
+        <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">scalar_f32</span>(f)));
+    }
+    <span class="kw">let</span> x: i8 = <span class="nb">5</span>;
+    <span class="kw">return</span> <span class="kw">Err</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">BoringError</span>::<span class="fn">scalar_i8</span>(x)));
+}</code></pre></div>
+<p><code>catch Int8:</code> / <code>catch Float32:</code> each compile to a guard on the <code>ScalarKind</code> tag, binding <code>error</code> as the real native type (<code>i8</code>, <code>f32</code>, …) reconstructed from the shared <code>u128</code> payload — not a stringified <code>Arc&lt;str&gt;</code> the way the untyped <code>Int</code>/<code>Float</code>/<code>Bool</code> fast paths do:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kt">BoringError</span>::<span class="fn">Scalar</span>(<span class="kt">ScalarKind</span>::<span class="kt">Int8</span>, __bits) =&gt; { <span class="kw">let</span> error: i8 = __bits <span class="kw">as</span> i128 <span class="kw">as</span> i8; /* body */ }
+<span class="kt">BoringError</span>::<span class="fn">Scalar</span>(<span class="kt">ScalarKind</span>::<span class="kt">Float32</span>, __bits) =&gt; { <span class="kw">let</span> error: f32 = f32::<span class="fn">from_bits</span>(__bits <span class="kw">as</span> u32); /* body */ }</code></pre></div>
+<p><code>Other</code> still exists, unchanged, for exactly what only it can do — genuine user-defined <code>throws ErrorType</code> enums/structs.</p>
 <h4 id="qualified-error-type-paths">Qualified error type paths</h4>
 <p>The error type in a <code>throws</code> clause can be a <strong>module-qualified path</strong> using dot notation — the dot separator is translated to <code>::</code> in Rust:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kt">string</span> <span class="fn">read_file</span>(<span class="kt">string</span> path) <span class="kw">throws</span> io.Error:

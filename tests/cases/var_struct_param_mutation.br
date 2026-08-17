@@ -1,0 +1,33 @@
+# Regression test: a `var StructType param` (docs/CLAUDE.md: "`var` param —
+# passes `&mut T`; changes are visible at the call site") must actually
+# mutate the CALLER's variable, not a throwaway clone of it.
+#
+# The transpiler's struct-value-semantics heuristic (`emit_let_value_fallback`
+# in src/transpiler/emit_let.rs, used to emit call arguments) unconditionally
+# added `.clone()` to a bare `Var` argument whose type is a known user struct
+# -- its comment claims var params are the documented exception ("`var`
+# params are `&mut T` — don't clone, pass the reference directly"), but the
+# actual exclusion only covered `var_primitive_params` (scalar `var` params),
+# never a struct-typed `var` param. `emit_args_coerced` (src/transpiler/
+# emit_methods.rs), the only place that actually knows the target parameter
+# is rebindable, then wrapped that already-cloned argument in `&mut`:
+# `bump(&mut v.clone(), 1)` -- a mutable reference to a temporary clone, so
+# `bump`'s mutation of the struct never reached the real `v` at all.
+#
+# Only fixed for the simple "pass an existing var/mut local directly" case
+# (a bare `Var` argument) -- see the fix's own comment in `emit_args_coerced`.
+
+struct Vars:
+    var mut {int=int} table
+
+    def set(int id, int v):
+        table[id] = v
+
+def bump(var Vars vars, int id):
+    vars.set(id, 99)
+
+def main():
+    var v = Vars(table = {=})
+    bump(v, 1)
+    let r = v.table[1] else -1
+    print "after bump: {r}"

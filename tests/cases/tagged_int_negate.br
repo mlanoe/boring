@@ -1,0 +1,17 @@
+# Regression test for docs/known-issues-biguint-spike.md item 7: unary `-`
+# on an `int64`/`int128`-TAGGED value (i.e. one that actually went through an
+# `as int64`/`as int128` cast, not just a bare literal handed to a typed
+# param — see the doc's note on why the naive repro doesn't always trigger
+# it) used to fail with "cannot negate Int64"/"cannot negate Int128".
+def show64(int64 v):
+    let n = -v
+    print n
+
+def show128(int128 v):
+    let n = -v
+    print n
+
+show64(-42 as int64)
+show64(42 as int64)
+show128(-42 as int128)
+show128(42 as int128)

@@ -1,0 +1,33 @@
+# Regression test for docs/known-issues-biguint-spike.md item 5 (transpiler
+# fix) + item 4 (typed `throws` on a type-level method): a type-level factory
+# method (`type def`) inside an ENUM body must accept a typed `throws Type:`
+# clause and have it wrapped in Result<T, E> by the transpiler, the same as
+# the already-fixed struct case (tests/cases/type_def_typed_throws.br).
+#
+# Registered in both tests/run.rs (`boring run`) and tests/transpile.rs
+# (`boring build`).
+enum FooError:
+    Empty
+
+enum Foo:
+    A(int)
+
+    type def Foo make(string s) throws FooError:
+        if s.length == 0:
+            throw FooError.Empty
+        Foo.A(1)
+
+    type req Foo zero() throws FooError:
+        Foo.A(0)
+
+def main() throws:
+    try:
+        let f = Foo.make("")
+    catch FooError.Empty:
+        print "caught empty"
+
+    let z = Foo.zero()
+    print z
+
+    let g = Foo.make("x")
+    print g

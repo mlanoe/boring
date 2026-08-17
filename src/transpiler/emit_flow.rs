@@ -299,8 +299,22 @@ impl Transpiler {
                                         }
                                 }
                             }
-                            let val = self.emit_expr(expr);
-                            self.line(&format!("let Some({}) = {} else {{", name, val));
+                            // Narrowing numeric `as` cast scrutinee (docs/known-issues-
+                            // biguint-spike.md #11): see the identical check in
+                            // `emit_cond_clauses` (emit_match.rs) for the full rationale --
+                            // `guard let` has the exact same `let Some(name) = val else {...}`
+                            // shape and needs the same checked, Option-producing codegen.
+                            let val = self.try_emit_checked_int_cast_as_option(expr)
+                                .unwrap_or_else(|| self.emit_expr(expr));
+                            // Parenthesize unconditionally: Rust's `let-else` grammar rejects a
+                            // block-like initializer ending directly in `}` right before `else`
+                            // (ambiguous with the `else` binding to the initializer's own
+                            // trailing `if`/`match`/block) — e.g. `readLine()` transpiles to an
+                            // inline `{ ...; if ... { None } else { Some(...) } }` block, which
+                            // hit exactly this without parens. Wrapping is valid Rust for any
+                            // expression shape, so do it unconditionally rather than pattern-
+                            // matching which shapes need it.
+                            self.line(&format!("let Some({}) = ({}) else {{", name, val));
                             self.known_local_vars.insert(name.clone());
                             self.indent += 1;
                             self.emit_body(&s.else_body);
@@ -311,7 +325,9 @@ impl Transpiler {
                             let pat_s = self.emit_pattern(pat);
                             let val = self.emit_expr(expr);
                             Self::collect_pattern_binds(pat, &mut self.known_local_vars);
-                            self.line(&format!("let {} = {} else {{", pat_s, val));
+                            // See the `CondClause::Let` arm just above for why this is
+                            // unconditionally parenthesized.
+                            self.line(&format!("let {} = ({}) else {{", pat_s, val));
                             self.indent += 1;
                             self.emit_body(&s.else_body);
                             self.indent -= 1;
@@ -485,7 +501,10 @@ impl Transpiler {
                                 } else {
                                     self.line(&format!("let error: {p}<str> = {p}::<str>::from(__boring_err.to_string());", p = self.str_ptr()));
                                 }
+                                let prev_error_concrete = self.error_var_is_concrete_enum;
+                                self.error_var_is_concrete_enum = is_enum;
                                 self.emit_loop_body(&body_stmts);
+                                self.error_var_is_concrete_enum = prev_error_concrete;
                                 self.line("None");
                                 self.indent -= 1;
                                 self.line("}");
@@ -587,7 +606,10 @@ impl Transpiler {
                                     } else {
                                         self.line(&format!("let error: {p}<str> = {p}::<str>::from(__e.to_string());", p = self.str_ptr()));
                                     }
+                                    let prev_error_concrete = self.error_var_is_concrete_enum;
+                                    self.error_var_is_concrete_enum = is_enum;
                                     self.emit_loop_body(&body_stmts);
+                                    self.error_var_is_concrete_enum = prev_error_concrete;
                                     self.line("None");
                                     self.indent -= 1;
                                     self.line("}");

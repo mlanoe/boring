@@ -49,6 +49,47 @@ fn test_fn_type_in_let() {
 }
 
 #[test]
+fn test_type_def_typed_throws() {
+    // Regression test for docs/known-issues-biguint-spike.md item 4: a type-level
+    // factory method (`type def`) must accept a typed `throws Type:` clause, the
+    // same grammar `req`/`def` already accept — previously only the untyped
+    // `throws:` form parsed here.
+    let src = "\
+enum BigUintError:\n    Underflow\n\nstruct BigUint:\n    int value\n\n    type def BigUint make(string s) throws BigUintError:\n        BigUint(0)\n";
+    let tokens = crate::lexer::lex(src).expect("lex");
+    let program = crate::parser::parse(tokens).expect("parse");
+    let ast::Item::Struct(decl) = &program.items[1] else { panic!("expected Struct item") };
+    assert_eq!(decl.type_methods.len(), 1);
+    let tm = &decl.type_methods[0];
+    assert_eq!(tm.name, "make");
+    assert!(tm.throws, "throws flag should be set");
+    match &tm.throws_ty {
+        Some(ast::Type::Named(n)) => assert_eq!(n, "BigUintError"),
+        other => panic!("expected typed throws BigUintError, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_type_req_typed_throws_task_either_order() {
+    // `throws Type` combined with `task`, in both orders, on `type req`.
+    for src in [
+        "struct BigUint:\n    int value\n\n    type req BigUint zero() throws BigUintError task:\n        BigUint(0)\n",
+        "struct BigUint:\n    int value\n\n    type req BigUint zero() task throws BigUintError:\n        BigUint(0)\n",
+    ] {
+        let tokens = crate::lexer::lex(src).expect("lex");
+        let program = crate::parser::parse(tokens).expect("parse");
+        let ast::Item::Struct(decl) = &program.items[0] else { panic!("expected Struct item") };
+        let tm = &decl.type_methods[0];
+        assert!(tm.throws);
+        assert!(tm.task);
+        match &tm.throws_ty {
+            Some(ast::Type::Named(n)) => assert_eq!(n, "BigUintError"),
+            other => panic!("expected typed throws BigUintError, got {:?}", other),
+        }
+    }
+}
+
+#[test]
 fn test_generic_type_args_extended() {
     // `Foo<&a, T, U as Clone>` — lifetime arg + type param + type param with bound.
     // The `as Clone` bound is silently ignored at use sites.

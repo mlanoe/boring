@@ -62,7 +62,7 @@ fn expr_uses_gpu_warp(e: &Expr) -> bool {
         return true;
     }
     match &e.kind {
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_) | ExprKind::DotIdent(_) => false,
         ExprKind::StringInterp(segs) => segs.iter().any(|s| match s {
             StringSegment::Lit(_) => false,

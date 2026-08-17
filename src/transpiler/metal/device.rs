@@ -887,6 +887,16 @@ fn map_builtin_fn(name: &str) -> String {
     match name {
         "int"   => "(int64_t)".into(),
         "float" => "(float)".into(),
+        // `float32(x)` — MSL's only float type already is 32-bit, so this is the
+        // exact same cast as bare `float(x)` just above. Was missing entirely
+        // (fell through to the `other => other.into()` passthrough below, emitting
+        // an invalid, undeclared `float32(x)` function call in the generated MSL —
+        // confirmed via examples/mandelbrot_gpu.br, which must use `float32`
+        // throughout its kernel: MSL has no native `double`, so any GPU kernel
+        // field/local touching float data needs `float32`, not the bare
+        // `float`/`float64` alias — see docs/float-width-types.md and
+        // examples/saxpy.br's identical requirement).
+        "float32" => "(float)".into(),
         "abs"   => "abs".into(),
         "min"   => "min".into(),
         "max"   => "max".into(),

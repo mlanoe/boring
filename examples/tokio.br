@@ -36,14 +36,14 @@ task def void main():
     let h_api  = task fetch_users_from_api(url)
 
     # Collecte séquentielle — les fetches ont tourné en parallèle
-    var [User] all_users = []
+    var mut [User]'actor'task all_users = []
     try:
-        all_users.extend(h_file.value)
+        all_users.append(h_file.value)
         info "Fichier lu: {all_users.length} utilisateurs"
     catch:
         error "Erreur lors de la lecture du fichier: {error}"
     try:
-        all_users.extend(h_api.value)
+        all_users.append(h_api.value)
         info "API: {all_users.length} utilisateurs au total"
     catch:
         error "Erreur API: {error}"

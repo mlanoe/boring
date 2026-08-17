@@ -1,0 +1,54 @@
+# Regression test: `pub let NAME = "literal"` (a string, no type annotation) at module
+# scope must promote to a real Rust module-level item, referenceable from OTHER functions
+# in the same file -- not just fall through to the synthesized `fn main()`'s local
+# fallback. Before the fix, `top_level_let_is_promotable` (src/transpiler/mod.rs) had no
+# notion of a string-literal `let` at all -- only scalar consts
+# (`top_level_let_is_const_safe`) and external-type constructor calls
+# (`top_level_let_external_call`) -- so `OP_ADD` below fell through to `emit_item`'s
+# generic scalar-literal fallback, emitting the invalid `pub let OP_ADD: Arc<str> =
+# Arc::<str>::from("operator_add");` as a STATEMENT inside `fn main()` ("visibility `pub`
+# is not followed by an item", "expected expression, found `let` statement") -- and even
+# had that compiled, `is_add`/`block_opcode_is` below have no way to see a `fn
+# main()`-local at all.
+#
+# This is the exact shape discovered (and worked around, not fixed) while porting
+# scratch-boring's `scratch.br` to Boring: an opcode string constant read by one helper
+# and passed into a second one -- see that file's own comment near
+# `block_opcode_is`/`block_field_id`/`target_find_hat` for the workaround (a `string`
+# function parameter instead of a top-level constant) this fix makes unnecessary.
+#
+# `OP_SUB` is the explicit-type-annotation sibling (`pub let string OP_SUB = ...`) --
+# same promotion path, just confirming the fix isn't gated on the annotation being absent.
+#
+# `PRIVATE_UNUSED` is the control: a bare (non-`pub`) top-level string `let` with zero
+# in-file consumers must stay un-promoted entirely, exactly like the scalar equivalent in
+# `pub_top_level_const_unused.br` -- a private, unused constant has no reason to exist as
+# a real Rust item.
+#
+# `PRIVATE_USED` is a bonus regression case one level beyond the reported bug: a bare
+# (non-`pub`) top-level string `let` that IS referenced from another function was ALSO
+# unreachable before this fix (same promotion gate, `top_level_let_is_promotable`, was
+# never even asking `global_lets_used_elsewhere` for a string-shaped `let`) -- confirms
+# the fix isn't `pub`-only.
+pub let OP_ADD = "operator_add"
+pub let string OP_SUB = "operator_subtract"
+let PRIVATE_UNUSED = "never_read"
+let PRIVATE_USED = "shh"
+
+def bool block_opcode_is(string opcode, string op):
+    opcode == op
+
+def bool is_add(string opcode):
+    block_opcode_is(opcode, OP_ADD)
+
+def bool is_sub(string opcode):
+    block_opcode_is(opcode, OP_SUB)
+
+def string reveal_private():
+    PRIVATE_USED
+
+def main():
+    print is_add("operator_add")
+    print is_add("operator_subtract")
+    print is_sub("operator_subtract")
+    print reveal_private()

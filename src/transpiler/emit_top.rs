@@ -45,13 +45,15 @@ impl Transpiler {
                 // let` (or drops the item) instead of a module-level item.
                 if s.is_static || self.is_gpu_target || s.is_pub || self.global_lets_used_elsewhere.contains(&s.name) {
                     // Non-GPU only: a call into an external/opaque type (`Color.srgb(...)`,
-                    // `Vec2.new(...)`) that isn't itself scalar-safe -- `top_level_let_is_const_safe`
-                    // still declines it, so `top_level_let_is_promotable`'s only other way to
-                    // reach here is `top_level_let_external_call`. GPU/kernel targets never take
-                    // this branch: `no_std` kernel code has no `std::sync::LazyLock` to fall
-                    // back to, and `emit_program_items`'s GPU branch already filters every
-                    // non-scalar `let` out via `top_level_let_is_const_safe` before this arm
-                    // is ever reached for one.
+                    // `Vec2.new(...)`) or a plain string literal (`top_level_let_is_string_literal`)
+                    // that isn't itself scalar-safe -- `top_level_let_is_const_safe` still declines
+                    // both, so `top_level_let_is_promotable`'s only other ways to reach here are
+                    // `top_level_let_external_call` and `top_level_let_is_string_literal`.
+                    // GPU/kernel targets never take this branch: `no_std` kernel code has neither
+                    // `std::sync::LazyLock` nor `Rc`/`Arc` to fall back to, and both
+                    // `top_level_let_is_string_literal` and `emit_program_items`'s GPU branch
+                    // (`top_level_let_is_const_safe`-gated) already keep every non-scalar `let`
+                    // away from this arm under `is_gpu_target`.
                     // `pub let` at module scope → `pub const`/`pub static`, mirroring `pub
                     // struct`/`pub def`/`pub enum` elsewhere. A bare `let` (no `pub`) keeps
                     // emitting a private item, matching prior behavior for code that never
@@ -80,6 +82,37 @@ impl Transpiler {
                                 vis, s.name, rust_ty, val_str
                             ));
                         }
+                    } else if self.top_level_let_is_string_literal(s) {
+                        // A plain string literal (`pub let OP_ADD = "operator_add"` / `pub let
+                        // string OP_ADD = "operator_add"`) -- never a `const`, since
+                        // `Rc/Arc::<str>::from(...)` isn't a const fn, so this always takes the
+                        // same lazily-initialized `static` form as a non-const-fn external call
+                        // above. Name is emitted verbatim (not uppercased) -- like the external-
+                        // call branch above and unlike the scalar fallback below, nothing rewrites
+                        // read sites to an uppercased name for this case (see
+                        // `gpu_top_level_const_names`'s doc comment), so the emitted name must
+                        // match what `.br` source (and `emit_expr`/`emit_expr_owned`) already
+                        // reference verbatim.
+                        //
+                        // Always `Arc<str>` here, NEVER `self.str_ptr()`/`self.str_from` (which
+                        // pick `Rc` in single-thread mode) -- a `static` item must be `Sync`
+                        // regardless of the target's threading mode, and `Rc<str>` isn't. Same
+                        // reasoning as the module-level mutable-`var`-global static just above
+                        // (`std::sync::LazyLock<std::sync::Mutex<Arc<str>>>`, hardcoded `Arc<str>`
+                        // there too) -- and same fixup: `transpile_with_config`'s single-thread
+                        // `Arc<str>` → `Rc<str>` blanket replace would wrongly rewrite this literal
+                        // `Arc<str>` too, so it carries a matching undo rule
+                        // (`std::sync::LazyLock<Rc<str>>` → `std::sync::LazyLock<Arc<str>>`) that
+                        // must stay in sync with the exact literal text emitted here.
+                        let rust_ty = "Arc<str>".to_string();
+                        let ExprKind::Str(lit) = &s.value.as_ref().expect("string-literal let always has a value").kind else {
+                            unreachable!("top_level_let_is_string_literal guarantees an ExprKind::Str value")
+                        };
+                        let val_str = format!("Arc::<str>::from(\"{}\")", escape_str(lit));
+                        self.line(&format!(
+                            "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
+                            vis, s.name, rust_ty, val_str
+                        ));
                     } else {
                         // `_` is not a valid const item type in Rust (E0121) -- unlike a `let`,
                         // where the compiler can infer it. Without an explicit boring type
@@ -102,20 +135,23 @@ impl Transpiler {
                             s.value.as_ref().and_then(literal_ty_str).unwrap_or("_").to_string()
                         });
                         let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
-                        // GPU targets: uppercase the Rust identifier. A fn parameter whose name
-                        // matches an in-scope `const` is parsed by Rust as a refutable pattern
-                        // matching that constant's *value*, not a fresh binding -- a hard type
-                        // error the moment the types differ (E0308, "interpreted as a constant,
-                        // not a new binding"). Kernel constructors commonly use `width`/`height`
-                        // as parameter names (see `wgpu::host::emit_kernel_new`), which collides
-                        // with exactly the top-level names the docs' own examples use
-                        // (`let width = 800`, see examples/game_of_life.br). `map_builtin_var`
-                        // does the matching read-side rewrite via `gpu_top_level_const_names`.
-                        let const_name = if self.is_gpu_target {
-                            s.name.to_uppercase()
-                        } else {
-                            s.name.clone()
-                        };
+                        // Uppercase the Rust identifier, on every target (not just GPU —
+                        // see the matching, now target-agnostic comment on
+                        // `gpu_top_level_const_names`'s population site, mod.rs). A fn
+                        // parameter (or pattern binding, e.g. `while let Some(n) = ...`)
+                        // whose name matches an in-scope `const` is parsed by Rust as a
+                        // refutable pattern matching that constant's *value*, not a fresh
+                        // binding -- a hard error the moment the types differ, or an
+                        // outright "function parameters cannot shadow constants" (E0308 /
+                        // E0530). Kernel constructors commonly use `width`/`height` as
+                        // parameter names (see `wgpu::host::emit_kernel_new`), which
+                        // collides with exactly the top-level names the docs' own
+                        // examples use (`let width = 800`, see examples/game_of_life.br)
+                        // -- and a plain CPU program hits the identical restriction with
+                        // any common short name (`let n = 255` vs. `fn countdown(n)`,
+                        // confirmed via examples/hello.br). `map_builtin_var` does the
+                        // matching read-side rewrite via `gpu_top_level_const_names`.
+                        let const_name = s.name.to_uppercase();
                         self.line(&format!("{}const {}: {} = {};", vis, const_name, ty_str, val_str));
                     }
                 } else {
@@ -179,8 +215,17 @@ impl Transpiler {
         // Filter out items already imported by the standard prelude to avoid
         // "defined multiple times" errors (e.g. `use std.collections.HashMap`).
         let prelude_types = ["HashMap", "HashSet"];
+        // `Duration` is unconditionally in the prelude too (`use std::time::Duration;`,
+        // always emitted — see this file's caller) — a program that also writes
+        // `use tokio.time.Duration, timeout` (a common combo: `timeout` genuinely needs
+        // importing, `Duration` doesn't but is easy to list alongside it) would otherwise
+        // re-import it and hit E0252 ("defined multiple times"). `std::time`/`tokio::time`
+        // are the only two realistic source paths for a `Duration` item.
+        let is_time_path = matches!(path.as_str(), "std::time" | "tokio::time");
         let filtered_items: Vec<&String> = if path == "std::collections" {
             u.items.iter().filter(|item| !prelude_types.contains(&item.as_str())).collect()
+        } else if is_time_path {
+            u.items.iter().filter(|item| item.as_str() != "Duration").collect()
         } else {
             u.items.iter().collect()
         };
@@ -804,6 +849,124 @@ impl Transpiler {
         }
     }
 
+    /// Pre-seeds `known_local_vars`, `var_types`, `string_vars`, `dict_vars`,
+    /// mutex/rwlock/managed/arc tracking, and `var_struct_types` from a parameter list —
+    /// shared by `emit_fn` (regular functions and instance methods) and
+    /// `emit_type_method` (type-level `type def`/`type req`/`type set` methods, which
+    /// have no `self` receiver but otherwise need the same per-param local-variable
+    /// bookkeeping so their bodies emit correctly — e.g. `.length` on a `string`
+    /// param, or a struct-typed param's field/method access). Extracted verbatim from
+    /// `emit_fn`'s param loop; only ever reads `p.name`/`p.ty`/`p.mutable`, nothing
+    /// `FnDecl`-specific, so it applies equally to both callers.
+    pub(crate) fn seed_param_locals(&mut self, params: &[Param]) {
+        for p in params {
+            self.known_local_vars.insert(p.name.clone());
+            if let Some(ty) = &p.ty {
+                self.var_types.insert(p.name.clone(), ty.clone());
+                // Track dict-typed (`{K=V}`) params so `.get()`/`.insert()` subscript
+                // dispatch and dict method-name mapping (`.contains` → `.contains_key`,
+                // etc.) work for parameters, not just `let`/`var` locals (which
+                // `emit_let.rs` already tracks in `dict_vars`) — without this, a
+                // dict-typed parameter fell through to the Vec-shaped `as usize`
+                // indexing path and produced invalid Rust. `.without_mut()` strips
+                // the `Type::Mut(..)` wrapper a `mut {K=V}` param carries.
+                if matches!(ty.without_mut(), Type::Dict(..)) {
+                    self.dict_vars.insert(p.name.clone());
+                }
+                // Track string params for string concatenation detection.
+                if Self::is_string_type(ty) {
+                    self.string_vars.insert(p.name.clone());
+                }
+                // T'actor / T'actor'task params → mutex tracking.
+                if Self::is_mutex_binding(p.mutable, ty) {
+                    if Self::is_mutex_task_binding(p.mutable, ty) {
+                        self.var_mutex_task_types.insert(p.name.clone());
+                    } else {
+                        self.var_mutex_types.insert(p.name.clone());
+                    }
+                    self.arc_vars.insert(p.name.clone());
+                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(p.name.clone());
+                    }
+                }
+                // T'guard / T'guard'task params → rwlock tracking.
+                if Self::is_rwlock_binding(p.mutable, ty) {
+                    if Self::is_rwlock_task_binding(p.mutable, ty) {
+                        self.var_rwlock_task_types.insert(p.name.clone());
+                    } else {
+                        self.var_rwlock_types.insert(p.name.clone());
+                    }
+                    self.arc_vars.insert(p.name.clone());
+                }
+                // Arc/Rc-qualified and string params must be cloned before capture in `async move {}` blocks.
+                if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) || Self::is_string_type(ty) {
+                    self.arc_vars.insert(p.name.clone());
+                    // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone.
+                    if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                        self.rc_vars.insert(p.name.clone());
+                    }
+                    // Params are now by-value (owned clone), so single deref (*var) suffices for match.
+                }
+                if matches!(ty, Type::Optional(_)) {
+                    self.optional_vars.insert(p.name.clone());
+                }
+                // Managed mode T' params (OwnerQual::Owned over user type) → managed tracking.
+                // Also resolve non-function type aliases (e.g. `use Pt as LPoint'` → LPoint').
+                let resolved_ty_for_managed = if let Type::Named(n) = ty {
+                    self.non_fn_type_aliases.get(n.as_str()).unwrap_or(ty)
+                } else { ty };
+                if crate::transpiler::Transpiler::is_managed_user_owned(
+                    &self.config, &self.user_types, &self.unit_enums, resolved_ty_for_managed)
+                {
+                    match self.config.threading {
+                        crate::transpiler::ThreadingMode::Multi => {
+                            self.managed_mutex_vars.insert(p.name.clone());
+                            self.arc_vars.insert(p.name.clone());
+                        }
+                        crate::transpiler::ThreadingMode::Single => {
+                            self.managed_refcell_vars.insert(p.name.clone());
+                        }
+                    }
+                }
+                // Unqualified params whose type is a known actor-source type are inferred as 'actor.
+                // Register them in var_mutex_types so field access and method calls emit .lock().
+                if let Type::Named(n) = ty {
+                    if self.actor_source_types.contains(n.as_str()) {
+                        self.var_mutex_types.insert(p.name.clone());
+                        self.arc_vars.insert(p.name.clone());
+                    }
+                }
+                // Task fn params: calling them produces a Future → needs .await.
+                // Throws fn params: calling them returns Result → needs `?` in throws context.
+                {
+                    let resolved = if let Type::Named(n) = ty {
+                        self.fn_type_aliases.get(n.as_str()).unwrap_or(ty)
+                    } else { ty };
+                    if matches!(resolved, Type::Fn(_, _, _, true, _)) {
+                        self.task_vars.insert(p.name.clone());
+                    }
+                    // Track non-task fn params that throw: `int f() throws` → Result-returning closure
+                    if matches!(resolved, Type::Fn(_, _, true, false, _)) {
+                        self.throws_fn_params.insert(p.name.clone());
+                    }
+                }
+                // Plain Named struct/enum params → var_struct_types (direct field/method
+                // dispatch — `is_known_user_type` covers both, see its doc comment).
+                // Smart-pointer-qualified types (T'auto, T'weak, etc.) are excluded here;
+                // they have their own dispatch path.
+                if let crate::ast::Type::Named(tname) = ty {
+                    if self.is_known_user_type(tname.as_str()) {
+                        self.var_struct_types.insert(p.name.clone(), tname.clone());
+                    }
+                    // Newtype params: `fn f(UserId id)` → track so `id as uint` → `id.0`.
+                    if self.newtype_types.contains(tname.as_str()) {
+                        self.var_newtype_type.insert(p.name.clone(), tname.clone());
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
         // Register param types for ALL top-level functions — including native stdlib ones
         // (wait, timeout, …) — so that DotIdent type hints can be resolved at call sites:
@@ -1065,12 +1228,26 @@ impl Transpiler {
         // save/restore so variable names from one function body don't shadow another.
         let prev_var_struct_types  = std::mem::take(&mut self.var_struct_types);
         let prev_var_mutex_types   = std::mem::take(&mut self.var_mutex_types);
+        // `var_mutex_types`'s 'actor'task sibling — was missing from this save/restore
+        // entirely (unlike every other per-function var-tracking set here), so a name
+        // like `todo_list` inserted by one function's `'actor'task` binding leaked into
+        // every later function reusing that name, wrongly emitting `.lock().await` on an
+        // unrelated plain (non-Mutex) local of the same name (confirmed via
+        // examples/todo.br's `@test` fns, which redeclare `todo_list` as a bare local).
+        let prev_var_mutex_task_types = std::mem::take(&mut self.var_mutex_task_types);
         let prev_var_rwlock_types  = std::mem::take(&mut self.var_rwlock_types);
         let prev_known_local_vars  = std::mem::take(&mut self.known_local_vars);
         let prev_optional_vars    = std::mem::take(&mut self.optional_vars);
         let prev_var_types        = std::mem::take(&mut self.var_types);
         let prev_string_vars      = std::mem::take(&mut self.string_vars);
         let prev_string_arc_vars  = std::mem::take(&mut self.string_arc_vars);
+        // Re-seed promoted top-level string-literal constants (`OP_ADD`-shaped `pub let`s,
+        // see `global_string_const_names`'s doc comment) into both sets on every function/
+        // method entry -- unlike a param, such a constant is never locally declared inside
+        // the body reading it, so without this `emit_expr_owned`'s `Var` arm has no signal
+        // that a bare read of it (e.g. as a by-value call argument) needs `.clone()`.
+        self.string_vars.extend(self.global_string_const_names.iter().cloned());
+        self.string_arc_vars.extend(self.global_string_const_names.iter().cloned());
         // Which string bindings get indexed (`name[idx]`, non-constant idx) anywhere in
         // this function -- see `collect_str_index_targets` for why that's worth caching.
         let prev_str_index_cache_vars = std::mem::replace(
@@ -1083,102 +1260,7 @@ impl Transpiler {
         let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
         let prev_managed_mutex_vars   = std::mem::take(&mut self.managed_mutex_vars);
         // Pre-seed known_local_vars, var_struct_types, var_types, and var_mutex_types from params.
-        for p in &f.params {
-            self.known_local_vars.insert(p.name.clone());
-            if let Some(ty) = &p.ty {
-                self.var_types.insert(p.name.clone(), ty.clone());
-                // Track string params for string concatenation detection.
-                if Self::is_string_type(ty) {
-                    self.string_vars.insert(p.name.clone());
-                }
-                // T'actor / T'actor'task params → mutex tracking.
-                if Self::is_mutex_binding(p.mutable, ty) {
-                    if Self::is_mutex_task_binding(p.mutable, ty) {
-                        self.var_mutex_task_types.insert(p.name.clone());
-                    } else {
-                        self.var_mutex_types.insert(p.name.clone());
-                    }
-                    self.arc_vars.insert(p.name.clone());
-                    if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
-                        self.rc_vars.insert(p.name.clone());
-                    }
-                }
-                // T'guard / T'guard'task params → rwlock tracking.
-                if Self::is_rwlock_binding(p.mutable, ty) {
-                    if Self::is_rwlock_task_binding(p.mutable, ty) {
-                        self.var_rwlock_task_types.insert(p.name.clone());
-                    } else {
-                        self.var_rwlock_types.insert(p.name.clone());
-                    }
-                    self.arc_vars.insert(p.name.clone());
-                }
-                // Arc/Rc-qualified and string params must be cloned before capture in `async move {}` blocks.
-                if Self::is_arc_qualified(ty) || Self::is_rc_qualified(ty) || Self::is_string_type(ty) {
-                    self.arc_vars.insert(p.name.clone());
-                    // In single-thread mode, T'shared → Rc<T>; mark for Rc::clone.
-                    if Self::is_rc_qualified(ty) && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
-                        self.rc_vars.insert(p.name.clone());
-                    }
-                    // Params are now by-value (owned clone), so single deref (*var) suffices for match.
-                }
-                if matches!(ty, Type::Optional(_)) {
-                    self.optional_vars.insert(p.name.clone());
-                }
-                // Managed mode T' params (OwnerQual::Owned over user type) → managed tracking.
-                // Also resolve non-function type aliases (e.g. `use Pt as LPoint'` → LPoint').
-                let resolved_ty_for_managed = if let Type::Named(n) = ty {
-                    self.non_fn_type_aliases.get(n.as_str()).unwrap_or(ty)
-                } else { ty };
-                if crate::transpiler::Transpiler::is_managed_user_owned(
-                    &self.config, &self.user_types, &self.unit_enums, resolved_ty_for_managed)
-                {
-                    match self.config.threading {
-                        crate::transpiler::ThreadingMode::Multi => {
-                            self.managed_mutex_vars.insert(p.name.clone());
-                            self.arc_vars.insert(p.name.clone());
-                        }
-                        crate::transpiler::ThreadingMode::Single => {
-                            self.managed_refcell_vars.insert(p.name.clone());
-                        }
-                    }
-                }
-                // Unqualified params whose type is a known actor-source type are inferred as 'actor.
-                // Register them in var_mutex_types so field access and method calls emit .lock().
-                if let Type::Named(n) = ty {
-                    if self.actor_source_types.contains(n.as_str()) {
-                        self.var_mutex_types.insert(p.name.clone());
-                        self.arc_vars.insert(p.name.clone());
-                    }
-                }
-                // Task fn params: calling them produces a Future → needs .await.
-                // Throws fn params: calling them returns Result → needs `?` in throws context.
-                {
-                    let resolved = if let Type::Named(n) = ty {
-                        self.fn_type_aliases.get(n.as_str()).unwrap_or(ty)
-                    } else { ty };
-                    if matches!(resolved, Type::Fn(_, _, _, true, _)) {
-                        self.task_vars.insert(p.name.clone());
-                    }
-                    // Track non-task fn params that throw: `int f() throws` → Result-returning closure
-                    if matches!(resolved, Type::Fn(_, _, true, false, _)) {
-                        self.throws_fn_params.insert(p.name.clone());
-                    }
-                }
-                // Plain Named struct/enum params → var_struct_types (direct field/method
-                // dispatch — `is_known_user_type` covers both, see its doc comment).
-                // Smart-pointer-qualified types (T'auto, T'weak, etc.) are excluded here;
-                // they have their own dispatch path.
-                if let crate::ast::Type::Named(tname) = ty {
-                    if self.is_known_user_type(tname.as_str()) {
-                        self.var_struct_types.insert(p.name.clone(), tname.clone());
-                    }
-                    // Newtype params: `fn f(UserId id)` → track so `id as uint` → `id.0`.
-                    if self.newtype_types.contains(tname.as_str()) {
-                        self.var_newtype_type.insert(p.name.clone(), tname.clone());
-                    }
-                }
-            }
-        }
+        self.seed_param_locals(&f.params);
         self.in_throws = f.throws;
         self.in_req_fn = !f.mutating;
         self.in_struct_method = self_ty.is_some();
@@ -1341,6 +1423,7 @@ impl Transpiler {
         self.weak_vars         = prev_weak_vars;
         self.var_struct_types  = prev_var_struct_types;
         self.var_mutex_types   = prev_var_mutex_types;
+        self.var_mutex_task_types = prev_var_mutex_task_types;
         self.var_rwlock_types  = prev_var_rwlock_types;
         self.known_local_vars  = prev_known_local_vars;
         self.optional_vars     = prev_optional_vars;
@@ -1772,6 +1855,21 @@ impl Transpiler {
                 && !self.var_primitive_params.contains(v.as_str()) =>
             {
                 format!("{}.clone()", self.emit_expr(expr))
+            }
+            // Promoted top-level string-literal constant (`global_string_const_names`) in
+            // owned position under single-thread mode: its declaration is ALWAYS `Arc<str>`
+            // (a `static` must stay `Sync` even under `use_rc_str()`, see
+            // `top_level_let_is_string_literal`'s emission), so a plain `.clone()` (the next
+            // arm below) would still be an `Arc<str>` -- mismatching every other local/
+            // param's ambient `Rc<str>` convention (E0308) at a return, call-argument, or
+            // array/dict-literal site. Bridge through a fresh `Rc<str>` here instead --
+            // `LazyLock<Arc<str>>` derefs twice (`LazyLock` → `Arc<str>` → `str`) to reach
+            // `&str`, which `Rc<str>: From<&str>` accepts. Multi-thread mode's ambient
+            // convention IS `Arc<str>`, so the plain-`.clone()` arm just below is already
+            // correct and cheaper there -- this only special-cases the mismatched
+            // single-thread combination.
+            ExprKind::Var(v) if self.use_rc_str() && self.global_string_const_names.contains(v.as_str()) => {
+                format!("Rc::<str>::from(&**{})", v)
             }
             // String variable in owned position: clone to avoid moving Rc<str>.
             ExprKind::Var(v) if self.string_vars.contains(v.as_str())
@@ -2336,6 +2434,66 @@ impl Transpiler {
                 if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }
             }
             _ => None,
+        }
+    }
+
+    /// Walks a function/method body collecting `arc_qualified_types` from every local
+    /// `let`/`var` binding's type annotation (`let Worker'shared w = ...`), recursing
+    /// into every nested-block statement kind. Struct fields and function/method
+    /// *parameters* were already scanned by their own dedicated loops in `pre_scan`
+    /// (and `pre_scan_ext_item`) — this covers the gap that left a *local* binding's
+    /// `'shared`/`'actor`/`'guard` qualifier invisible to the `task fn` "requires an
+    /// arc-qualified binding somewhere in the program" validation (`emit_param`, just
+    /// above), which otherwise only ever sees struct-field/param declarations. A real
+    /// program can (and the motivating case, examples/hello.br's `Worker`, does) only
+    /// ever arc-qualify a type via a local `let`/`var` inside a function body, never
+    /// as a field or param type — that case reported a false "no arc-qualified binding
+    /// found" error even though `let Worker'shared w = Worker(...)` is right there.
+    pub(crate) fn collect_arc_qualified_lets_stmts(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.collect_arc_qualified_lets_stmt(stmt);
+        }
+    }
+
+    fn collect_arc_qualified_lets_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(ty) = &s.ty {
+                    if let Some(n) = Self::arc_inner_type_name(ty) {
+                        self.arc_qualified_types.insert(n.to_string());
+                    }
+                }
+            }
+            Stmt::If(s) => {
+                for (_, body) in &s.branches { self.collect_arc_qualified_lets_stmts(body); }
+                if let Some(b) = &s.else_body { self.collect_arc_qualified_lets_stmts(b); }
+            }
+            Stmt::IfLet(s) => {
+                self.collect_arc_qualified_lets_stmts(&s.then_body);
+                for branch in &s.elif_branches { self.collect_arc_qualified_lets_stmts(&branch.body); }
+                if let Some(b) = &s.else_body { self.collect_arc_qualified_lets_stmts(b); }
+            }
+            Stmt::Match(s) => {
+                for arm in &s.arms {
+                    match &arm.body {
+                        MatchBody::Block(b) => self.collect_arc_qualified_lets_stmts(b),
+                        MatchBody::Expr(_) => {}
+                    }
+                }
+            }
+            Stmt::While(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::WhileLet(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::DoWhile(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::Loop(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::For(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::With(s) => self.collect_arc_qualified_lets_stmts(&s.body),
+            Stmt::Try(s) => {
+                self.collect_arc_qualified_lets_stmts(&s.body);
+                for c in &s.catch_clauses { self.collect_arc_qualified_lets_stmts(&c.body); }
+            }
+            Stmt::Guard(s) => self.collect_arc_qualified_lets_stmts(&s.else_body),
+            Stmt::Defer(body) => self.collect_arc_qualified_lets_stmts(body),
+            _ => {}
         }
     }
 

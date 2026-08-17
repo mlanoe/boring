@@ -1,0 +1,31 @@
+# Regression test: an enum thrown ONLY from an UNTYPED `throws:` function (no
+# `throws EnumName:` declared anywhere in the program) must still route
+# through `BoringError::Other` with real type information preserved, not get
+# stringified via `Display` into `BoringError::String` — which would make ANY
+# `catch EnumName.Variant:` elsewhere silently never match at runtime. See
+# docs/book.md's "Enum error types are always typed, even from untyped
+# `throws`" (Advanced — Error handling internals).
+#
+# Before the fix: this either failed to compile (rustc E0277 — a plain enum
+# has no `Display` impl unless it's registered as a typed error type) or, once
+# a hand-written `as string:` papered over that, compiled cleanly but
+# `catch StopSignal.Stop:` below never fired — the error surfaced instead as
+# an unhandled-error panic (discovered implementing scratch-boring's
+# `control_stop`).
+
+enum StopSignal:
+    Stop
+
+def maybe_stop(int n) throws:
+    if n > 0:
+        throw StopSignal.Stop
+    print "continuing: {n}"
+
+def run(int n):
+    try:
+        maybe_stop(n)
+    catch StopSignal.Stop:
+        print "caught stop signal"
+
+run(1)
+run(0)

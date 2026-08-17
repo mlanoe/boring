@@ -242,6 +242,19 @@ pub(crate) fn desugared_labeled_array_shadow_fields(field_name: &str, all_fields
 }
 
 pub(crate) fn looks_like_collection(expr: &str) -> bool {
+    // `arr.join(sep)`/`arr.joined(sep)` always collapses a collection into a single
+    // owned `String` (`.iter().map(...).collect::<Vec<&str>>().join(&*sep)` — see
+    // emit_methods.rs's `"joined" | "join"` case) — never a collection itself, no
+    // matter that the emitted expression's *prefix* happens to start with `vec![`
+    // (the array literal being joined). Must be checked before the `starts_with`
+    // heuristic below, which only looks at the front of the string and would
+    // otherwise treat the joined String as a Vec and wrongly Debug-quote it in a
+    // `print`/string interpolation (confirmed via examples/hello.br: `print "join:
+    // {["a","b","c"].join(", ")}"` rendered `"a, b, c"` with quotes instead of
+    // `a, b, c`).
+    if expr.contains(".collect::<Vec<&str>>().join(") {
+        return false;
+    }
     // Subscript access on a collection yields an element, not a collection.
     // E.g. `arr.collect::<Vec<_>>()[0].clone()` is a scalar, not a Vec.
     let has_vec_collect = expr.contains(".collect::<Vec<_>>()")
@@ -474,7 +487,16 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "endsWith"   | "hasSuffix"   => ("ends_with".into(), None),
         "first"            => ("first".into(), None),
         "last"             => ("last".into(), None),
-        "append"           => ("push".into(), None),
+        // `arr.append(other)` merges a whole other collection in — always `.extend()`,
+        // never `.push()` (that's `arr.push(v)`, a single element — see docs/book.md's
+        // "Array methods" table). This was mapped to `push` here, which only "worked"
+        // in the one call-site branch that separately detected a collection-typed arg
+        // and overrode it back to `extend` (emit_methods.rs's `arg_is_collection`
+        // check) — every other call site (the general fallback) had no such override
+        // and emitted `arr.push(other_vec)`, a type mismatch (E0308: expected element
+        // type, found `Vec<T>` — confirmed via examples/tokio.br's
+        // `all_users.append(h_file.value)`).
+        "append"           => ("extend".into(), None),
         "extend"           => ("extend".into(), None),
         // T'weak — .upgrade() returns Option<Rc/Arc<T>>; unwrap so the result is
         // the strong ref directly, matching the interpreter's semantics (upgrade returns
@@ -894,7 +916,7 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
         }
 
         // Leaf nodes (no sub-expressions containing variable references)
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
     }
 }
@@ -1055,6 +1077,7 @@ pub(crate) fn collect_default_rest_targets(items: &[Item], out: &mut std::collec
             Item::Enum(e) => {
                 for m in &e.methods { scan_stmts_for_default_rest(&m.body, out); }
                 for st in &e.setters { scan_stmts_for_default_rest(&st.body, out); }
+                for tm in &e.type_methods { scan_stmts_for_default_rest(&tm.body, out); }
             }
             Item::Ext(e) => {
                 for m in &e.methods { scan_stmts_for_default_rest(&m.body, out); }
@@ -2292,6 +2315,141 @@ fn collect_called_names_expr(expr: &Expr, out: &mut Vec<String>) {
         }
         ExprKind::TryElse(a, b) => { collect_called_names_expr(a, out); collect_called_names_expr(b, out); }
         _ => {}
+    }
+}
+
+// ── Consistent typed-error routing for enum `throw`s ────────────────────────
+//
+// `throws EnumName:` (typed) registers `EnumName` in `typed_error_enums`, which
+// gates two independent things at emission time: (1) `emit_enum` auto-generates
+// `Display`/`Error` impls for it, and (2) `emit_throw`'s `is_typed_error` check
+// routes a `throw` of one of its variants through `BoringError::Other(TypeId,
+// ...)` -- the only encoding a later `catch EnumName.Variant:` can downcast back
+// out of. A bare `throws:` function throwing that SAME enum, when no `throws
+// EnumName:` declaration exists ANYWHERE in the program, falls through instead
+// to `BoringError::String(format!("{}", value))` -- stringifying the value via
+// `Display` and permanently discarding which variant it was. Any `catch
+// EnumName...:` clause elsewhere then silently never matches at runtime (the
+// error surfaces as an "unhandled error" panic instead) -- confirmed via
+// scratch-boring's `control_stop`/`StopSignal` (see docs/book.md's "Propagation
+// across nested throws functions" section for the write-up).
+//
+// `typed_error_enums` is already global, per-program state -- consulted by
+// `is_typed_error` regardless of which function is doing the current throwing
+// (a single `throws EnumName:` declaration anywhere unlocks correct handling
+// for every throw of that enum everywhere, typed function or not; confirmed by
+// inspection of `emit_throw`). This closes the gap the other direction: any
+// enum that is EVER the direct target of a `throw` statement -- typed
+// `throws:` function or not -- is registered up front, so the correct,
+// consistent `BoringError::Other` encoding (and the `Display`/`Error` impls
+// that make it compile without a hand-written `as string:`) is used
+// everywhere, matching the built-in `Error` enum's always-typed treatment.
+// Purely additive: it only ever adds entries `is_typed_error` would otherwise
+// have treated as "not typed", so no enum that already worked can regress.
+pub(crate) fn collect_thrown_enum_names(
+    program: &Program,
+    all_enum_types: &std::collections::HashSet<String>,
+    enum_variants: &std::collections::HashMap<String, String>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    fn visit_items(items: &[Item], all_enum_types: &std::collections::HashSet<String>, enum_variants: &std::collections::HashMap<String, String>, out: &mut std::collections::HashSet<String>) {
+        for item in items {
+            match item {
+                Item::Fn(f) => collect_thrown_enum_names_stmts(&f.body, all_enum_types, enum_variants, out),
+                Item::Struct(s) => {
+                    for m in &s.methods { collect_thrown_enum_names_stmts(&m.body, all_enum_types, enum_variants, out); }
+                    for i in &s.inits { collect_thrown_enum_names_stmts(&i.body, all_enum_types, enum_variants, out); }
+                    for st in &s.setters { collect_thrown_enum_names_stmts(&st.body, all_enum_types, enum_variants, out); }
+                    // Type-level methods (`type def`/`type req`/`type set`, called as
+                    // `TypeName.method(...)`) were missing here -- an enum thrown ONLY from
+                    // inside one of those bodies never got auto-registered as typed, unlike
+                    // the same enum thrown from a regular instance method or free function.
+                    for tm in &s.type_methods { collect_thrown_enum_names_stmts(&tm.body, all_enum_types, enum_variants, out); }
+                }
+                Item::Enum(e) => {
+                    for m in &e.methods { collect_thrown_enum_names_stmts(&m.body, all_enum_types, enum_variants, out); }
+                    for st in &e.setters { collect_thrown_enum_names_stmts(&st.body, all_enum_types, enum_variants, out); }
+                    // Type-level methods (`type def`/`type req`/`type set`) -- mirrors the
+                    // identical fix already applied to StructDecl::type_methods above.
+                    for tm in &e.type_methods { collect_thrown_enum_names_stmts(&tm.body, all_enum_types, enum_variants, out); }
+                }
+                Item::Ext(e) => {
+                    for m in &e.methods { collect_thrown_enum_names_stmts(&m.body, all_enum_types, enum_variants, out); }
+                    for st in &e.setters { collect_thrown_enum_names_stmts(&st.body, all_enum_types, enum_variants, out); }
+                }
+                Item::Mod(m) => visit_items(&m.items, all_enum_types, enum_variants, out),
+                Item::Stmt(s) => collect_thrown_enum_names_stmt(s, all_enum_types, enum_variants, out),
+                _ => {}
+            }
+        }
+    }
+    visit_items(&program.items, all_enum_types, enum_variants, out);
+}
+
+fn collect_thrown_enum_names_stmts(stmts: &[Stmt], all_enum_types: &std::collections::HashSet<String>, enum_variants: &std::collections::HashMap<String, String>, out: &mut std::collections::HashSet<String>) {
+    for stmt in stmts { collect_thrown_enum_names_stmt(stmt, all_enum_types, enum_variants, out); }
+}
+
+fn collect_thrown_enum_names_stmt(stmt: &Stmt, all_enum_types: &std::collections::HashSet<String>, enum_variants: &std::collections::HashMap<String, String>, out: &mut std::collections::HashSet<String>) {
+    let rec = |body: &[Stmt], out: &mut std::collections::HashSet<String>| collect_thrown_enum_names_stmts(body, all_enum_types, enum_variants, out);
+    match stmt {
+        Stmt::Throw(t) => {
+            if let Some(e) = &t.value {
+                if let Some(name) = resolve_thrown_enum_name(e, all_enum_types, enum_variants) {
+                    out.insert(name);
+                }
+            }
+        }
+        Stmt::If(i) => {
+            for (_, body) in &i.branches { rec(body, out); }
+            if let Some(b) = &i.else_body { rec(b, out); }
+        }
+        Stmt::While(w) => rec(&w.body, out),
+        Stmt::DoWhile(d) => rec(&d.body, out),
+        Stmt::Loop(l) => rec(&l.body, out),
+        Stmt::For(f) => rec(&f.body, out),
+        Stmt::Try(t) => {
+            rec(&t.body, out);
+            for c in &t.catch_clauses { rec(&c.body, out); }
+        }
+        Stmt::Defer(body) => rec(body, out),
+        Stmt::Match(m) => {
+            for arm in &m.arms {
+                match &arm.body {
+                    MatchBody::Expr(_) => {}
+                    MatchBody::Block(body) => rec(body, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolves a `throw`n expression to the user-defined enum type it targets, if
+/// any -- mirroring the enum-specific patterns `emit_flow::emit_throw`'s
+/// `is_typed_error` check recognizes (`EnumName.Variant`, bare `Variant`,
+/// `EnumName.Variant(args)`, bare `Variant(args)`), but unconditionally (not
+/// gated on the enum already being in `typed_error_enums` -- that set is
+/// exactly what this function's result feeds into).
+fn resolve_thrown_enum_name(e: &Expr, all_enum_types: &std::collections::HashSet<String>, enum_variants: &std::collections::HashMap<String, String>) -> Option<String> {
+    match &e.kind {
+        // `throw EnumName.Variant`
+        ExprKind::Field(base, _variant) => match &base.kind {
+            ExprKind::Var(n) if all_enum_types.contains(n.as_str()) => Some(n.clone()),
+            _ => None,
+        },
+        // `throw Variant` (bare shorthand, resolved via the global variant→enum map)
+        ExprKind::Var(n) => enum_variants.get(n.as_str()).cloned(),
+        // `throw EnumName.Variant(args)` / `throw Variant(args)`
+        ExprKind::Call(func, _) => match &func.kind {
+            ExprKind::Field(base, _variant) => match &base.kind {
+                ExprKind::Var(n) if all_enum_types.contains(n.as_str()) => Some(n.clone()),
+                _ => None,
+            },
+            ExprKind::Var(n) => enum_variants.get(n.as_str()).cloned(),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

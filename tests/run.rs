@@ -143,6 +143,7 @@ interp_test!(closures);
 interp_test!(structs);
 interp_test!(collections);
 interp_test!(error_handling);
+interp_test!(throws_untyped_enum_catch);
 interp_test!(tasks);
 interp_test!(channels);
 interp_test!(protocols);
@@ -168,6 +169,11 @@ interp_test!(numeric);
 interp_test!(float_width_cross_eq);
 interp_test!(scalar_catch);
 interp_test!(modules);
+// `use boring.collections` — the first-party stdlib mechanism (docs/cross-
+// project-code-sharing-gap.md's stdlib work), backed by src/stdlib_embed.rs.
+// See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
+// with tests/transpile.rs's registration below for the `boring build` side.
+interp_test!(boring_stdlib_collections);
 interp_test!(ownership);
 interp_test!(let_pattern);
 interp_test!(result_compat);
@@ -208,21 +214,87 @@ interp_test!(pipe);
 interp_test!(inline_match);
 interp_test!(supertraits);
 interp_test!(type_cast);
+interp_test!(int_literal_overflow_cast);
+interp_test!(builtin_error_enum);
+interp_test!(multi_variant_catch_dispatch);
+interp_test!(type_def_typed_throws);
+interp_test!(type_method_throws_untyped);
 interp_test!(ref_identity);
 interp_test!(mut_scalar);
 interp_test!(int_float_literal_compare);
 interp_test!(float32_math_builtins);
+interp_test!(float32_struct_method_math);
+// Same gap as float32_struct_method_math above, but for a plain `let`-bound local
+// variable computed from an unannotated arithmetic expression, in an ordinary
+// (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
+interp_test!(float32_local_var_math);
 interp_test!(top_level_const);
 interp_test!(pub_top_level_const);
 interp_test!(pub_top_level_const_unused);
+// `pub let`/used-elsewhere `let` STRING constants -- unlike the scalar cases just above,
+// promotion to a Rust module-level item requires a dedicated `top_level_let_is_string_literal`
+// check (a plain scalar-literal check never matches a string). This run only proves the
+// interpreter (entirely unaffected by transpiler promotion) evaluates it correctly -- unlike
+// `pub_top_level_const_unused` above, every constant here HAS an in-file consumer
+// (`is_add`/`is_sub`/`reveal_private` each read one across a function boundary), so
+// `transpile.rs`'s single-crate `transpile_test!` run is what actually proves promotion: if
+// the string stayed a `fn main()` local, those calls would fail to compile (E0425) rather
+// than just produce a wrong runtime value.
+interp_test!(pub_top_level_string_const);
 // A struct field literally named `count` -- must never be hijacked by the
 // `.length`/`.count` collection-length builtin. The interpreter's `get_field`
 // was never affected (its Array/Set/Dict shortcuts are gated by value type,
 // never reached for a struct/Object); this is here to lock that in.
 interp_test!(struct_count_field);
+// Dict `[key]` indexing (read + write) with a string key, as a function
+// parameter and as an implicit-self struct field. The interpreter (this
+// test) never caught the underlying bugs -- both were only visible in
+// `--emit-rust` output (see tests/transpile.rs's registration for the real
+// regression coverage) -- kept here anyway so the runtime *values* stay
+// pinned down too. See tests/cases/dict_string_key_index.br's own doc comment.
+interp_test!(dict_string_key_index);
+// A `var StructType` parameter must mutate the caller's variable directly
+// (docs/CLAUDE.md: "changes are visible at the call site"), not a throwaway
+// clone of it. The interpreter (this test) never caught this either -- it
+// was a `--emit-rust`-only codegen bug (see tests/transpile.rs). See
+// tests/cases/var_struct_param_mutation.br's own doc comment.
+interp_test!(var_struct_param_mutation);
+
+// docs/known-issues-biguint-spike.md item 5: `type def`/`type req` must
+// parse inside an `enum` body, not just a `struct` body. Now registered in
+// both tests/run.rs and tests/transpile.rs (see tests/cases/enum_type_def.br's
+// own doc comment) -- the transpiler codegen gap for this is fixed too.
+interp_test!(enum_type_def);
+// docs/known-issues-biguint-spike.md item 5: an enum's type-level method's
+// `throws Type:` clause must be wrapped in Result<T, E> by the transpiler,
+// the same as a struct's already is (item 4). `boring run` side of this
+// pairs with tests/transpile.rs's registration below.
+interp_test!(enum_type_def_throws);
+
+// docs/known-issues-biguint-spike.md item 6 (most dangerous of the four: a
+// silent wrong-value bug, not a compile error): a two-branch
+// `if let x = expr: A else: B` used as a nested (non-tail) expression used
+// to always evaluate to `B`, and the same shape as a function's direct tail
+// statement used to fail with an unrelated "return value discarded" error.
+interp_test!(if_let_expr_nested);
+
+// docs/known-issues-biguint-spike.md item 7: unary `-` on a genuinely
+// int64/int128-tagged value (as opposed to the generic untyped `Value::Int`)
+// used to fail with "cannot negate Int64"/"cannot negate Int128".
+interp_test!(tagged_int_negate);
+
+// docs/known-issues-biguint-spike.md item 8: the interpreter's move-checker
+// used to treat int64/int128-tagged scalars as non-Copy, wrongly raising
+// "use of moved value" on a plain `let t = n` reuse, unlike the generic
+// untyped `int`.
+interp_test!(tagged_int_copy);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
+// `use boring.<module>` for an unrecognized module name is a hard error,
+// unlike the generic filesystem `use` loader's silent no-op (which assumes
+// a native Rust module — not applicable to `boring`, never a real crate).
+error_test!(error_unknown_boring_stdlib_module);
 error_test_exact!(error_undefined_var);
 error_test_exact!(error_uncaught_throw);
 error_test_exact!(error_move_source);

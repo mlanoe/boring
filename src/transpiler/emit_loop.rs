@@ -313,7 +313,17 @@ impl Transpiler {
             // Local variable iteration: use iter().cloned() so the variable is not moved
             // and can be reused after the loop. into_iter() would consume the collection.
             // Exception: multi-var (dict/tuple) iteration needs into_iter() to get owned pairs.
-            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) && s.vars.len() <= 1 => {
+            // Exception: a loop variable tracked as a task/JoinHandle var (the common
+            // `for future in futures: future.wait` idiom — `futures` was built by
+            // pushing `task_vars`/`join_handle_vars`-tracked values) holds
+            // `tokio::task::JoinHandle<T>`, which isn't `Clone`; `.iter().cloned()`
+            // is a hard compile error there (E0277). `into_iter()` is always safe for
+            // this idiom since the array is never reused after awaiting every handle.
+            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) && s.vars.len() <= 1
+                && !s.vars.first().is_some_and(|lv| {
+                    self.task_vars.contains(lv.as_str()) || self.join_handle_vars.contains(lv.as_str())
+                }) =>
+            {
                 format!("{}.iter().cloned()", iter)
             }
             _ => format!("{}.into_iter()", iter),

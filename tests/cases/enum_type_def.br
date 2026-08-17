@@ -1,0 +1,23 @@
+# Regression test for docs/known-issues-biguint-spike.md item 5: a
+# type-level factory method (`type def`) must be parseable inside an `enum`
+# body, the same as it already is inside a `struct` body.
+#
+# Registered in both tests/run.rs (`boring run`) and tests/transpile.rs
+# (`boring build`) -- the transpiler previously had a separate, now-fixed gap
+# where an enum's type_methods were silently dropped from codegen entirely
+# (no `impl Foo { fn make() ... }` block emitted at all, even though
+# `Foo::make()` was still emitted at the call site) -- see `emit_enum` in
+# src/transpiler/emit_struct.rs.
+enum Foo:
+    A(int)
+    B
+
+    type def Foo make():
+        Foo.A(1)
+
+    type req Foo zero():
+        Foo.A(0)
+
+def main():
+    print Foo.make()
+    print Foo.zero()

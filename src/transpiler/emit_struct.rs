@@ -30,7 +30,13 @@ impl Transpiler {
                 .collect()
         } else {
             let has_non_clone_field = s.fields.iter().any(|f| {
-                matches!(&f.ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
+                // `mut AtomicUsize` (docs/mut-type-modifier.md) wraps the field type in
+                // `Type::Mut` to unlock `.fetch_add()`-style calls in Boring's own
+                // content-mutation bookkeeping — peel it off first so a `mut`-qualified
+                // atomic field is still recognized here, same as a bare one.
+                let mut ty = &f.ty;
+                while let Type::Mut(inner) = ty { ty = inner; }
+                matches!(ty, Type::Named(n) if NON_CLONE_TYPES.contains(&n.as_str()))
             });
             // Don't derive PartialEq when the struct has any comparison operator method —
             // emit_operator_trait_impls will generate PartialEq/PartialOrd impls that would conflict.
@@ -677,7 +683,7 @@ impl Transpiler {
         }
     }
 
-    pub(crate) fn emit_type_method(&mut self, tm: &TypeMethod, struct_name: &str) {
+    pub(crate) fn emit_type_method(&mut self, tm: &TypeMethod, type_name: &str) {
         use crate::ast::TypeMethodKind;
         let vis = if tm.is_pub { "pub " } else { "" };
         let (fn_name, params_s) = match tm.kind {
@@ -696,13 +702,102 @@ impl Transpiler {
                 (tm.name.clone(), ps.join(", "))
             }
         };
-        let ret_ty = tm.return_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "()".into());
+        // A method is "void" if it has no declared return type, or returns () / Nil / Void --
+        // mirrors emit_fn's `declared_void` (emit_top.rs) so a throwing type method's Ok(())
+        // wrapping (in emit_stmt's tail-expression handling) matches a regular throwing
+        // function's.
+        let declared_void = match &tm.return_ty {
+            None => true,
+            Some(Type::Void) | Some(Type::Nil) => true,
+            Some(Type::Named(n)) if n == "void" || n == "nil" => true,
+            _ => false,
+        };
+        let base_ret = if declared_void {
+            "()".to_string()
+        } else {
+            tm.return_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "()".into())
+        };
+        // `throws`/`throws Type:` on a type-level method previously had NO effect on codegen
+        // at all: no `Result<_, _>` wrapping here, so `throw` inside the body fell through to
+        // `emit_flow::emit_throw`'s `not_throws` branch and emitted a bare `panic!(...)`
+        // instead of `return Err(...)`. As with a regular throwing `FnDecl` (see
+        // `compute_fn_return_type` in emit_top.rs), the typed vs untyped distinction doesn't
+        // change this wrapping -- both use `Box<dyn Error>` here; what a typed `throws Type:`
+        // actually buys is `Type` being registered in `typed_error_enums` (done in
+        // `pre_scan`/`transpiler/mod.rs`), which drives the enum's Display/Error impls and
+        // `BoringError::Other` routing at the throw site.
+        let ret_ty = if tm.throws {
+            format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", base_ret)
+        } else {
+            base_ret
+        };
         let ret_s = if ret_ty == "()" { String::new() } else { format!(" -> {}", ret_ty) };
-        let _ = struct_name;
+        let _ = type_name;
         self.line(&format!("{}fn {}({}){} {{", vis, fn_name, params_s, ret_s));
         self.indent += 1;
         let prev_setter = std::mem::replace(&mut self.in_type_setter, matches!(tm.kind, TypeMethodKind::Set));
+        // Same save/restore-around-emit_body dance as emit_fn (emit_top.rs) -- `in_throws`
+        // gates `emit_throw`'s Err(...)-vs-panic! choice and the tail-expression Ok(...)
+        // wrapping in emit_stmt.rs; `fn_return_ty` is consulted by `emit_return` for
+        // explicit `return expr` statements.
+        let prev_throws = self.in_throws;
+        let prev_returns_void = self.fn_returns_void;
+        let prev_declared_void = self.fn_declared_void;
+        let prev_fn_return_ty = self.fn_return_ty.clone();
+        self.in_throws = tm.throws;
+        self.fn_returns_void = !tm.throws && declared_void;
+        self.fn_declared_void = declared_void;
+        self.fn_return_ty = tm.return_ty.clone();
+        // A type-level method's params were never fed into the per-function-body
+        // local-variable bookkeeping `seed_param_locals` populates (emit_top.rs) --
+        // unlike `emit_fn`, which does this for every regular function/instance method.
+        // Confirmed real gap, not just a throws-adjacent nicety: a plain (non-throwing)
+        // `type def`/`type req` taking a `string` param already mis-transpiled `s.length`
+        // as `s::length` (treating the unregistered param as a type/module path) --
+        // exercised by tests/cases/type_def_typed_throws.br once it's wired into
+        // tests/transpile.rs. Save/take/restore the same sets `seed_param_locals` writes
+        // to, so entries seeded here don't leak into the next item's body (same rationale
+        // as emit_fn's own per-function save/restore of these sets).
+        let prev_known_local_vars   = std::mem::take(&mut self.known_local_vars);
+        let prev_var_types          = std::mem::take(&mut self.var_types);
+        let prev_dict_vars          = std::mem::take(&mut self.dict_vars);
+        let prev_string_vars        = std::mem::take(&mut self.string_vars);
+        let prev_var_mutex_types    = std::mem::take(&mut self.var_mutex_types);
+        let prev_var_mutex_task_types = std::mem::take(&mut self.var_mutex_task_types);
+        let prev_var_rwlock_types   = std::mem::take(&mut self.var_rwlock_types);
+        let prev_var_rwlock_task_types = std::mem::take(&mut self.var_rwlock_task_types);
+        let prev_arc_vars           = std::mem::take(&mut self.arc_vars);
+        let prev_rc_vars            = std::mem::take(&mut self.rc_vars);
+        let prev_optional_vars      = std::mem::take(&mut self.optional_vars);
+        let prev_managed_mutex_vars = std::mem::take(&mut self.managed_mutex_vars);
+        let prev_managed_refcell_vars = std::mem::take(&mut self.managed_refcell_vars);
+        let prev_var_struct_types   = std::mem::take(&mut self.var_struct_types);
+        let prev_task_vars          = std::mem::take(&mut self.task_vars);
+        let prev_throws_fn_params   = std::mem::take(&mut self.throws_fn_params);
+        let prev_var_newtype_type   = std::mem::take(&mut self.var_newtype_type);
+        self.seed_param_locals(&tm.params);
         self.emit_body(&tm.body);
+        self.var_newtype_type   = prev_var_newtype_type;
+        self.throws_fn_params   = prev_throws_fn_params;
+        self.task_vars          = prev_task_vars;
+        self.var_struct_types   = prev_var_struct_types;
+        self.managed_refcell_vars = prev_managed_refcell_vars;
+        self.managed_mutex_vars = prev_managed_mutex_vars;
+        self.optional_vars      = prev_optional_vars;
+        self.rc_vars            = prev_rc_vars;
+        self.arc_vars           = prev_arc_vars;
+        self.var_rwlock_task_types = prev_var_rwlock_task_types;
+        self.var_rwlock_types   = prev_var_rwlock_types;
+        self.var_mutex_task_types = prev_var_mutex_task_types;
+        self.var_mutex_types    = prev_var_mutex_types;
+        self.string_vars        = prev_string_vars;
+        self.dict_vars          = prev_dict_vars;
+        self.var_types          = prev_var_types;
+        self.known_local_vars   = prev_known_local_vars;
+        self.fn_return_ty = prev_fn_return_ty;
+        self.fn_declared_void = prev_declared_void;
+        self.fn_returns_void = prev_returns_void;
+        self.in_throws = prev_throws;
         self.in_type_setter = prev_setter;
         self.indent -= 1;
         self.line("}");
@@ -909,11 +1004,38 @@ impl Transpiler {
         self.line("}");
         self.blank();
 
-        // Typed error enum: emit Display + Error so `throws CalcError` compiles.
-        // Skip when thiserror is in use — it generates Display + Error automatically.
-        if is_error_type && !has_variant_error_attr {
+        // Auto-emit Display for enums (delegates to Debug), mirroring the identical
+        // auto-Display struct behavior above, so that:
+        //  - BoringFmt<T: Display> works for Vec<Enum>
+        //  - String interpolation / `print` can use `{}` on a plain enum value directly,
+        //    not just on its pattern-matched fields or an explicit `as string:` conversion
+        //    — this is what `print Foo.make()`/`print z` in
+        //    tests/cases/enum_type_def{,_throws}.br exercise (docs/known-issues-biguint-spike.md
+        //    item 5): those are plain, non-error enums with no Display impl otherwise.
+        // This also covers typed error enums (`throws CalcError`), which previously had
+        // their own copy of this exact same Display impl gated on `is_error_type` only —
+        // folded into this general case; `impl Error` below is still emitted only for those.
+        // Skipped when: thiserror will generate Display itself (has_variant_error_attr), the
+        // enum (or a same-named `ext` block) already declares its own `as string:` conversion
+        // (`display_types`, emitted as a real Display impl further down / in the ext path), or
+        // the enum explicitly opts out via `@derive(Display)`.
+        let has_derive_display = e.attrs.iter().any(|a| a.name == "derive" && a.args.iter().any(|arg| arg == "Display"));
+        if !has_variant_error_attr && !self.display_types.contains(&e.name) && !has_derive_display {
             let name = &e.name;
-            self.line(&format!("impl std::fmt::Display for {} {{", name));
+            // Bounded impl type params (`+ Debug`) plus bare use-site params, same as the
+            // struct auto-Display above — needed for generic enums like `Result<T, E>`.
+            let tp_impl_disp = if e.type_params.is_empty() {
+                String::new()
+            } else {
+                let bounded: Vec<String> = e.type_params.iter()
+                    .map(|p| if p.starts_with('\'') { p.clone() }
+                             else if p.starts_with('$') { emit_generic_param(p) }
+                             else { format!("{}: Clone + std::fmt::Debug", p) })
+                    .collect();
+                format!("<{}>", bounded.join(", "))
+            };
+            let tp_use_disp = type_params_use_str(&e.type_params);
+            self.line(&format!("impl{} std::fmt::Display for {}{} {{", tp_impl_disp, name, tp_use_disp));
             self.indent += 1;
             self.line("fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {");
             self.indent += 1;
@@ -922,7 +1044,10 @@ impl Transpiler {
             self.line("}");
             self.indent -= 1;
             self.line("}");
-            self.line(&format!("impl std::error::Error for {} {{}}", name));
+            self.blank();
+        }
+        if is_error_type && !has_variant_error_attr {
+            self.line(&format!("impl std::error::Error for {} {{}}", e.name));
             self.blank();
         }
 
@@ -969,7 +1094,8 @@ impl Transpiler {
         let plain_methods: Vec<&FnDecl> = e.methods.iter()
             .filter(|f| !has_protocols || !proto_method_set.contains(&f.name))
             .collect();
-        if !plain_methods.is_empty() || !e.conversions.is_empty() || !e.setters.is_empty() || has_named_fields {
+        if !plain_methods.is_empty() || !e.conversions.is_empty() || !e.setters.is_empty()
+            || has_named_fields || !e.type_methods.is_empty() {
             self.line(&format!("impl{} {}{} {{", tp, e.name, tp_use));
             self.indent += 1;
             for f in &plain_methods {
@@ -978,6 +1104,15 @@ impl Transpiler {
             }
             for setter in &e.setters {
                 self.emit_setter(setter);
+                self.blank();
+            }
+            // Type methods (`type def`/`type req`/`type set`) — same production and same
+            // emission logic already used for a struct's type_methods (see emit_struct
+            // above); `emit_type_method` takes a plain type-name string, so it was already
+            // generic over struct vs. enum with no changes needed here beyond calling it.
+            // (docs/known-issues-biguint-spike.md item 5, "Still open (transpiler)".)
+            for tm in &e.type_methods {
+                self.emit_type_method(tm, &e.name);
                 self.blank();
             }
             for conv in &e.conversions {

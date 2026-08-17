@@ -316,6 +316,10 @@ fn split_hole_fmt(s: &str) -> (&str, Option<&str>) {
 pub enum TokenKind {
     // Literals
     Int(i64),
+    /// Decimal integer literal that overflows `i64` but fits `u64` (see
+    /// `ExprKind::UInt64` in ast/mod.rs for why this is a separate token
+    /// rather than being range-checked at lex time against the default `int` type).
+    UInt64(u64),
     Float(f64),
     Str(String),
     StringInterp(Vec<RawInterpPart>),
@@ -1045,7 +1049,18 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) ->
         }
         return s.parse().map(TokenKind::Float).map_err(|_| LexError::IntegerOverflow { line, col });
     }
-    s.parse().map(TokenKind::Int).map_err(|_| LexError::IntegerOverflow { line, col })
+    // Plain decimal integer. Try the default `i64` width first (the common case);
+    // if the literal is too big for `i64` but still fits `u64` — e.g. `u64::MAX`,
+    // `18446744073709551615` — don't fail here. The literal's default/inferred
+    // type (`int`/isize) genuinely can't hold it, but an immediately-following
+    // `as uint64` (or wider unsigned target) can; deferring that decision past
+    // the lexer (which has no notion of a following `as` cast) means parsing
+    // this token must not itself reject the value. See
+    // docs/known-issues-biguint-spike.md item 1.
+    match s.parse::<i64>() {
+        Ok(n) => Ok(TokenKind::Int(n)),
+        Err(_) => s.parse::<u64>().map(TokenKind::UInt64).map_err(|_| LexError::IntegerOverflow { line, col }),
+    }
 }
 
 /// Collect digits (skipping `_` separators) while `pred` matches.
@@ -1158,6 +1173,37 @@ mod tests {
     #[test]
     fn test_integer() {
         assert_eq!(kinds("42"), vec![TokenKind::Int(42), TokenKind::Newline, TokenKind::Eof]);
+    }
+
+    /// Regression test for docs/known-issues-biguint-spike.md item 1: a decimal
+    /// literal that overflows `i64` but fits `u64` (e.g. `u64::MAX`) must lex
+    /// successfully as `TokenKind::UInt64`, not fail with `IntegerOverflow` — the
+    /// range check against the literal's *default* type is deferred past lexing so
+    /// a following `as uint64` can still validate/use it correctly.
+    #[test]
+    fn test_integer_overflowing_i64_but_fits_u64() {
+        assert_eq!(
+            kinds("18446744073709551615"),
+            vec![TokenKind::UInt64(u64::MAX), TokenKind::Newline, TokenKind::Eof]
+        );
+        // One past i64::MAX also takes this path.
+        assert_eq!(
+            kinds(&(i64::MAX as u64 + 1).to_string()),
+            vec![TokenKind::UInt64(i64::MAX as u64 + 1), TokenKind::Newline, TokenKind::Eof]
+        );
+        // i64::MAX itself still lexes as a plain Int (unaffected).
+        assert_eq!(
+            kinds(&i64::MAX.to_string()),
+            vec![TokenKind::Int(i64::MAX), TokenKind::Newline, TokenKind::Eof]
+        );
+    }
+
+    /// A literal bigger than `u64::MAX` still overflows — the fallback only
+    /// widens the ceiling from `i64::MAX` to `u64::MAX`, it doesn't remove it.
+    #[test]
+    fn test_integer_overflowing_u64_is_still_an_error() {
+        let src = "184467440737095516150"; // u64::MAX * 10
+        assert!(lex(src).is_err());
     }
 
     #[test]

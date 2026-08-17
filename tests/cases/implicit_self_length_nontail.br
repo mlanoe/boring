@@ -1,0 +1,57 @@
+# Regression test: docs/known-issues-biguint-spike.md #9.
+#
+# `.length` on an implicit-`self` array field (`limbs.length`, no explicit
+# `self.` prefix) used to transpile to invalid Rust (`self.limbs::length`,
+# `::` instead of `.len() as isize`) whenever the expression appeared
+# anywhere other than the method's own tail expression. The bug was in
+# `emit_expr_field`'s `is_path_receiver` heuristic: a bare identifier not
+# present in `known_local_vars` was assumed to be a module/type path
+# (`mpsc.foo` -> `mpsc::foo`) -- but an implicit-self field reference is
+# *also* absent from `known_local_vars` (it's a field, not a local var),
+# so it was wrongly treated the same way. Tail-position reads went through
+# a separate emitter (`emit_expr_owned`) that never had this bug, which is
+# why only non-tail uses broke.
+
+struct Foo:
+    var mut [uint32] limbs
+
+    # Non-tail uses: inside a `while` condition, an `if` condition, and an
+    # index expression -- all broken before the fix.
+    def normalize():
+        while limbs.length > 1 and limbs[limbs.length - 1] == 0:
+            limbs.pop()
+        if limbs.length == 0:
+            limbs.push(0)
+
+    # Tail position -- was already correct before the fix; kept so a future
+    # regression on this path would show up too.
+    req int just_length():
+        limbs.length
+
+    # Non-tail use as a plain comparison, not inside a loop/if condition.
+    req bool at_least_two():
+        limbs.length > 1
+
+    # Non-tail use assigned into a `var`.
+    req int length_via_var():
+        var idx = limbs.length
+        idx
+
+def run():
+    var mut f = Foo(limbs = [1, 2, 3])
+    f.normalize()
+    print "{f.just_length()}"
+    print "{f.at_least_two()}"
+    print "{f.length_via_var()}"
+
+    # Trailing zero should be stripped by normalize().
+    var mut g = Foo(limbs = [5, 0])
+    g.normalize()
+    print "{g.just_length()}"
+
+    # All-zero collapses to a single zero, never an empty array.
+    var mut h = Foo(limbs = [0, 0, 0])
+    h.normalize()
+    print "{h.just_length()}"
+
+run()

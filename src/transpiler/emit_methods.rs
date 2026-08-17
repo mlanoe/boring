@@ -462,9 +462,26 @@ impl Transpiler {
                     _ => (method.to_string(), false),
                 })
                 .unwrap_or_else(|| (method.to_string(), false));
-            let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            // emit_expr_owned (not emit_expr) so a string-literal argument is coerced to
+            // Arc<str>/Rc<str> to match the generated signature (Boring `string` params map
+            // to Arc<str>/Rc<str>) -- same reasoning as the user-struct instance-method-call
+            // arg coercion elsewhere in this file. Without this, `Foo.make("literal")` against
+            // a `type def Foo make(string s)` left the arg as a raw `&'static str`, an
+            // `Arc<str>` vs `&str` mismatch confirmed via tests/cases/type_def_typed_throws.br.
+            let vals: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
             let _ = is_setter;
-            return Some(format!("{}::{}({})", type_name, rust_name, vals.join(", ")));
+            let call = format!("{}::{}({})", type_name, rust_name, vals.join(", "));
+            // Propagate `?` when the called type-level method throws -- mirrors the
+            // instance-method call-site logic above (`emit_method_call`'s qualified
+            // "StructName::method" lookup in `struct_method_throws`). Unlike the instance
+            // case, `type_name` here IS the struct name already, so no receiver-type
+            // resolution is needed -- just check the qualified key directly.
+            let throws = self.struct_method_throws.contains(&format!("{}::{}", type_name, method));
+            return Some(if (self.in_throws || self.in_try_body) && throws {
+                format!("{}?", call)
+            } else {
+                call
+            });
         }
         // `is_variant` (computed above) is true but the type wasn't found in
         // `enum_variant_fields` -- this is a *genuinely external* enum's tuple
@@ -662,12 +679,15 @@ impl Transpiler {
                     || TOKIO_ASYNC_INSTANCE.contains(&method);
                 let throws = (self.in_throws || self.in_try_body)
                     && (self.fn_throws.contains(method) || self.struct_method_throws.contains(method));
-                let call = if throws { format!("{}?", call) } else { call };
-                return Some(if self.in_async && needs_await {
+                // `.await` must come before `?` — a `Future` isn't `Try`, only its
+                // resolved `Result` output is, so `call?.await` (await-after-throw)
+                // is invalid Rust (E0277); `call.await?` is what actually compiles.
+                let call = if self.in_async && needs_await {
                     format!("{}.await", call)
                 } else {
                     call
-                });
+                };
+                return Some(if throws { format!("{}?", call) } else { call });
             }
         }
         // Managed-mode mutex var method: w.method(args) → w.lock().unwrap().method(args)
@@ -1013,6 +1033,26 @@ impl Transpiler {
                 in_string_set && not_collection && type_confirms
             }
             ExprKind::Str(_) | ExprKind::StringInterp(_) => true,
+            // A chained call to a method that itself always returns a string
+            // (`line.trim().split(",")`) — without this, the receiver `line.trim()`
+            // fails this check (it's a `MethodCall`, not a bare `Var`/literal), so the
+            // outer call misses this file's owned-`Arc<str>`-per-element special cases
+            // (e.g. `split`'s `.map(|p| Arc::from(p.to_string()))`) and falls back to
+            // the generic method emission instead, which — combined with `.trim()`'s own
+            // result being wrapped in a fresh owned `Arc::<str>::from(...)` elsewhere —
+            // produced `Arc::<str>::from(line.trim()).split(",").collect::<Vec<_>>()`:
+            // a `Vec<&str>` borrowing from a temporary that's dropped at the end of the
+            // statement (E0716). Recursing into the receiver mirrors the `Var` case's
+            // intent for the common "trim then transform" chain.
+            ExprKind::MethodCall(inner, m, _) => {
+                const STRING_RETURNING_METHODS: &[&str] = &[
+                    "trim", "trimStart", "trimEnd",
+                    "upper", "toUpper", "toUpperCase", "uppercased",
+                    "lower", "toLower", "toLowerCase", "lowercased",
+                    "replace",
+                ];
+                STRING_RETURNING_METHODS.contains(&m.as_str()) && self.expr_is_string_receiver(inner)
+            }
             _ => false,
         }
     }
@@ -1477,9 +1517,22 @@ impl Transpiler {
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
         // Note: the map_method fallback maps indexOf → iter().position which returns Option<usize>;
         // we need Option<isize> to match interpreter semantics (indexOf returns `int`).
+        // `indexOf((t): pred)` — a closure/predicate argument (the same shorthand
+        // `.find()` accepts) must be passed straight through to `.position()` as the
+        // predicate itself, not compared with `==`: `__x == &(|t| ...)` doesn't even
+        // type-check (comparing an element to a closure), which is what this emitted
+        // before this fix whenever `indexOf`'s argument was a closure instead of a
+        // plain value.
         if method == "indexOf" && !self.expr_is_string_receiver(obj) {
             if let Some(val_arg) = args.first() {
                 let obj_s = self.emit_expr(obj);
+                if matches!(&val_arg.value.kind, ExprKind::Closure(..)) {
+                    let pred_s = self.emit_expr(&val_arg.value);
+                    return Some(format!(
+                        "{}.iter().position({}).map(|i| i as isize)",
+                        obj_s, pred_s
+                    ));
+                }
                 let val_s = self.emit_expr(&val_arg.value);
                 return Some(format!(
                     "{}.iter().position(|__x| __x == &({})).map(|i| i as isize)",
@@ -1878,7 +1931,12 @@ impl Transpiler {
                 if i == 0 { self.emit_dict_key_owned(&a.value) }
                 else { self.emit_expr_owned(&a.value) }
             }).collect()
-        } else if rust_method == "contains" || rust_method == "contains_key" {
+        } else if !is_user_struct_receiver && (rust_method == "contains" || rust_method == "contains_key") {
+            // Vec/HashSet::contains and HashMap::contains_key both take a reference.
+            // Guarded on `!is_user_struct_receiver` so a user struct's own `contains`
+            // method (preserved as-is above) isn't mistaken for the builtin — same
+            // false-positive-by-name bug class as `.position()`/`.count` (see
+            // `try_emit_array_special_method`'s `expr_receiver_is_known_user_type` guard).
             args.iter().map(|a| format!("&{}", self.emit_expr(&a.value))).collect()
         } else if is_user_struct_receiver {
             // User-defined struct methods: coerce string literals to Arc<str> to match
@@ -2002,13 +2060,20 @@ impl Transpiler {
         // AudioEncoder.forward, both "forward") would incorrectly pick up a stray
         // `?` from the bare-name entry. Fall back to the bare-name check only when
         // the receiver's struct type can't be resolved here.
-        let receiver_struct = match &obj.kind {
-            ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
-                .or_else(|| self.var_struct_type.get(v.as_str()))
-                .cloned(),
-            _ => None,
-        };
+        //
+        // Resolved via `resolve_expr_struct_type` (not just a bare `ExprKind::Var`
+        // match on `self`/a local) so a field-of-field receiver like
+        // `self.numerator.mul(...)` also gets its real type (`Inner`) looked up --
+        // see docs/known-issues-biguint-spike.md #10: the old narrower match here
+        // only handled `self` and a plain local var, so any other receiver shape
+        // (chained field access) fell through to `None` and hit the bare-name
+        // fallback below, picking up `?` from an unrelated same-named throwing
+        // method on a completely different type.
+        let receiver_struct = self.resolve_expr_struct_type(obj)
+            .or_else(|| match &obj.kind {
+                ExprKind::Var(v) => self.var_struct_type.get(v.as_str()).cloned(),
+                _ => None,
+            });
         let struct_throws = match &receiver_struct {
             Some(sn) => self.struct_method_throws.contains(&format!("{}::{}", sn, method)),
             None => self.struct_method_throws.contains(method),
@@ -2445,8 +2510,16 @@ impl Transpiler {
                         emitted
                     }
                 // var (rebindable) param: out-parameter, pass &mut for all stack/primitive types.
+                // 'actor'task/'guard'task (OwnerQual::ActorTask/GuardTask) belong in the same
+                // exclusion as their non-task counterparts just above — they're passed by
+                // Arc-clone/shared reference (see `is_actor_or_guard` right above this arm),
+                // never by `&mut`, so a `var T'actor'task` param must not demand a `var`
+                // binding at the call site (this arm previously only excluded `Actor`/`Guard`,
+                // wrongly rejecting `let x'actor'task = ...` callers with a bogus "pass `var`
+                // instead" diagnostic).
                 } else if param_rebindable && !matches!(param_ty,
-                    Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Weak))
+                    Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
+                        | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak))
                 ) {
                     if let ExprKind::Var(vname) = &a.value.kind {
                         if self.immutable_local_vars.contains(vname.as_str()) {
@@ -2461,6 +2534,23 @@ impl Transpiler {
                             ));
                         }
                     }
+                    // A bare local/param passed directly to a `var` (rebindable) parameter
+                    // must be referenced in place — `&mut` must point at the real variable,
+                    // not at a temporary. `emitted` may already carry a trailing `.clone()`
+                    // here: the struct-value-semantics heuristic in `emit_let.rs`'s
+                    // `emit_let_value_fallback` doesn't know this call's parameter is
+                    // rebindable (that information only exists here), so for a struct-typed
+                    // argument it unconditionally clones. `&mut v.clone()` takes a mutable
+                    // reference to that throwaway clone, silently discarding every mutation
+                    // the callee makes — the opposite of "var param passes &mut T; changes
+                    // are visible at the call site" (see CLAUDE.md). Only strip the clone for
+                    // a plain `Var` argument (an existing place) — a computed/temporary
+                    // expression still needs whatever `emit_let_value` produced for it.
+                    let emitted = if matches!(&a.value.kind, ExprKind::Var(_)) {
+                        emitted.strip_suffix(".clone()").map(str::to_owned).unwrap_or(emitted)
+                    } else {
+                        emitted
+                    };
                     format!("&mut {}", emitted)
                 } else {
                     emitted
@@ -2691,10 +2781,13 @@ impl Transpiler {
             ExprKind::Var(v) => {
                 if self.dict_vars.contains(v.as_str()) { return true; }
                 // Struct fields accessed as bare vars inside method bodies.
+                // `.without_mut()`: a `var mut {K=V} field` declaration wraps the field's
+                // type in `Type::Mut(..)` (see `wrap_type_mut`), so a direct match against
+                // `Type::Dict(..)` misses every mut/var-mut dict field.
                 self.self_type.as_ref()
                     .and_then(|sn| self.struct_fields.get(sn.as_str()))
                     .and_then(|fs| fs.iter().find(|(n, _)| n == v.as_str()))
-                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Dict(..)))
+                    .map(|(_, ty)| matches!(ty.without_mut(), crate::ast::Type::Dict(..)))
                     .unwrap_or(false)
             }
             ExprKind::Dict(_) => true,
@@ -2709,7 +2802,7 @@ impl Transpiler {
                 };
                 struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
                     .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
-                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Dict(..)))
+                    .map(|(_, ty)| matches!(ty.without_mut(), crate::ast::Type::Dict(..)))
                     .unwrap_or(false)
             }
             // Chained dict → dict methods
@@ -2858,6 +2951,7 @@ impl Transpiler {
             weak_vars: self.weak_vars.clone(),
             fn_variadic: self.fn_variadic.clone(),
             in_try_body: self.in_try_body,
+            error_var_is_concrete_enum: self.error_var_is_concrete_enum,
             in_type_setter: self.in_type_setter,
             in_init_body: self.in_init_body,
             struct_type_var_names: self.struct_type_var_names.clone(),
@@ -2927,6 +3021,7 @@ impl Transpiler {
             global_var_inits: self.global_var_inits.clone(),
             global_vars_used_in_fns: self.global_vars_used_in_fns.clone(),
             global_lets_used_elsewhere: self.global_lets_used_elsewhere.clone(),
+            global_string_const_names: self.global_string_const_names.clone(),
             optional_numeric_vars: self.optional_numeric_vars.clone(),
             always_none_vars: self.always_none_vars.clone(),
             fn_type_aliases: self.fn_type_aliases.clone(),

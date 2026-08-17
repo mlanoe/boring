@@ -998,8 +998,8 @@ impl HostEmitter {
                     }
                 }
                 if let ExprKind::Assign(lhs, rhs) = &e.kind {
-                    let l = self.expr(lhs);
-                    let r = self.expr(rhs);
+                    let l = self.emit_assign_target(lhs);
+                    let r = self.emit_assign_rhs(lhs, rhs);
                     self.line(&format!("{l} = {r};"));
                 } else if let Some(launch) = self.try_emit_kernel_launch_call(e) {
                     self.line(&format!("{launch};"));
@@ -1028,6 +1028,90 @@ impl HostEmitter {
                 self.line("}");
             }
             other => self.emit_stmt(other),
+        }
+    }
+
+    /// Renders an assignment *target* (LHS) as a plain Rust place expression —
+    /// `obj.field`, recursing into `(a, b) = (b, a)`-style tuple targets — rather
+    /// than going through `self.expr()`, which for a kernel-struct field access
+    /// (`step.cells_in`) instead emits the *read* path (`step.read_cells_in()?`,
+    /// via `try_gpu_field_read`) unconditionally, with no awareness of whether
+    /// the caller wants to read or write it. That miscompiled every direct
+    /// assignment to (or tuple-swap of) a kernel field — `render.cells =
+    /// step.cells_in` became `render.read_cells()? = step.read_cells_in()?;`
+    /// (E0070, can't assign to a call result; E0277, `?` outside a
+    /// Result/Option-returning fn) — confirmed via examples/game_of_life.br's
+    /// ping-pong buffer swap (`step.cells_in, step.cells_out = step.cells_out,
+    /// step.cells_in`) and its `render.cells = step.cells_in` handoff, both
+    /// inside the `boring_event_loop.run_return` render-loop closure. Once each
+    /// element resolves to a plain place expression this way, Rust's own
+    /// destructuring-assignment support (`(a, b) = (b, a);`, stable since
+    /// 1.59) handles the tuple case natively — no manual temporary-swap
+    /// codegen needed.
+    fn emit_assign_target(&mut self, target: &Expr) -> String {
+        match &target.kind {
+            ExprKind::Var(name) => name.clone(),
+            ExprKind::Field(obj, field) => format!("{}.{}", self.emit_assign_target(obj), field),
+            ExprKind::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|e| self.emit_assign_target(e)).collect();
+                format!("({})", parts.join(", "))
+            }
+            _ => self.expr(target),
+        }
+    }
+
+    /// Whether `e` is a Field access on a tracked kernel var, or a Tuple purely of
+    /// such (recursively) — the shape a GPU-buffer handoff/ping-pong-swap RHS must
+    /// have (mirroring `emit_assign_target`'s LHS) to skip host materialization
+    /// entirely and stay a plain `Buffer` value on both sides.
+    fn is_kernel_field_ref(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Field(obj, _) => matches!(&obj.kind, ExprKind::Var(v) if self.var_kernel_type.contains_key(v.as_str())),
+            ExprKind::Tuple(elems) => !elems.is_empty() && elems.iter().all(|el| self.is_kernel_field_ref(el)),
+            _ => false,
+        }
+    }
+
+    /// Emits `e` (already confirmed by `is_kernel_field_ref`) as a plain `Buffer`
+    /// value — `obj.field.clone()` for a leaf, recursing for a tuple. `.clone()`
+    /// on `metal::Buffer` is a cheap retain-count bump that ALIASES the same
+    /// underlying `MTLBuffer` — exactly the desired zero-copy semantics for a GPU
+    /// buffer handoff between kernel fields (`render.cells = step.cells_in`) or a
+    /// ping-pong swap (`step.cells_in, step.cells_out = step.cells_out,
+    /// step.cells_in`), confirmed via examples/game_of_life.br. This is the
+    /// opposite of a fresh kernel *constructor's* own arguments, which need an
+    /// independent copy instead — see `__boring_metal_buffer_copy`'s doc for why
+    /// aliasing there would be wrong. Without this, the RHS fell through to
+    /// `try_gpu_field_read`'s materializing `.read_field()?` (a full GPU→host
+    /// readback producing `Vec<T>`, not `Buffer`) even though the target is a
+    /// `Buffer`-typed field expecting a `Buffer` value straight back — E0308 and
+    /// a stray `?` outside any Result/Option-returning function.
+    fn emit_kernel_field_value(&mut self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Field(obj, field) => {
+                if let ExprKind::Var(name) = &obj.kind {
+                    format!("{}.{}.clone()", name, field)
+                } else {
+                    format!("{}.clone()", self.expr(e))
+                }
+            }
+            ExprKind::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter().map(|el| self.emit_kernel_field_value(el)).collect();
+                format!("({})", parts.join(", "))
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    /// Shared RHS-emission decision for an assignment whose LHS is a kernel
+    /// field/tuple-of-fields (`emit_assign_target`'s domain) — see
+    /// `emit_kernel_field_value`'s doc for why a mirroring kernel-field RHS needs
+    /// its own, non-materializing emission instead of the ordinary `self.expr()`.
+    fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        if self.is_kernel_field_ref(lhs) && self.is_kernel_field_ref(rhs) {
+            self.emit_kernel_field_value(rhs)
+        } else {
+            self.expr(rhs)
         }
     }
 
@@ -1246,6 +1330,26 @@ impl HostEmitter {
                             field.name, elem
                         ));
                     }
+                    // Fixed-shape labeled array (`[T, width = W, height = H]`) with no
+                    // explicit init-body assignment — per docs/array-multidim-types.md,
+                    // this is auto zero-initialized to its full `W*H`(*D) element count,
+                    // exactly like a fixed-size `[T, N]` field already is (the flat-array
+                    // arm just above, minus the size — that one always allocates a
+                    // *single*-element placeholder buffer, apparently expecting a real
+                    // size to be assigned later; a fixed-shape labeled array has no such
+                    // later assignment to rely on, so it must get its real full size
+                    // right here). This arm was entirely missing (fell through to the `_`
+                    // scalar-default case below, producing a bare `Vec<f32>` — wrong
+                    // *shape* of value, not just wrong size) — confirmed via
+                    // examples/matrix_mul_gpu.br's `c` field.
+                    ty if ty.as_labeled_array().is_some() => {
+                        let elem = elem_rust_type(ty);
+                        let n = ty.labeled_array_len().unwrap_or(1);
+                        self.line(&format!(
+                            "let {}: Buffer = __device.new_buffer(({n}usize * mem::size_of::<{}>()) as u64, MTLResourceOptions::StorageModeShared);",
+                            field.name, elem
+                        ));
+                    }
                     _ => {
                         let ty = rust_type(&field.ty);
                         let val = field.default.as_ref()
@@ -1353,8 +1457,10 @@ impl HostEmitter {
                                         }
                                         _ => {
                                             let rhs_s = self.expr(rhs);
-                                            match &field.ty {
-                                                Type::Array(_) | Type::ArrayN(_, _) => {
+                                            let is_array_like = matches!(&field.ty, Type::Array(_) | Type::ArrayN(_, _))
+                                                || field.ty.as_labeled_array().is_some();
+                                            match () {
+                                                () if is_array_like => {
                                                     // A bare `field = param` assignment (this codebase's
                                                     // only real pattern here) means the constructor's
                                                     // OWN param type is already `Buffer` -- see
@@ -1834,8 +1940,8 @@ impl HostEmitter {
                             self.line(&format!("{}[({}) as usize] = {};", obj_s, idx_s, rhs_s));
                             return;
                         }
-                        let l = self.expr(lhs);
-                        let r = self.expr(rhs);
+                        let l = self.emit_assign_target(lhs);
+                        let r = self.emit_assign_rhs(lhs, rhs);
                         self.line(&format!("{} = {};", l, r));
                     }
                     _ => {
@@ -1947,6 +2053,40 @@ impl HostEmitter {
             Stmt::Continue(_label)    => self.line("continue;"),
             Stmt::Comment(_)          => {}
             Stmt::KernelBlock(kb) => self.emit_kernel_block(&kb.body),
+            // `with <name>: <body>` — the general/std transpiler's emit_stmt.rs has a
+            // full implementation (mutex/rwlock guard acquisition, direct-kernel-field
+            // GPU materialization via `gpu_resident_vars`) that this Metal-specific
+            // emitter has never had any equivalent of at all: every name Metal's own
+            // scan tracks that machinery for (`var_mutex_types`/`var_rwlock_types`/
+            // `gpu_resident_vars`) is simply empty here, so every `with` block silently
+            // fell through to the catch-all `/* unsupported stmt */` below — dropping
+            // its entire body, including any `print`/host-side use of the values it
+            // opens. Confirmed via examples/mandelbrot_gpu.br and matrix_mul_gpu.br,
+            // whose `with flat_image:` / `with c:` post-processing loops (the only
+            // place either program ever prints/encodes its GPU result) vanished
+            // entirely from `main()`, which is why the exact same kernel produced a
+            // real Mandelbrot render under `boring run` but an all-black PPM once
+            // actually compiled and run on real Metal hardware: the readback
+            // (`k.read_image()`, emitted by the *separate* `.flatten()` call one
+            // statement earlier) still ran and was correct, but the loop that would
+            // have copied it into `pixels` never existed in the generated binary.
+            // Every name this backend can appear in a `with` header today is already a
+            // plain materialized local by construction (Metal has no lazy/resident
+            // value that only becomes real inside a `with` block, unlike the general
+            // backend) — `k.image` is only ever read via an explicit `.flatten()`/
+            // direct index first (this is the documented, and only, Metal-target
+            // pattern; see docs/array-multidim-types.md and examples/*_gpu.br), which
+            // already performs the real GPU readback eagerly at that point. So unlike
+            // the general backend, Metal's `with` needs no acquire/materialize/write-
+            // back step of its own here — it can simply lower to a bare scope around
+            // its body.
+            Stmt::With(w) => {
+                self.line("{");
+                self.indent += 1;
+                for s in &w.body { self.emit_stmt(s); }
+                self.indent -= 1;
+                self.line("}");
+            }
             _ => { self.line("/* unsupported stmt */"); }
         }
     }
@@ -1989,12 +2129,21 @@ impl HostEmitter {
         if !is_kernel { return None; }
         let kernel_type = self.var_kernel_type.get(var_name.as_str()).cloned()
             .or_else(|| Some(var_name.clone()));
+        // Same array-or-labeled-array check as `emit_boring_launch`'s
+        // `auto_grid_field` — this is an independent, duplicated copy of it (this
+        // one decides whether to wrap the *call site's* grid arg in `Some(...)`,
+        // that one decides the *callee signature's* `Option<...>` vs bare tuple)
+        // and used to only check `Type::Array`/`Type::ArrayN`, never a labeled
+        // array — so a kernel with only labeled-array fields got the `Option<...>`
+        // signature from `emit_boring_launch` but a bare, un-`Some`-wrapped tuple
+        // argument here, a guaranteed E0308 at every call site (confirmed via
+        // examples/matrix_mul_gpu.br's explicit `k(block = ..., grid = (2, 2))`).
         let auto_grid = kernel_type
             .as_ref()
             .and_then(|t| self.kernel_decls.get(t))
             .map(|decl| decl.fields.iter().any(|f|
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
+                && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
             .unwrap_or(false);
         let block = args.iter().find(|a| a.label.as_deref() == Some("block"))
             .map(|a| self.dim3_expr(&a.value))
@@ -2164,7 +2313,9 @@ impl HostEmitter {
                 format!("({}{})", unaryop_rust(op), v)
             }
             ExprKind::Assign(lhs, rhs) => {
-                format!("({} = {})", self.expr(lhs), self.expr(rhs))
+                let l = self.emit_assign_target(lhs);
+                let r = self.emit_assign_rhs(lhs, rhs);
+                format!("({} = {})", l, r)
             }
             ExprKind::Index(arr, idx) => {
                 if let ExprKind::Field(obj, field) = &arr.kind {
@@ -2280,6 +2431,25 @@ impl HostEmitter {
                         if let Some(arg) = args.first() {
                             let inner = self.expr(&arg.value);
                             return format!("({} as usize)", inner);
+                        }
+                    }
+                }
+                // Fixed-width numeric cast-calls (`uint8(x)`, `int16(x)`, ...) — this host
+                // codegen only hand-duplicated `float`/`float64`/`float32`/`int`/`uint`
+                // above, missing every other width the general/std transpiler supports
+                // (emit_expr.rs's identical `"int" | "uint" | "uint8" | ...` match arm) —
+                // `uint8(b)` fell through to a plain, unrecognized function call
+                // (`uint8(b)`, undefined in Rust — E0425) instead of `(b as u8)`,
+                // confirmed via examples/mandelbrot_gpu.br's PPM byte-encoding step.
+                if let ExprKind::Var(name) = &callee.kind {
+                    if matches!(name.as_str(),
+                        "uint8" | "int8" | "int16" | "int32" | "int64" | "int128"
+                        | "uint16" | "uint32" | "uint64" | "uint128")
+                    {
+                        if let Some(arg) = args.first() {
+                            let inner = self.expr(&arg.value);
+                            let rust_ty = crate::transpiler::helpers::normalize_type_name(name, false);
+                            return format!("({} as {})", inner, rust_ty);
                         }
                     }
                 }
@@ -2464,11 +2634,15 @@ impl HostEmitter {
                 }
             }
             ExprKind::KernelLaunch { config, kernel } => {
+                // Third copy of the same array-or-labeled-array check — see
+                // `try_emit_kernel_launch_call`'s identical fix's doc comment for the
+                // full rationale (this is the `ExprKind::KernelLaunch` AST shape rather
+                // than a plain `ExprKind::Call`, but the same E0308 applies).
                 let auto_grid = self.resolve_kernel_type(kernel)
                     .and_then(|t| self.kernel_decls.get(&t))
                     .map(|decl| decl.fields.iter().any(|f|
                         matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
-                        && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))))
+                        && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())))
                     .unwrap_or(false);
                 let k = self.expr(kernel);
                 let block = config.block.as_ref()
@@ -2705,9 +2879,38 @@ impl HostEmitter {
                 decl.fields.iter().find(|f| &f.name == fname)
             }).map(|f| {
                 matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const)
-                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _))
+                    // Fixed-shape labeled arrays (`[T, width = W, height = H]`) are a
+                    // buffer-passthrough field exactly like `Type::Array`/`Type::ArrayN` —
+                    // this check used to miss them entirely (only flat arrays), so a
+                    // labeled-array constructor param stayed a plain host `Vec` all the
+                    // way through, producing `field: Buffer = param` with `param: Vec<f32>`
+                    // (E0308) — confirmed via examples/matrix_mul_gpu.br's `a`/`b`/`c`
+                    // fields, all `[float32, width = 32, height = 32]'global`/`'unified`.
+                    && (matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) || f.ty.as_labeled_array().is_some())
             }).unwrap_or(false)
         }).collect())
+    }
+
+    /// For `kernel_name`'s `init(...)` parameter at position `idx`, the Rust
+    /// element type of the buffer field it's assigned to (see
+    /// `kernel_ctor_buffer_flags`'s identical field lookup) -- e.g. `"i64"` for
+    /// a `[int]'global` field, `"f32"` for `[float32]`/a labeled float32 array.
+    /// `None` if the field/type can't be resolved -- callers fall back to the
+    /// pre-existing hardcoded `f32` assumption in that case (unchanged
+    /// behavior for whatever this can't determine).
+    fn kernel_ctor_buffer_elem_type(&self, kernel_name: &str, idx: usize) -> Option<String> {
+        let decl = self.kernel_decls.get(kernel_name)?;
+        let init = decl.inits.first()?;
+        let p = init.params.get(idx)?;
+        let field = init.body.iter().find_map(|stmt| {
+            let Stmt::Expr(e) = stmt else { return None; };
+            let ExprKind::Assign(lhs, rhs) = &e.kind else { return None; };
+            let ExprKind::Var(fname) = &lhs.kind else { return None; };
+            let ExprKind::Var(pname) = &rhs.kind else { return None; };
+            if pname != &p.name { return None; }
+            decl.fields.iter().find(|f| &f.name == fname)
+        })?;
+        Some(elem_rust_type(&field.ty))
     }
 
     /// Renders `args` for a call to kernel `name`'s constructor targeting
@@ -2724,6 +2927,16 @@ impl HostEmitter {
         let buffer_flags = self.kernel_ctor_buffer_flags(name);
         args.iter().enumerate().map(|(i, a)| {
             let is_buffer_pos = buffer_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+            // The actual element type of the field this argument uploads into --
+            // every upload path below used to hardcode `f32` unconditionally,
+            // silently corrupting any non-float buffer (`[int]'global`, `int64_t`
+            // on the device side): the host upload wrote 4-byte floats into a
+            // buffer the kernel reads as 8-byte integers, a byte-for-byte layout
+            // mismatch that produces garbage/zeroed results with no compile-time
+            // or runtime error at all -- confirmed via examples/vector_add_gpu.br,
+            // whose real Metal run produced all-zero output despite `cargo build`
+            // and `cargo run` both succeeding cleanly.
+            let elem = self.kernel_ctor_buffer_elem_type(name, i).unwrap_or_else(|| "f32".to_string());
             if is_buffer_pos {
                 // `k_prev.field` passed directly as an argument (this
                 // codebase's common inline-chaining shape, e.g.
@@ -2745,14 +2958,14 @@ impl HostEmitter {
                 if let ExprKind::Var(vname) = &a.value.kind {
                     if self.resident_locals.contains(vname.as_str()) {
                         return format!(
-                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => __boring_metal_buffer_copy(&{dev}, &buf)?, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, (v.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared) }})",
-                            v = vname, dev = dev
+                            "(match {v} {{ BoringGpuArg::Resident(buf, _) => __boring_metal_buffer_copy(&{dev}, &buf)?, BoringGpuArg::Host(v) => {dev}.new_buffer_with_data((v.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, (v.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }})",
+                            v = vname, dev = dev, elem = elem
                         );
                     }
                     if self.f64_array_locals.contains(vname.as_str()) {
                         return format!(
-                            "{dev}.new_buffer_with_data(({v}.iter().map(|&x| x as f32).collect::<Vec<f32>>()).as_ptr() as *const _, ({v}.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared)",
-                            v = vname, dev = dev
+                            "{dev}.new_buffer_with_data(({v}.iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>()).as_ptr() as *const _, ({v}.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared)",
+                            v = vname, dev = dev, elem = elem
                         );
                     }
                 }
@@ -2760,17 +2973,18 @@ impl HostEmitter {
                 // `let`-bound Vec<f64> that isn't already tracked as
                 // `resident_locals`/`f64_array_locals` above -- e.g. a
                 // top-level `let data = [1.0, 2.0]`) is a `Vec<f64>` by the
-                // general pipeline's own convention, NOT the `Vec<f32>`
-                // `new_buffer_with_data` needs -- narrow it explicitly first.
-                // Missing this cast silently copied half the intended bytes
-                // (mem::size_of::<f32>() against actual f64 data) instead of
-                // failing to compile, confirmed by inspecting the generated
-                // Rust directly (`(data).as_ptr()` typed `*const f64` sized
-                // as if `f32`).
+                // general pipeline's own convention, NOT the target buffer's
+                // native element type `new_buffer_with_data` needs -- narrow it
+                // explicitly first. Missing this cast silently copied the wrong
+                // number of bytes (e.g. `mem::size_of::<f32>()` against actual
+                // `int`/`int64_t` data) instead of failing to compile — confirmed
+                // by inspecting the generated Rust directly, and independently by
+                // a real Metal run of examples/vector_add_gpu.br producing
+                // all-zero output despite a clean `cargo build`.
                 let s = self.coerce_call_arg(&a.value, false);
                 return format!(
-                    "{{ let __boring_buf: Vec<f32> = ({s}).iter().map(|&x| x as f32).collect(); {dev}.new_buffer_with_data(__boring_buf.as_ptr() as *const _, (__boring_buf.len() * mem::size_of::<f32>()) as u64, MTLResourceOptions::StorageModeShared) }}",
-                    dev = dev, s = s
+                    "{{ let __boring_buf: Vec<{elem}> = ({s}).iter().map(|&x| x as {elem}).collect(); {dev}.new_buffer_with_data(__boring_buf.as_ptr() as *const _, (__boring_buf.len() * mem::size_of::<{elem}>()) as u64, MTLResourceOptions::StorageModeShared) }}",
+                    dev = dev, s = s, elem = elem
                 );
             }
             // Scalar position -- unchanged. A `Vec<f64>` local bound
@@ -2792,11 +3006,15 @@ impl HostEmitter {
         let kf = decl.fields.iter().find(|f| f.name == field)?;
         match kf.qual {
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                match &kf.ty {
-                    Type::Array(_) | Type::ArrayN(_, _) => {
-                        Some(format!("{}.read_{}()?", obj, field))
-                    }
-                    _ => None,
+                // Fourth copy of the same array-or-labeled-array check — see
+                // `try_emit_kernel_launch_call`'s fix for the full rationale. A bare
+                // `k.field` read (no `.flatten()`) of a labeled-array field used to fall
+                // through to `None` here, silently missing the `.read_{field}()` buffer
+                // readback this same shape already gets for a flat array field.
+                if matches!(&kf.ty, Type::Array(_) | Type::ArrayN(_, _)) || kf.ty.as_labeled_array().is_some() {
+                    Some(format!("{}.read_{}()?", obj, field))
+                } else {
+                    None
                 }
             }
             _ => None,

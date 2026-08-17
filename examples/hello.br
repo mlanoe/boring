@@ -116,7 +116,7 @@ print "{add(3, 4)}, {greet("boring")}, {display("Alice")}, {display(nil)}"
 print "say: {say()}, {say("yo")}"
 print "identity: {identity(42)}, {identity("hi")}"
 print "first: {first([10, 20, 30])}"
-print "join: {join(", ", "a", "b", "c")}"
+print "join: {["a", "b", "c"].join(", ")}"
 print "sum: {sum(1, 2, 3, 4, 5)}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -567,10 +567,14 @@ print "red={red as string}, green={green as string}"
 
 # Import a native Rust module — falls back to `use math_utils::*;` in emitted Rust.
 # No .br source file needed; symbols are resolved by the Rust compiler.
-use math_utils.*
+# Commented out here since `math_utils` isn't a real crate this project depends on —
+# `boring build` happily transpiles the two lines below verbatim (`use math_utils::*;`
+# / `use math_utils::clamp_f;`), but `cargo build` then fails to resolve them
+# (E0432, no such crate) since nothing backs that module in this standalone example.
+# use math_utils.*
 
 # Import a specific item by name
-use math_utils.clamp_f
+# use math_utils.clamp_f
 
 # Type aliases
 use Score as int                    # i64 — rename a primitive
@@ -686,7 +690,7 @@ struct Temperature:
     set fahrenheit(float f):
         self.celsius = (f - 32.0) * 5.0 / 9.0
 
-var t = Temperature(celsius = 0.0)
+var mut t = Temperature(celsius = 0.0)
 print "0°C = {t.fahrenheit}°F"
 t.fahrenheit = 212.0
 print "212°F = {t.celsius}°C"

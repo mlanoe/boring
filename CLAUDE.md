@@ -173,6 +173,8 @@ print "Hello, {name}!"
 
 The mode is inferred by the transpiler from usage context; there is no explicit qualifier to force it.
 
+**Known gap**: a string literal passed *directly* as an argument to a method/function call on an **external type** (a Rust type Boring never parsed a `struct`/`enum` for) stays a raw `&'static str` — it is never promoted to `Rc<str>`/`Arc<str>`, unlike the same literal passed to a Boring-declared `string` parameter. Fails to compile only when the external signature expects an owned `Rc<str>`/`Arc<str>` (fine when it expects `&str`). Workaround: `blk.method("literal" as string)`, or route through a Boring function/method with a `string`-typed parameter. See [docs/book.md](docs/book.md) "Advanced — String literals as external call arguments" for the full writeup and why a blanket default change isn't safe.
+
 ## Collections
 
 Dict and set literals/types use `=`, **not** `:` — a common mistake:

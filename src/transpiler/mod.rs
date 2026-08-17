@@ -210,6 +210,11 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
             // Global statics require Send — restore Arc<str> inside Mutex for static vars.
             .replace("std::sync::Mutex<Rc<str>>", "std::sync::Mutex<Arc<str>>")
             .replace("std::sync::Mutex::new(Rc::<str>::from(", "std::sync::Mutex::new(Arc::<str>::from(")
+            // Promoted top-level `pub let`/used-elsewhere `let` string-literal constants
+            // (`top_level_let_is_string_literal`, emit_top.rs) are also a bare `static` —
+            // same Send+Sync requirement, same undo, just without the `Mutex<...>` wrapper.
+            .replace("std::sync::LazyLock<Rc<str>>", "std::sync::LazyLock<Arc<str>>")
+            .replace("std::sync::LazyLock::new(|| Rc::<str>::from(", "std::sync::LazyLock::new(|| Arc::<str>::from(")
             // Assignments to static string vars (through Mutex) also need Arc<str>.
             .replace(".unwrap_or_else(|e| e.into_inner()) = Rc::<str>::from(", ".unwrap_or_else(|e| e.into_inner()) = Arc::<str>::from(")
             // In single-thread mode, error types and BoringVal don't need Send + Sync.
@@ -375,6 +380,12 @@ struct Transpiler {
     pub(crate) fn_variadic: std::collections::HashMap<String, usize>,
     /// Inside a `try:` body closure — calls to throws functions get `?`.
     pub(crate) in_try_body: bool,
+    /// True while emitting the body of a `catch TypeName:` clause where `error` has
+    /// already been bound as a concrete `&TypeName` enum reference (see emit_flow.rs's
+    /// typed-catch dispatch). Tells emit_match's `match error:` special case to skip
+    /// its BoringError re-downcast rewrite — `error` is not a `Box<dyn Error>` here,
+    /// it's already the concrete enum, so a plain match on it is correct as-is.
+    pub(crate) error_var_is_concrete_enum: bool,
     /// True while emitting a `type set` body — prevents recursive setter dispatch.
     pub(crate) in_type_setter: bool,
     /// True while emitting an `init` body — `self` must be emitted as `__self`.
@@ -585,6 +596,12 @@ struct Transpiler {
     pub(crate) match_subject_enum: Option<String>,
     /// Local variable name → its declared boring type (for match subject enum inference).
     pub(crate) var_types: std::collections::HashMap<String, Type>,
+    /// Local variable name → its `let`/`var` initializer expression, recorded regardless of
+    /// whether `var_types` itself got an entry (e.g. an unannotated `let rad = a * b` binop
+    /// initializer isn't tracked into `var_types` at all). Used by `infer_float_width` as a
+    /// fallback so a builtin math call on such a variable (`sin(rad)`) can still recover its
+    /// float32/float64 width from the initializer instead of silently defaulting to f64.
+    pub(crate) var_init_exprs: std::collections::HashMap<String, Expr>,
     /// "StructName::method_name" for methods that are operator overloads (add, sub, mul, div,
     /// rem, neg, eq, ne, lt, le, gt, ge). BinOp dispatch emits `a.clone().method(b.clone())`
     /// instead of `(a op b)` when the left operand's struct has the method registered.
@@ -622,6 +639,17 @@ struct Transpiler {
     /// GPU case) so ordinary top-level scripting `let`s — including same-named shadowing
     /// re-declarations — keep behaving as sequential locals in `main()`.
     pub(crate) global_lets_used_elsewhere: std::collections::HashSet<String>,
+    /// Names of top-level `let` string-literal constants that got promoted to a module-level
+    /// `static ... LazyLock<Rc/Arc<str>>` (per `top_level_let_is_string_literal`, gated the
+    /// same way as `global_lets_used_elsewhere`: `is_pub` unconditionally, or actual
+    /// cross-scope usage otherwise — see `emit_program_items`'s `Item::Let` classification).
+    /// Re-seeded into `string_vars`/`string_arc_vars` at the start of every function/method
+    /// body (`emit_fn`) so a read of the constant there is recognized as a string value and
+    /// gets `.clone()`d in owned position (e.g. as a by-value call argument) — without this,
+    /// `emit_expr_owned`'s `Var` arm has no way to know a bare top-level identifier like
+    /// `OP_ADD` is a string at all, since (unlike function params) it's never locally
+    /// declared inside the function reading it.
+    pub(crate) global_string_const_names: std::collections::HashSet<String>,
     /// Variables that hold `Option<numeric>` (int/uint/float) — from string-to-numeric casts.
     /// Used in `else` coalescing: when the optional is numeric but default is String, use map_or_else.
     pub(crate) optional_numeric_vars: std::collections::HashSet<String>,
@@ -928,6 +956,7 @@ impl Transpiler {
             fn_mutable: std::collections::HashMap::new(),
             fn_variadic: std::collections::HashMap::new(),
             in_try_body: false,
+            error_var_is_concrete_enum: false,
             in_type_setter: false,
             in_init_body: false,
             struct_type_var_names: std::collections::HashSet::new(),
@@ -995,6 +1024,7 @@ impl Transpiler {
             current_trait_assoc_names: std::collections::HashSet::new(),
             match_subject_enum: None,
             var_types: std::collections::HashMap::new(),
+            var_init_exprs: std::collections::HashMap::new(),
             struct_operator_methods: std::collections::HashSet::new(),
             struct_operator_param_types: std::collections::HashMap::new(),
             var_struct_type: std::collections::HashMap::new(),
@@ -1007,6 +1037,7 @@ impl Transpiler {
             global_var_inits: std::collections::HashMap::new(),
             global_vars_used_in_fns: std::collections::HashSet::new(),
             global_lets_used_elsewhere: std::collections::HashSet::new(),
+            global_string_const_names: std::collections::HashSet::new(),
             optional_numeric_vars: std::collections::HashSet::new(),
             always_none_vars: std::collections::HashSet::new(),
             fn_type_aliases: std::collections::HashMap::new(),
@@ -2009,16 +2040,42 @@ impl Transpiler {
         }
     }
 
+    /// Whether a top-level `let`'s initializer is a plain string literal (no
+    /// interpolation, no method call) with either no declared type or an explicit
+    /// `string` type -- `pub let OP_ADD = "operator_add"` / `pub let string OP_ADD =
+    /// "operator_add"`. Unlike the scalar case, `Rc/Arc::<str>::from(...)` is never a
+    /// `const fn`, so a promoted string constant always takes the same lazily-
+    /// initialized `static ... LazyLock<T>` form `emit_item`'s `Item::Let` arm already
+    /// uses for a non-const-fn external call -- see that arm's dedicated branch for
+    /// string literals. GPU/kernel (`no_std`) targets have neither `Rc`/`Arc` nor
+    /// `std::sync::LazyLock` available, so this always returns `false` there, same
+    /// exclusion `top_level_let_external_call` gets at its call sites.
+    fn top_level_let_is_string_literal(&self, s: &LetStmt) -> bool {
+        if self.is_gpu_target {
+            return false;
+        }
+        if let Some(ty) = &s.ty {
+            if !Self::is_string_type(ty) {
+                return false;
+            }
+        }
+        matches!(s.value.as_ref().map(|v| &v.kind), Some(ExprKind::Str(_)))
+    }
+
     /// Whether a top-level `let` can be promoted out of the synthesized `fn main()` into
     /// real module scope at all -- the scalar case (`top_level_let_is_const_safe`, always
     /// a `const`) plus a call into an external/opaque type (`top_level_let_external_call`,
     /// `const` or a lazily-initialized `static` depending on `is_known_external_const_fn`
-    /// -- see `emit_item`'s `Item::Let` arm for that split). Anything else (an array/
-    /// dict/set/string value, a call into one of the file's own struct/enum constructors,
-    /// a kernel constructor call) has no module-scope Rust representation this transpiler
-    /// can emit yet and stays a `fn main()` local, same as before this function existed.
+    /// -- see `emit_item`'s `Item::Let` arm for that split) plus a plain string literal
+    /// (`top_level_let_is_string_literal`, always the lazily-initialized `static` form).
+    /// Anything else (an array/dict/set value, a call into one of the file's own struct/
+    /// enum constructors, a kernel constructor call) has no module-scope Rust
+    /// representation this transpiler can emit yet and stays a `fn main()` local, same as
+    /// before this function existed.
     fn top_level_let_is_promotable(&self, s: &LetStmt) -> bool {
-        self.top_level_let_is_const_safe(s) || self.top_level_let_external_call(s).is_some()
+        self.top_level_let_is_const_safe(s)
+            || self.top_level_let_external_call(s).is_some()
+            || self.top_level_let_is_string_literal(s)
     }
 
     /// Hand-verified external associated functions that ARE `const fn` in their defining
@@ -2392,6 +2449,22 @@ impl Transpiler {
         let mut method_map = std::collections::HashMap::new();
         for tm in &s.type_methods {
             method_map.insert(tm.name.clone(), tm.kind.clone());
+            // Register throwing type-level methods the same way instance methods are
+            // below -- gates the `?` propagation `try_emit_type_method_call` adds at
+            // `TypeName.method(...)` call sites (emit_methods.rs). Qualified key
+            // ("StructName::method") avoids a same-named-but-non-throwing type method
+            // on a different struct picking up a stray `?` from the bare-name entry.
+            if tm.throws {
+                self.struct_method_throws.insert(format!("{}::{}", s.name, tm.name));
+                self.struct_method_throws.insert(tm.name.clone());
+            }
+            // Typed `throws ErrType:` on a type-level method registers ErrType the same
+            // way a regular throwing FnDecl's throws_ty does (line ~3283 below) -- so
+            // emit_enum generates its Display/Error impls and emit_throw routes it
+            // through BoringError::Other instead of stringifying it via Display.
+            if let Some(Type::Named(err_name)) = &tm.throws_ty {
+                self.typed_error_enums.insert(err_name.clone());
+            }
         }
         if !method_map.is_empty() {
             self.struct_type_method_sigs.insert(s.name.clone(), method_map);
@@ -2478,7 +2551,9 @@ impl Transpiler {
                 self.arc_qualified_types.insert(n.to_string());
             }
         }
-        // Collect arc-qualified types from method params too.
+        // Collect arc-qualified types from method params too, and from local
+        // `let`/`var` bindings inside each method body (see
+        // `collect_arc_qualified_lets_stmts`'s doc comment).
         for m in &s.methods {
             for p in &m.params {
                 if let Some(ty) = &p.ty {
@@ -2487,6 +2562,7 @@ impl Transpiler {
                     }
                 }
             }
+            self.collect_arc_qualified_lets_stmts(&m.body);
         }
         // Track req (non-mutating) methods for 'guard read vs write dispatch.
         for m in &s.methods {
@@ -2545,7 +2621,9 @@ impl Transpiler {
     /// overloaded-method tracking (mirroring inline struct methods), setters, and
     /// no-protocol method-override tracking.
     fn pre_scan_ext_item(&mut self, e: &crate::ast::ExtDecl) {
-        // Collect arc-qualified types from ext method params.
+        // Collect arc-qualified types from ext method params, and from local
+        // `let`/`var` bindings inside each method body (see
+        // `collect_arc_qualified_lets_stmts`'s doc comment).
         for m in &e.methods {
             for p in &m.params {
                 if let Some(ty) = &p.ty {
@@ -2554,6 +2632,7 @@ impl Transpiler {
                     }
                 }
             }
+            self.collect_arc_qualified_lets_stmts(&m.body);
         }
         // Register user-defined `as T:` conversion targets from extensions too.
         for conv in &e.conversions {
@@ -2822,7 +2901,18 @@ impl Transpiler {
                 // source order than the `let` it references still sees the name in
                 // this set -- Rust doesn't care about const declaration order, but
                 // this scan does, being a single pass over `program.items`.
-                if self.is_gpu_target && self.top_level_let_is_const_safe(s) {
+                // Despite the field's `gpu_`-prefixed name (kept to minimize the diff —
+                // it started GPU-only), this now applies to every target: any promoted
+                // top-level scalar `let` is emitted as an UPPERCASE Rust `const` (see
+                // `emit_item`'s `Item::Let` arm) specifically to avoid colliding with a
+                // same-named local variable or function parameter elsewhere in the file
+                // — a fn param/pattern binding can't shadow a Rust `const` (E0530 /
+                // E0308 "interpreted as a constant, not a new binding"). This used to
+                // be gated on `is_gpu_target`, which was never the real boundary: a
+                // plain CPU program with `let n = 255` at the top and an unrelated local
+                // `n` anywhere else (e.g. `fn countdown(n: isize)`) hit the exact same
+                // Rust restriction — confirmed via examples/hello.br.
+                if self.top_level_let_is_const_safe(s) {
                     self.gpu_top_level_const_names.insert(s.name.clone());
                 }
                 if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_promotable(s) {
@@ -2916,6 +3006,32 @@ impl Transpiler {
                     for conv in &e.conversions {
                         let tname = self.emit_type(&conv.ty);
                         self.user_conv_targets.insert(tname.to_lowercase());
+                        // `as string:` emits a Display impl — mark the type so the
+                        // general auto-Display emitted by `emit_enum` is skipped
+                        // (mirrors the identical struct/ext registration above).
+                        if Self::is_string_conversion(conv) {
+                            self.display_types.insert(e.name.clone());
+                        }
+                    }
+                    // Register type vars and type methods for emission dispatch — mirrors
+                    // `pre_scan_struct_item`'s identical registration for a struct's
+                    // `type_methods` (see that function's own comments for the rationale on
+                    // each map). Enums have no `type var`/`type let` (out of scope per
+                    // docs/known-issues-biguint-spike.md item 5), so only `type_methods` is
+                    // registered here, unlike the struct side which also handles type vars.
+                    let mut method_map = std::collections::HashMap::new();
+                    for tm in &e.type_methods {
+                        method_map.insert(tm.name.clone(), tm.kind.clone());
+                        if tm.throws {
+                            self.struct_method_throws.insert(format!("{}::{}", e.name, tm.name));
+                            self.struct_method_throws.insert(tm.name.clone());
+                        }
+                        if let Some(Type::Named(err_name)) = &tm.throws_ty {
+                            self.typed_error_enums.insert(err_name.clone());
+                        }
+                    }
+                    if !method_map.is_empty() {
+                        self.struct_type_method_sigs.insert(e.name.clone(), method_map);
                     }
                 }
                 Item::Fn(f) => {
@@ -2927,6 +3043,9 @@ impl Transpiler {
                             }
                         }
                     }
+                    // ...and from local `let`/`var` bindings inside the body — see
+                    // `collect_arc_qualified_lets_stmts`'s doc comment.
+                    self.collect_arc_qualified_lets_stmts(&f.body);
                     // Signature-only var-param positions, for the `with` mutation scan.
                     self.fn_var_params.insert(f.name.clone(), f.params.iter().map(|p| p.rebindable).collect());
                     // Interprocedural GPU residency (docs/scoped-access-blocks.md) — mirrors
@@ -3076,6 +3195,23 @@ impl Transpiler {
             }
         }
 
+        // Fourth pass: which top-level `let` string-literal constants
+        // (`top_level_let_is_string_literal`) will actually be promoted to a module-level
+        // `static` -- same gate `emit_program_items`'s `Item::Let` classification uses:
+        // unconditionally for `pub`, or gated on `global_lets_used_elsewhere` (just
+        // finished above) otherwise. Recorded so `emit_fn` can re-seed `string_vars`/
+        // `string_arc_vars` with these names at the start of every function/method body --
+        // see `global_string_const_names`'s doc comment for why that's needed at all.
+        for item in &program.items {
+            if let Item::Let(s) = item {
+                if self.top_level_let_is_string_literal(s)
+                    && (s.is_pub || self.global_lets_used_elsewhere.contains(&s.name))
+                {
+                    self.global_string_const_names.insert(s.name.clone());
+                }
+            }
+        }
+
         // Collect variables used in `x is y` reference-identity comparisons where both x and y
         // are plain variable names (not type names, nil, or enum variants). Such variables must
         // be wrapped in Rc<T> to support pointer-equality semantics.
@@ -3099,6 +3235,22 @@ impl Transpiler {
             }
         }
         self.rc_identity_vars = identity_vars;
+
+        // Any enum ever directly `throw`n -- regardless of whether the throwing
+        // function declares a typed `throws EnumName:` -- gets consistent typed-error
+        // treatment (Display+Error impls, `BoringError::Other` routing at the throw
+        // site instead of a Display-stringifying `BoringError::String`). Without
+        // this, an enum thrown ONLY from bare `throws:` functions silently loses its
+        // type end-to-end: `catch EnumName.Variant:` elsewhere can never downcast back
+        // out of the stringified error, and instead of a compile-time signal it just
+        // panics at runtime as an "unhandled error". See
+        // `helpers::collect_thrown_enum_names`'s doc comment for the full mechanism
+        // and `tests/cases/throws_untyped_enum_catch.br` for the regression case.
+        let mut thrown_enum_names = std::collections::HashSet::new();
+        helpers::collect_thrown_enum_names(program, &self.all_enum_types, &self.enum_variants, &mut thrown_enum_names);
+        for name in thrown_enum_names {
+            self.typed_error_enums.insert(name);
+        }
     }
 
     fn pre_register_fn(&mut self, f: &FnDecl) {

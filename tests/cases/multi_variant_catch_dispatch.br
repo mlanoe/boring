@@ -1,0 +1,40 @@
+# Regression test: a `try` with several `catch EnumName.Variant:` clauses on
+# the same enum must dispatch to the clause matching the *actual* thrown
+# variant, not just the first clause declared (see exec_try in
+# src/interpreter/exec.rs — the `variant` field on CatchClause was parsed but
+# never checked, so the first clause always matched regardless of which
+# variant was thrown).
+
+enum MyErr:
+    Bad
+    Worse
+
+def check(int n) throws:
+    if n > 100:
+        throw MyErr.Worse
+    if n > 10:
+        throw MyErr.Bad
+    print "ok {n}"
+
+def main() throws:
+    try:
+        check(200)
+    catch MyErr.Bad:
+        print "bad"
+    catch MyErr.Worse:
+        print "worse"
+
+    try:
+        check(50)
+    catch MyErr.Bad:
+        print "bad"
+    catch MyErr.Worse:
+        print "worse"
+
+    # Same bug reproduces identically with the builtin `Error` enum.
+    try:
+        throw Error.OutOfBounds
+    catch Error.InvalidInput:
+        print "invalid input"
+    catch Error.OutOfBounds:
+        print "out of bounds"

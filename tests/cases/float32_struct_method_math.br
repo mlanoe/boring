@@ -1,0 +1,30 @@
+# Regression test: a `float32`-returning struct *method* whose body calls a
+# builtin math function on the struct's own (implicit-`self`) `float32` fields
+# must keep its result at `f32` in the transpiled Rust.
+#
+# `infer_float_width` (used by `math_builtin_float_ty`, which picks the cast
+# target for sqrt/atan2/etc. lowering — see tests/cases/float32_math_builtins.br
+# for the free-function case) only resolved a bare `Var` against `var_types`.
+# Inside a struct method, a bare field name (`x` instead of `self.x`) is NOT a
+# local var — `emit_expr`'s own `ExprKind::Var` case resolves it against
+# `self.struct_fields` via the implicit-self lookup, but `infer_float_width`
+# didn't mirror that, so it fell through to `None` and the f64 default. A
+# method like `req float32 len(): sqrt(x * x + y * y)` would then emit
+# `(... as f64).sqrt()` while its signature stayed `-> f32`, which rustc
+# rejects (E0308) even though `boring run`'s untyped interpreter never caught
+# it. This is only caught by a real `rustc`/`cargo build` compile of the
+# `--emit-rust` output (see tests/transpile.rs), not by `boring run`.
+
+struct Vec2f:
+    float32 x
+    float32 y
+
+    req float32 len():
+        sqrt(x * x + y * y)
+
+    req float32 angle():
+        atan2(y, x)
+
+let v = Vec2f(3.0, 4.0)
+print v.len()
+print v.angle()

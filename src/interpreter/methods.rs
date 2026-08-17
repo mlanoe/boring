@@ -5,7 +5,7 @@ use std::rc::Rc;
 impl Interpreter {
     pub(crate) fn call_method(&mut self, obj: Value, method: &str, args: Vec<Value>, line: usize, out_self: &mut Option<Value>) -> Eval {
         // Screen built-in method dispatch.
-        if let Value::Screen { width: _width, height: _height, frame, resized, keys, pixels, title: _title } = &obj {
+        if let Value::Screen { width: _width, height: _height, frame, resized, keys, pixels, title: _title, .. } = &obj {
             match method {
                 // screen.present(pixels_array) — write pixel buffer; advance frame counter.
                 // In simulation mode: store the pixels for PPM output.
@@ -66,8 +66,13 @@ impl Interpreter {
                     // Non-blocking poll — always true in the interpreter (eager evaluation)
                     return Ok(Value::Bool(true));
                 }
-                "cancel" => {
-                    // Cancellation is not supported in the interpreter — no-op.
+                "cancel" | "abort" => {
+                    // Cancellation is not supported in the interpreter — no-op (the
+                    // task already ran to completion eagerly by the time this is
+                    // called, since `task:` bodies aren't truly concurrent here).
+                    // `abort` is JoinHandle's real name for this same operation
+                    // (`future.abort()` in examples/todo.br's cancellation demo) —
+                    // was missing here entirely, unlike its `cancel` synonym.
                     return Ok(Value::Nil);
                 }
                 _ => {}
@@ -322,6 +327,23 @@ impl Interpreter {
                     buf.borrow_mut().push_back(val);
                     return Ok(Value::Void);
                 }
+            // `receiver.recv()` — pop the oldest queued value, or `Nil` once drained.
+            // Matches the documented `while let x = receiver.recv():` idiom (book.md's
+            // "stop looping when the producer closes" shorthand): every sender in this
+            // synchronous, single-threaded simulation has already run to completion
+            // by the time a spawned `task:` consumer's recv loop starts (`task:`
+            // bodies are evaluated eagerly, not truly concurrently — see
+            // `Value::Future`'s doc), so the queue draining to empty is
+            // indistinguishable from — and stands in for — a real closed channel.
+            // This was previously entirely unimplemented (`send` had a dispatch arm,
+            // `recv` never did), so every `receiver.recv()` call failed outright.
+            Value::Channel { buf, is_sender, .. }
+                if method == "recv" => {
+                    if *is_sender {
+                        return Err(err("recv called on a channel sender", line));
+                    }
+                    return Ok(buf.borrow_mut().pop_front().unwrap_or(Value::Nil));
+                }
             _ => {}
         }
 
@@ -338,6 +360,103 @@ impl Interpreter {
         // `.clone()` — universal deep copy for all non-primitive types.
         if method == "clone" && args.is_empty() {
             return Ok(obj);
+        }
+
+        // std::sync::atomic::Atomic{Usize,Isize,U8,...,Bool} method dispatch.
+        // The interpreter has no real threading, so these are modeled as a plain
+        // single-field Object (see `construct_rust_type`, eval_expr.rs) holding the
+        // current value; every fetch_*/load/store op below runs synchronously
+        // against that one field. `Ordering` args (SeqCst, etc.) are accepted and
+        // ignored — they're meaningless without real concurrent access.
+        const ATOMIC_TYPES: &[&str] = &[
+            "AtomicUsize", "AtomicIsize", "AtomicU8", "AtomicU16", "AtomicU32", "AtomicU64",
+            "AtomicI8", "AtomicI16", "AtomicI32", "AtomicI64", "AtomicBool",
+        ];
+        if let Value::Object(inner_rc) = &obj {
+            let type_name = inner_rc.borrow().type_name.clone();
+            if ATOMIC_TYPES.contains(&type_name.as_str()) {
+                let is_bool = type_name == "AtomicBool";
+                match method {
+                    "load" | "into_inner" | "get_mut" => {
+                        let inner = inner_rc.borrow();
+                        return Ok(inner.fields.iter().find(|(k, _)| k == "value")
+                            .map(|(_, v)| v.clone()).unwrap_or(Value::Int(0)));
+                    }
+                    "store" => {
+                        let new_val = args.into_iter().next().unwrap_or(Value::Int(0));
+                        let mut inner = inner_rc.borrow_mut();
+                        if let Some(f) = inner.fields.iter_mut().find(|(k, _)| k == "value") {
+                            f.1 = new_val;
+                        }
+                        return Ok(Value::Void);
+                    }
+                    "fetch_add" | "fetch_sub" | "fetch_or" | "fetch_and" | "fetch_xor" | "swap" => {
+                        let arg = args.into_iter().next().unwrap_or(Value::Int(0));
+                        let mut inner = inner_rc.borrow_mut();
+                        if let Some((_, cur)) = inner.fields.iter_mut().find(|(k, _)| k == "value") {
+                            let old = cur.clone();
+                            if is_bool {
+                                let cur_b = matches!(cur, Value::Bool(true));
+                                let arg_b = matches!(arg, Value::Bool(true));
+                                *cur = Value::Bool(match method {
+                                    "swap"      => arg_b,
+                                    "fetch_or"  => cur_b || arg_b,
+                                    "fetch_and" => cur_b && arg_b,
+                                    "fetch_xor" => cur_b != arg_b,
+                                    _ => cur_b,
+                                });
+                            } else {
+                                let cur_i = self.expect_int(cur.clone(), line)?;
+                                let arg_i = self.expect_int(arg, line)?;
+                                *cur = Value::Int(match method {
+                                    "fetch_add" => cur_i.wrapping_add(arg_i),
+                                    "fetch_sub" => cur_i.wrapping_sub(arg_i),
+                                    "fetch_or"  => cur_i | arg_i,
+                                    "fetch_and" => cur_i & arg_i,
+                                    "fetch_xor" => cur_i ^ arg_i,
+                                    "swap"      => arg_i,
+                                    _ => cur_i,
+                                });
+                            }
+                            return Ok(old);
+                        }
+                        return Ok(Value::Int(0));
+                    }
+                    "compare_exchange" | "compare_exchange_weak" => {
+                        let mut it = args.into_iter();
+                        let expected = it.next().unwrap_or(Value::Int(0));
+                        let new_val = it.next().unwrap_or(Value::Int(0));
+                        let mut inner = inner_rc.borrow_mut();
+                        if let Some((_, cur)) = inner.fields.iter_mut().find(|(k, _)| k == "value") {
+                            let old = cur.clone();
+                            return if Self::values_equal(cur, &expected) {
+                                *cur = new_val;
+                                Ok(Value::EnumVariant { type_name: "Result".into(), variant: "Ok".into(), fields: vec![old] })
+                            } else {
+                                Ok(Value::EnumVariant { type_name: "Result".into(), variant: "Err".into(), fields: vec![old] })
+                            };
+                        }
+                        return Ok(Value::EnumVariant { type_name: "Result".into(), variant: "Err".into(), fields: vec![Value::Int(0)] });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // tokio::sync::Semaphore method dispatch — opaque in the interpreter (no real
+        // concurrency to limit, so every permit is granted immediately). `acquire`/
+        // `try_acquire` return `Nil`, matching the common `_ = semaphore.acquire()`
+        // discard idiom; `available_permits` reports the semaphore as always-open.
+        if let Value::Object(inner_rc) = &obj {
+            if inner_rc.borrow().type_name == "Semaphore" {
+                return match method {
+                    "acquire" | "try_acquire" | "acquire_owned" | "try_acquire_owned" => Ok(Value::Nil),
+                    "available_permits" => Ok(Value::Int(i64::MAX)),
+                    "add_permits" | "close" | "forget_permits" => Ok(Value::Void),
+                    "is_closed" => Ok(Value::Bool(false)),
+                    _ => Err(err(format!("no method '{}' on Semaphore", method), line)),
+                };
+            }
         }
 
         // Struct method dispatch
@@ -771,6 +890,19 @@ impl Interpreter {
             }
             "indexOf" => {
                 let target = args.into_iter().next().unwrap_or(Value::Nil);
+                // `indexOf((t): pred)` — a closure/predicate argument (same shorthand
+                // `.find()` above accepts) finds by predicate, not by equality: a
+                // `Value::Closure`/`Fn`/`NativeFn` never equals a `Task`/etc. element via
+                // `==`, so the equality branch below would silently always return `Nil`
+                // for this call shape (confirmed via examples/todo.br's `complete_task`,
+                // which always threw "not found" before this fix).
+                if matches!(target, Value::Closure { .. } | Value::Fn { .. } | Value::NativeFn { .. } | Value::OverloadedFn { .. }) {
+                    for (i, item) in Value::rc_vec_into_owned(arr).into_iter().enumerate() {
+                        let r = self.call_value(target.clone(), vec![item], line, false)?;
+                        if self.expect_bool(r, line)? { return Ok(Some(Value::Int(i as i64))); }
+                    }
+                    return Ok(Some(Value::Nil));
+                }
                 for (i, item) in arr.iter().enumerate() {
                     if item == &target { return Ok(Some(Value::Int(i as i64))); }
                 }
@@ -1246,7 +1378,7 @@ impl Interpreter {
     pub(crate) fn get_field(&mut self, obj: Value, field: &str, line: usize) -> Eval {
         match obj {
             // Screen property access.
-            Value::Screen { ref width, ref height, ref frame, ref resized, .. } => {
+            Value::Screen { ref width, ref height, ref frame, ref resized, ref created_at, .. } => {
                 match field {
                     "dimension" => {
                         let w = *width.borrow();
@@ -1264,6 +1396,9 @@ impl Interpreter {
                     "frame"   => Ok(Value::Uint(*frame.borrow())),
                     "width"   => Ok(Value::Uint(*width.borrow())),
                     "height"  => Ok(Value::Uint(*height.borrow())),
+                    // "seconds elapsed since loop start" (docs/gpu-display.md) —
+                    // was entirely unimplemented; see the `created_at` field's doc.
+                    "time"    => Ok(Value::Float64(created_at.elapsed().as_secs_f64())),
                     other => Err(err(format!("Screen has no field '{}'", other), line)),
                 }
             }

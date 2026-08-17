@@ -426,6 +426,7 @@ impl KernelValidator {
 
             // Leaf kinds — nothing to recurse into
             ExprKind::Int(_)
+            | ExprKind::UInt64(_)
             | ExprKind::Str(_)
             | ExprKind::Bool(_)
             | ExprKind::Nil

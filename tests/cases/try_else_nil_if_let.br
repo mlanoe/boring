@@ -1,0 +1,51 @@
+# Regression test: docs/known-issues-biguint-spike.md #12.
+#
+# `try EXPR else nil` (spelled-out form) is documented (book.md) as exactly
+# equivalent to `try? EXPR`. The parser used to always fold the spelled-out
+# form into `ExprKind::TryElseBlock` regardless of what the else branch was,
+# producing a `match` whose `Ok` arm is the raw success value and whose `Err`
+# arm is `None` -- never unified into a single `Option<T>` -- while `try?`
+# built a dedicated `ExprKind::TryElse(expr, Nil)` node with correct `.ok()`
+# codegen. Covers both a plain `let` binding and use as an `if let`
+# condition (the shape from the original bug report), plus a control case
+# confirming `try? expr` still works exactly as before.
+
+enum MyErr:
+    Bad
+
+int risky(int v) throws MyErr:
+    guard v > 0 else throw MyErr.Bad
+    v * 2
+
+def use_try_else_nil(int v):
+    if let r = (try risky(v) else nil):
+        print "{r}"
+    else:
+        print "none"
+
+def use_try_question(int v):
+    if let r = (try? risky(v)):
+        print "{r}"
+    else:
+        print "none"
+
+def run():
+    use_try_else_nil(5)
+    use_try_else_nil(-5)
+    use_try_question(5)
+    use_try_question(-5)
+
+    # Plain `let` binding (not inside if let) -- same desugaring, must also work.
+    let x = try risky(5) else nil
+    let y = try risky(-5) else nil
+    if let xx = x:
+        print "{xx}"
+    else:
+        print "plain-none"
+    if let yy = y:
+        print "{yy}"
+    else:
+        print "plain-none"
+
+def main():
+    run()

@@ -56,6 +56,22 @@ impl Interpreter {
             } else {
                 fn_env.borrow_mut().define(&param.name, val);
             }
+            // Task-safe qualifier: a `'shared`/`'rc`/`'static`/etc.-typed *parameter*
+            // needs the exact same `mark_task_safe` treatment a `let`/`var` binding of
+            // the same type already gets (`Stmt::Let` handling, exec.rs/mod.rs) — this
+            // loop bound only `param.mutable` behavior and never marked any parameter
+            // task-safe at all, so a `task:` closure capturing a `'shared` *parameter*
+            // (e.g. `Metrics'shared metrics` passed into a function that spawns a
+            // `task:` block referencing it) hit `check_task_captures`'s "cannot capture"
+            // diagnostic even though `'shared`'s entire purpose is safe cross-task
+            // sharing (confirmed via examples/todo.br's
+            // `add_tasks_in_parallel_with_semaphore`).
+            if let Some(ty) = &param.ty {
+                let resolved = self.resolve_type(ty);
+                if Self::type_annotation_is_task_safe(&resolved) {
+                    fn_env.borrow_mut().mark_task_safe(&param.name);
+                }
+            }
         }
 
         // ── Generic: infer type-parameter bindings and check where clause ──────────
@@ -168,7 +184,14 @@ impl Interpreter {
         // - An assignment expression, `defer`, or any other statement → non-value-producing
         let last_produces_value = decl.body.last().map(|s| match s {
             Stmt::Expr(e) => !matches!(e.kind, ExprKind::Assign(..)),
-            Stmt::If(_) | Stmt::Match(_) => true,
+            // `Stmt::IfLet` was missing here (docs/known-issues-biguint-spike.md
+            // item 6): as the literal tail statement of a function body, an
+            // `if let ... else ...` used to fall into the "non-value-producing"
+            // branch below and run via plain `exec_stmt` → `exec_if_let`, so a
+            // bare-call tail expression inside a branch (e.g. `Foo(v = 2)`)
+            // tripped the unrelated must-use "return value discarded" check
+            // instead of becoming the function's return value.
+            Stmt::If(_) | Stmt::IfLet(_) | Stmt::Match(_) => true,
             _ => false,
         }).unwrap_or(false);
 

@@ -287,6 +287,10 @@ pub enum Value {
         setters: Vec<SetDecl>,
         conversions: Vec<AsDecl>,
         protocols: Vec<String>,
+        /// Type-level (`type def`/`type req`/`type set`) factory/static
+        /// methods — mirrors `Struct`'s dispatch via `StructDecl::type_methods`.
+        /// See docs/known-issues-biguint-spike.md item 5.
+        type_methods: Vec<TypeMethod>,
         /// The environment at enum definition time, used as the parent scope
         /// when calling enum methods — mirrors `Struct::captured`.
         captured: EnvRef,
@@ -365,6 +369,12 @@ pub enum Value {
         keys:    Rc<RefCell<Vec<String>>>,
         /// Pixel buffer written by the last `present()` call (PPM output).
         pixels:  Rc<RefCell<Vec<u32>>>,
+        /// Wall-clock creation time — backs `screen.time` ("seconds elapsed
+        /// since loop start", docs/gpu-display.md). Was entirely missing
+        /// before (no field to compute it from at all), so `screen.time` hit
+        /// `get_field`'s generic "Screen has no field" error — confirmed via
+        /// examples/plasma_metal.br, which reads it every frame.
+        created_at: std::time::Instant,
     },
 }
 
@@ -1287,6 +1297,12 @@ fn register_numeric_conversion_builtins(e: &mut Env) {
                 Value::Uint64(n) => Ok(Value::Int(*n as i64)),
                 Value::Uint128(n) => Ok(Value::Int(*n as i64)),
                 Value::Float64(f) => Ok(Value::Int(*f as i64)),
+                // float32 was missing from every conversion/math builtin below (this one
+                // included) — added while fixing examples/mandelbrot_gpu.br, which passes
+                // a `float32` (mandatory for a `--target metal` kernel field — MSL has no
+                // native `double`) through `int(...)`. The exhaustive per-width match arms
+                // above only ever handled `Float64`.
+                Value::Float32(f) => Ok(Value::Int(*f as i64)),
                 Value::Str(s) => s.trim().parse::<i64>()
                     .map(Value::Int)
                     .map_err(|_| err(format!("cannot convert '{}' to Int", s), line)),
@@ -1968,6 +1984,10 @@ fn register_misc_globals(e: &mut Env) {
     for name in &["Duration", "Instant"] {
         e.define(name, Value::RustType { name: name.to_string() });
     }
+    // Semaphore(n) — opaque in the interpreter (no real concurrency to limit).
+    // `.acquire()` is special-cased in call_method (methods.rs) as an immediate
+    // no-op permit, matching the `_ = semaphore.acquire()` discard idiom.
+    e.define("Semaphore", Value::RustType { name: "Semaphore".to_string() });
 }
 
 fn register_stdlib(env: &EnvRef) {
@@ -2205,7 +2225,50 @@ impl Interpreter {
         self.search_paths.push(path);
     }
 
+    /// Build the AST for the stdlib `Error` enum (`Error.Expired`, `.Cancelled`,
+    /// `.NotFound`, `.InvalidInput`, `.OutOfBounds`) — documented in book.md
+    /// ("Standard error enum") as always available without any import. The
+    /// transpiler already pre-populates its own equivalent tables for this in
+    /// `pre_scan` (src/transpiler/mod.rs); this mirrors it for the interpreter,
+    /// which previously had no such registration at all (undefined variable
+    /// 'Error' under `boring run` — see docs/known-issues-biguint-spike.md item 3).
+    fn builtin_error_enum_decl() -> EnumDecl {
+        EnumDecl {
+            name: "Error".to_string(),
+            is_pub: true,
+            is_native: false,
+            type_params: vec![],
+            protocols: vec![],
+            variants: ["Expired", "Cancelled", "NotFound", "InvalidInput", "OutOfBounds"]
+                .iter()
+                .map(|name| EnumVariant {
+                    name: name.to_string(),
+                    fields: vec![],
+                    attrs: vec![],
+                    line: 0,
+                    col: 0,
+                })
+                .collect(),
+            methods: vec![],
+            setters: vec![],
+            conversions: vec![],
+            type_methods: vec![],
+            attrs: vec![],
+            line: 0,
+            col: 0,
+        }
+    }
+
     pub fn exec_program(&mut self, program: &Program) -> Result<(), RuntimeError> {
+        // Register built-in stdlib types before any user code runs, so `Error.Variant`
+        // resolves regardless of where/whether the user declares their own enums.
+        let builtin_error = Self::builtin_error_enum_decl();
+        if let Err(sig) = self.exec_item(&Item::Enum(builtin_error), Rc::clone(&self.global)) {
+            if let Signal::Error(e) = sig {
+                return Err(e);
+            }
+        }
+
         for item in &program.items {
             if let Err(sig) = self.exec_item(item, Rc::clone(&self.global)) {
                 match sig {
@@ -2581,6 +2644,7 @@ impl Interpreter {
                     setters: decl.setters.clone(),
                     conversions: decl.conversions.clone(),
                     protocols: decl.protocols.clone(),
+                    type_methods: decl.type_methods.clone(),
                     captured: Rc::clone(&env),
                 };
                 self.enums.insert(decl.name.clone(), decl.clone());
@@ -2746,7 +2810,7 @@ impl Interpreter {
                 };
 
                 // Handle enum ext
-                if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols, captured: enum_captured } = existing {
+                if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols, type_methods: enum_type_methods, captured: enum_captured } = existing {
                     for m in &decl.methods {
                         methods.retain(|existing_m| {
                             existing_m.name != m.name || !params_same_signature(existing_m, m)
@@ -2783,7 +2847,7 @@ impl Interpreter {
                             ));
                         }
                     }
-                    let updated = Value::EnumNamespace { name, variants, methods, setters: enum_setters, conversions, protocols, captured: enum_captured };
+                    let updated = Value::EnumNamespace { name, variants, methods, setters: enum_setters, conversions, protocols, type_methods: enum_type_methods, captured: enum_captured };
                     env.borrow_mut().define(&decl.type_name, updated);
                     return Ok(());
                 }

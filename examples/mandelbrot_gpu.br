@@ -1,51 +1,55 @@
 # GPU Mandelbrot set — Boring with CUDA/Metal backend
 # Output: mandelbrot.ppm (PPM P6, convert with `convert mandelbrot.ppm mandelbrot.png`)
 # width/height reduced for simulation; increase to 1024x768 for boring build --target cuda
+#
+# Uses float32 throughout (not the bare `float`/`float64` alias) — MSL has no
+# native `double`, so a `--target metal` build requires float32 buffers (same
+# reasoning as examples/saxpy.br).
 
-let width         = 64
-let height        = 48
-let x_min         = -2.0
-let x_max         =  1.0
-let y_min         = -1.5
-let y_max         =  1.5
-let max_iter      = 100
+let width             = 64
+let height            = 48
+let float32 x_min     = -2.0
+let float32 x_max     =  1.0
+let float32 y_min     = -1.5
+let float32 y_max     =  1.5
+let max_iter          = 100
 
 kernel Mandelbrot:
-    mut Image<float>'unified image
+    mut [float32, width, height]'unified image
 
     init(int w, int h):
-        image = Image(w, h)
+        image = [0.0 for width = w, height = h]
 
     def ():
         let col = gpu.block.x * gpu.block_dim.x + gpu.thread.x
         let row = gpu.block.y * gpu.block_dim.y + gpu.thread.y
-        if col < image.width() and row < image.height():
-            let x0 = x_min + float(col) * (x_max - x_min) / float(image.width())
-            let y0 = y_min + float(row) * (y_max - y_min) / float(image.height())
-            var float cx = 0.0
-            var float cy = 0.0
-            var int   it = 0
+        if col < image.width and row < image.height:
+            let x0 = x_min + float32(col) * (x_max - x_min) / float32(image.width)
+            let y0 = y_min + float32(row) * (y_max - y_min) / float32(image.height)
+            var float32 cx = 0.0
+            var float32 cy = 0.0
+            var int     it = 0
             while cx * cx + cy * cy < 4.0 and it < max_iter:
                 let xtemp = cx * cx - cy * cy + x0
                 cy = 2.0 * cx * cy + y0
                 cx = xtemp
                 it += 1
-            let value = if it == max_iter: 1.0 else: float(it) / float(max_iter)
-            image.at(col, row) = value
+            let value = if it == max_iter: 1.0 else: float32(it) / float32(max_iter)
+            image[width = col, height = row] = value
 
 var k = Mandelbrot(width, height)
 kernel:
     # `grid=` is passed explicitly, sized from width/height so it stays correct
     # if you change them — `boring run`'s interpreter simulation doesn't yet
-    # read a dynamic-shape `Image` field's runtime width/height when `grid=`
-    # is omitted (a known interpreter limitation; `boring build`'s real
-    # generated code infers it correctly). See docs/image-volume-types.md's
-    # "Dispatch and grid sizing" section.
+    # read a dynamic-shape labeled-array field's runtime width/height when
+    # `grid=` is omitted (a known interpreter limitation; `boring build`'s
+    # real generated code infers it correctly). See
+    # docs/array-multidim-types.md's "GPU dispatch axis mapping" section.
     k(block = (16, 16), grid = ((width + 15) / 16, (height + 15) / 16))
 
 # Color palette: deep blue → cyan → white for points outside the set
 # Points inside the set (value == 1.0) remain black
-def [int] colorize(float t):
+def [int] colorize(float32 t):
     if t >= 1.0:
         return [0, 0, 0]
     let v = t * 4.0
@@ -67,16 +71,18 @@ let header_chars = header.chars()
 var [int] header_bytes = [ord(header_chars[i]) for i in ..header_chars.length]
 var [int] pixels = [0 for ..width * height * 3]
 let total_pixels = width * height
-for i in 0..total_pixels:
-    let rgb = colorize(k.image[i])
-    pixels[i * 3]     = rgb[0]
-    pixels[i * 3 + 1] = rgb[1]
-    pixels[i * 3 + 2] = rgb[2]
+let flat_image = k.image.flatten()
+with flat_image:
+    for i in 0..total_pixels:
+        let rgb = colorize(flat_image[i])
+        pixels[i * 3]     = rgb[0]
+        pixels[i * 3 + 1] = rgb[1]
+        pixels[i * 3 + 2] = rgb[2]
 
 var [int] ppm_data = []
 for b in header_bytes:
     ppm_data.push(b)
 for b in pixels:
     ppm_data.push(b)
-fs.writeBytes("mandelbrot.ppm", [uint8(b) for b in ppm_data])
+fs.writeBytes("mandelbrot.ppm", ppm_data.map((b): uint8(b)))
 print "Image saved as 'mandelbrot.ppm'"

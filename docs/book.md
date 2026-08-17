@@ -4054,7 +4054,7 @@ The `:field op expr` form covers only a single operator. For compound conditions
 
 ```boring
 # compound condition — use named param
-words.filter(w: w.length > 3 && w.length < 8)
+words.filter(w: w.length > 3 and w.length < 8)
 ```
 
 **Rust equivalent**
@@ -6923,6 +6923,68 @@ include = ["../shared/external_types.toml"]   # path relative to this boring.tom
 
 The included file has its own `[external_types]` section, folded into this project's lists (additive, single-level — a nested `include` inside the included file is not followed). See `boring-bevylib/external_types.toml` in the `boring`-adjacent Bevy-game projects for a real example.
 
+### Advanced — String literals as external call arguments (known limitation)
+
+A string literal passed **directly** as an argument to a method or function call on an
+**external type** (a Rust type defined outside the `.br` file — a hand-written struct, a
+third-party crate type, anything Boring never parsed a `struct`/`enum` declaration for)
+transpiles as a raw `&'static str`, *not* `string`'s usual `Rc<str>`/`Arc<str>`
+representation:
+
+```boring
+def bool direct_external_call(Sb3Block blk):
+    blk.opcode_is("literal_direct")
+```
+```rust
+fn direct_external_call(blk: Sb3Block) -> bool {
+    blk.opcode_is("literal_direct")   // &'static str, NOT Arc::<str>::from(...)
+}
+```
+
+This compiles fine when the external method's Rust signature takes `&str` (`&'static
+str` is a subtype of `&str` — the common case for idiomatic Rust APIs) but fails to
+compile (`E0308: expected Arc<str>, found &'static str`) when the signature takes an
+owned `Arc<str>`/`Rc<str>` — which does happen, e.g. a hand-written type that stores the
+value or hands it to another owned-`Arc<str>` API.
+
+**Why**: the promotion from a bare literal to `Arc::<str>::from("...")` (`emit_expr_owned`,
+used e.g. for arguments to a Boring-declared function/method, where the callee's `string`
+parameter type is known from its own signature) only happens where the transpiler has an
+actual Boring-level parameter type to coerce toward. A call into an external type has, by
+definition, no such signature for Boring to consult — there is no way to distinguish "this
+external method wants `&str`" from "this external method wants `Arc<str>`" from the `.br`
+source alone, so the argument falls back to the same representation as any other bare
+expression (`emit_expr`, not `emit_expr_owned`).
+
+**This is not going to become a safe default to change**: emitting `Arc::<str>::from(...)`
+unconditionally for every literal argument to an external call would fix the `Arc<str>`-
+parameter case above, but silently break the (more common) `&str`-parameter case — an
+owned `Arc<str>`/`Rc<str>` value does not coerce to `&str` at a by-value argument position
+(`Deref` coercion only applies through an actual reference, e.g. `&Arc<str>` → `&str`;
+there is no reference here to coerce through). Since Boring cannot see the external
+signature, it cannot pick the right representation automatically, and defaulting either
+way trades one working case for a different broken one.
+
+**Workarounds**, in order of preference:
+
+```boring
+# 1. `as string` cast at the call site — the lightest fix, one call, no new function:
+blk.opcode_is("literal_direct" as string)
+
+# 2. Route through a Boring-declared function/method with a `string`-typed parameter —
+#    useful when the same literal (or several) needs the conversion repeatedly, since the
+#    parameter's known `string` type is what drives the coercion, not the cast:
+def bool block_opcode_is(Sb3Block blk, string op):
+    blk.opcode_is(op)   # `op` is already `Arc<str>` here — this call is fine as-is
+
+block_opcode_is(blk, "operator_add")
+```
+
+Either form works today with no compiler changes; a computed/interpolated string
+(`"{x}"`) or a value already bound to a `string` variable passed to an external call is
+unaffected by this gap — only a *bare literal* used directly as the argument expression
+hits it.
+
 ### Advanced — derive-trait whitelist (`as Trait:` routed into `#[derive(...)]`)
 
 `struct Foo as Trait1, Trait2:` / `enum Foo as Trait1, Trait2:` normally means trait *conformance*: Boring emits `impl Trait for Foo { ...only the methods Trait requires... }`, expecting the struct/enum body to provide those methods itself.
@@ -7114,6 +7176,28 @@ The `TypeId` uniquely identifies `CalcError` at the catch site regardless of mod
 | `catch CalcError:` | ✗ | ✓ dispatches via `TypeId` |
 | `try … else` | ✓ | ✓ |
 | Propagate with `?` | ✓ | ✓ (unwrapped at the catching `try:` block) |
+
+#### Enum error types are always typed, even from untyped `throws`
+
+`BoringError::Other` routing (previous section) is **not** limited to functions that declare `throws EnumName:` themselves. Any user-defined enum that is the direct target of a `throw` *anywhere* in the program — even from a plain untyped `throws:` function — is automatically registered as a typed error type, and gets the same `Display`/`Error` impls and `BoringError::Other(TypeId, …)` wrapping as if every one of its throw sites had declared `throws EnumName:` explicitly:
+
+```boring
+enum StopSignal:
+    Stop
+
+def exec(int n) throws:            # untyped — no `throws StopSignal:` here
+    if n > 0:
+        throw StopSignal.Stop
+
+try:
+    exec(1)
+catch StopSignal.Stop:             # still dispatches correctly via TypeId
+    print "stopped"
+```
+
+This matters because, without it, `throw StopSignal.Stop` from an untyped `throws:` function would stringify the value via `Display` into `BoringError::String` — discarding which variant it was — and `catch StopSignal.Stop:` anywhere else in the program could never downcast back out of it. That failure mode used to be silent at the Boring level: the generated Rust either failed to compile with a plain "`StopSignal` doesn't implement `Display`" (if the enum had no `Display` impl of its own), or, once a hand-written `as string:` papered over that, compiled cleanly and only failed at runtime — the `catch` clause never fired, and the error surfaced instead as an unhandled-error panic. Registering *any* thrown enum as typed, independent of which function's `throws` clause mentions it, closes this gap: there is no untyped/typed distinction left for enums to fall into by accident. (Discovered implementing scratch-boring's `control_stop`, where the fix originally required declaring `throws StopSignal:` explicitly, before this guarantee existed at the compiler level.)
+
+One consequence: a hand-written `as string:` on an enum that is ever thrown now always conflicts with the auto-generated `Display` impl (`E0119`, duplicate `impl Display`) — the same trade-off `throws EnumName:` already made before this fix. Remove the `as string:`; the auto-generated `Display` (delegating to `Debug`) covers the same need.
 
 #### Fixed-width scalar throws — `BoringError::Scalar`
 

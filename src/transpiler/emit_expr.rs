@@ -6,6 +6,11 @@ impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
         match &expr.kind {
             ExprKind::Int(n)   => n.to_string(),
+            // Oversized decimal literal (overflows `i64`, fits `u64` — see
+            // docs/known-issues-biguint-spike.md item 1). Must carry an explicit `u64`
+            // suffix: an unsuffixed Rust integer literal this large would default-infer
+            // as `i32` and fail to compile.
+            ExprKind::UInt64(n) => format!("{}u64", n),
             ExprKind::Float(f) => {
                 let s = format!("{}", f);
                 if s.contains('.') || s.contains('e') || s.contains('E') { s }
@@ -35,7 +40,12 @@ impl Transpiler {
                                 // in-place via method calls on self; cloning would make mutations no-ops.
                                 let is_primitive = matches!(fty, Type::Int | Type::Uint | Type::Float32 | Type::Float64 | Type::Bool)
                                     || matches!(fty, Type::Named(s) if matches!(s.as_str(), "int" | "uint" | "float" | "float32" | "float64" | "bool" | "usize" | "isize"));
-                                let is_collection = matches!(fty, Type::Dict(..) | Type::Array(_) | Type::Set(_));
+                                // `.without_mut()` — a `var mut {K=V} field` / `mut [T] field`
+                                // struct field declaration wraps its type in `Type::Mut(..)`
+                                // (see `wrap_type_mut` in src/parser/mod.rs), so a direct
+                                // `matches!(fty, Type::Dict(..) | ...)` would miss any
+                                // mut/var-mut collection field and wrongly `.clone()` it here.
+                                let is_collection = matches!(fty.without_mut(), Type::Dict(..) | Type::Array(_) | Type::Set(_));
                                 let needs_clone = !is_primitive && !is_collection && !self.in_lhs_assign.get();
                                 return if needs_clone {
                                     format!("{}.{}.clone()", self_ref, field_s)
@@ -199,12 +209,16 @@ impl Transpiler {
                     return match ty {
                         Type::Float64 => format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Float32 => format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
-                        Type::Bool => format!("({} == \"true\")", src),
+                        // Deref before comparing: `Arc<str>`/`Rc<str>` (boring `string`) has no
+                        // `PartialEq<&str>` impl, only `PartialEq<Self>` — `&*(src) == "true"`
+                        // derefs to a real `&str` first, which does compare against a `&'static
+                        // str` literal directly (E0308 otherwise: "expected Arc<str>, found &str").
+                        Type::Bool => format!("(&*({}) == \"true\")", src),
                         Type::Named(n) if n == "float" || n == "float64" || n == "f64" =>
                             format!("{}.trim().parse::<f64>().unwrap_or({})", src, dv),
                         Type::Named(n) if n == "float32" || n == "f32" =>
                             format!("{}.trim().parse::<f32>().unwrap_or({})", src, dv),
-                        Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
+                        Type::Named(n) if n == "bool" => format!("(&*({}) == \"true\")", src),
                         // `f32`/`f64` used to be excluded here (routed to the generic
                         // `.unwrap_or()` fallback below, with no real parse-and-validate
                         // behavior at all) — now real types with their own arms above,
@@ -896,6 +910,11 @@ impl Transpiler {
             };
         }
         let src_is_numeric_lit = matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
+        // A decimal literal that overflows `i64` but fits `u64` (see ExprKind::UInt64 /
+        // docs/known-issues-biguint-spike.md item 1). `emit_expr` already suffixes it as
+        // `NNNNu64`, so — unlike the `ExprKind::Int` literal branch below — it must NOT
+        // get an additional `i64` suffix tacked on here.
+        let src_is_big_uint_lit = matches!(&e.kind, ExprKind::UInt64(_));
         let _src_is_bool = matches!(&e.kind, ExprKind::Bool(_))
             || matches!(&e.kind, ExprKind::Var(v) if {
                 // bool variable (rough heuristic: not in known numeric vars)
@@ -921,7 +940,20 @@ impl Transpiler {
             || matches!(ty, Type::Named(n) if n == "bool");
 
         // Numeric computation (BinOp/Call/UnaryOp) → numeric cast: use `as T`, not .parse()
-        let src_is_expr = matches!(&e.kind,
+        // A `MethodCall` is only a numeric computation when the method itself doesn't
+        // return a string — `id_input.trim() as uint` must still fall through to the
+        // string→int `.trim().parse::<T>()` path further below (`STRING_RETURNING_METHODS`
+        // below never exist on a numeric receiver, so excluding them here is unambiguous;
+        // an actually-numeric method call like `arr.len() as uint` is unaffected).
+        const STRING_RETURNING_METHODS: &[&str] = &[
+            "trim", "trimStart", "trimEnd",
+            "upper", "toUpper", "toUpperCase", "uppercased",
+            "lower", "toLower", "toLowerCase", "lowercased",
+            "replace",
+        ];
+        let is_string_returning_method_call = matches!(&e.kind,
+            ExprKind::MethodCall(_, m, _) if STRING_RETURNING_METHODS.contains(&m.as_str()));
+        let src_is_expr = !is_string_returning_method_call && matches!(&e.kind,
             ExprKind::BinOp(_, _, _) | ExprKind::Call(_, _) | ExprKind::UnaryOp(_, _)
             | ExprKind::MethodCall(_, _, _));
         if src_is_expr && is_float_ty {
@@ -951,6 +983,14 @@ impl Transpiler {
             return format!("({} as {})", src, dst);
         }
 
+        // Oversized-decimal literal (already suffixed `u64` by emit_expr) → numeric target:
+        // plain `as` cast, no extra literal suffix (it already carries one).
+        if src_is_big_uint_lit && (is_float_ty || is_fixed_int_ty) {
+            return format!("({} as {})", src, dst);
+        }
+        if src_is_big_uint_lit && is_bool_ty {
+            return "None".into();
+        }
         // bool → int: direct cast (true=1, false=0), always succeeds
         if src_is_bool_lit && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
@@ -966,8 +1006,10 @@ impl Transpiler {
             // literal provably doesn't fit — even though Boring's own cast semantics
             // want a normal truncating/wrapping runtime cast here, same as it would be
             // for any other numeric source. The explicit suffix makes the literal's own
-            // type `i64` (which it always fits, since the lexer caps literals at
-            // `i64::MAX`), so the subsequent `as` is an ordinary (non-literal) cast.
+            // type `i64` (every `ExprKind::Int` literal fits by construction —
+            // anything bigger lexes as `ExprKind::UInt64` instead, handled by the
+            // `src_is_big_uint_lit` branch above), so the subsequent `as` is an
+            // ordinary (non-literal) cast.
             return format!("({}i64 as {})", src, dst);
         }
         // numeric literal → bool: always nil (int-to-bool not meaningful in Boring)
@@ -1004,15 +1046,72 @@ impl Transpiler {
             };
         }
         match ty {
-            // string → bool: equality check
-            Type::Bool => format!("({} == \"true\")", src),
-            Type::Named(n) if n == "bool" => format!("({} == \"true\")", src),
+            // string → bool: equality check. Deref first — see the identical `as bool
+            // else default` branch above (`ExprKind::Else` arm) for why: `Arc<str>`/
+            // `Rc<str>` has no `PartialEq<&str>` impl, only `PartialEq<Self>`.
+            Type::Bool => format!("(&*({}) == \"true\")", src),
+            Type::Named(n) if n == "bool" => format!("(&*({}) == \"true\")", src),
             // numeric/value → string
             Type::Str => self.str_from_expr(&format!("{}.to_string()", src)),
             Type::Named(n) if n == "string" => self.str_from_expr(&format!("{}.to_string()", src)),
             // everything else: primitive Rust cast
             _ => format!("({} as {})", src, dst),
         }
+    }
+
+    /// Is `expr` a source expression that already has its own correct
+    /// Option-producing cast codegen in `emit_expr_cast` (string → `.parse().ok()`,
+    /// bool → `None`) — i.e. NOT the plain-numeric case that `emit_expr_cast`
+    /// emits as an unconditional infallible `(src as dst)` and that
+    /// `try_emit_checked_int_cast_as_option` (below) needs to intercept instead.
+    fn cast_source_is_stringy_or_bool(&self, inner: &Expr) -> bool {
+        match &inner.kind {
+            ExprKind::Str(_) | ExprKind::StringInterp(_) | ExprKind::Bool(_) => true,
+            ExprKind::Var(v) => {
+                self.string_vars.contains(v.as_str())
+                    || matches!(self.var_types.get(v.as_str()), Some(Type::Str))
+                    || matches!(self.var_types.get(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
+            }
+            _ => false,
+        }
+    }
+
+    /// Checked-narrowing-cast-as-`Option` codegen for the scrutinee of an
+    /// `if let`/`guard let` binding clause (see `emit_cond_clauses` and
+    /// `emit_guard`'s `CondClause::Let` arms, the only two call sites).
+    ///
+    /// A two-branch `if let`/`guard let` clause always emits its pattern as
+    /// `Some(name)` (both call sites hard-code that), which structurally
+    /// requires the scrutinee to actually be an `Option<T>` at the Rust level.
+    /// For most expression shapes that's already true (dict lookups, `T?`-
+    /// returning calls, etc.) — but a numeric `as` cast used as a bare
+    /// (non-`if let`) expression is deliberately emitted as an unconditional,
+    /// infallible `(src as dst)` by `emit_expr_cast` (see
+    /// docs/known-issues-biguint-spike.md #11 — that infallible emission for a
+    /// plain numeric-to-integer cast is pre-existing/unchanged behavior, not
+    /// itself being "fixed" here), which doesn't type-check against the
+    /// `Some(...)` pattern. This intercepts exactly that one shape — a numeric
+    /// source cast to a fixed-width/pointer-width integer target — and emits
+    /// Rust's standard `TryFrom` conversion instead, which is implemented for
+    /// every pair of the twelve integer types (narrowing, widening, or
+    /// same-width), so it isn't limited to the `int128 -> int64` pair the bug
+    /// was originally found with.
+    ///
+    /// Returns `None` for every other shape (string/bool source, non-integer
+    /// target, or not a cast at all) so the caller falls back to the ordinary
+    /// `emit_expr`, which already produces correct `Option`-typed codegen for
+    /// those (`.parse().ok()`, literal `None`, or whatever the non-cast
+    /// expression's own codegen already does).
+    pub(crate) fn try_emit_checked_int_cast_as_option(&self, expr: &Expr) -> Option<String> {
+        let ExprKind::Cast(inner, ty) = &expr.kind else { return None };
+        let dst = self.emit_type(ty);
+        let is_integer_target = crate::transpiler::helpers::is_specific_numeric_type(&dst)
+            && dst != "f32" && dst != "f64";
+        if !is_integer_target || self.cast_source_is_stringy_or_bool(inner) {
+            return None;
+        }
+        let src = self.emit_expr(inner);
+        Some(format!("{}::try_from({}).ok()", dst, src))
     }
 
     /// `obj[idx]` — slice ranges, char-safe string indexing, opaque collection-index
@@ -1138,7 +1237,7 @@ impl Transpiler {
                     let is_dict_field = self.self_type.as_deref()
                         .and_then(|t| self.struct_fields.get(t))
                         .and_then(|fields| fields.iter().find(|(fname, _)| fname == field_name))
-                        .map(|(_, fty)| matches!(fty, crate::ast::Type::Dict(..)))
+                        .map(|(_, fty)| matches!(fty.without_mut(), crate::ast::Type::Dict(..)))
                         .unwrap_or(false);
                     let idx_is_string = match &idx.kind {
                         ExprKind::Var(v) => {
@@ -1706,16 +1805,23 @@ impl Transpiler {
                         .and_then(|fields| fields.iter().find(|(fname, _)| fname == field))
                         .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
                         .unwrap_or(false);
-                return if field_is_shared {
-                    match self.config.threading {
+                if field_is_shared {
+                    return match self.config.threading {
                         crate::transpiler::ThreadingMode::Single =>
                             format!("Rc::clone(&{}.{})", access, field),
                         crate::transpiler::ThreadingMode::Multi =>
                             format!("Arc::clone(&{}.{})", access, field),
-                    }
-                } else {
-                    format!("{}.{}", access, field)
-                };
+                    };
+                }
+                // Builtin pseudo-fields (`.length`/`.count`/`.isEmpty`) need the same
+                // `map_field` remap the non-mutex path applies further down (`arr.length`
+                // → `arr.len() as isize`) — this branch used to emit the Boring field
+                // name verbatim, so `mutex_var.length` produced invalid Rust
+                // (`MutexGuard<Vec<T>>` has no `length` field; confirmed via
+                // examples/tokio.br's `all_users.length` on an `'actor'task` array).
+                let mapped = map_field(field);
+                let result = format!("{}.{}", access, mapped);
+                return if mapped.contains(" as ") { format!("({})", result) } else { result };
             }
             // RwLock var access: w.field → w.read().unwrap().field (multi) or w.borrow().field (single)
             if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
@@ -1780,7 +1886,20 @@ impl Transpiler {
         // function, for why `PADDLE_SIZE.x` must stay `.x`).
         let is_path_receiver = match &obj.kind {
             ExprKind::Var(v) => {
-                if v == "self" || self.user_top_level_names.contains(v.as_str()) { false }
+                // Implicit-self field: a bare identifier that resolves to the current
+                // struct's own field (not a real local var) is an *instance* receiver,
+                // never a module/type path — even though it's absent from
+                // known_local_vars (see docs/known-issues-biguint-spike.md #9: this
+                // used to fall into the `else` arm below and get treated as an
+                // imported-module-style path receiver, mis-emitting `self.limbs.length`
+                // as `self.limbs::length`). Mirrors the implicit-self resolution at the
+                // top of `emit_expr`'s own `ExprKind::Var` arm.
+                let is_implicit_self_field = !self.known_local_vars.contains(v.as_str())
+                    && self.self_type.as_deref()
+                        .and_then(|t| self.struct_fields.get(t))
+                        .map(|fields| fields.iter().any(|(fname, _)| fname == v))
+                        .unwrap_or(false);
+                if v == "self" || self.user_top_level_names.contains(v.as_str()) || is_implicit_self_field { false }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else { !self.known_local_vars.contains(v.as_str()) }
             }
@@ -2085,7 +2204,25 @@ impl Transpiler {
                     let is_dict_field = self.self_type.as_ref()
                         .and_then(|t| self.struct_fields.get(t))
                         .and_then(|fields| fields.iter().find(|(n, _)| n == field_name))
-                        .map(|(_, ty)| matches!(ty, Type::Dict(..)))
+                        .map(|(_, ty)| matches!(ty.without_mut(), Type::Dict(..)))
+                        .unwrap_or(false);
+                    if is_dict_field {
+                        let key_owned = self.emit_dict_key_owned(key);
+                        let val_s = self.emit_expr_owned(value);
+                        return format!("self.{}.insert({}, {})", field_name, key_owned, val_s);
+                    }
+                }
+            }
+            // Implicit self: `table[key] = v` inside a struct method where `table` is
+            // itself a dict-typed struct field (no explicit `self.` prefix) — same
+            // implicit-self resolution the read path already does in the `ExprKind::Var`
+            // arm of `emit_expr` above, which this assignment-target path never checked.
+            if let ExprKind::Var(field_name) = &dict_obj.kind {
+                if !self.known_local_vars.contains(field_name.as_str()) {
+                    let is_dict_field = self.self_type.as_ref()
+                        .and_then(|t| self.struct_fields.get(t))
+                        .and_then(|fields| fields.iter().find(|(n, _)| n == field_name))
+                        .map(|(_, ty)| matches!(ty.without_mut(), Type::Dict(..)))
                         .unwrap_or(false);
                     if is_dict_field {
                         let key_owned = self.emit_dict_key_owned(key);
@@ -2104,6 +2241,21 @@ impl Transpiler {
                 _ => raw_idx,
             };
             match &arr_obj.kind {
+                // Implicit self: `items[i] = v` inside a struct method where `items` is
+                // itself an array-typed (or any non-dict) struct field — mirrors the
+                // dict implicit-self branch above; without this, the field name is
+                // emitted bare (`items[i] = v`), which is not a local and doesn't
+                // compile ("cannot find value `items`").
+                ExprKind::Var(arr_name)
+                    if !self.dict_vars.contains(arr_name.as_str())
+                        && !self.known_local_vars.contains(arr_name.as_str())
+                        && self.self_type.as_ref()
+                            .and_then(|t| self.struct_fields.get(t))
+                            .map(|fields| fields.iter().any(|(n, _)| n == arr_name))
+                            .unwrap_or(false) =>
+                {
+                    format!("self.{}[{}]", arr_name, idx_s)
+                }
                 ExprKind::Var(arr_name) if !self.dict_vars.contains(arr_name.as_str()) => {
                     format!("{}[{}]", arr_name, idx_s)
                 }
@@ -3123,7 +3275,27 @@ impl Transpiler {
             }
         };
         match &e.kind {
-            ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(width_of),
+            ExprKind::Var(v) => {
+                if let Some(w) = self.var_types.get(v.as_str()).and_then(width_of) {
+                    return Some(w);
+                }
+                // Implicit self field access inside a struct method — a bare `x` inside
+                // `req`/`def` on a struct with a `float32 x` field lowers to `self.x`
+                // (see the `ExprKind::Var` case in `emit_expr` above), so its width must
+                // be looked up the same way `emit_expr` resolves it, or a method body like
+                // `sqrt(x * x + y * y)` falls through to the f64 default below even though
+                // `x`/`y` are float32 fields.
+                if !self.known_local_vars.contains(v.as_str()) {
+                    if let Some(struct_name) = &self.self_type {
+                        if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                            if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == v) {
+                                return width_of(fty);
+                            }
+                        }
+                    }
+                }
+                None
+            }
             // Struct field access — e.g. `v.x` where `Velocity.x` is declared `float32`.
             ExprKind::Field(base, field) => {
                 let struct_name = self.resolve_struct_name(base)?;
@@ -3200,11 +3372,25 @@ impl Transpiler {
             "format" => {
                 self.emit_print_call_named("format", args)
             }
-            // Log-level builtins: map to the `log` crate macros.
-            // Requires `log = "0.4"` in Cargo.toml.
+            // Log-level builtins: `[LEVEL] message` on stderr, matching the interpreter
+            // exactly (`call_display_builtin`, methods.rs: `eprintln!("[INFO] {}", ...)`).
+            // Previously mapped to `log::info!`/etc., which requires a registered logger
+            // backend (`env_logger::init()` or similar) to print anything at all — the
+            // `log` crate's macros are a silent no-op facade otherwise. Nothing in a
+            // `boring build` full-project output ever registered one (no `env_logger`
+            // dependency, no init call in `main()`), so every `info`/`warn`/`debug`/
+            // `trace`/`error` call in a compiled binary silently produced zero output
+            // (confirmed via examples/tokio.br running clean with no program output at
+            // all). Plain `eprintln!` needs no setup and matches `boring run`'s output.
             "error" | "warn" | "info" | "debug" | "trace" => {
-                self.uses_log.set(true);
-                self.emit_print_call_named(&format!("log::{}", name), args)
+                let call = self.emit_print_call_named("eprintln", args);
+                let level = name.to_uppercase();
+                match call.find('"') {
+                    Some(pos) => format!("{}\"[{}] {}", &call[..pos], level, &call[pos + 1..]),
+                    // `emit_print_call_named` only omits the quote for a zero-arg call
+                    // (`eprintln!()`) — still worth a level marker on its own.
+                    None => format!("eprintln!(\"[{}]\")", level),
+                }
             }
             "assert" => {
                 if args.len() == 1 {

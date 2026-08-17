@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Known issues found while spiking a pure-Boring `BigUint`</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="known-issues-found-while-spiking-a-pure-boring-biguint">Known issues found while spiking a pure-Boring <code>BigUint</code></h1>
+<p>Found 2026-08-19 while writing <code>scratch-boring/boring/spikes/biguint_spike.br</code> — a pure-Boring arbitrary-precision unsigned integer (little-endian <code>[uint32]</code> limbs), meant as a candidate replacement for <code>scratch-boring</code>&#x27;s hand-written Rust <code>num_bigint</code> dependency (see that project&#x27;s README.md / CLAUDE.md memory <code>boring-goal-pure-boring-rust-parity</code>). All four items below were worked around in the spike itself (it fully passes, 17/17 assertions) — this doc exists to track the underlying language/interpreter issues for a real fix, not to report a blocked task.</p>
+<p>Only <code>boring run</code> (the tree-walk interpreter) was exercised — none of these were re-checked against <code>boring build</code>&#x27;s transpiled-Rust path, so it&#x27;s possible some are interpreter-only gaps that already work when transpiled. Worth confirming before fixing, since the fix (and its scope) may differ between the two backends.</p>
+<h2 id="1-integer-literal-range-checked-before-its-as-cast-not-after">1. Integer literal range-checked before its <code>as</code> cast, not after</h2>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> x = <span class="nb">18446744073709551615</span> <span class="kw">as</span> <span class="kt">uint64</span>   <span class="co"># u64::MAX</span></code></pre></div>
+<p>fails with <code>error: integer literal out of range</code>, even though the literal is immediately cast to <code>uint64</code> (which can hold it). The range check appears to run against the literal&#x27;s default type (<code>isize</code>/<code>int</code>) before the <code>as uint64</code> conversion is applied, rather than validating against the cast&#x27;s target type.</p>
+<p><strong>Workaround used:</strong> build the value arithmetically instead of as a literal —</p>
+<p><code>let u32_max64 = 4294967295 as uint64; let u64_max = (u32_max64 &lt;&lt; 32) | u32_max64</code>.</p>
+<p><strong>Suggested fix:</strong> when parsing/checking an integer literal immediately followed by <code>as &lt;IntType&gt;</code>, validate the literal&#x27;s range against <code>&lt;IntType&gt;</code>, not the default inferred type.</p>
+<h2 id="2-bookmd-documents--but-the-lexer-only-accepts-andor">2. <code>book.md</code> documents <code>&amp;&amp;</code>/<code>||</code>, but the lexer only accepts <code>and</code>/<code>or</code></h2>
+<p><code>docs/book.md</code> (e.g. the <code>.filter(w: w.length &gt; 3 &amp;&amp; w.length &lt; 8)</code> example) shows</p>
+<p><code>&amp;&amp;</code>/<code>||</code> as the logical operators. In reality the lexer has no <code>&amp;&amp;</code>/<code>||</code> token at</p>
+<p>all — only <code>and</code>/<code>or</code> (keywords) for logical combination, plus single <code>&amp;</code>/<code>|</code> for bitwise. <code>words.filter(w: w.length &gt; 3 &amp;&amp; w.length &lt; 8)</code> fails with <code>error: unexpected token in expression: Ampersand</code>. Every real test under <code>tests/cases/*.br</code> already uses <code>and</code>/<code>or</code>, consistent with the lexer, not the doc — this looks like a <strong>documentation bug</strong>, not a compiler bug.</p>
+<p><strong>Suggested fix:</strong> correct <code>book.md</code>&#x27;s examples to use <code>and</code>/<code>or</code> (or add real</p>
+<p><code>&amp;&amp;</code>/<code>||</code> lexer support if that&#x27;s actually the intended long-term syntax — worth a deliberate decision either way rather than leaving the doc and the lexer disagreeing).</p>
+<h2 id="3-built-in-error-enum-not-resolved-by-the-interpreter">3. Built-in <code>Error</code> enum not resolved by the interpreter</h2>
+<p><code>book.md</code> (Error Handling, &quot;Standard error enum&quot;) documents a built-in <code>Error</code> type &quot;always available without any import&quot;. Under <code>boring run</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">throw</span> Error.InvalidInput</code></pre></div>
+<p>fails with <code>error: undefined variable &#x27;Error&#x27; — did you mean &#x27;error&#x27;?</code>. Not a single file under <code>tests/cases/*.br</code> actually relies on the built-in <code>Error</code> type either — they all declare their own error enums — which is consistent with this being a real gap rather than a documented-but-untested feature that happens to work.</p>
+<p><strong>Workaround used:</strong> declared a small local error enum (<code>enum BigUintError: Underflow, InvalidInput</code>) instead of using the built-in one.</p>
+<p><strong>Suggested fix:</strong> confirm whether <code>boring build</code>&#x27;s transpiled Rust path resolves <code>Error</code> correctly (if so, this is interpreter-only — the tree-walk evaluator&#x27;s builtin-name resolution is presumably missing an entry the transpiler&#x27;s codegen already has). If it&#x27;s broken on both backends, <code>Error</code> needs to be registered as a real builtin in whichever central place builtin names/types are seeded.</p>
+<h2 id="4-type-def-staticfactory-method-rejects-a-typed-throws-type-clause">4. <code>type def</code> (static/factory method) rejects a typed <code>throws Type</code> clause</h2>
+<p>Instance methods (<code>req</code>/<code>def</code>) accept a typed throws clause fine:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> BigUint <span class="fn">sub</span>(BigUint other) <span class="kw">throws</span> BigUintError:
+    ...</code></pre></div>
+<p>But the equivalent on a type-level factory method fails to parse:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">type</span> <span class="kw">def</span> BigUint <span class="fn">from_decimal_string</span>(<span class="kt">string</span> s) <span class="kw">throws</span> BigUintError:
+    ...</code></pre></div>
+<p>→ <code>error: expected Colon, got Ident(&quot;BigUintError&quot;)</code>. Only the untyped form (<code>throws:</code>) is accepted on <code>type def</code>.</p>
+<p><strong>Workaround used:</strong> declared <code>from_decimal_string</code> with untyped <code>throws:</code> and still threw concrete <code>BigUintError</code> variants from inside it — this compiles and the thrown values remain catchable/matchable normally, so it&#x27;s a narrowing-precision loss on that one declaration, not a functional blocker.</p>
+<p><strong>Suggested fix:</strong> the parser rule for <code>type def ... throws &lt;Type&gt;:</code> presumably needs the same grammar production already used for <code>req</code>/<code>def ... throws &lt;Type&gt;:</code> — likely a parser-only fix (whichever function parses a <code>type def</code> header probably just never calls the typed-throws-clause parser that <code>req</code>/<code>def</code> do).</p>
+<h2 id="reference">Reference</h2>
+<p>Full spike: <code>scratch-boring/boring/spikes/biguint_spike.br</code> (all workarounds are commented in place at their use site). All 4 items were routed around, not silently ignored — the spike&#x27;s 17/17 passing assertions don&#x27;t depend on any of these being fixed, but pure-Boring code going forward will keep hitting them until they are.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# Regression test for docs/known-issues-biguint-spike.md item 4: a type-level
+# factory method (`type def`) must accept a typed `throws Type:` clause, the
+# same as an instance method (`req`/`def`) already does.
+#
+# Registered in both tests/run.rs (`boring run`) and tests/transpile.rs
+# (`boring build`) — the transpiler previously had a separate, now-fixed gap
+# where a type-level method's `throws` (typed or untyped) was never wired into
+# `Result<T, E>` codegen/typed-error-enum registration the way a regular
+# function's is (see `emit_type_method` in src/transpiler/emit_struct.rs, and
+# tests/cases/type_method_throws_untyped.br for the untyped-`throws:` sibling
+# of this test).
+enum BigUintError:
+    Underflow
+    InvalidInput
+
+struct BigUint:
+    int value
+
+    type def BigUint from_decimal_string(string s) throws BigUintError:
+        if s.length == 0:
+            throw BigUintError.InvalidInput
+        BigUint(42)
+
+    type req BigUint zero() throws BigUintError:
+        BigUint(0)
+
+def main() throws:
+    try:
+        let b = BigUint.from_decimal_string("")
+    catch BigUintError.InvalidInput:
+        print "caught invalid input"
+
+    let z = BigUint.zero()
+    print "{z.value}"

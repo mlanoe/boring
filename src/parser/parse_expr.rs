@@ -229,6 +229,22 @@ impl Parser {
             if self.check(&TokenKind::Else) {
                 self.advance();
                 let else_expr = self.parse_else_body_expr()?;
+                // `try expr else nil` (spelled-out) is documented (book.md) as exactly
+                // equivalent to `try? expr` — desugar identically instead of folding
+                // into TryElseBlock's separate match lowering. See
+                // docs/known-issues-biguint-spike.md #12: TryElseBlock's `match`
+                // (`Ok(__boring_v) => __boring_v, Err(...) => { let error = ..; nil }`)
+                // never unifies the raw-success `Ok` arm and the `None`/nil `Err` arm
+                // into a single `Option<T>` the way TryElse's dedicated `.ok()` codegen
+                // already does for `try?`. Only a literal, non-block `nil` else takes
+                // this path (matching `try? expr`'s own shape exactly, `error` unbound)
+                // — an `else:` block still goes through TryElseBlock even if it merely
+                // computes to nil, since it may run side effects or want `error` bound.
+                if matches!(else_expr.kind, ExprKind::Nil) {
+                    return Ok(Expr {
+                        kind: ExprKind::TryElse(Box::new(inner), Box::new(else_expr)),
+                        line, col, len: self.tok_len(), });
+                }
                 let else_stmts = match else_expr.kind {
                     ExprKind::Block(stmts) => stmts,
                     other => vec![Stmt::Expr(Expr { kind: other, line: else_expr.line, col, len: self.tok_len()})],
@@ -858,6 +874,7 @@ impl Parser {
             Some(TokenKind::Str(_))
             | Some(TokenKind::StringInterp(_))
             | Some(TokenKind::Int(_))
+            | Some(TokenKind::UInt64(_))
             | Some(TokenKind::Float(_))
             | Some(TokenKind::Bool(_))
             | Some(TokenKind::Nil)
@@ -931,7 +948,7 @@ impl Parser {
                 // Range operators:
                 TokenKind::DotDot | TokenKind::DotDotEq | TokenKind::DotDotDot => return false,
                 // Literal values (can never be a param name):
-                TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::Bool(_)
+                TokenKind::Int(_) | TokenKind::UInt64(_) | TokenKind::Float(_) | TokenKind::Bool(_)
                 | TokenKind::Nil => return false,
                 // String / interpolated string literal:
                 TokenKind::Str(_) | TokenKind::StringInterp(_) => return false,
@@ -1313,6 +1330,10 @@ impl Parser {
             TokenKind::Int(n) => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Int(n), line, col, len: self.tok_len()})
+            }
+            TokenKind::UInt64(n) => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::UInt64(n), line, col, len: self.tok_len()})
             }
             TokenKind::Float(f) => {
                 self.advance();

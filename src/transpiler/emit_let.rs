@@ -193,6 +193,14 @@ impl Transpiler {
         } else if let Some(inferred_qual) = self.inferred_qualifiers.get(&s.name).cloned() {
             // Priority 5: use-site qualifier inference — apply the inferred qualifier.
             // Handles bare T, T', T?, and T'? initialisers.
+            // Only a call to a Boring-declared struct (`self.struct_fields` — populated
+            // from actual `struct` decls) is a valid target here: `emit_type` on a
+            // `Type::Named` for an unregistered *external* Rust type just emits the bare
+            // identifier with no generic params, which is wrong for a type like
+            // `BufReader<R>` that genuinely needs one (`var reader = BufReader(file)` was
+            // emitting the invalid `let mut reader: BufReader = BufReader::new(file);`
+            // before this guard — E0107, missing generics — instead of leaving the type
+            // to Rust's own inference, which handles it fine with no annotation at all).
             let type_name_opt = match &s_value.kind {
                 // some(Counter(0)) — must come before the generic Call arm
                 ExprKind::Call(callee, args)
@@ -201,7 +209,9 @@ impl Transpiler {
                     if let Some(arg) = args.first() {
                         if let ExprKind::Call(inner, _) = &arg.value.kind {
                             if let ExprKind::Var(n) = &inner.kind {
-                                if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                                if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                                    && self.struct_fields.contains_key(n.as_str())
+                                {
                                     Some((n.clone(), true))
                                 } else { None }
                             } else { None }
@@ -211,7 +221,9 @@ impl Transpiler {
                 // Counter(0)
                 ExprKind::Call(callee, _) => {
                     if let ExprKind::Var(n) = &callee.kind {
-                        if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                            && self.struct_fields.contains_key(n.as_str())
+                        {
                             Some((n.clone(), false))
                         } else { None }
                     } else { None }
@@ -1510,6 +1522,12 @@ impl Transpiler {
                 let s = self.emit_expr_owned(value);
                 // emit_expr_owned may return &str for index/method results not handled specially.
                 // Ensure the result is Rc/Arc<str>; if not, wrap with Rc/Arc::<str>::from(x.to_string()).
+                // (A promoted top-level string constant under `use_rc_str()` already comes back
+                // from `emit_expr_owned` as a fresh `Rc::<str>::from(&**NAME)` -- see that
+                // function's `global_string_const_names` arm -- so it's caught by the
+                // `starts_with("Rc::")` check above and never reaches the plain-`.clone()`
+                // branch below, which would otherwise leave a mismatched `Arc<str>` where this
+                // call site's `Rc<str>` is expected.)
                 if s.starts_with("Arc::") || s.starts_with("Rc::") {
                     s
                 } else if matches!(&value.kind,

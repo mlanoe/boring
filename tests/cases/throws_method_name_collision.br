@@ -1,0 +1,57 @@
+# Regression test: docs/known-issues-biguint-spike.md #10.
+#
+# A nested method call inside a `throws` function used to get a spurious `?`
+# based purely on the callee's *name*: as long as *some* method named `mul`
+# *anywhere in the whole program* was `throws`-declared, *every* call to
+# `.mul(...)` inside any `throws` function got `?` appended, regardless of
+# the actual receiver's type. `Inner.mul` below is plain (non-throwing);
+# `Outer2.mul` (a completely unrelated struct) is `throws`-declared with the
+# same method name. `Outer.combo` calls `self.numerator.mul(...)` --
+# `self.numerator` is an `Inner`, so this call must NOT get a `?` (it isn't
+# even `Result`-returning) -- the receiver is reached via a field-of-field
+# chain (`self.numerator`, not a bare local/`self`), which is exactly the
+# receiver shape the old bare-name fallback mishandled.
+
+enum MyErr:
+    Bad
+
+struct Inner:
+    int v
+
+    # Non-throwing -- shares the name "mul" with Outer2.mul below.
+    req Inner mul(Inner other):
+        Inner(v = v * other.v)
+
+struct Outer2:
+    int v
+
+    # Throwing -- unrelated type, same method name "mul" as Inner.mul.
+    req Outer2 mul(Outer2 other) throws MyErr:
+        guard true else throw MyErr.Bad
+        Outer2(v = v * other.v)
+
+struct Outer:
+    Inner numerator
+    Inner denominator
+
+    req Outer combo(Outer other) throws MyErr:
+        guard true else throw MyErr.Bad
+        # Field-of-field receiver (self.numerator), not a bare local/self --
+        # the shape that used to fall through to the bare-name "mul" lookup
+        # and pick up an invalid `?` from Outer2.mul.
+        let n = self.numerator.mul(other.denominator)
+        let d = denominator
+        Outer(numerator = n, denominator = d)
+
+def run() throws MyErr:
+    let a = Outer(numerator = Inner(v = 2), denominator = Inner(v = 3))
+    let b = Outer(numerator = Inner(v = 5), denominator = Inner(v = 7))
+    let c = a.combo(b)
+    print "{c.numerator.v}"
+    print "{c.denominator.v}"
+
+def main():
+    try:
+        run()
+    catch:
+        print "error: {error}"

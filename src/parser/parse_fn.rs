@@ -378,6 +378,35 @@ impl Parser {
         }
     }
 
+    /// Parse the `throws [Type]` / `task` suffix shared by `type def`, `type req`,
+    /// and `type set` headers, in either order (`throws Type task:` or
+    /// `task throws Type:`). Mirrors `FnDecl`'s `throws`/`throws_ty` handling
+    /// (see `parse_throws_type` and its call sites in this file) — before this,
+    /// `type def`/`type req`/`type set` only ever recognized a bare `throws`,
+    /// rejecting a typed `throws Type:` clause that the equivalent instance-method
+    /// grammar (`req`/`def`) already accepted. See
+    /// docs/known-issues-biguint-spike.md item 4.
+    fn parse_type_method_throws_task(&mut self) -> Result<(bool, Option<Type>, bool), ParseError> {
+        let mut throws = false;
+        let mut throws_ty: Option<Type> = None;
+        let mut task = false;
+        if self.eat(&TokenKind::Throws) {
+            throws = true;
+            throws_ty = self.parse_throws_type()?;
+        }
+        if self.eat(&TokenKind::Task) {
+            task = true;
+        }
+        if !throws && self.eat(&TokenKind::Throws) {
+            throws = true;
+            throws_ty = self.parse_throws_type()?;
+        }
+        if !task {
+            task = self.eat(&TokenKind::Task);
+        }
+        Ok((throws, throws_ty, task))
+    }
+
     /// Parse `[pub] type def/req/set/var/let …` inside a struct body.
     /// `is_pub` is already consumed by the caller; `type` token is NOT yet consumed.
     pub(crate) fn parse_type_member(&mut self, is_pub: bool) -> Result<TypeMemberKind, ParseError> {
@@ -406,10 +435,7 @@ impl Parser {
                 let param_ty = self.parse_type_qualifier(param_ty)?;
                 let param_name = self.expect_ident()?;
                 self.expect(&TokenKind::RParen)?;
-                let mut throws = self.eat(&TokenKind::Throws);
-                let mut task   = self.eat(&TokenKind::Task);
-                if !throws { throws = self.eat(&TokenKind::Throws); }
-                if !task   { task   = self.eat(&TokenKind::Task);   }
+                let (throws, throws_ty, task) = self.parse_type_method_throws_task()?;
                 self.expect(&TokenKind::Colon)?;
                 let body = self.parse_method_body()?;
                 let param = crate::ast::Param {
@@ -418,7 +444,7 @@ impl Parser {
                 };
                 Ok(TypeMemberKind::Method(TypeMethod {
                     kind: TypeMethodKind::Set, name, params: vec![param],
-                    return_ty: None, body, is_pub, throws, task, line, col,
+                    return_ty: None, body, is_pub, throws, throws_ty, task, line, col,
                 }))
             }
             // ── type def / type req: [RetTy] name(params): body ──────────────
@@ -432,14 +458,11 @@ impl Parser {
                 let return_ty = self.try_parse_return_type_prefix();
                 let name = self.expect_ident()?;
                 let params = self.parse_params()?;
-                let mut throws = self.eat(&TokenKind::Throws);
-                let mut task   = self.eat(&TokenKind::Task);
-                if !throws { throws = self.eat(&TokenKind::Throws); }
-                if !task   { task   = self.eat(&TokenKind::Task);   }
+                let (throws, throws_ty, task) = self.parse_type_method_throws_task()?;
                 self.expect(&TokenKind::Colon)?;
                 let body = self.parse_method_body()?;
                 Ok(TypeMemberKind::Method(TypeMethod {
-                    kind, name, params, return_ty, body, is_pub, throws, task, line, col,
+                    kind, name, params, return_ty, body, is_pub, throws, throws_ty, task, line, col,
                 }))
             }
             other => Err(ParseError::Generic {

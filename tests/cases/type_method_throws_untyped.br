@@ -1,0 +1,23 @@
+# Regression test: a type-level method (`type def`, called as `TypeName.method(...)`)
+# with an untyped `throws:` clause must actually propagate its error instead of
+# panicking. Before the fix, `emit_type_method` (src/transpiler/emit_struct.rs)
+# ignored `throws`/`throws_ty` entirely — no `Result<T, E>` wrapping, so `throw`
+# inside the body fell through to a bare `panic!(...)` under `boring build`
+# (the interpreter's `call_type_method`, src/interpreter/call.rs, was already
+# correct — this exercises the transpiler path).
+enum MyError:
+    Bad
+
+struct Foo:
+    int x
+
+    type def Foo make(int n) throws:
+        if n < 0:
+            throw MyError.Bad
+        Foo(n)
+
+def main() throws:
+    try:
+        let f = Foo.make(-1)
+    catch MyError.Bad:
+        print "caught"

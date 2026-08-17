@@ -141,6 +141,14 @@ impl Transpiler {
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {
         clauses.iter().map(|c| match c {
             CondClause::Let(name, expr) => {
+                // Narrowing numeric `as` cast scrutinee (docs/known-issues-biguint-spike.md
+                // #11): needs its own checked, Option-producing codegen — the plain
+                // `emit_expr` path for a numeric-to-integer cast emits an unconditional
+                // infallible `(src as dst)`, which doesn't type-check against the
+                // `Some(...)` pattern this function always emits below.
+                if let Some(checked) = self.try_emit_checked_int_cast_as_option(expr) {
+                    return format!("let Some({}) = {}", name, checked);
+                }
                 let expr_s = self.emit_expr(expr);
                 // Auto-clone: actor fields and general field accesses must be cloned
                 // to avoid moving out of the struct.
@@ -525,8 +533,15 @@ impl Transpiler {
         //     Some(AppError::NotFound) => body,    ← variant arms
         //     None => fallback,                    ← wildcard arm
         //   }
+        //
+        // This rewrite only applies when `error` is still the untyped `Box<dyn Error>`
+        // from an untyped/generic catch. A typed `catch TypeName:` clause (for an enum
+        // TypeName) has already downcast `error` to a concrete `&TypeName` reference
+        // before this body is emitted (see emit_flow.rs's typed-catch dispatch) — in
+        // that case `error_var_is_concrete_enum` is set and we must fall through to the
+        // plain match below, since `error` has no `.downcast_ref::<BoringError>()` method.
         if let ExprKind::Var(vname) = &s.subject.kind {
-            if vname == "error" {
+            if vname == "error" && !self.error_var_is_concrete_enum {
                 // Find enum type from first qualified variant pattern (name contains "::")
                 let enum_type: Option<String> = s.arms.iter().find_map(|arm| {
                     arm.patterns.iter().find_map(|p| {
@@ -997,13 +1012,20 @@ impl Transpiler {
         let pats: Vec<String> = effective_pats.iter().map(|p| {
             self.emit_pattern_with_mut(p, &mutated)
         }).collect();
-        let guard = arm.guard.as_ref().map(|g| format!(" if {}", self.emit_expr(g))).unwrap_or_default();
         let pat_s = pats.join(" | ");
         // Register all bound variables from this arm's patterns in known_local_vars so that
         // field accesses like `s.name` on pattern-bound vars are not treated as module paths.
+        // Must happen BEFORE the guard is emitted just below (`x if x < 0:` needs `x` to
+        // already read as a known local when emitting the guard condition — otherwise a
+        // bare guard reference to a pattern-bound name that happens to also be a promoted
+        // top-level scalar `const` gets misread as that const instead of the binding,
+        // confirmed via examples/hello.br's `match n: ... x if x < 0: "negative"`, which
+        // wrongly emitted `x if X < 0` once top-level scalar consts started being
+        // uppercased on every target, not just GPU ones).
         for b in &bound {
             self.known_local_vars.insert(b.clone());
         }
+        let guard = arm.guard.as_ref().map(|g| format!(" if {}", self.emit_expr(g))).unwrap_or_default();
         let mut bound_structs: Vec<String> = Vec::new();
         let mut bound_optionals: Vec<String> = Vec::new();
         // Content-mutation bookkeeping for struct-typed bound names — mirrors `let`'s

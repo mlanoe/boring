@@ -187,6 +187,10 @@ pub struct TypeMethod {
     pub body: Vec<Stmt>,
     pub is_pub: bool,
     pub throws: bool,
+    /// Optional error type: `type def T make() throws MyError:` → mirrors
+    /// `FnDecl::throws_ty` (see there). `None` = untyped `throws:`.
+    /// See docs/known-issues-biguint-spike.md item 4.
+    pub throws_ty: Option<Type>,
     pub task: bool,
     pub line: usize,
     pub col: usize,
@@ -372,6 +376,11 @@ pub struct EnumDecl {
     pub methods: Vec<FnDecl>,
     pub setters: Vec<SetDecl>,
     pub conversions: Vec<AsDecl>,
+    /// Type-level (`type def`/`type req`/`type set`) factory/static methods —
+    /// same production as `StructDecl::type_methods` (see
+    /// docs/known-issues-biguint-spike.md item 5). `boring run` only; the
+    /// transpiler does not yet emit these for enums.
+    pub type_methods: Vec<TypeMethod>,
     pub attrs: Vec<Attr>,
     pub line: usize,
     pub col: usize,
@@ -884,6 +893,13 @@ pub struct Expr {
 pub enum ExprKind {
     // Literals
     Int(i64),
+    /// A decimal integer literal whose magnitude overflows `i64` but fits `u64`
+    /// (e.g. `18446744073709551615`, `u64::MAX`). Lexed/parsed separately from
+    /// `Int` specifically so the literal's true, non-negative value survives
+    /// into evaluation/codegen intact — only there can it be checked against
+    /// (and only make sense for) an unsigned target, typically via an explicit
+    /// `as uintNN` cast. See docs/known-issues-biguint-spike.md item 1.
+    UInt64(u64),
     Float(f64),
     Str(String),
     StringInterp(Vec<StringSegment>),
@@ -1814,7 +1830,7 @@ fn scan_expr_var_arg(
             ClosureBody::Block(stmts) => b!(stmts),
         },
         ExprKind::MacroCall { args, .. } => { for ex in args { e!(ex); } }
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
     }
 }
@@ -1932,7 +1948,7 @@ fn with_expr_mutates(
             ClosureBody::Block(stmts) => b(stmts, ivp, imm),
         },
         ExprKind::MacroCall { args, .. } => args.iter().any(|ex| e(ex, ivp, imm)),
-        ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
+        ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
         | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => false,
     }
 }

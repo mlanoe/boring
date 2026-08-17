@@ -267,6 +267,7 @@ transpile_test!(closures);
 transpile_test!(structs);
 transpile_test!(collections);
 transpile_test!(error_handling);
+transpile_test!(throws_untyped_enum_catch);
 transpile_test!(protocols);
 transpile_test!(optionals);
 transpile_test!(enums);
@@ -287,6 +288,11 @@ transpile_test!(uint_int_cross_eq);
 transpile_test!(float_width_cross_eq);
 transpile_test!(scalar_catch);
 transpile_test!(modules);
+// `use boring.collections` — the first-party stdlib mechanism (docs/cross-
+// project-code-sharing-gap.md's stdlib work), backed by src/stdlib_embed.rs.
+// See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
+// with tests/run.rs's registration above for the `boring run` side.
+transpile_test!(boring_stdlib_collections);
 transpile_test!(ownership);
 transpile_test!(tasks);
 transpile_test!(channels);
@@ -316,10 +322,36 @@ transpile_test!(pipe);
 transpile_test!(inline_match);
 transpile_test!(supertraits);
 transpile_test!(type_cast);
+transpile_test!(int_literal_overflow_cast);
+transpile_test!(builtin_error_enum);
+transpile_test!(typed_catch_match_error);
+// A type-level method's (`type def`/`type req`/`type set`) `throws` was previously
+// ignored entirely by `emit_type_method` (src/transpiler/emit_struct.rs) -- no
+// `Result<T, E>` wrapping, so `throw` fell through to a bare `panic!(...)` under
+// `boring build` even though `boring run` (the interpreter) already handled it
+// correctly. Untyped `throws:` and typed `throws Type:` both exercised: typed_throws
+// additionally needs its thrown enum registered as a typed error (Display/BoringVal
+// impls) the same way a regular throwing function's typed throws_ty already is.
+transpile_test!(type_def_typed_throws);
+transpile_test!(type_method_throws_untyped);
+// docs/known-issues-biguint-spike.md item 5, "Still open (transpiler)": an enum's
+// `type_methods` were silently dropped from codegen entirely -- `enum Foo { A(isize) }`
+// with no `impl Foo { fn make() ... }` block, even though the call site (`Foo::make()`)
+// was still emitted. Fixed in `emit_enum` (src/transpiler/emit_struct.rs), reusing the
+// same `emit_type_method` helper the struct side already used. `enum_type_def` is the
+// exact untyped repro from the doc; `enum_type_def_throws` additionally covers a typed
+// `throws Type:` clause on an enum type method, mirroring `type_def_typed_throws` (item 4).
+transpile_test!(enum_type_def);
+transpile_test!(enum_type_def_throws);
 transpile_test!(ref_identity);
 transpile_test!(mut_scalar);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
+transpile_test!(float32_struct_method_math);
+// Same gap as float32_struct_method_math above, but for a plain `let`-bound local
+// variable computed from an unannotated arithmetic expression, in an ordinary
+// (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
+transpile_test!(float32_local_var_math);
 // Top-level `let` constants referenced from a free function, a struct method, AND an
 // enum method — regression test for the transpiler silently dropping the `const`
 // declaration for a module-scope `let` whenever nothing but a function/method body
@@ -351,6 +383,22 @@ transpile_test!(pub_top_level_const);
 // only compiles if it was promoted to a real `pub const` despite never being
 // referenced anywhere in the `.br` file itself.
 transpile_test!(pub_top_level_const_unused);
+// `pub let`/used-elsewhere `let` STRING constants (`top_level_let_is_string_literal`,
+// src/transpiler/mod.rs) -- the scalar cases above never exercised this path at all, since
+// `top_level_let_is_const_safe` never matches a string. Unlike `pub_top_level_const_unused`
+// (zero in-file consumers, needs `pub_module_const.rs`'s cross-module `cargo build` to prove
+// anything), every constant here IS read from another function in the same file
+// (`is_add`/`is_sub`/`reveal_private`), so this single-crate `cargo run` already proves
+// promotion on its own: an un-promoted string `let` stays a `fn main()` local, and
+// `block_opcode_is(opcode, OP_ADD)` (etc.) would fail to compile with E0425 "cannot find
+// value" rather than silently producing a wrong runtime value. Also covers the explicit-
+// type-annotation sibling (`pub let string OP_SUB = ...`) and confirms a private-but-
+// used `let` (`PRIVATE_USED`) promotes too, not just `pub` ones -- run across all four
+// mode/threading combinations catches both the `Sync`-required-for-`static` `Arc<str>`-
+// vs-`Rc<str>` mismatch under `--threading single` (see `emit_expr_owned`'s
+// `global_string_const_names` arm, src/transpiler/emit_top.rs) and the invalid-syntax
+// failure the bug report was originally about.
+transpile_test!(pub_top_level_string_const);
 // A top-level `let` whose initializer calls into an external/opaque type -- one hand-
 // verified as a `const fn` (`Duration.from_secs`/`from_millis`, see
 // `Transpiler::KNOWN_EXTERNAL_CONST_FNS`) -- promotes as a plain `const`, same as a
@@ -367,6 +415,27 @@ transpile_test!(const_promotion_known_fn);
 // case's real value is exactly that real `cargo run` compile, same rationale
 // as `top_level_const` above.
 transpile_test!(struct_count_field);
+// Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
+// (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
+// whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`
+// was only ever populated from local `let`/`var` declarations, never from
+// function parameters, and the struct-field Dict check matched `Type::Dict(..)`
+// directly, missing every `mut`/`var mut` dict field (wrapped in `Type::Mut(..)`
+// at parse time). A second, separate bug dropped the `self.` prefix entirely
+// on `table[id] = v` when `table` was an implicit-self struct field (the
+// assignment-target codegen path never checked `self_type`/`struct_fields`
+// the way the read path already did) -- neither compiles as real Rust, which
+// only `cargo run` (this test), not `boring run`, catches. See tests/cases/
+// dict_string_key_index.br's own doc comment.
+transpile_test!(dict_string_key_index);
+// A `var StructType` parameter (docs/CLAUDE.md: "passes `&mut T`; changes are
+// visible at the call site") actually cloned the argument before taking the
+// `&mut` reference -- `&mut v.clone()` borrows a throwaway temporary, so the
+// callee's mutation never reached the real caller variable. Only reachable
+// via a real compile+run (the interpreter's object model has no such
+// clone-before-mutate step to get wrong). See tests/cases/
+// var_struct_param_mutation.br's own doc comment.
+transpile_test!(var_struct_param_mutation);
 // A user-declared method/field whose name collides with a builtin Rust Iterator/Vec
 // adapter (`position`, `count`) must dispatch to the user's own declaration, on both
 // a struct AND an enum -- see the file's own doc comment for the full writeup of the
@@ -374,6 +443,10 @@ transpile_test!(struct_count_field);
 // type" check, so `map_method`/`map_field` fired unconditionally regardless of what the
 // enum actually declared).
 transpile_test!(builtin_name_user_members);
+transpile_test!(implicit_self_length_nontail);
+transpile_test!(throws_method_name_collision);
+transpile_test!(narrowing_cast_if_let);
+transpile_test!(try_else_nil_if_let);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 

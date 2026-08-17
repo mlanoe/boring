@@ -1,0 +1,36 @@
+# Regression test for docs/known-issues-biguint-spike.md item 3: the stdlib
+# `Error` enum (book.md, "Standard error enum") must be resolvable without any
+# user declaration, on both `boring run` and `boring build`.
+#
+# Each case uses its own `try` with a single matching `catch Error.Variant:`
+# clause — deliberately not exercising multiple `catch Error.X: / catch
+# Error.Y:` clauses on the same `try`, which was a separate, pre-existing
+# interpreter bug unrelated to this one (the first catch clause matched
+# regardless of variant; reproduced identically with a plain user-defined
+# enum, nothing to do with the builtin `Error` type or this fix). Now fixed
+# and covered by tests/cases/multi_variant_catch_dispatch.br.
+def check_low(int n) throws:
+    if n < 0:
+        throw Error.InvalidInput
+    print "ok {n}"
+
+def check_high(int n) throws:
+    if n > 100:
+        throw Error.OutOfBounds
+    print "ok {n}"
+
+def main() throws:
+    try:
+        check_low(-1)
+    catch Error.InvalidInput:
+        print "caught invalid input"
+
+    try:
+        check_high(200)
+    catch Error.OutOfBounds:
+        print "caught out of bounds"
+
+    try:
+        check_low(5)
+    catch Error.InvalidInput:
+        print "caught invalid input"

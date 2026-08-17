@@ -1,0 +1,27 @@
+# Regression test for docs/known-issues-biguint-spike.md item 8: the
+# interpreter's move-checker used to treat a genuinely int64/int128-tagged
+# scalar as non-Copy, so reusing it after a plain `let t = n` wrongly raised
+# "use of moved value". book.md documents ALL primitive numeric types as
+# Copy -- this is the exact gcd-style repro from the doc, for both int64 and
+# int128.
+int64 gcd64(int64 a, int64 b):
+    var m = a
+    var n = b
+    while n != (0 as int64):
+        let t = n
+        n = m % n
+        m = t
+    m
+
+int128 gcd128(int128 a, int128 b):
+    var m = a
+    var n = b
+    while n != (0 as int128):
+        let t = n
+        n = m % n
+        m = t
+    m
+
+def main():
+    print gcd64(48 as int64, 18 as int64)
+    print gcd128(48 as int128, 18 as int128)
