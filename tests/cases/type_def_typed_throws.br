@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 4: a type-level
+# Regression test: a type-level
 # factory method (`type def`) must accept a typed `throws Type:` clause, the
 # same as an instance method (`req`/`def`) already does.
 #

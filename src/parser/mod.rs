@@ -1844,8 +1844,7 @@ impl Parser {
                 }
                 // `type def`/`type req`/`type set` — type-level factory/static
                 // methods, same production `struct` bodies already use
-                // (`parse_type_member`). See docs/known-issues-biguint-spike.md
-                // item 5. `type var`/`type let` (associated type-level
+                // (`parse_type_member`). `type var`/`type let` (associated type-level
                 // variables) are not yet supported on enums — `parse_type_member`
                 // can still return that variant, so reject it with a clear
                 // error rather than silently dropping it.

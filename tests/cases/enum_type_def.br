@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 5: a
+# Regression test: a
 # type-level factory method (`type def`) must be parseable inside an `enum`
 # body, the same as it already is inside a `struct` body.
 #

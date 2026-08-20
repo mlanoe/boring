@@ -194,6 +194,38 @@ impl Transpiler {
             if root == "super" {
                 return;
             }
+            // `use boring.<module>` — first-party stdlib, resolved against the embedded
+            // source in `stdlib_embed` rather than `source_dir` (there is no file on disk).
+            // Must be checked before the `source_dir`-relative existence check below, which
+            // would otherwise fall through to emitting a broken literal `use boring::x;`.
+            if root == "boring" {
+                let module = u.path.get(1).map(String::as_str).unwrap_or("");
+                match crate::stdlib_embed::lookup(module) {
+                    Some(src) => self.inline_boring_stdlib_use(module, src, u.line, u.col),
+                    None => self.push_error(u.line, u.col, format!("unknown boring stdlib module '{module}'")),
+                }
+                return;
+            }
+            // `use <name>.xxx` where `name` is a project dependency declared in the current
+            // project's boring.toml `[deps]` (see `BoringToml::resolve_deps`,
+            // docs/cross-project-code-sharing-gap.md). Checked after `boring` (which `[deps]`
+            // can never shadow) and before the `source_dir`-relative check below, since a
+            // named dependency always resolves against its own root, never the current
+            // project's directory. An ordinary external crate (`use rand.Rng`, not a
+            // declared dependency name) falls through unaffected.
+            if let Some(dep_root) = self.deps.get(root.as_str()) {
+                let rel: std::path::PathBuf = u.path[1..].iter().collect::<std::path::PathBuf>().with_extension("br");
+                let candidate = dep_root.join(&rel);
+                if candidate.exists() {
+                    self.inline_boring_use(&candidate, u.line, u.col);
+                } else {
+                    self.push_error(u.line, u.col, format!(
+                        "cannot find '{}' in dependency '{}' (looked in {})",
+                        rel.display(), root, dep_root.display()
+                    ));
+                }
+                return;
+            }
         }
 
         // Check if this resolves to a Boring source file — if so, inline it.
@@ -255,6 +287,42 @@ impl Transpiler {
         self.pre_infer_fn_qualifiers(program);
         for item in &program.items {
             if let crate::ast::Item::Use(u) = item {
+                // `use boring.<module>` — pre-scan the embedded stdlib source the same way
+                // as a real file, so forward references into it (e.g. a stdlib fn called
+                // before its `use` line) resolve correctly. See `emit_use`'s matching check
+                // for why this must run before the `source_dir`-relative existence check.
+                if u.path.first().map(String::as_str) == Some("boring") {
+                    let module = u.path.get(1).map(String::as_str).unwrap_or("");
+                    let Some(src) = crate::stdlib_embed::lookup(module) else { continue };
+                    let synthetic = crate::stdlib_embed::synthetic_path(module);
+                    if !visited.insert(synthetic) { continue; }
+                    let Ok(tokens) = crate::lexer::lex(src) else { continue };
+                    let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
+                    self.deep_pre_scan(&sub_program, visited);
+                    continue;
+                }
+                // `use <name>.xxx` for a declared [deps] dependency — pre-scan against that
+                // dependency's own root instead of `source_dir`. See `emit_use`'s matching
+                // check for the full rationale; unlike `emit_use`, a missing file here is
+                // silently skipped (this pass never reports errors — `emit_use` will surface
+                // the same "not found" error for real when it runs).
+                if let Some(root) = u.path.first() {
+                    if let Some(dep_root) = self.deps.get(root.as_str()) {
+                        let rel: std::path::PathBuf = u.path[1..].iter().collect::<std::path::PathBuf>().with_extension("br");
+                        let candidate = dep_root.join(&rel);
+                        if !candidate.exists() { continue; }
+                        let canonical = match candidate.canonicalize() {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        if !visited.insert(canonical.clone()) { continue; }
+                        let Ok(source) = std::fs::read_to_string(&canonical) else { continue };
+                        let Ok(tokens) = crate::lexer::lex(&source) else { continue };
+                        let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
+                        self.deep_pre_scan(&sub_program, visited);
+                        continue;
+                    }
+                }
                 let rel: std::path::PathBuf = u.path.iter().collect::<std::path::PathBuf>().with_extension("br");
                 let candidate = self.source_dir.join(&rel);
                 if !candidate.exists() { continue; }
@@ -407,6 +475,42 @@ impl Transpiler {
         self.out = saved_out;
 
         self.modules.push((module_name, module_code));
+    }
+
+    /// `use boring.<module>` counterpart of `inline_boring_use` — same emission
+    /// strategy (own output buffer → `self.modules`), but the source comes from
+    /// `stdlib_embed` instead of a file on disk, so there is no path to
+    /// canonicalize and `source_dir` is left untouched (stdlib modules don't
+    /// `use` project-local files).
+    fn inline_boring_stdlib_use(&mut self, module: &str, source: &str, use_line: usize, use_col: usize) {
+        let synthetic = crate::stdlib_embed::synthetic_path(module);
+        // Circular / duplicate import guard.
+        if self.loaded.contains(&synthetic) {
+            return;
+        }
+        self.loaded.insert(synthetic);
+
+        let tokens = match crate::lexer::lex(source) {
+            Ok(t) => t,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("lex error in boring.{module}: {e}"));
+                return;
+            }
+        };
+        let program = match crate::parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                self.push_error(use_line, use_col, format!("parse error in boring.{module}: {e}"));
+                return;
+            }
+        };
+
+        let saved_out = std::mem::take(&mut self.out);
+        self.emit_program(&program);
+        let module_code = std::mem::take(&mut self.out);
+        self.out = saved_out;
+
+        self.modules.push((module.to_string(), module_code));
     }
 
     // ── type aliases ──────────────────────────────────────────────────────────

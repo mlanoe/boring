@@ -231,8 +231,7 @@ impl Parser {
                 let else_expr = self.parse_else_body_expr()?;
                 // `try expr else nil` (spelled-out) is documented (book.md) as exactly
                 // equivalent to `try? expr` — desugar identically instead of folding
-                // into TryElseBlock's separate match lowering. See
-                // docs/known-issues-biguint-spike.md #12: TryElseBlock's `match`
+                // into TryElseBlock's separate match lowering. TryElseBlock's `match`
                 // (`Ok(__boring_v) => __boring_v, Err(...) => { let error = ..; nil }`)
                 // never unifies the raw-success `Ok` arm and the `None`/nil `Err` arm
                 // into a single `Option<T>` the way TryElse's dedicated `.ok()` codegen

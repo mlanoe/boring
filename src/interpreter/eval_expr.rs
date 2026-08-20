@@ -667,9 +667,9 @@ impl Interpreter {
                     ));
                 }
                 // `Enum.make()` — a `type def`/`type req`/`type set` factory/static
-                // method on an enum. Mirrors the `Value::Struct` branch above; see
-                // docs/known-issues-biguint-spike.md item 5. Only checked once the
-                // struct branch above and the variant-constructor path elsewhere
+                // method on an enum. Mirrors the `Value::Struct` branch above.
+                // Only checked once the struct branch above and the
+                // variant-constructor path elsewhere
                 // have had their chance, so this never shadows `Enum.Variant(args)`
                 // construction (variants are matched separately, not through this
                 // `Value::EnumNamespace` arm at all).
@@ -1137,8 +1137,8 @@ impl Interpreter {
         let len = expr.len;
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
-            // A literal that overflows `i64` but fits `u64` (see docs/known-issues-biguint-spike.md
-            // item 1) evaluates directly to a real `Uint64`, preserving its true magnitude —
+            // A literal that overflows `i64` but fits `u64` evaluates directly
+            // to a real `Uint64`, preserving its true magnitude —
             // any subsequent `as <Type>` cast goes through the normal checked `cast_value`
             // path from there (e.g. `18446744073709551615 as uint64` now round-trips exactly;
             // `as uint32` correctly yields `nil`, same as any other out-of-range numeric cast).
@@ -1230,8 +1230,7 @@ impl Interpreter {
                     UnaryOp::Neg => match val {
                         Value::Int(n) => Ok(Value::Int(-n)),
                         // Sized *signed* integers are negatable, same as the
-                        // generic `Value::Int` above — see
-                        // docs/known-issues-biguint-spike.md item 7. Only the
+                        // generic `Value::Int` above. Only the
                         // signed family gets a case: negating an unsigned
                         // (`Value::Uint*`) legitimately stays an error, falling
                         // through to the catch-all arm below.
@@ -1713,8 +1712,8 @@ impl Interpreter {
     /// dispatch handled `Stmt::If`/`Stmt::Match` specially, never
     /// `Stmt::IfLet` — which silently fell through to plain `exec_stmt`
     /// (`exec_if_let`, which returns `()`, not a value). That produced two
-    /// symptoms documented in docs/known-issues-biguint-spike.md item 6: as
-    /// the literal top-level tail statement of a function, the `then`/`else`
+    /// symptoms: as the literal top-level tail statement of a function, the
+    /// `then`/`else`
     /// bodies were run via ordinary `exec_stmt`, so a bare-call tail
     /// expression (e.g. `Foo(v = 2)`) tripped the unrelated "return value
     /// discarded" must-use check; nested one level deeper (inside another
@@ -2698,8 +2697,34 @@ impl Interpreter {
                 }
             }
 
+            // ── First-party stdlib (boring.X) ────────────────────────────────
+            // use boring.collections.*
+            // use boring.collections.Stack, Queue
+            // Real, embedded Boring source (src/stdlib_embed.rs) — loaded and
+            // executed like any other module, not an opaque RustType stand-in.
+            ("boring", module) => {
+                self.exec_boring_stdlib_use(decl, module, env)?;
+            }
+
+            // ── Named cross-project dependency (<name>.X) ────────────────────
+            // use numlib.big_uint.*
+            // use numlib.big_uint.BigUint, BigInt
+            // `prefix` is a name declared in the current project's boring.toml
+            // `[deps]` section (resolved into `self.deps` by main.rs::run_file
+            // before exec_program runs) — see docs/cross-project-code-sharing-
+            // gap.md. Checked last among the special prefixes (after std/crate/
+            // boring, which `[deps]` can never shadow — see
+            // BoringToml::resolve_deps) and only when `prefix` is actually a
+            // declared dependency name, so an ordinary external crate import
+            // (`use rand.Rng`) still falls through to the generic loader below
+            // exactly as before.
+            (prefix, _) if self.deps.contains_key(prefix) => {
+                self.exec_named_dep_use(decl, prefix, env)?;
+            }
+
             _ => {
-                // Not a stdlib module — fall back to the filesystem-based loader
+                // Not a stdlib module or named dependency — fall back to the
+                // filesystem-based loader.
                 self.exec_use(decl, env)?;
             }
         }

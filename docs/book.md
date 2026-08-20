@@ -4126,6 +4126,101 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Write, BufRead};
 ```
 
+### First-party stdlib — `use boring.<module>`
+
+`boring.<module>` resolves against the compiler's own embedded standard
+library (`stdlib/*.br`, compiled straight into the `boring` binary — see
+`stdlib/README.md`) rather than a project-relative file. It works
+identically under `boring run` and `boring build`, with no setup: since
+`boring` is only ever installed as a single binary (`cargo install --git`/
+`--path .`), there is no separate stdlib directory to place anywhere.
+
+```boring
+use boring.collections.*             # everything in the module
+use boring.collections.Stack         # one item
+use boring.collections.Stack, Queue  # several items
+```
+
+The same rule as any other multi-segment `use` applies (see above): a bare
+`use boring.collections`, with no `.*` and no named items, does **not**
+mean "the whole module" — the parser always treats a path's final segment
+as a selected item name, so that would mean "import the item `collections`
+from a module named `boring`". Always write `.*` or name concrete items.
+
+**What's in `boring.*` today:**
+
+| Module | Provides |
+|---|---|
+| `boring.collections` | `Stack<T>` (LIFO) and `Queue<T>` (FIFO) — genuine composite types built on `[T]`, not re-exports of anything already global |
+
+**Nothing already free moves behind an import.** `[T]`/`{T}`/`{K=V}`
+literals and every native method already callable on them, the always-
+loaded global functions (`print`, `assert`, `pow`, …), and the built-in
+`Error` enum stay unconditionally global exactly as before — see the
+"Built-in Types & Functions Reference" below. A `boring.*` module only ever
+adds *new* functionality that doesn't already exist for free.
+
+### Named cross-project dependencies — `[deps]` and `use <name>.xxx`
+
+A project can declare a dependency on *another Boring project's* source in
+its own `boring.toml`:
+
+```toml
+[deps]
+numlib   = "../boring-numlib"                           # a path — resolved
+                                                         # relative to this
+                                                         # boring.toml's own
+                                                         # directory
+otherlib = { path = "../other-lib" }                    # same thing, explicit
+somelib  = { git = "https://github.com/me/somelib" }    # git — default branch
+pinned   = { git = "...", rev = "a1b2c3d" }              # git — exact commit
+onbranch = { git = "...", branch = "main" }              # git — a branch
+attag    = { git = "...", tag = "v1.2.0" }               # git — a tag
+```
+
+A `git` dependency is cloned into a persistent local cache the first time
+it's needed (`~/Library/Caches/boring/git-deps` on macOS, `~/.cache/boring/
+git-deps` on Linux, or `$BORING_CACHE_DIR` if set) and reused/refreshed on
+later builds — a `rev`-pinned dependency needs no network at all once its
+commit is cached; `branch`/`tag`/the default branch are re-fetched on each
+resolution (falling back to the cached copy, with a warning, if offline).
+Only one of `branch`/`tag`/`rev` may be given.
+
+Either way, the dependency is just a plain directory with a `src/`
+convention — it doesn't need its own `boring.toml`. Import from it exactly
+like `boring.<module>`:
+
+```boring
+use numlib.big_uint.*             # everything in numlib/src/big_uint.br
+use numlib.big_uint.BigUint       # one item
+use numlib.big_uint.BigUint, BigInt
+```
+
+Same rule as `boring.*` above: a bare `use numlib.big_uint`, with no `.*`
+and no named items, does **not** mean "the whole module" — the parser
+always treats a multi-segment path's final segment as a selected item
+name.
+
+This works identically under `boring run` and `boring build` (including
+the GPU targets), resolved via `find_project_root` from whatever file you
+point the compiler at — no need to `cd` into the project first. A file
+genuinely missing under a *declared* dependency's `src/` is a hard error
+(you named the dependency for exactly this purpose); an ordinary prefix
+that isn't a declared dependency name (e.g. a real external crate) falls
+through to the usual behavior unaffected.
+
+**Rules:**
+- `std`, `crate`, and `boring` are reserved — a project cannot declare a
+  dependency under any of those names.
+- No transitive resolution: if `numlib` itself has a `[deps]` section, it
+  is not followed — same single-level rule this section's `include` key
+  (see `[external_types]` above) already follows.
+- A `git` dependency needs the `git` CLI installed and on `PATH`.
+
+See `docs/cross-project-code-sharing-gap.md` for the motivation (sharing a
+real module — e.g. an exact-arithmetic `BigUint` tower — between sibling
+projects without copy-pasting it).
+
 ### Type aliases — `use … as`
 
 Rename or qualify a type:
@@ -4202,6 +4297,99 @@ type Parser     = fn(&str) -> Result<Arc<str>, Box<dyn std::error::Error>>;
 ```
 
 Built-in primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` literals emit as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when they are stored or concatenated. See [Advanced — Strings](#advanced--strings-string-and-arc-str).
+
+### Built-in Types & Functions Reference
+
+Everything below is a language **primitive** — always in scope, no `use`
+needed, whether you're calling `boring run` or `boring build`. This section
+replaces the standalone `stdlib/array.br` / `builtins.br` / `channel.br` /
+`dict.br` / `future.br` / `string.br` doc files that used to sit unwired in
+`stdlib/` (nothing ever loaded them — see
+`docs/cross-project-code-sharing-gap.md`); `stdlib/` itself is now reserved
+for genuinely *importable* `boring.*` modules (see above).
+
+**Array (`[T]`)** — `def` mutates in place (needs a `var`/`mut` binding);
+`req` returns a new value, leaving the receiver untouched.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `push(item)`, `insert(i, item)`, `append(other)`, `reverse()`, `sort()` | `void` (`def`) | mutating |
+| `pop()`, `first()`, `last()` | `T?` | nil if empty |
+| `find(pred)` | `T?` | first match, nil if none |
+| `indexOf(item)` | `int` | `-1` if absent |
+| `reversed()`, `sorted()`, `sortedBy(key)`, `slice(from, to)`, `take(n)`, `drop(n)`, `filter(pred)` | `[T]` | new array |
+| `map(f)`, `flatMap(f)`, `flat()`, `zip(other)`, `enumerate()` | `[any]` | new array |
+| `reduce(init, f)` | `any` | fold left |
+| `any(pred)`, `all(pred)`, `isEmpty()`, `contains(item)` | `bool` | |
+| `count()` (also `len`, `length`) | `int` | |
+| `sum()`, `min()`, `max()` | `any` | numeric elements |
+| `join(sep)` (also `joined`) | `string` | |
+
+`firstIndex()`/`nextIndex(i)`/`getAt(i)`/`removeAt(i)` are an **internal
+cursor-based protocol** backing generic `for`/index-based iteration across
+`[T]`/`{K=V}`/`{T}` uniformly (`i` is an opaque cursor value from
+`firstIndex()`, not a plain integer) — reach for `arr[i]`/`arr[i] = v` for
+direct indexed access instead; that always works and is what these exist to
+support internally.
+
+**Dict (`{K=V}`) and Set (`{T}`)**
+
+| Method | Returns | Notes |
+|---|---|---|
+| `set(key, value)` (also `put`), `remove(key)` — dict; `add(item)`, `remove(item)` — set | `void` (`def`) | mutating |
+| `get(key)` | `V?` | nil if absent (dict) |
+| `contains(key)` (also `containsKey`, `has`) | `bool` | |
+| `isEmpty()`, `count()` (also `len`, `length`) | | |
+| `union(other)`, `intersection(other)`, `difference(other)` | new set | set only |
+| `isSubset(other)` | `bool` | set only |
+
+Dict literals use `=`, not `:` — `{"a" = 1, "b" = 2}`; a bare `{}` is an
+empty **set**, `{=}` is an empty **dict**.
+
+**String** — strings are immutable; every method returns a new value.
+
+| Method | Returns |
+|---|---|
+| `isEmpty()`, `contains(s)`, `startsWith(s)`, `endsWith(s)` | `bool` |
+| `indexOf(s)` | `int` (`-1` if absent) |
+| `trim()`, `upper()` (also `toUpper`/`toUpperCase`), `lower()` (also `toLower`/`toLowerCase`), `replace(old, new)`, `slice(from, to)`, `repeat(n)` | `string` |
+| `split(sep)`, `chars()`, `lines()` | `[string]` |
+| `parseInt()`, `parseFloat()`, `parseFloat32()` | `int?` / `float?` / `float32?` |
+| `.length` (property, not a call) | `int` |
+
+**Global functions** — pre-loaded, no `use` needed.
+
+- I/O: `print(msg)`, `write(msg)` (no trailing newline), `readLine()`, `args()`
+- Process: `exit(code)`
+- Characters: `ord(c)`, `chr(code)`
+- Conversion: `int(v)`, `uint(v)`, `float(v)` (alias of `float64`), `float32(v)`, `float64(v)`, `str(v)`
+- Collections: `len(coll)`
+- Math: `abs`, `floor`, `ceil`, `round`, `sqrt`, `pow`, `log`/`log2`/`log10`, `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`, `clamp`, `sign`, `isNaN`, `isInfinite`, `min`, `max` — each has a `float32` overload alongside the `float` (=`float64`) one
+- Assertions: `assert(cond, msg?)`, `assert_eq(a, b)`, `assert_neq(a, b)`, `panic(msg)`
+- Ownership: `drop(v)`
+- Result: `Ok(value)`, `Err(error)`
+- Constants: `PI`, `E`, `INF`, `NAN`
+
+**Channels, `Future<T>`, and `task`** — see [§14 Closures and Higher-Order
+Functions](#14-closures-and-higher-order-functions) and the `task`/`wait`/
+`timeout` coverage throughout this book for the full async model. Quick
+reference:
+
+- `channel<T>(capacity)` → `(Sender<T>, Receiver<T>)`. `tx.send(value)` (task,
+  suspends until room), `tx.clone()`; `rx.recv()` (task) → `T?`, nil when
+  every sender has dropped — prefer `for x in rx:`.
+- `Future<T>` is the handle returned by any `task` expression: `f.value`/
+  `f.value()` awaits and returns `T` (throws on task failure); `f.wait`
+  awaits and discards; both take an optional `Duration`/`Instant` deadline,
+  throwing `Error.Expired` if it elapses. `f.done()` polls without
+  blocking; `f.cancel()` signals cancellation.
+- `wait(duration_or_deadline)` pauses the current task.
+  `timeout(duration_or_deadline, callable)` races a callable against a
+  timer, throwing `Error.Expired` on expiry.
+
+**Built-in `Error` enum** — always available, no declaration needed:
+`Error.Expired`, `.Cancelled`, `.NotFound`, `.InvalidInput`, `.OutOfBounds`.
+Use `throw Error.Expired`, `catch Error:`, or `match err: Error.Expired: …`.
 
 ---
 
@@ -6922,6 +7110,43 @@ include = ["../shared/external_types.toml"]   # path relative to this boring.tom
 ```
 
 The included file has its own `[external_types]` section, folded into this project's lists (additive, single-level — a nested `include` inside the included file is not followed). See `boring-bevylib/external_types.toml` in the `boring`-adjacent Bevy-game projects for a real example.
+
+### Advanced — `[external_fns]`: argument-borrow whitelist for external calls
+
+A call into an external (non-Boring) function or method has, by construction, no real Rust signature for the transpiler to consult when emitting its arguments — every argument is emitted by value unless something overrides it. That's a problem for an external signature that takes `&T`/`&mut T` in a position *other than* the receiver: the receiver itself is fine (Rust auto-resolves `&mut self` from an owned place expression at a method-call receiver on its own), but an argument *after* the receiver that needs a reference produces invalid Rust if emitted by value.
+
+The compiler ships a small hand-verified table for exactly this — `std::mem`'s three most common functions:
+
+```boring
+var int a = 1
+var int b = 2
+mem.swap(a, b)              # std::mem::swap(&mut a, &mut b) — both args &mut
+
+var int c = 10
+let int old = mem.replace(c, 20)   # std::mem::replace(&mut c, 20) — only the first arg &mut
+
+var int d = 5
+let int taken = mem.take(d)        # std::mem::take(&mut d) — its one arg &mut
+```
+
+**Extending the list from your own project**: same shape as `[external_types]`/`[derives]` — declare your own hand-verified entries in `boring.toml`'s `[external_fns]` section rather than patching the compiler. This supplements the built-in table; it never overrides or removes an entry from it:
+
+```toml
+[external_fns]
+"ZipFile::readToEnd" = ["&mut"]                    # method call: "Qualifier::method" = per-arg borrows
+"resvg::render" = ["&", "", "&mut"]                # free function: full call-site path, split on the LAST "::"
+```
+
+The key's `Qualifier` is either the external type name for an instance-method call (matched against the receiver's Boring-declared type, e.g. `ZipFile entry = ...; entry.readToEnd(buf)`), or a free function's fully-qualified call-site path (`"std::mem::swap"`, `"resvg::render"`) — since a free function's qualifier can itself contain further `::`, the key is always split on its **last** `::`, not its first (unlike `[external_types]`'s `const_fns`, where a type name never contains `::`, so the first-`::` split is safe there instead). The value is one borrow-form entry per argument **after** the receiver (a free function has no receiver to exclude, so every argument counts starting at index 0) — each entry is `"&"`, `"&mut"`, or `""` (by value, the default). A shorter array than the call's actual argument count just leaves the remaining trailing arguments at the by-value default, rather than erroring.
+
+Same rule as every other hand-verified whitelist in this doc: only add an entry once you've checked the defining crate's own signature — a wrong entry produces invalid Rust that `boring build` won't catch, only `cargo build` will (a borrow where none is needed, or a missing one, both surface as a `cargo build` type error).
+
+`[external_fns]` also supports `include = [...]`, same additive/single-level semantics as `[external_types]`/`[derives]`:
+
+```toml
+[external_fns]
+include = ["../shared/external_fns.toml"]   # path relative to this boring.toml
+```
 
 ### Advanced — String literals as external call arguments (known limitation)
 

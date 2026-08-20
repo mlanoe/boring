@@ -50,24 +50,36 @@ attr_arg        ::= IDENT ("=" (IDENT | STRING | INT))?
 # ─── Imports ─────────────────────────────────────────────────────────────────
 
 use_decl        ::= "use" mod_path ".*" NEWLINE                                       # glob — all pub items
-                  | "use" mod_path "(" IDENT ("," IDENT)* ")" NEWLINE                # selective import
+                  | "use" IDENT NEWLINE                                               # whole module (single segment only)
+                  | "use" mod_path "." IDENT ("," IDENT)* NEWLINE                    # selective import
                   | "use" IDENT "as" type NEWLINE                                     # type alias
                   | "use" IDENT "<" IDENT ("," IDENT)* ">" "as" type NEWLINE         # generic type alias
 
 mod_path        ::= path_seg ("." path_seg)*
 path_seg        ::= IDENT | keyword_as_ident   # keywords like `sync` are valid path segments
 keyword_as_ident ::= "sync" | "type" | "mod" | "new" | "set" | "init" | …
-# The last dot-segment is always an item name, never a module name.
+# The last dot-segment is always an item name, never a module name — this is
+# why there is NO form for "the whole module a.b.c, no glob, no items": a
+# multi-segment path always treats its final segment as a selected item.
+# `use a.b.c` alone parses as "module a.b, item c", not "module a.b.c".
 #
-# Three import forms:
+# Import forms actually implemented by the parser (parser/mod.rs's
+# parse_use_decl — NOT a parenthesized item list; that shape does not exist):
+#   use a                    — whole module a (single segment only)
 #   use a.b.c.*              — glob: all pub items from module a.b.c
-#   use a.b.c(X)             — single item X from module a.b.c
-#   use a.b.c(X, Y, Z)       — multiple items from module a.b.c
+#   use a.b.c.X              — single item X from module a.b.c
+#   use a.b.c.X, Y           — multiple items from module a.b.c
 #
 # ── boring stdlib ─────────────────────────────────────────────────────────────
-#   use boring.collections.*            — all collections (Stack, Queue, …)
+# `use boring.<module>` resolves against the compiler's embedded first-party
+# stdlib (src/stdlib_embed.rs, stdlib/*.br) rather than a project file — see
+# stdlib/README.md for the module list and how to add one. Same selective-
+# import rule as above applies: a bare `use boring.collections` does NOT mean
+# "the whole module" (it means "item `collections` from module `boring`") —
+# always use `.*` or name concrete items:
+#   use boring.collections.*            — all of collections (Stack, Queue)
 #   use boring.collections.Stack        — one item
-#   use boring.math.*                   — math module namespace (math.sqrt, …)
+#   use boring.collections.Stack, Queue — multiple items
 #
 # ── Built-in namespaces (no `use` needed) ────────────────────────────────────
 #

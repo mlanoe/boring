@@ -1,0 +1,7 @@
+# `use boring.<module>` for an unrecognized module name must be a hard
+# error in both `boring run` (this test) and `boring build` (tests/
+# transpile.rs's registration) — unlike the generic filesystem `use` loader,
+# which silently no-ops on a missing file (it assumes a native Rust module).
+# `boring` is never a real crate, so there's no legitimate native fallback.
+use boring.nope.*
+print "should not reach"

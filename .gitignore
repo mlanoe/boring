@@ -59,5 +59,12 @@ tests/cases/clear_color_construct/src/main_rust/
 tests/cases/clear_color_construct/src/main_rust_single/
 tests/cases/clear_color_construct/src/main_rust_managed/
 tests/cases/clear_color_construct/src/main_rust_managed_single/
+# Same as ext_const_promotion above, for tests/transpile.rs's `cross_project_dep` case
+# (tests/cases/fixtures/dep_numlib, named [deps] cross-project import mechanism —
+# see docs/cross-project-code-sharing-gap.md).
+tests/cases/cross_project_dep/src/main_rust/
+tests/cases/cross_project_dep/src/main_rust_single/
+tests/cases/cross_project_dep/src/main_rust_managed/
+tests/cases/cross_project_dep/src/main_rust_managed_single/
 Cargo.lock
 .claude/worktrees/

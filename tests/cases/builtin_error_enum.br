@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 3: the stdlib
+# Regression test: the stdlib
 # `Error` enum (book.md, "Standard error enum") must be resolvable without any
 # user declaration, on both `boring run` and `boring build`.
 #

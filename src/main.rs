@@ -19,6 +19,8 @@ pub mod parser;
 pub mod desugar_labeled_array;
 pub mod interpreter;
 pub mod checker;
+mod git_deps;
+pub mod stdlib_embed;
 pub mod transpiler;
 pub mod validator;
 
@@ -157,6 +159,49 @@ struct BoringToml {
     /// `external_types_includes`, but for `derive_traits`. Consumed and drained by
     /// `resolve_derive_includes` — empty again once `load_project_toml` returns.
     derive_includes: Vec<String>,
+    /// `[deps]` entries — named dependencies on other Boring *projects* (as opposed to
+    /// `[dependencies]`'s Rust crates), each `(name, raw_value)`. `raw_value` is kept as
+    /// opaque text here (same "the format is tiny" philosophy as `[dependencies]`) and only
+    /// interpreted by `resolve_deps`, which turns it into an actual filesystem path (or
+    /// rejects it) — see that method's doc comment for the value grammar
+    /// (`"../path"` or `{ path = "..." }` or `{ git = "..." }`).
+    deps: Vec<(String, String)>,
+    /// `[external_fns]` entries — project-declared supplement to the transpiler's built-in
+    /// `KNOWN_EXTERNAL_FN_BORROWS` (see that const's doc comment in `transpiler/mod.rs`).
+    /// Each line is `"Qualifier::method" = ["&mut", "&", ...]` — `Qualifier` is an external
+    /// type name for a method call, or a free function's fully-qualified module path (see
+    /// `KNOWN_EXTERNAL_FN_BORROWS`'s doc comment for the exact split); the array is one
+    /// borrow-form entry (`"&"`, `"&mut"`, or `""`) per call argument after the receiver.
+    /// Parsed here into `(qualifier, method, borrows)` triples by `Self::parse_external_fn_key`
+    /// splitting the key on its *last* `::` (a free function's qualifier can itself contain
+    /// `::`, e.g. `"std::mem::swap"` splits to qualifier `"std::mem"`, method `"swap"`).
+    /// Threaded into `TranspileConfig::external_fns`.
+    external_fns: Vec<(String, String, Vec<String>)>,
+    /// `[external_fns]` `include = [...]` entries — same shape and semantics as
+    /// `external_types_includes`/`derive_includes`, but for `external_fns`. Consumed and
+    /// drained by `resolve_external_fns_includes` — empty again once `load_project_toml`
+    /// returns.
+    external_fns_includes: Vec<String>,
+}
+
+/// One `[deps]` entry's interpreted value — see `BoringToml::resolve_deps`.
+#[derive(Debug, PartialEq)]
+enum DepSpec {
+    Path(String),
+    Git { url: String, gitref: GitRef },
+}
+
+/// Which ref of a `git` dependency to check out — see `git_deps::resolve_git_dep`.
+/// `Default` means "whatever the remote's default branch is" (a plain `git clone`
+/// with no `--branch`). Exactly one of `branch`/`tag`/`rev` may be given in a
+/// `{ git = "...", ... }` table; giving more than one is a `parse_dep_value` error
+/// since it's ambiguous which one should win.
+#[derive(Debug, PartialEq, Clone)]
+enum GitRef {
+    Default,
+    Branch(String),
+    Tag(String),
+    Rev(String),
 }
 
 impl BoringToml {
@@ -187,9 +232,14 @@ impl BoringToml {
         let mut external_types_includes = Vec::new();
         let mut derive_traits = Vec::new();
         let mut derive_includes = Vec::new();
+        let mut deps = Vec::new();
+        let mut external_fns = Vec::new();
+        let mut external_fns_includes = Vec::new();
         let mut in_dependencies = false;
         let mut in_external_types = false;
         let mut in_derives = false;
+        let mut in_deps = false;
+        let mut in_external_fns = false;
 
         for line in src.lines() {
             let line = line.trim();
@@ -200,10 +250,40 @@ impl BoringToml {
                 in_dependencies = line == "[dependencies]";
                 in_external_types = line == "[external_types]";
                 in_derives = line == "[derives]";
+                in_deps = line == "[deps]";
+                in_external_fns = line == "[external_fns]";
                 continue;
             }
             if in_dependencies {
                 dependencies.push(line.to_string());
+            } else if in_deps {
+                // Same one-line-per-entry style as `[dependencies]`, but keyed: split on the
+                // first `=` into (name, raw_value). `resolve_deps` interprets `raw_value`.
+                if let Some((name, value)) = line.split_once('=') {
+                    deps.push((name.trim().to_string(), value.trim().to_string()));
+                }
+            } else if in_external_fns {
+                if let Some(rest) = line.strip_prefix("include") {
+                    external_fns_includes = Self::extract_array(rest);
+                } else if let Some((key, value)) = line.split_once('=') {
+                    // `"Qualifier::method" = ["&mut", "&mut"]` — key is a quoted string; the
+                    // value is a positional array, so — unlike every other `extract_array`
+                    // call site in this file (`tuple_structs`/`const_fns`/`traits`/`include`,
+                    // where a blank entry never carries meaning) — an empty `""` element here
+                    // is a real, meaningful "by value, no borrow" placeholder that MUST keep
+                    // its position (e.g. `["&", "", "&mut"]` for `resvg::render(tree: &Tree,
+                    // transform: Transform, pixmap: &mut PixmapMut)` — the by-value `transform`
+                    // in the middle). `extract_array`'s own `.filter(|s| !s.is_empty())` would
+                    // silently drop that element and shift every later position left — found
+                    // via exactly this `resvg::render` real-crate repro, where it turned
+                    // `["&", "", "&mut"]` into `["&", "&mut"]` and mis-borrowed both later
+                    // arguments. `extract_borrow_array` below is `extract_array` without that
+                    // filter — used only here, never for the other whitelist tables.
+                    let key = key.trim().trim_matches('"');
+                    if let Some((qualifier, method)) = Self::parse_external_fn_key(key) {
+                        external_fns.push((qualifier, method, Self::extract_borrow_array(value)));
+                    }
+                }
             } else if in_external_types {
                 if let Some(rest) = line.strip_prefix("tuple_structs") {
                     external_tuple_structs = Self::extract_array(rest);
@@ -232,8 +312,22 @@ impl BoringToml {
         BoringToml {
             name, version, main, dependencies,
             external_tuple_structs, external_const_fns, external_types_includes,
-            derive_traits, derive_includes,
+            derive_traits, derive_includes, deps,
+            external_fns, external_fns_includes,
         }
+    }
+
+    /// Splits an `[external_fns]` key on its *last* `::` into `(qualifier, method)` — e.g.
+    /// `"std::mem::swap"` → `("std::mem", "swap")`, `"ZipFile::readToEnd"` →
+    /// `("ZipFile", "readToEnd")`. Unlike `[external_types]`'s `const_fns` (which splits
+    /// `"Type::method"` on the *first* `::` since a type name never itself contains `::`), a
+    /// free function's qualifier is a full module path that can contain further `::` of its
+    /// own, so only the last segment can safely be assumed to be the method name. Returns
+    /// `None` for a key with no `::` at all (silently skipped, same "malformed entry is
+    /// dropped rather than a hard parse error" convention `const_fns`'s `filter_map` already
+    /// uses).
+    fn parse_external_fn_key(key: &str) -> Option<(String, String)> {
+        key.rsplit_once("::").map(|(q, m)| (q.to_string(), m.to_string()))
     }
 
     /// Resolves this `boring.toml`'s `[external_types]` `include` paths (each relative to
@@ -278,6 +372,127 @@ impl BoringToml {
         Ok(())
     }
 
+    /// Resolves this `boring.toml`'s `[external_fns]` `include` paths the same way
+    /// `resolve_external_types_includes`/`resolve_derive_includes` do — same relative-to-dir
+    /// resolution, same single-level (no recursion into a nested `include`), same
+    /// additive-only fold into `external_fns`, same idempotent drain-based design, and same
+    /// `Result<(), String>` return so this stays independently unit-testable rather than
+    /// exiting directly.
+    fn resolve_external_fns_includes(&mut self, boring_toml_dir: &Path) -> Result<(), String> {
+        for include_path in std::mem::take(&mut self.external_fns_includes) {
+            let resolved = boring_toml_dir.join(&include_path);
+            let included_src = std::fs::read_to_string(&resolved).map_err(|e| {
+                format!("cannot read external_fns include '{}': {}", resolved.display(), e)
+            })?;
+            let included = Self::parse(&included_src);
+            self.external_fns.extend(included.external_fns);
+        }
+        Ok(())
+    }
+
+    /// Resolves this `boring.toml`'s `[deps]` entries — named dependencies on other Boring
+    /// *projects* (`use <name>.xxx` resolving to `<name>`'s own `src/` directory), as opposed
+    /// to `[dependencies]`'s Rust crates. See `docs/cross-project-code-sharing-gap.md` for the
+    /// motivation and `docs/book.md` §15 for the user-facing syntax. Each entry's raw value is
+    /// either a bare path string (`numlib = "../boring-numlib"`) or a small inline table
+    /// (`numlib = { path = "../boring-numlib" }` / `{ git = "..." }`) — parsed by
+    /// `parse_dep_value` below, which is deliberately not a real TOML-inline-table parser
+    /// (single level, string values only — matches this whole file's "the format is tiny"
+    /// philosophy). Resolution rules, checked for every entry regardless of value shape:
+    /// - `name` may not be `std`, `crate`, or `boring` — those are the compiler's own reserved
+    ///   `use` prefixes (Rust stdlib, current crate, and the first-party embedded stdlib
+    ///   respectively) and can never be shadowed by a project dependency.
+    /// - `git = "..."` clones the repo into a persistent local cache the first time it's
+    ///   needed and reuses/refreshes it on later resolutions — see `git_deps::resolve_git_dep`
+    ///   for the caching/refresh strategy. An optional `branch`/`tag`/`rev` key picks which ref
+    ///   to check out (default: the remote's default branch).
+    /// - A `path` value resolves to `<boring_toml_dir>/<path>/src` (the dependency is just a
+    ///   directory with a `src/` convention, not required to have its own `boring.toml`) —
+    ///   relative to *this* `boring.toml`'s own directory, same as
+    ///   `resolve_external_types_includes`. No transitive resolution: if that directory has
+    ///   its own `boring.toml` with its own `[deps]`, those are not followed — same
+    ///   single-level rule `resolve_external_types_includes`/`resolve_derive_includes` already
+    ///   follow for `include`.
+    /// Returns an error message (rather than exiting directly) on the first invalid entry, so
+    /// this stays independently unit-testable, same convention as the `include` resolvers.
+    fn resolve_deps(&self, boring_toml_dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>, String> {
+        let mut resolved = std::collections::HashMap::new();
+        for (name, raw_value) in &self.deps {
+            if matches!(name.as_str(), "std" | "crate" | "boring") {
+                return Err(format!(
+                    "'{}' is a reserved name and cannot be used as a [deps] dependency name",
+                    name
+                ));
+            }
+            match Self::parse_dep_value(raw_value)? {
+                DepSpec::Path(p) => {
+                    resolved.insert(name.clone(), boring_toml_dir.join(p).join("src"));
+                }
+                DepSpec::Git { url, gitref } => {
+                    let src = crate::git_deps::resolve_git_dep(&url, &gitref)
+                        .map_err(|e| format!("dep '{}': {}", name, e))?;
+                    resolved.insert(name.clone(), src);
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Parses one `[deps]` entry's raw value — either a quoted path string, or a small
+    /// `{ key = "value", ... }` inline table looking for `path` or `git` (+ optional
+    /// `branch`/`tag`/`rev`) keys. Not a general TOML inline-table parser: single level,
+    /// string values only, no nested tables/arrays — matches `extract_value`/`extract_array`'s
+    /// existing "the format is tiny" style. Unlike the old first-match-wins version, this reads
+    /// every key in the table before deciding, since `git` needs to see a possible
+    /// `branch`/`tag`/`rev` key alongside it regardless of which order they're written in.
+    fn parse_dep_value(raw: &str) -> Result<DepSpec, String> {
+        let raw = raw.trim();
+        if let Some(stripped) = raw.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            let mut path = None;
+            let mut git = None;
+            let mut branch = None;
+            let mut tag = None;
+            let mut rev = None;
+            for pair in stripped.split(',') {
+                let pair = pair.trim();
+                if pair.is_empty() { continue; }
+                let Some((key, value)) = pair.split_once('=') else { continue };
+                let value = value.trim().trim_matches('"').to_string();
+                match key.trim() {
+                    "path"   => path = Some(value),
+                    "git"    => git = Some(value),
+                    "branch" => branch = Some(value),
+                    "tag"    => tag = Some(value),
+                    "rev"    => rev = Some(value),
+                    _ => {}
+                }
+            }
+            if path.is_some() && git.is_some() {
+                return Err(format!("[deps] entry '{}' has both 'path' and 'git' — pick one", raw));
+            }
+            if let Some(p) = path {
+                return Ok(DepSpec::Path(p));
+            }
+            if let Some(url) = git {
+                let gitref = match (branch, tag, rev) {
+                    (None, None, None) => GitRef::Default,
+                    (Some(b), None, None) => GitRef::Branch(b),
+                    (None, Some(t), None) => GitRef::Tag(t),
+                    (None, None, Some(r)) => GitRef::Rev(r),
+                    _ => return Err(format!(
+                        "[deps] entry '{}' gives more than one of branch/tag/rev — pick one", raw
+                    )),
+                };
+                return Ok(DepSpec::Git { url, gitref });
+            }
+            return Err(format!("[deps] entry '{}' has no recognized 'path' or 'git' key", raw));
+        }
+        if raw.starts_with('"') {
+            return Ok(DepSpec::Path(raw.trim_matches('"').to_string()));
+        }
+        Err(format!("[deps] entry '{}' is neither a quoted path nor a {{ path/git = ... }} table", raw))
+    }
+
     /// Extract the value from `= "value"` or `= value`.
     fn extract_value(rest: &str) -> Option<String> {
         let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
@@ -303,11 +518,35 @@ impl BoringToml {
             .filter(|s| !s.is_empty())
             .collect()
     }
+
+    /// `extract_array` without its `.filter(|s| !s.is_empty())` — for `[external_fns]`'s
+    /// per-argument borrow-form arrays only, where a bare `""` element is a meaningful "by
+    /// value" placeholder whose *position* matters (see the call site's own doc comment for
+    /// why dropping it silently misaligns every later argument). Every other bracketed-array
+    /// value in `boring.toml` (`tuple_structs`, `const_fns`, `traits`, any `include`) is an
+    /// unordered set of names, where an accidental blank/trailing-comma entry is noise to
+    /// discard, not signal — `extract_array` keeps its filter for those.
+    fn extract_borrow_array(rest: &str) -> Vec<String> {
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+        let inner = rest.trim_start_matches('[').trim_end_matches(']').trim();
+        // A genuinely empty array (`= []`, a zero-argument call) must stay `vec![]`, not the
+        // single-blank-element `vec![""]` that `"".split(',')` would otherwise produce — that
+        // single blank would then be misread as "argument 0 is by value" for a call that
+        // actually takes no arguments at all.
+        if inner.is_empty() {
+            return Vec::new();
+        }
+        inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod boring_toml_tests {
-    use super::BoringToml;
+    use super::{BoringToml, DepSpec, GitRef};
+    use std::path::PathBuf;
 
     #[test]
     fn dependencies_section_captured_verbatim() {
@@ -526,6 +765,170 @@ mod boring_toml_tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn deps_section_parses_plain_path_string() {
+        let src = "[deps]\nnumlib = \"../boring-numlib\"\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.deps, vec![("numlib".to_string(), "\"../boring-numlib\"".to_string())]);
+    }
+
+    #[test]
+    fn deps_section_parses_inline_table() {
+        let src = "[deps]\nnumlib = { path = \"../boring-numlib\" }\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.deps, vec![("numlib".to_string(), "{ path = \"../boring-numlib\" }".to_string())]);
+    }
+
+    #[test]
+    fn resolve_deps_resolves_path_to_src_dir() {
+        let dir = PathBuf::from("/some/project");
+        let toml = BoringToml::parse("[deps]\nnumlib = \"../boring-numlib\"\n");
+        let resolved = toml.resolve_deps(&dir).unwrap();
+        assert_eq!(resolved.get("numlib"), Some(&dir.join("../boring-numlib").join("src")));
+    }
+
+    #[test]
+    fn resolve_deps_accepts_inline_table_path_form() {
+        let dir = PathBuf::from("/some/project");
+        let toml = BoringToml::parse("[deps]\nnumlib = { path = \"../boring-numlib\" }\n");
+        let resolved = toml.resolve_deps(&dir).unwrap();
+        assert_eq!(resolved.get("numlib"), Some(&dir.join("../boring-numlib").join("src")));
+    }
+
+    // Real git clone/fetch/checkout coverage (via a local, no-network fixture repo) lives in
+    // `git_deps::tests` — these here only cover `parse_dep_value`'s pure parsing of the `git`
+    // inline-table shape, no subprocess involved.
+
+    #[test]
+    fn parse_dep_value_git_defaults_to_default_ref() {
+        let spec = BoringToml::parse_dep_value("{ git = \"https://example.com/x\" }").unwrap();
+        assert_eq!(spec, DepSpec::Git { url: "https://example.com/x".to_string(), gitref: GitRef::Default });
+    }
+
+    #[test]
+    fn parse_dep_value_git_accepts_branch_tag_rev() {
+        let branch = BoringToml::parse_dep_value("{ git = \"u\", branch = \"main\" }").unwrap();
+        assert_eq!(branch, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Branch("main".to_string()) });
+
+        let tag = BoringToml::parse_dep_value("{ git = \"u\", tag = \"v1.0\" }").unwrap();
+        assert_eq!(tag, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Tag("v1.0".to_string()) });
+
+        let rev = BoringToml::parse_dep_value("{ git = \"u\", rev = \"abc123\" }").unwrap();
+        assert_eq!(rev, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()) });
+
+        // Key order shouldn't matter.
+        let reordered = BoringToml::parse_dep_value("{ rev = \"abc123\", git = \"u\" }").unwrap();
+        assert_eq!(reordered, DepSpec::Git { url: "u".to_string(), gitref: GitRef::Rev("abc123".to_string()) });
+    }
+
+    #[test]
+    fn parse_dep_value_rejects_multiple_refs() {
+        let err = BoringToml::parse_dep_value("{ git = \"u\", branch = \"main\", tag = \"v1\" }").unwrap_err();
+        assert!(err.contains("more than one"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_dep_value_rejects_path_and_git_together() {
+        let err = BoringToml::parse_dep_value("{ path = \"../x\", git = \"u\" }").unwrap_err();
+        assert!(err.contains("both 'path' and 'git'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn resolve_deps_rejects_reserved_names() {
+        for reserved in ["std", "crate", "boring"] {
+            let src = format!("[deps]\n{reserved} = \"../whatever\"\n");
+            let toml = BoringToml::parse(&src);
+            let err = toml.resolve_deps(&PathBuf::from("/some/project")).unwrap_err();
+            assert!(err.contains("reserved"), "unexpected error for '{reserved}': {err}");
+        }
+    }
+
+    #[test]
+    fn no_deps_section_is_empty() {
+        let toml = BoringToml::parse("[project]\nname = \"demo\"\n");
+        assert!(toml.deps.is_empty());
+        assert!(toml.resolve_deps(&PathBuf::from("/some/project")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_fns_section_parses_method_and_free_function_keys() {
+        let src = "[external_fns]\n\"ZipFile::readToEnd\" = [\"&mut\"]\n\"std::mem::swap\" = [\"&mut\", \"&mut\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_fns, vec![
+            ("ZipFile".to_string(), "readToEnd".to_string(), vec!["&mut".to_string()]),
+            ("std::mem".to_string(), "swap".to_string(), vec!["&mut".to_string(), "&mut".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn no_external_fns_section_is_empty() {
+        let toml = BoringToml::parse("[project]\nname = \"demo\"\n");
+        assert!(toml.external_fns.is_empty());
+    }
+
+    #[test]
+    fn external_fns_key_without_double_colon_is_skipped() {
+        let src = "[external_fns]\n\"NotAPair\" = [\"&mut\"]\n\"Tree::from_str\" = [\"\", \"&\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_fns, vec![
+            ("Tree".to_string(), "from_str".to_string(), vec!["".to_string(), "&".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn external_fns_key_splits_on_last_double_colon() {
+        // A free function's qualifier is a module path that can itself contain further
+        // `::` — unlike `[external_types]`'s `const_fns` (first-`::` split, safe there
+        // since a type name never contains `::`), this must split on the LAST `::` so
+        // `"std::mem::swap"` yields qualifier `"std::mem"`, not `"std"`.
+        let src = "[external_fns]\n\"std::mem::swap\" = [\"&mut\", \"&mut\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_fns, vec![
+            ("std::mem".to_string(), "swap".to_string(), vec!["&mut".to_string(), "&mut".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn external_fns_borrow_array_preserves_positional_empty_string() {
+        // Regression test for the exact bug the `resvg::render` real-crate repro found:
+        // `extract_array` (used by every other bracketed-array value in this file) drops
+        // empty-string elements entirely, which is fine for an unordered name list but
+        // corrupts a *positional* borrow-form array — `["&", "", "&mut"]` (by-value
+        // argument in the middle) must stay three elements, not collapse to two and
+        // silently misalign every later position. `extract_borrow_array` (used only for
+        // `[external_fns]` values) must keep the blank entry in place.
+        let src = "[external_fns]\n\"resvg::render\" = [\"&\", \"\", \"&mut\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_fns, vec![
+            ("resvg".to_string(), "render".to_string(),
+             vec!["&".to_string(), "".to_string(), "&mut".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn external_fns_include_parses_to_raw_paths() {
+        let src = "[external_fns]\ninclude = [\"../shared/external_fns.toml\"]\n\"LocalType::localMethod\" = [\"&mut\"]\n";
+        let toml = BoringToml::parse(src);
+        assert_eq!(toml.external_fns_includes, vec!["../shared/external_fns.toml".to_string()]);
+        assert_eq!(toml.external_fns, vec![
+            ("LocalType".to_string(), "localMethod".to_string(), vec!["&mut".to_string()]),
+        ]);
+    }
+
+    #[test]
+    fn resolve_external_fns_includes_folds_in_shared_declarations() {
+        let dir = std::env::temp_dir().join(format!("boring_test_external_fns_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared_path = dir.join("shared_external_fns.toml");
+        std::fs::write(&shared_path, "[external_fns]\n\"Shared::sharedMethod\" = [\"&\"]\n").unwrap();
+        let src = format!("[external_fns]\ninclude = [\"{}\"]\n\"Local::localMethod\" = [\"&mut\"]\n", shared_path.file_name().unwrap().to_str().unwrap());
+        let mut toml = BoringToml::parse(&src);
+        toml.resolve_external_fns_includes(&dir).unwrap();
+        assert!(toml.external_fns.contains(&("Shared".to_string(), "sharedMethod".to_string(), vec!["&".to_string()])));
+        assert!(toml.external_fns.contains(&("Local".to_string(), "localMethod".to_string(), vec!["&mut".to_string()])));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Load `boring.toml` from the current directory, or exit with an error.
@@ -553,6 +956,10 @@ fn load_project_toml() -> (BoringToml, PathBuf) {
         process::exit(1);
     }
     if let Err(e) = toml.resolve_derive_includes(toml_dir) {
+        eprintln!("error: {}", e);
+        process::exit(1);
+    }
+    if let Err(e) = toml.resolve_external_fns_includes(toml_dir) {
         eprintln!("error: {}", e);
         process::exit(1);
     }
@@ -794,6 +1201,7 @@ fn build_project_with_config(config: transpiler::TranspileConfig) {
         external_tuple_structs: toml.external_tuple_structs.clone(),
         external_const_fns: toml.external_const_fns.clone(),
         known_derives: toml.derive_traits.clone(),
+        external_fns: toml.external_fns.clone(),
         ..config
     };
     emit_rust_with_version_and_config(&toml.main, &toml.version, config, &toml.dependencies);
@@ -1012,7 +1420,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new() };
+    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
 
     if emit_rust {
         match file {
@@ -1030,6 +1438,7 @@ fn parse_build_command(build_args: &[String]) {
                     external_tuple_structs: toml.external_tuple_structs.clone(),
                     external_const_fns: toml.external_const_fns.clone(),
                     known_derives: toml.derive_traits.clone(),
+                    external_fns: toml.external_fns.clone(),
                     ..config
                 };
                 print_rust(&toml.main, config);
@@ -1149,6 +1558,20 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
         if src_dir.is_dir() {
             interp.add_search_path(src_dir);
         }
+        // If that project's boring.toml declares [deps] (named dependencies on other
+        // Boring projects — see docs/cross-project-code-sharing-gap.md), resolve them
+        // now so `use <name>.xxx` works. Errors here (a reserved name, an unsupported
+        // `git = ...` entry, ...) are fatal — same fail-fast convention as
+        // `load_project_toml`'s own [external_types]/[derives] include resolution.
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(deps) => interp.set_deps(deps),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
     }
 
     // Add BORING_PATH entries (uses OS path-list separator: `:` on Unix, `;` on Windows)
@@ -1219,6 +1642,21 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
     };
     let program = desugar_labeled_array::desugar_labeled_array(program);
     if report_check_result(&path, &source, checker::check(&program)) { process::exit(1); }
+    // Same [deps] resolution as emit_rust_to_dir, so `--emit-rust` (project mode or a
+    // standalone file) resolves `use <name>.xxx` identically to a real `boring build`.
+    let mut deps = config.deps.clone();
+    if let Some(root) = find_project_root(&path) {
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(resolved) => deps.extend(resolved),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+    }
+    let config = transpiler::TranspileConfig { deps, ..config };
     let out = transpiler::transpile_with_config(&program, config);
     report_transpile_warnings(&path, &source, &out.warnings);
     if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
@@ -1282,7 +1720,24 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
     }
 
     let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
-    let config_with_dir = transpiler::TranspileConfig { source_dir, ..config.clone() };
+    // Resolve boring.toml's [deps] the same way run_file does for `boring run` — via
+    // find_project_root, so this works uniformly for both project mode (`boring build`,
+    // no file arg) and a standalone file (`boring build path/to/file.br`), covering both
+    // without needing separate handling in build_project_with_config/the --emit-rust
+    // branch. See docs/cross-project-code-sharing-gap.md.
+    let mut deps = config.deps.clone();
+    if let Some(root) = find_project_root(&path) {
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(resolved) => deps.extend(resolved),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+    }
+    let config_with_dir = transpiler::TranspileConfig { source_dir, deps, ..config.clone() };
     let transpile_out = transpiler::transpile_with_config(&program, config_with_dir);
     report_transpile_warnings(&path, &source, &transpile_out.warnings);
     if !transpile_out.errors.is_empty() { report_transpile_errors(&path, &source, &transpile_out.errors); process::exit(1); }
@@ -1474,19 +1929,31 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     let mut visited = std::collections::HashSet::new();
     let mut items = Vec::new();
     let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut deps: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     // Mirror `run_file`'s project-root discovery: a file under `test/` or
     // `examples/` can `use` a module living in the project's `src/` directory
-    // without requiring `BORING_PATH` to be set manually.
+    // without requiring `BORING_PATH` to be set manually. Also resolve that
+    // project's boring.toml [deps] the same way, so `use <name>.xxx` works
+    // under GPU targets too — see docs/cross-project-code-sharing-gap.md.
     if let Some(root) = find_project_root(&path) {
         let src_dir = root.join("src");
         if src_dir.is_dir() {
             search_paths.push(src_dir);
         }
+        if let Ok(toml_src) = std::fs::read_to_string(root.join("boring.toml")) {
+            match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(resolved) => deps = resolved,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            }
+        }
     }
     if let Ok(env_path) = std::env::var("BORING_PATH") {
         search_paths.extend(std::env::split_paths(&env_path));
     }
-    merge_into(&path, &mut visited, &mut items, &search_paths);
+    merge_into(&path, &mut visited, &mut items, &search_paths, &deps);
     desugar_labeled_array::desugar_labeled_array(ast::Program { items })
 }
 
@@ -1495,6 +1962,7 @@ fn merge_into(
     visited: &mut std::collections::HashSet<PathBuf>,
     items: &mut Vec<ast::Item>,
     search_paths: &[PathBuf],
+    deps: &std::collections::HashMap<String, PathBuf>,
 ) {
     let canonical = match path.canonicalize() {
         Ok(p) => p,
@@ -1534,19 +2002,129 @@ fn merge_into(
     let dir = canonical.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     for item in program.items {
         if let ast::Item::Use(u) = &item {
+            // `use boring.<module>` — first-party stdlib, resolved against the embedded
+            // source in `stdlib_embed` rather than the filesystem. Checked before the
+            // on-disk search below since `boring` is never a real sibling file/crate.
+            if u.path.first().map(String::as_str) == Some("boring") {
+                let module = u.path.get(1).map(String::as_str).unwrap_or("");
+                match stdlib_embed::lookup(module) {
+                    Some(src) => {
+                        merge_stdlib_into(module, src, visited, items, search_paths, deps);
+                        continue;
+                    }
+                    None => {
+                        eprintln!("error: unknown boring stdlib module '{}'", module);
+                        process::exit(1);
+                    }
+                }
+            }
+            // `use <name>.xxx` for a declared [deps] dependency (see BoringToml::resolve_deps,
+            // docs/cross-project-code-sharing-gap.md) -- resolves against that dependency's
+            // own root instead of the generic search-path scan below. A file genuinely
+            // missing under a *declared* dependency is a hard error, unlike an ordinary
+            // unresolved `use` (kept as a literal Rust import a few lines down) -- the user
+            // named this dependency for exactly this purpose.
+            if let Some(root) = u.path.first() {
+                if let Some(dep_root) = deps.get(root.as_str()) {
+                    let rel: PathBuf = u.path[1..].iter().collect::<PathBuf>().with_extension("br");
+                    let candidate = dep_root.join(&rel);
+                    if candidate.exists() {
+                        merge_into(&candidate, visited, items, search_paths, deps);
+                        continue;
+                    }
+                    eprintln!(
+                        "error: cannot find '{}' in dependency '{}' (looked in {})",
+                        rel.display(), root, dep_root.display()
+                    );
+                    process::exit(1);
+                }
+            }
             let rel: PathBuf = u.path.iter().collect::<PathBuf>().with_extension("br");
             let candidate = std::iter::once(&dir)
                 .chain(search_paths.iter())
                 .map(|base| base.join(&rel))
                 .find(|c| c.exists());
             if let Some(candidate) = candidate {
-                merge_into(&candidate, visited, items, search_paths);
+                merge_into(&candidate, visited, items, search_paths, deps);
                 continue; // inlined -- the `use` item itself is now redundant
             }
             // Not a boring source file (e.g. `use std.collections`) -- keep the
             // item as-is so callers that also run the general transpiler over
             // this merged program (which knows how to emit real Rust `use`
             // statements for external crates) still see it.
+        }
+        items.push(item);
+    }
+}
+
+/// `use boring.<module>` counterpart of `merge_into` for GPU targets --
+/// parses embedded stdlib source (already looked up by the caller) instead
+/// of reading a file, and recurses into its own `use` items the same way
+/// (so a stdlib module can itself `use boring.other` or a sibling file).
+fn merge_stdlib_into(
+    module: &str,
+    source: &str,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    items: &mut Vec<ast::Item>,
+    search_paths: &[PathBuf],
+    deps: &std::collections::HashMap<String, PathBuf>,
+) {
+    let synthetic = stdlib_embed::synthetic_path(module);
+    if !visited.insert(synthetic) {
+        return; // already merged (circular or duplicate `use`)
+    }
+
+    let tokens = match lexer::lex_all(source) {
+        Ok(t) => t,
+        Err(errors) => {
+            report_lex_errors(Path::new(&format!("boring.{module}")), source, &errors);
+            process::exit(1);
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(Path::new(&format!("boring.{module}")), source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
+    };
+
+    for item in program.items {
+        if let ast::Item::Use(u) = &item {
+            if u.path.first().map(String::as_str) == Some("boring") {
+                let sub_module = u.path.get(1).map(String::as_str).unwrap_or("");
+                match stdlib_embed::lookup(sub_module) {
+                    Some(src) => {
+                        merge_stdlib_into(sub_module, src, visited, items, search_paths, deps);
+                        continue;
+                    }
+                    None => {
+                        eprintln!("error: unknown boring stdlib module '{}'", sub_module);
+                        process::exit(1);
+                    }
+                }
+            }
+            if let Some(root) = u.path.first() {
+                if let Some(dep_root) = deps.get(root.as_str()) {
+                    let rel: PathBuf = u.path[1..].iter().collect::<PathBuf>().with_extension("br");
+                    let candidate = dep_root.join(&rel);
+                    if candidate.exists() {
+                        merge_into(&candidate, visited, items, search_paths, deps);
+                        continue;
+                    }
+                    eprintln!(
+                        "error: cannot find '{}' in dependency '{}' (looked in {})",
+                        rel.display(), root, dep_root.display()
+                    );
+                    process::exit(1);
+                }
+            }
+            let rel: PathBuf = u.path.iter().collect::<PathBuf>().with_extension("br");
+            let candidate = search_paths.iter().map(|base| base.join(&rel)).find(|c| c.exists());
+            if let Some(candidate) = candidate {
+                merge_into(&candidate, visited, items, search_paths, deps);
+                continue;
+            }
         }
         items.push(item);
     }

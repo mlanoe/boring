@@ -1,0 +1,11 @@
+# Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
+# work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib
+# via this project's own boring.toml `[deps] numlib = "../fixtures/dep_numlib"`.
+# Registered as both `interp_test!(cross_project_dep)` (tests/run.rs, boring run
+# against this same src/main.br) and `transpile_project_test!(cross_project_dep)`
+# (tests/transpile.rs, project-mode `boring build` + a real `cargo run`).
+use numlib.big_uint.*
+
+let b = BigUint(21)
+print b.get()
+print b.doubled()

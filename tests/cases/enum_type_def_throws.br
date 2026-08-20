@@ -1,5 +1,5 @@
-# Regression test for docs/known-issues-biguint-spike.md item 5 (transpiler
-# fix) + item 4 (typed `throws` on a type-level method): a type-level factory
+# Regression test (transpiler fix + typed `throws` on a type-level method):
+# a type-level factory
 # method (`type def`) inside an ENUM body must accept a typed `throws Type:`
 # clause and have it wrapped in Result<T, E> by the transpiler, the same as
 # the already-fixed struct case (tests/cases/type_def_typed_throws.br).

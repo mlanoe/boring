@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 1:
+# Regression test:
 # a decimal integer literal that overflows the default `int` (i64) type but
 # fits `uint64` must lex/parse successfully when immediately cast, and the
 # cast must produce the literal's true value (not an error, and not `nil`).

@@ -1010,8 +1010,8 @@ impl Transpiler {
         //  - String interpolation / `print` can use `{}` on a plain enum value directly,
         //    not just on its pattern-matched fields or an explicit `as string:` conversion
         //    — this is what `print Foo.make()`/`print z` in
-        //    tests/cases/enum_type_def{,_throws}.br exercise (docs/known-issues-biguint-spike.md
-        //    item 5): those are plain, non-error enums with no Display impl otherwise.
+        //    tests/cases/enum_type_def{,_throws}.br exercise: those are plain,
+        //    non-error enums with no Display impl otherwise.
         // This also covers typed error enums (`throws CalcError`), which previously had
         // their own copy of this exact same Display impl gated on `is_error_type` only —
         // folded into this general case; `impl Error` below is still emitted only for those.
@@ -1110,7 +1110,6 @@ impl Transpiler {
             // emission logic already used for a struct's type_methods (see emit_struct
             // above); `emit_type_method` takes a plain type-name string, so it was already
             // generic over struct vs. enum with no changes needed here beyond calling it.
-            // (docs/known-issues-biguint-spike.md item 5, "Still open (transpiler)".)
             for tm in &e.type_methods {
                 self.emit_type_method(tm, &e.name);
                 self.blank();

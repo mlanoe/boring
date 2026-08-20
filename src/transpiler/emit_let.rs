@@ -257,6 +257,13 @@ impl Transpiler {
     /// `let` (cancel token + spawn) and returns `true`, telling the caller to return early
     /// instead of falling through to `emit_let`'s normal final-emission code.
     fn track_let_metadata(&mut self, s: &LetStmt, s_value: &Expr, val: &str, is_mutable_string_lit: bool, is_mutable_string_ty: bool) -> bool {
+        // Record the raw initializer for every let/var/mut binding, regardless of whether it
+        // also gets a `var_types` entry below — an unannotated arithmetic/unary initializer
+        // (`let rad = direction * 0.017453292`) never populates `var_types` at all (only the
+        // `s.ty.is_some()` and a handful of `s.ty.is_none()` shapes below do), so a later
+        // `infer_float_width` lookup on a bare `Var(rad)` would otherwise have nothing to go on
+        // and silently default a builtin math call like `sin(rad)` to f64.
+        self.var_init_exprs.insert(s.name.clone(), s_value.clone());
         // Track mutable Arc<str> vars for read_line / clear() special-casing
         if is_mutable_string_lit || is_mutable_string_ty {
             self.string_arc_vars.insert(s.name.clone());
@@ -464,6 +471,26 @@ impl Transpiler {
                         }
                     }
                 }
+            }
+        }
+        // Same as the `ExprKind::Call` struct-type tracking just above, for a constructor
+        // called with an explicit type argument (`mut q = Queue<string>([])`, parsed as
+        // `ExprKind::GenericCall` — see ast/mod.rs's doc on that variant — rather than
+        // `ExprKind::Call`). Found wiring `boring.collections`'s `Stack<T>`/`Queue<T>`
+        // (docs/cross-project-code-sharing-gap.md's stdlib work): without this, `q`'s
+        // struct type never got registered, so a later `q.count()` — despite `Queue`
+        // declaring its own `count()` method — fell through to the generic-collection
+        // `map_method` heuristic and was rewritten to `q.len()`, which doesn't exist on
+        // `Queue<T>` (E0599). Deliberately narrower than the `ExprKind::Call` block above
+        // (no newtype/optional-return tracking): those don't apply to a generic-typed-arg
+        // constructor call in practice, and this fix is scoped to unblocking method
+        // dispatch on an explicitly-instantiated generic struct.
+        if let ExprKind::GenericCall(callee, _, _) = &s_value.kind {
+            if let ExprKind::Var(type_name) = &callee.kind {
+                if type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && self.is_known_user_type(type_name.as_str()) {
+                        self.var_struct_types.insert(s.name.clone(), type_name.clone());
+                    }
             }
         }
         // Track element type for `let x = arr[i]` when arr has a known Array type.

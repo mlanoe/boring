@@ -184,10 +184,10 @@ impl Interpreter {
         // - An assignment expression, `defer`, or any other statement → non-value-producing
         let last_produces_value = decl.body.last().map(|s| match s {
             Stmt::Expr(e) => !matches!(e.kind, ExprKind::Assign(..)),
-            // `Stmt::IfLet` was missing here (docs/known-issues-biguint-spike.md
-            // item 6): as the literal tail statement of a function body, an
-            // `if let ... else ...` used to fall into the "non-value-producing"
-            // branch below and run via plain `exec_stmt` → `exec_if_let`, so a
+            // `Stmt::IfLet` was missing here: as the literal tail statement of
+            // a function body, an `if let ... else ...` used to fall into the
+            // "non-value-producing" branch below and run via plain
+            // `exec_stmt` → `exec_if_let`, so a
             // bare-call tail expression inside a branch (e.g. `Foo(v = 2)`)
             // tripped the unrelated must-use "return value discarded" check
             // instead of becoming the function's return value.

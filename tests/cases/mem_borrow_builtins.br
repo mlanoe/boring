@@ -1,0 +1,29 @@
+# Regression test for `boring.toml [external_fns]`'s built-in `KNOWN_EXTERNAL_FN_BORROWS`
+# table (src/transpiler/mod.rs) -- `std::mem::swap`/`replace`/`take` all take at least one
+# argument by `&mut`, which the transpiler's generic external-call fallback would otherwise
+# emit by value (invalid Rust). Transpiler-only (no interpreter support for a raw `mem.*`
+# call at all -- not added to tests/run.rs, same reason `pointee` isn't there), and
+# deliberately `int`-only so it stays a self-contained, zero-Cargo-dependency case: a
+# `string` argument would hit the separate "string literal as external call argument"
+# known gap documented in docs/book.md, which is not what this test is about.
+#
+# Also regression-covers the `mem.take(t)` false-positive bug `expr_is_path_receiver`
+# (src/transpiler/emit_methods.rs) fixes: `try_emit_array_special_method`'s generic `"take"`
+# case (a Vec/Iterator adapter, keyed on method name alone) used to misfire on `mem.take(t)`
+# and rewrite it into `mem.iter().cloned().take(...)` -- nonsense applied to a module path.
+
+var int a = 1
+var int b = 2
+mem.swap(a, b)
+print a
+print b
+
+var int c = 10
+let int old = mem.replace(c, 20)
+print old
+print c
+
+var int d = 5
+let int taken = mem.take(d)
+print taken
+print d

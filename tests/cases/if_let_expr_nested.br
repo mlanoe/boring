@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 6 — the most
+# Regression test — the most
 # dangerous of the four: a two-branch `if let x = expr: A else: B` used as a
 # value-producing expression that is NOT the literal, unnested tail statement
 # of a function used to silently always evaluate to `B`, even when the

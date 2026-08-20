@@ -1,4 +1,4 @@
-# Regression test: docs/known-issues-biguint-spike.md #9.
+# Regression test.
 #
 # `.length` on an implicit-`self` array field (`limbs.length`, no explicit
 # `self.` prefix) used to transpile to invalid Rust (`self.limbs::length`,

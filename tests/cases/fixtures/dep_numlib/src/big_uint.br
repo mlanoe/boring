@@ -1,0 +1,14 @@
+# Minimal stand-in "sibling Boring project" for the `cross_project_dep`
+# transpiler/interpreter test (tests/cases/cross_project_dep/) -- exercises
+# `boring.toml`'s `[deps]` mechanism (see BoringToml::resolve_deps,
+# docs/cross-project-code-sharing-gap.md), which resolves `use numlib.big_uint.*`
+# against this file via `[deps] numlib = "../fixtures/dep_numlib"`.
+
+pub struct BigUint:
+    pub uint value
+
+    req uint get():
+        value
+
+    req uint doubled():
+        value * 2

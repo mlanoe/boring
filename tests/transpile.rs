@@ -293,6 +293,13 @@ transpile_test!(modules);
 // See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
 // with tests/run.rs's registration above for the `boring run` side.
 transpile_test!(boring_stdlib_collections);
+// Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
+// work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
+// tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
+// own boring.toml, not a flat tests/cases/<name>.br file) so a real `cargo run`
+// exercises the generated Rust — same reason `ext_tuple_construct` needs project
+// mode. Paired with tests/run.rs's `cross_project_dep` test for the `boring run` side.
+transpile_project_test!(cross_project_dep);
 transpile_test!(ownership);
 transpile_test!(tasks);
 transpile_test!(channels);
@@ -334,7 +341,7 @@ transpile_test!(typed_catch_match_error);
 // impls) the same way a regular throwing function's typed throws_ty already is.
 transpile_test!(type_def_typed_throws);
 transpile_test!(type_method_throws_untyped);
-// docs/known-issues-biguint-spike.md item 5, "Still open (transpiler)": an enum's
+// An enum's
 // `type_methods` were silently dropped from codegen entirely -- `enum Foo { A(isize) }`
 // with no `impl Foo { fn make() ... }` block, even though the call site (`Foo::make()`)
 // was still emitted. Fixed in `emit_enum` (src/transpiler/emit_struct.rs), reusing the
@@ -526,3 +533,12 @@ transpile_project_test!(text_color_construct);
 // clear_color_construct/src/main.br's own doc comment. Reuses the `ext_tuple` fixture
 // crate (extended with a stand-in `ClearColor`), same reason as `ext_tuple_construct`.
 transpile_project_test!(clear_color_construct);
+
+// `boring.toml [external_fns]`'s built-in `KNOWN_EXTERNAL_FN_BORROWS` supplement
+// (src/transpiler/mod.rs) -- `std::mem::swap`/`replace`/`take` argument-borrow
+// whitelisting, plus the `expr_is_path_receiver` fix for `mem.take(t)` being
+// misidentified as the generic Vec/Iterator `.take(n)` adapter. See tests/cases/
+// mem_borrow_builtins.br's own doc comment. Zero external Cargo dependency (std::mem
+// only), so single-file mode is enough -- no boring.toml/[external_fns] needed here,
+// since this exercises the compiler's *built-in* table, not a project-declared one.
+transpile_test!(mem_borrow_builtins);

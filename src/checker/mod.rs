@@ -797,8 +797,7 @@ impl Checker {
     fn check_enum(&mut self, e: &EnumDecl) {
         for m in &e.methods { self.check_fn(m); }
         // `type def`/`type req`/`type set` factory/static methods — mirrors
-        // `check_struct`'s identical loop. See
-        // docs/known-issues-biguint-spike.md item 5.
+        // `check_struct`'s identical loop.
         for m in &e.type_methods {
             self.push_scope();
             for p in &m.params { self.define_typed(&p.name, param_binding(p), p.ty.clone()); }

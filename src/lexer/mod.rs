@@ -1055,8 +1055,7 @@ fn lex_number(first: char, chars: &mut CharIter<'_>, line: usize, col: usize) ->
     // type (`int`/isize) genuinely can't hold it, but an immediately-following
     // `as uint64` (or wider unsigned target) can; deferring that decision past
     // the lexer (which has no notion of a following `as` cast) means parsing
-    // this token must not itself reject the value. See
-    // docs/known-issues-biguint-spike.md item 1.
+    // this token must not itself reject the value.
     match s.parse::<i64>() {
         Ok(n) => Ok(TokenKind::Int(n)),
         Err(_) => s.parse::<u64>().map(TokenKind::UInt64).map_err(|_| LexError::IntegerOverflow { line, col }),
@@ -1175,7 +1174,7 @@ mod tests {
         assert_eq!(kinds("42"), vec![TokenKind::Int(42), TokenKind::Newline, TokenKind::Eof]);
     }
 
-    /// Regression test for docs/known-issues-biguint-spike.md item 1: a decimal
+    /// Regression test: a decimal
     /// literal that overflows `i64` but fits `u64` (e.g. `u64::MAX`) must lex
     /// successfully as `TokenKind::UInt64`, not fail with `IntegerOverflow` — the
     /// range check against the literal's *default* type is deferred past lexing so

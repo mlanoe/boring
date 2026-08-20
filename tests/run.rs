@@ -174,6 +174,37 @@ interp_test!(modules);
 // See tests/cases/boring_stdlib_collections.br's own doc comment. Paired
 // with tests/transpile.rs's registration below for the `boring build` side.
 interp_test!(boring_stdlib_collections);
+
+// Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
+// work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib
+// via tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Doesn't fit
+// `interp_test!`'s flat `tests/cases/<name>.br` convention (this is a small project
+// with its own boring.toml, like `transpile_project_test!` cases) -- `run_file`
+// discovers that boring.toml itself via `find_project_root`, independent of the test
+// runner's cwd, so no `current_dir` juggling is needed here unlike the
+// `transpile_project_test!` counterpart below (project-mode `boring build` reads
+// `./boring.toml` from cwd). Paired with tests/transpile.rs's registration for the
+// `boring build` + real `cargo run` side.
+#[test]
+fn cross_project_dep() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/cross_project_dep/src/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "cross_project_dep exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "21\n42");
+}
+
 interp_test!(ownership);
 interp_test!(let_pattern);
 interp_test!(result_compat);
@@ -260,30 +291,30 @@ interp_test!(dict_string_key_index);
 // tests/cases/var_struct_param_mutation.br's own doc comment.
 interp_test!(var_struct_param_mutation);
 
-// docs/known-issues-biguint-spike.md item 5: `type def`/`type req` must
+// `type def`/`type req` must
 // parse inside an `enum` body, not just a `struct` body. Now registered in
 // both tests/run.rs and tests/transpile.rs (see tests/cases/enum_type_def.br's
 // own doc comment) -- the transpiler codegen gap for this is fixed too.
 interp_test!(enum_type_def);
-// docs/known-issues-biguint-spike.md item 5: an enum's type-level method's
+// An enum's type-level method's
 // `throws Type:` clause must be wrapped in Result<T, E> by the transpiler,
 // the same as a struct's already is (item 4). `boring run` side of this
 // pairs with tests/transpile.rs's registration below.
 interp_test!(enum_type_def_throws);
 
-// docs/known-issues-biguint-spike.md item 6 (most dangerous of the four: a
-// silent wrong-value bug, not a compile error): a two-branch
+// Most dangerous of the four: a
+// silent wrong-value bug, not a compile error: a two-branch
 // `if let x = expr: A else: B` used as a nested (non-tail) expression used
 // to always evaluate to `B`, and the same shape as a function's direct tail
 // statement used to fail with an unrelated "return value discarded" error.
 interp_test!(if_let_expr_nested);
 
-// docs/known-issues-biguint-spike.md item 7: unary `-` on a genuinely
+// Unary `-` on a genuinely
 // int64/int128-tagged value (as opposed to the generic untyped `Value::Int`)
 // used to fail with "cannot negate Int64"/"cannot negate Int128".
 interp_test!(tagged_int_negate);
 
-// docs/known-issues-biguint-spike.md item 8: the interpreter's move-checker
+// The interpreter's move-checker
 // used to treat int64/int128-tagged scalars as non-Copy, wrongly raising
 // "use of moved value" on a plain `let t = n` reuse, unlike the generic
 // untyped `int`.

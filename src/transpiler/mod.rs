@@ -120,6 +120,25 @@ pub struct TranspileConfig {
     /// against `boring` itself. Always additive, never overrides the built-in list. Empty
     /// unless `boring build` populated it from `BoringToml`.
     pub known_derives: Vec<String>,
+    /// Named dependencies on other Boring projects, sourced from `boring.toml`'s `[deps]`
+    /// (see `docs/cross-project-code-sharing-gap.md`). Maps a dependency name (the
+    /// `use <name>.xxx` prefix) to its `src/` directory. Empty unless `boring build`
+    /// populated it from `BoringToml::resolve_deps`.
+    pub deps: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Project-declared supplement to `KNOWN_EXTERNAL_FN_BORROWS` (see that const's doc
+    /// comment below), sourced from `boring.toml`'s `[external_fns]` section. Each entry is
+    /// `(qualifier, method, arg_borrows)`: `qualifier` is the external type name for a
+    /// method-call key (`"ZipFile"`) or the fully-qualified call-site path for a free
+    /// function (`"std::mem::swap"`'s module part, `"std::mem"`) — see
+    /// `Transpiler::external_fn_arg_borrows`'s doc comment for the exact split. `method` is
+    /// the Rust (snake_case, post `camel_to_snake`/`map_method`) name actually emitted at the
+    /// call site. `arg_borrows` is one entry per argument *after* the receiver (a method
+    /// call's `self`/first free-function arg still counts as position 0 here for a free
+    /// function, since a free function has no receiver to exclude) — each entry is `"&"`,
+    /// `"&mut"`, or `""` (by value, the pre-existing default). Always additive, never
+    /// overrides a built-in entry. Empty unless `boring build` populated it from
+    /// `BoringToml`.
+    pub external_fns: Vec<(String, String, Vec<String>)>,
 }
 
 impl Default for TranspileConfig {
@@ -131,12 +150,14 @@ impl Default for TranspileConfig {
             instrument: false,
             sanitize: None::<&'static str>,
             source_dir: std::path::PathBuf::new(),
+            deps: std::collections::HashMap::new(),
             gpu_kernels: Vec::new(),
             is_gpu_target: false,
             gpu_top_level_handled_by_host: false,
             external_tuple_structs: Vec::new(),
             external_const_fns: Vec::new(),
             known_derives: Vec::new(),
+            external_fns: Vec::new(),
         }
     }
 }
@@ -200,6 +221,7 @@ pub fn transpile_full(program: &Program) -> TranspileOutput {
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
     let mut t = Transpiler::new(config);
     t.source_dir = t.config.source_dir.clone();
+    t.deps = t.config.deps.clone();
     t.emit_program(program);
     let apply_single_thread_fixups = |s: String| -> String {
         s
@@ -679,6 +701,10 @@ struct Transpiler {
     pub(crate) boring_mod_names: std::collections::HashSet<String>,
     /// Directory of the root source file — used to resolve relative `use` paths.
     pub(crate) source_dir: std::path::PathBuf,
+    /// Named cross-project dependencies (copied from `TranspileConfig::deps` — see that
+    /// field's doc comment). Consulted by `emit_top.rs`'s `emit_use`/`deep_pre_scan` before
+    /// falling back to `source_dir`-relative resolution.
+    pub(crate) deps: std::collections::HashMap<String, std::path::PathBuf>,
     /// Canonical paths already inlined — prevents duplicate / circular imports.
     pub(crate) loaded: std::collections::HashSet<std::path::PathBuf>,
     /// Per-file Rust output collected from inlined `.br` use imports.
@@ -1047,6 +1073,7 @@ impl Transpiler {
             rc_identity_vars: std::collections::HashSet::new(),
             boring_mod_names: std::collections::HashSet::new(),
             source_dir: std::path::PathBuf::new(),
+            deps: std::collections::HashMap::new(),
             loaded: std::collections::HashSet::new(),
             modules: Vec::new(),
             prelude_emitted: false,
@@ -2236,6 +2263,111 @@ impl Transpiler {
         "ClearColor",
     ];
 
+    /// Hand-verified argument-borrow requirements for external (Rust, non-Boring-authored)
+    /// functions/methods whose signature takes `&T`/`&mut T` in a position *other than* the
+    /// receiver (`self`) — the gap this whole table exists to close: `try_emit_type_method_call`
+    /// and `emit_method_call_fallback`'s generic external-call fallback (emit_expr.rs/
+    /// emit_methods.rs) have, by construction, no real external signature to consult when
+    /// emitting a call's arguments, so every argument is emitted by value
+    /// (`self.emit_expr(&a.value)`) unless something overrides it. A receiver `self` is NOT
+    /// affected by this gap and needs no entry here — Rust auto-resolves `&mut self` from an
+    /// owned place expression at a method-call receiver on its own (`entry.readToEnd(buf)`
+    /// already transpiles fine); only arguments *after* the receiver need this.
+    ///
+    /// Each entry is `(qualifier, method, arg_borrows)`:
+    /// - `qualifier` is the external type name for an instance-method call (matched against
+    ///   `Transpiler::resolve_expr_struct_type(obj)`/`resolve_expr_external_type_name(obj)` —
+    ///   the Boring-source type name the receiver was declared with, e.g. `"ZipFile"`), the
+    ///   external type name itself for a static `Type.method(args)` call with no
+    ///   Boring-registered `struct_type_method_sigs` entry (`"Tree"` for `Tree.from_str(...)`,
+    ///   handled by `try_emit_type_method_call`'s own external fallback), or the fully-qualified module path as
+    ///   normalized at the call site for a free function (e.g. `"std::mem"` for `mem.swap(...)`
+    ///   /`std.mem.swap(...)`, both normalized to `std::mem` by `emit_method_call_fallback`'s
+    ///   `obj_qualified` mapping before this table is consulted). Qualifying by type name (not
+    ///   bare method name) is deliberate — the same lesson learned from a real bug this
+    ///   session in an unrelated part of the transpiler (a bare-method-name lookup emitted a
+    ///   stray `?` for a same-named-but-unrelated method on a different type, see
+    ///   `emit_method_call_fallback`'s `receiver_struct`/`struct_throws` handling): matching by
+    ///   method name alone here would apply another type's borrow requirements to an unrelated
+    ///   method that happens to share its name.
+    /// - `method` is the Rust name actually emitted at the call site — i.e. *after*
+    ///   `camel_to_snake`/`map_method`, not necessarily the raw Boring source spelling
+    ///   (`readToEnd` in `.br` source, `read_to_end` here).
+    /// - `arg_borrows` is one entry per call argument, in order, each `"&"`, `"&mut"`, or `""`
+    ///   (by value — the pre-existing, still-default behavior). For a method call this excludes
+    ///   `self`/the receiver (index 0 of `arg_borrows` is the method's first *argument*, not the
+    ///   receiver); for a free function every argument counts, since there is no receiver to
+    ///   exclude. An `arg_borrows` shorter than the actual call's argument count leaves the
+    ///   remaining trailing arguments at the by-value default rather than erroring — a
+    ///   deliberately forgiving reading matching `Vec::get`-style out-of-bounds `None` handling
+    ///   elsewhere in this file, not a validated arity check.
+    ///
+    /// `std::mem::swap`/`replace`/`take` are the motivating, zero-Cargo-dependency cases (a
+    /// spike confirmed `mem.swap(a, b)` transpiles both arguments by value today, producing
+    /// invalid Rust for `fn swap<T>(a: &mut T, b: &mut T)`) — hand-verified against
+    /// `std::mem`'s actual signatures:
+    ///   - `swap<T>(a: &mut T, b: &mut T)` — both arguments `&mut`.
+    ///   - `replace<T>(dest: &mut T, src: T) -> T` — only the first argument `&mut`, the second
+    ///     stays by value (moved in, not borrowed).
+    ///   - `take<T: Default>(dest: &mut T) -> T` — its one argument `&mut`.
+    /// Extend this list as more such external functions/methods (e.g. `zip`'s
+    /// `ZipFile::read_to_end(&mut self, buf: &mut Vec<u8>)`, `resvg::render(tree: &Tree,
+    /// transform: Transform, pixmap: &mut PixmapMut)`) are hand-verified against their crate's
+    /// own source — or, for a project that doesn't want to patch the compiler for its own
+    /// third-party dependency, declared locally via `boring.toml`'s `[external_fns]` section
+    /// (see `TranspileConfig::external_fns`'s doc comment and docs/book.md's `[external_fns]`
+    /// section).
+    const KNOWN_EXTERNAL_FN_BORROWS: &[(&str, &str, &[&str])] = &[
+        ("std::mem", "swap", &["&mut", "&mut"]),
+        ("std::mem", "replace", &["&mut", ""]),
+        ("std::mem", "take", &["&mut"]),
+    ];
+
+    /// Consults the built-in hand-verified `KNOWN_EXTERNAL_FN_BORROWS` first, then
+    /// `self.config.external_fns` (the project's own `boring.toml` `[external_fns]`
+    /// supplement — see `TranspileConfig::external_fns`'s doc comment). The project list is
+    /// purely additive: it can never remove or override a built-in entry. Returns `None` when
+    /// neither list has an entry for `(qualifier, method)` — callers should fall back to the
+    /// pre-existing by-value argument emission in that case, unchanged.
+    ///
+    /// `method` is always the already-`camel_to_snake`'d Rust name (both call sites pass
+    /// `rust_method_name`/`rust_method`, computed *before* calling this). `KNOWN_EXTERNAL_FN_BORROWS`'s
+    /// own entries are hand-written directly in that already-Rust form (`"swap"`, `"take"`, ...),
+    /// so they compare equal as-is. A `boring.toml [external_fns]` key, by contrast, is stored
+    /// verbatim from the TOML text as parsed by `BoringToml::parse_external_fn_key` — e.g.
+    /// `"ZipFile::readToEnd"` stores the method half as literal `"readToEnd"`, the same casing a
+    /// project author would naturally write matching their `.br` source's own call
+    /// (`entry.readToEnd(buf)`). Without normalizing it here too, a project's own whitelist entry
+    /// would silently never match at all (`"readToEnd" != "read_to_end"`) — found via this exact
+    /// scenario (`ZipFile::readToEnd` against a real `zip` crate build) when `mem.swap`/`replace`/
+    /// `take`'s own identical Boring-source/Rust spellings had never exposed the gap.
+    pub(crate) fn external_fn_arg_borrows(&self, qualifier: &str, method: &str) -> Option<Vec<String>> {
+        if let Some(&(_, _, borrows)) = Self::KNOWN_EXTERNAL_FN_BORROWS.iter()
+            .find(|&&(q, m, _)| q == qualifier && m == method)
+        {
+            return Some(borrows.iter().map(|s| s.to_string()).collect());
+        }
+        self.config.external_fns.iter()
+            .find(|(q, m, _)| q == qualifier && camel_to_snake(m) == method)
+            .map(|(_, _, borrows)| borrows.clone())
+    }
+
+    /// Applies one `external_fn_arg_borrows` result to a call's already-emitted (by-value)
+    /// argument strings — prefixing `&mut `/`&` at each position `borrows` names, leaving a
+    /// `""` (or a position beyond `borrows`'s length) untouched. Shared by both call sites that
+    /// consult the whitelist (the free-function path-receiver branch and the generic external
+    /// instance-method fallback, both in emit_methods.rs) so the prefixing logic itself is
+    /// written once.
+    pub(crate) fn apply_arg_borrows(borrows: &[String], arg_strs: Vec<String>) -> Vec<String> {
+        arg_strs.into_iter().enumerate().map(|(i, s)| {
+            match borrows.get(i).map(String::as_str) {
+                Some("&mut") => format!("&mut {}", s),
+                Some("&") => format!("&{}", s),
+                _ => s,
+            }
+        }).collect()
+    }
+
     /// Consults the built-in hand-verified list first, then
     /// `self.config.external_tuple_structs` (the project's own `boring.toml`
     /// `[external_types]` supplement — see `TranspileConfig::external_tuple_structs`'s doc
@@ -3016,9 +3148,9 @@ impl Transpiler {
                     // Register type vars and type methods for emission dispatch — mirrors
                     // `pre_scan_struct_item`'s identical registration for a struct's
                     // `type_methods` (see that function's own comments for the rationale on
-                    // each map). Enums have no `type var`/`type let` (out of scope per
-                    // docs/known-issues-biguint-spike.md item 5), so only `type_methods` is
-                    // registered here, unlike the struct side which also handles type vars.
+                    // each map). Enums have no `type var`/`type let` (out of scope for now),
+                    // so only `type_methods` is registered here, unlike the struct side
+                    // which also handles type vars.
                     let mut method_map = std::collections::HashMap::new();
                     for tm in &e.type_methods {
                         method_map.insert(tm.name.clone(), tm.kind.clone());
@@ -3955,5 +4087,61 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
             "error should explain Debug is a derive macro, got: {:?}", out.errors);
         assert!(!out.code.contains("impl Debug for Foo"),
             "must not emit an impl block for a derive-macro name via ext, got:\n{}", out.code);
+    }
+
+    // ── `boring.toml [external_fns]` / `KNOWN_EXTERNAL_FN_BORROWS` ──────────────────────
+    // `mem_borrow_builtins` (tests/cases/mem_borrow_builtins.br, tests/transpile.rs) already
+    // covers the built-in table end-to-end through a real `cargo run`. The three unit tests
+    // below cover project-declared `TranspileConfig::external_fns` entries at the transpiler
+    // level (no real external crate needed, since these only check the generated Rust
+    // *string* — a full compile+run of a project-declared entry against real crates like
+    // `zip`/`resvg` was done separately, outside this repo's own test suite).
+
+    #[test]
+    fn external_fns_static_type_call_applies_project_declared_borrows() {
+        // `Type.method(args)` — the "static call on an unregistered external type" shape
+        // (`try_emit_type_method_call`'s own external fallback), the third and, until this
+        // fix, unwired call site (found via the `Tree.from_str(text, opt)` real-crate repro
+        // — `resvg.render(...)`, a free function, already worked; this one silently didn't).
+        let src = "def main():\n    var int a = 1\n    var int b = 2\n    Widget.build(a, b)\n";
+        let mut config = TranspileConfig::default();
+        config.external_fns = vec![("Widget".to_string(), "build".to_string(), vec!["".to_string(), "&mut".to_string()])];
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("Widget::build(a, &mut b)"),
+            "static Type.method(args) call should apply project-declared arg borrows, got:\n{}", code);
+    }
+
+    #[test]
+    fn external_fns_method_name_is_normalized_to_snake_case_before_matching() {
+        // Regression test: `boring.toml [external_fns]` stores a key's method half verbatim
+        // from the TOML text (e.g. `"buildThing"`, matching the `.br` source's own camelCase
+        // call spelling) — never run through `camel_to_snake` at parse time. Every call site
+        // passes the *already*-`camel_to_snake`'d Rust method name to
+        // `external_fn_arg_borrows`, so the lookup itself must normalize the stored entry
+        // too, or a project's own whitelist entry never matches at all. Never caught by
+        // `mem.swap`/`replace`/`take` (identical Boring-source/Rust spellings already) —
+        // only surfaced via the `ZipFile::readToEnd` (→ `read_to_end`) real-crate repro.
+        let src = "def main():\n    var int a = 1\n    var int b = 2\n    Widget.buildThing(a, b)\n";
+        let mut config = TranspileConfig::default();
+        config.external_fns = vec![("Widget".to_string(), "buildThing".to_string(), vec!["".to_string(), "&mut".to_string()])];
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("Widget::build_thing(a, &mut b)"),
+            "camelCase TOML method name should still match the snake_case Rust call site, got:\n{}", code);
+    }
+
+    #[test]
+    fn external_fns_preserves_positional_by_value_placeholder_mid_array() {
+        // Regression test for the `resvg::render` real-crate repro's other bug:
+        // `["&", "", "&mut"]`'s middle by-value placeholder must stay at index 1, not be
+        // dropped and shift the trailing `"&mut"` left (`BoringToml::extract_borrow_array`,
+        // src/main.rs — this test exercises the *consuming* end of that fix, the TOML
+        // parsing side has its own dedicated unit tests in main.rs).
+        let src = "def main():\n    var int a = 1\n    var int b = 2\n    var int c = 3\n    Lib.call3(a, b, c)\n";
+        let mut config = TranspileConfig::default();
+        config.external_fns = vec![("Lib".to_string(), "call3".to_string(),
+            vec!["&".to_string(), "".to_string(), "&mut".to_string()])];
+        let code = transpile_src_with_config(src, config);
+        assert!(code.contains("Lib::call3(&a, b, &mut c)"),
+            "middle by-value arg must stay unprefixed, first/last keep their own borrows, got:\n{}", code);
     }
 }

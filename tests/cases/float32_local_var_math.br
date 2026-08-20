@@ -1,0 +1,27 @@
+# Regression test: a builtin math function (`sin`, `cos`, ...) called on a plain
+# `float32`-typed LOCAL VARIABLE — not a struct field, not a function param directly,
+# but a `let`-bound local whose value comes from an unannotated arithmetic expression
+# over `float32` values — must keep its result at `f32` in the transpiled Rust.
+#
+# The builtin math lowering infers its argument's width by walking the argument
+# expression (`infer_float_width`); for a bare `Var(name)` it originally only
+# consulted `var_types`. But an unannotated `let rad = direction * 0.017453292`
+# initializer (a `BinOp`, not a literal/struct-field/call) never gets an entry in
+# `var_types` at all — only a handful of initializer shapes do (see emit_let.rs's
+# `track_let_metadata`) — so `sin(rad)` fell through to the `f64` default even
+# though `rad` is transitively float32. Mixing that with another float32 value
+# (`steps * sin(rad)`) then fails `rustc` with "cannot multiply f32 by f64"
+# (E0277) even though the untyped interpreter runs it fine — same category of gap
+# as `float32_math_builtins.br`, just triggered through a local var instead of an
+# explicit struct-field/param access, so only caught by a real `rustc` compile of
+# the `--emit-rust` output (see tests/transpile.rs), not by `boring run`.
+#
+# This function deliberately has no `self`/struct — an ordinary free function —
+# to also confirm the fix doesn't rely on the struct-method implicit-self path.
+
+def float32 exec_like(float32 direction, float32 steps):
+    let rad = direction * 0.017453292
+    let dx = steps * cos(rad)
+    dx
+
+print exec_like(0.0, 10.0)

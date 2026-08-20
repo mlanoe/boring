@@ -9,81 +9,78 @@
 #
 # See the LICENSE file at the project root for the full text.
 
-# Boring standard library — collection index traits
+# Boring standard library — boring.collections
 #
-# These traits implement the Boring index API on Rust's standard collections.
-# Three traits so each collection has its own natural index type:
-#   [T]    → ArrayIndex  (index: uint)
-#   {K: V} → DictIndex   (index: K)
-#   {T}    → SetIndex    (index: uint, positional)
+# Genuine Boring-authored composite types built on top of the native `[T]`
+# array — unlike `[T]`/`{T}`/`{K=V}` themselves (always-global primitives,
+# see docs/book.md's "Built-in Types & Functions Reference"), `Stack<T>` and
+# `Queue<T>` don't exist until you import this module:
+#
+#   use boring.collections.*             # everything (note: a bare
+#                                         # `use boring.collections` does NOT
+#                                         # mean this — see stdlib/README.md)
+#   use boring.collections.Stack         # selective import
+#   use boring.collections.Stack, Queue  # selective, multiple items
+#
+# Not to be confused with the `Stack<T, uint N>` fixed-capacity example in
+# docs/book.md §13 (Const generics) — that's a teaching example for the
+# `<uint N>` const-generic feature. This `Stack<T>` is the real, unbounded,
+# growable stack you actually get from `use boring.collections.*`.
+#
+# Implementation note: deliberately built only from `isEmpty`/`count`/
+# `push`/`slice`/indexing — not `.pop()`/`.first()`/`.last()`, which (as of
+# this writing) the transpiler doesn't yet round-trip correctly through a
+# generic method declared `T?` (see the transpiler fixes landed alongside
+# this module: `emit_methods.rs`'s `is_option_expr`, `emit_let.rs`'s
+# `GenericCall` struct-type tracking, `emit_expr.rs`'s constructor turbofish
+# and Optional-method-call print detection). Revisit once `.pop()`'s
+# `map_method` unwrap-to-default semantics and `.first()`/`.last()`'s
+# missing `.cloned()` are fixed for real.
 
-trait ArrayIndex:
-    type Item as Clone
-    req uint?       first_index()
-    req uint?       next_index(uint i)
-    req [Self.Item] remove_at(uint? i)
-    req Self.Item   get_at(uint i)
+# ── Stack<T> — LIFO, backed by [T] ──────────────────────────────────────────
 
-ext Vec<T as Clone> as ArrayIndex:
-    type Item = T
-    req uint? first_index():
-        if self.isEmpty(): nil else 0
-    req uint? next_index(uint i):
-        if i + 1 < self.len(): i + 1 else nil
-    req [T] remove_at(uint? i):
-        var v = self.clone()
-        if let idx = i:
-            if idx < v.len():
-                v.remove(idx)
-        v
-    req T get_at(uint i):
-        self[i].clone()
+pub struct Stack<T>:
+    pub var mut [T] items
 
+    req bool isEmpty():
+        items.isEmpty()
 
-trait DictIndex:
-    type Key as Clone
-    type Value as Clone
-    req Self.Key?   first_index()
-    req Self.Key?   next_index(Self.Key k)
-    req Self        remove_at(Self.Key? k)
-    req Self.Value  get_at(Self.Key k)
+    req int count():
+        items.count()
 
-ext HashMap<K as Clone+Eq+Hash, V as Clone> as DictIndex:
-    type Key = K
-    type Value = V
-    req K? first_index():
-        self.keys().next().cloned()
-    req K? next_index(K k):
-        let keys = self.keys().collect()
-        let pos = keys.iter().position(kk: kk == k)
-        pos.and_then(p: keys.get(p + 1)).map(kk: kk.clone())
-    req HashMap<K, V> remove_at(K? k):
-        var m = self.clone()
-        if let key = k:
-            m.remove(key)
-        m
-    req V get_at(K k):
-        self.get(k).cloned().unwrap()
+    def void push(T item):
+        items.push(item)
 
+    def T? pop():
+        guard !items.isEmpty() else return nil
+        let top = items[items.count() - 1]
+        items = items.slice(0, items.count() - 1)
+        top
 
-trait SetIndex:
-    type Item as Clone
-    req uint?       first_index()
-    req uint?       next_index(uint i)
-    req Self        remove_at(uint? i)
-    req Self.Item   get_at(uint i)
+    req T? peek():
+        guard !items.isEmpty() else return nil
+        items[items.count() - 1]
 
-ext HashSet<T as Clone+Eq+Hash> as SetIndex:
-    type Item = T
-    req uint? first_index():
-        if self.isEmpty(): nil else 0
-    req uint? next_index(uint i):
-        if i + 1 < self.len(): i + 1 else nil
-    req HashSet<T> remove_at(uint? i):
-        let elem = i.and_then(i: self.iter().nth(i).cloned())
-        var s = self.clone()
-        if let e = elem:
-            s.remove(e)
-        s
-    req T get_at(uint i):
-        self.iter().nth(i).cloned().unwrap()
+# ── Queue<T> — FIFO, backed by [T] ──────────────────────────────────────────
+
+pub struct Queue<T>:
+    pub var mut [T] items
+
+    req bool isEmpty():
+        items.isEmpty()
+
+    req int count():
+        items.count()
+
+    def void enqueue(T item):
+        items.push(item)
+
+    def T? dequeue():
+        guard !items.isEmpty() else return nil
+        let front = items[0]
+        items = items.slice(1, items.count())
+        front
+
+    req T? peek():
+        guard !items.isEmpty() else return nil
+        items[0]

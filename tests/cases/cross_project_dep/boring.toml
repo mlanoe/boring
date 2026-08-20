@@ -1,0 +1,7 @@
+[project]
+name = "cross_project_dep"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+numlib = "../fixtures/dep_numlib"

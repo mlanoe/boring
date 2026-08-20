@@ -1,4 +1,4 @@
-# Regression test for docs/known-issues-biguint-spike.md item 8: the
+# Regression test: the
 # interpreter's move-checker used to treat a genuinely int64/int128-tagged
 # scalar as non-Copy, so reusing it after a plain `let t = n` wrongly raised
 # "use of moved value". book.md documents ALL primitive numeric types as

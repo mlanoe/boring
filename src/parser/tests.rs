@@ -50,7 +50,7 @@ fn test_fn_type_in_let() {
 
 #[test]
 fn test_type_def_typed_throws() {
-    // Regression test for docs/known-issues-biguint-spike.md item 4: a type-level
+    // Regression test: a type-level
     // factory method (`type def`) must accept a typed `throws Type:` clause, the
     // same grammar `req`/`def` already accept — previously only the untyped
     // `throws:` form parsed here.

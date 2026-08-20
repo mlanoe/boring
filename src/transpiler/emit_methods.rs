@@ -103,6 +103,32 @@ impl Transpiler {
         }
     }
 
+    /// Fallback for `external_fn_arg_borrows`'s receiver-type lookup when `resolve_expr_struct_type`
+    /// declines. That function deliberately resolves only a Boring-*known* user struct/enum type
+    /// (`is_known_user_type`/`struct_fields`) — by design, to avoid misattributing one type's
+    /// method/field to an unrelated type that happens to share a name (see its own doc comment
+    /// and `is_known_user_type`'s). An `[external_fns]` whitelist entry is keyed on the opposite
+    /// case: a type Boring never parsed a `struct`/`enum` for at all (a real external crate type
+    /// like `zip`'s `ZipFile`), so its name can only come from the variable's own explicit type
+    /// annotation (tracked in `var_types` for *any* named type, known-user or not — see
+    /// `emit_let.rs`'s unconditional `self.var_types.insert(s.name.clone(), ty.clone())` for a
+    /// `let`/`var` with an explicit annotation), never from `struct_fields`.
+    ///
+    /// Deliberately narrow: only a plain `Var` receiver, only when it carries a bare
+    /// `Type::Named(..)` annotation. `[external_fns]`'s only documented receiver shape is a local
+    /// variable declared with the external type's name (`let ZipFile entry = ...`) — this doesn't
+    /// attempt `self`/field-access/array-index resolution the way `resolve_expr_struct_type` does
+    /// for genuine user types, since there's no realistic external-type equivalent of "a struct
+    /// field typed as some other external type" in the cases this table exists for.
+    pub(crate) fn resolve_expr_external_type_name(&self, expr: &Expr) -> Option<String> {
+        if let ExprKind::Var(v) = &expr.kind {
+            if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
+                return Some(n.clone());
+            }
+        }
+        None
+    }
+
     /// Is `name` a real user-declared type (struct or enum)? The shared "is this receiver a
     /// user type with its own members, or should builtin Iterator/collection name tables
     /// apply?" check — used by both method-call dispatch (`is_user_struct_receiver` below)
@@ -158,6 +184,46 @@ impl Transpiler {
         }
     }
 
+    /// Whether `obj` is a "path receiver" — a module/type path (`mem.swap(...)`,
+    /// `mpsc.channel(32)`, `tokio::time.sleep()`) rather than an instance value being called
+    /// through `.method()`. Standalone duplicate of the heuristic `emit_method_call_fallback`
+    /// computes inline for its own `is_path_receiver` local (kept as a literal copy rather
+    /// than a shared extraction so a change to either site can't silently affect the other):
+    /// `self`/a known local var/a top-level constant is never a path even if it happens to be
+    /// uppercase; a lowercase bare identifier is a path unless it's an implicit `self.<field>`
+    /// access; anything else is a path only when its emitted form contains `::` and doesn't
+    /// look like a call/struct-literal result.
+    ///
+    /// Used as an early-return guard by dispatchers (`try_emit_array_special_method`) whose
+    /// builtin method tables key purely on method *name* (`take`, `drop`, `any`, `count`, ...)
+    /// with no receiver-type check of their own — without this guard, an external free
+    /// function whose name happens to collide with one of those (the motivating case:
+    /// `mem.take(t)`, meant as `std::mem::take`, was being rewritten into
+    /// `mem.iter().cloned().take(...)`, a plain Vec adapter applied to the `mem` module path)
+    /// would be misidentified as a collection method purely by name — the same
+    /// false-positive-by-name bug class `expr_receiver_is_known_user_type`'s doc comment
+    /// already documents for the "user struct/enum" receiver shape, just for the "external
+    /// free function" receiver shape instead.
+    pub(crate) fn expr_is_path_receiver(&self, obj: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::Var(v) => {
+                if v == "self" || self.known_local_vars.contains(v.as_str()) || self.user_top_level_names.contains(v.as_str()) { false }
+                else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
+                else {
+                    let is_struct_field = self.self_type.as_ref()
+                        .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                        .map(|fields| fields.iter().any(|(f, _)| f == v.as_str()))
+                        .unwrap_or(false);
+                    !is_struct_field
+                }
+            }
+            _ => {
+                let obj_s = self.emit_expr(obj);
+                obj_s.contains("::") && !obj_s.ends_with(')') && !obj_s.ends_with('}')
+            }
+        }
+    }
+
     /// Returns true when an expression is likely to produce an `Option<T>` value,
     /// used to avoid wrapping Option-chain methods in `.iter().cloned().collect()`
     /// (`try_emit_option_chain_method`). Was a free function in helpers.rs; moved to a
@@ -176,12 +242,25 @@ impl Transpiler {
                 // Unambiguously Option-producing (not Vec methods):
                 const OPTION_ONLY: &[&str] = &["and_then", "or_else", "flatten", "as_ref", "as_deref"];
                 if OPTION_ONLY.contains(&method.as_str()) { return true; }
-                // Ambiguous (exists on both Vec and Option): propagate — only treat as
-                // Option if the receiver is itself Option-like.
-                const MAYBE_OPTION: &[&str] = &[
-                    "filter", "map", "next", "cloned", "copied",
-                    "find", "first", "last", "get", "pop",
-                ];
+                // Also unambiguous, but easy to mistake for the "ambiguous" bucket below:
+                // these names exist on Vec *and* happen to read like Option methods, but
+                // Boring's own native array/dict surface declares every one of them `T?`/`V?`
+                // (docs/book.md's Built-in Types & Functions Reference — array.pop/first/
+                // last/find, dict.get) regardless of the receiver's shape. Unlike the truly
+                // ambiguous names just below, there is no Boring-native meaning of
+                // `pop`/`first`/`last`/`find`/`get` that returns a bare (non-Optional) value,
+                // so — unlike those — they don't need a receiver check at all. Found wiring
+                // `boring.collections`'s `Stack<T>`/`Queue<T>` (docs/cross-project-code-
+                // sharing-gap.md's stdlib work): `def T? pop(): items.pop()` was getting a
+                // spurious extra `Some(...)` wrapped around the already-`Option<T>` `Vec::
+                // pop()` call, because this function said "not proven Optional" for a plain
+                // array receiver.
+                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "get"];
+                if ALWAYS_OPTION.contains(&method.as_str()) { return true; }
+                // Genuinely ambiguous (exists on both Vec/iterator and Option with different
+                // return shapes): propagate — only treat as Option if the receiver is itself
+                // Option-like.
+                const MAYBE_OPTION: &[&str] = &["filter", "map", "next", "cloned", "copied"];
                 if MAYBE_OPTION.contains(&method.as_str()) {
                     return self.is_option_expr(recv);
                 }
@@ -502,7 +581,25 @@ impl Transpiler {
         // (external types like Duration, File, Path, BufReader, etc.):
         // `Duration.fromMillis(100)` (Boring camelCase) → `Duration::from_millis(100)` (Rust)
         let rust_method = camel_to_snake(method);
-        let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+        // A hand-verified (or `boring.toml [external_fns]`-declared) argument-borrow entry for
+        // this static call, keyed on the type name itself as the qualifier — e.g.
+        // `"Tree::from_str"` for `Tree.from_str(text, opt)` needing `opt: &Options`. This is a
+        // *third*, distinct call shape from the two `KNOWN_EXTERNAL_FN_BORROWS` doc comment
+        // names (the lowercase-module free-function path and the generic instance-method
+        // fallback) — an uppercase `Type.staticMethod(args)` call with no user-registered
+        // `struct_type_method_sigs` entry, which reaches here rather than either of those.
+        // Found missing via the `resvg::render`/`usvg::Tree::from_str` real-crate repro:
+        // `resvg.render(...)` (a free function) got its borrows applied fine, but
+        // `Tree.from_str(text, opt)` — same whitelist, same `boring.toml`, just a static
+        // Type-call instead — silently emitted `opt` by value, since this function had never
+        // been wired to consult the table at all.
+        let vals: Vec<String> = {
+            let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            match self.external_fn_arg_borrows(type_name, &rust_method) {
+                Some(borrows) => Self::apply_arg_borrows(&borrows, raw),
+                None => raw,
+            }
+        };
         let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
         // Known async static methods need .await (+ ? in throws context) in async context
         const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
@@ -1306,6 +1403,13 @@ impl Transpiler {
         if self.expr_receiver_is_known_user_type(obj) {
             return None;
         }
+        // An external module/type path receiver (`mem.take(t)`, meant as `std::mem::take`)
+        // must never be misidentified as a collection method purely by name — see
+        // `expr_is_path_receiver`'s doc comment for the motivating bug (`mem.take(t)` was
+        // being rewritten into `mem.iter().cloned().take(...)`).
+        if self.expr_is_path_receiver(obj) {
+            return None;
+        }
         // `future.value()` and `future.wait()` — method-call syntax for task results.
         // Equivalent to the field-access forms `future.value` / `future.wait`.
         // Delegate to emit_expr for the Field variant, which has the full
@@ -1693,13 +1797,24 @@ impl Transpiler {
         if is_path_receiver {
             // Normalize bare stdlib module names to their fully-qualified forms.
             // `io.stdin()` → `std::io::stdin()`;  `io::Error` already handled in normalize_type_name.
+            // `mem` joins this list purely so a free-function whitelist entry keyed on the
+            // fully-qualified `"std::mem"` (see `KNOWN_EXTERNAL_FN_BORROWS`) matches regardless
+            // of whether the call site wrote `mem.swap(...)` or `std.mem.swap(...)` — both now
+            // normalize to the same qualifier before the whitelist lookup below.
             let obj_qualified = match obj_s.as_str() {
                 "io" => "std::io".to_string(),
                 "fs" => "std::fs".to_string(),
+                "mem" => "std::mem".to_string(),
                 other => other.to_string(),
             };
             let rust_method_name = camel_to_snake(method);
-            let vals: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            let vals: Vec<String> = {
+                let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+                match self.external_fn_arg_borrows(&obj_qualified, &rust_method_name) {
+                    Some(borrows) => Self::apply_arg_borrows(&borrows, raw),
+                    None => raw,
+                }
+            };
             let call = format!("{}::{}({})", obj_qualified, rust_method_name, vals.join(", "));
             // Known tokio async static methods (File::open, File::create, etc.) need .await
             const TOKIO_ASYNC_STATIC: &[&str] = &["open", "create", "connect", "bind"];
@@ -1921,8 +2036,28 @@ impl Transpiler {
             let (m, w) = map_method(method, args.len());
             (m, w)
         };
+        // A hand-verified (or `boring.toml [external_fns]`-declared) argument-borrow entry
+        // for this exact (receiver type, method) pair — see `KNOWN_EXTERNAL_FN_BORROWS`'s doc
+        // comment. Only ever `Some` for a non-user-struct receiver (`is_user_struct_receiver`
+        // is false, so this can't collide with a user-defined method of the same name on an
+        // unrelated struct — same qualify-by-type lesson that comment documents) whose
+        // Boring-declared type name resolves via `resolve_expr_struct_type` — e.g. a local
+        // bound `let ZipFile entry = ...`. Checked first, ahead of every other args_s branch
+        // below: an explicit whitelist entry is a stronger signal than any of the built-in
+        // Vec/HashMap/HashSet name-based guesses that follow, and should never be shadowed by
+        // one of them.
+        let external_arg_borrows: Option<Vec<String>> = if is_user_struct_receiver {
+            None
+        } else {
+            self.resolve_expr_struct_type(obj)
+                .or_else(|| self.resolve_expr_external_type_name(obj))
+                .and_then(|qualifier| self.external_fn_arg_borrows(&qualifier, &rust_method))
+        };
         // HashSet::contains needs a plain reference; HashMap::contains_key needs &String.
-        let args_s: Vec<String> = if rust_method == "contains_key" && receiver_is_dict_var {
+        let args_s: Vec<String> = if let Some(borrows) = &external_arg_borrows {
+            let raw: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
+            Self::apply_arg_borrows(borrows, raw)
+        } else if rust_method == "contains_key" && receiver_is_dict_var {
             // Use emit_dict_key_borrow so the key is &str (Arc<str> via Deref).
             args.iter().map(|a| self.emit_dict_key_borrow(&a.value)).collect()
         } else if receiver_is_dict_var && rust_method == "insert" {
@@ -2064,7 +2199,7 @@ impl Transpiler {
         // Resolved via `resolve_expr_struct_type` (not just a bare `ExprKind::Var`
         // match on `self`/a local) so a field-of-field receiver like
         // `self.numerator.mul(...)` also gets its real type (`Inner`) looked up --
-        // see docs/known-issues-biguint-spike.md #10: the old narrower match here
+        // the old narrower match here
         // only handled `self` and a plain local var, so any other receiver shape
         // (chained field access) fell through to `None` and hit the bare-name
         // fallback below, picking up `?` from an unrelated same-named throwing
@@ -3007,6 +3142,7 @@ impl Transpiler {
             inside_trait_impl: self.inside_trait_impl,
             match_subject_enum: self.match_subject_enum.clone(),
             var_types: self.var_types.clone(),
+            var_init_exprs: self.var_init_exprs.clone(),
             string_vars: self.string_vars.clone(),
             str_index_cache_vars: self.str_index_cache_vars.clone(),
             struct_operator_methods: self.struct_operator_methods.clone(),
@@ -3065,6 +3201,7 @@ impl Transpiler {
             inferred_qualifiers: self.inferred_qualifiers.clone(),
             infer_local_actor_vars: std::collections::HashSet::new(),
             source_dir: self.source_dir.clone(),
+            deps: self.deps.clone(),
             loaded: self.loaded.clone(),
             prelude_emitted: self.prelude_emitted,
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),

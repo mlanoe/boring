@@ -6,10 +6,10 @@ impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
         match &expr.kind {
             ExprKind::Int(n)   => n.to_string(),
-            // Oversized decimal literal (overflows `i64`, fits `u64` — see
-            // docs/known-issues-biguint-spike.md item 1). Must carry an explicit `u64`
-            // suffix: an unsuffixed Rust integer literal this large would default-infer
-            // as `i32` and fail to compile.
+            // Oversized decimal literal (overflows `i64`, fits `u64`). Must
+            // carry an explicit `u64` suffix: an unsuffixed Rust integer
+            // literal this large would default-infer as `i32` and fail to
+            // compile.
             ExprKind::UInt64(n) => format!("{}u64", n),
             ExprKind::Float(f) => {
                 let s = format!("{}", f);
@@ -910,8 +910,8 @@ impl Transpiler {
             };
         }
         let src_is_numeric_lit = matches!(&e.kind, ExprKind::Int(_) | ExprKind::Float(_));
-        // A decimal literal that overflows `i64` but fits `u64` (see ExprKind::UInt64 /
-        // docs/known-issues-biguint-spike.md item 1). `emit_expr` already suffixes it as
+        // A decimal literal that overflows `i64` but fits `u64` (see
+        // ExprKind::UInt64). `emit_expr` already suffixes it as
         // `NNNNu64`, so — unlike the `ExprKind::Int` literal branch below — it must NOT
         // get an additional `i64` suffix tacked on here.
         let src_is_big_uint_lit = matches!(&e.kind, ExprKind::UInt64(_));
@@ -1086,10 +1086,9 @@ impl Transpiler {
     /// For most expression shapes that's already true (dict lookups, `T?`-
     /// returning calls, etc.) — but a numeric `as` cast used as a bare
     /// (non-`if let`) expression is deliberately emitted as an unconditional,
-    /// infallible `(src as dst)` by `emit_expr_cast` (see
-    /// docs/known-issues-biguint-spike.md #11 — that infallible emission for a
-    /// plain numeric-to-integer cast is pre-existing/unchanged behavior, not
-    /// itself being "fixed" here), which doesn't type-check against the
+    /// infallible `(src as dst)` by `emit_expr_cast` (that infallible emission
+    /// for a plain numeric-to-integer cast is pre-existing/unchanged
+    /// behavior, not itself being "fixed" here), which doesn't type-check against the
     /// `Some(...)` pattern. This intercepts exactly that one shape — a numeric
     /// source cast to a fixed-width/pointer-width integer target — and emits
     /// Rust's standard `TryFrom` conversion instead, which is implemented for
@@ -1889,7 +1888,7 @@ impl Transpiler {
                 // Implicit-self field: a bare identifier that resolves to the current
                 // struct's own field (not a real local var) is an *instance* receiver,
                 // never a module/type path — even though it's absent from
-                // known_local_vars (see docs/known-issues-biguint-spike.md #9: this
+                // known_local_vars (this
                 // used to fall into the `else` arm below and get treated as an
                 // imported-module-style path receiver, mis-emitting `self.limbs.length`
                 // as `self.limbs::length`). Mirrors the implicit-self resolution at the
@@ -2707,6 +2706,18 @@ impl Transpiler {
                 }
                 _ => {}
             }
+            // A known user struct constructed with an explicit type argument, e.g.
+            // `Stack<int>([])` — found wiring `boring.collections`'s `Stack<T>`/`Queue<T>`
+            // (docs/cross-project-code-sharing-gap.md's stdlib work): without this check,
+            // execution fell straight to the "regular call" fallback below, which ignores
+            // struct-ness entirely and emits `Stack::<isize>(vec![])` — invalid Rust for a
+            // named-field struct (E0423: "use struct literal syntax instead of calling").
+            // `emit_constructor`/`emit_constructor_inner` already build the correct
+            // `Name { field: value, ... }` / `Name::new(...)` form for a bare `Stack([])`
+            // (no type args) — reuse that and just splice the turbofish onto its head.
+            if self.struct_fields.contains_key(name.as_str()) {
+                return self.emit_constructor_with_turbofish(name, type_args, args);
+            }
             // Fallback: emit as a regular call, ignore type args
             let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
@@ -2761,6 +2772,22 @@ impl Transpiler {
                 // Strict mode: wrap in Box<T>
                 return format!("Box::new({})", result);
             }
+        }
+        result
+    }
+
+    /// `emit_constructor` variant for a struct constructed with explicit generic type
+    /// arguments (`Stack<int>([])`, as opposed to inferred `Stack([])`). Delegates to the
+    /// normal constructor logic for the actual `Name { field: value }` / `Name::new(...)`
+    /// shape, then splices `::<T1, T2>` onto the type name — Rust accepts a turbofish on a
+    /// struct-literal path (`Foo::<i32> { x: 0 }`) the same as on a call. This is also
+    /// needed (not just stylistic) when a field's initial value is itself ambiguous without
+    /// it, e.g. `Stack<int>([])` — `vec![]` alone can't tell Rust what `T` is.
+    pub(crate) fn emit_constructor_with_turbofish(&self, name: &str, type_args: &[Type], args: &[Arg]) -> String {
+        let result = self.emit_constructor_inner(name, args);
+        if let Some(rest) = result.strip_prefix(name) {
+            let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
+            return format!("{}::<{}>{}", name, ty_args_s.join(", "), rest);
         }
         result
     }
@@ -3261,6 +3288,16 @@ impl Transpiler {
     /// determined statically, `None` when it's ambiguous (e.g. an untyped literal)
     /// — used by `math_builtin_float_ty` below.
     fn infer_float_width(&self, e: &Expr) -> Option<&'static str> {
+        let mut visiting = std::collections::HashSet::new();
+        self.infer_float_width_inner(e, &mut visiting)
+    }
+
+    /// `visiting` guards the `var_init_exprs` fallback below against infinite recursion on
+    /// self-referential shadowing (`let x = 1.0` then `let x = x * 2.0` — the second
+    /// initializer's `Var("x")` refers to the *previous* binding, but `var_init_exprs` is a
+    /// flat name→expr map that only remembers the latest one, so without a guard resolving
+    /// it would recurse into itself forever instead of just giving up with `None`).
+    fn infer_float_width_inner(&self, e: &Expr, visiting: &mut std::collections::HashSet<String>) -> Option<&'static str> {
         let width_of = |t: &Type| -> Option<&'static str> {
             match t {
                 Type::Float32 => Some("f32"),
@@ -3294,7 +3331,17 @@ impl Transpiler {
                         }
                     }
                 }
-                None
+                // A `let`-bound local whose type wasn't recorded in `var_types` (e.g. an
+                // unannotated `let rad = direction * 0.017453292` — arithmetic/unary-op
+                // initializers aren't tracked into `var_types` at all, see emit_let.rs) —
+                // fall back to the initializer expression's own inferred width, if we
+                // still have it on hand.
+                if !visiting.insert(v.clone()) {
+                    return None;
+                }
+                let result = self.var_init_exprs.get(v.as_str()).and_then(|init| self.infer_float_width_inner(init, visiting));
+                visiting.remove(v.as_str());
+                result
             }
             // Struct field access — e.g. `v.x` where `Velocity.x` is declared `float32`.
             ExprKind::Field(base, field) => {
@@ -3307,8 +3354,8 @@ impl Transpiler {
             // known one (Boring requires matching widths to mix float32/float64
             // in arithmetic — docs/float-width-types.md §3 — so if one side is
             // known the other, if also known, necessarily agrees).
-            ExprKind::BinOp(_, l, r) => self.infer_float_width(l).or_else(|| self.infer_float_width(r)),
-            ExprKind::UnaryOp(_, inner) => self.infer_float_width(inner),
+            ExprKind::BinOp(_, l, r) => self.infer_float_width_inner(l, visiting).or_else(|| self.infer_float_width_inner(r, visiting)),
+            ExprKind::UnaryOp(_, inner) => self.infer_float_width_inner(inner, visiting),
             ExprKind::Index(base, _) => match &base.kind {
                 ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
                     Some(Type::Array(elem)) => width_of(elem),
@@ -3332,7 +3379,7 @@ impl Transpiler {
                         "sqrt" | "abs" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan"
                             | "asin" | "acos" | "atan" | "atan2" | "exp" | "tanh"
                             | "log" | "log2" | "log10" | "pow"
-                            if !args.is_empty() => return self.infer_float_width(&args[0].value),
+                            if !args.is_empty() => return self.infer_float_width_inner(&args[0].value, visiting),
                         _ => {}
                     }
                     self.fn_return_types.get(fname.as_str()).and_then(width_of)
@@ -3696,7 +3743,24 @@ impl Transpiler {
                 ExprKind::Call(callee, _) | ExprKind::GenericCall(callee, _, _)
                 if matches!(&callee.kind, ExprKind::Var(n)
                     if matches!(self.fn_return_types.get(n.as_str()), Some(Type::Optional(_)))));
-            let is_optional = is_optional_var || is_optional_call;
+            // Same, for a *method* call on a known struct-typed variable, e.g. `print
+            // s.peek()` where `peek` is declared `req T? peek()` — found wiring
+            // `boring.collections`'s `Stack<T>`/`Queue<T>` (docs/cross-project-code-
+            // sharing-gap.md's stdlib work): without this, `print s.pop()` compiled to
+            // `println!("{}", s.pop())` and failed (`Option<T>` has no `Display` impl),
+            // even though the exact same struct_method_return_types lookup already
+            // recognizes this shape for `return`/tail-expression Some()-wrapping
+            // elsewhere (emit_flow.rs, emit_stmt.rs).
+            let is_optional_method_call = !is_optional_var && !is_optional_call
+                && matches!(&a.value.kind, ExprKind::MethodCall(recv, method, _)
+                    if matches!(&recv.kind, ExprKind::Var(v)
+                        if self.var_struct_types.get(v.as_str()).map(|sty| {
+                            self.struct_method_return_types
+                                .get(&format!("{}::{}", sty, method))
+                                .map(|t| matches!(t, Type::Optional(_)))
+                                .unwrap_or(false)
+                        }).unwrap_or(false)));
+            let is_optional = is_optional_var || is_optional_call || is_optional_method_call;
             let expr_s = if is_optional {
                 let v = self.emit_expr(&a.value);
                 format!("{}.as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", v)

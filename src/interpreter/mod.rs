@@ -289,7 +289,6 @@ pub enum Value {
         protocols: Vec<String>,
         /// Type-level (`type def`/`type req`/`type set`) factory/static
         /// methods — mirrors `Struct`'s dispatch via `StructDecl::type_methods`.
-        /// See docs/known-issues-biguint-spike.md item 5.
         type_methods: Vec<TypeMethod>,
         /// The environment at enum definition time, used as the parent scope
         /// when calling enum methods — mirrors `Struct::captured`.
@@ -1519,6 +1518,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Int(n)) => Ok(Value::Int(n.abs())),
             Some(Value::Float64(f)) => Ok(Value::Float64(f.abs())),
+            // float32/float64 are distinct runtime types with the same method surface
+            // (docs/float-width-types.md §8) — a `float32`-typed value reaching this
+            // free-function form (as opposed to `x.abs()`, handled in methods.rs) must
+            // keep its width, not error out as "not a number".
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.abs())),
             _ => Err(Signal::Error(RuntimeError { message: "abs: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1551,6 +1555,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.sqrt())),
             Some(Value::Int(n)) => Ok(Value::Float64((*n as f64).sqrt())),
+            // See the `abs` free function above — preserve float32 width instead of
+            // rejecting it as "not a number".
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.sqrt())),
             _ => Err(Signal::Error(RuntimeError { message: "sqrt: expected number".into(), line, col: 0, len: 0 })),
         },
     });
@@ -1614,6 +1621,9 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.sin())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).sin())),
+            // See the `abs` free function above — preserve float32 width instead of
+            // rejecting it as "not a number".
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.sin())),
             _ => Err(err("sin: expected number", line)),
         },
     });
@@ -1622,6 +1632,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.cos())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).cos())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.cos())),
             _ => Err(err("cos: expected number", line)),
         },
     });
@@ -1630,6 +1641,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.tan())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).tan())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.tan())),
             _ => Err(err("tan: expected number", line)),
         },
     });
@@ -1638,6 +1650,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.asin())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).asin())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.asin())),
             _ => Err(err("asin: expected number", line)),
         },
     });
@@ -1646,6 +1659,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.acos())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).acos())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.acos())),
             _ => Err(err("acos: expected number", line)),
         },
     });
@@ -1654,12 +1668,33 @@ fn register_string_and_math_builtins(e: &mut Env) {
         func: |args, line| match args.first() {
             Some(Value::Float64(f)) => Ok(Value::Float64(f.atan())),
             Some(Value::Int(n))   => Ok(Value::Float64((*n as f64).atan())),
+            Some(Value::Float32(f)) => Ok(Value::Float32(f.atan())),
             _ => Err(err("atan: expected number", line)),
         },
     });
     e.define("atan2", Value::NativeFn {
         name: "atan2".into(),
         func: |args, line| {
+            // float32/float64 are distinct runtime types with the same method surface
+            // (docs/float-width-types.md §8) — if either argument is a real float32
+            // value, keep the whole call at f32 precision instead of always widening
+            // to f64 (matches the `x.atan2(y)` method-call form in methods.rs).
+            let is_f32 = matches!(args.first(), Some(Value::Float32(_))) || matches!(args.get(1), Some(Value::Float32(_)));
+            if is_f32 {
+                let y = match args.first() {
+                    Some(Value::Float32(f)) => *f,
+                    Some(Value::Float64(f)) => *f as f32,
+                    Some(Value::Int(n))   => *n as f32,
+                    _ => return Err(err("atan2: expected numeric y", line)),
+                };
+                let x = match args.get(1) {
+                    Some(Value::Float32(f)) => *f,
+                    Some(Value::Float64(f)) => *f as f32,
+                    Some(Value::Int(n))   => *n as f32,
+                    _ => return Err(err("atan2: expected numeric x", line)),
+                };
+                return Ok(Value::Float32(y.atan2(x)));
+            }
             let y = match args.first() {
                 Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
@@ -2011,6 +2046,14 @@ pub struct Interpreter {
     pub aliases: HashMap<String, Type>,   // user-defined + built-in type aliases
     pub search_paths: Vec<PathBuf>,
     pub loaded: HashSet<PathBuf>,
+    /// Named dependencies on other Boring projects, declared in the current project's
+    /// `boring.toml` `[deps]` section (see `docs/cross-project-code-sharing-gap.md`) and
+    /// resolved by `main.rs::run_file` before `exec_program` runs. Maps a dependency name
+    /// (the `use <name>.xxx` prefix) to its `src/` directory — unlike `search_paths` (an
+    /// ordered list searched for ANY `use`), each dependency has exactly one root and is
+    /// looked up by name, so `exec_named_dep_use` indexes this directly rather than
+    /// scanning a list.
+    pub deps: HashMap<String, PathBuf>,
     pub task_context: bool,  // true at top-level and inside task fns
     /// True while inside a `kernel:` execution block.
     /// Enables implicit `.wait()` on KernelHandle bare expressions.
@@ -2160,6 +2203,7 @@ impl Interpreter {
             aliases,
             search_paths: Vec::new(),
             loaded: HashSet::new(),
+            deps: HashMap::new(),
             task_context: true,  // top-level is implicitly task context
             kernel_context: false,
             defer_stack: Vec::new(),
@@ -2199,6 +2243,7 @@ impl Interpreter {
             aliases,
             search_paths: Vec::new(),
             loaded: HashSet::new(),
+            deps: HashMap::new(),
             task_context: false,
             kernel_context: false,
             defer_stack: Vec::new(),
@@ -2225,13 +2270,19 @@ impl Interpreter {
         self.search_paths.push(path);
     }
 
+    /// Registers the current project's `[deps]` (see the `deps` field's doc comment),
+    /// resolved by `main.rs::run_file` from `boring.toml` before `exec_program` runs.
+    pub fn set_deps(&mut self, deps: HashMap<String, PathBuf>) {
+        self.deps = deps;
+    }
+
     /// Build the AST for the stdlib `Error` enum (`Error.Expired`, `.Cancelled`,
     /// `.NotFound`, `.InvalidInput`, `.OutOfBounds`) — documented in book.md
     /// ("Standard error enum") as always available without any import. The
     /// transpiler already pre-populates its own equivalent tables for this in
     /// `pre_scan` (src/transpiler/mod.rs); this mirrors it for the interpreter,
     /// which previously had no such registration at all (undefined variable
-    /// 'Error' under `boring run` — see docs/known-issues-biguint-spike.md item 3).
+    /// 'Error' under `boring run`, now fixed by this registration).
     fn builtin_error_enum_decl() -> EnumDecl {
         EnumDecl {
             name: "Error".to_string(),
@@ -2439,6 +2490,23 @@ impl Interpreter {
         for item in &program.items {
             self.exec_item(item, Rc::clone(&module_env))?;
         }
+        Self::bind_module_items(&program, decl, module_env, env, &decl.path.join("."))
+    }
+
+    /// Bind a parsed module's items into the importing scope, per `decl.items`
+    /// (empty ⇒ every named item; non-empty ⇒ only the listed, `pub`-required
+    /// names). Shared tail of `exec_use` (a real file on disk) and
+    /// `exec_boring_stdlib_use` (an embedded stdlib module) — both have
+    /// already parsed the module's `Program` and executed its items into
+    /// `module_env` by this point; only the export step differs by nothing,
+    /// which is why it's factored out here instead of duplicated.
+    fn bind_module_items(
+        program: &Program,
+        decl: &UseDecl,
+        module_env: EnvRef,
+        env: EnvRef,
+        module_label: &str,
+    ) -> Result<(), Signal> {
         if decl.items.is_empty() {
             // No filter — export every named item (pub or not).
             // Within a project, all symbols from sibling files are accessible;
@@ -2458,7 +2526,6 @@ impl Interpreter {
             }
         } else {
             // Selective import — only export the listed names.
-            let module_name = decl.path.join(".");
             for item_name in &decl.items {
                 // Must be declared pub in the module.
                 let is_pub = program.items.iter().any(|item| {
@@ -2466,7 +2533,7 @@ impl Interpreter {
                 });
                 if !is_pub {
                     return Err(err(
-                        format!("'{}' is not exported by module '{}'", item_name, module_name),
+                        format!("'{}' is not exported by module '{}'", item_name, module_label),
                         decl.line,
                     ));
                 }
@@ -2476,6 +2543,89 @@ impl Interpreter {
             }
         }
         Ok(())
+    }
+
+    /// `use boring.<module>` — resolve `module` against the embedded
+    /// first-party stdlib (`crate::stdlib_embed`) rather than the filesystem.
+    /// Unlike `exec_use`'s "not found ⇒ assume native Rust module, no-op"
+    /// fallback, an unrecognized `boring.*` name is always a hard error:
+    /// `boring` is not a real crate, so there's no legitimate native meaning
+    /// to fall back to.
+    fn exec_boring_stdlib_use(&mut self, decl: &UseDecl, module: &str, env: EnvRef) -> Result<(), Signal> {
+        let Some(source) = crate::stdlib_embed::lookup(module) else {
+            return Err(err(format!("unknown boring stdlib module '{module}'"), decl.line));
+        };
+
+        // Circular / duplicate import guard — same `loaded` set real files use,
+        // keyed on a synthetic path since there's no real file to canonicalize.
+        let synthetic = crate::stdlib_embed::synthetic_path(module);
+        if self.loaded.contains(&synthetic) {
+            return Ok(());
+        }
+        self.loaded.insert(synthetic.clone());
+
+        let tokens = crate::lexer::lex(source).map_err(|e| {
+            err(format!("lex error in boring.{module}: {e}"), decl.line)
+        })?;
+        let program = crate::parser::parse(tokens).map_err(|e| {
+            err(format!("parse error in boring.{module}: {e}"), decl.line)
+        })?;
+        // See exec_use's comment on the same call: every other entry point
+        // desugars labeled arrays right after parsing.
+        let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+
+        let module_env = Env::child(Rc::clone(&env));
+        for item in &program.items {
+            self.exec_item(item, Rc::clone(&module_env))?;
+        }
+        Self::bind_module_items(&program, decl, module_env, env, &format!("boring.{module}"))
+    }
+
+    /// `use <name>.xxx` where `name` is a project dependency declared in `boring.toml`
+    /// `[deps]` (`self.deps[name]`, resolved to that dependency's own `src/` directory —
+    /// see `BoringToml::resolve_deps` and docs/cross-project-code-sharing-gap.md). Unlike
+    /// `exec_use`'s multi-root `search_paths` scan, a named dependency has exactly one
+    /// root, so this resolves directly against it. Unlike `exec_use`'s "not found ⇒ assume
+    /// native Rust module, no-op" fallback, a file genuinely missing under a *declared*
+    /// dependency's `src/` is always a hard error — the user named this dependency for
+    /// exactly this purpose, so silently doing nothing would be confusing, not helpful.
+    fn exec_named_dep_use(&mut self, decl: &UseDecl, dep_name: &str, env: EnvRef) -> Result<(), Signal> {
+        let root = self.deps[dep_name].clone();
+        let rel: PathBuf = decl.path[1..].iter().collect::<PathBuf>().with_extension("br");
+        let abs = root.join(&rel);
+        if !abs.exists() {
+            return Err(err(
+                format!("cannot find '{}' in dependency '{}' (looked in {})", rel.display(), dep_name, root.display()),
+                decl.line,
+            ));
+        }
+
+        let canonical = abs.canonicalize().map_err(|e| {
+            err(format!("cannot resolve '{}': {}", abs.display(), e), decl.line)
+        })?;
+        if self.loaded.contains(&canonical) {
+            return Ok(());
+        }
+        self.loaded.insert(canonical.clone());
+
+        let source = std::fs::read_to_string(&canonical).map_err(|e| {
+            err(format!("cannot read '{}': {}", canonical.display(), e), decl.line)
+        })?;
+        let tokens = crate::lexer::lex(&source).map_err(|e| {
+            err(format!("lex error in '{}': {}", canonical.display(), e), decl.line)
+        })?;
+        let program = crate::parser::parse(tokens).map_err(|e| {
+            err(format!("parse error in '{}': {}", canonical.display(), e), decl.line)
+        })?;
+        // See exec_use's comment on the same call: every other entry point
+        // desugars labeled arrays right after parsing.
+        let program = crate::desugar_labeled_array::desugar_labeled_array(program);
+
+        let module_env = Env::child(Rc::clone(&env));
+        for item in &program.items {
+            self.exec_item(item, Rc::clone(&module_env))?;
+        }
+        Self::bind_module_items(&program, decl, module_env, env, &format!("{}.{}", dep_name, decl.path[1..].join(".")))
     }
 
     fn exec_item(&mut self, item: &Item, env: EnvRef) -> Result<(), Signal> {

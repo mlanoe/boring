@@ -189,7 +189,6 @@ pub struct TypeMethod {
     pub throws: bool,
     /// Optional error type: `type def T make() throws MyError:` → mirrors
     /// `FnDecl::throws_ty` (see there). `None` = untyped `throws:`.
-    /// See docs/known-issues-biguint-spike.md item 4.
     pub throws_ty: Option<Type>,
     pub task: bool,
     pub line: usize,
@@ -377,8 +376,7 @@ pub struct EnumDecl {
     pub setters: Vec<SetDecl>,
     pub conversions: Vec<AsDecl>,
     /// Type-level (`type def`/`type req`/`type set`) factory/static methods —
-    /// same production as `StructDecl::type_methods` (see
-    /// docs/known-issues-biguint-spike.md item 5). `boring run` only; the
+    /// same production as `StructDecl::type_methods`. `boring run` only; the
     /// transpiler does not yet emit these for enums.
     pub type_methods: Vec<TypeMethod>,
     pub attrs: Vec<Attr>,
@@ -898,7 +896,7 @@ pub enum ExprKind {
     /// `Int` specifically so the literal's true, non-negative value survives
     /// into evaluation/codegen intact — only there can it be checked against
     /// (and only make sense for) an unsigned target, typically via an explicit
-    /// `as uintNN` cast. See docs/known-issues-biguint-spike.md item 1.
+    /// `as uintNN` cast.
     UInt64(u64),
     Float(f64),
     Str(String),

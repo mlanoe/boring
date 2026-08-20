@@ -1,4 +1,4 @@
-# Regression test: docs/known-issues-biguint-spike.md #12.
+# Regression test.
 #
 # `try EXPR else nil` (spelled-out form) is documented (book.md) as exactly
 # equivalent to `try? EXPR`. The parser used to always fold the spelled-out

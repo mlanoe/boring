@@ -384,8 +384,7 @@ impl Parser {
     /// (see `parse_throws_type` and its call sites in this file) — before this,
     /// `type def`/`type req`/`type set` only ever recognized a bare `throws`,
     /// rejecting a typed `throws Type:` clause that the equivalent instance-method
-    /// grammar (`req`/`def`) already accepted. See
-    /// docs/known-issues-biguint-spike.md item 4.
+    /// grammar (`req`/`def`) already accepted.
     fn parse_type_method_throws_task(&mut self) -> Result<(bool, Option<Type>, bool), ParseError> {
         let mut throws = false;
         let mut throws_ty: Option<Type> = None;

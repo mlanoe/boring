@@ -1766,8 +1766,8 @@ impl Interpreter {
                 // book.md documents ALL primitive numeric types as Copy. Before
                 // this, only the generic untyped variants were exempted here,
                 // so a `let t = n` on an `int64`/`int128` (etc.) scalar was
-                // wrongly treated as a move. See
-                // docs/known-issues-biguint-spike.md item 8.
+                // wrongly treated as a move (bug already fixed by including
+                // the sized variants below).
                 | Value::Int8(_)
                 | Value::Int16(_)
                 | Value::Int32(_)

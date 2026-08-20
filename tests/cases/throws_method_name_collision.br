@@ -1,4 +1,4 @@
-# Regression test: docs/known-issues-biguint-spike.md #10.
+# Regression test.
 #
 # A nested method call inside a `throws` function used to get a spurious `?`
 # based purely on the callee's *name*: as long as *some* method named `mul`

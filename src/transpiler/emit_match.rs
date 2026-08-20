@@ -141,8 +141,8 @@ impl Transpiler {
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {
         clauses.iter().map(|c| match c {
             CondClause::Let(name, expr) => {
-                // Narrowing numeric `as` cast scrutinee (docs/known-issues-biguint-spike.md
-                // #11): needs its own checked, Option-producing codegen — the plain
+                // Narrowing numeric `as` cast scrutinee needs its own checked,
+                // Option-producing codegen — the plain
                 // `emit_expr` path for a numeric-to-integer cast emits an unconditional
                 // infallible `(src as dst)`, which doesn't type-check against the
                 // `Some(...)` pattern this function always emits below.

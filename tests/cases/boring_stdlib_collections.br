@@ -1,0 +1,22 @@
+# use boring.collections — the first-party stdlib mechanism (docs/cross-
+# project-code-sharing-gap.md's stdlib work). Exercises both Stack<T> and
+# Queue<T> with two different type instantiations (int, string) so both the
+# interpreter (tests/run.rs) and the transpiler (tests/transpile.rs) cover
+# generic-struct-from-an-embedded-module construction, method dispatch, and
+# string-literal argument coercion into a generic parameter.
+use boring.collections.*
+
+mut s = Stack<int>([])
+s.push(1)
+s.push(2)
+s.push(3)
+print s.count()
+print s.pop()
+print s.peek()
+print s.isEmpty()
+
+mut q = Queue<string>([])
+q.enqueue("a")
+q.enqueue("b")
+print q.dequeue()
+print q.count()

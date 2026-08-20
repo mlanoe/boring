@@ -48,8 +48,7 @@ impl KernelTranspiler {
         match &expr.kind {
             ExprKind::Int(n)   => n.to_string(),
             // Oversized decimal literal (overflows `i64`, fits `u64`) — kernel-target Rust
-            // has native 64-bit integer support, so this just needs the explicit suffix
-            // (see docs/known-issues-biguint-spike.md item 1).
+            // has native 64-bit integer support, so this just needs the explicit suffix.
             ExprKind::UInt64(n) => format!("{}u64", n),
             ExprKind::Float(f) => {
                 // floats are not supported in kernel code; emit a comment

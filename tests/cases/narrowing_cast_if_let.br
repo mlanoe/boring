@@ -1,4 +1,4 @@
-# Regression test: docs/known-issues-biguint-spike.md #11.
+# Regression test.
 #
 # A narrowing numeric `as` cast (`int128 as int64`, also `int64 as int32`)
 # used as the scrutinee of `if let`/`guard let` used to transpile its
