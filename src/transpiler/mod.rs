@@ -2247,8 +2247,8 @@ impl Transpiler {
     ///     Boring `Startup` system (`commands.insert_resource(ClearColor(BACKGROUND_COLOR))`)
     ///     instead of hand-written Rust -- same failure shape as `TextColor`
     ///     (`ClearColor::new(args)`, E0599).
-    /// NOT added despite looking similar -- confirmed wrong by reading source, do not
-    /// re-add without re-verifying against the actual bevy version in use:
+    ///     NOT added despite looking similar -- confirmed wrong by reading source, do not
+    ///     re-add without re-verifying against the actual bevy version in use:
     ///   - `BorderColor`/`Outline`/`BorderRadius` -- named-field structs in bevy 0.19, not
     ///     tuple structs (`BorderColor` was suggested as a candidate for this list; it
     ///     isn't one -- it has `top`/`right`/`bottom`/`left` fields).
@@ -2320,13 +2320,13 @@ impl Transpiler {
     ///   - `replace<T>(dest: &mut T, src: T) -> T` — only the first argument `&mut`, the second
     ///     stays by value (moved in, not borrowed).
     ///   - `take<T: Default>(dest: &mut T) -> T` — its one argument `&mut`.
-    /// Extend this list as more such external functions/methods (e.g. `zip`'s
-    /// `ZipFile::read_to_end(&mut self, buf: &mut Vec<u8>)`, `resvg::render(tree: &Tree,
-    /// transform: Transform, pixmap: &mut PixmapMut)`) are hand-verified against their crate's
-    /// own source — or, for a project that doesn't want to patch the compiler for its own
-    /// third-party dependency, declared locally via `boring.toml`'s `[external_fns]` section
-    /// (see `TranspileConfig::external_fns`'s doc comment and docs/book.md's `[external_fns]`
-    /// section).
+    ///     Extend this list as more such external functions/methods (e.g. `zip`'s
+    ///     `ZipFile::read_to_end(&mut self, buf: &mut Vec<u8>)`, `resvg::render(tree: &Tree,
+    ///     transform: Transform, pixmap: &mut PixmapMut)`) are hand-verified against their crate's
+    ///     own source — or, for a project that doesn't want to patch the compiler for its own
+    ///     third-party dependency, declared locally via `boring.toml`'s `[external_fns]` section
+    ///     (see `TranspileConfig::external_fns`'s doc comment and docs/book.md's `[external_fns]`
+    ///     section).
     const KNOWN_EXTERNAL_FN_BORROWS: &[(&str, &str, &[&str])] = &[
         ("std::mem", "swap", &["&mut", "&mut"]),
         ("std::mem", "replace", &["&mut", ""]),

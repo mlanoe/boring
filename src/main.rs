@@ -413,8 +413,8 @@ impl BoringToml {
     ///   its own `boring.toml` with its own `[deps]`, those are not followed — same
     ///   single-level rule `resolve_external_types_includes`/`resolve_derive_includes` already
     ///   follow for `include`.
-    /// Returns an error message (rather than exiting directly) on the first invalid entry, so
-    /// this stays independently unit-testable, same convention as the `include` resolvers.
+    ///   Returns an error message (rather than exiting directly) on the first invalid entry, so
+    ///   this stays independently unit-testable, same convention as the `include` resolvers.
     fn resolve_deps(&self, boring_toml_dir: &Path) -> Result<std::collections::HashMap<String, PathBuf>, String> {
         let mut resolved = std::collections::HashMap::new();
         for (name, raw_value) in &self.deps {

@@ -2314,10 +2314,8 @@ impl Interpreter {
         // Register built-in stdlib types before any user code runs, so `Error.Variant`
         // resolves regardless of where/whether the user declares their own enums.
         let builtin_error = Self::builtin_error_enum_decl();
-        if let Err(sig) = self.exec_item(&Item::Enum(builtin_error), Rc::clone(&self.global)) {
-            if let Signal::Error(e) = sig {
-                return Err(e);
-            }
+        if let Err(Signal::Error(e)) = self.exec_item(&Item::Enum(builtin_error), Rc::clone(&self.global)) {
+            return Err(e);
         }
 
         for item in &program.items {
