@@ -216,6 +216,7 @@ interp_test!(struct_spread);
 interp_test!(default_rest);
 interp_test!(tuple_string);
 interp_test!(array_pop_remove);
+interp_test!(optional_pop_tail_call);
 interp_test!(closure_break);
 interp_test!(transpiler_coerce);
 interp_test!(pattern_some);
@@ -319,6 +320,12 @@ interp_test!(tagged_int_negate);
 // "use of moved value" on a plain `let t = n` reuse, unlike the generic
 // untyped `int`.
 interp_test!(tagged_int_copy);
+// Vec::first()/last() and HashMap::get(k) return Option<&T> in Rust; Boring's
+// first()/last()/get() are documented as owned `T?`. Regression test for the
+// transpiler double-wrapping an already-Option-shaped result in Some(...), and
+// for `.cloned()` insertion producing owned values. Interpreter-side (this file)
+// is the semantic baseline; `transpile_test!` below exercises the actual bug.
+interp_test!(option_owned_methods);
 
 // ── Error / rejection tests ──────────────────────────────────────────────────
 

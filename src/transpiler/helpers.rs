@@ -443,8 +443,26 @@ pub(crate) fn binop_str(op: &BinOp) -> &'static str {
     }
 }
 
+/// True when `e` is a bare, argument-less `.pop()` call (`items.pop()`, not chained
+/// further) — the shape a `T?`-returning function/`let` needs to recognize so it can pass
+/// `Vec::pop()`'s `Option<T>` through raw instead of letting `map_method` unwrap it (see
+/// `map_method`'s `want_raw_option` doc) and then re-wrapping it in `Some(...)`.
+pub(crate) fn is_bare_pop_call(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::MethodCall(_, m, a) | ExprKind::Pipe(_, m, a) if m == "pop" && a.is_empty())
+}
+
 /// Map boring method names to (rust_method, optional_suffix).
-pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static str>) {
+///
+/// `want_raw_option` — true only while emitting an expression flowing directly into an
+/// Optional-typed function return / `let T?` binding (`Transpiler::want_raw_option_pop`,
+/// set narrowly around that outer expression — see its doc). It affects only "pop": when
+/// true, the `.unwrap_or_default()` suffix below is skipped so the raw `Option<T>` Rust's
+/// `Vec::pop()` produces flows through unchanged, matching array.br's own declared
+/// `req T? pop(): native` signature (nil if empty) instead of discarding `None`. In every
+/// other (non-Optional-target) context — the common case, e.g. `let v = arr.pop()` with
+/// `v` inferred as a bare `T` — the suffix stays on, since that's the position Boring's
+/// "returns the value or default" pop semantics is documented for.
+pub(crate) fn map_method(name: &str, _arity: usize, want_raw_option: bool) -> (String, Option<&'static str>) {
     match name {
         // len() returns usize; Boring's length/count returns int (isize).
         "length" | "count" => ("len".into(), Some(" as isize")),
@@ -454,7 +472,9 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "len"              => ("len".into(), Some(" as usize")),
         "isEmpty"          => ("is_empty".into(), None),
         "push"             => ("push".into(), None),
-        // Vec::pop() returns Option<T>; unwrap to match Boring semantics (returns the value or default).
+        // Vec::pop() returns Option<T>; unwrap to match Boring semantics (returns the value
+        // or default) — UNLESS the caller wants the raw Option (see doc above).
+        "pop" if want_raw_option => ("pop".into(), None),
         "pop"              => ("pop".into(), Some(".unwrap_or_default()")),
         "insert"           => ("insert".into(), None),
         "remove"           => ("remove".into(), None),
@@ -485,8 +505,12 @@ pub(crate) fn map_method(name: &str, _arity: usize) -> (String, Option<&'static 
         "toLowerCase" | "lowercased" | "lower" | "to_lower" | "toLower" => ("to_lowercase".into(), None),
         "startsWith" | "hasPrefix"   => ("starts_with".into(), None),
         "endsWith"   | "hasSuffix"   => ("ends_with".into(), None),
-        "first"            => ("first".into(), None),
-        "last"             => ("last".into(), None),
+        // Vec::first()/last() return Option<&T> (a borrow); Boring's `first()`/`last()`
+        // are documented (book.md's "Array methods" table) as returning an *owned* `T?`,
+        // matching every other Vec-derived method here — append `.cloned()` so the
+        // emitted Option actually holds T, not &T.
+        "first"            => ("first".into(), Some(".cloned()")),
+        "last"             => ("last".into(), Some(".cloned()")),
         // `arr.append(other)` merges a whole other collection in — always `.extend()`,
         // never `.push()` (that's `arr.push(v)`, a single element — see docs/book.md's
         // "Array methods" table). This was mapped to `push` here, which only "worked"

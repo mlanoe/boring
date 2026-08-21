@@ -282,6 +282,15 @@ struct Transpiler {
     /// True while emitting the LHS of an assignment — suppresses `.clone()` on Arc fields.
     /// Uses Cell<bool> because emit_expr takes &self.
     pub(crate) in_lhs_assign: std::cell::Cell<bool>,
+    /// True while emitting an expression that will flow directly into an Optional-typed
+    /// function return or `let T?` binding — set only around the exact outer expression
+    /// (return tail / return stmt / let-value), not while recursing into unrelated
+    /// subexpressions. Lets `map_method`'s "pop" mapping skip its `.unwrap_or_default()`
+    /// suffix so a bare `arr.pop()` flows through as the raw `Option<T>` `Vec::pop()`
+    /// already produces, matching Boring's own declared `req T? pop(): native` semantics
+    /// (nil if empty) instead of discarding `None` — see helpers.rs's `map_method` doc.
+    /// Uses Cell<bool> because emit_expr takes &self.
+    pub(crate) want_raw_option_pop: std::cell::Cell<bool>,
     /// Are we inside a `req` (non-mutating, &self) function body?
     pub(crate) in_req_fn: bool,
     /// Are we emitting a struct/enum method (self_ty.is_some())?
@@ -938,6 +947,7 @@ impl Transpiler {
             indent: 0,
             in_throws: false,
             in_lhs_assign: std::cell::Cell::new(false),
+            want_raw_option_pop: std::cell::Cell::new(false),
             in_req_fn: false,
             in_struct_method: false,
             in_async: false,

@@ -2197,19 +2197,27 @@ impl Transpiler {
                     return format!("{}.insert({}, {})", dict_name, key_owned, val_s);
                 }
             }
-            // self.field[key] = val → self.field.insert(key_owned, val)
+            // obj.field[key] = val → obj.field.insert(key_owned, val)
+            // `obj` may be `self` or any other struct-typed var/param reached from
+            // outside the struct's own methods -- e.g. a `var Registry registry`
+            // parameter on a free function assigning into `registry.table[key]`.
+            // `resolve_struct_name` already special-cases `self` (matching the old
+            // self-only check below) and resolves any other `Var`/`Field` chain via
+            // `var_struct_types`/`var_types`, so one branch now covers both instead
+            // of silently falling through to the generic read-expression path (which
+            // used to emit an invalid `.clone()`-as-assignment-target for the
+            // non-self case).
             if let ExprKind::Field(inner_obj, field_name) = &dict_obj.kind {
-                if matches!(&inner_obj.kind, ExprKind::Var(v) if v == "self") {
-                    let is_dict_field = self.self_type.as_ref()
-                        .and_then(|t| self.struct_fields.get(t))
+                let is_dict_field = self.resolve_struct_name(inner_obj)
+                    .and_then(|t| self.struct_fields.get(t.as_str())
                         .and_then(|fields| fields.iter().find(|(n, _)| n == field_name))
-                        .map(|(_, ty)| matches!(ty.without_mut(), Type::Dict(..)))
-                        .unwrap_or(false);
-                    if is_dict_field {
-                        let key_owned = self.emit_dict_key_owned(key);
-                        let val_s = self.emit_expr_owned(value);
-                        return format!("self.{}.insert({}, {})", field_name, key_owned, val_s);
-                    }
+                        .map(|(_, ty)| matches!(ty.without_mut(), Type::Dict(..))))
+                    .unwrap_or(false);
+                if is_dict_field {
+                    let key_owned = self.emit_dict_key_owned(key);
+                    let val_s = self.emit_expr_owned(value);
+                    let obj_s = self.emit_expr(inner_obj);
+                    return format!("{}.{}.insert({}, {})", obj_s, field_name, key_owned, val_s);
                 }
             }
             // Implicit self: `table[key] = v` inside a struct method where `table` is

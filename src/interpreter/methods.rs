@@ -103,7 +103,11 @@ impl Interpreter {
                     if let Value::Array(arr_rc) = obj {
                         let mut arr_owned = Value::rc_vec_into_owned(arr_rc);
                         if arr_owned.is_empty() {
-                            return Err(err("pop: array is empty", line));
+                            // array.br declares `req T? pop(): native — nil if empty`,
+                            // matching first()/last()'s Value::Nil-on-empty handling
+                            // below — no element to remove, so out_self is left
+                            // untouched (the array stays empty either way).
+                            return Ok(Value::Nil);
                         }
                         let last = arr_owned.pop().unwrap();
                         *out_self = Some(Value::Array(arr_owned.into()));

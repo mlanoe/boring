@@ -183,7 +183,16 @@ impl Transpiler {
                         &self.fn_return_ty,
                         Some(Type::Optional(_))
                     );
-                    let s = if is_optional_return && !self.is_option_expr(e) {
+                    let s = if is_optional_return && is_bare_pop_call(e) {
+                        // Bare `arr.pop()` tail call with a declared `T?` return: pass
+                        // `Vec::pop()`'s `Option<T>` straight through raw (skip
+                        // map_method's default `.unwrap_or_default()`, and don't
+                        // re-wrap in `Some(...)` below — it's already Option-shaped).
+                        self.want_raw_option_pop.set(true);
+                        let raw = self.emit_expr_owned(e);
+                        self.want_raw_option_pop.set(false);
+                        raw
+                    } else if is_optional_return && !self.is_option_expr(e) {
                         // Function returns Option<T>; expression is not already Option-typed.
                         // Wrap scalar/integer/variable values in Some() so Rust is happy.
                         // Use emit_expr_owned so string literals become Arc::<str>::from("...")

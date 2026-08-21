@@ -234,7 +234,7 @@ impl Transpiler {
     /// chain regardless of `x`'s actual type.
     pub(crate) fn is_option_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::MethodCall(recv, method, _) | ExprKind::Pipe(recv, method, _) => {
+            ExprKind::MethodCall(recv, method, args) | ExprKind::Pipe(recv, method, args) => {
                 // A call whose own receiver is a known user struct/enum is never guessed to
                 // be Option-shaped from name alone — its methods are real declared members,
                 // not Option's, whatever they happen to be named.
@@ -248,15 +248,20 @@ impl Transpiler {
                 // (docs/book.md's Built-in Types & Functions Reference — array.pop/first/
                 // last/find, dict.get) regardless of the receiver's shape. Unlike the truly
                 // ambiguous names just below, there is no Boring-native meaning of
-                // `pop`/`first`/`last`/`find`/`get` that returns a bare (non-Optional) value,
+                // `pop`/`first`/`last`/`find` that returns a bare (non-Optional) value,
                 // so — unlike those — they don't need a receiver check at all. Found wiring
                 // `boring.collections`'s `Stack<T>`/`Queue<T>` (docs/cross-project-code-
                 // sharing-gap.md's stdlib work): `def T? pop(): items.pop()` was getting a
                 // spurious extra `Some(...)` wrapped around the already-`Option<T>` `Vec::
                 // pop()` call, because this function said "not proven Optional" for a plain
                 // array receiver.
-                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "get"];
+                const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find"];
                 if ALWAYS_OPTION.contains(&method.as_str()) { return true; }
+                // `get(k)` (1-arg dict form, try_emit_dict_method) is the same story as the
+                // names above -- always Option<T>. The 2-arg `get(k, default)` form unwraps
+                // instead (`.unwrap_or(default)`), so only the 1-arg call is unconditionally
+                // Option-shaped; the 2-arg form falls through to `false` below.
+                if method == "get" && args.len() == 1 { return true; }
                 // Genuinely ambiguous (exists on both Vec/iterator and Option with different
                 // return shapes): propagate — only treat as Option if the receiver is itself
                 // Option-like.
@@ -626,7 +631,7 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                 let is_task = self.var_rwlock_task_types.contains(v.as_str());
-                let (rust_method, extra_wrap) = map_method(method, args.len());
+                let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let struct_name = self.resolve_receiver_type_name(v.as_str());
                 let is_req = self.method_is_req_or_task(&struct_name, method);
@@ -675,7 +680,7 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, rwlock_field));
                     if let Some(k) = key {
                         if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
-                            let (rust_method, extra_wrap) = map_method(method, args.len());
+                            let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                             let struct_type_name = self.self_type.as_deref().unwrap_or("");
                             let req_key = format!("{}::{}", struct_type_name, method);
@@ -735,7 +740,7 @@ impl Transpiler {
                         self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
                     }
                 }
-                let (mut rust_method, extra_wrap) = map_method(method, args.len());
+                let (mut rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 // `append(xs)` where xs is a collection → use `extend` instead of `push`
                 // so that Vec<T> arguments are flattened into the actor collection.
                 if rust_method == "push" && args.len() == 1 {
@@ -791,7 +796,7 @@ impl Transpiler {
         // Uses std::sync::Mutex (synchronous), no .await needed.
         if let ExprKind::Var(v) = &obj.kind {
             if self.managed_mutex_vars.contains(v.as_str()) {
-                let (rust_method, extra_wrap) = map_method(method, args.len());
+                let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let call = format!("{}.lock().unwrap().{}({})", v, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
@@ -799,7 +804,7 @@ impl Transpiler {
             }
             // Managed-mode RefCell var method: w.method(args) → w.borrow_mut().method(args)
             if self.managed_refcell_vars.contains(v.as_str()) {
-                let (rust_method, extra_wrap) = map_method(method, args.len());
+                let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                 let call = format!("{}.borrow_mut().{}({})", v, rust_method, args_s.join(", "));
                 let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
@@ -814,7 +819,7 @@ impl Transpiler {
                         .map(|t| format!("{}::{}", t, mutex_field));
                     if let Some(k) = key {
                         if self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k) {
-                            let (rust_method, extra_wrap) = map_method(method, args.len());
+                            let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = format!("{}.{}({})", guard_expr, rust_method, args_s.join(", "));
@@ -871,7 +876,7 @@ impl Transpiler {
                     let is_actor_field = matches!(&field_ty,
                         Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
                     if is_actor_field {
-                        let (rust_method, extra_wrap) = map_method(method, args.len());
+                        let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                         let obj_s = self.emit_expr(obj);
                         let is_task_field = matches!(&field_ty,
@@ -900,7 +905,7 @@ impl Transpiler {
             if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
                 if let ExprKind::Var(v) = &inner_obj.kind {
                     if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
-                        let (rust_method, extra_wrap) = map_method(method, args.len());
+                        let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                         let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                         let guard = self.mutex_var_write(v, v);
                         let call = format!("{}.{}.{}({})", guard, field_name, rust_method, args_s.join(", "));
@@ -2033,7 +2038,7 @@ impl Transpiler {
             // dict.set(key, val) / dict.put(key, val) → dict.insert(key, val)
             ("insert".to_string(), None)
         } else {
-            let (m, w) = map_method(method, args.len());
+            let (m, w) = map_method(method, args.len(), self.want_raw_option_pop.get());
             (m, w)
         };
         // A hand-verified (or `boring.toml [external_fns]`-declared) argument-borrow entry
@@ -3194,6 +3199,7 @@ impl Transpiler {
             managed_mutex_vars: self.managed_mutex_vars.clone(),
             managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),
             in_lhs_assign: std::cell::Cell::new(false),
+            want_raw_option_pop: std::cell::Cell::new(false),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),

@@ -1,0 +1,28 @@
+# A struct method declared `T?` whose body is a bare tail-call to `.pop()`. The
+# transpiler must pass `Vec::pop()`'s `Option<T>` straight through (`self.items.pop()`)
+# instead of unconditionally appending `.unwrap_or_default()` (which either fails to
+# compile for a non-Default `T`, or silently turns every empty pop into `Some(default)`
+# instead of `None`) — see helpers.rs's `map_method` doc for the full history.
+
+struct Stack:
+    var [int] items = []
+
+    def push(int x):
+        items.push(x)
+
+    def int? pop():
+        items.pop()
+
+var mut s = Stack()
+s.push(1)
+s.push(2)
+
+match s.pop():
+    Some(x): print "got {x}"
+    None:    print "empty"
+match s.pop():
+    Some(x): print "got {x}"
+    None:    print "empty"
+match s.pop():
+    Some(x): print "got {x}"
+    None:    print "empty"

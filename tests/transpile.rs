@@ -315,6 +315,7 @@ transpile_test!(tuple_string);
 transpile_test!(tuple_methods);
 transpile_test!(tuple_map);
 transpile_test!(array_pop_remove);
+transpile_test!(optional_pop_tail_call);
 transpile_test!(transpiler_coerce);
 transpile_test!(string_len_chars);
 transpile_test!(mixed_modulo);
@@ -454,6 +455,12 @@ transpile_test!(implicit_self_length_nontail);
 transpile_test!(throws_method_name_collision);
 transpile_test!(narrowing_cast_if_let);
 transpile_test!(try_else_nil_if_let);
+// Vec::first()/last() and HashMap::get(k) return Option<&T> in Rust; Boring's
+// first()/last()/get() are documented (book.md) as owned `T?`. This is the real
+// value of this case: `cargo run` on the emitted Rust only compiles if `.cloned()`
+// was inserted AND the already-Option-shaped result wasn't double-wrapped in
+// Some(...) (which fails to type-check against `Option<isize>`).
+transpile_test!(option_owned_methods);
 // Note: nil_assign (type inference for nil variables), pattern_some (Some/None on non-Option),
 // and closure_break (break inside closure) are interpreter-only tests — not added here.
 

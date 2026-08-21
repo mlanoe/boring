@@ -264,6 +264,16 @@ impl Transpiler {
         // `infer_float_width` lookup on a bare `Var(rad)` would otherwise have nothing to go on
         // and silently default a builtin math call like `sin(rad)` to f64.
         self.var_init_exprs.insert(s.name.clone(), s_value.clone());
+        // A fresh `let <name> = ...` always starts a brand-new binding — reset any
+        // `optional_vars` marking left over from an *unrelated*, identically-named `let`
+        // elsewhere in the same top-level fn (optional_vars is a flat per-fn set, not
+        // scoped to Rust match-arm/block boundaries like the real variables are). Without
+        // this, e.g. one `match` arm's `let result = dict.get(k)` (Option-producing) could
+        // leak "result is optional" into a later, unrelated `let result = some_fn(...)`
+        // (not Option-producing) in a different arm of the same fn, wrongly Some(...)-wrapping
+        // patterns matched against it. The heuristics below re-insert the name if *this*
+        // let's own RHS is actually Option-shaped.
+        self.optional_vars.remove(s.name.as_str());
         // Track mutable Arc<str> vars for read_line / clear() special-casing
         if is_mutable_string_lit || is_mutable_string_ty {
             self.string_arc_vars.insert(s.name.clone());
@@ -522,6 +532,26 @@ impl Transpiler {
                     }
                 }
             }
+        }
+        // Any method-call/pipe RHS that is_option_expr recognizes as Option-shaped
+        // (first()/last()/find(), a 1-arg dict get(k), and_then/or_else/flatten/
+        // as_ref/as_deref, or a map/filter/cloned/... chain rooted in one of those)
+        // marks the var optional too — otherwise a later bare-var tail-return or
+        // match on this var gets wrapped in Some(...) a second time (e.g.
+        // `let front = items.first()` then returning `front` from a `T?` method).
+        // Excludes a bare `pop()` call specifically: is_option_expr's ALWAYS_OPTION
+        // list treats `pop` as unconditionally Option-shaped for a different
+        // consumer (avoiding a double Some(...) wrap when a `T?`-returning
+        // fn/let's tail *is* the bare pop call — see emit_flow.rs/emit_stmt.rs's
+        // `is_bare_pop_call` checks and map_method's `want_raw_option` doc), but an
+        // untyped `let v = arr.pop()` never actually reaches that raw-passthrough
+        // path — map_method's default `.unwrap_or_default()` applies here, so `v`
+        // is a bare T, not Option<T>, and must not be marked optional.
+        if s.ty.is_none() && matches!(&s_value.kind, ExprKind::MethodCall(..) | ExprKind::Pipe(..))
+            && !is_bare_pop_call(s_value)
+            && self.is_option_expr(s_value)
+        {
+            self.optional_vars.insert(s.name.clone());
         }
         // If-expression or match-expression with nil/some branches already produces Option<T>.
         if s.ty.is_none() {
@@ -1116,6 +1146,17 @@ impl Transpiler {
     /// a function/method/field known to return Optional, etc.), in which case it's passed
     /// through unwrapped to avoid double-wrapping.
     fn emit_let_value_optional(&self, inner: &Type, value: &Expr, is_option_cast: bool) -> String {
+        // Bare `let T? x = arr.pop()`: pass `Vec::pop()`'s `Option<T>` straight through
+        // raw — skip map_method's default `.unwrap_or_default()` and don't wrap it in
+        // `Some(...)` below (it's already Option-shaped). Mirrors the identical check in
+        // emit_stmt.rs's tail-return and emit_flow.rs's `return` — see map_method's
+        // `want_raw_option` doc for why the suffix needs suppressing here specifically.
+        if is_bare_pop_call(value) {
+            self.want_raw_option_pop.set(true);
+            let raw = self.emit_expr_owned(value);
+            self.want_raw_option_pop.set(false);
+            return raw;
+        }
         // If-expression with mixed branches (some nil, some non-optional): emit via a
         // sub-transpiler that has fn_return_ty = Optional(inner) so each branch
         // independently wraps non-nil values in Some() and nil → None.

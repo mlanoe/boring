@@ -1,0 +1,74 @@
+# Regression test: Vec::first()/last() and HashMap::get() return Option<&T> in
+# Rust; Boring's `first()`/`last()`/`get()` are documented (book.md's "Array
+# methods" table) as returning an *owned* `T?`. The transpiler must insert
+# `.cloned()` so the emitted Option actually holds T, not &T — and must not
+# double-wrap the result in `Some(...)` (it's already Option-shaped).
+
+struct Stack:
+    var [int] items = []
+
+    # (a) bare tail-call `T?` method — the classic double-wrap trap:
+    # `Some(self.items.last())` doesn't type-check once `.cloned()` is added,
+    # since the raw method call is already `Option<isize>`.
+    req int? peek():
+        items.last()
+
+    req int? peekFirst():
+        items.first()
+
+    # (b) `let` binding later used where `Option<T>` (not `Option<&T>`) is
+    # required — the RHS var itself must be tracked as already-optional so the
+    # bare-var tail return isn't re-wrapped in Some(...).
+    req int? peekFirstViaLet():
+        let front = items.first()
+        front
+
+    def push(int v):
+        items.push(v)
+
+struct Registry:
+    var {string=int} scores = {=}
+
+    # Single-arg dict.get(k) is Option-producing too (same double-wrap trap as
+    # array first()/last()); the 2-arg get(k, default) form is not (unwraps).
+    req int? lookup(string k):
+        scores.get(k)
+
+    req int lookupOr(string k):
+        scores.get(k, -1)
+
+def main():
+    mut s = Stack([])
+    s.push(10)
+    s.push(20)
+    s.push(30)
+
+    match s.peek():
+        Some(x): print "peek: {x}"
+        None: print "peek: nil"
+
+    match s.peekFirst():
+        Some(x): print "peekFirst: {x}"
+        None: print "peekFirst: nil"
+
+    match s.peekFirstViaLet():
+        Some(x): print "peekFirstViaLet: {x}"
+        None: print "peekFirstViaLet: nil"
+
+    mut empty = Stack([])
+    match empty.peek():
+        Some(x): print "emptyPeek: {x}"
+        None: print "emptyPeek: nil"
+    match empty.peekFirst():
+        Some(x): print "emptyPeekFirst: {x}"
+        None: print "emptyPeekFirst: nil"
+
+    mut r = Registry({"alice" = 90})
+    match r.lookup("alice"):
+        Some(x): print "lookup alice: {x}"
+        None: print "lookup alice: nil"
+    match r.lookup("bob"):
+        Some(x): print "lookup bob: {x}"
+        None: print "lookup bob: nil"
+    let bobOr = r.lookupOr("bob")
+    print "lookupOr bob: {bobOr}"

@@ -1,0 +1,8 @@
+peek: 30
+peekFirst: 10
+peekFirstViaLet: 10
+emptyPeek: nil
+emptyPeekFirst: nil
+lookup alice: 90
+lookup bob: nil
+lookupOr bob: -1
