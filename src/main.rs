@@ -1656,11 +1656,28 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
             }
         }
     }
-    let config = transpiler::TranspileConfig { deps, ..config };
+    // Same `source_dir` derivation as `emit_rust_to_dir` — without it, a local
+    // `use <file>` resolves relative to the *process* cwd instead of the source
+    // file's own directory, so `--emit-rust` run from anywhere other than the
+    // file's directory would silently fail to find it (falls through to being
+    // emitted as a bogus external `use` path instead of inlining the module).
+    let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    let config = transpiler::TranspileConfig { source_dir, deps, ..config };
     let out = transpiler::transpile_with_config(&program, config);
     report_transpile_warnings(&path, &source, &out.warnings);
     if !out.errors.is_empty() { report_transpile_errors(&path, &source, &out.errors); process::exit(1); }
     print!("{}", out.code);
+    // `--emit-rust` prints a single Rust stream on stdout, so cross-file/cross-project
+    // `use` imports (which the project-mode path below writes as their own `src/<name>.rs`
+    // and pulls in via `include!`, see `emit_rust_to_dir`) have nowhere else to go — inline
+    // each module's code directly here instead, under a banner naming its source file.
+    // Module code never re-emits the prelude/imports (see `prelude_emitted` in
+    // `transpiler::mod::emit_program`), so simple concatenation into one flat namespace
+    // is exactly what `include!` would have produced anyway.
+    for (mod_name, mod_code) in &out.modules {
+        println!("\n// ─── module: {} ───", mod_name);
+        print!("{}", mod_code);
+    }
 }
 
 fn rust_dir_name_full(stem: &str, threading: &transpiler::ThreadingMode, mode: &transpiler::TranspileMode) -> String {

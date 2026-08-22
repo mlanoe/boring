@@ -1,0 +1,12 @@
+# Minimal sibling `.br` file for the `emit_rust_modules` regression test
+# (tests/emit_rust_modules.rs). Imported by cross_file_use_main.br via a
+# plain local `use cross_file_use_lib` (no [deps], no boring.toml -- just
+# two files in the same directory), which the transpiler resolves through
+# `inline_boring_use` into a separate `t.modules` entry (see emit_top.rs's
+# `emit_use`). `boring build --emit-rust` used to silently drop every such
+# module from its stdout output -- only the real "write a Cargo project to
+# disk" path (`emit_rust_to_dir`) ever wrote them out, via one `include!`
+# per module. See tests/emit_rust_modules.rs for the fix this proves.
+
+int double_it(int x):
+    x * 2

@@ -1,0 +1,9 @@
+# See cross_file_use_lib.br's doc comment. Registered only by
+# tests/emit_rust_modules.rs, which runs `boring build --emit-rust` on this
+# file and real-compiles the result with rustc -- unlike a project-mode
+# `boring build` (which already wrote per-module `src/<name>.rs` files
+# correctly before this fix), this is the path that used to drop
+# cross_file_use_lib.br's contents entirely.
+use cross_file_use_lib
+
+print double_it(21)
