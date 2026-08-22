@@ -362,6 +362,41 @@ impl std::fmt::Debug for dyn BoringVal + Send + Sync {
 // BoringError — typed exception wrapper so `catch String:` / `catch Int:` / `catch MyError:` can dispatch.
 // `Other(TypeId, error)` identifies the thrown type uniquely across modules via std::any::TypeId::of::<T>(),
 // which requires no instance — fully collision-free even when two modules define identically-named types.
+//
+// `Scalar(ScalarKind, u128)` is the fixed-width numeric family's own path —
+// int8..int128, uint8..uint128, and float32 — kept OUT of `Other` on purpose
+// (docs/float-width-types.md §7): the compiler already knows, statically,
+// that a thrown value here is exactly one of eleven small Copy kinds, so
+// paying for a heap allocation + `dyn Any` downcast the way `Other` does for
+// arbitrary user enums/structs would be pure overhead. The raw bits are
+// reinterpreted per `kind` in `Display` below and at each `catch` arm —
+// sign/zero-extended into the shared `u128` slot on the way in, truncated (or
+// bit-reinterpreted, for float32) back to the exact original type on the way
+// out; this round-trips exactly, it never touches `Other`'s TypeId machinery
+// at all. `float`/`float64` deliberately stay on their own pre-existing
+// `BoringError::Float(f64)` fast path instead of joining `Scalar` — unlike
+// the other eleven kinds, they already had a dedicated, no-allocation
+// representation before this family existed, and giving them a second,
+// parallel one here would only create two disjoint representations for the
+// same type with no single `catch` spelling reliably catching both (a literal
+// float throw and a `float64`-typed variable throw would land in different
+// variants). `Other` still exists, narrowed to what only it can do: genuine
+// user-defined enums/structs the compiler can't enumerate in advance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32 }
+impl BoringError {
+    fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }
+    fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }
+    fn scalar_i32(v: i32) -> Self { BoringError::Scalar(ScalarKind::Int32, v as i128 as u128) }
+    fn scalar_i64(v: i64) -> Self { BoringError::Scalar(ScalarKind::Int64, v as i128 as u128) }
+    fn scalar_i128(v: i128) -> Self { BoringError::Scalar(ScalarKind::Int128, v as u128) }
+    fn scalar_u8(v: u8) -> Self { BoringError::Scalar(ScalarKind::Uint8, v as u128) }
+    fn scalar_u16(v: u16) -> Self { BoringError::Scalar(ScalarKind::Uint16, v as u128) }
+    fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }
+    fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }
+    fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }
+    fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }
+}
 #[derive(Debug)]
 enum BoringError {
     Int(i64),
@@ -369,6 +404,7 @@ enum BoringError {
     Bool(bool),
     Str(&'static str),
     String(Arc<str>),
+    Scalar(ScalarKind, u128),
     Other(std::any::TypeId, std::boxed::Box<dyn BoringVal + Send + Sync>),
 }
 impl std::fmt::Display for BoringError {
@@ -379,6 +415,19 @@ impl std::fmt::Display for BoringError {
             BoringError::Bool(b)        => write!(f, "{}", b),
             BoringError::Str(s)         => write!(f, "{}", s),
             BoringError::String(s)      => write!(f, "{}", s),
+            BoringError::Scalar(k, bits) => match k {
+                ScalarKind::Int8    => write!(f, "{}", *bits as i128 as i8),
+                ScalarKind::Int16   => write!(f, "{}", *bits as i128 as i16),
+                ScalarKind::Int32   => write!(f, "{}", *bits as i128 as i32),
+                ScalarKind::Int64   => write!(f, "{}", *bits as i128 as i64),
+                ScalarKind::Int128  => write!(f, "{}", *bits as i128),
+                ScalarKind::Uint8   => write!(f, "{}", *bits as u8),
+                ScalarKind::Uint16  => write!(f, "{}", *bits as u16),
+                ScalarKind::Uint32  => write!(f, "{}", *bits as u32),
+                ScalarKind::Uint64  => write!(f, "{}", *bits as u64),
+                ScalarKind::Uint128 => write!(f, "{}", *bits),
+                ScalarKind::Float32 => write!(f, "{}", f32::from_bits(*bits as u32)),
+            },
             BoringError::Other(_, e)    => write!(f, "{}", e),
         }
     }
@@ -442,7 +491,7 @@ impl std::error::Error for GpuError {}
 
 const N: i64 = 16;
 
-const ALPHA: f64 = 2.0;
+const ALPHA: f32 = 2.0;
 
 
 fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -454,13 +503,16 @@ fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // boring run saxpy.br                          # interpreted simulation
     // boring build --target cuda saxpy.br          # CUDA (simulation on macOS without nvidia)
     // boring build --target metal saxpy.br         # Metal (macOS native)
+    // 
+    // Uses float32 throughout (not the bare `float`/`float64` alias) — MSL has no
+    // native `double`, so a `--target metal` build requires float32 buffers.
     let g = ((0) as usize);
     println!("Device : {}", __boring_gpu_name());
     println!("Memory : {} GB", (__boring_gpu_total_mem() / 1073741824));
-    let mut x: Vec<f64> = vec![0.0; N as usize];
-    let mut y: Vec<f64> = vec![1.0; N as usize];
+    let mut x: Vec<f32> = vec![0.0; N as usize];
+    let mut y: Vec<f32> = vec![1.0; N as usize];
     for i in (0..N) {
-        x[(i) as usize] = (i as f64);
+        x[(i) as usize] = (i as f32);
     }
     let mut k = Saxpy::new(__boring_gpu_device(), __boring_gpu_queue());
     k.alpha = (ALPHA) as f32;
@@ -468,7 +520,7 @@ fn boring_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     k.copy_y_to_device(&y.iter().map(|&x| x as f32).collect::<Vec<f32>>());
     k.dispatch((1) as u32, (1) as u32, (1) as u32)?;
     println!("Results (expected: y[i] = 2*i + 1):");
-    for (i, v) in k.copy_y_to_host().iter().map(|&x| x as f64).collect::<Vec<f64>>().into_iter() {
+    for (i, v) in k.copy_y_to_host().iter().map(|&x| x as f32).collect::<Vec<f32>>().into_iter().enumerate().map(|(i, v)| (i as isize, v)) {
         println!("  y[{}] = {}", i, v);
     }
     Ok(())

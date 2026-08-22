@@ -309,6 +309,7 @@ transpile_test!(result_compat);
 transpile_test!(multi_catch);
 transpile_test!(implicit_self);
 transpile_test!(shadowing);
+transpile_test!(for_destructure);
 transpile_test!(struct_spread);
 transpile_test!(default_rest);
 transpile_test!(tuple_string);

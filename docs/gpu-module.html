@@ -230,8 +230,8 @@ print k.buf[<span class="nb">0</span>]</code></pre></div>
         dst[width = r, height = c] = src[width = c, height = r]</code></pre></div>
 <ul><li><strong>Indexing</strong>: <code>a[width = w, height = h]</code> — no <code>.at(...)</code> method call; labels</li></ul>
 <p>  are mandatory for 2+ axes and order-free at the use site   (<code>a[height=h, width=w]</code> is identical to <code>a[width=w, height=h]</code>).</p>
-<ul><li><strong>Shape queries</strong>: <code>a.size(.width)</code> / <code>a.size(.height)</code> / <code>a.size(.depth)</code> —</li></ul>
-<p>  one method, an axis-selector enum synthesized per array type instead of a   separate method name per axis.</p>
+<ul><li><strong>Shape queries</strong>: <code>a.width</code> / <code>a.height</code> / <code>a.depth</code> — each declared axis</li></ul>
+<p>  is a read-only property, no separate accessor method per axis and no call   syntax at all.</p>
 <ul><li><strong>Layout</strong>: row-major — the <em>first declared label</em> is the fastest-varying</li></ul>
 <p>  axis (<code>a[width=w, height=h]</code> lowers to flat index <code>w + h*width_size</code>),   regardless of what the labels are named.</p>
 <ul><li><strong>Qualifiers</strong>: same set as <code>[T]</code>/<code>[T, N]</code> combined (see the matrix above)</li></ul>

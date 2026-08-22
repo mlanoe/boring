@@ -212,6 +212,9 @@ struct_decl     ::= attr* "struct" IDENT type_params? ("as" type_list)? ":" NEWL
 
 struct_member   ::= field_decl
                   | init_decl
+                  | "pass" NEWLINE                # no-op filler; lets an indented body of just
+                                                   # `pass` parse as an empty struct (in addition
+                                                   # to the inline `":" "pass"` form above)
                   | "pub"? fn_decl
                   | "pub"? set_decl
                   | conformance_decl
@@ -283,7 +286,10 @@ enum_decl       ::= attr* "enum" IDENT type_params? ("as" type_list)? ":" NEWLIN
 
 enum_variant    ::= IDENT ("(" variant_fields ")")? NEWLINE
 variant_fields  ::= variant_field ("," variant_field)*
-variant_field   ::= type IDENT?              # type first, optional name (consistent with params)
+variant_field   ::= type IDENT?              # type first, optional name (consistent with params);
+                                              # `type` already covers `mut Type` here (mut-qualified
+                                              # variant fields, e.g. `Value(mut Point p)`) — see the
+                                              # "mut"? type alternative in the `type` production below
 
 enum_member     ::= "pub"? fn_decl
                   | "pub"? set_decl
@@ -385,11 +391,18 @@ ext_member      ::= "pub"? fn_decl
 #   'unified  — unified DRAM (host + device); host can read/write directly.
 #               On Apple Silicon (Metal), zero-copy. On CUDA x86: cudaMallocManaged.
 #   'global   — device-only DRAM; host accesses via gpu.copy(). CUDA: __global__.
-#   'sync     — block SRAM shared by all threads in a block. CUDA: __shared__. MSL: threadgroup.
+#   'actor    — block SRAM shared by all threads in a block (formerly spelled 'sync — the
+#               qualifier was renamed; the `sync` *statement* inside a kernel `def` body,
+#               used for manual barriers, is unrelated and keeps its name).
+#               CUDA: __shared__. MSL: threadgroup.
 #               Barriers are inserted automatically (auto mode) unless the `def` body contains
 #               at least one explicit `sync` statement (manual mode).
-#               A user-defined struct can also be qualified with 'sync to group compound state
+#               A user-defined struct can also be qualified with 'actor to group compound state
 #               that must be observed coherently across threads.
+#   'actor'global   — device DRAM with atomic access (device-side compound-assigns become
+#               atomic ops). Behaves like 'global for memory placement.
+#   'actor'unified  — host+device DRAM with atomic access. Behaves like 'unified for memory
+#               placement. CUDA/ROCm only — Metal/wgpu reject it with a target-specific error.
 #   'local    — thread-private (registers). CUDA: local variables. MSL: default.
 #   'const    — constant cache; read-only. CUDA: __constant__. MSL: constant buffer.
 #
@@ -399,7 +412,7 @@ ext_member      ::= "pub"? fn_decl
 #   var T field       →  'local   (idem)
 #   let [T, N] field  →  'const   (fixed array `let` → constant cache)
 #   mut [T, N] field  →  'local   (fixed array `mut`/`var` → thread-private)
-#   Dynamic [T] always requires an explicit qualifier ('unified, 'global, or 'sync).
+#   Dynamic [T] always requires an explicit qualifier ('unified, 'global, or 'actor).
 #
 # Host-side binding qualifiers for kernel results (outside kernel struct):
 #   T'unified  — returned slice lives in unified memory; accessible on both host and device
@@ -413,7 +426,7 @@ kernel_member   ::= kernel_field_decl
                   | fn_decl
 
 # Scalar fields may carry an inline default value (omitted from the generated constructor).
-# Array/buffer fields ('unified, 'global, 'sync) must NOT have a default — the parser rejects them.
+# Array/buffer fields ('unified, 'global, 'actor) must NOT have a default — the parser rejects them.
 kernel_field_decl ::= ("let" | "mut" | "var") type IDENT ("=" expr)? NEWLINE
 
 # Module grouping — flat scoping at runtime; structure preserved for the transpiler.
@@ -694,7 +707,12 @@ trailing_closure ::= "(" param_list? ")" modifier* ":" fn_body   # (p, q): body
 postfix         ::= "(" arg_list? ")" trailing_closure?          # call with optional trailing closure
                   | "<" type_list ">" "(" arg_list? ")" trailing_closure?  # generic call: f<T>(args)
                   | trailing_closure                                         # trailing closure, no regular args
-                  | "." IDENT                                                # field access
+                  | "." IDENT                                                # field access — also covers
+                                                                             #   `.pointee` on an opaque/external
+                                                                             #   Rust type (emits `*expr`, read
+                                                                             #   and write, not a real field) and
+                                                                             #   a labeled array's own axis
+                                                                             #   properties (`a.width`, `a.height`)
                   | "?." IDENT                                               # optional chaining — field
                   | "." IDENT "(" arg_list? ")"                             # method call
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
@@ -712,6 +730,10 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
 arg_list        ::= arg ("," arg)* ","?    # trailing comma allowed
 arg             ::= (IDENT "=")? expr      # labeled or positional
                   | ".." expr              # spread argument — expands into the variadic slot
+                  | "_"                    # fill-rest marker (struct construction only): every
+                                            # field not otherwise supplied gets its default value.
+                                            # Mutually exclusive with `..spread`; every other arg in
+                                            # the same call must be labeled (`field = expr`).
 
 primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | IDENT
@@ -903,9 +925,10 @@ type            ::= primitive_type
                                                        #   tuple/generic argument/array element/dict value
                                                        #   exactly like the unprefixed form above)
                   | "mut"? type                        # mut Type → valid only where the CHECKER allows
-                                                       #   it (tuple slot, struct field, array element,
-                                                       #   dict value, or a let_stmt's own top-level type —
-                                                       #   see binding_keyword above); a Boring-only
+                                                       #   it (tuple slot, struct field, enum variant
+                                                       #   field, array element, dict value, or a
+                                                       #   let_stmt's own top-level type — see
+                                                       #   binding_keyword above); a Boring-only
                                                        #   permission with no distinct Rust type of its
                                                        #   own. Grammar-unrestricted on purpose — parses
                                                        #   anywhere a `type` does, rejected elsewhere by

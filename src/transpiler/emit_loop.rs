@@ -14,6 +14,79 @@ use super::Transpiler;
 use super::helpers::*;
 
 impl Transpiler {
+    /// Best-effort resolution of an expression's static Boring type, for the
+    /// two shapes relevant to for-loop auto-enumerate detection: a plain
+    /// local variable/parameter, and a struct field access. Returns `None`
+    /// when the type can't be determined from local bookkeeping (e.g. a
+    /// method-call result) — callers must treat that as "unknown", not
+    /// "definitely not a dict/tuple-array".
+    fn resolve_iterable_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Var(v) => self.var_types.get(v.as_str())
+                .or_else(|| self.fn_current_params.get(v.as_str()))
+                .cloned(),
+            ExprKind::Field(inner, field) => {
+                let owner_ty = self.resolve_expr_struct_type(inner)?;
+                self.struct_fields.get(owner_ty.as_str())?
+                    .iter().find(|(fname, _)| fname == field)
+                    .map(|(_, fty)| fty.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Shape check on an expression's own syntax only (no variable lookups):
+    /// `Some(true)`/`Some(false)` when the expression is itself one of the
+    /// telltale tuple-or-not shapes, `None` when it's some other kind of
+    /// expression entirely (a method call, a field access, ...) and the
+    /// caller needs to fall back to type-based resolution instead.
+    fn literal_shape_is_tuples(&self, e: &Expr) -> Option<bool> {
+        match &e.kind {
+            // `.enumerate()`/`.zip(...)` already produce tuples.
+            ExprKind::MethodCall(_, method, _) if method == "enumerate" || method == "zip" => Some(true),
+            // Array literal: tuple-shaped iff its elements are tuple literals,
+            // e.g. `[(1, "one"), (2, "two")]` vs. `[10, 20, 30]`.
+            ExprKind::Array(elems) => Some(elems.first().is_some_and(|el| matches!(el.kind, ExprKind::Tuple(_)))),
+            // Dict literal: `{"a" = 1}` — HashMap iteration already yields (K, V).
+            ExprKind::Dict(_) => Some(true),
+            _ => None,
+        }
+    }
+
+    /// True when a `for <a>, <b> in <iterable>:` iterable is already
+    /// tuple-shaped (a dict, or an array of tuples) — i.e. the two loop
+    /// variables should destructure each item directly, per
+    /// docs/book.md's "`for` with index — auto-enumerate" rule. False (or
+    /// unknown, which callers treat the same as false) means the two-var
+    /// form is the auto-enumerate shorthand (`for i, v in arr:` ≡
+    /// `for i, v in arr.enumerate():`) and needs an explicit `.enumerate()`
+    /// injected, since — unlike the tree-walk interpreter, which decides
+    /// per item at runtime — the transpiler has to decide once, statically.
+    fn iterable_yields_tuples(&self, iterable: &Expr) -> bool {
+        if let Some(shape) = self.literal_shape_is_tuples(iterable) {
+            return shape;
+        }
+        // A local variable: check the dict tracking set (populated even for
+        // unannotated `var scores = {...}` bindings — see emit_let.rs), then
+        // fall back to its recorded initializer's own literal shape (covers
+        // `let pairs = [(1, "one"), ...]` with no type annotation, which
+        // `var_types`/`resolve_iterable_type` below can't see at all).
+        if let ExprKind::Var(v) = &iterable.kind {
+            if self.dict_vars.contains(v.as_str()) { return true; }
+            if let Some(shape) = self.var_init_exprs.get(v.as_str())
+                .and_then(|init| self.literal_shape_is_tuples(init))
+            {
+                return shape;
+            }
+        }
+        // Last resort: an explicit type annotation (local var, param, or
+        // struct field — the latter is how the kernel-field case, e.g.
+        // `for i, v in k.y:` where `y` is a declared `[float32]'unified`, gets
+        // proven non-tuple without ever touching `var_types`/`dict_vars`).
+        matches!(self.resolve_iterable_type(iterable), Some(Type::Dict(_, _)))
+            || matches!(self.resolve_iterable_type(iterable), Some(Type::Array(elem)) if matches!(*elem, Type::Tuple(_)))
+    }
+
     pub(crate) fn emit_while(&mut self, s: &WhileStmt) {
         let cond = self.emit_expr(&s.condition);
         self.line(&format!("while {} {{", cond));
@@ -305,6 +378,14 @@ impl Transpiler {
                 }
             }
         }
+        // `for i, v in arr:` auto-enumerate shorthand (docs/book.md's "`for` with
+        // index" rule): two loop vars over an iterable that isn't already
+        // tuple-shaped (a dict, or an array of tuples) bind vars[0] = index,
+        // vars[1] = element, same as `arr.enumerate()` written out explicitly.
+        // The interpreter already implements this dynamically (exec_for); the
+        // transpiler has to decide statically since Rust has no such thing as
+        // "iterate a Vec<T> as index+value only when T happens not to be a tuple".
+        let needs_auto_enumerate = s.vars.len() == 2 && !self.iterable_yields_tuples(&s.iterable);
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
             ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
@@ -312,14 +393,18 @@ impl Transpiler {
             }
             // Local variable iteration: use iter().cloned() so the variable is not moved
             // and can be reused after the loop. into_iter() would consume the collection.
-            // Exception: multi-var (dict/tuple) iteration needs into_iter() to get owned pairs.
+            // Exception: multi-var (dict/tuple) iteration needs into_iter() to get owned pairs
+            // — except the auto-enumerate case just above, which behaves like the single-var
+            // case (the source array itself isn't already tuple-shaped, so it's just as
+            // reusable afterward as the plain `for v in arr:` form).
             // Exception: a loop variable tracked as a task/JoinHandle var (the common
             // `for future in futures: future.wait` idiom — `futures` was built by
             // pushing `task_vars`/`join_handle_vars`-tracked values) holds
             // `tokio::task::JoinHandle<T>`, which isn't `Clone`; `.iter().cloned()`
             // is a hard compile error there (E0277). `into_iter()` is always safe for
             // this idiom since the array is never reused after awaiting every handle.
-            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str()) && s.vars.len() <= 1
+            ExprKind::Var(v) if self.known_local_vars.contains(v.as_str())
+                && (s.vars.len() <= 1 || needs_auto_enumerate)
                 && !s.vars.first().is_some_and(|lv| {
                     self.task_vars.contains(lv.as_str()) || self.join_handle_vars.contains(lv.as_str())
                 }) =>
@@ -327,6 +412,14 @@ impl Transpiler {
                 format!("{}.iter().cloned()", iter)
             }
             _ => format!("{}.into_iter()", iter),
+        };
+        // Inject the index: `<base>.enumerate()` yields `(usize, T)`, cast to
+        // `isize` to match bare `int` (see CLAUDE.md's scalar-type table) so the
+        // bound index composes with ordinary `int` arithmetic in the loop body.
+        let iter_expr = if needs_auto_enumerate {
+            format!("{}.enumerate().map(|(i, v)| (i as isize, v))", iter_expr)
+        } else {
+            iter_expr
         };
         // Tuple destructuring: `for k, v in dict:` → `for (k, v) in dict { ... }`.
         // When the iterable's static type is tuple-shaped with `mut`-tagged

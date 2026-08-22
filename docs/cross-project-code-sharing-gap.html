@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Gap: no way to share Boring source across sibling projects</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="gap-no-way-to-share-boring-source-across-sibling-projects">Gap: no way to share Boring source across sibling projects</h1>
+<p><strong>Status (2026-08-20): SOLVED — both option 2 (named cross-project <code>[deps]</code>) and option 3 (first-party <code>boring/stdlib/*.br</code>) below are now implemented.</strong></p>
+<ul><li><strong>Option 3</strong> (first-party stdlib): <code>use boring.&lt;module&gt;</code> is a real,</li></ul>
+<p>  working import in both <code>boring run</code> and <code>boring build</code>, backed by   <code>stdlib/*.br</code> embedded into the compiler binary (<code>src/stdlib_embed.rs</code>);   see <code>stdlib/README.md</code> and <code>docs/book.md</code> §15. A <em>fixed</em> set of modules   shipped with the compiler itself — does not let one project import   another arbitrary project&#x27;s own source.</p>
+<ul><li><strong>Option 2</strong> (general cross-project sharing — the actual subject of this</li></ul>
+<p>  document, and what solves the <code>BigUint</code>-across-<code>scratch-boring</code>/   <code>whisper-boring</code> motivating case below): a project declares named   dependencies on other Boring projects in its own <code>boring.toml</code> <code>[deps]</code>   section, each pointing at a plain directory (just a <code>src/</code> convention, no   <code>boring.toml</code> required in the dependency itself) by local path —   <code>numlib = &quot;../boring-numlib&quot;</code> or <code>numlib = { path = &quot;../boring-numlib&quot; }</code>.   <code>use numlib.big_uint.*</code> then resolves real <code>.br</code> source from that   directory, transpiled/interpreted together with the consumer — or by   <code>git = &quot;...&quot;</code> (optionally <code>branch</code>/<code>tag</code>/<code>rev</code>), cloned into a persistent   local cache (<code>src/git_deps.rs</code>, shells out to the <code>git</code> CLI — no new   Cargo dependency) the first time it&#x27;s needed and reused/refreshed on   later builds, same as a real package manager&#x27;s git dependency but without   a lockfile. See <code>docs/book.md</code> §15&#x27;s &quot;Named cross-project dependencies&quot;   subsection for full syntax and <code>BoringToml::resolve_deps</code> (<code>src/main.rs</code>)   for the resolution rules (reserved names <code>std</code>/<code>crate</code>/<code>boring</code>; no   transitive resolution, same single-level rule <code>[external_types]</code>/   <code>[derives]</code>&#x27;s own <code>include</code> already follows). Wired into all three   consumers — the interpreter (<code>boring run</code>,   <code>Interpreter::exec_named_dep_use</code>), the transpiler&#x27;s std/tokio target   (<code>boring build</code>, <code>emit_top.rs</code>&#x27;s <code>emit_use</code>/<code>deep_pre_scan</code>), and the   GPU-target CLI merge path (<code>main.rs</code>&#x27;s <code>merge_into</code>) — the same three   places option 3&#x27;s <code>boring.*</code> mechanism needed fixing.</p>
+<p>The rest of this document (below) is preserved as originally written, recording the motivating case and the investigation that led here.</p>
+<h2 id="the-motivating-case">The motivating case</h2>
+<p><code>scratch-boring/boring/spikes/biguint_spike.br</code> implements a pure-Boring <code>BigUint</code>/<code>BigInt</code>/<code>BigFraction</code>/<code>ScratchNumber</code> exact-arithmetic tower (113 passing assertions under <code>boring run</code>), written to replace that project&#x27;s hand-written-Rust <code>value_rt.rs</code> — the effort drove 12 compiler bugs to a fix along the way. It&#x27;s now wired into <code>scratch-boring/boring/scratch.br</code> for real.</p>
+<p>The natural next question — &quot;should <code>BigUint</code>/<code>BigInt</code>/<code>BigFraction</code> move into a shared stdlib so other Boring projects don&#x27;t have to copy-paste ~1000 lines of tested numeric code?&quot; — exposed that <strong>Boring currently has no mechanism for one Boring project to import <code>.br</code> source from another.</strong> Today the code exists in exactly two places, both copies: the original spike file (kept as a historical/reference copy) and a second, adapted copy embedded directly in <code>scratch.br</code> (renamed methods to route around now-fixed compiler bugs, plus a few extra conversions <code>scratch.br</code> needed). A future project (a Boring-authored interpreter, a game needing precise physics, <code>whisper-boring</code> if it ever needs exact reductions) would have to copy a third time.</p>
+<h2 id="what-exists-today-and-why-it-doesnt-solve-this">What exists today, and why it doesn&#x27;t solve this</h2>
+<h3 id="boringstdlibbr--was-dead-now-wired-in-for-real-2026-08-20"><code>boring/stdlib/*.br</code> — was dead, now wired in for real (2026-08-20)</h3>
+<p><strong>Historical note (accurate as of the original 2026-08-20 investigation, before the same-day fix below):</strong> the <code>boring</code> repo root&#x27;s <code>stdlib/</code> directory (<code>array.br</code>, <code>builtins.br</code>, <code>channel.br</code>, <code>collections.br</code>, <code>dict.br</code>, <code>future.br</code>, <code>string.br</code>, <code>task.br</code> — 662 lines total) was pure doc/stub content, never loaded by anything — grepping <code>src/</code> and <code>tests/</code> for those filenames returned zero hits. <code>use std.collections.HashMap</code> resolved to Rust&#x27;s real stdlib; any other <code>use module.item</code> fell through to a generic filesystem loader resolving relative to the current project only, with no fixed <code>stdlib/</code> search path and no <code>&quot;boring&quot;</code>-prefix handling anywhere.</p>
+<p><strong>Current state:</strong> fixed the same day. <code>stdlib/</code> now holds only genuinely <em>loadable</em> <code>boring.*</code> modules — the always-native content that used to live in <code>array.br</code>/<code>builtins.br</code>/<code>channel.br</code>/<code>dict.br</code>/<code>future.br</code>/<code>string.br</code> (all of it already unconditionally global, so it was never truly &quot;importable&quot; in the first place) was corrected for drift and folded into <code>docs/book.md</code> §15&#x27;s &quot;Built-in Types &amp; Functions Reference&quot; instead. <code>use boring.&lt;module&gt;</code> resolves against <code>stdlib/*.br</code> <strong>embedded into the compiler binary</strong> (<code>src/stdlib_embed.rs</code>, via <code>include_str!</code> — the same pattern <code>interpreter::gpu_profile</code> already used for built-in GPU profiles) in three independent places that each needed their own fix: the interpreter (<code>exec_use_decl</code>/<code>exec_boring_stdlib_use</code>, <code>src/interpreter/*.rs</code>), the transpiler&#x27;s std/tokio target (<code>emit_use</code>/<code>deep_pre_scan</code>/ <code>inline_boring_stdlib_use</code>, <code>src/transpiler/emit_top.rs</code>), and the GPU-target CLI merge path (<code>merge_stdlib_into</code>, <code>src/main.rs</code>). An unrecognized <code>boring.*</code> module name is a hard compiler error in all three, unlike the generic filesystem loader&#x27;s silent no-op (there&#x27;s no legitimate &quot;native Rust module&quot; fallback for a <code>boring.*</code> path — <code>boring</code> is never a real crate). See <code>stdlib/README.md</code> for the current module list and how to add another.</p>
+<p>There is a <em>separate</em>, unrelated <code>boring/interpreter/stdlib.br</code> (inside the self-hosted-interpreter-written-in-Boring subproject, <code>boring/interpreter/</code>) that <em>is</em> real and wired in (<code>main.br</code>&#x27;s <code>use stdlib</code> → its own <code>register_stdlib(interp)</code>) — but that&#x27;s the runtime prelude for programs run <em>by</em> the self-hosted interpreter, not a stdlib for programs written <em>in</em> Boring generally. Easy to conflate the two by name; they&#x27;re unrelated.</p>
+<h3 id="docslibrary-distributionmd--addresses-a-different-narrower-problem"><code>docs/library-distribution.md</code> — addresses a different, narrower problem</h3>
+<p>That document (status: <strong>Draft</strong>, &quot;no decision is final&quot;) is about distributing a Boring library to <em>third parties</em> — the current position is &quot;follow Rust&quot;: ship the generated Rust crate, not <code>.br</code> source, and lean on Rust&#x27;s own crate ecosystem/<code>Cargo.toml</code> <code>[dependencies]</code> for reuse.</p>
+<p>That&#x27;s a heavier, differently-shaped problem (confidentiality, ABI stability, ownership-qualifier inference across a compiled boundary) than what this gap is actually about: <strong>the same author&#x27;s own sibling projects wanting to share plain <code>.br</code> source with no compiled-artifact/registry concerns at all.</strong> <code>docs/library-distribution.md</code>&#x27;s &quot;follow Rust&quot; answer, taken literally, would mean: compile <code>BigUint</code> to a Rust crate, publish it (even just locally via a path dependency), and add it to each consuming project&#x27;s <code>Cargo.toml</code> — which defeats the actual goal here (see <code>boring-goal-pure-boring-rust-parity</code> project memory): the point was to stop depending on a Rust crate (<code>num-bigint</code>) for this, not to depend on a different, self-published one instead.</p>
+<h3 id="the-one-existing-precedent-boring-bevylib--config-only-not-code">The one existing precedent: <code>boring-bevylib</code> — config only, not code</h3>
+<p><code>boring-bevylib</code> (a sibling repo to <code>scratch-boring</code>/<code>breakout-boring</code>) is the only existing example of sharing anything across Boring projects. It shares <code>boring.toml</code> <strong>config</strong> (<code>[external_types] include = &quot;../boring-bevylib/external_types.toml&quot;</code>, a TOML-level <code>include</code> key added to <code>boring</code>&#x27;s own <code>BoringToml</code> parser specifically for this) — not Boring <em>source code</em>. Its own <code>src/lib.rs</code> is still just a doc comment: &quot;no shared Rust code has been extracted yet... scaffolded and ready to receive real shared code... once a second real game actually needs something <code>breakout-boring</code> already has.&quot; That day has now effectively arrived, just for exact-arithmetic code rather than Bevy glue, and the answer isn&#x27;t obviously &quot;put it in <code>boring-bevylib</code>&quot; since that repo&#x27;s whole reason to exist is Bevy-specific.</p>
+<h2 id="options-not-decided-not-implemented">Options (not decided, not implemented)</h2>
+<ol><li><strong>Vendoring convention</strong> — a new sibling repo (e.g. <code>boring-numlib</code>)</li></ol>
+<p>   holding the canonical <code>.br</code> source, with consuming projects literally    copying it in (as <code>scratch.br</code> already did from the spike) plus a    regen/sync script, same spirit as <code>boring-bevylib</code>&#x27;s <code>external_types.toml</code>    <code>include</code> but for actual code instead of config. Cheap, no compiler    changes, but still copy-paste under the hood — drift between copies is    possible if a consuming project patches its local copy (as <code>scratch.br</code>    already had to, for the now-fixed transpiler bugs) and the sync script    doesn&#x27;t reconcile that. 2. ~~<strong>A real cross-project <code>.br</code> import mechanism</strong>~~ — <strong>done</strong> (2026-08-20,    see above): <code>boring.toml</code> <code>[deps]</code> + <code>use &lt;name&gt;.xxx</code>, path <em>and</em> git    (<code>branch</code>/<code>tag</code>/<code>rev</code>, cached locally). Chose the &quot;named prefix,    configured in <code>boring.toml</code>&quot; shape over a flat <code>BORING_PATH</code>-style    search-list addition specifically for provenance (<code>use numlib.BigUint</code>    says where it&#x27;s from) and to avoid filename collisions between two    unrelated dependencies. Whichever source a dependency resolves from    (local path or git clone), its <code>.br</code> source is spliced straight into the    consumer&#x27;s <em>generated Rust project</em> as its own <code>.rs</code> file — same    mechanism <code>boring build</code> already used for local sibling-file <code>use</code>    imports (<code>inline_boring_use</code>, <code>src/transpiler/emit_top.rs</code>) — so the    generated project is self-contained: <code>cargo build</code> on it never touches    <code>boring.toml</code>, the dependency&#x27;s path, or the git cache again, only    <code>boring build</code> (the transpile step) does. 3. ~~<strong>Wire up <code>boring/stdlib/*.br</code> for real</strong>~~ — <strong>done</strong> (2026-08-20, see    above).</p>
+<p>Option 1 (vendoring/copy-paste with a sync script) is superseded by option 2 now being real — no reason to prefer manual copying over a declared <code>[deps]</code> entry going forward. This file is kept as the historical record of the investigation and the options considered, not because the gap is still open.</p>
+<h2 id="future-work--gaps-vs-a-real-package-manager-2026-08-20">Future work — gaps vs. a real package manager (2026-08-20)</h2>
+<p><code>[deps]</code> solves the actual motivating case (sharing <code>.br</code> source between sibling projects) but is deliberately minimal next to Cargo/npm/Go modules. Recorded here so a future session doesn&#x27;t have to re-derive the comparison. Roughly in priority order for Boring&#x27;s actual use case (personal, single-author, a handful of sibling projects) — not necessarily implementation order:</p>
+<ol><li><strong>Lockfile</strong> (highest priority). Nothing today records which exact</li></ol>
+<p>   commit a <code>branch</code>/<code>tag</code>/default-branch git dependency last resolved to    — it can silently drift between builds or machines. A minimal    <code>boring.lock</code> (just <code>name → resolved commit sha</code> per git dependency)    would fix this without needing a real dependency-resolution algorithm.    Would also want <code>boring update</code> (refresh the lock deliberately) and    <code>--locked</code>/<code>--offline</code> flags (fail instead of silently re-resolving or    silently falling back to a stale cache). 2. <strong>Transitive dependencies.</strong> <code>[deps]</code> is explicitly single-level — a    dependency&#x27;s own <code>[deps]</code> (if it has any) are never followed, same rule    <code>[external_types]</code>/<code>[derives]</code>&#x27;s <code>include</code> already uses. Fine while no    dependency itself depends on another Boring project; becomes a real gap    the day one does. Doing this properly also opens the &quot;diamond    dependency&quot; question (two deps needing the same third dep at possibly    different refs) — no need to solve that until transitive resolution    itself is needed. 3. <strong>Version ranges / real resolution.</strong> No <code>^1.2</code>/<code>~1.0</code>-style semver    constraints or a solver — a dependency is always pinned exactly (a    path is what it is; <code>rev</code> is exact; <code>branch</code>/<code>tag</code> float but aren&#x27;t    &quot;resolved&quot; against any other constraint). Only becomes meaningful once    (2) exists and two dependencies could disagree on what they need. 4. <strong>A public registry</strong> (crates.io/npm-style: resolve &quot;name + version&quot;    against a central index instead of always naming a path or git URL).    Ecosystem-scale investment that doesn&#x27;t fit a single-author, sibling-    project use case — not worth pursuing unless that changes. 5. <strong>Workspaces</strong> (Cargo-style: several projects sharing one lockfile/    build cache). Partially moot already — the git cache    (<code>src/git_deps.rs</code>) is keyed by <code>(url, ref)</code> and shared globally on one    machine regardless of which project asks for it, so two sibling    projects depending on the same git repo at the same ref already don&#x27;t    duplicate the clone. 6. <strong>dev-dependencies / feature-gated deps.</strong> No distinction between &quot;needed    to build&quot; and &quot;needed only for tests/examples&quot; — every <code>[deps]</code> entry is    unconditional. Low priority; no concrete case has needed it yet.</p>
+<p>Not real gaps despite looking like ones: <strong>auth for private git repos</strong> works for free today (shelling out to the user&#x27;s own <code>git</code> inherits their SSH/credential-helper config — nothing to build); <strong>integrity/checksums</strong> are largely redundant for a <code>rev</code>-pinned dependency (a commit sha is already content-addressed by git itself).</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

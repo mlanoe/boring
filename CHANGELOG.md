@@ -5,6 +5,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.9.5] — 2026-08-21 *(interpreter: 642/642 · functional: 76/76 × 4 modes)*
+
+### Added
+
+- **`with <name>[, <name>...]:` scoped-access blocks** — a lexically-scoped block that grants extended, multi-statement access to a value normally touched one operation at a time: eliminates the host round-trip on every `'gpu'unified`/`'gpu'global` kernel-chain step, and lets `'actor'`/`'guard'` hold a lock across several statements instead of acquiring/releasing on every call. Read-only vs. mutating access is inferred from the value's own `let`/`mut`/`var` binding plus a bounded scan of the block body — no separate read/write keyword. Implemented across the checker, interpreter (no-op wrapper), and every host transpile target. See [docs/scoped-access-blocks.md](docs/scoped-access-blocks.md).
+- **`mut` as a type modifier** (`mut Type`, `mut Type&`) — composes into tuple slots, struct fields, array/dict/set elements, and borrows, not just a bare local. See [docs/mut-type-modifier.md](docs/mut-type-modifier.md).
+- **Fixed-width integer scalars** — `int8`/`16`/`32`/`64`/`128` and `uint8`/`16`/`32`/`64`/`128` as real distinct types across every target (interpreter, `boring build`, kernel `no_std`, wgpu/CUDA/Metal, and the self-hosted Boring-in-Boring interpreter). Mixing two distinct fixed-width types requires an explicit `as` cast; each GPU backend enforces its own real width support (WGSL 32-bit only, MSL no 64/128-bit, CUDA full range via `__int128`).
+- **`float32`/`float64` fixed-width float types**, and `mut`-qualified enum variant fields.
+- **`--target rocm`** — new AMD GPU/HIP backend, joining wgpu/CUDA/Metal.
+- **GPU residency across function-call boundaries** — a `'gpu'unified`/`'gpu'global` value now survives being passed into or returned from another function (including transitively, through multi-hop parameter forwarding and resident-tuple returns), collapsing a kernel-chaining pipeline down to a single host round-trip instead of one per call.
+- **`gpu.warp.*` warp-level primitives**, classified GPU error reporting, and real cross-thread `'sync` barrier semantics in the interpreter's kernel simulation (genuine OS-thread barriers within a block, not a no-op) — makes `boring run` a faithful simulator for manual-mode `'sync` kernels like tiled GEMM.
+- **`Image<T>`/`Volume<T>`** dynamic-shape GPU buffer types; **multi-dimensional arrays**; labeled-array axes exposed as read-only properties (`a.axis`).
+- **`GPU` type on `--target wgpu`** — `GPU(n)`, `GPU.all()`, and instance methods (`.name()`, `.totalMem()`, `.warpSize()`, etc.) now emit real codegen against the single adapter wgpu opens.
+- **`.pointee`** postfix dereference for opaque Rust types; **`_` fill-rest marker** for struct construction; empty struct body via indented `pass`.
+- **`boring.toml` `[dependencies]`** section (plain `boring build`, not `--emit-rust`) and **`[external_types]`** section (with an `include` key to pull in a shared whitelist file) to supplement the transpiler's built-in external-type knowledge.
+- **First-party `boring.*` stdlib** wired up as real modules (previously placeholders).
+- **String slicing** (`s[lo..hi]`) and **25 float math methods** (`.sqrt`, `.cos`, `.pow`, `.tanh`, etc.) callable via method syntax, not just as free functions.
+
+### Changed
+
+- **`int`/`uint` now transpile to `isize`/`usize`** (previously `i64`/`u64`), consistent with the new fixed-width types sitting alongside them.
+- **Array push / index-assignment are now O(1) amortized** — `Value::Array` moved from a plain `Vec` to `Rc<Vec<Value>>` with copy-on-write, replacing an implicit full-array clone on every mutating call (10k pushes: ~107s → ~0.15s).
+- **wgpu shader/pipeline compiled once per kernel**, lazily behind `OnceLock`, instead of once per kernel *instance* — up to ~2x wall-clock on programs with many dispatches.
+- **Metal backend**: real GPU buffer residency and deferred command-buffer sync instead of synchronous per-call transfer.
+- **The self-hosted (Boring-in-Boring) interpreter is now genuinely runnable end-to-end** and accepts the same launch parameters as `boring run` (`[--gpu <profile>] [file.br] [-- args...]`). Fixed two bugs that had silently corrupted it since its introduction: `.append(x)` used where `.push(x)` was meant (~215 call sites), and labeled struct construction written as `Name(field: value)` instead of `Name(field= value)` (misparsed as a closure).
+- **Clippy is now blocking in CI** (`-D warnings`); all outstanding warnings across the compiler were fixed.
+
+### Fixed
+
+- **`for i, v in <plain array>:` auto-enumerate shorthand was silently broken under `boring build`** — documented (book.md's "`for` with index") and correctly implemented in the interpreter since day one, but the transpiler's general `for`-loop codegen only ever handled the two-variable case as dict/tuple-array destructuring, never injecting the implicit `.enumerate()` a non-tuple array needs. Any `for i, v in arr:` over a plain (non-tuple-element) array failed to compile under **every** `boring build` target — long-standing, only masked because the regression test for this exact pattern (`tests/cases/for_destructure.br`) was wired into the interpreter suite but never into the transpile suite. Fixed by detecting, at transpile time, whether the iterable is already tuple-shaped (a `HashMap`/dict, or an array of tuple literals) via its declared type, its tracked dict-ness, or its recorded initializer's own shape — and injecting `.enumerate()` (with an `as isize` cast on the index) otherwise. `for_destructure` is now also registered in `tests/transpile.rs` across all 4 modes so this can't regress silently again.
+- Cross-type numeric equality (`int`/`uint`/`uint8`/`float`) in both the interpreter and transpiler.
+- `@derive(...)` before `pub struct`/`pub def` no longer silently drops the attribute.
+- Auto-ref borrowing extended to array/dict/set parameters on free functions (previously struct/enum params only) — avoids a full clone on every call.
+- `use` import resolution now also searches a project's `src/` directory from `boring run`/`boring build`'s GPU targets, matching non-GPU builds.
+- Numerous GPU-backend correctness fixes across CUDA/Metal/ROCm/wgpu: kernel block/grid dispatch scanning recursing into function bodies, unreachable free-function WGSL emission, cross-kernel buffer-name collisions, zero-sized output buffers, array-index method-call receivers being cloned before mutation, unary/range operator precedence, top-level scalar inlining, and unsupported kernel/async patterns now reported as clean compile errors instead of panicking.
+
+### Spec
+
+- **`spec/grammar.bnf`** brought back in sync with this cycle's parser changes: the `_` fill-rest marker in call args, an indented `struct Foo:\n    pass` body, the `'sync` → `'actor` kernel-qualifier rename (plus the new `'actor'global`/`'actor'unified` atomic forms), and `mut`-qualified enum variant fields in the `mut`-generalization notes. `.pointee` and labeled-array axis properties (`a.width`) were confirmed to already parse via the existing generic field-access production and got a one-line clarifying comment each.
+- **`linguist/Boring.tmLanguage.json`** (TextMate/GitHub-Linguist grammar): `builtin-types` now also matches `float32`/`float64` and every fixed-width alias (`int8`..`int128`, `uint8`..`uint128`, `i8`/`u8`/… , `f32`/`f64`) — none of these were highlighted as types before, including ones that predate this release.
+- **`linguist/samples/gpu.br`** no longer fails to parse: it was still written against the pre-rename `'sync` qualifier and a since-removed kernel-dispatch pipe syntax (`kernel(block=..) k |> .wait`), plus a couple of unrelated stale constructs (`.map()` on a `Range`, `[v] * n` array-repeat). Updated to current syntax throughout; the Saxpy kernel now runs end-to-end via `boring run`. The Blur/TileSum kernels in the same sample still hit two separate, pre-existing gaps unrelated to this fix (see Known Issues) — not addressed here.
+
+### Known Issues
+
+Found while regenerating the `examples/*_wgpu` projects against the current compiler for this release (the committed projects were last generated against 0.9.3-era codegen); **left un-regenerated and unfixed for 0.9.5** since each needs its own real fix, not just a re-run:
+
+- **`matrix_mul_gpu_wgpu`**: regenerating drops the kernel's buffer fields entirely from the generated host struct (`k.a = ...` / `k.c` no longer resolve — only `device`/`queue`/`pipeline`/`bind_group` remain).
+- **`vector_add_gpu_wgpu`**: regenerating produces a `Vec<isize>`/`Vec<i64>` mismatch in the host array setup, plus an unrelated lowercase/uppercase constant-name mismatch (`n` referenced where the top-level scalar was promoted to `N`).
+- **`plasma_metal_wgpu`**: regenerating produces an `f32`/`f64` field-type mismatch on the kernel's scalar time field.
+- The `linguist/samples/gpu.br` `Blur` kernel (`[float, W * H]'const weights`, a const-generic-sized array field) isn't resolvable by `boring run`'s kernel simulation (`undefined variable 'W'`), and the same file's `TileSum` kernel hits the same f32/f64 width-mismatch class of bug as `plasma_metal_wgpu` above when built for `--target wgpu`.
+
+None of these affect `boring run` (interpreter) or the plain-array (non-`'unified`/`'global`) GPU examples, and the *committed* `examples/*_wgpu` projects (pre-this-release codegen) still build and pass `cargo check` as-is — only a fresh regeneration surfaces them. `examples/saxpy_wgpu` was the one exception already broken in its committed form (missing `.enumerate()` on `for i, v in k.y:`, the same root cause as the Fixed entry above) — that one *is* regenerated and fixed in this release.
+
+### Testing
+
+- Full suite: 642 interpreter unit tests (up from 445) and 76 functional cases × 4 transpile-mode combinations (up from 69), all green.
+- The self-hosted interpreter's own build+functional suite (`interpreter_build.rs` / `interpreter_functional.rs`) is verified in all four mode/threading combinations, per [CLAUDE.md](CLAUDE.md).
+- Added `for_destructure` to `tests/transpile.rs` (all 4 mode combinations) — the auto-enumerate/dict/tuple-array `for`-loop cases were previously interpreter-only.
+
+---
+
 ## [0.9.4] — 2026-07-16 *(interpreter: 445/445 · functional: 69/69 × 4 modes)*
 
 ### Added

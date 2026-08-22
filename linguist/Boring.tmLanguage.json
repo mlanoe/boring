@@ -189,7 +189,7 @@
 
     "builtin-types": {
       "name": "storage.type.boring",
-      "match": "\\b(int|uint|float|bool|string|str)\\b"
+      "match": "\\b(int|uint|float|float32|float64|bool|string|str|int8|int16|int32|int64|int128|uint8|uint16|uint32|uint64|uint128|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)\\b"
     },
 
     "ownership-qualifier": {

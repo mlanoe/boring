@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — `float32` / `float64`: real fixed-width float types, `float` as a pure alias</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="float32--float64-real-fixed-width-float-types-float-as-a-pure-alias"><code>float32</code> / <code>float64</code>: real fixed-width float types, <code>float</code> as a pure alias</h1>
+<blockquote><strong>Status: Draft — not implemented.</strong> No lexer, parser, checker, interpreter, transpiler, or GPU-backend changes exist yet for anything described here. This document records the design as worked out in discussion, as a basis for implementation.</blockquote>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>Boring already has <code>int8</code>/<code>int16</code>/.../<code>int128</code> and <code>uint8</code>/.../<code>uint128</code> as <strong>real, distinct runtime types</strong> — each its own <code>Type</code>/<code>Value</code> variant, each with its own Rust mapping, each refusing to mix implicitly with any other fixed-width type (<code>CLAUDE.md</code>, <code>spec/grammar.bnf</code>&#x27;s <code>numeric_type</code> section). <code>float</code> has no equivalent. Today <code>f32</code>/<code>f64</code> are accepted as spellings, but both are pure aliases collapsing onto the <em>same</em> <code>Type::Float</code> / <code>Value::Float(f64)</code> — there is exactly one float type at runtime, always 64-bit, regardless of which spelling was written:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// src/interpreter/mod.rs</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;f32&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="fn">Qualified</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Type</span>::<span class="kt">Float</span>), <span class="kt">OwnerQual</span>::<span class="kt">Stack</span>));
+aliases.<span class="fn">insert</span>(<span class="s">&quot;f64&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="fn">Qualified</span>(<span class="kw">Box</span>::<span class="fn">new</span>(<span class="kt">Type</span>::<span class="kt">Float</span>), <span class="kt">OwnerQual</span>::<span class="kt">Stack</span>));</code></pre></div>
+<p>The transpiler relays the literal Rust text <code>&quot;f32&quot;</code> for the type annotation (<code>src/transpiler/helpers.rs</code>&#x27;s <code>normalize_type_name</code>), so <code>f32 x = 1.0</code> <em>transpiles</em> to <code>x: f32</code> and compiles — but <code>boring run</code> still evaluates <code>x</code> as a full <code>f64</code> underneath, with no truncation, no range narrowing, and no cast machinery distinguishing it from plain <code>float</code>. Interpreted and transpiled behavior silently diverge the moment a program does anything beyond passing the value straight through (arithmetic, comparison, printing a value near the edge of <code>f32</code>&#x27;s precision).</p>
+<p>This is exactly the gap <code>int8</code>..<code>int128</code> already closed for integers, just never done for floats. Two goals follow:</p>
+<ol><li><strong><code>float32</code> and <code>float64</code> become real, independent runtime types</strong> —</li></ol>
+<p>   mirroring <code>int8</code>/<code>int32</code>/etc. exactly: their own <code>Type</code>/<code>Value</code> variants,    genuine 32-bit truncation in the interpreter (not a label over an <code>f64</code>),    and the same no-implicit-mixing rule between distinct fixed-width types    that integers already enforce. 2. <strong><code>float</code> becomes a pure alias of <code>float64</code></strong> — not a third, independent    type the way <code>int</code>/<code>uint</code> are independent of <code>int64</code>/<code>uint64</code> (those stay    pointer-width and orthogonal to the fixed-width family). <code>float</code> is    Boring&#x27;s <em>only</em> fixed-width numeric family member with no independent    identity: write <code>float</code>, get exactly <code>float64</code>, indistinguishable at    every stage after alias resolution. This is a deliberate asymmetry with    <code>int</code>/<code>uint</code> (which map to <code>isize</code>/<code>usize</code>, never to <code>int64</code>/<code>uint64</code>) —    called out explicitly here so it isn&#x27;t mistaken for an oversight when the    <code>int</code>/<code>uint</code> precedent is the first thing implementation will reach for.</p>
+<p><strong>Three known correctness/design gaps get closed as a side effect</strong>, not scope creep — each is a consequence of <code>float32</code>/<code>float64</code> becoming real types with a real identity, not a new problem being bundled in:</p>
+<ul><li><strong>Metal (MSL) device code lies about precision today.</strong> MSL has no native</li></ul>
+<p>  <code>double</code>; <code>Type::Float</code> on Metal&#x27;s device side (<code>src/transpiler/metal/device.rs</code>)   already silently maps to 32-bit <code>float</code>, meaning a Boring <code>float</code> (nominally   64-bit) used inside a <code>kernel</code> targeting Metal is <em>actually</em> computed at   32-bit precision on-device today, with nothing telling the author. Once   <code>float64</code> is a real, checked type, this stops being representable at all —   see <a href="#metal-mslfloat64-device-side-is-a-compile-error-not-a-silent-narrowing">Metal below</a>.</p>
+<ul><li><em></em>The generic <code>&#x27;gpu&#x27;unified</code> residency path already narrows <code>float</code> to</li></ul>
+<p>  32-bit on the device side, on purpose — <code>float32</code>/<code>float64</code> make that   explicit instead of implicit.<em></em> <code>kernel_host_scalar_type</code> (device-facing)   maps <code>Type::Float</code> to <code>&quot;f32&quot;</code> while <code>kernel_host_element_type</code>   (host-facing) maps the same <code>Type::Float</code> to <code>&quot;f64&quot;</code>   (<code>src/transpiler/emit_kernel.rs</code>) — a deliberate choice (this path targets   wgpu, which has no 64-bit float at all), not a bug; see   <a href="#hostdevice-buffer-narrowing-in-the-generic-gpuunified-residency-path--not-a-bug-after-all">§6&#x27;s note</a>   for why an earlier revision of this document mischaracterized it as one.   <code>float32</code>/<code>float64</code> as separate types at least make the two functions&#x27;   differing treatment legible by name instead of both silently reading the   same <code>Type::Float</code>.</p>
+<ul><li><em></em><code>BoringError</code> boxes every fixed-width scalar through the same generic</li></ul>
+<p>  path as arbitrary user types, today.<em></em> <code>catch Int8:</code>/<code>catch Uint32:</code>/etc.   already exist and already work, but only by falling through to   <code>BoringError::Other(TypeId, Box&lt;dyn BoringVal&gt;)</code> — the identical mechanism   used for <code>catch MyEnum:</code>/<code>catch MyStruct:</code>. A plain <code>i8</code> or <code>u32</code> gets   heap-allocated and type-erased behind <code>dyn Any</code> to be thrown, then   downcast back on catch — real cost and indirection for what is, at   runtime, just a few bytes. <code>float32</code>/<code>float64</code> were about to join that   same fallback (an earlier revision of this document accepted that   explicitly, see the retired paragraph in   <a href="#7-boringerrorscalar--one-dedicated-variant-for-the-whole-fixed-width-family-replacing-other">§7</a>   below) — instead, this document now also fixes it for the <em>entire</em>   fixed-width family, <code>int8</code>..<code>int128</code>/<code>uint8</code>..<code>uint128</code> included, not just   the two types this document is nominally about. This is a genuine scope   expansion beyond floats, called out explicitly rather than smuggled in:   it was surfaced by asking &quot;what should <code>catch Float32:</code> do&quot; and the answer   turned out to generalize to a pre-existing gap, not a floats-only fix.</p>
+<h2 id="proposed-design">Proposed Design</h2>
+<h3 id="1-typefloat32--typefloat64--real-variants-not-qualified-aliases">1. <code>Type::Float32</code> / <code>Type::Float64</code> — real variants, not qualified aliases</h3>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">enum</span> <span class="kt">Type</span> {
+    ...
+    <span class="kt">Uint128</span>,
+    <span class="kt">Float32</span>,   <span class="co">// new — Rust f32</span>
+    <span class="kt">Float64</span>,   <span class="co">// new — Rust f64; identical to today&#x27;s Type::Float in every mapping</span>
+    ...
+}</code></pre></div>
+<p><code>Type::Float</code> is retired as a distinct variant used past alias resolution — every site that pattern-matches <code>Type::Float</code> today (~450 occurrences across <code>src/</code>, see the exploration notes at the end of this document) is a mechanical rename to <code>Type::Float64</code>, since <code>Type::Float</code>&#x27;s existing mapping <em>is</em> what <code>Float64</code> should do. This is the lowest-risk path: no site currently distinguishing &quot;float&quot; from &quot;float64&quot; behavior needs new logic, only a rename. <code>Value::Float(f64)</code> similarly gains siblings:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">enum</span> <span class="kt">Value</span> {
+    ...
+    <span class="fn">Uint128</span>(u128),
+    <span class="fn">Float32</span>(f32),   <span class="co">// new — genuine 32-bit storage, not a label</span>
+    <span class="fn">Float64</span>(f64),   <span class="co">// new — identical layout/behavior to today&#x27;s Value::Float(f64)</span>
+    ...
+}</code></pre></div>
+<p><code>Value::Float32</code> is the one place actual 32-bit truncation must be real: <code>Value::Float32(3.14_f64 as f32)</code>, not <code>Value::Float32(3.14)</code> reinterpreted — mirrors <code>Value::Int8(i8)</code> doing a genuine range-checked narrowing, not a tag over an <code>isize</code>.</p>
+<h3 id="2-float-resolves-to-typefloat64-at-the-alias-table--nowhere-else-sees-typefloat">2. <code>float</code> resolves to <code>Type::Float64</code> at the alias table — nowhere else sees <code>Type::Float</code></h3>
+<p>Both the Rust interpreter&#x27;s alias table (<code>src/interpreter/mod.rs</code>) and the self-hosted interpreter&#x27;s parser (<code>boring/interpreter/parser_core.br</code>) are where <code>float</code>/<code>Float</code>/<code>f64</code> collapse into <code>Type::Float64</code> and <code>f32</code> collapses into <code>Type::Float32</code>:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>aliases.<span class="fn">insert</span>(<span class="s">&quot;float&quot;</span>.<span class="fn">into</span>(),   <span class="kt">Type</span>::<span class="kt">Float64</span>);   <span class="co">// was Type::Float</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;Float&quot;</span>.<span class="fn">into</span>(),   <span class="kt">Type</span>::<span class="kt">Float64</span>);   <span class="co">// was Type::Float</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;f64&quot;</span>.<span class="fn">into</span>(),     <span class="kt">Type</span>::<span class="kt">Float64</span>);   <span class="co">// was Type::Qualified(Float, Stack)</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;f32&quot;</span>.<span class="fn">into</span>(),     <span class="kt">Type</span>::<span class="kt">Float32</span>);   <span class="co">// was Type::Qualified(Float, Stack)</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;float64&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="kt">Float64</span>);   <span class="co">// new spelling</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;Float64&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="kt">Float64</span>);   <span class="co">// new spelling</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;float32&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="kt">Float32</span>);   <span class="co">// new spelling</span>
+aliases.<span class="fn">insert</span>(<span class="s">&quot;Float32&quot;</span>.<span class="fn">into</span>(), <span class="kt">Type</span>::<span class="kt">Float32</span>);   <span class="co">// new spelling</span></code></pre></div>
+<p>Everything downstream of alias resolution — checker, interpreter arithmetic, transpiler, GPU backends — only ever sees <code>Type::Float32</code> or <code>Type::Float64</code>, never a third <code>Type::Float</code> value. This is the same shape <code>int</code>/<code>i64</code>/<code>Int64</code> already use to converge on one canonical variant; <code>float</code> simply converges on <code>Float64</code> instead of getting its own variant. <code>Type::Float</code> is removed from the enum entirely once every site is migrated — keeping it around as a dead variant would reopen exactly the &quot;which one does this code path mean&quot; ambiguity this document exists to close (mirrors <a href="mut-type-modifier.html">mut-type-modifier.md</a>&#x27;s own retirement of a shortcut once its replacement covers every case).</p>
+<p>The parser&#x27;s <code>parse_type_base</code> (<code>src/parser/parse_type.rs</code>) gains <code>&quot;Float32&quot; =&gt; Type::Float32, &quot;Float64&quot; =&gt; Type::Float64</code> alongside the existing <code>&quot;Float&quot; =&gt; Type::Float</code> line (updated to <code>Type::Float64</code>); the lowercase spellings continue to resolve via the alias table, as <code>float</code>/<code>f32</code> already do today. <code>is_type_name</code> (<code>src/parser/mod.rs</code>) gains</p>
+<p><code>&quot;float32&quot; | &quot;float64&quot;</code> to its lowercase type-name list — <code>f32</code>/<code>f64</code> are already present there.</p>
+<h3 id="3-mixing-rule-strict-matching-int8int16">3. Mixing rule: strict, matching <code>int8</code>/<code>int16</code></h3>
+<p><code>float32</code> and <code>float64</code> do not mix implicitly, exactly like distinct fixed-width integers today:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>float32 a = <span class="nb">1.0</span>
+float64 b = <span class="nb">2.0</span>
+<span class="kw">let</span> c = a + b          <span class="co"># ERROR — cannot mix float32 and float64 without an explicit cast</span>
+<span class="kw">let</span> c = (a <span class="kw">as</span> float64) + b   <span class="co"># OK</span></code></pre></div>
+<p>An untyped float literal (<code>3.14</code>) mixes freely with either, resolved by context — exactly as an untyped int literal (<code>42</code>) mixes freely with <code>int8</code>/<code>int32</code>/etc. today:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>float32 a = <span class="nb">1.0</span>
+<span class="kw">let</span> c = a + <span class="nb">3.14</span>        <span class="co"># OK — 3.14 resolves to float32 in this context</span></code></pre></div>
+<p><code>float</code> participates in this rule as <code>float64</code> — since it <em>is</em> <code>float64</code> after alias resolution, <code>float_var + float32_var</code> is exactly as much an error as <code>float64_var + float32_var</code>, with no special case needed: the checker never sees <code>float</code> as a separate case to reason about.</p>
+<p>This closes the current inconsistency where fixed-width integers already enforce strict mixing (<code>docs/book.md</code>&#x27;s &quot;Fixed-width integers&quot; section) but floats have no fixed-width family to be strict about at all yet.</p>
+<h3 id="4-casts-as-float32--as-float64-truncate-else-fallback-parses-with-the-matching-rust-type">4. Casts: <code>as float32</code> / <code>as float64</code> truncate; <code>else</code> fallback parses with the matching Rust type</h3>
+<p><code>x as float32</code> / <code>x as float64</code> follow the same shape as <code>as int8</code>/<code>as uint32</code>: a genuine narrowing conversion (<code>as f32</code> / <code>as f64</code> in the emitted Rust and in the interpreter), with no range check needed in either direction (unlike integer narrowing, every finite <code>f64</code> converts to <em>some</em> <code>f32</code> value — overflow saturates to <code>±inf</code> in Rust&#x27;s own <code>as</code> semantics, which Boring inherits unchanged rather than inventing a stricter float-narrowing rule).</p>
+<p>The <code>x as float32 else default</code> string-parse form (used today for <code>x as float else default</code>, e.g. parsing user input) gets its own dedicated arm parsing with <code>str::parse::&lt;f32&gt;()</code> / <code>str::parse::&lt;f64&gt;()</code> respectively, matching <code>as float</code>&#x27;s existing arm — <strong>not</strong> the generic fallback path <code>f32</code>/<code>f64</code> currently take (<code>src/transpiler/emit_expr.rs</code>&#x27;s <code>is_specific_numeric_type(&amp;dst_ty) &amp;&amp; dst_ty != &quot;f32&quot; &amp;&amp; dst_ty != &quot;f64&quot;</code> guard, which today excludes <code>f32</code>/<code>f64</code> from ever getting <em>any</em> real parse-and-validate behavior here — see gap notes below). This is a correctness fix riding along with real-type status, not new scope: once <code>float32</code>/<code>float64</code> are checked types the size of <code>int8</code>/<code>uint32</code>, they should get the same cast infrastructure those already have, and today&#x27;s <code>f32</code>/<code>f64</code> spellings were never wired into it despite already existing as type-annotation spellings.</p>
+<h3 id="5---target-kernel-rust-for-linux-no_std-both-forbidden-same-reason-as-todays-float">5. <code>--target kernel</code> (Rust-for-Linux, no_std): both forbidden, same reason as today&#x27;s <code>float</code></h3>
+<p>The kernel target already forbids <code>float</code> outright (<code>src/validator/kernel.rs</code>: <em>&quot;float is not allowed in kernel context — FPU is disabled&quot;</em>) because kernel code runs with the FPU unavailable. <code>float32</code> and <code>float64</code> are both banned for the identical reason — narrower storage doesn&#x27;t change whether the FPU exists. The validator&#x27;s <code>Type::Float</code> match arm becomes</p>
+<p><code>Type::Float32 | Type::Float64</code>, and the error message generalizes to name whichever was actually written (<code>&quot;{float32,float64} is not allowed in kernel context — FPU is disabled&quot;</code>, not a message that only ever says &quot;float&quot; regardless of which spelling triggered it).</p>
+<h3 id="6-gpu-kernel-backends-kernel-name--cudarocmmetalwgpu">6. GPU kernel backends (<code>kernel Name:</code> — CUDA/ROCm/Metal/wgpu)</h3>
+<p>This is the one area where <code>float32</code>/<code>float64</code> genuinely need <strong>different</strong> per-backend rules, not just a mechanical rename — floats have hardware support constraints that fixed-width integers mostly don&#x27;t:</p>
+<table><thead><tr><th>Backend</th><th><code>float32</code> (device)</th><th><code>float64</code> (device)</th></tr></thead><tbody><tr><td>CUDA</td><td><code>float</code></td><td><code>double</code> — full native support</td></tr><tr><td>ROCm</td><td><code>float</code></td><td><code>double</code> — full native support</td></tr><tr><td>Metal (MSL)</td><td><code>float</code></td><td><strong>compile error</strong> — see below</td></tr><tr><td>wgpu (WGSL)</td><td><code>f32</code></td><td><strong>compile error</strong> — WGSL has no <code>f64</code> at all</td></tr></tbody></table>
+<h4 id="metal-msl-float64-device-side-is-a-compile-error-not-a-silent-narrowing">Metal (MSL): <code>float64</code> device-side is a compile error, not a silent narrowing</h4>
+<p>MSL has no native <code>double</code>. Today, <code>Type::Float</code> (nominally 64-bit) transpiles to MSL <code>float</code> on the device side unconditionally (<code>src/transpiler/metal/device.rs</code>) — meaning a <code>kernel</code> targeting Metal that declares a <code>float</code> field is silently computed at 32-bit precision on-device today, with the host side still believing it&#x27;s 64-bit. Once <code>float32</code> and <code>float64</code> are distinguishable, this stops being representable as a silent narrowing: <strong><code>float64</code> (and therefore also plain <code>float</code>, its alias) used in a Metal device-side kernel position is a validator error</strong> — &quot;MSL has no native 64-bit float; use <code>float32</code> in this kernel, or target a backend that supports 64-bit floats (<code>cuda</code>, <code>rocm</code>)&quot;. <code>float32</code> continues to map to MSL <code>float</code> exactly as it (silently, incorrectly labeled) does today — the mapping doesn&#x27;t change, only the fact that using <code>float</code>/<code>float64</code> here now surfaces instead of being swallowed.</p>
+<h4 id="wgpu-wgsl-float64-is-a-compile-error-for-the-same-underlying-reason">wgpu (WGSL): <code>float64</code> is a compile error for the same underlying reason</h4>
+<p>WGSL has no 64-bit float type at all (unlike Metal, not even a narrowing target exists) — <code>float64</code>/<code>float</code> in a <code>kernel</code> targeting <code>--target wgpu</code> is a validator error: &quot;WGSL has no 64-bit float type; use <code>float32</code>.&quot; <code>float32</code> maps to WGSL&#x27;s native <code>f32</code> (<code>src/transpiler/wgpu/device.rs</code> already does this for <code>Type::Float</code> today — no behavior change, same correctness gap being closed as Metal&#x27;s).</p>
+<h4 id="hostdevice-buffer-narrowing-in-the-generic-gpuunified-residency-path--not-a-bug-after-all">Host/device buffer narrowing in the generic <code>&#x27;gpu&#x27;unified</code> residency path — not a bug after all</h4>
+<p><strong>An earlier revision of this section claimed <code>kernel_host_scalar_type</code> (device-facing, narrows to <code>&quot;f32&quot;</code>) vs. <code>kernel_host_element_type</code> (host-facing, stays <code>&quot;f64&quot;</code>) — both in <code>src/transpiler/emit_kernel.rs</code> — disagreeing for a <code>float</code>/<code>float64</code> buffer was a bug this document would fix &quot;by construction.&quot; Investigated further and reverted: it isn&#x27;t a bug.</strong> These two functions are specifically the generic, backend-agnostic <code>&#x27;gpu&#x27;unified</code> residency path (interprocedural resident values, the feature <code>with</code>/dual-typed-parameter tests exercise) — <code>kernel_host_scalar_type</code>&#x27;s own doc comment says so directly: <em>&quot;GPU buffers always use 32-bit elements&quot;</em>, modeled on <code>wgpu::host::host_scalar_type</code> because wgpu is this path&#x27;s primary real target and WGSL has no 64-bit float at all. Making <code>Type::Float64</code> stop narrowing here (as an earlier draft of this feature did) breaks exactly the case it exists for — a <code>float</code>/<code>float64</code> value flowing through this generic path on <code>--target wgpu</code> needs its GPU-side buffer to genuinely be <code>f32</code>, independent of whatever the host-side &quot;general convention&quot; (<code>f64</code>) reads it back as. <code>Type::Float32</code> needs no narrowing here since it&#x27;s already 32-bit; <code>Type::Float64</code> keeps the pre-existing narrow-to-<code>f32</code> behavior, unchanged.</p>
+<p>This is a <strong>different code path</strong> from an actual <code>kernel struct</code>&#x27;s own field type, which each backend maps in its own <code>device.rs</code>/<code>host.rs</code> (§6 above) — those correctly do NOT narrow <code>float64</code> for CUDA/ROCm (native <code>double</code>) and correctly DO reject it outright for Metal/wgpu (<code>msl_unsupported_f64</code>/ <code>wgsl_unsupported_f64</code>). The narrowing discussed here is specific to the generic residency functions, which have no per-backend knowledge to condition on. One real, pre-existing gap remains, called out honestly rather than silently left implied: this generic path silently narrows a <code>float</code>/<code>float64</code> resident value to <code>f32</code> instead of erroring the way an actual <code>kernel struct</code> field declared <code>float64</code> now does on Metal/wgpu — a narrower, pre-existing inconsistency (identical to <code>float</code>&#x27;s behavior before this document), not introduced by float32/float64 and not fixed here.</p>
+<h3 id="7-boringerrorscalar--one-dedicated-variant-for-the-whole-fixed-width-family-replacing-other">7. <code>BoringError::Scalar</code> — one dedicated variant for the whole fixed-width family, replacing <code>Other</code></h3>
+<p><strong>An earlier revision of this section proposed no dedicated variant at all</strong> — routing <code>catch Float32:</code>/<code>catch Float64:</code> through <code>BoringError::Other</code>, matching what <code>catch Int8:</code>/<code>catch Uint32:</code>/etc. already do today. Retired: on reflection, sharing <code>Other</code> between fixed-width scalars and arbitrary user enums/structs was never the right precedent to extend — it&#x27;s an accident of <code>Int8</code>..<code>Uint128</code> never having been given their own path when they shipped, not a deliberate design worth perpetuating onto <code>float32</code>/<code>float64</code> too. <code>Other</code> (<code>TypeId</code> + <code>Box&lt;dyn BoringVal + Send + Sync&gt;</code>, downcast via <code>Any</code>) exists for types the runtime can say nothing structural about in advance — a user&#x27;s own enum or struct, defined anywhere, with arbitrary shape. A fixed-width numeric is the opposite: the compiler already knows, statically, that it is exactly one of twelve possible kinds, each a few bytes, Copy, with no fields to speak of — paying for a heap allocation and a dynamic downcast to throw an <code>i8</code> is real, avoidable cost that the closed, fully-enumerable nature of this family should never have incurred in the first place.</p>
+<p><strong>New shape: one variant, not twelve.</strong> Rather than mirroring <code>Int8(i8)</code> .. <code>Float64(f64)</code> as twelve separate <code>BoringError</code> variants (rejected — it would duplicate the twelve-way match in <code>Display</code>, in every <code>catch</code> dispatch site, and in mangling, for a benefit no different from the single shared variant below), <code>BoringError</code> gains <strong>one</strong> new variant carrying a kind tag plus a bit-packed raw value, wide enough for the largest member (<code>int128</code>/<code>uint128</code>, 128 bits):</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(Debug, Clone, Copy, PartialEq)]</span>
+<span class="kw">enum</span> <span class="kt">ScalarKind</span> {
+    <span class="kt">Int8</span>, <span class="kt">Int16</span>, <span class="kt">Int32</span>, <span class="kt">Int64</span>, <span class="kt">Int128</span>,
+    <span class="kt">Uint8</span>, <span class="kt">Uint16</span>, <span class="kt">Uint32</span>, <span class="kt">Uint64</span>, <span class="kt">Uint128</span>,
+    <span class="kt">Float32</span>, <span class="kt">Float64</span>,
+}
+
+<span class="kw">enum</span> <span class="kt">BoringError</span> {
+    <span class="fn">Int</span>(i64),
+    <span class="fn">Float</span>(f64),
+    <span class="fn">Bool</span>(bool),
+    <span class="fn">Str</span>(&amp;<span class="lf">&#x27;static</span> str),
+    <span class="fn">String</span>(<span class="kw">Arc</span>&lt;str&gt;),
+    <span class="fn">Scalar</span>(<span class="kt">ScalarKind</span>, u128),   <span class="co">// new — kind tag + raw bits, reinterpreted per kind</span>
+    <span class="fn">Other</span>(std::any::<span class="kt">TypeId</span>, std::boxed::<span class="kw">Box</span>&lt;<span class="kw">dyn</span> <span class="kt">BoringVal</span> + <span class="kt">Send</span> + <span class="kt">Sync</span>&gt;),
+}</code></pre></div>
+<p><code>Int8</code>..<code>Int64</code> sign-extend into the <code>u128</code> slot (bit-reinterpreted as <code>i128</code>, <code>as</code>-truncated back to the exact original width on read — lossless, since narrowing an <code>as</code>-widened-then-narrowed integer round-trips exactly); <code>Uint8</code>..<code>Uint64</code> zero-extend the same way; <code>Int128</code>/<code>Uint128</code> fill the slot directly; <code>Float32</code>/<code>Float64</code> store <code>f32::to_bits()</code>/<code>f64::to_bits()</code> zero-extended into the same <code>u128</code>, reinterpreted via <code>f32::from_bits</code>/ <code>f64::from_bits</code> on the way out (bit pattern only — never a numeric <code>as</code> cast between the two, which would silently change the value). No heap allocation, no <code>TypeId</code>, no <code>dyn Any</code> — <code>Display</code> and <code>catch</code> dispatch both become a plain match on <code>ScalarKind</code> followed by one bit reinterpretation, exactly the same shape <code>Int(i64)</code>/<code>Float(f64)</code> already get, just parameterized over which of the twelve kinds it is instead of having a fixed width baked into the variant itself.</p>
+<p><code>catch Int8:</code> / <code>catch Float32:</code> / etc. each compile to a guard on <code>ScalarKind</code>:</p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kt">BoringError</span>::<span class="fn">Scalar</span>(<span class="kt">ScalarKind</span>::<span class="kt">Int8</span>, __bits) =&gt; { <span class="kw">let</span> error: i8 = __bits <span class="kw">as</span> i8; ... }
+<span class="kt">BoringError</span>::<span class="fn">Scalar</span>(<span class="kt">ScalarKind</span>::<span class="kt">Float32</span>, __bits) =&gt; { <span class="kw">let</span> error: f32 = f32::<span class="fn">from_bits</span>(__bits <span class="kw">as</span> u32); ... }</code></pre></div>
+<p><code>catch Float:</code> (i.e. <code>float</code>/<code>float64</code>, since <code>float</code> is <code>float64</code>&#x27;s alias, <a href="#2-float-resolves-to-typefloat64-at-the-alias-table--nowhere-else-sees-typefloat">§2</a>) keeps its existing fast-path <code>BoringError::Float(f64)</code> arm — <code>Scalar</code> is strictly for the fixed-width family (<code>float32</code>/<code>float64</code>, <code>int8</code>..<code>int128</code>, <code>uint8</code>..<code>uint128</code>); the bare, flexible <code>int</code>/<code>uint</code>/<code>float</code> kinds keep their own dedicated <code>Int(i64)</code>/<code>Float(f64)</code> variants exactly as today, unaffected by any of this.</p>
+<p><strong><code>Other</code> still exists, unchanged, for exactly what it always covered:</strong> arbitrary user-defined enums/structs (<code>catch MyEnum:</code>, <code>catch CalcError:</code>), where the runtime genuinely cannot know the shape in advance and the <code>TypeId</code> + <code>Any</code>-downcast machinery is the only option. This document narrows what <code>Other</code> is <em>for</em>, it does not remove it.</p>
+<h3 id="8-interpreter-arithmetic-methods-comparisons-duplicate-valuefloats-existing-logic">8. Interpreter arithmetic, methods, comparisons: duplicate <code>Value::Float</code>&#x27;s existing logic</h3>
+<p><code>src/interpreter/eval_expr.rs</code>&#x27;s binary operators (<code>+</code>/<code>-</code>/<code>*</code>/<code>/</code>/<code>%</code>), <code>src/interpreter/methods.rs</code>&#x27;s ~25 native float methods (<code>sqrt</code>, <code>abs</code>, <code>floor</code>, <code>ceil</code>, <code>round</code>, <code>exp</code>, <code>log</code>/<code>log2</code>/<code>log10</code>, trig functions, <code>pow</code>, <code>atan2</code>, <code>clamp</code>, …), and comparison/<code>partial_cmp</code> logic all gain a <code>Value::Float32(f32)</code> arm alongside the existing <code>Value::Float64(f64)</code> arm (renamed from <code>Value::Float</code>), each doing the identical operation at the matching precision — Rust&#x27;s <code>f32</code> has the same method surface as <code>f64</code>, so this is direct duplication, not new algorithm design. Mixed-width arithmetic (<code>Value::Float32</code> operated on with <code>Value::Float64</code>) is a runtime error at the interpreter level mirroring the checker&#x27;s static rejection (§3) — the interpreter is the last line of defense for code paths the checker doesn&#x27;t statically cover (e.g. <code>any</code>-typed dynamic values).</p>
+<h3 id="9-stdlib-stdlibbuiltinsbr-duplicate-each-float-signature">9. Stdlib (<code>stdlib/builtins.br</code>): duplicate each <code>float</code> signature</h3>
+<p>Every <code>native</code> float function declared in <code>stdlib/builtins.br</code> (<code>sqrt</code>, <code>abs</code>, <code>floor</code>, <code>pow</code>, the trig family, <code>clamp</code>, <code>sign</code>, <code>isNaN</code>, <code>isInfinite</code>, <code>min</code>, <code>max</code>, ~25 signatures) gets a <code>float32</code> and a <code>float64</code> overload alongside the existing <code>float</code> signature — since <code>float</code> is now a pure alias of <code>float64</code>, the <code>float64</code> overload and the existing <code>float</code> signature are the same function under two names; only the <code>float32</code> overload is genuinely new declaration text. Boring&#x27;s overload resolution (already used for the existing <code>int8</code>/<code>int16</code>/… numeric builtins, per <code>normalize_type_name</code>/mangling in the transpiler) picks the right one from the argument&#x27;s static type, same mechanism as today.</p>
+<h2 id="grammar-changes-required">Grammar changes required</h2>
+<div class="code-block" data-lang="bnf"><span class="lang-label">bnf</span><pre><code># primitive_type keeps &quot;float&quot; (now documented as an alias of float64,
+# not an independent type) — no grammar change needed for the keyword itself,
+# only for the two new spellings, which join numeric_type alongside f32/f64:
+numeric_type ::= &quot;i8&quot; | &quot;i16&quot; | &quot;i32&quot; | &quot;i64&quot; | &quot;i128&quot; | &quot;isize&quot;
+               | &quot;u8&quot; | &quot;u16&quot; | &quot;u32&quot; | &quot;u64&quot; | &quot;u128&quot; | &quot;usize&quot;
+               | &quot;f32&quot; | &quot;f64&quot; | &quot;float32&quot; | &quot;float64&quot;</code></pre></div>
+<p>No new grammar production is needed — <code>float32</code>/<code>float64</code> parse as ordinary identifiers resolved through the alias table exactly as <code>f32</code>/<code>int8</code>/etc. already do (§2); the lexer requires no changes at all (confirmed during exploration: <code>float</code>/<code>int8</code>/<code>f32</code> are not lexer keywords today, just <code>Ident</code> tokens resolved later).</p>
+<p><code>spec/grammar.bnf</code>&#x27;s comment block documenting the fixed-width family (currently: <em>&quot;Floats: f32 f64 (→ interpreter: float&#x27;copy)&quot;</em>) is rewritten to match the integer rows immediately above it — naming <code>float32</code>/<code>float64</code> as real, distinct runtime types with the same strict-mixing rule, and calling out <code>float</code> as the odd one out (alias of <code>float64</code>, not an independent pointer-width-style type like <code>int</code>/<code>uint</code>).</p>
+<h2 id="interactions-and-invariants">Interactions and invariants</h2>
+<ul><li><em></em><code>is_scalar_type</code> (<code>src/checker/mod.rs</code>) and <code>is_copy_type</code></li></ul>
+<p>  (<code>src/transpiler/emit_top.rs</code>) gain <code>Type::Float32 | Type::Float64</code><strong> in   their match arms, alongside the <code>Type::Float</code> → <code>Type::Float64</code> rename —   both already list every fixed-width int variant explicitly, so this is   the same shape extended by two entries. </strong>Pre-existing gap fixed in the   same pass<em></em>: neither of these lists currently include <code>&quot;f32&quot;</code>/<code>&quot;f64&quot;</code> in   their <code>Type::Named</code> string-matching arms at all — an existing   inconsistency (int aliases like <code>&quot;i8&quot;</code>/<code>&quot;u32&quot;</code> are covered, <code>&quot;f32&quot;</code>/<code>&quot;f64&quot;</code>   are not) that becomes impossible to leave unfixed once floats get the same   named-alias treatment integers already have.</p>
+<ul><li><strong><code>estimate_size_inner</code> (<code>src/transpiler/mod.rs</code>)</strong>, used for strict-mode</li></ul>
+<p>  auto-boxing size estimates, gains <code>Type::Float32 =&gt; Some(4), Type::Float64   =&gt; Some(8)</code> — today&#x27;s <code>Type::Named</code> arm only recognizes <code>&quot;float&quot;</code>/<code>&quot;f64&quot;</code>   as 8 bytes and has no <code>&quot;f32&quot;</code> entry at all (silently falls through to   whatever the default case does) — fixed as part of this work, not a   separate cleanup.</p>
+<ul><li><strong>Mangled names</strong> (<code>src/transpiler/helpers.rs</code>&#x27;s <code>mangle_type_name</code>, used</li></ul>
+<p>  for overload resolution) get <code>Type::Float32 =&gt; &quot;float32&quot;</code>, <code>Type::Float64   =&gt; &quot;float64&quot;</code> — distinct manglings, so <code>describe(float32)</code> and   <code>describe(float64)</code> overloads never collide, matching how <code>describe(int32)</code>   and <code>describe(int64)</code> already don&#x27;t.</p>
+<ul><li><strong><code>normalize_type_name</code></strong> (<code>src/transpiler/helpers.rs</code>) becomes the single</li></ul>
+<p>  place where every spelling converges: `&quot;float32&quot;|&quot;Float32&quot;|&quot;f32&quot; =&gt;</p>
+<p>  &quot;f32&quot;<code>, and </code>&quot;float64&quot;|&quot;Float64&quot;|&quot;float&quot;|&quot;Float&quot;|&quot;f64&quot; =&gt; &quot;f64&quot;<code> — </code>float<code>   is textually folded into the </code>f64<code> bucket here, exactly mirroring how the   alias table folds it into </code>Type::Float64<code> at the </code>Type<code> level (§2). Two   independent tables encoding the same alias is not duplication to resolve —   one operates on </code>Type<code> values (interpreter/checker), the other on raw   </code>Type::Named<code> strings the transpiler sees before/instead of going through   full type resolution; both must agree, but they&#x27;re inherently separate   data structures already, matching how every other fixed-width alias   (</code>&quot;i8&quot;<code> vs </code>Type::Int8`) is already handled twice today.</p>
+<ul><li><strong><code>docs/book.md</code>&#x27;s Scalar Types table</strong> documents <code>float32</code>/<code>float64</code> as</li></ul>
+<p>  the two real members of the family, with <code>float</code> called out as a   documented alias of <code>float64</code> rather than a third table row — matching how   this document&#x27;s Problem Statement frames it, so the book and the design   doc never disagree about which one is the &quot;real&quot; type and which is sugar.</p>
+<ul><li><strong><code>boring_type_to_boring_val_arms</code> (<code>src/transpiler/helpers.rs</code>)</strong> — today</li></ul>
+<p>  emits a real match arm only for <code>Int</code>/<code>Float</code>/<code>Bool</code>/<code>String</code>; every other   type name (including, today, <code>Int8</code>/<code>Uint32</code>/etc.) falls into a literal   <code>/* unreachable catch {} */</code> placeholder arm, with the actual dispatch   handled entirely by a separate <code>TypeId</code>-guard code path in   <code>emit_flow.rs</code>. Once <code>BoringError::Scalar</code> exists (§7), this function</p>
+<p>  gains one real arm per <code>ScalarKind</code> (<code>&quot;Int8&quot; | &quot;int8&quot; | &quot;i8&quot;</code> →   <code>BoringError::Scalar(ScalarKind::Int8, __bits)</code> with the <code>i8</code>   reinterpretation, and so on through <code>Float64</code>), and the corresponding   <code>TypeId</code>-guard branch in <code>emit_flow.rs</code> (<code>&quot;Named error types (enums) →   BoringError::Other guard arms&quot;</code>) stops being reached for any fixed-width   scalar — it still exists, unchanged, for actual named enum/struct types.</p>
+<h2 id="implementation-checklist">Implementation checklist</h2>
+<ol><li><code>src/ast/mod.rs</code> — add <code>Type::Float32</code>, <code>Type::Float64</code>; remove</li></ol>
+<p>   <code>Type::Float</code> once every reference is migrated (step 2 makes the    compiler enumerate every site that needs updating — do not pre-audit by    hand, same rationale as <a href="mut-type-modifier.html">mut-type-modifier.md</a>&#x27;s    <code>BindingKind::is_mutable()</code> migration). 2. Mechanical rename pass: every <code>Type::Float</code> → <code>Type::Float64</code> across    <code>src/checker/</code>, <code>src/transpiler/</code> (including all four GPU backend    dirs — <code>cuda/</code>, <code>rocm/</code>, <code>metal/</code>, <code>wgpu/</code> — and <code>emit_kernel.rs</code>,    <code>kernel/helpers.rs</code>), <code>src/validator/kernel.rs</code>, <code>src/interpreter/</code>    (including <code>eval_gpu.rs</code>&#x27;s <code>ThreadValue</code>). The Rust compiler&#x27;s    exhaustiveness check on <code>match</code> surfaces every site once <code>Type::Float</code>    is removed from the enum — treat that error list as the authoritative    worklist, not this document&#x27;s line numbers (which are a starting map,    not a guarantee against drift). 3. <code>src/interpreter/mod.rs</code> — alias table: <code>float</code>/<code>Float</code>/<code>f64</code>/<code>float64</code>/    <code>Float64</code> → <code>Type::Float64</code>; <code>f32</code>/<code>float32</code>/<code>Float32</code> → <code>Type::Float32</code>    (§2). Add <code>Value::Float32(f32)</code>/<code>Value::Float64(f64)</code> to the <code>Value</code> enum    (rename existing <code>Value::Float(f64)</code> → <code>Value::Float64(f64)</code> first, then    add <code>Float32</code> alongside). 4. <code>src/interpreter/eval_expr.rs</code>, <code>methods.rs</code>, <code>exec.rs</code>, <code>call.rs</code>,    <code>eval_gpu.rs</code> — duplicate every <code>Value::Float</code>-matching arm for    <code>Value::Float32</code>, with genuine <code>as f32</code> truncation where values cross    from <code>Value::Int</code>/<code>Value::Float64</code>/parsed strings into a <code>Float32</code> slot    (§8). Enforce the strict no-implicit-mixing rule between <code>Float32</code> and    <code>Float64</code> at arithmetic/comparison sites (§3), mirroring existing    fixed-width-int mixing errors. 5. <code>src/checker/mod.rs</code> — <code>is_scalar_type</code> and any other <code>Type::Float</code>    match arms gain <code>Float32</code>/<code>Float64</code> (rename + extend); <code>is_scalar_type</code>&#x27;s</p>
+<p>   <code>Type::Named</code> string arm gains <code>&quot;float32&quot;|&quot;float64&quot;|&quot;f32&quot;|&quot;f64&quot;</code> (closing    the pre-existing <code>f32</code>/<code>f64</code> gap noted above); <code>src/validator/kernel.rs</code>    bans <code>Float32</code>/<code>Float64</code> alongside the renamed <code>Float64</code>, with a    generalized error message (§5). 6. <code>src/parser/parse_type.rs</code> — <code>&quot;Float32&quot;</code>/<code>&quot;Float64&quot;</code> capitalized    branches; <code>src/parser/mod.rs</code>&#x27;s <code>is_type_name</code> — add</p>
+<p>   <code>&quot;float32&quot;|&quot;float64&quot;</code> to the lowercase type-name list. 7. <code>src/transpiler/emit_top.rs</code> — <code>emit_type</code>/<code>is_copy_type</code>: add    <code>Float32</code>/<code>Float64</code> arms (§Interactions); <code>src/transpiler/helpers.rs</code> —    <code>normalize_type_name</code>, <code>mangle_type_name</code>, <code>estimate_size_inner</code>&#x27;s    <code>Type::Named</code> arm, <code>is_specific_numeric_type</code>, <code>wider_numeric_type</code>/<code>rank</code>    (verify <code>&quot;float32&quot;</code>/<code>&quot;float64&quot;</code> route to the same rank entries as    <code>&quot;f32&quot;</code>/<code>&quot;f64&quot;</code> already do). <code>emit_expr.rs</code>/<code>emit_let.rs</code>/<code>emit_stmt.rs</code>    — extend every <code>Type::Float</code>-matching list (~15 sites) and give    <code>float32</code>/<code>float64</code> (and, while there, the already-existing but    unwired <code>f32</code>/<code>f64</code> spellings) real <code>as float32 else default</code> /    <code>as float64 else default</code> parse-and-validate cast arms (§4), instead of    the generic fallback they silently get today. 8. GPU backends — <code>src/transpiler/{cuda,rocm}/{device,host}.rs</code>:    <code>Type::Float32 =&gt; &quot;float&quot;</code>, <code>Type::Float64 =&gt; &quot;double&quot;</code> (both sides, no    error case — full native support). <code>src/transpiler/metal/device.rs</code>:    <code>Type::Float32 =&gt; &quot;float&quot;</code>, <code>Type::Float64 =&gt;</code> <strong>validator error</strong>    (§6); <code>metal/host.rs</code> keeps <code>Type::Float64 =&gt; &quot;f64&quot;</code> (host-side Rust has    no such restriction) and <code>Type::Float32 =&gt; &quot;f32&quot;</code>.    <code>src/transpiler/wgpu/{device,host}.rs</code>: <code>Type::Float32 =&gt; &quot;f32&quot;</code>,    <code>Type::Float64 =&gt;</code> <strong>validator error</strong> (§6, no host-side exception —    wgpu buffers are shared layout, not just device code). <code>emit_kernel.rs</code>&#x27;s    <code>kernel_host_scalar_type</code>/<code>kernel_host_element_type</code> — both map    <code>Float32</code>/<code>Float64</code> identically on both sides (§6, &quot;fixed by    construction&quot;). 9. <strong><code>BoringError::Scalar</code> (§7)</strong> — add the <code>ScalarKind</code> enum and the    <code>Scalar(ScalarKind, u128)</code> variant to the generated Rust prelude    (<code>src/transpiler/mod.rs</code>&#x27;s embedded <code>BoringError</code> definition, string-built    today, see the exploration notes at the end of this document for exact    line ranges); update its <code>Display</code> impl with the bit-reinterpretation    match (§7); <code>emit_flow.rs</code>&#x27;s throw-value emission gains a <code>Scalar</code>    construction arm for all twelve kinds (<code>Box::new(BoringError::Scalar(...))</code>    instead of the boxed <code>Other(TypeId::of::&lt;i8&gt;(), Box::new(v))</code> path it uses    today for every fixed-width numeric); <code>helpers.rs</code>&#x27;s    <code>boring_type_to_boring_val_arms</code> gains the twelve real match arms    described in Interactions above, replacing today&#x27;s <code>/* unreachable catch    {} */</code> placeholder for these specific type names; verify the existing    <code>TypeId</code>-guard catch-dispatch path in <code>emit_flow.rs</code> is now reached only    for genuine named enum/struct types, never for <code>Int8</code>..<code>Uint128</code>/    <code>Float32</code>/<code>Float64</code>. <strong>This step&#x27;s scope is the whole fixed-width family,    not just <code>float32</code>/<code>float64</code></strong> — <code>int8</code>..<code>int128</code>/<code>uint8</code>..<code>uint128</code> move    off <code>Other</code> in the same pass, since it&#x27;s the same mechanism (see the    Problem Statement&#x27;s third bullet). 10. <code>stdlib/builtins.br</code> — duplicate each <code>native</code> float signature into     <code>float32</code>/<code>float64</code> overloads (§9); <code>stdlib/string.br</code>&#x27;s <code>parseFloat</code>     gains <code>parseFloat32</code>/<code>parseFloat64</code> siblings (keep bare <code>parseFloat</code> as     the <code>float64</code>/default form, matching <code>float</code>&#x27;s alias status). 11. <code>boring/interpreter/*.br</code> (self-hosted interpreter) — same rename +     extend pass as steps 1–4, scaled to its simpler model: <code>ast.br</code>&#x27;s     <code>Type</code>/<code>value.br</code>&#x27;s <code>Value</code> enums, <code>parser_core.br</code>&#x27;s <code>parse_type_base</code>     table, <code>eval.br</code>&#x27;s arithmetic/cast/method/display logic, <code>exec.br</code>,     <code>methods.br</code>. The self-hosted interpreter&#x27;s own error-handling model is     simpler than the Rust transpiler&#x27;s <code>BoringError</code> (no typed-catch     downcast machinery to mirror) — confirm during implementation whether     step 9&#x27;s <code>Scalar</code> split has any self-hosted equivalent to update at all,     or whether it&#x27;s Rust-transpiler-only.</p>
+<ol><li><code>spec/grammar.bnf</code> — <code>numeric_type</code> gains <code>&quot;float32&quot; | &quot;float64&quot;</code>;</li></ol>
+<p>    rewrite the fixed-width-family comment block (§Grammar changes). 13. <code>docs/book.md</code> — Scalar Types table split into <code>float32</code>/<code>float64</code> rows     with <code>float</code> documented as <code>float64</code>&#x27;s alias (not a third row); GPU     width-support table gains float rows per backend (§6); <code>CLAUDE.md</code>&#x27;s     &quot;Common types&quot; table gets the same two-row treatment; the &quot;Advanced —     Error handling internals&quot; section&#x27;s <code>BoringError</code>/typed-<code>catch</code>     documentation is updated to describe <code>Scalar</code> and the narrowed meaning     of <code>Other</code> (§7). 14. Tests — new <code>tests/cases/float_width_cross_eq.br</code> (mirroring the     existing <code>uint_int_cross_eq.br</code>, the closest existing precedent for     &quot;strict mixing between same-family fixed-width types&quot;) covering:     <code>float32</code>/<code>float64</code> rejection when mixed directly, literal mixing with     either, <code>as float32</code>/<code>as float64</code> casts (including the <code>else</code> fallback     form), and <code>float</code> behaving identically to <code>float64</code> at every one of     these sites. A new <code>tests/cases/scalar_catch.br</code> covering <code>catch Int8:</code>/     <code>catch Uint32:</code>/<code>catch Float32:</code>/<code>catch Float64:</code> round-tripping the     thrown value correctly through <code>BoringError::Scalar</code> — no such test     exists today (the current <code>Other</code>-based path has no dedicated coverage     either, per the exploration notes). GPU codegen tests     (<code>tests/{cuda,rocm,metal,wgpu}_codegen.rs</code>) get cases for the Metal/wgpu     <code>float64</code> compile-error paths specifically, since those are new failure     modes with no existing test coverage. The existing <code>numeric.br</code> test     (already declares an <code>f32</code> function) should be re-verified once <code>f32</code>     stops being a <code>Type::Float</code> alias — its expected output may need     updating if it previously relied on <code>f32</code> behaving exactly like <code>f64</code> at     runtime.</p>
+<h2 id="explicitly-out-of-scope-future-work-not-corollaries">Explicitly out of scope (future work, not corollaries)</h2>
+<ul><li><strong>A dedicated <code>BoringError</code> variant per fixed-width type</strong> (<code>Int8(i8)</code>,</li></ul>
+<p>  <code>Float32(f32)</code>, … — twelve variants) — decided against in §7 in favor of   one shared <code>Scalar(ScalarKind, u128)</code> variant; revisit only if a future   need arises for something a shared representation can&#x27;t express (none   identified while writing this document).</p>
+<ul><li><strong>A stricter float-narrowing cast</strong> (e.g. erroring on <code>as float32</code> when the</li></ul>
+<p>  value doesn&#x27;t round-trip losslessly) — Rust&#x27;s own <code>as f32</code> semantics   (silent precision loss, overflow saturates to infinity) are inherited   unchanged; a checked/fallible narrowing cast would be a separate, additive   proposal (<code>x as float32 checked</code> or similar), not assumed here.</p>
+<ul><li><strong>Per-field/per-element <code>mut float32</code></strong> — this document is orthogonal to</li></ul>
+<p>  <a href="mut-type-modifier.html">mut-type-modifier.md</a>; <code>mut</code> on any scalar   (<code>float32</code> included) remains a checker error under that document&#x27;s rules,   unchanged by anything here.</p>
+<ul><li><strong>New float constants for <code>float32</code></strong> (<code>PI</code> etc. are <code>Value::Float64</code></li></ul>
+<p>  today) — no product requirement surfaced for <code>float32</code>-native constants;   <code>PI as float32</code> covers the need if it ever arises.</p>
+<ul><li><strong>Half-precision (<code>float16</code>/<code>bfloat16</code>)</strong> — genuinely different hardware</li></ul>
+<p>  support story (only some GPU backends, no native Rust scalar type without   a crate dependency); not a corollary of this document&#x27;s all-native-Rust-type   approach and would need its own design work.</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>
