@@ -1,0 +1,8 @@
+fromJson ok: ok
+fromJson bad: none
+fs.read ok: true
+fs.read missing: none
+fs.readLines ok: 3
+fs.readLines missing: none
+fs.readBytes ok: 33
+fs.readBytes missing: none

@@ -3274,20 +3274,83 @@ impl Transpiler {
     // ─── Built-in `fs` module ─────────────────────────────────────────────────
     //
     // `fs.read("path")` etc.  In async contexts emits tokio::fs; otherwise std::fs.
-    // All fallible operations add `?` in throws/try_body, `.unwrap()` otherwise.
+    // All fallible operations add `?` in throws/try_body, `.unwrap()` otherwise, or
+    // `.ok()` for `try?` (see `emit_fs_call_try_optional`).
+    //
+    // `emit_fs_call_bare` builds every fallible operation as a single, self-contained
+    // `Result<T, io::Error>`-typed Rust expression with NO trailing `?`/`.unwrap()`/
+    // `.ok()` — every caller (this fn, and `emit_fs_call_try_optional`) applies exactly
+    // one suffix on top. This used to be inverted (each match arm baked its own `?` or
+    // `.unwrap()` in, sometimes deep inside a `{ let x = …; transform(x) }` block whose
+    // *outer* value wasn't a `Result` at all) which made `try? fs.read(path)` etc. add a
+    // second, incompatible layer of handling on top of the first — see
+    // docs/try-wrap-double-handling-bug.md. Rewriting `read`/`readLines`/`list` to end
+    // in `.map(...)`/`.and_then(...)` instead of an internal `?`/`.unwrap()` means the
+    // *whole* expression is always a real `Result`, so one suffix at the call site is
+    // always enough and always correct — including a `.ok()` that gracefully yields
+    // `None` on a real failure instead of panicking.
 
     pub(crate) fn emit_fs_call(&self, method: &str, args: &[Arg]) -> String {
-        // Error-propagation suffix: ? in throws context, .unwrap() otherwise.
-        let prop: &str = if self.in_throws || self.in_try_body { "?" } else { ".unwrap()" };
+        match method {
+            // Never fallible — no Result involved, nothing for `?`/`.unwrap()` to attach to.
+            "exists" | "isDir" | "isFile" => self.emit_fs_infallible_call(method, args),
+            _ => {
+                let bare = self.emit_fs_call_bare(method, args);
+                if self.in_throws || self.in_try_body {
+                    format!("({})?", bare)
+                } else {
+                    format!("({}).unwrap()", bare)
+                }
+            }
+        }
+    }
 
-        // Await suffix: .await? or .await.unwrap() or nothing for sync.
-        // We always emit tokio::fs in Boring — all programs run under tokio.
-        let aw = if self.in_async {
-            format!(".await{}", prop)
-        } else {
-            // Sync context: emit std::fs (blocking), still propagate errors.
-            prop.to_string()
+    /// `try? fs.X(...)` — the graceful, panic-free counterpart to `emit_fs_call`. Reuses
+    /// the same bare `Result`-typed expression and applies exactly one `.ok()`, so a real
+    /// read/write/etc. failure becomes `None` instead of the `.unwrap()`-based panic
+    /// `emit_fs_call`'s plain form would otherwise produce (see module doc comment above
+    /// and docs/try-wrap-double-handling-bug.md).
+    pub(crate) fn emit_fs_call_try_optional(&self, method: &str, args: &[Arg]) -> String {
+        match method {
+            // Not fallible in the first place — pass through unchanged (there's no
+            // Result to turn into an Option; `try?` on these isn't meaningful, but this
+            // at least avoids emitting a bogus extra `.ok()` on a bare `bool`).
+            "exists" | "isDir" | "isFile" => self.emit_fs_infallible_call(method, args),
+            _ => {
+                let bare = self.emit_fs_call_bare(method, args);
+                format!("({}).ok()", bare)
+            }
+        }
+    }
+
+    /// `fs.exists`/`fs.isDir`/`fs.isFile` — always return `bool` directly, never a `Result`.
+    fn emit_fs_infallible_call(&self, method: &str, args: &[Arg]) -> String {
+        let a = |i: usize| -> String {
+            args.get(i).map(|a| self.emit_expr(&a.value)).unwrap_or_default()
         };
+        let pth = |i: usize| -> String { format!("&*({})", a(i)) };
+        match method {
+            "exists" => {
+                let path = pth(0);
+                if self.in_async {
+                    format!("tokio::fs::metadata({}).await.is_ok()", path)
+                } else {
+                    format!("std::path::Path::new({}).exists()", path)
+                }
+            }
+            "isDir" => format!("std::path::Path::new({}).is_dir()", pth(0)),
+            "isFile" => format!("std::path::Path::new({}).is_file()", pth(0)),
+            _ => unreachable!("emit_fs_infallible_call called with fallible method {method}"),
+        }
+    }
+
+    /// Builds one `fs.<method>(...)` call as a bare `Result<T, io::Error>`-typed Rust
+    /// expression — no `?`, `.unwrap()`, or `.ok()` suffix. See the module doc comment
+    /// on `emit_fs_call` above for why every method is built this way now.
+    fn emit_fs_call_bare(&self, method: &str, args: &[Arg]) -> String {
+        // Await suffix only — error propagation is left to the caller (see above).
+        // We always emit tokio::fs in Boring — all programs run under tokio.
+        let aw = if self.in_async { ".await" } else { "" };
 
         // Shorthand: emit the i-th arg value as an expression.
         let a = |i: usize| -> String {
@@ -3302,27 +3365,28 @@ impl Transpiler {
 
         // Which fs module to use (tokio for async, std for sync).
         let fs_mod = if self.in_async { "tokio::fs" } else { "std::fs" };
+        let p = self.str_ptr();
 
         match method {
-            // fs.read("path") → Arc<str>
+            // fs.read("path") → Result<Arc<str>, io::Error>
             "read" => {
                 let path = pth(0);
                 format!(
-                    "{{ let __boring_s = {}::read_to_string({}){aw}; {}::<str>::from(__boring_s.as_str()) }}",
-                    fs_mod, path, self.str_ptr(), aw = aw
+                    "{}::read_to_string({}){aw}.map(|__boring_s| {p}::<str>::from(__boring_s.as_str()))",
+                    fs_mod, path, aw = aw, p = p
                 )
             }
 
-            // fs.readLines("path") → Vec<Arc<str>>
+            // fs.readLines("path") → Result<Vec<Arc<str>>, io::Error>
             "readLines" => {
                 let path = pth(0);
                 format!(
-                    "{{ let __boring_s = {}::read_to_string({}){aw}; __boring_s.lines().map(|l| {}::<str>::from(l)).collect::<Vec<{}<str>>>() }}",
-                    fs_mod, path, self.str_ptr(), self.str_ptr(), aw = aw
+                    "{}::read_to_string({}){aw}.map(|__boring_s| __boring_s.lines().map(|l| {p}::<str>::from(l)).collect::<Vec<{p}<str>>>())",
+                    fs_mod, path, aw = aw, p = p
                 )
             }
 
-            // fs.write("path", content)
+            // fs.write("path", content) → Result<(), io::Error>
             "write" => {
                 let path    = pth(0);
                 let content = a(1);
@@ -3330,111 +3394,88 @@ impl Transpiler {
                 format!("{}::write({}, ({}).as_bytes()){aw}", fs_mod, path, content, aw = aw)
             }
 
-            // fs.append("path", content)  — OpenOptions::append
+            // fs.append("path", content) → Result<(), io::Error> — OpenOptions::append
             "append" => {
                 let path    = pth(0);
                 let content = a(1);
                 if self.in_async {
                     format!(
-                        "{{ use tokio::io::AsyncWriteExt as _; let mut __boring_f = tokio::fs::OpenOptions::new().append(true).create(true).open({}){aw}; __boring_f.write_all(({}).as_bytes()){aw} }}",
-                        path, content, aw = aw
+                        "{{ use tokio::io::AsyncWriteExt as _; match {}::OpenOptions::new().append(true).create(true).open({}).await {{ Ok(mut __boring_f) => __boring_f.write_all(({}).as_bytes()).await, Err(__boring_e) => Err(__boring_e), }} }}",
+                        fs_mod, path, content
                     )
                 } else {
                     format!(
-                        "{{ use std::io::Write as _; std::fs::OpenOptions::new().append(true).create(true).open({}){prop}.write_all(({}).as_bytes()){prop} }}",
-                        path, content, prop = prop
+                        "{{ use std::io::Write as _; std::fs::OpenOptions::new().append(true).create(true).open({}).and_then(|mut __boring_f| __boring_f.write_all(({}).as_bytes())) }}",
+                        path, content
                     )
                 }
             }
 
-            // fs.exists("path") → bool  (never throws — uses is_ok())
-            "exists" => {
-                let path = pth(0);
-                if self.in_async {
-                    format!("tokio::fs::metadata({}).await.is_ok()", path)
-                } else {
-                    format!("std::path::Path::new({}).exists()", path)
-                }
-            }
-
-            // fs.isDir("path") → bool
-            "isDir" => {
-                let path = pth(0);
-                format!("std::path::Path::new({}).is_dir()", path)
-            }
-
-            // fs.isFile("path") → bool
-            "isFile" => {
-                let path = pth(0);
-                format!("std::path::Path::new({}).is_file()", path)
-            }
-
-            // fs.mkdir("path")  — create_dir_all
+            // fs.mkdir("path") → Result<(), io::Error> — create_dir_all
             "mkdir" => {
                 let path = pth(0);
                 format!("{}::create_dir_all({}){aw}", fs_mod, path, aw = aw)
             }
 
-            // fs.remove("path")  — remove file or directory tree
+            // fs.remove("path") → Result<(), io::Error> — remove file or directory tree
             "remove" => {
                 let path = pth(0);
                 // Smart remove: directory tree if it's a dir, single file otherwise.
-                // Emit a block that tries remove_file, falls back to remove_dir_all.
+                // Both branches are bare Results — the whole if/else is Result<(), io::Error>.
                 if self.in_async {
                     format!(
-                        "{{ if std::path::Path::new({path}).is_dir() {{ tokio::fs::remove_dir_all({path}).await{prop} }} else {{ tokio::fs::remove_file({path}).await{prop} }} }}",
-                        path = path, prop = prop
+                        "{{ if std::path::Path::new({path}).is_dir() {{ tokio::fs::remove_dir_all({path}).await }} else {{ tokio::fs::remove_file({path}).await }} }}",
+                        path = path
                     )
                 } else {
                     format!(
-                        "{{ if std::path::Path::new({path}).is_dir() {{ std::fs::remove_dir_all({path}){prop} }} else {{ std::fs::remove_file({path}){prop} }} }}",
-                        path = path, prop = prop
+                        "{{ if std::path::Path::new({path}).is_dir() {{ std::fs::remove_dir_all({path}) }} else {{ std::fs::remove_file({path}) }} }}",
+                        path = path
                     )
                 }
             }
 
-            // fs.rename("old", "new") / fs.move(...)
+            // fs.rename("old", "new") / fs.move(...) → Result<(), io::Error>
             "rename" | "move" => {
                 let from = pth(0);
                 let to   = pth(1);
                 format!("{}::rename({}, {}){aw}", fs_mod, from, to, aw = aw)
             }
 
-            // fs.copy("src", "dst")
+            // fs.copy("src", "dst") → Result<(), io::Error>
+            // std::fs::copy/tokio::fs::copy return u64 (bytes copied); discard it via .map
+            // so the bare expression stays a plain Result<(), io::Error> like the rest.
             "copy" => {
                 let from = pth(0);
                 let to   = pth(1);
-                // std::fs::copy returns u64 (bytes); tokio::fs::copy too — discard it.
-                format!("{{ let _ = {}::copy({}, {}){aw}; }}", fs_mod, from, to, aw = aw)
+                format!("{}::copy({}, {}){aw}.map(|_| ())", fs_mod, from, to, aw = aw)
             }
 
-            // fs.list("path") → Vec<Arc<str>> of entry names
+            // fs.list("path") → Result<Vec<Arc<str>>, io::Error> of entry names
             "list" => {
-                let path = pth(0);
-                let p = self.str_ptr();
                 if self.in_async {
+                    let path = pth(0);
                     format!(
-                        "{{ let mut __boring_dir = tokio::fs::read_dir({}){aw}; let mut __boring_entries: Vec<{p}<str>> = Vec::new(); while let Some(__boring_e) = __boring_dir.next_entry().await{prop} {{ __boring_entries.push({p}::<str>::from(__boring_e.file_name().to_string_lossy().as_ref())); }} __boring_entries }}",
-                        path, aw = aw, prop = prop, p = p
+                        "{{ async {{ let mut __boring_dir = {}::read_dir({}).await?; let mut __boring_entries: Vec<{p}<str>> = Vec::new(); while let Some(__boring_e) = __boring_dir.next_entry().await? {{ __boring_entries.push({p}::<str>::from(__boring_e.file_name().to_string_lossy().as_ref())); }} Ok::<_, std::io::Error>(__boring_entries) }}.await }}",
+                        fs_mod, path, p = p
                     )
                 } else {
+                    let path = pth(0);
                     format!(
-                        "{{ std::fs::read_dir({}){prop}.filter_map(|e| e.ok()).map(|e| {p}::<str>::from(e.file_name().to_string_lossy().as_ref())).collect::<Vec<{p}<str>>>() }}",
-                        path, prop = prop, p = p
+                        "{}::read_dir({}).map(|__boring_dir| __boring_dir.filter_map(|e| e.ok()).map(|e| {p}::<str>::from(e.file_name().to_string_lossy().as_ref())).collect::<Vec<{p}<str>>>())",
+                        fs_mod, path, p = p
                     )
                 }
             }
 
-            // fs.readBytes("path") → Vec<u8>, matching boring's [uint8] directly —
-            // no per-element widening needed since uint8 is a real 1-byte type.
-            // `aw` already includes `.await` when async (see its definition above),
-            // so no separate self.in_async branch is needed here.
+            // fs.readBytes("path") → Result<Vec<u8>, io::Error>, matching boring's [uint8]
+            // directly — no per-element widening needed since uint8 is a real 1-byte type.
             "readBytes" => {
                 let path = pth(0);
                 format!("{}::read({}){aw}", fs_mod, path, aw = aw)
             }
 
-            // fs.writeBytes("path", bytes) — bytes is already Vec<u8> ([uint8]).
+            // fs.writeBytes("path", bytes) → Result<(), io::Error> — bytes is already Vec<u8> ([uint8]).
             "writeBytes" => {
                 let path  = pth(0);
                 let bytes = a(1);

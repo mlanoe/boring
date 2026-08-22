@@ -559,3 +559,14 @@ transpile_test!(mem_borrow_builtins);
 // tests/run.rs -- the interpreter's `fromJson` is a no-op stub (returns its string
 // argument unparsed), so this is a transpiler-only feature today.
 transpile_test!(json_serde_rename);
+
+// docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
+// (`fromJson<T>(s)`, `fs.read`/`fs.readLines`/`fs.readBytes`) that already do their own
+// Result->Option/panic handling in a plain context: `.ok()` got appended a second time
+// (didn't compile), `fs.read`'s inner `.unwrap()` panicked on a real read failure
+// instead of yielding `None`, and a `try? EXPR` tail-returned from a `T?` function got
+// an extra `Some(...)` wrapped around its already-`Option<T>` value. See
+// tests/cases/try_wrap_double_handling.br's own doc comment for the full breakdown.
+// Not registered in tests/run.rs for the same reason as json_serde_rename above
+// (interpreter's `fromJson` is a no-op stub).
+transpile_test!(try_wrap_double_handling);

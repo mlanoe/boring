@@ -1,0 +1,84 @@
+# Regression test for docs/try-wrap-double-handling-bug.md.
+#
+# `fromJson<T>(s)` and `fs.read`/`fs.readLines`/`fs.readBytes` already do their own
+# Result->Option (or, for the fs.* trio, panic-on-error `.unwrap()`) handling in a
+# plain (non-throws) context -- book.md's own tables document `try? fromJson<T>(s)`
+# as *identical* to the plain form. Wrapping such a call in `try? ...` used to add a
+# second, incompatible layer of handling on top of the first:
+#   - `try? fromJson<T>(s)` transpiled to `....ok().ok()` -- doesn't compile
+#     (`.ok()` called twice on what starts as a `Result`, ending as an `Option`).
+#   - `try? fs.read(path)` transpiled to a block ending in a bare (non-Result)
+#     `Arc<str>` with an inner `.unwrap()` (panics on a real read failure) plus a
+#     trailing `.ok()` that then also failed to compile on that non-Result value.
+#   - Separately (found while fixing the above): a `try? EXPR` used as a `T?`-typed
+#     function's tail return expression got wrapped in an extra `Some(...)` on top,
+#     since `try?` wasn't recognized as already producing `Option<T>` --
+#     `Option<Option<T>>` doesn't type-check against a declared `Option<T>` return.
+#
+# All three are covered here, success and failure paths, plus `fs.readLines`/
+# `fs.readBytes` (same "self-handling builtin" shape as `fs.read`). The mutating
+# `fs.*` builtins (`write`/`append`/`mkdir`/`remove`/`rename`/`copy`/`list`) share
+# the exact same fix (see emit_methods.rs's `emit_fs_call_bare`) but aren't exercised
+# by this checked-in, read-only test to avoid filesystem side effects/races across
+# the four mode/threading variants this case runs under -- verified manually instead
+# (build + cargo run against real temp files, both outcomes, sync and async).
+#
+# Reads a fixture file (tests/cases/fixtures/try_wrap_fixture.txt) that ships in the
+# repo -- read-only, so all four mode/threading variants can run concurrently.
+
+@derive(Serialize, Deserialize)
+struct Thing:
+    string name
+
+# Tail-return form -- exactly docs/try-wrap-double-handling-bug.md's repro 1.
+def Thing? parse(string s):
+    try? fromJson<Thing>(s)
+
+def main():
+    let good = parse("{{\"name\": \"ok\"}}")
+    guard let g = good else:
+        print "fromJson: unexpected none"
+        return
+    print "fromJson ok: {g.name}"
+
+    let bad = try? fromJson<Thing>("not json")
+    if let _ = bad:
+        print "fromJson bad: unexpected some"
+    else:
+        print "fromJson bad: none"
+
+    let content = try? fs.read("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let c = content else:
+        print "fs.read: unexpected none"
+        return
+    print "fs.read ok: {c.length > 0}"
+
+    let missing = try? fs.read("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = missing:
+        print "fs.read missing: unexpected some"
+    else:
+        print "fs.read missing: none"
+
+    let lines = try? fs.readLines("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let ls = lines else:
+        print "fs.readLines: unexpected none"
+        return
+    print "fs.readLines ok: {ls.length}"
+
+    let lines_missing = try? fs.readLines("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = lines_missing:
+        print "fs.readLines missing: unexpected some"
+    else:
+        print "fs.readLines missing: none"
+
+    let bytes = try? fs.readBytes("tests/cases/fixtures/try_wrap_fixture.txt")
+    guard let bs = bytes else:
+        print "fs.readBytes: unexpected none"
+        return
+    print "fs.readBytes ok: {bs.length}"
+
+    let bytes_missing = try? fs.readBytes("tests/cases/fixtures/does_not_exist.txt")
+    if let _ = bytes_missing:
+        print "fs.readBytes missing: unexpected some"
+    else:
+        print "fs.readBytes missing: none"

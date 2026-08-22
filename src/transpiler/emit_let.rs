@@ -1216,6 +1216,7 @@ impl Transpiler {
         // • method calls known to return Option (indexOf, parseInt, parseFloat, string indexOf/find)
         //   whose emitted form ends with ".ok()" or ".map(|i| i as isize)"
         let already_opt = inner_val.starts_with("Some(") || inner_val == "None"
+            || is_try_optional(value)
             || matches!(&value.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str())
                 || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
             || inner_val.ends_with(".ok()")

@@ -451,6 +451,20 @@ pub(crate) fn is_bare_pop_call(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::MethodCall(_, m, a) | ExprKind::Pipe(_, m, a) if m == "pop" && a.is_empty())
 }
 
+/// `try? EXPR` — i.e. `ExprKind::TryElse` whose else-branch is the literal `nil` the
+/// parser desugars `try?` to (as opposed to `try EXPR else default`, whose result is a
+/// plain `T`, not `Option<T>` — see parse_expr.rs's `try?` desugaring comment). Always
+/// evaluates to `Option<T>` regardless of what `EXPR` is, so every "already produces an
+/// Option, don't wrap it in another `Some(...)`" check (return/let/assign — emit_flow.rs,
+/// emit_let.rs, emit_stmt.rs, emit_expr.rs's assign) needs this case; before this helper
+/// existed none of them had it, so `def Thing? parse(s): try? fromJson<Thing>(s)` emitted
+/// `Some(serde_json::from_str::<Thing>(&s).ok())` — `Option<Option<Thing>>`, not
+/// `Option<Thing>` (E0308) — on top of the separate double-`.ok()` bug those sites don't
+/// cause. See docs/try-wrap-double-handling-bug.md.
+pub(crate) fn is_try_optional(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::TryElse(_, default) if matches!(default.kind, ExprKind::Nil))
+}
+
 /// Map boring method names to (rust_method, optional_suffix).
 ///
 /// `want_raw_option` — true only while emitting an expression flowing directly into an

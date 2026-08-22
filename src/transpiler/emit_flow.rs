@@ -41,6 +41,7 @@ impl Transpiler {
                     let inner = self.emit_expr_owned(e);
                     // Check if the return expression is already an Option.
                     let already_opt = inner.starts_with("Some(") || inner == "None"
+                        || is_try_optional(e)
                         || matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
                         || matches!(&e.kind, ExprKind::Var(v) if self.var_types.get(v.as_str())
                             .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))

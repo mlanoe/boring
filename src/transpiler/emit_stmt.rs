@@ -199,6 +199,7 @@ impl Transpiler {
                         // rather than &str, which would mismatch Option<Arc<str>>.
                         let raw = self.emit_expr_owned(e);
                         let already_opt = raw == "None" || raw.starts_with("Some(")
+                            || is_try_optional(e)
                             || matches!(&e.kind, ExprKind::Var(v)
                                 if self.optional_vars.contains(v.as_str())
                                 || self.var_types.get(v.as_str())

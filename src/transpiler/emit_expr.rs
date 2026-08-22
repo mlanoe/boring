@@ -137,6 +137,23 @@ impl Transpiler {
             ExprKind::TryElse(e, default) => {
                 // `try expr else default` — calls a throws/Result function and returns the Ok
                 // value or the default on error.
+
+                // `try? expr` desugars to TryElse(expr, Nil). Some builtins (`fromJson<T>(s)`,
+                // `fs.read(path)`, …) already do their own Result→Option/panic handling in a
+                // plain (non-throws) context — book.md documents `try? fromJson<T>(s)` as
+                // exactly equivalent to the plain form. Letting the generic path below run
+                // (emit the inner expr plain, then append another `.ok()`) double-handles
+                // them: `.ok()` on an already-`Option` (fromJson) doesn't compile, and
+                // `fs.read`'s plain form panics via `.unwrap()` instead of yielding `None`,
+                // defeating the whole point of `try?`. See docs/try-wrap-double-handling-bug.md.
+                // Recognize these up front and emit their dedicated `try?`-aware form directly,
+                // instead of falling into the generic "emit plain, append .ok()" path.
+                if matches!(default.kind, ExprKind::Nil) {
+                    if let Some(code) = self.emit_try_optional_self_handling_builtin(e) {
+                        return code;
+                    }
+                }
+
                 // The inner expression must NOT get `?` propagation — TryElse handles the error
                 // locally. Use a sub-transpiler with throws flags cleared.
                 let mut sub = self.make_sub();
@@ -2311,6 +2328,7 @@ impl Transpiler {
         let rhs_s = if let ExprKind::Var(v) = &target.kind {
             let rhs_already_opt = rhs_s.starts_with("Some(")
                 || rhs_s == "None"
+                || is_try_optional(value)
                 || matches!(&value.kind, ExprKind::Nil)
                 || matches!(&value.kind, ExprKind::Var(vn)
                     if self.optional_vars.contains(vn.as_str())
@@ -2330,6 +2348,47 @@ impl Transpiler {
             rhs_s
         };
         format!("{} = {}", target_s, rhs_s)
+    }
+
+    /// `try? EXPR` — recognizes builtins that already do their own Result→Option/panic
+    /// handling in a plain (non-throws) context (`fromJson<T>(s)`, `fs.read(path)`, and the
+    /// other `fs.*` operations — see book.md's own tables), and emits their dedicated
+    /// `try?`-aware form directly instead of letting `ExprKind::TryElse`'s generic path
+    /// (emit plain, append another `.ok()`) double-handle them. Returns `None` for anything
+    /// else, so the caller falls back to the generic handling. See
+    /// docs/try-wrap-double-handling-bug.md for the bug this fixes.
+    fn emit_try_optional_self_handling_builtin(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            // `try? fromJson<T>(s)` — book.md documents this as identical to the plain
+            // form (`serde_json::from_str::<T>(&s).ok()`). Force that plain emission via a
+            // sub-transpiler with throws flags cleared, regardless of the ambient context
+            // (`try?` may itself appear inside a `throws` function, where the ambient
+            // `in_throws` would otherwise route `fromJson` to its `?`-suffixed form instead).
+            ExprKind::GenericCall(callee, type_args, args) => {
+                if let ExprKind::Var(name) = &callee.kind {
+                    if name == "fromJson" {
+                        let mut sub = self.make_sub();
+                        sub.in_throws = false;
+                        sub.in_try_body = false;
+                        return Some(sub.emit_generic_call(callee, type_args, args));
+                    }
+                }
+                None
+            }
+            // `try? fs.read(path)` / `try? fs.write(...)` / etc. — route through the
+            // dedicated `.ok()`-suffixed bare-Result form (see emit_methods.rs's
+            // `emit_fs_call_try_optional`), which gracefully yields `None` on a real
+            // failure instead of `fs.read`'s plain-context `.unwrap()` panicking.
+            ExprKind::MethodCall(obj, method, args) => {
+                if let ExprKind::Var(v) = &obj.kind {
+                    if v == "fs" {
+                        return Some(self.emit_fs_call_try_optional(method, args));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
