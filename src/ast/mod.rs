@@ -1380,6 +1380,37 @@ impl Type {
         }
     }
 
+    /// True if this type is a tuple with a `mut`-qualified slot, or an array/`ArrayN`
+    /// with a `mut`-qualified element type — the two owned-`mut Type` positions
+    /// (docs/mut-type-modifier.md §3) that have no per-slot Rust representation at
+    /// all. Rust has no per-tuple-element `mut` and no per-index `Vec` mutability, so
+    /// the checker's per-slot permission tracking (`grants_mut`, already correct —
+    /// see `tuple_slot_mut_flags`/`index_element_type`) has nothing to attach to on
+    /// the Rust side except the *whole* binding: `t.0.move_to(...)` /
+    /// `arr[0].move_to(...)` only compiles if the underlying Rust `let`/`var`
+    /// binding itself is `mut`, regardless of what Boring keyword (`let`/`var`) was
+    /// written. Used by `emit_let.rs` to force `let mut` on a tuple/array binding
+    /// whose Boring-level binding kind alone wouldn't otherwise request it — this is
+    /// the "Transpiler honesty" invariant from "Interactions and invariants" in that
+    /// doc, not a change to what Boring source is allowed to do.
+    ///
+    /// Deliberately narrower than `index_element_type` — dict values (`{K = mut V}`)
+    /// are NOT covered here. That case has a separate, worse bug (the transpiler
+    /// mutates a throwaway clone of the fetched value, silently losing the write —
+    /// see "Known implementation bugs" in the doc) that a `let mut` on the `HashMap`
+    /// binding alone would not fix and could make easier to miss.
+    pub fn nested_slot_grants_mut(&self) -> bool {
+        match self {
+            Type::Tuple(elems) => elems.iter().any(Type::grants_mut),
+            Type::Array(elem) | Type::ArrayN(elem, _) | Type::ArrayNExpr(elem, _)
+                | Type::LabeledArray(elem, _) => elem.grants_mut(),
+            Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => {
+                inner.nested_slot_grants_mut()
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_copy(&self) -> bool {
         match self {
             Type::Mut(inner) => inner.is_copy(),

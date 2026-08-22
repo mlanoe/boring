@@ -1,0 +1,13 @@
+struct Counter:
+    var int value
+
+    def inc():
+        value += 1
+
+def run():
+    let [mut Counter] arr = [Counter(value = 0), Counter(value = 10)]
+    arr[0].inc()
+    arr[1].inc()
+    print "{arr[0].value} {arr[1].value}"
+
+run()

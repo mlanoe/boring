@@ -575,13 +575,18 @@ until specifically checked.
    rules for `boring run`, confirmed empirically for every case in (2)
    except the owning-binding gap noted there, which is unenforced in the
    interpreter too.
-4. **Not shipped for tuples/arrays; silently wrong for dicts.**
-   `src/transpiler/*.rs` does not emit `let mut` on the underlying Rust
-   tuple/array binding when a slot/element is `mut` — `boring build`
-   accepts the source (per (2)) but the generated Rust fails `cargo build`
-   with E0596. Dict value mutation (`{K = mut V}`) is worse: it compiles
-   and runs, but transpiles to a clone-then-mutate-then-drop that silently
-   loses the write. See "Known implementation bugs" below.
+4. **Shipped for tuples/arrays; still silently wrong for dicts.**
+   `src/transpiler/emit_let.rs`'s `emit_let` now forces `let mut` on the
+   Rust binding whenever `Type::nested_slot_grants_mut` (`src/ast/mod.rs`)
+   is true for the declared type — a tuple with any `mut`-qualified slot
+   (`(mut Point, string) t`) or an array/`ArrayN` with a `mut`-qualified
+   element type (`[mut Point] arr`) — so `t.0.move_to(...)` /
+   `arr[0].move_to(...)` now compiles, matching the "Transpiler honesty"
+   invariant this document already stated. Dict value mutation
+   (`{K = mut V}`) is a separate, worse bug, deliberately not touched by
+   this fix: it compiles and runs, but transpiles to a
+   clone-then-mutate-then-drop that silently loses the write. See
+   "Known implementation bugs" below.
 5. `boring/interpreter/*.br` (self-hosted interpreter) — not verified as
    part of this status pass; still open.
 6. **Shipped.** `CLAUDE.md`'s cheat sheet now documents `mut` on a scalar as
@@ -620,16 +625,18 @@ proposal that *did* ship — the checker and interpreter enforce them
 correctly — but whose transpiler codegen is wrong, in one case silently.
 None of these are mentioned anywhere else in this document.
 
-- **Tuple slots and array elements don't get `let mut` in generated Rust.**
-  `boring build`'s codegen for owned `mut Type` inside a tuple slot
-  (`(mut Point, string) t`) or an array element (`[mut Point] arr`) doesn't
-  mark the underlying Rust binding `mut` — it emits `let t: (Point,
-  Arc<str>) = ...` instead of `let mut t: (...)`. `t.0.move_to(...)` /
-  `arr[0].move_to(...)` then fails `cargo build` with E0596, even though
-  `boring build` itself accepted the source with no complaint. This is
-  exactly the "Transpiler honesty" invariant already stated under
-  "Interactions and invariants" above — shipped as a stated invariant, not
-  yet as codegen. Matches Implementation checklist item 4, still open.
+- **Fixed.** Tuple slots and array elements now get `let mut` in generated
+  Rust. `boring build`'s codegen for owned `mut Type` inside a tuple slot
+  (`(mut Point, string) t`) or an array element (`[mut Point] arr`) used to
+  leave the underlying Rust binding non-`mut` — it emitted `let t: (Point,
+  Arc<str>) = ...` instead of `let mut t: (...)`, and `t.0.move_to(...)` /
+  `arr[0].move_to(...)` then failed `cargo build` with E0596, even though
+  `boring build` itself accepted the source with no complaint. Fixed via
+  `Type::nested_slot_grants_mut` (`src/ast/mod.rs`) consulted from
+  `emit_let.rs`'s `emit_let` — see Implementation checklist item 4, now
+  shipped, and regression tests in `tests/tuple_array_mut_slot_binding.rs`
+  (`tests/cases/tuple_mut_slot_binding.br`,
+  `tests/cases/array_mut_element_binding.br`).
 - **Dict value mutation (`{K = mut V}`) silently loses the write.** The
   checker/interpreter side is correct, but the transpiler emits
   `d.get(k).cloned().expect(...).move_to(...)` — mutating a throwaway clone

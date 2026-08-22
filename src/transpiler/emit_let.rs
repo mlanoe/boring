@@ -1027,7 +1027,8 @@ impl Transpiler {
         // `let v` / `var v` — deferred initialisation: emit `let v;` and let Rust
         // enforce definite assignment via its own control-flow analysis.
         if s.value.is_none() {
-            let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+            let forces_mut = s.ty.as_ref().is_some_and(Type::nested_slot_grants_mut);
+            let kw = if s.binding.is_mutable() || forces_mut { "let mut" } else { "let" };
             if let Some(ty) = &s.ty {
                 self.line(&format!("{} {}: {};", kw, s.name, self.emit_type(ty)));
             } else {
@@ -1068,7 +1069,14 @@ impl Transpiler {
                 }
             }
         }
-        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        // A `mut`-qualified tuple slot (`(mut Point, string) t`) or array element
+        // (`[mut Point] arr`) has no per-slot Rust representation — the *whole*
+        // Rust binding must be `mut` for `t.0.move_to(...)`/`arr[0].move_to(...)`
+        // to compile, even when the Boring binding keyword itself is a plain
+        // `let`. See `Type::nested_slot_grants_mut`'s doc and the "Transpiler
+        // honesty" invariant in docs/mut-type-modifier.md.
+        let forces_mut = s.ty.as_ref().is_some_and(Type::nested_slot_grants_mut);
+        let kw = if s.binding.is_mutable() || forces_mut { "let mut" } else { "let" };
         let vis = if s.is_pub { "pub " } else { "" };
         let (ty, val, is_mutable_string_lit, is_mutable_string_ty) = self.compute_let_ty_and_value(s, s_value);
         if self.track_let_metadata(s, s_value, &val, is_mutable_string_lit, is_mutable_string_ty) {

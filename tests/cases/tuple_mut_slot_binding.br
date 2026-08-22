@@ -1,0 +1,16 @@
+struct Point:
+    var float x
+    var float y
+
+    def move_to(float nx, float ny):
+        x = nx
+        y = ny
+
+def run():
+    let Point p = Point(x = 0.0, y = 0.0)
+    let string s = "label"
+    let (mut Point, string) t = (p, s)
+    t.0.move_to(1.0, 2.0)
+    print "{t.0.x} {t.0.y} {t.1}"
+
+run()
