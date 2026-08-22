@@ -1,10 +1,26 @@
 # `mut` as a type modifier: `mut Type` and `mut Type&`
 
-> **Status: Draft — not implemented.** No grammar, checker, interpreter, or
-> transpiler changes exist yet for anything described here. This document
-> records the design as worked out in discussion, as a basis for
-> implementation. See [binding-mutability.md](binding-mutability.md) for the
-> current (shipped) `let`/`mut`/`var` model this proposal extends.
+> **Status: Mostly implemented.** This document started as a from-scratch
+> design proposal; most of it shipped since, in separate sessions, as
+> drive-by work alongside other fixes — this status line was simply never
+> updated to match, and one section below (struct fields) went stale enough
+> to claim the opposite of what's actually true. Verified shipped, in both
+> `boring run` and `boring build`, as of 2026-08-22: §1 (bare `mut` sugar,
+> `var`'s auto-`mut` implication retired), §2 (`mut Type&` composing in
+> tuples/generics), §3's enum-variant-field *and* struct-field forms (see
+> the correction inline in §3 — the "not shipped yet" claim there is
+> itself the stale part), §4 (per-element destructuring keywords), §6
+> (inference never upgrading to `mut`), the grammar changes (Implementation
+> checklist item 1), and checklist item 0 (`BindingKind::is_mutable()`
+> retired as the mutation-permission source of truth — see
+> `Type::grants_mut()`/`binding_grants_mut()` in `src/ast/mod.rs`).
+> Genuinely still unshipped: kernel `FieldBinding` cleanup (bottom
+> section), full `var`-parameter content-mutation gating (Parameters
+> section), and `{mut T}` set rejection. Separately, several *shipped*
+> pieces have real transpiler bugs this document didn't mention anywhere
+> — see "Known implementation bugs" near the end. See
+> [binding-mutability.md](binding-mutability.md) for the baseline
+> `let`/`mut`/`var` model this document extends.
 
 ## Problem Statement
 
@@ -238,37 +254,39 @@ fully built yet (it isn't — see below):
   through it, same as any owned match subject. Full walkthrough, with the
   Rust output for both the mut-field and no-mut-field cases, in
   [book.md §9, "Enum variant fields — `mut Type`"](book.md#enum-variant-fields--mut-type).
-- **Struct fields** — **not actually shipped yet, an earlier revision of
-  this document overclaimed it was.** `mut` isn't even a valid field
-  keyword today (`struct S: mut Point p` fails to parse — fields only
-  accept `var` or no keyword, i.e. `FieldDecl { mutable: bool }`, a single
-  boolean, not the two independent axes this document is about). And
-  `var Point p`, verified empirically, currently grants **both**
-  reassignment (`self.p = newInstance`) **and** content mutation
-  (`self.p.inc()`) under the same keyword — exactly the conflation §1
-  retires for local bindings, just never addressed for fields at all.
-  `self.p = x` (does the field point at a different instance?) and
-  `self.p.inc()` (can whatever it currently holds be mutated?) are as
-  independent for a field as they are for a local variable — a struct
-  field can itself hold a struct with its own methods, so this isn't
-  degenerate the way it is for scalars. Fields should get the same
-  four-combination table as §1, not a two-state `mutable: bool`:
+- **Struct fields** — **shipped, contrary to the "not actually shipped
+  yet" claim an earlier revision of this document made right here** (the
+  claim below this correction is the stale part, kept only as a record of
+  what was once believed). `struct S: let Point a / mut Point b /
+  var Point c / var mut Point d` parses today, and reassignment vs.
+  content mutation are enforced independently per the same
+  four-combination table §1 uses for local bindings — not the two-state
+  `mutable: bool` this section used to describe. `CLAUDE.md`'s own
+  "Structs" section already documents this as ordinary, working syntax:
 
   | Field | Reassignable | Content mutable |
   |---|---|---|
-  | `let Point p` (today's default) | no | no |
-  | `mut Point p` / `let mut Point p` (doesn't parse today) | no | yes |
-  | `var Point p` (today grants both, incorrectly) | yes | no |
-  | `var mut Point p` (doesn't parse today) | yes | yes |
+  | `let Point p` | no | no |
+  | `mut Point p` / `let mut Point p` | no | yes |
+  | `var Point p` | yes | no |
+  | `var mut Point p` | yes | yes |
 
-  This carries the same breaking-change shape as §1's `var` migration,
-  applied to fields: every existing `var Point p` field whose owning
-  struct calls a mutating method on `p` would need to become
-  `var mut Point p` to keep compiling. Not part of this session's shipped
-  work — flagged here as a real, in-scope gap this document should own,
-  not a separate proposal, since it's the exact same model applied one
-  level down. **Kernel struct fields are the one place this genuinely
-  doesn't apply**: a kernel struct has exactly one method (the anonymous
+  **Two real enforcement gaps found while verifying this status, neither
+  documented anywhere else in this document:**
+  1. The field-reassignment-immutability check (rejecting `o.a = X` on a
+     `let`/`mut` field) exists only in the interpreter
+     (`src/interpreter/methods.rs`) — `boring build` has no matching
+     check and silently transpiles an illegal reassignment through a
+     non-reassignable field, with no diagnostic at all.
+  2. `CLAUDE.md`'s own claim that "reading/writing ANY field also needs
+     `o` itself declared mut/var mut — a plain `let`/`var o` blocks every
+     field access above regardless of the field's own keyword" is **not
+     enforced**, in either mode: `let o = Outer(...)` still lets
+     `o.d.move_to(...)` succeed through a `var mut` field `d`, even
+     though `o` itself is a plain, non-mutable `let`.
+
+  **Kernel struct fields are the one place this genuinely doesn't
+  apply**: a kernel struct has exactly one method (the anonymous
   `def ()` body), so there is no second, independent "call a method on
   what this field currently holds" operation to distinguish from
   "write the field" — confirmed by reading every `FieldBinding` use site
@@ -530,53 +548,45 @@ until specifically checked.
 
 ## Implementation checklist
 
-0. **`BindingKind::is_mutable()` (`src/ast/mod.rs`) stops being the source of
-   truth for "`def` calls allowed."** It currently returns `true` for both
-   `Mut` and `Var` and is read directly by every `def`-call check across the
-   checker, interpreter, and self-hosted interpreter (this session's
-   `'actor`/`'guard` fix included). Under this proposal, permission comes
-   from whether the *resolved type* carries `mut`, not from the
-   `BindingKind` alone — `Var` without a `mut`-typed value must no longer
-   satisfy these checks, **`'actor`/`'guard` included, decided in §1 with no
-   exception** (`var T'actor x` alone stops being enough; only `var mut
-   T'actor x` does) — update `binding-mutability.md`'s `'actor`/`'guard`
-   table to match. This is the change with the widest blast radius in this
-   list; do it first, and expect it alone to surface the bulk of the
-   migration errors described above.
-1. `spec/grammar.bnf` — the two `type` alternatives above; `binding`'s own
-   optional keyword, usable in both the bare and parenthesised destructure
-   forms; `field_decl` gains the same `let`/`mut`/`var` three-way (today it
-   only accepts `var`/no-keyword — a single `mutable: bool`, `src/ast/mod.rs`'s
-   `FieldDecl`), so `mut`/`let mut`/`var mut` become writable on a field at
-   all.
-2. `src/checker/mod.rs` — per-slot permission tracking for tuple types and
-   destructure bindings (new; today only whole-bindings are tracked via
-   `BindingKind` — struct fields track only reassignment via `mutable: bool`,
-   not content mutation at all, see §3); reject `mut Type` (bare) everywhere
-   outside tuple-slot / struct-field / array-element / dict-value position
-   with a clear diagnostic; reject `mut` on scalars outright (§1), not
-   silently ignore it; resolve each destructured element's default per the
-   bare-vs-parenthesised rule above; **lint warning** (not an error) on a
-   bare unmarked element following a differently-keyworded one in the same
-   statement (e.g. `mut a, b = t`) — correct but a readability trap, worth
-   flagging even though it's valid; enforce the one-way `mut Type` → `Type`
-   coercion at every call site, assignment, and return (§5), and resolve
-   inferred `let`/`var` types to the plain type, never `mut Type`, when the
-   source is `mut`-typed (§6); split `self.field = x` (reassignment) from
-   `self.field.method()` (content mutation) into the same two independently
-   gated operations a local binding already gets (§3) — today `var Point p`
-   grants both under one flag.
-3. `src/interpreter/*.rs` — matching per-slot bookkeeping for `boring run`
-   (extends the per-binding-name `mutable_vars`/`is_mutable` machinery to
-   per-tuple-position and to the field-reassign/field-mutate split above).
-4. `src/transpiler/*.rs` — emit `let mut` on the whole Rust tuple binding
-   whenever any slot is `mut`; rely on (2)/(3) having already rejected any
-   source that would misuse the other slots.
-5. `boring/interpreter/*.br` (self-hosted interpreter) — same two changes as
-   (3)/(2), scaled down to its simpler qualifier-blind model, once the Rust
-   side is settled.
-6. Retire the "`mut` ≡ `var` for scalars" line from `CLAUDE.md`'s cheat
-   sheet once (1) ships, to resolve the doc conflict noted above.
+0. **Shipped.** `BindingKind::is_mutable()` (`src/ast/mod.rs`) is no longer
+   the source of truth for "`def` calls allowed" — its own doc comment now
+   says so directly. `Type::grants_mut()` and `binding_grants_mut()`
+   (`src/ast/mod.rs`) are the real authority: permission comes from whether
+   the *resolved type* carries `mut`, not from `BindingKind` alone. `var
+   T'actor x` alone correctly no longer suffices for a `def` call; only
+   `var mut T'actor x` does, exactly as decided in §1 with no
+   `'actor`/`'guard` exception.
+1. **Shipped.** `spec/grammar.bnf` has both `type` alternatives (`"mut"?
+   type "&" borrow_qual` / `"mut"? type`), `binding_keyword ::= ("let" |
+   "var") "mut"? | "mut"` on both `field_decl` and destructure `binding`,
+   and `FieldDecl` has moved off the old single `mutable: bool`.
+2. **Shipped for enum variant fields, struct fields, tuple slots, array
+   elements, and dict values — with one real gap.** `src/checker/mod.rs`
+   does per-slot permission tracking for all of the above, rejects bare
+   `mut Type` outside a valid position, rejects `mut` on scalars, resolves
+   destructure defaults per the bare-vs-parenthesised rule (§4, including
+   the lint warning), and enforces the one-way `mut Type` → `Type` coercion
+   (§5) and never-upgrades-to-mut inference (§6). **Gap**: `self.field = x`
+   (reassignment) vs. `self.field.method()` (content mutation) are split
+   correctly per-field, but there is no check that the *owning* binding
+   (`o` in `o.field = x`) is itself `mut`/`var mut` before any field access
+   is permitted — see the struct-fields correction in §3 above.
+3. **Shipped**, per (2) — `src/interpreter/*.rs` enforces the same per-slot
+   rules for `boring run`, confirmed empirically for every case in (2)
+   except the owning-binding gap noted there, which is unenforced in the
+   interpreter too.
+4. **Not shipped for tuples/arrays; silently wrong for dicts.**
+   `src/transpiler/*.rs` does not emit `let mut` on the underlying Rust
+   tuple/array binding when a slot/element is `mut` — `boring build`
+   accepts the source (per (2)) but the generated Rust fails `cargo build`
+   with E0596. Dict value mutation (`{K = mut V}`) is worse: it compiles
+   and runs, but transpiles to a clone-then-mutate-then-drop that silently
+   loses the write. See "Known implementation bugs" below.
+5. `boring/interpreter/*.br` (self-hosted interpreter) — not verified as
+   part of this status pass; still open.
+6. **Shipped.** `CLAUDE.md`'s cheat sheet now documents `mut` on a scalar as
+   a checker error and explicitly notes the old "`mut` ≡ `var` for
+   scalars" shortcut as retired.
 
 ## Explicitly out of scope (future work, not corollaries)
 
@@ -602,6 +612,46 @@ until specifically checked.
   Today the only way to get a mutable binding out of a guard/if-let is a
   follow-up `var mut T c = b`. Widening `CondClause::Let` to carry the same
   binding-kind information as `LetStmt` would let this compile directly.
+
+## Known implementation bugs (found verifying this document's status)
+
+Distinct from "Explicitly out of scope" above: these are pieces of this
+proposal that *did* ship — the checker and interpreter enforce them
+correctly — but whose transpiler codegen is wrong, in one case silently.
+None of these are mentioned anywhere else in this document.
+
+- **Tuple slots and array elements don't get `let mut` in generated Rust.**
+  `boring build`'s codegen for owned `mut Type` inside a tuple slot
+  (`(mut Point, string) t`) or an array element (`[mut Point] arr`) doesn't
+  mark the underlying Rust binding `mut` — it emits `let t: (Point,
+  Arc<str>) = ...` instead of `let mut t: (...)`. `t.0.move_to(...)` /
+  `arr[0].move_to(...)` then fails `cargo build` with E0596, even though
+  `boring build` itself accepted the source with no complaint. This is
+  exactly the "Transpiler honesty" invariant already stated under
+  "Interactions and invariants" above — shipped as a stated invariant, not
+  yet as codegen. Matches Implementation checklist item 4, still open.
+- **Dict value mutation (`{K = mut V}`) silently loses the write.** The
+  checker/interpreter side is correct, but the transpiler emits
+  `d.get(k).cloned().expect(...).move_to(...)` — mutating a throwaway clone
+  of the fetched value, never the map entry itself. This *compiles and
+  runs* with no error of any kind: `boring run` prints the mutated value,
+  the compiled binary prints the original, unmutated one. Confirmed via a
+  `boring run` vs. compiled-binary A/B comparison. This is worse than the
+  tuple/array bug above — it's silent, not a build failure.
+- **`{mut T}` (set element mutability) isn't rejected at all**, in either
+  `boring run` or `boring build` — it should be a hard checker error per
+  §3 (no Rust API exists to honor it, see the out-of-scope entry above)
+  but currently silently parses and is accepted with no diagnostic.
+- **`var`-parameter content-mutation gating is still missing** (see
+  "Parameters" below): `mut Point a` correctly blocks the callee from
+  reseating the caller's binding, but `var Point a` (reseat-only, per the
+  Parameters table) incorrectly still lets the callee call `def` methods
+  on `a`.
+- **A field's owning binding doesn't need to be `mut`/`var mut` to write
+  through it** (see the struct-fields correction in §3 above): `let o =
+  Outer(...)` still lets `o.d.move_to(...)` succeed through a `var mut`
+  field `d`, contrary to `CLAUDE.md`'s own documented rule that the owner
+  itself must be `mut`/`var mut` first.
 
 ## Parameters: a distinct, related model — `let` stays implicit under `mut`
 
@@ -635,15 +685,19 @@ never implied by `mut` alone. `compute(mut Point a)` silently becoming
 caller-rebind rights it doesn't have today, as a side effect of a rule
 designed for a completely different context — exactly the trap to avoid.
 
-This table describes intent that mostly isn't enforced yet — `mut T&` and
-`var T&` currently both transpile to the identical Rust `&mut T`
-(`binding-mutability.md`), so nothing today actually stops a `var`-parameter
-callee from mutating content it's only supposed to reassign, or a
-`mut`-parameter callee from attempting to reseat the caller's variable
-undetected by the checker. Closing that gap — and introducing `var mut T&
-m` as a real, checker-distinguished combination — is real, related work,
-but it belongs in its own follow-up proposal with its own migration
-accounting, not folded into this one.
+This table describes intent that is now **half** enforced — verified
+directly, correcting an earlier revision of this document that claimed
+neither half was: a `mut`-parameter callee reseating the caller's variable
+(`a = X`) is correctly rejected today, in both `boring run` and
+`boring build`. What's still open is the other half: a `var`-parameter
+callee can still call `def` methods on `a` that it's only supposed to be
+able to reseat, not mutate in place — `mut T&` and `var T&` still
+transpile to the identical Rust `&mut T` (`binding-mutability.md`), so
+nothing distinguishes "may reseat" from "may mutate content" at the type
+level for `var`. Closing that gap — and introducing `var mut T& m` as a
+real, checker-distinguished combination — is real, related work, but it
+belongs in its own follow-up proposal with its own migration accounting,
+not folded into this one.
 
 ## Kernel structs: a distinct, related model — one axis, not two
 
