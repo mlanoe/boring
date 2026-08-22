@@ -54,8 +54,10 @@ impl Transpiler {
     }
 
     /// True when a `for <a>, <b> in <iterable>:` iterable is already
-    /// tuple-shaped (a dict, or an array of tuples) — i.e. the two loop
-    /// variables should destructure each item directly, per
+    /// tuple-shaped (a dict, an array of tuples, or an external generic
+    /// container — e.g. a Bevy-ECS-style `Query<(mut Transform&, Sprite&)>`
+    /// parameter — whose sole type argument is itself a tuple) — i.e. the
+    /// two loop variables should destructure each item directly, per
     /// docs/book.md's "`for` with index — auto-enumerate" rule. False (or
     /// unknown, which callers treat the same as false) means the two-var
     /// form is the auto-enumerate shorthand (`for i, v in arr:` ≡
@@ -83,8 +85,21 @@ impl Transpiler {
         // struct field — the latter is how the kernel-field case, e.g.
         // `for i, v in k.y:` where `y` is a declared `[float32]'unified`, gets
         // proven non-tuple without ever touching `var_types`/`dict_vars`).
-        matches!(self.resolve_iterable_type(iterable), Some(Type::Dict(_, _)))
-            || matches!(self.resolve_iterable_type(iterable), Some(Type::Array(elem)) if matches!(*elem, Type::Tuple(_)))
+        //
+        // `tuple_slot_mut_flags` is reused here (not just for `mut`-prefix
+        // emission below) as the general "does this type's item shape have a
+        // tuple at its core" probe: it already unwraps `Array`/`Optional`/
+        // `Mut`/`Qualified`, and — critically — a one-arg `Generic` type
+        // (`Query<(mut Transform&, Sprite&)>`), which a plain
+        // `Type::Array(Tuple)` match can't see at all. Without this, any
+        // external generic whose "tuple" is actually a component-destructuring
+        // pattern (not an index/value pair) fell through to `false` and got
+        // wrongly `.enumerate()`-wrapped, since `Query`/`Res`-style types have
+        // no `.iter()` returning `(usize, Item)` pairs — see the regression
+        // this guards, `tests/for_loop_mut_tuple.rs`.
+        let resolved = self.resolve_iterable_type(iterable);
+        matches!(resolved, Some(Type::Dict(_, _)))
+            || resolved.as_ref().is_some_and(|ty| ty.tuple_slot_mut_flags().is_some())
     }
 
     pub(crate) fn emit_while(&mut self, s: &WhileStmt) {

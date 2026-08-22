@@ -1,0 +1,29 @@
+# Regression fixture for the `for (a, b) in <external-generic>:` auto-enumerate
+# bug — see tests/for_loop_mut_tuple.rs for the full writeup. Two functions,
+# on purpose, in the same file so a future fix to one case can't silently
+# regress the other:
+#
+#   - sync_from_holder: iterates a `Holder<(mut Point&, Sprite&)>` parameter
+#     (a Bevy `Query`-shaped external generic whose tuple is a component
+#     destructuring pattern, not an index/value pair) — must transpile to a
+#     plain `.into_iter()`, never `.enumerate()`.
+#   - sync_from_array: iterates a real Boring `[int]` with a two-var pattern
+#     (`for i, v in arr:`) — must keep the auto-enumerate behavior that
+#     motivated this feature in the first place.
+
+struct Point:
+    float x
+    float y
+
+struct Sprite:
+    int target_id
+
+pub def sync_from_holder(Holder<(mut Point&, Sprite&)> query):
+    for point, sprite in query:
+        point.x = point.x + 1.0
+        print "sprite {sprite.target_id}: {point.x}"
+
+pub def sync_from_array():
+    let pts = [10, 20, 30]
+    for i, v in pts:
+        print "{i}:{v}"
