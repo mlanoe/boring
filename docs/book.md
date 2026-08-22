@@ -4089,6 +4089,11 @@ mod math_utils {
 
 ### Importing — `use`
 
+> Every form below is a **multi-segment** path (`module.item`, `module.*`).
+> For splitting one project across sibling `.br` files with a bare,
+> single-segment `use <name>` (no dot), see [Same-project multi-file — bare
+> `use <name>`](#same-project-multi-file--bare-use-name) further down.
+
 Import all public items from a module:
 
 ```boring
@@ -4219,7 +4224,103 @@ through to the usual behavior unaffected.
 
 See `docs/cross-project-code-sharing-gap.md` for the motivation (sharing a
 real module — e.g. an exact-arithmetic `BigUint` tower — between sibling
-projects without copy-pasting it).
+projects without copy-pasting it). For splitting *this* project's own
+sources across sibling files, without a separate project directory or a
+`[deps]` entry, see the next section.
+
+### Same-project multi-file — bare `use <name>`
+
+A **bare, single-segment `use <name>`** (no dot at all) is a third, distinct
+import form — separate from `mod name: ...` blocks, multi-segment `use
+module.item`, and the `[deps]`/`use boring.<module>` forms above. It lets a
+single project split its source across multiple sibling `.br` files with no
+`boring.toml` setup at all — used throughout `boring/interpreter/` itself
+(`main.br` does `use tokens`, `use ast`, `use lexer`, … against sibling
+`tokens.br`/`ast.br`/`lexer.br` files) and in `scratch-boring/boring/
+scratch.br` + `sb3_loader.br`.
+
+```boring
+use tokens     # loads ./tokens.br (sibling of the file containing this line)
+use ast
+use lexer
+```
+
+**Resolution rule**: the parser treats any `use` path with exactly one
+segment (no `.`) as "load `<name>.br` and import everything", rather than
+"import the item `<name>`" (that reading only applies once a path has two or
+more segments — see the multi-segment forms above). The file is searched
+for, in order:
+
+1. The **directory of the file containing the `use` statement** (not the
+   entry file, not the process's cwd) — always checked first, and, for a
+   chain of sibling imports, each file's *own* directory is used at its own
+   nesting level.
+2. The current project's `src/` directory, if the file belongs to a project
+   (an ancestor directory has a `boring.toml`) — **only** under `boring run`
+   and the GPU targets (`--target cuda|rocm|metal|wgpu`). Plain `boring
+   build`/`--emit-rust` does **not** add this fallback; it only ever checks
+   the current file's own directory.
+3. `BORING_PATH` entries — same caveat as step 2, `boring run`/GPU targets
+   only.
+
+Three independently-written codepaths implement this (not one shared
+resolver), but all follow the same rule above:
+
+- `boring run` — the interpreter's `exec_use`/`bind_module_items`, with
+  search paths assembled in `run_file` (file's own directory, then the
+  project's `src/`, then `BORING_PATH`).
+- The GPU targets — `parse_and_merge_program`/`merge_into` in `src/main.rs`
+  merge every reachable sibling file into one flat `Program` before
+  transpiling, using the same three-step search order.
+- Plain `boring build`/`--emit-rust` — the transpiler's `emit_use`/
+  `inline_boring_use`, resolving only against the current file's directory
+  (`TranspileConfig::source_dir`) — no project `src/` fallback, no
+  `BORING_PATH`.
+
+**Every top-level item is imported unconditionally, `pub` or not.** Unlike
+the multi-segment forms above (where `pub` gates which names a selective
+import may name), a bare `use <name>` pulls in every item the target file
+declares regardless of visibility — within one project, all symbols from a
+sibling file are accessible; `pub` only matters once a *different* project
+imports across a `[deps]`/`boring.*` boundary.
+
+**No slash syntax.** There is no `use sub/foo` — a file in a subdirectory
+needs the dotted multi-segment form instead, which does map dots to path
+components:
+
+```boring
+use sub.foo.*        # loads ./sub/foo.br, imports everything
+use sub.foo.SomeItem # loads ./sub/foo.br, imports just SomeItem (must be pub)
+```
+
+**Gotcha — duplicate `use` of the same external item across two sibling
+files is a real `E0252`.** When two files that both get pulled into the same
+compiled program each `use` the same external (non-Boring) item, and both
+files end up inlined into one flat Rust scope, `rustc` sees the same `use`
+line twice in one module and rejects it:
+
+```boring
+# a.br
+use zip.ZipArchive
+...
+
+# b.br
+use zip.ZipArchive
+...
+
+# main.br
+use a
+use b
+```
+
+Both `a.br` and `b.br` emit `use zip::ZipArchive;`, and since `boring
+build`/`--emit-rust` splices sibling files into `main.rs` via `include!`
+(literally sharing one namespace) and the GPU targets merge them into a
+single `Program` before emission, both land in the same scope → `rustc`
+error `E0252: the name 'ZipArchive' is defined multiple times`. `boring run`
+never hits this (it interprets, it doesn't compile Rust), so the bug only
+surfaces when actually building. Fix: keep each external-crate `use` in only
+**one** of the sibling files that end up in the same compiled program.
 
 ### Type aliases — `use … as`
 
