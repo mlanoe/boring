@@ -23,11 +23,13 @@ impl Transpiler {
             .cloned()
             .partition(|p| self.is_known_derivable_trait(p));
         let mut derive_names: Vec<String> = if has_derive {
-            // Merge every explicit `@derive(...)` attr's args verbatim (preserves user order).
-            s.attrs.iter()
+            // Merge every explicit `@derive(...)` attr's args verbatim (preserves user order),
+            // then qualify any bare Serialize/Deserialize — see `qualify_serde_derive_args`.
+            let raw: Vec<String> = s.attrs.iter()
                 .filter(|a| a.name == "derive")
                 .flat_map(|a| a.args.iter().cloned())
-                .collect()
+                .collect();
+            self.qualify_serde_derive_args(&raw)
         } else {
             let has_non_clone_field = s.fields.iter().any(|f| {
                 // `mut AtomicUsize` (docs/mut-type-modifier.md) wraps the field type in
@@ -90,6 +92,15 @@ impl Transpiler {
 
         // Fields from field declarations
         for f in &s.fields {
+            // Per-field attributes (`@serde(rename = "...")`, etc.) — emitted verbatim
+            // immediately above the field, same generic pass-through as struct-level attrs
+            // above. See `FieldDecl::attrs`'s doc comment for why this exists: a struct-wide
+            // `@serde(rename_all = "...")` can't cover a field whose JSON key doesn't
+            // correspond to any single Boring spelling of its name.
+            for attr in &f.attrs {
+                let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
+                self.line(&format!("#[{}{}]", attr.name, args_s));
+            }
             let fvis = if f.is_pub { "pub " } else { "" };
             let ty_s = if f.transient {
                 let inner = self.emit_type(&f.ty);
@@ -153,7 +164,15 @@ impl Transpiler {
         // Skip when the type already has (or will get) a Display impl from `as string:` (struct or ext).
         // The `display_types` set is populated during pre_scan for both struct and ext declarations.
         let has_derive_display = s.attrs.iter().any(|a| a.name == "derive" && a.args.iter().any(|arg| arg == "Display"));
-        if !self.display_types.contains(&s.name) && !has_derive_display {
+        // This delegates to `{:?}` (Debug), so it must not be emitted for a struct that won't
+        // actually have Debug — true whenever the struct has an explicit `@derive(...)` (the
+        // `has_derive` branch above uses the user's list verbatim, unlike the auto-derive
+        // `else` branch, which always includes Debug) that doesn't itself list Debug. Found via
+        // docs/book.md's own `json`/`fromJson` example (`@derive(Serialize, Deserialize)`, no
+        // Debug) failing to compile with "`Target` doesn't implement `Debug`" pointing straight
+        // at this generated impl.
+        let will_have_debug = derive_names.iter().any(|d| d == "Debug");
+        if !self.display_types.contains(&s.name) && !has_derive_display && will_have_debug {
             // Build impl type params: add `+ std::fmt::Debug` so that `write!(f, "{:?}", self)` compiles
             // for generic structs (e.g. `impl<T: Clone + Debug> Display for Foo<T>`).
             let tp_impl_disp = if s.type_params.is_empty() {
@@ -857,6 +876,27 @@ impl Transpiler {
         }
     }
 
+    /// Rewrites a `@derive(...)` argument list, qualifying bare `Serialize`/`Deserialize` to
+    /// `serde::Serialize`/`serde::Deserialize`. Rust's derive-macro position accepts a path
+    /// there (stable since edition 2018), so this sidesteps ever needing to emit a `use
+    /// serde::{Serialize, Deserialize};` import — Boring emits no such import today, so the
+    /// bare spelling docs/book.md's `json`/`fromJson` section actually documents
+    /// (`@derive(Serialize, Deserialize)`) failed to compile: "cannot find derive macro
+    /// `Deserialize` in this scope" / an unsatisfied `serde::Deserialize` trait bound.
+    /// Mirrors the existing `thiserror::Error` auto-qualification in `emit_enum` below.
+    ///
+    /// Also flips `uses_serde` (Cargo.toml gets the `serde` dependency) on any qualifying
+    /// name, not just when this file also happens to call `json()`/`fromJson()` — e.g. a
+    /// struct declared in one file and (de)serialized from another.
+    fn qualify_serde_derive_args(&self, args: &[String]) -> Vec<String> {
+        args.iter().map(|a| match a.as_str() {
+            "Serialize" => { self.uses_serde.set(true); "serde::Serialize".to_string() }
+            "Deserialize" => { self.uses_serde.set(true); "serde::Deserialize".to_string() }
+            "serde::Serialize" | "serde::Deserialize" => { self.uses_serde.set(true); a.clone() }
+            _ => a.clone(),
+        }).collect()
+    }
+
     // ── Enums ─────────────────────────────────────────────────────────────────
 
     pub(crate) fn emit_enum(&mut self, e: &EnumDecl) {
@@ -953,7 +993,17 @@ impl Transpiler {
             self.line(&format!("#[derive({})]", extra_derives.join(", ")));
         }
         for attr in &e.attrs {
-            let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
+            // `derive` args go through the same bare-Serialize/Deserialize qualification as
+            // the struct path — enums have no equivalent `derive_names` merge step of their
+            // own, so this attr is otherwise emitted completely verbatim.
+            let args_s = if attr.name == "derive" {
+                let qualified = self.qualify_serde_derive_args(&attr.args);
+                if qualified.is_empty() { String::new() } else { format!("({})", qualified.join(", ")) }
+            } else if attr.args.is_empty() {
+                String::new()
+            } else {
+                format!("({})", attr.args.join(", "))
+            };
             self.line(&format!("#[{}{}]", attr.name, args_s));
         }
         let vis = if e.is_pub { "pub " } else { "" };

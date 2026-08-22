@@ -236,6 +236,14 @@ pub struct FieldDecl {
     pub transient: bool,
     pub ty: Type,
     pub default: Option<Expr>,
+    /// `@name(args)` lines directly above the field, e.g. `@serde(rename = "current_costume")`.
+    /// Parsed the same way as struct-/enum-level attrs (`parse_attrs`) and emitted verbatim as
+    /// `#[name(args)]` immediately above the field in the generated Rust struct — see
+    /// `emit_struct.rs`'s field-emission loop. Exists specifically for the case a struct field's
+    /// JSON key (via `@derive(Deserialize)`/`fromJson<T>()`) doesn't match any single
+    /// Boring-spelling of the field name, so the struct-level `@serde(rename_all = "...")`
+    /// blanket rule can't cover it — see docs/json-deserialize-rename-gap.md.
+    pub attrs: Vec<Attr>,
     pub line: usize,
     pub col: usize,
 }

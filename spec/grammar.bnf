@@ -230,7 +230,11 @@ struct_member   ::= field_decl
 # four-way as local bindings (`binding_keyword` above) and same "mut lives in
 # the type" mechanism — see docs/mut-type-modifier.md §3.
 # `transient` → physically mutable even from `req` methods (lazy/cache pattern). Implies `var`.
-field_decl      ::= "pub"? "transient"? binding_keyword? type IDENT ("=" expr)? NEWLINE
+# Leading `attr*` (e.g. `@serde(rename = "...")`) is emitted verbatim as a Rust attribute
+# directly above the field — see docs/json-deserialize-rename-gap.md for why this exists
+# (a JSON key that isn't a valid Boring identifier at all, not reachable by a struct-wide
+# `@serde(rename_all = "...")`).
+field_decl      ::= attr* "pub"? "transient"? binding_keyword? type IDENT ("=" expr)? NEWLINE
 
 # ─── Constructors ─────────────────────────────────────────────────────────────
 #

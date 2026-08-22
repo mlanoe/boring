@@ -4050,6 +4050,61 @@ struct Point as Hash, Eq, Named:\n    int x\n    int y\n\n    req string name():
     }
 
     #[test]
+    fn bare_derive_serialize_deserialize_are_qualified_and_flag_uses_serde() {
+        // `@derive(Serialize, Deserialize)` (the exact bare spelling docs/book.md's `json`/
+        // `fromJson` section documents) must not emit a bare, unresolvable `Deserialize` in
+        // `#[derive(...)]` -- Boring never emits `use serde::{Serialize, Deserialize};`, so an
+        // unqualified name there fails to compile ("cannot find derive macro"/unsatisfied
+        // trait bound). Fixed by qualifying to the full path, mirroring the existing
+        // `thiserror::Error` auto-qualification. `uses_serde` must also flip so Cargo.toml
+        // gets the `serde` dependency even without a `json()`/`fromJson()` call in this file.
+        let src = "@derive(Serialize, Deserialize)\nstruct Costume:\n    string name\n";
+        let tokens = crate::lexer::lex(src).expect("lex error");
+        let program = crate::parser::parse(tokens).expect("parse error");
+        let out = transpile_with_config(&program, TranspileConfig::default());
+        assert!(out.code.contains("#[derive(serde::Serialize, serde::Deserialize)]"),
+            "bare Serialize/Deserialize should be qualified to serde::, got:\n{}", out.code);
+        assert!(out.uses_serde, "a struct deriving Serialize/Deserialize must flag uses_serde");
+    }
+
+    #[test]
+    fn struct_display_impl_skipped_without_debug_in_explicit_derive() {
+        // The auto Display impl delegates to `{:?}` (Debug). An explicit `@derive(...)` (used
+        // verbatim, unlike the no-@derive-at-all auto path, which always includes Debug) that
+        // doesn't itself list Debug must not get that impl -- book.md's own fromJson example
+        // (`@derive(Serialize, Deserialize)`, no Debug) hit exactly this: "`Target` doesn't
+        // implement `Debug`" pointing at the generated `impl Display`.
+        let src = "@derive(Serialize, Deserialize)\nstruct Costume:\n    string name\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("impl std::fmt::Display for Costume"),
+            "no Display impl should be generated when Debug isn't in the explicit derive list, got:\n{}", code);
+    }
+
+    #[test]
+    fn struct_display_impl_still_emitted_when_debug_explicit() {
+        // Same shape as above, but Debug IS in the explicit list -- the impl must still be
+        // generated (this is a no-regression check alongside the skip case above).
+        let src = "@derive(Debug, Serialize)\nstruct Costume:\n    string name\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("impl std::fmt::Display for Costume"),
+            "Display impl should still be generated when Debug is explicitly derived, got:\n{}", code);
+    }
+
+    #[test]
+    fn field_level_attr_emitted_verbatim_above_field() {
+        // `@serde(rename = "...")` (or any other attribute) directly above a field must be
+        // preserved and emitted as a real Rust attribute immediately above that field --
+        // needed for a JSON key that isn't a valid Boring identifier at all (e.g. "1"), which
+        // a struct-wide `@serde(rename_all = "...")` can't reach. See
+        // docs/json-deserialize-rename-gap.md.
+        let src = "@derive(Debug)\nstruct Costume:\n    string name\n    @serde(rename = \"1\")\n    int assetIndex\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("#[serde(rename=\"1\")]\n    pub assetIndex: isize,")
+            || code.contains("#[serde(rename = \"1\")]\n    pub assetIndex: isize,"),
+            "field-level attr should be emitted verbatim directly above its field, got:\n{}", code);
+    }
+
+    #[test]
     fn empty_derive_attr_suppresses_auto_default_alongside_header() {
         // An explicit `@derive()` (empty args) still counts as "has_derive" — it disables
         // the struct's auto-default Debug/Clone/PartialEq entirely, while a header `as

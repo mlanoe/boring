@@ -6486,7 +6486,7 @@ When either builtin is used, the compiler automatically adds `serde` (with the `
 features) and `serde_json` to the generated `Cargo.toml`.
 
 ```boring
-@derive(Serialize, Deserialize)
+@derive(Debug, Clone, Serialize, Deserialize)
 struct User:
     string name
     int age
@@ -6500,7 +6500,7 @@ let u2 = fromJson<User>(s)         # → User? (nil on parse error)
 
 **Rust equivalent**
 ```rust
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct User {
     name: Arc<str>,
     age:  isize,
@@ -6510,6 +6510,43 @@ let s: String = serde_json::to_string(&u).unwrap_or_default();
 
 let u2: Option<User> = serde_json::from_str::<User>(&s).ok();
 ```
+
+`@derive(...)` is used verbatim here — unlike a struct with no `@derive` at all (which
+auto-derives `Debug`/`Clone`/`PartialEq`), an explicit list gets exactly what it names, nothing
+implied. `Debug` is included above because the compiler's auto-generated `Display` impl (the
+one that makes `print "{u}"` and `{}`-interpolation work on the whole value) delegates to
+`{:?}` and is skipped entirely — not silently broken — when the explicit list omits `Debug`.
+`Serialize`/`Deserialize` don't need `Clone`/`Debug` themselves; add them only when you also
+want those on `User`. Bare `Serialize`/`Deserialize` (no `serde::` prefix needed) are
+recognized and qualified to the full path automatically, since Boring never emits a `use
+serde::...;` import.
+
+#### Field names and JSON keys
+
+A struct field's name is carried into the generated Rust struct exactly as written — Boring
+never renames it to `snake_case` the way it does with method names. So a field written in
+Boring's own camelCase convention (`dataFormat`, `isStage`) already matches a JSON API that
+also uses camelCase keys (the common case: most JSON outside the Rust ecosystem is camelCase),
+with no rename annotation needed at all.
+
+Two escape hatches exist for when a JSON key still doesn't match:
+
+- A struct-level `@serde(rename_all = "camelCase")` (or `"snake_case"`, `"kebab-case"`, ...)
+  passes through verbatim to the generated `#[derive(...)]` — any other `@name(args)` not
+  named `derive` does the same. This only has an effect when the field itself is written in
+  Rust's idiomatic `snake_case` (serde's case converters assume that as the source spelling);
+  it's a no-op on an already-camelCase Boring field.
+- A per-field `@name(args)` line directly above a field is emitted as a real attribute on
+  that field, for the cases a blanket `rename_all` can't reach at all — most commonly a JSON
+  key that isn't a valid Boring identifier in the first place (a bare number, a key with a
+  hyphen, a Rust keyword):
+
+  ```boring
+  struct Costume:
+      string dataFormat
+      @serde(rename = "1")
+      int assetIndex
+  ```
 
 #### `fromJson` in a `throws` context
 

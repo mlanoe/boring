@@ -494,6 +494,11 @@ impl Parser {
     }
 
     pub(crate) fn parse_field_decl(&mut self) -> Result<FieldDecl, ParseError> {
+        // Leading `@name(args)` line(s), e.g. `@serde(rename = "current_costume")` — same
+        // generic attribute parser used for struct/enum/fn attrs (see `parse_attrs`'s doc
+        // comment). Consumed before `line`/`col` are captured so they still point at the
+        // field itself, not its attribute, for error reporting.
+        let attrs = if self.check(&TokenKind::At) { self.parse_attrs() } else { vec![] };
         let line = self.line();
         let col = self.col();
         let explicit_pub = self.eat(&TokenKind::Pub);
@@ -540,7 +545,7 @@ impl Parser {
             None
         };
         self.expect_newline()?;
-        Ok(FieldDecl { name, is_pub, mutable, transient, ty, default, line, col })
+        Ok(FieldDecl { name, is_pub, mutable, transient, ty, default, attrs, line, col })
     }
 
     pub(crate) fn parse_init_decl(&mut self) -> Result<InitDecl, ParseError> {

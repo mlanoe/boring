@@ -550,3 +550,12 @@ transpile_project_test!(clear_color_construct);
 // only), so single-file mode is enough -- no boring.toml/[external_fns] needed here,
 // since this exercises the compiler's *built-in* table, not a project-declared one.
 transpile_test!(mem_borrow_builtins);
+
+// `@derive(Serialize, Deserialize)`/`fromJson<T>()`/`json()` -- see tests/cases/
+// json_serde_rename.br's own doc comment for the two real bugs this pins (a bare,
+// as-documented `@derive(Serialize, Deserialize)` never compiled at all: no serde
+// import was ever emitted, and the auto Display impl assumed Debug unconditionally)
+// plus the field-level `@serde(rename = "...")` addition. Not registered in
+// tests/run.rs -- the interpreter's `fromJson` is a no-op stub (returns its string
+// argument unparsed), so this is a transpiler-only feature today.
+transpile_test!(json_serde_rename);

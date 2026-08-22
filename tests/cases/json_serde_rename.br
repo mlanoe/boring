@@ -1,0 +1,37 @@
+# Regression test for two real bugs found while investigating
+# docs/json-deserialize-rename-gap.md, plus the field-level @serde(rename=...)
+# fix that gap actually needed:
+#
+# 1. `@derive(Serialize, Deserialize)` -- the exact bare spelling docs/book.md's
+#    "JSON serialization" section documents -- failed to compile at all: no
+#    `use serde::{Serialize, Deserialize};` is ever emitted, so the derive
+#    macro name didn't resolve. Fixed by qualifying bare Serialize/Deserialize
+#    to serde::Serialize/serde::Deserialize in the emitted #[derive(...)],
+#    mirroring the existing thiserror::Error auto-qualification.
+# 2. The auto-generated `impl Display` (delegates to `{:?}`/Debug) was emitted
+#    unconditionally, even for a struct whose explicit @derive(...) list (used
+#    verbatim, unlike the no-@derive-at-all auto path) doesn't include Debug --
+#    book.md's own fromJson example never derives Debug, so it never actually
+#    compiled either. Fixed by gating that impl on Debug actually being in the
+#    final derive list.
+#
+# Field names themselves are never case-converted (verified: they transpile
+# byte-for-byte into the Rust struct) -- so a Boring field written camelCase
+# already matches a camelCase JSON key with no rename needed at all. The only
+# real per-field gap is a JSON key that isn't a valid Boring identifier in the
+# first place (here, "1") -- @serde(rename = "...") on the field covers that.
+
+@derive(Serialize, Deserialize)
+struct Costume:
+    string dataFormat
+    bool isStage
+    @serde(rename = "1")
+    int assetIndex
+
+def main():
+    let src = "{{\"dataFormat\": \"png\", \"isStage\": true, \"1\": 7}}"
+    guard let c = fromJson<Costume>(src) else:
+        print "parse failed"
+        return
+    print "{c.dataFormat} {c.isStage} {c.assetIndex}"
+    print json(c)
