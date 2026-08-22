@@ -596,18 +596,6 @@ until specifically checked.
   below — the model itself is specified there, but implementing it (closing
   the "`mut T&`/`var T&` both transpile to `&mut T` today" enforcement gap)
   is separate work from this document's `let_stmt`/destructuring focus.
-- `if let`/`elif let` bindings (`emit_match.rs`'s `emit_if_let`) have the
-  *same* missing-`mut_checked_local_vars`-registration bug that `guard let`
-  had until it was fixed (see `emit_flow.rs`'s `emit_guard`,
-  `CondClause::Let` arm) — a field write or `def` call through an `if let`
-  binding is silently accepted by `boring build` and only fails downstream
-  at `cargo build` (E0594), instead of getting a clear Boring diagnostic.
-  Left unfixed here because `if let` bindings are block-scoped (unlike
-  `guard let`, which lives for the rest of the enclosing function), so the
-  same fix needs the scope-exit cleanup `emit_match.rs`'s `match`-arm
-  handling already does (`known_local_vars`/`mut_checked_local_vars` removal
-  after the block) to avoid false positives on a later same-named local —
-  separate, slightly larger change.
 - There is no `guard let mut b = …` / `guard var mut b = …` syntax at all —
   `ast::CondClause::Let` carries no `BindingKind`/`var_mut` slot, and the
   parser's `parse_cond_clause` explicitly rejects a `mut` after `let` there.

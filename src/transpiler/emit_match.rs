@@ -50,11 +50,64 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_if_let(&mut self, s: &IfLetStmt, is_last: bool) {
-        // Track if-let bindings as known locals; also track actor-typed bindings.
-        // Covers the initial clauses as well as every `elif let` branch's clauses.
-        for clause in s.clauses.iter().chain(s.elif_branches.iter().flat_map(|b| b.clauses.iter())) {
+        // When this if-let is the last statement in a value-returning function,
+        // use emit_body so the branch tail is returned without a semicolon.
+        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
+
+        // Each clause list (the initial `if let ...:` and every `elif let ...:`) is its
+        // own block scope — register its bindings right before emitting its condition +
+        // body, then unregister them right after, so a later `elif`/`else` (or a same-
+        // named local further down the function) never sees stale tracking from a branch
+        // it isn't part of. Unlike `guard let` (emit_flow.rs's `emit_guard`), which lives
+        // to the end of the enclosing function and needs no cleanup at all.
+        let scope = self.register_if_let_clause_bindings(&s.clauses);
+        let cond_s = self.emit_cond_clauses(&s.clauses);
+        self.line(&format!("if {} {{", cond_s));
+        self.indent += 1;
+        if use_value_body {
+            self.emit_body(&s.then_body);
+        } else {
+            self.emit_loop_body(&s.then_body);
+        }
+        self.indent -= 1;
+        self.unregister_if_let_clause_bindings(&scope);
+        for branch in &s.elif_branches {
+            let scope = self.register_if_let_clause_bindings(&branch.clauses);
+            let elif_cond_s = self.emit_cond_clauses(&branch.clauses);
+            self.line(&format!("}} else if {} {{", elif_cond_s));
+            self.indent += 1;
+            if use_value_body {
+                self.emit_body(&branch.body);
+            } else {
+                self.emit_loop_body(&branch.body);
+            }
+            self.indent -= 1;
+            self.unregister_if_let_clause_bindings(&scope);
+        }
+        if let Some(else_body) = &s.else_body {
+            self.line("} else {");
+            self.indent += 1;
+            if use_value_body {
+                self.emit_body(else_body);
+            } else {
+                self.emit_loop_body(else_body);
+            }
+            self.indent -= 1;
+        }
+        self.line("}");
+    }
+
+    /// Register one `if let`/`elif let` clause list's bindings as known locals ahead of
+    /// emitting its condition + body — covers actor-typed bindings, `T?`-returning-
+    /// expression struct-type inference, and content-mutation checking. Returns the
+    /// `CondClause::Let` names bound, for `unregister_if_let_clause_bindings` to clean up
+    /// once the block this clause list guards has been fully emitted.
+    fn register_if_let_clause_bindings(&mut self, clauses: &[CondClause]) -> Vec<String> {
+        let mut bound_names = Vec::new();
+        for clause in clauses {
             match clause {
                 CondClause::Let(name, expr) => {
+                    bound_names.push(name.clone());
                     self.known_local_vars.insert(name.clone());
                     // If the expression is an optional actor field, track the binding as managed.
                     let is_actor = self.expr_yields_actor(expr);
@@ -95,47 +148,78 @@ impl Transpiler {
                         if let Some(sty) = struct_ty {
                             self.var_struct_types.insert(name.clone(), sty);
                         }
+                    } else if let crate::ast::ExprKind::Var(src) = &expr.kind {
+                        // `if let b = someOptionalVar:` — propagate the inner type (mirrors
+                        // `emit_flow.rs`'s `emit_guard`, `CondClause::Let` arm) so a field
+                        // write or `def` call through `b` below can resolve its struct type
+                        // and get checked.
+                        if let Some(crate::ast::Type::Optional(inner)) = self.var_types.get(src.as_str()).cloned() {
+                            self.var_types.insert(name.clone(), *inner.clone());
+                            if Self::is_string_type(&inner) {
+                                self.string_vars.insert(name.clone());
+                            }
+                            if matches!(*inner, crate::ast::Type::Optional(_)) {
+                                self.optional_vars.insert(name.clone());
+                            }
+                            if let crate::ast::Type::Named(n) = inner.as_ref() {
+                                if self.is_known_user_type(n.as_str()) {
+                                    self.var_struct_types.insert(name.clone(), n.clone());
+                                }
+                            }
+                        }
+                    } else if let crate::ast::ExprKind::Call(callee, _) = &expr.kind {
+                        // `if let b = make():` where `make()` returns `T?` — mirror the
+                        // `Var` branch above using the callee's declared return type instead
+                        // of a variable's tracked type.
+                        if let crate::ast::ExprKind::Var(fn_name) = &callee.kind {
+                            if let Some(crate::ast::Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
+                                self.var_types.insert(name.clone(), *inner.clone());
+                                if Self::is_string_type(&inner) {
+                                    self.string_vars.insert(name.clone());
+                                }
+                                if let crate::ast::Type::Named(n) = inner.as_ref() {
+                                    if self.is_known_user_type(n.as_str()) {
+                                        self.var_struct_types.insert(name.clone(), n.clone());
+                                    }
+                                }
+                            }
+                        }
                     }
+                    // An `if let`/`elif let` binding has no `mut`/`var mut` spelling —
+                    // exactly like `guard let` (see `emit_flow.rs`'s `emit_guard`) — so it
+                    // is never content-mutable. Register it as *checked* so `emit_expr.rs`'s
+                    // field-write diagnostic and `emit_methods.rs`'s `def`-call diagnostics
+                    // actually fire for it, instead of silently no-op'ing and letting invalid
+                    // Rust reach rustc (E0594) further down the pipeline. Mirrors
+                    // `emit_let.rs`'s unconditional `mut_checked_local_vars.insert` for a
+                    // plain `let`.
+                    self.content_mutable_local_vars.remove(name);
+                    self.mut_checked_local_vars.insert(name.clone());
                 }
                 CondClause::LetPat(pat, _) => { Self::collect_pattern_binds(pat, &mut self.known_local_vars); }
                 CondClause::Expr(_) => {}
             }
         }
-        // When this if-let is the last statement in a value-returning function,
-        // use emit_body so the branch tail is returned without a semicolon.
-        let use_value_body = is_last && !self.fn_returns_void && (!self.in_throws || self.suppress_ok_wrap);
-        // Multi-clause: emit as a chain of let-else or if-let
-        let cond_s = self.emit_cond_clauses(&s.clauses);
-        self.line(&format!("if {} {{", cond_s));
-        self.indent += 1;
-        if use_value_body {
-            self.emit_body(&s.then_body);
-        } else {
-            self.emit_loop_body(&s.then_body);
+        bound_names
+    }
+
+    /// Undo `register_if_let_clause_bindings` once the block it guards has been fully
+    /// emitted, so tracking doesn't leak onto a same-named local declared later in the
+    /// function (or in a sibling `elif`/`else` branch) — the same cleanup
+    /// `emit_match_arm` already does for match-arm pattern bindings after each arm.
+    fn unregister_if_let_clause_bindings(&mut self, names: &[String]) {
+        for name in names {
+            self.known_local_vars.remove(name.as_str());
+            self.mut_checked_local_vars.remove(name.as_str());
+            self.content_mutable_local_vars.remove(name.as_str());
+            self.var_types.remove(name.as_str());
+            self.var_struct_types.remove(name.as_str());
+            self.string_vars.remove(name.as_str());
+            self.optional_vars.remove(name.as_str());
+            self.var_mutex_types.remove(name.as_str());
+            self.managed_refcell_vars.remove(name.as_str());
+            self.managed_mutex_vars.remove(name.as_str());
         }
-        self.indent -= 1;
-        for branch in &s.elif_branches {
-            let elif_cond_s = self.emit_cond_clauses(&branch.clauses);
-            self.line(&format!("}} else if {} {{", elif_cond_s));
-            self.indent += 1;
-            if use_value_body {
-                self.emit_body(&branch.body);
-            } else {
-                self.emit_loop_body(&branch.body);
-            }
-            self.indent -= 1;
-        }
-        if let Some(else_body) = &s.else_body {
-            self.line("} else {");
-            self.indent += 1;
-            if use_value_body {
-                self.emit_body(else_body);
-            } else {
-                self.emit_loop_body(else_body);
-            }
-            self.indent -= 1;
-        }
-        self.line("}");
     }
 
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {

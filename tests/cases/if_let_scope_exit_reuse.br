@@ -1,0 +1,14 @@
+struct Block:
+    pub var string opCode
+
+def Block? make():
+    return Block(opCode = "x")
+
+def run():
+    if let b = make():
+        print b.opCode
+    var mut Block b = Block(opCode = "y")
+    b.opCode = "z"
+    print b.opCode
+
+run()

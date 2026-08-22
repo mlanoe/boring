@@ -136,6 +136,7 @@ macro_rules! error_test_exact {
 
 interp_test!(basics);
 interp_test!(guard_let_mut_field_escape);
+interp_test!(if_let_mut_field_escape);
 interp_test!(strings);
 interp_test!(control_flow);
 interp_test!(match_stmt);
@@ -340,6 +341,7 @@ error_test_exact!(error_move_source);
 error_test_exact!(error_immutable_param);
 error_test_exact!(error_immutable_let);
 error_test_exact!(error_immutable_guard_let_field);
+error_test_exact!(error_immutable_if_let_field);
 error_test_exact!(error_immutable_loop_var);
 error_test_exact!(error_mut_shared);
 error_test_exact!(error_lazy_assign);
