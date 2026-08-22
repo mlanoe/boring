@@ -1,0 +1,5 @@
+error: cannot mutate field 'opCode' on non-mut binding 'b' — declare it with `mut` or `var mut` to permit content mutation
+ --> <file>:10
+   |
+10 |     b.opCode = "changed"
+   |

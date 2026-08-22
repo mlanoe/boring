@@ -1,0 +1,13 @@
+struct Block:
+    pub var string opCode
+
+def Block? make():
+    return Block(opCode = "x")
+
+def run():
+    guard let b = make() else:
+        return
+    b.opCode = "changed"
+    print b.opCode
+
+run()

@@ -307,8 +307,46 @@ impl Transpiler {
                                         if matches!(*inner, Type::Optional(_)) {
                                             self.optional_vars.insert(name.clone());
                                         }
+                                        // Propagate the struct type too (mirrors `emit_let.rs`'s
+                                        // `var_struct_types` tracking) so a field write through
+                                        // `name` can resolve the struct and be checked below —
+                                        // otherwise `emit_expr.rs`'s field-write diagnostic falls
+                                        // back to `var_types`, which already has `Type::Named`
+                                        // from the `insert` above, so this is belt-and-suspenders.
+                                        if let Type::Named(n) = inner.as_ref() {
+                                            if self.is_known_user_type(n.as_str()) {
+                                                self.var_struct_types.insert(name.clone(), n.clone());
+                                            }
+                                        }
+                                }
+                            } else if let ExprKind::Call(callee, _) = &expr.kind {
+                                // `guard let b = make()` where `make()` returns `T?` — mirror the
+                                // `Var` branch above using the callee's declared return type
+                                // instead of a variable's tracked type.
+                                if let ExprKind::Var(fn_name) = &callee.kind {
+                                    if let Some(Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
+                                        self.var_types.insert(name.clone(), *inner.clone());
+                                        if Self::is_string_type(&inner) {
+                                            self.string_vars.insert(name.clone());
+                                        }
+                                        if let Type::Named(n) = inner.as_ref() {
+                                            if self.is_known_user_type(n.as_str()) {
+                                                self.var_struct_types.insert(name.clone(), n.clone());
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                            // A `guard let` binding has no `mut`/`var mut` spelling — the parser's
+                            // `parse_cond_clause` only ever consumes a bare `let` for `CondClause::
+                            // Let` (see `ast::CondClause` doc) — so it is never content-mutable.
+                            // Register it as *checked* so `emit_expr.rs`'s field-write and
+                            // `emit_methods.rs`'s `def`-call diagnostics actually fire for it,
+                            // instead of silently no-op'ing and letting invalid Rust reach rustc
+                            // (E0594) further down the pipeline. Mirrors `emit_let.rs`'s
+                            // unconditional `mut_checked_local_vars.insert` for a plain `let`.
+                            self.content_mutable_local_vars.remove(name);
+                            self.mut_checked_local_vars.insert(name.clone());
                             // Narrowing numeric `as` cast scrutinee (docs/known-issues-
                             // biguint-spike.md #11): see the identical check in
                             // `emit_cond_clauses` (emit_match.rs) for the full rationale --
