@@ -1,0 +1,61 @@
+# docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and
+# `boring build` used to print *completely different* things for a
+# `@serde(untagged)` enum round-tripped through `fromJson<T>`:
+#
+#   1. The interpreter's `fromJson<T>(s)` was a no-op stub that returned its
+#      string argument unchanged, for EVERY `T` (not just enums) -- so this
+#      printed the original JSON text back. It now really deserializes, via
+#      `serde_json::Value` as the generic JSON tree plus a type-directed
+#      materializer driven by Boring's own `Type`/`EnumDecl`/`StructDecl`
+#      (src/interpreter/json.rs).
+#   2. The interpreter's `Display for Value` formatted enum payload fields
+#      with `Display` recursively, but the *compiled* program prints an enum
+#      through the transpiler's auto-generated `Display` -> derived `Debug`.
+#      Debug quotes strings and keeps a whole-number float's `.0` -- so
+#      `JStr(two)`/`JNum(1)` had to become `JStr("two")`/`JNum(1.0)`,
+#      recursively through nested arrays/dicts/variants.
+#
+# Registered in BOTH tests/run.rs and tests/transpile.rs on purpose: the same
+# .expected file pinned for both backends is exactly what proves the parity
+# this bug was about.
+#
+# Variant declaration order is load-bearing under `untagged` -- serde tries
+# each variant's Deserialize in order and takes the first that succeeds, and
+# so does the interpreter. Every JSON object below has exactly one key: a
+# multi-key `{string=JVal}` is a Rust `HashMap`, whose Debug iteration order
+# is nondeterministic, so it could never be pinned in an .expected file.
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(untagged)
+enum JVal:
+    JNull()
+    JBool(bool)
+    JNum(float)
+    JStr(string)
+    JArr([JVal])
+    JObj({string=JVal})
+
+def void main():
+    let s = "[1, \"two\", true, null, [3,4], {{\"a\": 5}}]"
+    let v = fromJson<JVal>(s)
+    if let v:
+        print "parsed ok: {v}"
+    else:
+        print "parse FAILED"
+
+    # Each scalar shape on its own, so a regression tells you *which* variant
+    # stopped matching rather than just "the big one differs".
+    for one in ["null", "false", "7", "-2.5", "\"hi\"", "[]", "{{}}"]:
+        let p = fromJson<JVal>(one)
+        if let p:
+            print "  {one} -> {p}"
+        else:
+            print "  {one} -> FAILED"
+
+    # A syntax error yields the absent optional, not a crash -- mirrors the
+    # transpiler's `serde_json::from_str(..).ok()`.
+    let bad = fromJson<JVal>("{{ not json")
+    if let bad:
+        print "bad: unexpectedly parsed {bad}"
+    else:
+        print "bad: none"

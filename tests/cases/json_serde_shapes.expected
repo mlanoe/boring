@@ -1,0 +1,6 @@
+Ada 36 Elm/7 3 3
+missing: none
+  "unit_thing" -> UnitThing
+  {"circle": 2.5} -> Circle(2.5)
+  {"rect": [3, 4]} -> Rect(3.0, 4.0)
+  "nope" -> none

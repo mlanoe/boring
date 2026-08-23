@@ -1,0 +1,71 @@
+# Companion to tests/cases/json_untagged_enum.br: the *other* `@serde(...)`
+# shapes `fromJson<T>` has to agree on between `boring run` and
+# `boring build`, now that the interpreter really deserializes instead of
+# returning its input string unchanged (see that file's header and
+# docs/interpreter-untagged-enum-fromjson-mismatch.md).
+#
+# Covered here:
+#   * struct-level `@serde(rename_all = "camelCase")` -- serde's own
+#     RenameRule, re-implemented interpreter-side in src/interpreter/json.rs
+#     (the transpiler needs no equivalent: it emits the attribute verbatim and
+#     lets real serde do the conversion, so there was no helper to share).
+#   * a per-field `@serde(rename = "...")` overriding rename_all, for a JSON
+#     key that isn't a valid Boring identifier at all.
+#   * a nested struct field, and an `[T]` of structs.
+#   * serde's DEFAULT (externally-tagged) enum representation, which
+#     `@serde(rename_all = ...)` applies to the *variant* names: a field-less
+#     variant is the bare string `"unit_thing"`, a 1-field variant is
+#     `{"circle": payload}`, and an N-field variant is `{"rect": [a, b]}`.
+#
+# Struct values are printed field-by-field rather than as `{p}`: Boring's
+# `Display for <struct>` and Rust's derived `Debug` genuinely disagree on
+# braced-struct spelling, and unifying that is out of scope here (only enum
+# payloads route through Debug-style formatting, since only enums get an
+# auto-`Display` that delegates to `{:?}`).
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "camelCase")
+struct Address:
+    string street_name
+    int house_number
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "camelCase")
+struct Person:
+    string first_name
+    int age_years
+    @serde(rename = "home-address")
+    Address home
+    [int] scores
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(rename_all = "snake_case")
+enum Shape:
+    UnitThing()
+    Circle(float)
+    Rect(float, float)
+
+def void main():
+    let src = "{{\"firstName\": \"Ada\", \"ageYears\": 36, \"home-address\": {{\"streetName\": \"Elm\", \"houseNumber\": 7}}, \"scores\": [1, 2, 3]}}"
+    guard let p = fromJson<Person>(src) else:
+        print "person FAILED"
+        return
+    # `{p.scores}` (a `[int]` *field*, interpolated directly) is avoided on purpose:
+    # the transpiler doesn't wrap a struct-field array in its `BoringFmt` shim, so it
+    # emits `println!("{}", p.scores)` on a `Vec<isize>` and doesn't compile. Unrelated
+    # pre-existing gap, not something this fixture is here to pin.
+    print "{p.first_name} {p.age_years} {p.home.street_name}/{p.home.house_number} {p.scores.count()} {p.scores[2]}"
+
+    # A missing required key is a mismatch, not a partially-filled struct.
+    let missing = fromJson<Person>("{{\"firstName\": \"Ada\"}}")
+    if let missing:
+        print "missing: unexpectedly parsed"
+    else:
+        print "missing: none"
+
+    for s in ["\"unit_thing\"", "{{\"circle\": 2.5}}", "{{\"rect\": [3, 4]}}", "\"nope\""]:
+        let sh = fromJson<Shape>(s)
+        if let sh:
+            print "  {s} -> {sh}"
+        else:
+            print "  {s} -> none"

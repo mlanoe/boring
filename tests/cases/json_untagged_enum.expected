@@ -1,0 +1,9 @@
+parsed ok: JArr([JNum(1.0), JStr("two"), JBool(true), JNull, JArr([JNum(3.0), JNum(4.0)]), JObj({"a": JNum(5.0)})])
+  null -> JNull
+  false -> JBool(false)
+  7 -> JNum(7.0)
+  -2.5 -> JNum(-2.5)
+  "hi" -> JStr("hi")
+  [] -> JArr([])
+  {} -> JObj({})
+bad: none

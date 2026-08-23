@@ -4107,6 +4107,42 @@ struct Point as Hash, Eq, Named:\n    int x\n    int y\n\n    req string name():
     }
 
     #[test]
+    fn enum_display_impl_skipped_without_debug_in_explicit_derive() {
+        // The *enum* auto-Display had no equivalent of the `will_have_debug` gate the two
+        // struct tests above cover, so `@derive(Clone, Serialize, Deserialize)` on an enum
+        // (explicit, hence used verbatim with no auto-injected Debug) generated
+        // `write!(f, "{:?}", self)` for a non-Debug type: "`Num` doesn't implement `Debug`".
+        // See tests/cases/enum_derive_no_debug.br.
+        let src = "@derive(Clone, Serialize, Deserialize)\nenum Num:\n    NInt(int)\n    NStr(string)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(!code.contains("impl std::fmt::Display for Num"),
+            "no Display impl should be generated for an enum when Debug isn't in the explicit derive list, got:\n{}", code);
+    }
+
+    #[test]
+    fn enum_display_impl_still_emitted_when_debug_explicit() {
+        // No-regression companion to the skip case above: with Debug explicitly derived the
+        // enum's auto-Display must still be generated (this is what lets `print someEnum`
+        // and `BoringFmt<Vec<Enum>>` work at all).
+        let src = "@derive(Debug, Clone, Serialize, Deserialize)\nenum Num:\n    NInt(int)\n    NStr(string)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("impl std::fmt::Display for Num"),
+            "Display impl should still be generated for an enum when Debug is explicitly derived, got:\n{}", code);
+    }
+
+    #[test]
+    fn enum_display_impl_still_emitted_without_any_derive_attr() {
+        // No `@derive(...)` at all -> the auto path emits `#[derive(Debug, Clone, ...)]`
+        // itself, so Debug is present and the auto-Display must be emitted. Guards against
+        // the `will_have_debug` gate being read off the *attrs* rather than off the derive
+        // names actually emitted.
+        let src = "enum Num:\n    NInt(int)\n    NStr(string)\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("impl std::fmt::Display for Num"),
+            "an enum with no explicit @derive still auto-derives Debug, so Display must be emitted, got:\n{}", code);
+    }
+
+    #[test]
     fn field_level_attr_emitted_verbatim_above_field() {
         // `@serde(rename = "...")` (or any other attribute) directly above a field must be
         // preserved and emitted as a real Rust attribute immediately above that field --

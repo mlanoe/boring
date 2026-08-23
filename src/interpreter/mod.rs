@@ -21,6 +21,7 @@ pub(crate) mod exec;
 pub(crate) mod eval_expr;
 pub(crate) mod call;
 pub(crate) mod methods;
+pub(crate) mod json;
 pub mod gpu_profile;
 
 
@@ -537,6 +538,69 @@ impl Value {
     }
 }
 
+/// Format a value the way real Rust's *derived* `Debug` would.
+///
+/// Boring enums get an auto-generated `Display` impl from the transpiler that delegates
+/// straight to `write!(f, "{:?}", self)` (see `src/transpiler/emit_struct.rs`'s
+/// `emit_enum`), so the compiled program prints an enum through Rust's derived `Debug` —
+/// which differs from Boring's `Display` in three ways that show up constantly in a
+/// payload: strings are quoted/escaped, whole-number floats keep their `.0`, and both
+/// rules apply recursively through nested collections and variants.
+///
+/// Used **only** for the payload fields of `Value::EnumVariant` (see the `Display` impl
+/// below), so printing a bare `[int]`/`{string=int}` on its own keeps its existing
+/// Boring-`Display` spelling. See docs/interpreter-untagged-enum-fromjson-mismatch.md.
+fn debug_repr(v: &Value) -> String {
+    match v {
+        // `{:?}` on a str/f32/f64 is exactly Rust's derived-Debug rendering:
+        // `"two"` (quoted, escaped) and `1.0` (trailing `.0` kept).
+        Value::Str(s) => format!("{:?}", s),
+        Value::Float32(n) => format!("{:?}", n),
+        Value::Float64(n) => format!("{:?}", n),
+        Value::Array(elems) => {
+            let inner: Vec<String> = elems.iter().map(debug_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Tuple(elems) => {
+            let inner: Vec<String> = elems.iter().map(debug_repr).collect();
+            format!("({})", inner.join(", "))
+        }
+        Value::Set(elems) => {
+            let inner: Vec<String> = elems.iter().map(debug_repr).collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        Value::Dict(pairs) => {
+            let inner: Vec<String> = pairs.iter()
+                .map(|(k, val)| format!("{}: {}", debug_repr(k), debug_repr(val)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        // A struct instance — Rust's derived Debug for a braced struct.
+        Value::Object(obj) => {
+            let obj = obj.borrow();
+            if obj.fields.is_empty() {
+                obj.type_name.clone()
+            } else {
+                let inner: Vec<String> = obj.fields.iter()
+                    .map(|(k, val)| format!("{}: {}", k, debug_repr(val)))
+                    .collect();
+                format!("{} {{ {} }}", obj.type_name, inner.join(", "))
+            }
+        }
+        Value::EnumVariant { variant, fields, .. } => {
+            if fields.is_empty() {
+                variant.clone()
+            } else {
+                let inner: Vec<String> = fields.iter().map(debug_repr).collect();
+                format!("{}({})", variant, inner.join(", "))
+            }
+        }
+        // Everything else (bools, every integer width, and the non-data values that
+        // have no Rust-`Debug` analogue at all) renders identically under both.
+        other => other.to_string(),
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -601,6 +665,10 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            // Payload fields go through `debug_repr`, not `Display`: the transpiled program
+            // prints an enum via its auto-generated `Display` -> derived `Debug`, so the
+            // interpreter has to match Rust's Debug spelling here (quoted strings,
+            // `1.0`-style floats, recursively) or `boring run` and `boring build` disagree.
             Value::EnumVariant { variant, fields, .. } => {
                 if fields.is_empty() {
                     write!(f, "{}", variant)
@@ -608,7 +676,7 @@ impl fmt::Display for Value {
                     write!(f, "{}(", variant)?;
                     for (i, v) in fields.iter().enumerate() {
                         if i > 0 { write!(f, ", ")?; }
-                        write!(f, "{}", v)?;
+                        write!(f, "{}", debug_repr(v))?;
                     }
                     write!(f, ")")
                 }

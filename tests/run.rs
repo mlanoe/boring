@@ -329,6 +329,23 @@ interp_test!(tagged_int_copy);
 // is the semantic baseline; `transpile_test!` below exercises the actual bug.
 interp_test!(option_owned_methods);
 
+// docs/interpreter-untagged-enum-fromjson-mismatch.md -- the interpreter's
+// `fromJson<T>(s)` was a no-op stub (returned its string argument unparsed, for every
+// `T`), and its `Display` for an enum payload used Display recursively where the
+// compiled program uses derived `Debug`. Both fixed; all three fixtures are registered
+// in tests/transpile.rs against the SAME .expected files, which is what pins the
+// interpreter/compiled parity these bugs were about.
+interp_test!(json_untagged_enum);
+interp_test!(json_serde_shapes);
+interp_test!(enum_derive_no_debug);
+
+// docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
+// `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`
+// the interpreter matches the compiled output byte-for-byte, so the same .expected
+// file is pinned for both backends. (Its sibling tests/cases/json_serde_rename.br
+// stays transpiler-only: the interpreter's `json(v)` *serializer* is still a stub.)
+interp_test!(try_wrap_double_handling);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,

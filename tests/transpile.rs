@@ -561,9 +561,10 @@ transpile_test!(mem_borrow_builtins);
 // json_serde_rename.br's own doc comment for the two real bugs this pins (a bare,
 // as-documented `@derive(Serialize, Deserialize)` never compiled at all: no serde
 // import was ever emitted, and the auto Display impl assumed Debug unconditionally)
-// plus the field-level `@serde(rename = "...")` addition. Not registered in
-// tests/run.rs -- the interpreter's `fromJson` is a no-op stub (returns its string
-// argument unparsed), so this is a transpiler-only feature today.
+// plus the field-level `@serde(rename = "...")` addition. Still not registered in
+// tests/run.rs -- the interpreter's `fromJson` is real now (see json_untagged_enum
+// below), but its `json(v)` *serializer* is still a stub that prints the interpreter's
+// own value repr, so this case's second line can't be shared with `boring run`.
 transpile_test!(json_serde_rename);
 
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
@@ -573,6 +574,24 @@ transpile_test!(json_serde_rename);
 // instead of yielding `None`, and a `try? EXPR` tail-returned from a `T?` function got
 // an extra `Some(...)` wrapped around its already-`Option<T>` value. See
 // tests/cases/try_wrap_double_handling.br's own doc comment for the full breakdown.
-// Not registered in tests/run.rs for the same reason as json_serde_rename above
-// (interpreter's `fromJson` is a no-op stub).
+// Now registered in tests/run.rs too (it never used `json()`, only `fromJson`, so a
+// real interpreter-side `fromJson` makes both backends agree byte-for-byte).
 transpile_test!(try_wrap_double_handling);
+
+// docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
+// printed completely different things for `fromJson<T>` on a `@serde(untagged)` enum,
+// because the interpreter's `fromJson` was a no-op stub returning its input string and
+// its enum `Display` formatted payloads with Display where the compiled program uses
+// derived `Debug`. Unlike json_serde_rename/try_wrap_double_handling above, these three
+// ARE registered in tests/run.rs too, against these same .expected files -- pinning the
+// same bytes for both backends is precisely the regression test for that divergence.
+// See each fixture's own doc comment for what it covers:
+//   json_untagged_enum   -- the doc's repro (untagged enum, every JSON shape)
+//   json_serde_shapes    -- struct rename/rename_all + externally-tagged enums
+//   enum_derive_no_debug -- the enum auto-`Display` missing the struct path's
+//                           `will_have_debug` gate: `@derive(Clone, Serialize,
+//                           Deserialize)` on an enum emitted `write!(f, "{:?}", self)`
+//                           for a non-`Debug` type and never compiled.
+transpile_test!(json_untagged_enum);
+transpile_test!(json_serde_shapes);
+transpile_test!(enum_derive_no_debug);

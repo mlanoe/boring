@@ -1085,7 +1085,7 @@ impl Interpreter {
     /// plus the handful of builtins that need type info at the *call syntax* level
     /// (`channel<T>`/`oneshot<T>`/etc., `timeout<T>`, `fromJson<T>`), mirroring the
     /// untyped forms `eval_expr_call` already handles.
-    fn eval_expr_generic_call(&mut self, callee: &Expr, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+    fn eval_expr_generic_call(&mut self, callee: &Expr, type_args: &[Type], args: &[Arg], env: EnvRef, line: usize) -> Eval {
         // In the interpreter, type args are erased — just evaluate as a regular call.
         // Special built-ins that need type info (like `channel`) return a pair of arrays
         // as a synchronous simulation: (sender_items, receiver_items) backed by a Vec.
@@ -1114,12 +1114,19 @@ impl Interpreter {
                 }
                 return Ok(Value::Nil);
             }
-            // from_json<T>(s) — interpreter stub: return the string as-is (no deserialization)
+            // fromJson<T>(s) — real, type-directed deserialization (see interpreter/json.rs).
+            // The type argument is the whole point here, so unlike every other generic call
+            // in the interpreter it is *not* erased. Mirrors the transpiler's
+            // `serde_json::from_str::<T>(&s).ok()`: `Value::Nil` (the interpreter's `None`)
+            // on a JSON syntax error, an unresolvable `T`, or a shape mismatch.
             if name.as_str() == "fromJson" {
-                if let Some(arg) = args.first() {
-                    return self.eval_expr(&arg.value, Rc::clone(&env));
-                }
-                return Ok(Value::Nil);
+                let (Some(arg), Some(target_ty)) = (args.first(), type_args.first()) else {
+                    return Ok(Value::Nil);
+                };
+                let src = self.eval_expr(&arg.value, Rc::clone(&env))?;
+                let Value::Str(src) = src else { return Ok(Value::Nil) };
+                let target_ty = target_ty.clone();
+                return Ok(self.eval_from_json(&src, &target_ty, &env, line));
             }
         }
         // Generic call with no special handling: evaluate callee and call it.
@@ -1677,7 +1684,7 @@ impl Interpreter {
                 Ok(Value::Tuple(results))
             }
 
-            ExprKind::GenericCall(callee, _type_args, args) => self.eval_expr_generic_call(callee, args, env, line),
+            ExprKind::GenericCall(callee, type_args, args) => self.eval_expr_generic_call(callee, type_args, args, env, line),
 
             ExprKind::SliceRange { .. } => {
                 Err(err("SliceRange cannot appear outside an index expression", line))

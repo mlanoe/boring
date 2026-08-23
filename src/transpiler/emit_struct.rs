@@ -1069,8 +1069,18 @@ impl Transpiler {
         // enum (or a same-named `ext` block) already declares its own `as string:` conversion
         // (`display_types`, emitted as a real Display impl further down / in the ext path), or
         // the enum explicitly opts out via `@derive(Display)`.
+        // Also skipped when the enum won't actually have a `Debug` impl for `{:?}` to use —
+        // the same `will_have_debug` gate the struct auto-Display above already has, which
+        // the enum path was missing: an explicit `@derive(Clone, Serialize, Deserialize)`
+        // (used verbatim, so no Debug is auto-added) generated an `impl Display` that failed
+        // to compile with "`X` doesn't implement `Debug`". `emitted_derives` is exactly the
+        // set of derive names the lines above emitted (auto Debug/Clone/..., thiserror's
+        // injected Debug, and the enum's own `@derive(...)` args); `extra_derives` is the
+        // header-protocol addition on top.
         let has_derive_display = e.attrs.iter().any(|a| a.name == "derive" && a.args.iter().any(|arg| arg == "Display"));
-        if !has_variant_error_attr && !self.display_types.contains(&e.name) && !has_derive_display {
+        let will_have_debug = emitted_derives.iter().any(|d| d == "Debug")
+            || extra_derives.iter().any(|d| d == "Debug");
+        if !has_variant_error_attr && !self.display_types.contains(&e.name) && !has_derive_display && will_have_debug {
             let name = &e.name;
             // Bounded impl type params (`+ Debug`) plus bare use-site params, same as the
             // struct auto-Display above — needed for generic enums like `Result<T, E>`.

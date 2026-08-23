@@ -1,0 +1,40 @@
+# Regression test for the enum half of the auto-`Display`-assumes-`Debug` bug.
+#
+# The struct path in src/transpiler/emit_struct.rs already gated its
+# auto-generated `impl Display` (which delegates to `write!(f, "{:?}", self)`)
+# on the type actually ending up with a `Debug` impl -- see
+# tests/cases/json_serde_rename.br, bug 2. The *enum* path had no such gate:
+# it emitted that `impl Display` whenever the enum had no `@error(...)` variant,
+# no `as string:` conversion and no `@derive(Display)`, regardless of whether
+# `Debug` was in the final derive list.
+#
+# So an explicit `@derive(Clone, Serialize, Deserialize)` on an enum -- explicit,
+# so used verbatim, with no auto-injected `Debug` -- generated Rust that failed
+# to compile with "`Num` doesn't implement `Debug`", pointing straight at the
+# generated impl. Fixed by mirroring the struct path's `will_have_debug` check.
+#
+# Consequence of the fix, deliberately: such an enum now has NO `Display` at
+# all, exactly like the equivalent struct, so `print n` on it would be a
+# compile error. That is why this fixture pattern-matches instead of printing
+# the enum value directly.
+
+@derive(Clone, Serialize, Deserialize)
+@serde(untagged)
+enum Num:
+    NInt(int)
+    NStr(string)
+
+def void main():
+    guard let a = fromJson<Num>("42") else:
+        print "a FAILED"
+        return
+    match a:
+        NInt(i): print "int {i}"
+        NStr(s): print "str {s}"
+
+    guard let b = fromJson<Num>("\"x\"") else:
+        print "b FAILED"
+        return
+    match b:
+        NInt(i): print "int {i}"
+        NStr(s): print "str {s}"
