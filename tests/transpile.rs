@@ -456,6 +456,12 @@ transpile_test!(implicit_self_length_nontail);
 transpile_test!(throws_method_name_collision);
 transpile_test!(narrowing_cast_if_let);
 transpile_test!(try_else_nil_if_let);
+// `try`/`try?` used to only be recognized as a prefix inside `parse_else_expr`,
+// one precedence level above where `guard let x = EXPR`/`if let x = EXPR`
+// clauses parse their RHS (`parse_or`) -- so a bare (unparenthesized)
+// `guard let x = try? foo() else ...` was a parse error. See
+// tests/cases/try_prefix_in_cond_clause_noparen.br's own doc comment.
+transpile_test!(try_prefix_in_cond_clause_noparen);
 // Vec::first()/last() and HashMap::get(k) return Option<&T> in Rust; Boring's
 // first()/last()/get() are documented (book.md) as owned `T?`. This is the real
 // value of this case: `cargo run` on the emitted Rust only compiles if `.cloned()`

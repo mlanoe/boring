@@ -282,6 +282,23 @@ impl Parser {
         Ok(expr)
     }
 
+    /// Like `parse_or`, but also recognizes a leading `try`/`try?` prefix —
+    /// routing through `parse_else_expr` when present — without requiring the
+    /// caller to parenthesize it. `guard let x = EXPR`/`if let x = EXPR`/
+    /// `elif let x = EXPR` clauses parse their RHS at `parse_or` precedence
+    /// (one level below where `try`/`try?` normally live in `parse_else_expr`),
+    /// so `guard let x = try? foo() else ...` would otherwise be a parse error
+    /// unless written `guard let x = (try? foo()) else ...`. Safe to fold in
+    /// directly because the `try?` shorthand returns immediately without
+    /// consuming a trailing `else` itself, leaving the clause's own `else` for
+    /// the caller to consume as before.
+    pub(crate) fn parse_or_with_try_prefix(&mut self) -> Result<Expr, ParseError> {
+        if self.check(&TokenKind::Try) {
+            return self.parse_else_expr();
+        }
+        self.parse_or()
+    }
+
     pub(crate) fn parse_pipe(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_or()?;
         let mut indent_depth: i32 = 0;

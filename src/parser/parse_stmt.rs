@@ -649,7 +649,7 @@ impl Parser {
             if is_pattern {
                 let pat = self.parse_pattern()?;
                 self.expect(&TokenKind::Eq)?;
-                let expr = self.parse_or()?;
+                let expr = self.parse_or_with_try_prefix()?;
                 Ok(CondClause::LetPat(pat, expr))
             } else {
                 let name_line = self.line();
@@ -661,11 +661,11 @@ impl Parser {
                     return Ok(CondClause::Let(name, expr));
                 }
                 self.expect(&TokenKind::Eq)?;
-                let expr = self.parse_or()?;
+                let expr = self.parse_or_with_try_prefix()?;
                 Ok(CondClause::Let(name, expr))
             }
         } else {
-            Ok(CondClause::Expr(self.parse_or()?))
+            Ok(CondClause::Expr(self.parse_or_with_try_prefix()?))
         }
     }
 

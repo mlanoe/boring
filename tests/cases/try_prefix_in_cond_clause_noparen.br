@@ -1,0 +1,36 @@
+# Regression test.
+#
+# `try`/`try?` used to only be recognized as a prefix inside `parse_else_expr`
+# (one precedence level above where `guard let x = EXPR`/`if let x = EXPR`/
+# `elif let x = EXPR` parse their clause's RHS via `parse_or`). So
+# `guard let x = try? foo() else ...` (no parens) was a parse error --
+# it had to be written `guard let x = (try? foo()) else ...`. Covers both
+# `guard let` and `if let` with a bare (unparenthesized) `try?` RHS.
+
+enum MyErr:
+    Bad
+
+int risky(int v) throws MyErr:
+    guard v > 0 else throw MyErr.Bad
+    v * 2
+
+def use_guard_let(int v):
+    guard let r = try? risky(v) else:
+        print "none"
+        return
+    print "{r}"
+
+def use_if_let(int v):
+    if let r = try? risky(v):
+        print "{r}"
+    else:
+        print "none"
+
+def run():
+    use_guard_let(5)
+    use_guard_let(-5)
+    use_if_let(5)
+    use_if_let(-5)
+
+def main():
+    run()
