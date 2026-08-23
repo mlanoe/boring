@@ -1250,6 +1250,11 @@ impl Transpiler {
                     .map(|(_, ty)| matches!(ty, Type::Optional(_)))
                     .unwrap_or(false)
             })
+            // Same, generalized to non-`self`/non-bare-var receivers (a field chain, an
+            // index expr) and to a `MethodCall`/implicit-self-field `Var` whose own
+            // declared type is `T?` — see `expr_is_declared_optional`'s doc and
+            // docs/option-return-double-some-wrap-bug.md.
+            || self.expr_is_declared_optional(value)
             // If-expression whose branches already produce Option (nil/some/method branches)
             || matches!(&value.kind, ExprKind::If(if_stmt) if {
                 fn body_ends_optional(body: &[Stmt]) -> bool {

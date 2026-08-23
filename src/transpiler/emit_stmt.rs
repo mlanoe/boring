@@ -216,6 +216,12 @@ impl Transpiler {
                                             .map(|t| matches!(t, Type::Optional(_)))
                                             .unwrap_or(false)
                                     }).unwrap_or(false)))
+                            // Field read of a `T?`-declared field, or a call/method-call whose
+                            // own declared return type is `T?` (any receiver shape, not just a
+                            // bare var — see `expr_is_declared_optional`'s doc for why the
+                            // MethodCall check above alone isn't enough, e.g. `items[0].as_str()`).
+                            // See docs/option-return-double-some-wrap-bug.md.
+                            || self.expr_is_declared_optional(e)
                             // If-expression whose branches already produce Option (nil/some/method)
                             || matches!(&e.kind, ExprKind::If(if_stmt) if {
                                 fn branch_ends_optional(body: &[Stmt]) -> bool {

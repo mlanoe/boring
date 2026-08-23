@@ -148,12 +148,22 @@ impl Transpiler {
                         if let Some(sty) = struct_ty {
                             self.var_struct_types.insert(name.clone(), sty);
                         }
-                    } else if let crate::ast::ExprKind::Var(src) = &expr.kind {
-                        // `if let b = someOptionalVar:` — propagate the inner type (mirrors
+                    } else if matches!(&expr.kind, crate::ast::ExprKind::Var(_) | crate::ast::ExprKind::Field(..)) {
+                        // `if let b = someOptionalVar:` / `if let b = self.field:` / `if let
+                        // b = bareImplicitSelfField:` — propagate the inner type (mirrors
                         // `emit_flow.rs`'s `emit_guard`, `CondClause::Let` arm) so a field
                         // write or `def` call through `b` below can resolve its struct type
-                        // and get checked.
-                        if let Some(crate::ast::Type::Optional(inner)) = self.var_types.get(src.as_str()).cloned() {
+                        // and get checked. `resolve_expr_declared_type` covers a known local
+                        // var, an implicit bare-field self-reference, AND an explicit field
+                        // chain alike — a bare implicit self-field source (`if let m =
+                        // mutation:` where `mutation` means `self.mutation`) used to fall
+                        // through this branch entirely untracked, since only `var_types` was
+                        // consulted (implicit fields are never registered there). Without
+                        // this, `m`'s own field reads inside the branch body couldn't resolve
+                        // their declared type, so the Some(...)-wrap guards in
+                        // `expr_is_declared_optional` couldn't recognize them as already
+                        // Optional either — see docs/option-return-double-some-wrap-bug.md.
+                        if let Some(crate::ast::Type::Optional(inner)) = self.resolve_expr_declared_type(expr) {
                             self.var_types.insert(name.clone(), *inner.clone());
                             if Self::is_string_type(&inner) {
                                 self.string_vars.insert(name.clone());
@@ -169,8 +179,8 @@ impl Transpiler {
                         }
                     } else if let crate::ast::ExprKind::Call(callee, _) = &expr.kind {
                         // `if let b = make():` where `make()` returns `T?` — mirror the
-                        // `Var` branch above using the callee's declared return type instead
-                        // of a variable's tracked type.
+                        // `Var`/`Field` branch above using the callee's declared return type
+                        // instead of a variable's tracked type.
                         if let crate::ast::ExprKind::Var(fn_name) = &callee.kind {
                             if let Some(crate::ast::Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
                                 self.var_types.insert(name.clone(), *inner.clone());
@@ -178,6 +188,24 @@ impl Transpiler {
                                     self.string_vars.insert(name.clone());
                                 }
                                 if let crate::ast::Type::Named(n) = inner.as_ref() {
+                                    if self.is_known_user_type(n.as_str()) {
+                                        self.var_struct_types.insert(name.clone(), n.clone());
+                                    }
+                                }
+                            }
+                        }
+                    } else if let crate::ast::ExprKind::MethodCall(recv, method, args) = &expr.kind {
+                        // `if let b = dict.get(k):` — a builtin dict lookup, not a
+                        // user-declared method, so there's no `struct_method_return_types`
+                        // entry to consult; propagate from the dict's own declared value
+                        // type instead (`{K=V}` → `V`). Scoped to the one-arg `.get()` form,
+                        // the only dict/array method whose return type is a clean `Option<V>`
+                        // determined purely by the receiver's own declared type (see
+                        // `is_option_expr`'s `ALWAYS_OPTION`/`get`-arity comment for the wider
+                        // "which builtin methods are unconditionally Option-shaped" context).
+                        if method == "get" && args.len() == 1 {
+                            if let Some(crate::ast::Type::Dict(_, v)) = self.resolve_expr_declared_type(recv) {
+                                if let crate::ast::Type::Named(n) = v.as_ref() {
                                     if self.is_known_user_type(n.as_str()) {
                                         self.var_struct_types.insert(name.clone(), n.clone());
                                     }

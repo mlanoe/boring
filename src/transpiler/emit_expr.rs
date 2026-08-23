@@ -2338,7 +2338,12 @@ impl Transpiler {
                 || matches!(&value.kind, ExprKind::Call(callee, _)
                     if matches!(&callee.kind, ExprKind::Var(fn_name)
                         if self.fn_return_types.get(fn_name.as_str())
-                            .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)));
+                            .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
+                // RHS is a field read of a `T?`-declared field, or a method call whose own
+                // declared return type is `T?` (any receiver shape) — e.g.
+                // `id = items[1].as_str()` where `as_str()` already returns `string?`.
+                // See docs/option-return-double-some-wrap-bug.md.
+                || self.expr_is_declared_optional(value);
             if self.optional_vars.contains(v.as_str()) && !rhs_already_opt {
                 format!("Some({})", rhs_s)
             } else {

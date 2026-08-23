@@ -3144,6 +3144,22 @@ impl Transpiler {
                             self.struct_task_methods.insert(format!("{}::{}", e.name, m.name));
                         }
                     }
+                    // Track return types for already_opt detection (the Some(...)-wrap
+                    // guards in emit_stmt/emit_flow/emit_expr/emit_let) — mirrors the
+                    // identical struct-method registration in `pre_scan_struct_item`.
+                    // Without this, `struct_method_return_types` never had an entry for
+                    // an enum method at all, so a `T?`-declared enum `req` method (e.g.
+                    // a tagged-union enum's `as_str()`) was never recognized as
+                    // already-Optional by any of those checks, even after they learned
+                    // to consult the map for a non-`self`/non-bare-var receiver — the
+                    // map itself was just missing every enum method's entry. See
+                    // docs/option-return-double-some-wrap-bug.md.
+                    for m in &e.methods {
+                        if let Some(ret_ty) = &m.return_ty {
+                            let key = format!("{}::{}", e.name, m.name);
+                            self.struct_method_return_types.insert(key, ret_ty.clone());
+                        }
+                    }
                     // Register enum `as T:` conversion targets.
                     for conv in &e.conversions {
                         let tname = self.emit_type(&conv.ty);
@@ -4208,5 +4224,67 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("Lib::call3(&a, b, &mut c)"),
             "middle by-value arg must stay unprefixed, first/last keep their own borrows, got:\n{}", code);
+    }
+
+    // ── docs/option-return-double-some-wrap-bug.md ────────────────────────────
+    // A `T?`-returning function/method (or a plain assignment into an already-
+    // `T?`-typed local) must NOT wrap an expression that is itself statically
+    // Option-shaped (a `T?`-declared field read, or a call to another
+    // `T?`-returning function/method) in an extra `Some(...)` — that produces
+    // `Option<Option<T>>`, a real E0308. These four tests cover the doc's three
+    // repros (tail-position field read, tail-position method call, plain
+    // assignment) plus the still-needed-wrap case that must keep working.
+
+    #[test]
+    fn optional_return_of_optional_field_is_not_double_wrapped() {
+        // Repro 1: `req string? next_id(): next` where `next` is a `string?` field.
+        let src = "\
+struct Block:\n    string? next\n\n    req string? next_id():\n        next\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn next_id(&self) -> Option<Arc<str>> {\n        self.next.clone()\n    }"),
+            "tail-position read of a T?-declared field must be passed through raw, not Some(...)-wrapped, got:\n{}", code);
+        assert!(!code.contains("Some(self.next"),
+            "must not double-wrap an already-Option field read, got:\n{}", code);
+    }
+
+    #[test]
+    fn optional_return_of_optional_method_call_is_not_double_wrapped() {
+        // Repro 2: `def string? first_of([JVal] items): items[0].as_str()` where
+        // `as_str()` is itself declared `string?` — receiver is an `Index` expr,
+        // not a bare `Var`, so this also exercises the general (non-Var-only)
+        // receiver resolution.
+        let src = "\
+enum JVal:\n    JStr(string)\n    JNum(float)\n\n    req string? as_str():\n        match self.clone():\n            JStr(s): s\n            _: nil\n\n\
+def string? first_of([JVal] items):\n    items[0].as_str()\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn first_of(items: &Vec<JVal>) -> Option<Arc<str>> {\n    items[(0) as usize].as_str()\n}"),
+            "tail call to a T?-returning method must be passed through raw, not Some(...)-wrapped, got:\n{}", code);
+        assert!(!code.contains("Some(items"),
+            "must not double-wrap an already-Option method-call result, got:\n{}", code);
+    }
+
+    #[test]
+    fn optional_assignment_of_optional_method_call_is_not_double_wrapped() {
+        // Repro 3: `id = items[0].as_str()` assigned into a `var string? id`.
+        let src = "\
+enum JVal:\n    JStr(string)\n    JNum(float)\n\n    req string? as_str():\n        match self.clone():\n            JStr(s): s\n            _: nil\n\n\
+def string? parse([JVal] items):\n    var string? id = nil\n    id = items[0].as_str()\n    id\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("id = items[(0) as usize].as_str();"),
+            "assignment RHS that's already T?-shaped must not be Some(...)-wrapped, got:\n{}", code);
+        assert!(!code.contains("Some(items"),
+            "must not double-wrap an already-Option assignment RHS, got:\n{}", code);
+    }
+
+    #[test]
+    fn optional_return_of_bare_value_is_still_wrapped() {
+        // Non-regression: a genuinely bare `T` (a plain, non-optional field) in
+        // T?-returning tail position must still get Some(...) — this is the
+        // legitimate case the fix must not break.
+        let src = "\
+struct Block:\n    string label\n\n    req string? label_opt():\n        label\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("Some(self.label"),
+            "a bare (non-optional) field read must still be wrapped in Some(...), got:\n{}", code);
     }
 }

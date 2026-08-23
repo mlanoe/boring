@@ -276,6 +276,97 @@ impl Transpiler {
         }
     }
 
+    /// The declared `Type` of an arbitrary expression, where statically knowable — a
+    /// known local var's own declared type (`var_types`), an implicit `self.field`
+    /// bare-name reference's field type (mirrors `emit_expr`'s own implicit-self
+    /// lowering — a struct method body's bare `mutation` meaning `self.mutation`), or
+    /// an explicit field-access chain's field type (via `resolve_expr_struct_type` on
+    /// the receiver). `None` for anything else a caller can't cheaply resolve a
+    /// declared type for (method-call results, literals, ...) — those callers should
+    /// treat `None` as "not statically knowable here", not as "definitely not
+    /// Optional". Used by `register_if_let_clause_bindings` (emit_match.rs) to
+    /// propagate an `if let`/`elif let` binding's inner type from its source
+    /// expression, including sources plain `var_types`-only lookups can't see.
+    pub(crate) fn resolve_expr_declared_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Var(v) if v == "self" => None,
+            ExprKind::Var(v) => {
+                if let Some(t) = self.var_types.get(v.as_str()) { return Some(t.clone()); }
+                if !self.known_local_vars.contains(v.as_str()) {
+                    let sn = self.self_type.as_ref()?;
+                    let (_, fty) = self.struct_fields.get(sn.as_str())?
+                        .iter().find(|(fname, _)| fname == v)?;
+                    return Some(fty.clone());
+                }
+                None
+            }
+            ExprKind::Field(obj, field_name) => {
+                let sn = self.resolve_expr_struct_type(obj)?;
+                let (_, fty) = self.struct_fields.get(sn.as_str())?
+                    .iter().find(|(fname, _)| fname == field_name)?;
+                Some(fty.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Is `expr`'s own *declared* type statically known to already be `Option<T>` —
+    /// a field read of a `T?`-declared field (explicit `obj.field` or an implicit
+    /// bare-field self-reference), or a call to a function/method whose declared
+    /// return type is `T?`? Consulted by every "auto-wrap a `T?`-context value in
+    /// `Some(...)`" call site (`emit_stmt.rs`'s tail-return, `emit_flow.rs`'s
+    /// `return`, `emit_expr.rs`'s plain-assignment wrap, and `emit_let.rs`'s
+    /// `emit_let_value_optional`) so none of them re-wraps an already-`Option<T>`
+    /// value into `Option<Option<T>>` — see docs/option-return-double-some-wrap-bug.md
+    /// for the three repros this closes. Deliberately declared-type-only (no
+    /// string-sniffing of the emitted Rust, unlike each call site's own
+    /// `Some(`/`.ok()`/`optional_vars` checks) so it's safe to share verbatim: it
+    /// only trusts `struct_fields`/`fn_return_types`/`struct_method_return_types`,
+    /// which are already fully populated by the time any of these sites run.
+    ///
+    /// Uses `resolve_expr_struct_type` for the method-call receiver, not a bare
+    /// `ExprKind::Var` check — that also covers a non-var receiver like
+    /// `items[0].as_str()` (an `Index` expr), which a `Var`-only check misses.
+    pub(crate) fn expr_is_declared_optional(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            // A local var already tracked as Optional (explicit annotation or
+            // inferred elsewhere), or a bare implicit `self.field` reference
+            // (see `emit_expr`'s own `ExprKind::Var` arm) whose field is
+            // declared `T?`.
+            ExprKind::Var(v) => {
+                self.optional_vars.contains(v.as_str())
+                    || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)
+                    || (!self.known_local_vars.contains(v.as_str())
+                        && self.self_type.as_ref()
+                            .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                            .and_then(|fs| fs.iter().find(|(n, _)| n == v))
+                            .map(|(_, ty)| matches!(ty, Type::Optional(_)))
+                            .unwrap_or(false))
+            }
+            // Explicit field access (`self.next`, `obj.field`, a longer chain) on a
+            // known struct whose field is declared `T?`.
+            ExprKind::Field(obj, field_name) => self.resolve_expr_struct_type(obj)
+                .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
+                .map(|(_, ty)| matches!(ty, Type::Optional(_)))
+                .unwrap_or(false),
+            // Free-function call whose declared return type is `T?`.
+            ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(fn_name)
+                if self.fn_return_types.get(fn_name.as_str())
+                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)),
+            // Method call whose receiver resolves to a known struct and whose
+            // declared method return type is `T?` — any receiver shape, not just
+            // a bare local var.
+            ExprKind::MethodCall(recv, method, _) => self.resolve_expr_struct_type(recv)
+                .map(|sty| self.struct_method_return_types
+                    .get(&format!("{}::{}", sty, method))
+                    .map(|t| matches!(t, Type::Optional(_)))
+                    .unwrap_or(false))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// Does `expected` name an enum that actually has a variant called `variant`? Used by
     /// overload resolution (here and in emit_expr.rs's free-function overload lookup) to
     /// judge a `.Variant` argument against a candidate's declared param type.

@@ -57,7 +57,12 @@ impl Transpiler {
                                         .get(&format!("{}::{}", sty, method))
                                         .map(|t| matches!(t, Type::Optional(_)))
                                         .unwrap_or(false)
-                                }).unwrap_or(false)));
+                                }).unwrap_or(false)))
+                        // Field read of a `T?`-declared field, or a call/method-call whose own
+                        // declared return type is `T?` (any receiver shape — see emit_stmt.rs's
+                        // tail-return twin of this check and `expr_is_declared_optional`'s doc).
+                        // See docs/option-return-double-some-wrap-bug.md.
+                        || self.expr_is_declared_optional(e);
                     if already_opt { inner } else { format!("Some({})", inner) }
                 } else if matches!(&self.fn_return_ty, Some(Type::Array(_)))
                     && !self.in_req_fn
@@ -326,6 +331,33 @@ impl Transpiler {
                                 // instead of a variable's tracked type.
                                 if let ExprKind::Var(fn_name) = &callee.kind {
                                     if let Some(Type::Optional(inner)) = self.fn_return_types.get(fn_name.as_str()).cloned() {
+                                        self.var_types.insert(name.clone(), *inner.clone());
+                                        if Self::is_string_type(&inner) {
+                                            self.string_vars.insert(name.clone());
+                                        }
+                                        if let Type::Named(n) = inner.as_ref() {
+                                            if self.is_known_user_type(n.as_str()) {
+                                                self.var_struct_types.insert(name.clone(), n.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if let ExprKind::MethodCall(recv, method, _) = &expr.kind {
+                                // `guard let b = recv.method()` where `method`'s declared
+                                // return type is `T?` — mirror the `Var`/`Call` branches
+                                // above using the method's own declared return type
+                                // (resolved via the receiver's struct/enum type) instead of
+                                // a variable's tracked type. Needed so a later use of `b` as
+                                // a further method-call/index receiver (e.g.
+                                // `items[i].as_str()` after `guard let items = raw.as_arr()
+                                // else return nil`) can itself be recognized as
+                                // already-Optional by `expr_is_declared_optional` instead of
+                                // silently falling through to "unknown, so wrap it" — see
+                                // docs/option-return-double-some-wrap-bug.md.
+                                if let Some(sty) = self.resolve_expr_struct_type(recv) {
+                                    if let Some(Type::Optional(inner)) = self.struct_method_return_types
+                                        .get(&format!("{}::{}", sty, method)).cloned()
+                                    {
                                         self.var_types.insert(name.clone(), *inner.clone());
                                         if Self::is_string_type(&inner) {
                                             self.string_vars.insert(name.clone());
