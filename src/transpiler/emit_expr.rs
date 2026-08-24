@@ -3331,7 +3331,7 @@ impl Transpiler {
     /// `infer_float_width` to look field types up in `struct_fields`. Mirrors the
     /// `var_struct_types` / `var_types` fallback already used by field-access
     /// emission elsewhere in this file (e.g. `field_is_arc` above).
-    fn resolve_struct_name(&self, e: &Expr) -> Option<String> {
+    pub(crate) fn resolve_struct_name(&self, e: &Expr) -> Option<String> {
         let named = |t: &Type| -> Option<String> {
             match t {
                 Type::Named(n) => Some(n.clone()),
@@ -3842,7 +3842,8 @@ impl Transpiler {
             if is_optional {
                 return (expr_s, "{}");
             }
-            let is_vec_var = matches!(&a.value.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()));
+            let is_vec_var = matches!(&a.value.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
+                || self.expr_field_is_array(&a.value);
             let is_col = looks_like_collection(&expr_s)
                 || matches!(&a.value.kind, ExprKind::Var(n) if self.collection_vars.contains(n.as_str()))
                 || matches!(&a.value.kind, ExprKind::Array(_))

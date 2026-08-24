@@ -447,6 +447,14 @@ transpile_test!(const_promotion_known_fn);
 // case's real value is exactly that real `cargo run` compile, same rationale
 // as `top_level_const` above.
 transpile_test!(struct_count_field);
+// String-interpolating a struct field whose type is an array (`[int]`,
+// `[string]`, and one level of field chaining) emitted a bare
+// `println!("{}", p.scores)` on a `Vec<isize>`/`Vec<Rc<str>>` field -- these
+// have no `Display` impl, so it failed to compile (E0277) even though the
+// exact same array in a local variable was already wrapped in the
+// transpiler's `BoringFmt` shim. This case's real value is the `cargo run`
+// compile, same rationale as `struct_count_field` above.
+transpile_test!(struct_field_array_interp);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`

@@ -2883,7 +2883,8 @@ impl Transpiler {
                     let expr_s = self.emit_expr(e);
                     // Vec collections: wrap in BoringFmt for Display without debug quotes.
                     // HashMap/HashSet: keep {:?} (no Display impl).
-                    let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()));
+                    let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
+                        || self.expr_field_is_array(e);
                     let is_col = looks_like_collection(&expr_s)
                         || matches!(&e.kind, ExprKind::Var(n) if self.collection_vars.contains(n))
                         || matches!(&e.kind, ExprKind::Array(_))
@@ -2977,10 +2978,12 @@ impl Transpiler {
                 }
                 StringSegment::Expr(e) => {
                     let expr_s = self.emit_expr(e);
-                    let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()));
+                    let is_vec_var = matches!(&e.kind, ExprKind::Var(n) if self.vec_vars.contains(n.as_str()))
+                        || self.expr_field_is_array(e);
                     let is_col = looks_like_collection(&expr_s)
                         || matches!(&e.kind, ExprKind::Var(n) if self.collection_vars.contains(n))
-                        || matches!(&e.kind, ExprKind::Array(_));
+                        || matches!(&e.kind, ExprKind::Array(_))
+                        || self.expr_returns_collection(e);
                     let (expr_s, spec) = boring_vec_fmt(expr_s, is_col, is_vec_var);
                     fmt.push_str(spec);
                     combined.push(expr_s);

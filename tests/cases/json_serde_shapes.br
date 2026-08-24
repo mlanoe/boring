@@ -50,11 +50,7 @@ def void main():
     guard let p = fromJson<Person>(src) else:
         print "person FAILED"
         return
-    # `{p.scores}` (a `[int]` *field*, interpolated directly) is avoided on purpose:
-    # the transpiler doesn't wrap a struct-field array in its `BoringFmt` shim, so it
-    # emits `println!("{}", p.scores)` on a `Vec<isize>` and doesn't compile. Unrelated
-    # pre-existing gap, not something this fixture is here to pin.
-    print "{p.first_name} {p.age_years} {p.home.street_name}/{p.home.house_number} {p.scores.count()} {p.scores[2]}"
+    print "{p.first_name} {p.age_years} {p.home.street_name}/{p.home.house_number} {p.scores}"
 
     # A missing required key is a mismatch, not a partially-filled struct.
     let missing = fromJson<Person>("{{\"firstName\": \"Ada\"}}")

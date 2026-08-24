@@ -369,6 +369,24 @@ impl Transpiler {
                                         }
                                     }
                                 }
+                            } else if let ExprKind::GenericCall(callee, type_args, _) = &expr.kind {
+                                // `guard let p = fromJson<Person>(src) else: ...` — `fromJson<T>`
+                                // is a hardcoded builtin (see emit_expr.rs's `"fromJson"` special
+                                // case) that always returns `T?`, not a user function tracked in
+                                // `fn_return_types` like the plain `Call` branch above relies on.
+                                // Without this, `p`'s struct type never got registered, so a later
+                                // `{p.scores}` on a `[T]` field fell through `resolve_struct_name`
+                                // and emitted a raw (non-`Display`) `Vec` argument to `println!`.
+                                if let ExprKind::Var(fn_name) = &callee.kind {
+                                    if fn_name == "fromJson" {
+                                        if let Some(Type::Named(n)) = type_args.first() {
+                                            if self.is_known_user_type(n.as_str()) {
+                                                self.var_types.insert(name.clone(), Type::Named(n.clone()));
+                                                self.var_struct_types.insert(name.clone(), n.clone());
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             // A `guard let` binding has no `mut`/`var mut` spelling — the parser's
                             // `parse_cond_clause` only ever consumes a bare `let` for `CondClause::

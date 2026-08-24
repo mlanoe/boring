@@ -1,4 +1,4 @@
-Ada 36 Elm/7 3 3
+Ada 36 Elm/7 [1, 2, 3]
 missing: none
   "unit_thing" -> UnitThing
   {"circle": 2.5} -> Circle(2.5)

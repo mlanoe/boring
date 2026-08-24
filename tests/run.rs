@@ -280,6 +280,11 @@ interp_test!(pub_top_level_string_const);
 // was never affected (its Array/Set/Dict shortcuts are gated by value type,
 // never reached for a struct/Object); this is here to lock that in.
 interp_test!(struct_count_field);
+// String-interpolating a struct field whose type is an array (`[int]`,
+// `[string]`, and one level of field chaining). The interpreter never had
+// this bug (see tests/transpile.rs's registration for the real regression
+// coverage) -- kept here anyway so the runtime values stay locked in.
+interp_test!(struct_field_array_interp);
 // Dict `[key]` indexing (read + write) with a string key, as a function
 // parameter and as an implicit-self struct field. The interpreter (this
 // test) never caught the underlying bugs -- both were only visible in

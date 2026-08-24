@@ -1685,13 +1685,46 @@ impl Transpiler {
         }
     }
 
-    /// Returns true when an expression is a function call whose return type is a collection.
-    /// Used to select `{:?}` formatting in println! for HashMap/Vec/HashSet return values.
+    /// Returns true when an expression is a function call whose return type is a collection,
+    /// or a struct field access (`p.scores`, possibly chained: `p.home.tags`) whose declared
+    /// field type is a collection. Used to select `{:?}`/`BoringFmt` formatting in println!
+    /// for HashMap/Vec/HashSet-shaped values — without this, `print "{p.scores}"` on a
+    /// `[int]` field emitted a bare `println!("{}", p.scores)`, which fails to compile
+    /// (`Vec<isize>` has no `Display` impl) even though the same array in a local variable
+    /// is caught by the `ExprKind::Array`/`vec_vars` checks alongside this call.
     pub(crate) fn expr_returns_collection(&self, expr: &Expr) -> bool {
         if let ExprKind::Call(callee, _) = &expr.kind {
             if let ExprKind::Var(fn_name) = &callee.kind {
                 if let Some(ty) = self.fn_return_types.get(fn_name.as_str()) {
                     return is_collection_type(Some(ty));
+                }
+            }
+        }
+        if let ExprKind::Field(base, field) = &expr.kind {
+            if let Some(struct_name) = self.resolve_struct_name(base) {
+                if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                    if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == field) {
+                        return is_collection_type(Some(fty));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns true when a struct field access (`p.scores`, possibly chained) resolves
+    /// to a declared `[T]` (array/Vec) field type. Narrower than `expr_returns_collection`
+    /// above — used to route these through `BoringFmt` (unquoted Display, matching how a
+    /// plain `[T]` local variable already prints) rather than the `{:?}` fallback that
+    /// merely makes them compile.
+    pub(crate) fn expr_field_is_array(&self, expr: &Expr) -> bool {
+        if let ExprKind::Field(base, field) = &expr.kind {
+            if let Some(struct_name) = self.resolve_struct_name(base) {
+                if let Some(fields) = self.struct_fields.get(struct_name.as_str()) {
+                    if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == field) {
+                        return matches!(fty, Type::Array(_))
+                            || matches!(fty, Type::Named(n) if n == "Vec");
+                    }
                 }
             }
         }

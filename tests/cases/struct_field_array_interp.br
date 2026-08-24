@@ -1,0 +1,32 @@
+# Regression test: string-interpolating a struct *field* whose type is an
+# array didn't compile. The transpiler wraps a plain local array variable
+# (`let a = [1,2,3]` then `print "{a}"`) in its `BoringFmt` shim so it prints
+# unquoted (`[1, 2, 3]`) instead of relying on `Vec<T>`'s (nonexistent)
+# `Display` impl -- but that shim-wrapping decision was made purely from the
+# interpolated expression's own shape (`ExprKind::Var`/`ExprKind::Array`/a
+# function call with a known collection return type), and never considered a
+# struct *field* access (`ExprKind::Field`) resolving to an array type. So
+# `print "{p.scores}"` on a `Person` with `[int] scores` emitted a bare
+# `println!("{}", p.scores)`, and rustc rejected it (E0277: `Vec<isize>`
+# doesn't implement `Display`).
+#
+# Covers:
+#   * a direct `[int]` field, interpolated on its own (the original repro).
+#   * a `[string]` field, to confirm it goes through the same `BoringFmt`
+#     unquoted-Display path as a local `[string]` var, not a `{:?}` fallback
+#     that would print with debug quotes (`["a", "b"]` vs `[a, b]`).
+#   * a *chained* field access (`p.inner.scores`) one level deep.
+
+struct Inner:
+    [int] scores
+
+struct Person:
+    [int] scores
+    [string] tags
+    Inner inner
+
+def void main():
+    let p = Person([1, 2, 3], ["red", "green"], Inner([9, 8, 7]))
+    print "{p.scores}"
+    print "{p.tags}"
+    print "{p.inner.scores}"
