@@ -2,6 +2,8 @@
 
 Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled with `boring build`.
 
+Boring's own semantics — memory management, ownership, and the qualifiers in [chapter 21](#21-ownership-qualifiers) especially — follow Rust's directly rather than inventing an independent model, so prior familiarity with Rust's concepts (ownership, borrowing, `Rc`/`Arc`, `Mutex`/`RwLock`) makes this book much easier to follow. [The Rust Programming Language](https://doc.rust-lang.org/book/) is the standard reference if you need to pick those up first.
+
 ---
 
 ## Table of Contents
@@ -9,10 +11,10 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 1. [Getting Started](#1-getting-started)
 2. [Variables and Mutability](#2-variables-and-mutability)
 3. [Data Types](#3-data-types)
-4. [Functions](#4-functions)
-5. [Comments](#5-comments)
-6. [Control Flow](#6-control-flow)
-7. [Collections](#7-collections)
+4. [Collections](#4-collections)
+5. [Functions](#5-functions)
+6. [Comments](#6-comments)
+7. [Control Flow](#7-control-flow)
 8. [Structs](#8-structs)
 9. [Enums and Pattern Matching](#9-enums-and-pattern-matching)
 10. [Traits and Extensions](#10-traits-and-extensions)
@@ -21,19 +23,23 @@ Boring is a high-level language that transpiles to Rust. It is designed to feel 
 13. [Generics](#13-generics)
 14. [Closures and Higher-Order Functions](#14-closures-and-higher-order-functions)
 15. [Modules](#15-modules)
-16. [Ownership Qualifiers](#21-ownership-qualifiers)
-17. [Defer](#22-defer)
-18. [Streams](#17-streams-stream--yield)
-19. [Channels](#18-channels-channel)
-19. [Tasks (Async)](#23-tasks-async)
-20. [Attributes](#24-attributes)
-21. [Format Specifiers](#25-format-specifiers)
-22. [Built-in Functions](#26-built-in-functions)
-23. [Appendix: Boring → Rust Mapping](#27-appendix-boring--rust-mapping)
-24. [Diagnostics](#28-diagnostics)
-25. [Advanced](#29-advanced)
-26. [Qualifier Inference](#30-qualifier-inference)
-27. [Rust-for-Linux target](#31-rust-for-linux-target)
+16. [Pipe Operator](#16-pipe-operator-)
+17. [Streams](#17-streams-stream--yield)
+18. [Channels](#18-channels-channel)
+19. [Task handles and parallel awaiting](#19-task-handles-and-parallel-awaiting)
+20. [`Future<T>`](#20-futuret--polling-and-cancellation)
+21. [Ownership Qualifiers](#21-ownership-qualifiers)
+22. [Defer](#22-defer)
+23. [Tasks (Async)](#23-tasks-async)
+24. [Attributes](#24-attributes)
+25. [Format Specifiers](#25-format-specifiers)
+26. [Built-in Functions](#26-built-in-functions)
+27. [Appendix: Boring → Rust Mapping](#27-appendix-boring--rust-mapping)
+28. [Diagnostics](#28-diagnostics)
+29. [Advanced](#29-advanced)
+30. [Qualifier Inference](#30-qualifier-inference)
+31. [Debugging & Profiling](#31-debugging--profiling)
+32. [GPU Computing](#32-gpu-computing)
 
 ---
 
@@ -103,18 +109,18 @@ Boring separates two orthogonal concepts:
 - **Rebindable**: can the variable point to a different instance?
 - **Mutable** (content-mutable): can the pointed instance be modified — `def` calls, field writes, structural collection mutation?
 
-Unlike many languages, these two axes are controlled **independently**, and `mut` lives in the **type**, not just the binding keyword — `mut Type`/`mut Type&` compose the same way anywhere a type appears (a tuple slot, a struct field, an array element, a generic argument), not only at the top of a variable declaration. Four combinations exist for a local binding:
+Unlike many languages, these two axes are controlled **independently**, and `mut` lives in the **type**, not just the binding keyword — `mut Type` composes the same way anywhere a type appears (a tuple slot, a struct field, an array element, a generic argument), not only at the top of a variable declaration. Four combinations exist for a local binding:
 
 | Form | Rebindable | Mutable |
 |---|---|---|
 | `let Type a` | no | no |
-| `mut Type a` (≡ `let mut Type a`) | no | yes |
+| `let mut Type a` (≡ `mut Type a`) | no | yes |
 | `var Type a` | yes | no |
 | `var mut Type a` | yes | yes |
 
 `lazy` is a fifth, orthogonal keyword: a deferred, write-once binding — no rebind, no mutation, assigned exactly once via `?=`.
 
-**`mut` never implies `var`, and `var` never implies `mut`** — this is deliberate and has no exceptions (not even for `'actor`/`'guard`-qualified types, where the underlying `Arc<Mutex<T>>`/`Arc<RwLock<T>>` would technically permit mutation through the lock regardless — Boring's own bookkeeping still gates it on the binding, matching every other type). `mut x = 42; x = 43` is a compile error — that's the whole point of writing `mut` instead of `var` in the first place.
+`mut x = 42; x = 43` is a compile error, which is the whole point of writing `mut` instead of `var` in the first place.
 
 ### Immutable bindings — `let`
 
@@ -143,8 +149,6 @@ c.get()          # 2
 ```
 
 Fixed binding, content-mutable instance. `mut Counter c` is exactly `let mut Counter c` — the bare keyword is sugar for that, always, with no other reading. The pointer never changes — the compiler can apply alias analysis, loop-invariant hoisting, and register allocation optimizations that `var` prevents.
-
-`let` and `var` are sufficient to write correct code. `mut` is an optional precision when you know the binding will never be rebound.
 
 **`mut` on a scalar is a compile error**, not a silent downgrade to `var`. Primitives (`int`, `uint`, `float`, `bool`) expose no `def` methods, so there's nothing for `mut` to unlock:
 
@@ -190,34 +194,17 @@ b = Counter()    # ok — var mut can
 
 ### `mut` composes into any type position
 
-Since `mut` is a modifier on the **type**, not a fifth binding keyword, it nests anywhere a type can appear — a tuple slot, a struct field (see [§8](#8-structs)), an array element or dict value (see [§7](#7-collections)), or a generic argument:
+Since `mut` is a modifier on the **type**, not a fifth binding keyword, it nests anywhere a type can appear — a tuple slot, a struct field (see [§8](#8-structs)), an array element or dict value (see [§4](#4-collections)), or a generic argument:
 
 ```boring
 let (mut Point, string) t = (Point(0, 0), "origin")   # slot 0 is content-mutable, slot 1 isn't
 t.0.move_to(1, 1)   # ok
 # t.1 = "elsewhere" # ERROR — the tuple binding itself isn't `var`/reassignable at that slot
-
-Query<(Position&, mut Velocity&)>   # a borrowed tuple slot can carry mut too — see below
 ```
 
-`mut Type` (no `&`) is only accepted where the checker can attach a stable, addressable permission to it — a tuple slot, a struct field, an array element, or a dict value. It's rejected on a scalar (above), on `'shared` (no interior mutability to unlock), on a whole tuple as a block (`mut (T1, T2) t` — no in-place mutation surface for a tuple *as a whole*, only per-slot), on a `'weak` reference (nothing but `.upgrade()`/`.clone()` to call on it), and on a set element (`HashSet<T>` has no mutable element access in Rust).
+`mut Type` is only accepted where the checker can attach a stable, addressable permission to it — a tuple slot, a struct field, an array element, or a dict value. It's rejected on a scalar (above), on `'shared` (no interior mutability to unlock), on a whole tuple as a block (`mut (T1, T2) t` — no in-place mutation surface for a tuple *as a whole*, only per-slot), on a `'weak` reference (nothing but `.upgrade()`/`.clone()` to call on it), and on a set element (`HashSet<T>` has no mutable element access in Rust).
 
-### The borrow form — `mut Type&`
-
-`Type&` is a borrow (`&Type` in Rust); `mut Type&` is a mutable borrow (`&mut Type`). Because it's a genuine, distinct Rust type — unlike the owned `mut Type` form above — it composes freely into tuples and generic arguments, which is exactly what a Bevy-ECS-style query needs:
-
-```boring
-struct Position: var float x; var float y
-struct Velocity: var float dx; var float dy
-
-var p = Position(x = 0.0, y = 0.0)
-var v = Velocity(dx = 1.0, dy = 0.0)
-let (Position&, mut Velocity&) pair = (p, v)
-pair.1.dx = pair.1.dx + 1.0   # ok — slot 1 is a mutable borrow
-# pair.0.x = 5.0              # ERROR — slot 0 is a plain (immutable) borrow
-```
-
-There's no sigil for this (`Type!`/`Type*` were both considered and dropped) — `mut Type&` stays consistent with the rest of Boring's spelled-out-keyword surface syntax.
+> There's also a **borrowed** form, `mut Type&`, for values that are references rather than owned data — needed for things like a Bevy-ECS-style query. It's a more advanced topic; see [Advanced — Explicit borrow syntax: `T&`](#advanced--explicit-borrow-syntax-t).
 
 ### Coercion is one-way
 
@@ -393,19 +380,7 @@ let bigger = count + 1     # fine — `1` is the flexible `int` literal kind
 
 Casting to a narrower type checks the range and produces `nil` (or errors, depending on context) if the value doesn't fit — same as the existing `uint8` behavior (`300 as uint8` is out of range).
 
-**GPU targets.** Each GPU backend's own numeric type system limits which widths a `kernel` struct field can use:
-
-| Width | `--target wgpu` (WGSL) | `--target cuda` (CUDA C) | `--target rocm` (HIP C++) | `--target metal` (MSL) |
-|-------|-------------------------|---------------------------|-----------------------------|--------------------------|
-| 8-bit | not supported (compile error) | full support (`uint8_t`/`int8_t`) | full support (`uint8_t`/`int8_t`) | full support (`uchar`/`char`) |
-| 16-bit | not supported (compile error) | full support | full support | full support (`ushort`/`short`) |
-| 32-bit | full support (`i32`/`u32`) | full support | full support | full support (`int`/`uint`) |
-| 64-bit | not supported (compile error) | full support | full support | not supported (compile error) |
-| 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | supported via the non-standard `__int128` GCC/HIP-clang extension | not supported (compile error) |
-| 32-bit float (`float32`) | full support (native `f32`) | full support (`float`) | full support (`float`) | full support (native `float`) |
-| 64-bit float (`float64`/`float`) | not supported (compile error — no `f64` in WGSL at all) | full support (`double`) | full support (`double`) | not supported (compile error — MSL has no native `double`) |
-
-WGSL has no native integer type below or above 32 bits, and no 64-bit float type at all; MSL has no native 64/128-bit integer and no native `double` (Apple GPUs historically lack native 64-bit ALU ops, for both integers and floats). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support, floats included. Using an unsupported width — or `float64`/`float` on Metal or wgpu — on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data; use `float32` there instead.
+> `kernel` struct fields (GPU targets) have their own, narrower per-backend width support than the host-side types above — see [chapter 32, GPU Computing](#32-gpu-computing).
 
 ### Fixed-width floats
 
@@ -789,7 +764,312 @@ Rc::ptr_eq(&a, &b)    // T'shared objects (single-thread)
 
 ---
 
-## 4. Functions
+## 4. Collections
+
+### Arrays — `[T]`
+
+```boring
+let numbers = [1, 2, 3, 4, 5]
+let [int] empty = []
+```
+
+**Rust equivalent**
+```rust
+let numbers: Vec<isize> = vec![1, 2, 3, 4, 5];
+let empty: Vec<isize> = Vec::new();
+```
+
+#### Element mutability — `[mut T]` vs `mut [T]`
+
+`mut` on the collection's own type (`mut [Point] arr`) and `mut` on the **element** type (`[mut Point] arr`) control two independent things — see [§2](#2-variables-and-mutability):
+
+- **`[mut Point] arr`** — the array itself can't grow/shrink/reassign entries (unless also `mut`/`var mut`, see below), but every element already in it can have `def` called on it: `arr[0].move_to(...)`.
+- **`mut [Point] arr`** — the reverse: `arr` supports structural mutation (`push`, `insert`, index-assign), but elements are plain `Point` — no `def` calls through an index read.
+- **`mut [mut Point] arr`** — both.
+
+```boring
+struct Point: var int x; var int y
+
+let [mut Point] a = [Point(0, 0), Point(1, 1)]
+a[0].x = 5           # ok — element type is mut Point
+a[0].move_to(1, 1)   # ok
+
+let [Point] b = [Point(0, 0)]
+# b[0].x = 5         # ERROR — element type is plain Point, not mut Point
+# b[0].move_to(1, 1) # ERROR — same reason
+```
+
+This is checked for a bare `Var` collection with an explicit type annotation (an inferred-type collection's element permission isn't tracked).
+
+#### Array fill and comprehension
+
+Two shorthand forms create arrays without listing every element:
+
+```boring
+let zeros  = [0 for ..10]             # fill: 10 zeros
+let squares = [i * i for i in ..5]   # comprehension: [0, 1, 4, 9, 16]
+```
+
+The range must be `..n` (exclusive, starting at 0) or `0..n`. In the comprehension form, `i` is bound to the index (0-based, type `int`). Both forms produce a `[T]` (`Vec<T>`).
+
+**Rust equivalent**
+```rust
+let zeros: Vec<isize>   = vec![0isize; 10];
+let squares: Vec<isize> = (0..5isize).map(|i| i * i).collect();
+```
+
+#### Fixed-size arrays — `[T, N]`
+
+A compile-time size can be given as a second element of the type, separated by a comma. The result is a stack-allocated array of exactly `N` elements, analogous to Rust's `[T; N]`.
+
+```boring
+let [float, 4] v = [1.0, 2.0, 3.0, 4.0]
+let [int, 3]   z = [0 for ..3]
+
+struct Mat2:
+    [float, 4] data                   # inline in a struct field
+
+let m = Mat2(data= [0.0, 1.0, 0.0, 1.0])
+print m.data[0]                       # 0
+```
+
+**Rust equivalent**
+```rust
+let v: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+let z: [isize; 3] = [0isize; 3];
+```
+
+`N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
+
+#### Labeled multi-dimensional arrays — `[T, width, height]`
+
+For 2 or more dimensions, `[T, N]`'s comma-separated slot generalizes into a
+list of **labels** — every index and every axis size is then read by name,
+not by position, so it's never ambiguous which one means rows and which
+means columns:
+
+```boring
+let [float, width, height] a = [ 0.0 for width = 3, height = 4 ]  # dynamic shape
+let [float, width = 3, height = 4] b                              # fixed shape
+
+let v = a[width = 1, height = 2]   # order-free — a[height = 2, width = 1] is identical
+let w = a.width                    # 3 — read-only shape-query property
+```
+
+- `[T, width, height]` (no `=`) — dynamic shape, sized at construction.
+- `[T, width = W, height = H]` — fixed shape, compile-time sizes (`W`/`H` may
+  be integer literals or const-generic expressions).
+- The **first label declared is the fastest-varying axis** in memory
+  (row-major storage) — `[T, width, height]` and `[T, height, width]` are
+  different (transposed) types.
+- `a[label = value, ...]` indexing requires every axis to be labeled — there
+  is no positional form — and reads correctly regardless of the order the
+  labels are written in.
+- `a.label` — each declared axis is a read-only property, same no-parens
+  convention as `arr.length` or a struct's `req` getter.
+- `flat.reshape(width = W, height = H)` / `a.flatten()` convert to and from
+  a plain `[T]` explicitly — never implicitly.
+
+Chained `for` clauses build one directly, one clause per axis:
+
+```boring
+let grid = [ f(width, height) for width in ..W for height in ..H ]
+```
+
+Full reference — the fill shorthand (`[0.0 for width = w, height = h]`),
+`.reshape()`/`.flatten()`, and the cross-label safety rule for passing
+arrays between differently-labeled parameters:
+[`array-multidim-types.md`](array-multidim-types.html). GPU-kernel-specific
+behavior (qualifiers, grid inference): [`gpu-module.md`](gpu-module.html).
+
+#### Array slicing
+
+A sub-array can be extracted with slice syntax. The result is a new `[T]` containing a copy of the selected elements.
+
+```boring
+let a = [10, 20, 30, 40, 50]
+
+let b = a[1..3]    # [20, 30]        — exclusive: indices 1 and 2
+let c = a[..3]     # [10, 20, 30]    — from start up to (not including) 3
+let d = a[2..]     # [30, 40, 50]    — from index 2 to end
+let e = a[..]      # [10, 20, 30, 40, 50]  — full copy
+let f = a[1..=3]   # [20, 30, 40]   — inclusive: indices 1, 2 and 3
+```
+
+Out-of-range bounds are clamped silently. An empty range (e.g. `a[3..1]`) produces `[]`.
+
+**Rust equivalent**
+```rust
+let b = a[1..3].to_vec();
+let c = a[..3].to_vec();
+let d = a[2..].to_vec();
+let e = a[..].to_vec();
+let f = a[1..=3].to_vec();
+```
+
+#### Array methods
+
+| Boring                      | Rust                              |
+|-----------------------------|-----------------------------------|
+| `arr.length`                | `arr.len()`                       |
+| `arr.first()`                | `arr.first().cloned()`            |
+| `arr.last()`                 | `arr.last().cloned()`             |
+| `arr.push(v)`               | `arr.push(v)`                     |
+| `arr.pop()`                 | `arr.pop()`                       |
+| `arr.append(other)`         | `arr.extend(other)`               |
+| `arr.insert(i, v)`          | `arr.insert(i, v)`                |
+| `arr.remove(i)`             | `arr.remove(i)`                   |
+| `arr.contains(v)`           | `arr.contains(&v)`                |
+| `arr.sort()`                | `arr.sort()`                      |
+| `arr.reverse()`             | `arr.reverse()`                   |
+| `arr.map((x): expr)`        | `arr.iter().map(\|x\| expr).collect()` |
+| `arr.filter((x): cond)`     | `arr.iter().filter(\|x\| cond).cloned().collect()` |
+| `arr.reduce(init, (a,b): expr)` | `arr.iter().fold(init, \|a,b\| expr)` |
+| `arr.any((x): cond)`        | `arr.iter().any(\|x\| cond)`      |
+| `arr.all((x): cond)`        | `arr.iter().all(\|x\| cond)`      |
+| `arr.join(sep)`             | `arr.join(sep)`                   |
+| `arr.flat()`                | `arr.concat()`                    |
+| `arr.isEmpty()`             | `arr.is_empty()`                  |
+
+```boring
+let doubled  = numbers.map((n): n * 2)
+let evens    = numbers.filter((n): n % 2 == 0)
+let total    = numbers.reduce(0, (acc, n): acc + n)
+```
+
+### Dictionaries — `{K=V}`
+
+```boring
+let {string=int} scores = {"Alice" = 90, "Bob" = 85}
+let {int=int} empty_map = {=}
+```
+
+**Rust equivalent**
+```rust
+let scores: HashMap<Arc<str>, isize> = HashMap::from([...]); // literals coerced via .to_arc()
+let empty_map: HashMap<isize, isize> = HashMap::new();
+```
+
+`mut` on the **value** position — `{K = mut V}` — is the dict analogue of `[mut T]`: it controls whether `def` calls work on values fetched via `d[k]` or iteration, independent of `mut {K=V} d` (structural `d[k]=v`/insertion/removal on the dict itself). Keys never accept `mut` — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust `HashMap`.
+
+#### Dictionary methods
+
+| Boring                      | Rust                              |
+|-----------------------------|-----------------------------------|
+| `d.keys()`                  | `d.keys().cloned().collect()`     |
+| `d.values()`                | `d.values().cloned().collect()`   |
+| `d.contains(k)`             | `d.contains_key(&k)`              |
+| `d.remove(k)`               | `d.remove(&k)`                    |
+| `d.length`                  | `d.len()`                         |
+| `d.isEmpty()`               | `d.is_empty()`                    |
+| `d.map((k,v): expr)`        | `d.iter().map(\|(k,v)\| expr).collect()` |
+| `d.filter((k,v): cond)`     | `d.into_iter().filter(\|(k,v)\| cond).collect()` |
+
+### Sets — `{T}`
+
+```boring
+let {int} unique = {1, 2, 3, 2, 1}   # deduplicates → {1, 2, 3}
+let {int} empty_set = {}
+```
+
+**Rust equivalent**
+```rust
+let unique: HashSet<isize> = HashSet::from([1, 2, 3]);
+let empty_set: HashSet<isize> = HashSet::new();
+```
+
+`{mut T}` (element-`mut` on a set) is rejected outright — not a Boring design choice, a hard Rust limitation: `HashSet<T>` deliberately exposes no mutable element access at all (no `iter_mut()`, no `get_mut()`), because mutating an element in place could change its `Hash`/`Eq` behavior and silently corrupt the set's buckets. `mut {T}` (mutable on the *set itself* — structural `add`/`remove`) is unaffected and works normally.
+
+#### Set methods
+
+| Boring                | Rust                          |
+|-----------------------|-------------------------------|
+| `s.contains(v)`       | `s.contains(&v)`              |
+| `s.add(v)`            | `s.insert(v)`                 |
+| `s.remove(v)`         | `s.remove(&v)`                |
+| `s.length`            | `s.len()`                     |
+| `s.isEmpty()`         | `s.is_empty()`                |
+
+### Index — opaque collection cursor
+
+Boring provides safe iteration over collections through an opaque `Index<T>` type. `firstIndex()` and `nextIndex(idx)` return `nil` when the collection is exhausted — no integer arithmetic needed.
+
+**Array example**
+```boring
+var nums = [10, 20, 30, 40]
+var i = nums.firstIndex()
+while let idx = i:
+    print "elem: {nums[idx]}"
+    i = nums.nextIndex(idx)
+nums = nums.removeAt(nums.firstIndex())   # new array without first element
+print nums                                 # [20, 30, 40]
+```
+
+**Modifying elements with `[]`** — `nums[idx] = value` works for arrays and dicts:
+```boring
+var nums = [10, 20, 30]
+var i = nums.firstIndex()
+while let idx = i:
+    nums[idx] = nums[idx] * 2             # double each element in place
+    i = nums.nextIndex(idx)
+print nums                                 # [20, 40, 60]
+
+var d = {"a" = 1, "b" = 2}
+var k = d.firstIndex()
+while let idx = k:
+    d[idx] = d[idx] + 10                  # update each value in place
+    k = d.nextIndex(idx)
+print d                                    # {"a" = 11, "b" = 12}
+```
+
+> Sets are read-only via index — `s[idx]` is not allowed. Use `getAt` to read and `remove` + `add` to modify.
+
+**Set example** — sets cannot be subscripted with `s[idx]`; use `getAt` instead:
+```boring
+var s = {10, 20, 30}
+var j = s.firstIndex()
+while let idx = j:
+    print "set: {s.getAt(idx)}"
+    j = s.nextIndex(idx)
+s = s.removeAt(s.firstIndex())
+```
+
+**Dict example** — the index is the key:
+```boring
+var d = {"a" = 1, "b" = 2}
+var k = d.firstIndex()
+while let idx = k:
+    print "{idx} → {d[idx]}"
+    k = d.nextIndex(idx)
+```
+
+**Optional type annotation**
+```boring
+var Index<[int]> cursor = nums.firstIndex()
+```
+
+**Index method reference**
+
+| Method                    | Array / Set         | Dict                  | Description                          |
+|---------------------------|---------------------|-----------------------|--------------------------------------|
+| `c.firstIndex()`          | `Option<usize>`     | `Option<K>`           | First index, or `nil` if empty       |
+| `c.nextIndex(idx)`        | `Option<usize>`     | `Option<K>`           | Next index after `idx`, or `nil`     |
+| `c.removeAt(idx)`         | new collection      | new collection        | Copy of collection without `idx`     |
+| `c.getAt(idx)`            | element             | value                 | Element at index (required for sets) |
+
+**Rust equivalent** — the transpiler emits `BoringArrayIndex`, `BoringDictIndex`, and `BoringSetIndex` extension traits in the preamble:
+```rust
+// arrays / sets → Option<usize>; dicts → Option<K>
+let mut i = nums.boring_first_index();
+while let Some(idx) = i {
+    println!("{}", nums[idx]);
+    i = nums.boring_next_index(idx);
+}
+```
+
+---
+
+## 5. Functions
 
 ### Basic definition
 
@@ -1166,7 +1446,7 @@ fn apply(f: impl Fn(isize) -> isize, x: isize) -> isize {
 
 ---
 
-## 5. Comments
+## 6. Comments
 
 ```boring
 # This is a comment
@@ -1183,7 +1463,7 @@ Only full-line comments are preserved in the transpiled output. Inline comments 
 
 ---
 
-## 6. Control Flow
+## 7. Control Flow
 
 ### `if` / `elif` / `else`
 
@@ -1689,311 +1969,6 @@ if ok: log "start"; proceed()
 ```
 
 Semicolons are optional everywhere — they exist for cases where grouping related statements on a single line improves readability.
-
----
-
-## 7. Collections
-
-### Arrays — `[T]`
-
-```boring
-let numbers = [1, 2, 3, 4, 5]
-let [int] empty = []
-```
-
-**Rust equivalent**
-```rust
-let numbers: Vec<isize> = vec![1, 2, 3, 4, 5];
-let empty: Vec<isize> = Vec::new();
-```
-
-#### Element mutability — `[mut T]` vs `mut [T]`
-
-`mut` on the collection's own type (`mut [Point] arr`) and `mut` on the **element** type (`[mut Point] arr`) control two independent things — see [§2](#2-variables-and-mutability):
-
-- **`[mut Point] arr`** — the array itself can't grow/shrink/reassign entries (unless also `mut`/`var mut`, see below), but every element already in it can have `def` called on it: `arr[0].move_to(...)`.
-- **`mut [Point] arr`** — the reverse: `arr` supports structural mutation (`push`, `insert`, index-assign), but elements are plain `Point` — no `def` calls through an index read.
-- **`mut [mut Point] arr`** — both.
-
-```boring
-struct Point: var int x; var int y
-
-let [mut Point] a = [Point(0, 0), Point(1, 1)]
-a[0].x = 5           # ok — element type is mut Point
-a[0].move_to(1, 1)   # ok
-
-let [Point] b = [Point(0, 0)]
-# b[0].x = 5         # ERROR — element type is plain Point, not mut Point
-# b[0].move_to(1, 1) # ERROR — same reason
-```
-
-This is checked for a bare `Var` collection with an explicit type annotation (an inferred-type collection's element permission isn't tracked).
-
-#### Array fill and comprehension
-
-Two shorthand forms create arrays without listing every element:
-
-```boring
-let zeros  = [0 for ..10]             # fill: 10 zeros
-let squares = [i * i for i in ..5]   # comprehension: [0, 1, 4, 9, 16]
-```
-
-The range must be `..n` (exclusive, starting at 0) or `0..n`. In the comprehension form, `i` is bound to the index (0-based, type `int`). Both forms produce a `[T]` (`Vec<T>`).
-
-**Rust equivalent**
-```rust
-let zeros: Vec<isize>   = vec![0isize; 10];
-let squares: Vec<isize> = (0..5isize).map(|i| i * i).collect();
-```
-
-#### Fixed-size arrays — `[T, N]`
-
-A compile-time size can be given as a second element of the type, separated by a comma. The result is a stack-allocated array of exactly `N` elements, analogous to Rust's `[T; N]`.
-
-```boring
-let [float, 4] v = [1.0, 2.0, 3.0, 4.0]
-let [int, 3]   z = [0 for ..3]
-
-struct Mat2:
-    [float, 4] data                   # inline in a struct field
-
-let m = Mat2(data= [0.0, 1.0, 0.0, 1.0])
-print m.data[0]                       # 0
-```
-
-**Rust equivalent**
-```rust
-let v: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-let z: [isize; 3] = [0isize; 3];
-```
-
-`N` must be a non-negative integer literal — it cannot be a runtime variable. Use `[T]` (`Vec<T>`) when the size is dynamic.
-
-#### Labeled multi-dimensional arrays — `[T, width, height]`
-
-For 2 or more dimensions, `[T, N]`'s comma-separated slot generalizes into a
-list of **labels** — every index and every axis size is then read by name,
-not by position, so it's never ambiguous which one means rows and which
-means columns:
-
-```boring
-let [float, width, height] a = [ 0.0 for width = 3, height = 4 ]  # dynamic shape
-let [float, width = 3, height = 4] b                              # fixed shape
-
-let v = a[width = 1, height = 2]   # order-free — a[height = 2, width = 1] is identical
-let w = a.width                    # 3 — read-only shape-query property
-```
-
-- `[T, width, height]` (no `=`) — dynamic shape, sized at construction.
-- `[T, width = W, height = H]` — fixed shape, compile-time sizes (`W`/`H` may
-  be integer literals or const-generic expressions).
-- The **first label declared is the fastest-varying axis** in memory
-  (row-major storage) — `[T, width, height]` and `[T, height, width]` are
-  different (transposed) types.
-- `a[label = value, ...]` indexing requires every axis to be labeled — there
-  is no positional form — and reads correctly regardless of the order the
-  labels are written in.
-- `a.label` — each declared axis is a read-only property, same no-parens
-  convention as `arr.length` or a struct's `req` getter.
-- `flat.reshape(width = W, height = H)` / `a.flatten()` convert to and from
-  a plain `[T]` explicitly — never implicitly.
-
-Chained `for` clauses build one directly, one clause per axis:
-
-```boring
-let grid = [ f(width, height) for width in ..W for height in ..H ]
-```
-
-Full reference — the fill shorthand (`[0.0 for width = w, height = h]`),
-`.reshape()`/`.flatten()`, and the cross-label safety rule for passing
-arrays between differently-labeled parameters:
-[`array-multidim-types.md`](array-multidim-types.html). GPU-kernel-specific
-behavior (qualifiers, grid inference): [`gpu-module.md`](gpu-module.html).
-
-#### Array slicing
-
-A sub-array can be extracted with slice syntax. The result is a new `[T]` containing a copy of the selected elements.
-
-```boring
-let a = [10, 20, 30, 40, 50]
-
-let b = a[1..3]    # [20, 30]        — exclusive: indices 1 and 2
-let c = a[..3]     # [10, 20, 30]    — from start up to (not including) 3
-let d = a[2..]     # [30, 40, 50]    — from index 2 to end
-let e = a[..]      # [10, 20, 30, 40, 50]  — full copy
-let f = a[1..=3]   # [20, 30, 40]   — inclusive: indices 1, 2 and 3
-```
-
-Out-of-range bounds are clamped silently. An empty range (e.g. `a[3..1]`) produces `[]`.
-
-**Rust equivalent**
-```rust
-let b = a[1..3].to_vec();
-let c = a[..3].to_vec();
-let d = a[2..].to_vec();
-let e = a[..].to_vec();
-let f = a[1..=3].to_vec();
-```
-
-#### Array methods
-
-| Boring                      | Rust                              |
-|-----------------------------|-----------------------------------|
-| `arr.length`                | `arr.len()`                       |
-| `arr.first()`                | `arr.first().cloned()`            |
-| `arr.last()`                 | `arr.last().cloned()`             |
-| `arr.push(v)`               | `arr.push(v)`                     |
-| `arr.pop()`                 | `arr.pop()`                       |
-| `arr.append(other)`         | `arr.extend(other)`               |
-| `arr.insert(i, v)`          | `arr.insert(i, v)`                |
-| `arr.remove(i)`             | `arr.remove(i)`                   |
-| `arr.contains(v)`           | `arr.contains(&v)`                |
-| `arr.sort()`                | `arr.sort()`                      |
-| `arr.reverse()`             | `arr.reverse()`                   |
-| `arr.map((x): expr)`        | `arr.iter().map(\|x\| expr).collect()` |
-| `arr.filter((x): cond)`     | `arr.iter().filter(\|x\| cond).cloned().collect()` |
-| `arr.reduce(init, (a,b): expr)` | `arr.iter().fold(init, \|a,b\| expr)` |
-| `arr.any((x): cond)`        | `arr.iter().any(\|x\| cond)`      |
-| `arr.all((x): cond)`        | `arr.iter().all(\|x\| cond)`      |
-| `arr.join(sep)`             | `arr.join(sep)`                   |
-| `arr.flat()`                | `arr.concat()`                    |
-| `arr.isEmpty()`             | `arr.is_empty()`                  |
-
-```boring
-let doubled  = numbers.map((n): n * 2)
-let evens    = numbers.filter((n): n % 2 == 0)
-let total    = numbers.reduce(0, (acc, n): acc + n)
-```
-
-### Dictionaries — `{K=V}`
-
-```boring
-let {string=int} scores = {"Alice" = 90, "Bob" = 85}
-let {int=int} empty_map = {=}
-```
-
-**Rust equivalent**
-```rust
-let scores: HashMap<Arc<str>, isize> = HashMap::from([...]); // literals coerced via .to_arc()
-let empty_map: HashMap<isize, isize> = HashMap::new();
-```
-
-`mut` on the **value** position — `{K = mut V}` — is the dict analogue of `[mut T]`: it controls whether `def` calls work on values fetched via `d[k]` or iteration, independent of `mut {K=V} d` (structural `d[k]=v`/insertion/removal on the dict itself). Keys never accept `mut` — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust `HashMap`.
-
-#### Dictionary methods
-
-| Boring                      | Rust                              |
-|-----------------------------|-----------------------------------|
-| `d.keys()`                  | `d.keys().cloned().collect()`     |
-| `d.values()`                | `d.values().cloned().collect()`   |
-| `d.contains(k)`             | `d.contains_key(&k)`              |
-| `d.remove(k)`               | `d.remove(&k)`                    |
-| `d.length`                  | `d.len()`                         |
-| `d.isEmpty()`               | `d.is_empty()`                    |
-| `d.map((k,v): expr)`        | `d.iter().map(\|(k,v)\| expr).collect()` |
-| `d.filter((k,v): cond)`     | `d.into_iter().filter(\|(k,v)\| cond).collect()` |
-
-### Sets — `{T}`
-
-```boring
-let {int} unique = {1, 2, 3, 2, 1}   # deduplicates → {1, 2, 3}
-let {int} empty_set = {}
-```
-
-**Rust equivalent**
-```rust
-let unique: HashSet<isize> = HashSet::from([1, 2, 3]);
-let empty_set: HashSet<isize> = HashSet::new();
-```
-
-`{mut T}` (element-`mut` on a set) is rejected outright — not a Boring design choice, a hard Rust limitation: `HashSet<T>` deliberately exposes no mutable element access at all (no `iter_mut()`, no `get_mut()`), because mutating an element in place could change its `Hash`/`Eq` behavior and silently corrupt the set's buckets. `mut {T}` (mutable on the *set itself* — structural `add`/`remove`) is unaffected and works normally.
-
-#### Set methods
-
-| Boring                | Rust                          |
-|-----------------------|-------------------------------|
-| `s.contains(v)`       | `s.contains(&v)`              |
-| `s.add(v)`            | `s.insert(v)`                 |
-| `s.remove(v)`         | `s.remove(&v)`                |
-| `s.length`            | `s.len()`                     |
-| `s.isEmpty()`         | `s.is_empty()`                |
-
-### Index — opaque collection cursor
-
-Boring provides safe iteration over collections through an opaque `Index<T>` type. `firstIndex()` and `nextIndex(idx)` return `nil` when the collection is exhausted — no integer arithmetic needed.
-
-**Array example**
-```boring
-var nums = [10, 20, 30, 40]
-var i = nums.firstIndex()
-while let idx = i:
-    print "elem: {nums[idx]}"
-    i = nums.nextIndex(idx)
-nums = nums.removeAt(nums.firstIndex())   # new array without first element
-print nums                                 # [20, 30, 40]
-```
-
-**Modifying elements with `[]`** — `nums[idx] = value` works for arrays and dicts:
-```boring
-var nums = [10, 20, 30]
-var i = nums.firstIndex()
-while let idx = i:
-    nums[idx] = nums[idx] * 2             # double each element in place
-    i = nums.nextIndex(idx)
-print nums                                 # [20, 40, 60]
-
-var d = {"a" = 1, "b" = 2}
-var k = d.firstIndex()
-while let idx = k:
-    d[idx] = d[idx] + 10                  # update each value in place
-    k = d.nextIndex(idx)
-print d                                    # {"a" = 11, "b" = 12}
-```
-
-> Sets are read-only via index — `s[idx]` is not allowed. Use `getAt` to read and `remove` + `add` to modify.
-
-**Set example** — sets cannot be subscripted with `s[idx]`; use `getAt` instead:
-```boring
-var s = {10, 20, 30}
-var j = s.firstIndex()
-while let idx = j:
-    print "set: {s.getAt(idx)}"
-    j = s.nextIndex(idx)
-s = s.removeAt(s.firstIndex())
-```
-
-**Dict example** — the index is the key:
-```boring
-var d = {"a" = 1, "b" = 2}
-var k = d.firstIndex()
-while let idx = k:
-    print "{idx} → {d[idx]}"
-    k = d.nextIndex(idx)
-```
-
-**Optional type annotation**
-```boring
-var Index<[int]> cursor = nums.firstIndex()
-```
-
-**Index method reference**
-
-| Method                    | Array / Set         | Dict                  | Description                          |
-|---------------------------|---------------------|-----------------------|--------------------------------------|
-| `c.firstIndex()`          | `Option<usize>`     | `Option<K>`           | First index, or `nil` if empty       |
-| `c.nextIndex(idx)`        | `Option<usize>`     | `Option<K>`           | Next index after `idx`, or `nil`     |
-| `c.removeAt(idx)`         | new collection      | new collection        | Copy of collection without `idx`     |
-| `c.getAt(idx)`            | element             | value                 | Element at index (required for sets) |
-
-**Rust equivalent** — the transpiler emits `BoringArrayIndex`, `BoringDictIndex`, and `BoringSetIndex` extension traits in the preamble:
-```rust
-// arrays / sets → Option<usize>; dicts → Option<K>
-let mut i = nums.boring_first_index();
-while let Some(idx) = i {
-    println!("{}", nums[idx]);
-    i = nums.boring_next_index(idx);
-}
-```
 
 ---
 
@@ -4723,7 +4698,7 @@ let int tx, rx = channel(32)
 let tx, rx = channel<int, 32>
 ```
 
-All three forms are fully interchangeable. The transpiler extracts the capacity from whichever position it appears — second type argument or first call argument — and forwards it to the backend. On the **tokio backend** it becomes the argument to `tokio::sync::mpsc::channel(N)`. On the **kernel backend** it sets the size of the pre-allocated ring buffer; see [Rust-for-Linux target](#30-rust-for-linux-target).
+All three forms are fully interchangeable. The transpiler extracts the capacity from whichever position it appears — second type argument or first call argument — and forwards it to the backend. On the **tokio backend** it becomes the argument to `tokio::sync::mpsc::channel(N)`. On the **kernel backend** it sets the size of the pre-allocated ring buffer; see [Rust-for-Linux target](kernel-target.html).
 
 #### Capacity in single-thread mode
 
@@ -5507,47 +5482,7 @@ d.inc()       # OK — var mut grants both rebind and content mutation
 d = Counter() # OK — rebind
 ```
 
-### Explicit borrow syntax — `T&`
-
-> **You rarely need this.** Structs and enums are already passed by reference automatically (see [Pass-by-reference — automatic](#pass-by-reference--automatic)). Reach for `T&` only when you need an explicit lifetime annotation or must lock in the borrow convention regardless of how the function body evolves.
-
-Borrows are written with `&` directly after the type name. The binding keyword defines what the callee can do with the reference:
-
-| Syntax | Rust type | Semantics |
-|---|---|---|
-| `T& m` / `let T& m` | `&T` | read-only — callee cannot modify content or binding |
-| `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
-| `var T m` | `&mut T` | callee can modify the caller's variable — equivalent to `mut T& m` without the explicit borrow syntax |
-
-| Form          | Rust type     | Notes                                                  |
-|---------------|---------------|--------------------------------------------------------|
-| `T&`          | `&T`          | Universal borrow — coerced from any qualifier          |
-| `mut T&`      | `&mut T`      | Mutable universal borrow                               |
-| `T?&`         | `&Option<T>`  | Borrow an optional                                     |
-| `T&a`         | `&'a T`       | Borrow with explicit lifetime                          |
-
-Lifetimes are only valid in borrow position (`&`), never on owned qualifiers (`'`). The lifetime letter is declared as a type parameter with `<'a>` and can appear anywhere a borrow is written:
-
-```boring
-# both params and return tied to the same lifetime 'a
-# no need to declare <'a> — lifetimes are inferred from usage
-string&a longest(string&a x, string&a y):
-    if x.len() > y.len(): x else y
-```
-
-**Rust equivalent**
-```rust
-fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
-    if x.len() > y.len() { x } else { y }
-}
-```
-
-Borrow forms with lifetime:
-
-| Boring | Rust | Meaning |
-|--------|------|---------|
-| `T&a` | `&'a T` | borrow a value |
-| `T'&a` | `&'a Box<T>` | borrow a heap-allocated value |
+> Boring also has an **explicit borrow syntax**, `T&` — rarely needed, since structs and enums are already passed by reference automatically (see [Pass-by-reference — automatic](#pass-by-reference--automatic)). See [Advanced — Explicit borrow syntax: `T&`](#advanced--explicit-borrow-syntax-t) for when and how to use it.
 
 ### Built-in type aliases
 
@@ -5692,60 +5627,7 @@ with a, b:
 
 Nesting a block on the **same** name inside itself is a compile error (double-acquire — `Mutex`/`RwLock` are not reentrant). Nesting on **different** names is unrestricted.
 
-### `with` for GPU kernel fields — `'gpu'unified`, `'gpu'global`
-
-A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'gpu'unified`/`'gpu'global`-qualified alias and reading it inside a `with` block materializes it exactly once instead, however many times the block's body indexes it:
-
-```boring
-var k = VectorAdd(host_a, host_b)
-kernel:
-    k(block = 256)
-
-let [int]'gpu'unified result = k.result   # compile-time alias — no transfer yet
-with result:                              # `result` is `let`-bound -> read-only
-    for i in 0..n:
-        print "c[{i}] = {result[i]}"      # readback happens once, here
-```
-
-This is purely additive — `k.result[i]` without an alias still works exactly as before, and is the right choice for a single access. The alias only pays off when the same field is read (or written) more than once in the same scope. A `mut`/`var`-bound alias follows the same read/write scan as `'actor`/`'guard`: mutating it inside the block (`result[i] = v`) writes the whole array back to the GPU once, at block close; a read-only block never does.
-
-The `'gpu'unified`/`'gpu'global` annotation itself is optional here — it's inferred whenever the initializer is a bare `k.field` read on a tracked kernel instance whose field is actually declared `'unified`/`'global`, so `let result = k.result` behaves identically to the explicit form above:
-
-```boring
-let result = k.result   # qualifier inferred from k.result's own 'unified declaration
-with result:
-    for i in 0..n:
-        print "c[{i}] = {result[i]}"
-```
-
-A `'gpu'unified`/`'gpu'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
-
-### Residency across a function boundary
-
-Everything above works when the kernel is constructed and read back in the same scope. Residency also survives a **function-call boundary**: a function declared with a `'gpu'unified`/`'gpu'global` return type hands its result straight to the next call as a still-resident value, with no host round-trip in between — only the final consumer's `with` pays a real transfer:
-
-```boring
-req [float]'gpu'unified linear_gpu([float] x, [float] w, [float] b, int seq, int d_in, int d_out):
-    mut k = Linear(x, w, b, seq, d_in, d_out)
-    kernel:
-        k(block = seq * d_out)
-    k.y
-
-req [float]'gpu'unified gelu_gpu([float] x, int n):
-    mut k = Gelu(x)
-    kernel:
-        k(block = n)
-    k.out
-
-let fc = linear_gpu(h, w1, b1, 1, d, d * 4)   # dispatch, stays resident
-let act = gelu_gpu(fc, d * 4)                  # fc consumed directly — no upload, no download
-with act:
-    print "act[0] = {act[0]}"                 # the only real device->host transfer in the chain
-```
-
-A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'gpu'unified`/`'gpu'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
-
-> Both halves of this design — same-scope kernel-field materialization and cross-function residency — are implemented and shipped. See [Scoped Access Blocks](scoped-access-blocks.html) for the full design, the codegen this actually produces, and current known limitations (cuda/metal targets don't share this yet).
+> `with` also has a GPU-specific use — materializing a `kernel` struct's `'unified`/`'global` field exactly once instead of on every access, including across a function-call boundary. See [chapter 32, GPU Computing](#32-gpu-computing).
 
 ---
 
@@ -6374,6 +6256,17 @@ struct Color:
 #[derive(Debug, Clone, PartialEq)]
 struct Color { r: isize, g: isize, b: isize }
 ```
+
+A more Boring-flavored equivalent exists too, for these built-in traits: naming them in the struct's own `as Trait:` header — normally trait *conformance* (see [§10](#10-traits-and-extensions)) — is recognized instead as a request to derive them, no method bodies needed:
+
+```boring
+struct Color as Debug, Clone, PartialEq:
+    int r
+    int g
+    int b
+```
+
+This only works for a whitelist of zero-dependency std derive macros (`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`, `Default`, plus anything your project adds via `boring.toml`'s `[derives]`) and has one caveat around the auto-default every struct/enum with no explicit `@derive` already gets — see [Advanced — derive-trait whitelist](#advanced--derive-trait-whitelist-as-trait-routed-into-derive) for the full rules before converting an existing `@derive(...)` to this form.
 
 The no-parentheses form applies to all `@` attributes, including `@error` on enum variants:
 
@@ -7051,6 +6944,65 @@ let val: &str = "toto";
 let n: &str = "42";
 let n: isize = n.trim().parse().unwrap_or(0);
 ```
+
+### Advanced — Explicit borrow syntax: `T&`
+
+> **You rarely need this.** Structs and enums are already passed by reference automatically (see [Pass-by-reference — automatic](#pass-by-reference--automatic)). Reach for `T&` only when you need an explicit lifetime annotation, must lock in the borrow convention regardless of how the function body evolves, or need a borrowed value to compose into a tuple or generic argument (see below).
+
+Borrows are written with `&` directly after the type name. The binding keyword defines what the callee can do with the reference:
+
+| Syntax | Rust type | Semantics |
+|---|---|---|
+| `T& m` / `let T& m` | `&T` | read-only — callee cannot modify content or binding |
+| `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
+| `var T m` | `&mut T` | callee can modify the caller's variable — equivalent to `mut T& m` without the explicit borrow syntax |
+
+| Form          | Rust type     | Notes                                                  |
+|---------------|---------------|--------------------------------------------------------|
+| `T&`          | `&T`          | Universal borrow — coerced from any qualifier          |
+| `mut T&`      | `&mut T`      | Mutable universal borrow                               |
+| `T?&`         | `&Option<T>`  | Borrow an optional                                     |
+| `T&a`         | `&'a T`       | Borrow with explicit lifetime                          |
+
+Lifetimes are only valid in borrow position (`&`), never on owned qualifiers (`'`). The lifetime letter is declared as a type parameter with `<'a>` and can appear anywhere a borrow is written:
+
+```boring
+# both params and return tied to the same lifetime 'a
+# no need to declare <'a> — lifetimes are inferred from usage
+string&a longest(string&a x, string&a y):
+    if x.len() > y.len(): x else y
+```
+
+**Rust equivalent**
+```rust
+fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+    if x.len() > y.len() { x } else { y }
+}
+```
+
+Borrow forms with lifetime:
+
+| Boring | Rust | Meaning |
+|--------|------|---------|
+| `T&a` | `&'a T` | borrow a value |
+| `T'&a` | `&'a Box<T>` | borrow a heap-allocated value |
+
+#### Borrowed tuple slots: `mut Type&`
+
+`Type&` is a borrow (`&Type` in Rust); `mut Type&` is a mutable borrow (`&mut Type`). Unlike the owned `mut Type` form (see [§2](#2-variables-and-mutability)), `Type&`/`mut Type&` are genuine, distinct Rust types, so they compose freely into tuples and generic arguments — exactly what a Bevy-ECS-style query needs:
+
+```boring
+struct Position: var float x; var float y
+struct Velocity: var float dx; var float dy
+
+var p = Position(x = 0.0, y = 0.0)
+var v = Velocity(dx = 1.0, dy = 0.0)
+let (Position&, mut Velocity&) pair = (p, v)
+pair.1.dx = pair.1.dx + 1.0   # ok — slot 1 is a mutable borrow
+# pair.0.x = 5.0              # ERROR — slot 0 is a plain (immutable) borrow
+```
+
+There's no sigil for this (`Type!`/`Type*` were both considered and dropped) — `mut Type&` stays consistent with the rest of Boring's spelled-out-keyword surface syntax.
 
 ### Advanced — `transient` fields and `?=` nil-coalescing assignment
 
@@ -7885,7 +7837,7 @@ let c'? = some(Counter(0))  # T'? → restricted set {Owned, Shared, Actor, Guar
 
 `T?` with inferred `'actor` becomes `Option<Arc<Mutex<Counter>>>` — the `Option` wraps the qualified value, not the other way around. Conflict detection works the same as for bare variables.
 
-## 32. Debugging & Profiling
+## 31. Debugging & Profiling
 
 Boring provides several layers of debugging support, from language-level builtins to build flags that activate Rust's own tooling.  All flags are orthogonal and composable.
 
@@ -8134,25 +8086,82 @@ This single command produces a binary that:
 
 ---
 
-## Further Reading
+## 32. GPU Computing
 
-The following documents cover topics in greater depth or address areas still under active design.
+Boring can target GPUs directly, alongside the standard Rust (CPU) backend: a `kernel Name:` struct declares device-resident state and dispatchable work, compiled by one of four GPU backends — `boring build --target cuda|rocm|metal|wgpu`. This chapter covers the two things that show up as soon as you write a kernel's fields: each backend's own numeric type system supports a narrower set of widths than the host-side types from [chapter 3](#3-data-types), and reading a `'unified`/`'global` field back from the GPU needs the `with` block from [chapter 21](#21-ownership-qualifiers) to avoid a transfer on every access. Everything else — `kernel` syntax, memory qualifiers, dispatch, atomics, multi-device — lives in the linked references below.
 
-### Ownership and qualifiers
+### Numeric type support per target
 
-**[Qualifiers — Complete Reference](qualifiers.html)**
-All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
+Each GPU backend's own numeric type system limits which widths a `kernel` struct field can use:
 
-**[Binding and mutability](binding-mutability.html)**
-Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
+| Width | `--target wgpu` (WGSL) | `--target cuda` (CUDA C) | `--target rocm` (HIP C++) | `--target metal` (MSL) |
+|-------|-------------------------|---------------------------|-----------------------------|--------------------------|
+| 8-bit | not supported (compile error) | full support (`uint8_t`/`int8_t`) | full support (`uint8_t`/`int8_t`) | full support (`uchar`/`char`) |
+| 16-bit | not supported (compile error) | full support | full support | full support (`ushort`/`short`) |
+| 32-bit | full support (`i32`/`u32`) | full support | full support | full support (`int`/`uint`) |
+| 64-bit | not supported (compile error) | full support | full support | not supported (compile error) |
+| 128-bit | not supported (compile error) | supported via the non-standard `__int128` GCC/NVCC extension | supported via the non-standard `__int128` GCC/HIP-clang extension | not supported (compile error) |
+| 32-bit float (`float32`) | full support (native `f32`) | full support (`float`) | full support (`float`) | full support (native `float`) |
+| 64-bit float (`float64`/`float`) | not supported (compile error — no `f64` in WGSL at all) | full support (`double`) | full support (`double`) | not supported (compile error — MSL has no native `double`) |
 
-**[`new` placement operator](new-placement.html)**
-Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
+WGSL has no native integer type below or above 32 bits, and no 64-bit float type at all; MSL has no native 64/128-bit integer and no native `double` (Apple GPUs historically lack native 64-bit ALU ops, for both integers and floats). ROCm's HIP C++ mirrors CUDA C's numeric type system (same underlying LLVM/Clang toolchain), so it has identical width support, floats included. Using an unsupported width — or `float64`/`float` on Metal or wgpu — on a kernel field produces a clear error at the point the type would be emitted, rather than silently mis-narrowing the data; use `float32` there instead.
 
-**[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
-Full design and implementation notes for `with` (see [chapter 21](#scoped-access-blocks--with) above for the language reference, including [residency across a function boundary](#residency-across-a-function-boundary)). The `'actor`/`'guard` per-block locking half, the same-scope `'gpu'unified`/`'gpu'global` kernel-field materialization half, and the inter-procedural case (a resident value returned across a function boundary and chained into a further call) are all implemented and shipped. This document records the full design, exactly what the generated Rust looks like, and current known limitations (cuda/metal targets don't share this yet).
+### `with` for GPU kernel fields — `'gpu'unified`, `'gpu'global`
 
-### GPU computing
+A `kernel Name:` struct's `'unified`/`'global` field is read back from the GPU **on every single access** — `k.result[i]` inside a loop re-reads the *entire* buffer back from the GPU on every iteration. Binding the field through a `'gpu'unified`/`'gpu'global`-qualified alias and reading it inside a `with` block (see [chapter 21, Scoped access blocks — `with`](#scoped-access-blocks--with)) materializes it exactly once instead, however many times the block's body indexes it:
+
+```boring
+var k = VectorAdd(host_a, host_b)
+kernel:
+    k(block = 256)
+
+let [int]'gpu'unified result = k.result   # compile-time alias — no transfer yet
+with result:                              # `result` is `let`-bound -> read-only
+    for i in 0..n:
+        print "c[{i}] = {result[i]}"      # readback happens once, here
+```
+
+This is purely additive — `k.result[i]` without an alias still works exactly as before, and is the right choice for a single access. The alias only pays off when the same field is read (or written) more than once in the same scope. A `mut`/`var`-bound alias follows the same read/write scan as `'actor`/`'guard`: mutating it inside the block (`result[i] = v`) writes the whole array back to the GPU once, at block close; a read-only block never does.
+
+The `'gpu'unified`/`'gpu'global` annotation itself is optional here — it's inferred whenever the initializer is a bare `k.field` read on a tracked kernel instance whose field is actually declared `'unified`/`'global`, so `let result = k.result` behaves identically to the explicit form above:
+
+```boring
+let result = k.result   # qualifier inferred from k.result's own 'unified declaration
+with result:
+    for i in 0..n:
+        print "c[{i}] = {result[i]}"
+```
+
+A `'gpu'unified`/`'gpu'global`-qualified variable that is **not** initialized from a bare kernel-field read — an ordinary array literal or expression — is just a plain host array, freely indexed and assigned with no `with` wrapper required anywhere; the qualifier only matters once it's passed into a kernel constructor, which uploads it.
+
+### Residency across a function boundary
+
+Everything above works when the kernel is constructed and read back in the same scope. Residency also survives a **function-call boundary**: a function declared with a `'gpu'unified`/`'gpu'global` return type hands its result straight to the next call as a still-resident value, with no host round-trip in between — only the final consumer's `with` pays a real transfer:
+
+```boring
+req [float]'gpu'unified linear_gpu([float] x, [float] w, [float] b, int seq, int d_in, int d_out):
+    mut k = Linear(x, w, b, seq, d_in, d_out)
+    kernel:
+        k(block = seq * d_out)
+    k.y
+
+req [float]'gpu'unified gelu_gpu([float] x, int n):
+    mut k = Gelu(x)
+    kernel:
+        k(block = n)
+    k.out
+
+let fc = linear_gpu(h, w1, b1, 1, d, d * 4)   # dispatch, stays resident
+let act = gelu_gpu(fc, d * 4)                  # fc consumed directly — no upload, no download
+with act:
+    print "act[0] = {act[0]}"                 # the only real device->host transfer in the chain
+```
+
+A parameter is only ever eligible for this zero-copy handoff when it's used *exclusively* as a kernel-constructor argument in the function's body — `x` above, in both functions; the block size instead comes from an ordinary `int` parameter (`n`, `d * 4`), which is why `gelu_gpu` doesn't read `x.length`. A parameter used more richly than that (indexed, measured, passed elsewhere) keeps the ordinary host-array behavior for that one parameter — no speedup, but no error either. The `'gpu'unified`/`'gpu'global` annotation on `let fc`/`let act` is optional here too, inferred the same way as the same-scope case.
+
+> Both halves of this design — same-scope kernel-field materialization and cross-function residency — are implemented and shipped. See [Scoped Access Blocks](scoped-access-blocks.html) for the full design, the codegen this actually produces, and current known limitations (cuda/metal targets don't share this yet).
+
+### Further reading
 
 **[GPU computing — language reference](gpu-module.html)**
 Complete GPU language reference: `kernel` struct syntax, const generic kernel declarations (`kernel Blur<int N>:`), memory qualifiers and inference rules, dispatch, the `GPU` type, atomics, multi-device dispatch, `after =` ordering, and simulation mode and profiles.
@@ -8174,6 +8183,26 @@ Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` obje
 
 **[Warp-level primitives](warp-level-primitives.html)**
 `gpu.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
+
+---
+
+## Further Reading
+
+The following documents cover topics in greater depth or address areas still under active design.
+
+### Ownership and qualifiers
+
+**[Qualifiers — Complete Reference](qualifiers.html)**
+All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
+
+**[Binding and mutability](binding-mutability.html)**
+Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.
+
+**[`new` placement operator](new-placement.html)**
+Explicit placement syntax for arena, heap, and GPU device allocators — `new(arena) T(...)`. Covers qualifier interaction, GPU device placement, and the full inference override rules.
+
+**[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
+Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for the GPU-specific `'gpu'unified`/`'gpu'global` kernel-field materialization, including [residency across a function boundary](#residency-across-a-function-boundary). Both halves are implemented and shipped. This document records the full design, exactly what the generated Rust looks like, and current known limitations (cuda/metal targets don't share this yet).
 
 ### Compilation targets
 
