@@ -40,6 +40,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Auto-ref borrowing extended to array/dict/set parameters on free functions (previously struct/enum params only) — avoids a full clone on every call.
 - `use` import resolution now also searches a project's `src/` directory from `boring run`/`boring build`'s GPU targets, matching non-GPU builds.
 - Numerous GPU-backend correctness fixes across CUDA/Metal/ROCm/wgpu: kernel block/grid dispatch scanning recursing into function bodies, unreachable free-function WGSL emission, cross-kernel buffer-name collisions, zero-sized output buffers, array-index method-call receivers being cloned before mutation, unary/range operator precedence, top-level scalar inlining, and unsupported kernel/async patterns now reported as clean compile errors instead of panicking.
+- **wgpu backend: a `Type::LabeledArray` kernel field (`[T, width = .., height = ..]'global`/`'unified`) was silently dropped from every host-side codegen path** — the multi-dimensional-array feature added `LabeledArray` alongside `Array`/`ArrayN`, but the wgpu host struct/constructor/bind-group/copy-accessor emission (`transpiler::wgpu::host`) and the shared kernel-construction-call codegen (`transpiler::emit_kernel`) still matched only the latter two. The field's struct field, GPU buffer, and bind-group entry vanished entirely, and its constructor argument silently cast straight to `i64` instead of being uploaded (`examples/matrix_mul_gpu_wgpu`, previously a Known Issue below).
+- **wgpu backend: an array comprehension's implicit loop var (`[expr for i in 0..n]`) still cast to `i64`** — a leftover from this release's `int`/`uint` → `isize`/`usize` move that only this one codegen path never picked up, producing a `Vec<i64>` where an explicitly `[int]`-typed (`Vec<isize>`) binding was expected (`examples/vector_add_gpu_wgpu`, previously a Known Issue below).
+- **wgpu backend: a kernel's `init()`-body output-fill count referencing a promoted top-level `const` used the stale pre-promotion name** — `field = [0 for ..n]` inside `init()`, where `n` names a top-level `let n = ...` rather than an init parameter, reproduced the boring-source identifier verbatim instead of resolving it through the same uppercasing rewrite (`gpu_top_level_const_names`) every other read site already gets (`examples/vector_add_gpu_wgpu`, previously a Known Issue below).
+- **wgpu backend: a bare `float(expr)` scalar kernel-field assignment (`k.t = float(...)`) narrowed to `f32` instead of `f64`** — `float` is a pure alias of `float64`, not its own type, but the host-side scalar-assignment codegen grouped it with `float32`'s device-only 32-bit narrowing, mismatching a `var float t` field's real `f64` host-struct type (`examples/plasma_metal_wgpu`, previously a Known Issue below).
 
 ### Spec
 
@@ -49,19 +53,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Known Issues
 
-Found while regenerating the `examples/*_wgpu` projects against the current compiler for this release (the committed projects were last generated against 0.9.3-era codegen); **left un-regenerated and unfixed for 0.9.5** since each needs its own real fix, not just a re-run:
+Found while regenerating the `examples/*_wgpu` projects against the current compiler for this release (the committed projects were last generated against 0.9.3-era codegen). `matrix_mul_gpu_wgpu`, `vector_add_gpu_wgpu`, and `plasma_metal_wgpu` were regenerated and fixed after this entry was first written — see the four wgpu-backend bullets above under Fixed — leaving one unrelated item still open:
 
-- **`matrix_mul_gpu_wgpu`**: regenerating drops the kernel's buffer fields entirely from the generated host struct (`k.a = ...` / `k.c` no longer resolve — only `device`/`queue`/`pipeline`/`bind_group` remain).
-- **`vector_add_gpu_wgpu`**: regenerating produces a `Vec<isize>`/`Vec<i64>` mismatch in the host array setup, plus an unrelated lowercase/uppercase constant-name mismatch (`n` referenced where the top-level scalar was promoted to `N`).
-- **`plasma_metal_wgpu`**: regenerating produces an `f32`/`f64` field-type mismatch on the kernel's scalar time field.
-- The `linguist/samples/gpu.br` `Blur` kernel (`[float, W * H]'const weights`, a const-generic-sized array field) isn't resolvable by `boring run`'s kernel simulation (`undefined variable 'W'`), and the same file's `TileSum` kernel hits the same f32/f64 width-mismatch class of bug as `plasma_metal_wgpu` above when built for `--target wgpu`.
+- The `linguist/samples/gpu.br` `Blur` kernel (`[float, W * H]'const weights`, a const-generic-sized array field) isn't resolvable by `boring run`'s kernel simulation (`undefined variable 'W'`), and the same file's `TileSum` kernel hits an f32/f64 buffer-element width mismatch (its `[float]` — i.e. `float64` — fields aren't representable in WGSL storage) when built for `--target wgpu`. Device-side, not the host-side scalar-field-cast class of bug the Fixed entries above address — left for its own fix.
 
-None of these affect `boring run` (interpreter) or the plain-array (non-`'unified`/`'global`) GPU examples, and the *committed* `examples/*_wgpu` projects (pre-this-release codegen) still build and pass `cargo check` as-is — only a fresh regeneration surfaces them. `examples/saxpy_wgpu` was the one exception already broken in its committed form (missing `.enumerate()` on `for i, v in k.y:`, the same root cause as the Fixed entry above) — that one *is* regenerated and fixed in this release.
+`examples/saxpy_wgpu` was the one `examples/*_wgpu` project already broken in its *committed* form before this release (missing `.enumerate()` on `for i, v in k.y:`, the same root cause as the auto-enumerate Fixed entry above) — that one was regenerated and fixed earlier in this same release cycle.
 
 ### Testing
 
 - Full suite: 642 interpreter unit tests (up from 445) and 76 functional cases × 4 transpile-mode combinations (up from 69), all green.
 - The self-hosted interpreter's own build+functional suite (`interpreter_build.rs` / `interpreter_functional.rs`) is verified in all four mode/threading combinations, per [CLAUDE.md](CLAUDE.md).
+- `tests/wgpu_codegen.rs` gained 4 regression tests for the `LabeledArray`/isize/const-promotion/`float`-alias bugs above (48 wgpu snapshot tests total), and `matrix_mul_gpu_wgpu`/`vector_add_gpu_wgpu`/`plasma_metal_wgpu` were regenerated against the fixed compiler and confirmed with a real `cargo check`.
 - Added `for_destructure` to `tests/transpile.rs` (all 4 mode combinations) — the auto-enumerate/dict/tuple-array `for`-loop cases were previously interpreter-only.
 
 ---

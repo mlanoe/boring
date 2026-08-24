@@ -328,7 +328,14 @@ impl Transpiler {
             ExprKind::ArrayComp { expr, var, count } => {
                 let n = self.emit_expr(count);
                 let body = self.emit_expr(expr);
-                format!("(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as i64; {} }}).collect::<Vec<_>>()", n, var, body)
+                // The comprehension's implicit loop var is a bare `int`, which
+                // transpiles to `isize` (not `i64`) since this release — a stale
+                // `as i64` here left it the one place that never followed, producing
+                // a `Vec<isize>` (as declared on the `let`) vs `Vec<i64>` (as
+                // collected here) mismatch anywhere the comprehension result binds
+                // to an explicitly `int`-typed variable (vector_add_gpu.br's wgpu
+                // regression).
+                format!("(0..({} as usize)).map(|__boring_i| {{ let {} = __boring_i as isize; {} }}).collect::<Vec<_>>()", n, var, body)
             }
             ExprKind::ArrayCompIter { expr, var, iter } => {
                 let it = self.emit_expr(iter);

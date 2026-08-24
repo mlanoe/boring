@@ -7,11 +7,11 @@ struct Dimension {
 
 // ─── kernel Plasma ───
 
-@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+@group(0) @binding(0) var<storage, read_write> plasma_pixels: array<u32>;
 struct PlasmaParams {
     dim_w: i32,
     dim_h: i32,
-    t: f32,
+    t: /* ERROR: `float64` is not supported on --target wgpu (WGSL has no 64-bit float type — use float32) */ f32,
 }
 @group(0) @binding(1) var<uniform> plasma_params: PlasmaParams;
 
@@ -25,7 +25,7 @@ fn Plasma_main(
 ) {
     let bp_bdim = vec3<u32>(16u, 16u, 1u);
     let dim: Dimension = Dimension(plasma_params.dim_w, plasma_params.dim_h);
-    let t: f32 = plasma_params.t;
+    let t: /* ERROR: `float64` is not supported on --target wgpu (WGSL has no 64-bit float type — use float32) */ f32 = plasma_params.t;
     let col = ((i32(bp_bid.x) * i32(bp_bdim.x)) + i32(bp_tid.x));
     let row = ((i32(bp_bid.y) * i32(bp_bdim.y)) + i32(bp_tid.y));
     if (((col < dim.width) && (row < dim.height))) {
@@ -35,7 +35,7 @@ fn Plasma_main(
         let r = u32((((sin((v + t)) * 0.5) + 0.5) * 255.0));
         let g = u32((((sin(((v + t) + 2.094)) * 0.5) + 0.5) * 255.0));
         let b = u32((((sin(((v + t) + 4.189)) * 0.5) + 0.5) * 255.0));
-        pixels[u32(((row * dim.width) + col))] = (((4278190080u | (r << 16)) | (g << 8)) | b);
+        plasma_pixels[u32(((row * dim.width) + col))] = (((4278190080u | (r << 16)) | (g << 8)) | b);
     }
 }
 

@@ -215,7 +215,7 @@ impl<'a> HostEmitter<'a> {
         for f in &decl.fields {
             match f.qual {
                 GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified => {
-                    if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if is_buffer_array_ty(&f.ty) {
                         // Arc-wrapped so a `'unified`/`'global` value returned across a
                         // function-call boundary can hand its buffer directly to the next
                         // kernel's constructor (an Arc::clone, no data copy) without the
@@ -245,7 +245,7 @@ impl<'a> HostEmitter<'a> {
                 GpuQual::Local => {
                     // Scalar local fields (e.g. `var float t`) get a host mirror so the
                     // caller can update them between dispatches.
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+                    if !is_buffer_array_ty(&f.ty) {
                         self.line(&format!("    {}: {},", f.name, host_scalar_type(&f.ty)));
                     }
                 }
@@ -310,7 +310,7 @@ impl<'a> HostEmitter<'a> {
         // Collect buffer fields.
         let buf_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
             .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
-                     && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                     && is_buffer_array_ty(&f.ty))
             .collect();
         let params_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
             .filter(|f| is_params_field(f)).collect();
@@ -322,6 +322,20 @@ impl<'a> HostEmitter<'a> {
             let host_ty = host_scalar_type(&inner_ty);
             let (size_expr, init_data) = match &f.ty {
                 Type::ArrayN(_, n) => {
+                    (format!("({} * std::mem::size_of::<{}>()) as u64", n, host_ty),
+                     format!("vec![{}::default(); {}]", host_ty, n))
+                }
+                // A fixed-shape labeled multi-dim array (every axis a literal
+                // int, e.g. `[float32, width = 32, height = 32]`) has a
+                // compile-time-known element count just like `ArrayN` above —
+                // allocate it at its real size up front instead of falling to
+                // the 4-byte placeholder below. A field with no explicit
+                // `field = ...` in `init()` (a pure output, e.g. this kernel's
+                // `c`) never reaches `copy_{field}_to_device` to grow it, so
+                // without this branch it would stay stuck at 4 bytes forever
+                // and fail wgpu's binding-size validation on first dispatch.
+                ty if ty.labeled_array_len().is_some() => {
+                    let n = ty.labeled_array_len().unwrap();
                     (format!("({} * std::mem::size_of::<{}>()) as u64", n, host_ty),
                      format!("vec![{}::default(); {}]", host_ty, n))
                 }
@@ -450,7 +464,7 @@ impl<'a> HostEmitter<'a> {
                 let inner_ty = array_inner(&f.ty);
                 let n = match &f.ty {
                     Type::ArrayN(_, n) => *n,
-                    _ => 0,
+                    ty => ty.labeled_array_len().map(|n| n as usize).unwrap_or(0),
                 };
                 self.line(&format!("            {}: vec![{}::default(); {}],",
                     f.name, host_scalar_type(&inner_ty), n));
@@ -480,7 +494,7 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 GpuQual::Local
-                    if !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) => {
+                    if !is_buffer_array_ty(&f.ty) => {
                         let val = f.default.as_ref()
                             .map(emit_scalar_default)
                             .unwrap_or_else(|| format!("{}::default()", host_scalar_type(&f.ty)));
@@ -565,7 +579,7 @@ impl<'a> HostEmitter<'a> {
     fn emit_kernel_rebuild_bind_group(&mut self, decl: &KernelDecl) {
         let buf_fields: Vec<&KernelFieldDecl> = decl.fields.iter()
             .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
-                     && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                     && is_buffer_array_ty(&f.ty))
             .collect();
         let has_params = decl.fields.iter().any(is_params_field);
 
@@ -600,7 +614,7 @@ impl<'a> HostEmitter<'a> {
             // 'actor'unified needs the same accessors for the same reason (host-visible),
             // plus `kernel_output_fill_map`'s unconditional `copy_{field}_to_device` call
             // for any `field = [value for ..count]` init — see `emit_kernel.rs`.
-            if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)) {
+            if matches!(f.qual, GpuQual::Global | GpuQual::Unified | GpuQual::ActorUnified) && is_buffer_array_ty(&f.ty) {
                 let inner_ty = array_inner(&f.ty);
                 let host_ty = host_scalar_type(&inner_ty);
                 // D2H.
@@ -1135,7 +1149,7 @@ impl<'a> HostEmitter<'a> {
                     if &decl.name == kname {
                         let fields: Vec<String> = decl.fields.iter()
                             .filter(|f| matches!(f.qual, GpuQual::Surface)
-                                     && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                                     && is_buffer_array_ty(&f.ty))
                             .map(|f| f.name.clone())
                             .collect();
                         return Some(fields);
@@ -1376,7 +1390,7 @@ impl<'a> HostEmitter<'a> {
                             let pfx = if self.in_method { "self." } else { "" };
                             let buf_fields: Vec<&KernelFieldDecl> = target_decl.fields.iter()
                                 .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified)
-                                         && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                                         && is_buffer_array_ty(&f.ty))
                                 .collect();
                             let params_fields: Vec<&KernelFieldDecl> = target_decl.fields.iter()
                                 .filter(|f| is_params_field(f)).collect();
@@ -1433,16 +1447,20 @@ impl<'a> HostEmitter<'a> {
             ExprKind::Field(obj, field) => {
                 format!("{}.{}", self.host_expr(obj), field)
             }
-            // float(expr)/float32(expr) → expr as f32 (wgpu is f32-only on device,
-            // and this host helper narrows the same way regardless of width —
-            // float64(expr) stays a real f64 here, matching `host_scalar_type`'s
-            // own float64-is-a-compile-error-on-device-only stance).
+            // float32(expr) → expr as f32 (wgpu is f32-only on device, and this
+            // host helper narrows the same way regardless of width). Bare
+            // `float(expr)` must NOT join float32 here — `float` is a pure alias
+            // of `float64` (see host_scalar_type/CLAUDE.md), not its own type, so
+            // it belongs with the float64 branch below (a real f64). Grouping it
+            // with float32 mis-cast a `var float t` field's assignment to f32,
+            // mismatching the f64 field it actually is (plasma_metal.br's wgpu
+            // regression).
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Var(n) = &callee.kind {
-                    if (n == "float" || n == "float32") && args.len() == 1 {
+                    if n == "float32" && args.len() == 1 {
                         return format!("({} as f32)", self.host_expr(&args[0].value));
                     }
-                    if n == "float64" && args.len() == 1 {
+                    if (n == "float" || n == "float64") && args.len() == 1 {
                         return format!("({} as f64)", self.host_expr(&args[0].value));
                     }
                 }
@@ -1530,7 +1548,7 @@ fn emit_scalar_default(expr: &Expr) -> String {
 fn is_params_field(f: &KernelFieldDecl) -> bool {
     match f.qual {
         GpuQual::Const => true,
-        GpuQual::Local => !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)),
+        GpuQual::Local => !is_buffer_array_ty(&f.ty),
         _ => {
             matches!(&f.ty, Type::Named(n) if n != "Dimension")
                 && !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface)
@@ -1538,9 +1556,23 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
     }
 }
 
+/// True for a boring array type that gets a real storage-buffer field on the
+/// generated host struct: a plain `[T]`/`[T; N]`, or a labeled multi-dim
+/// array (`Type::LabeledArray`, fixed- or dynamic-shape alike). Mirrors
+/// `wgpu::device::is_buffer_field`'s recognition of `LabeledArray` — that
+/// side of the backend picked it up when multi-dimensional arrays landed,
+/// but every one of *this* file's own "is this a buffer field" checks still
+/// only matched `Array`/`ArrayN`, so a `[T, width = .., height = ..]'global`
+/// field's buffer, struct field, and bind-group entry were all silently
+/// dropped (matrix_mul_gpu.br's wgpu regression).
+fn is_buffer_array_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Array(_) | Type::ArrayN(_, _)) || ty.as_labeled_array().is_some()
+}
+
 fn array_inner(ty: &Type) -> Type {
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => (**inner).clone(),
+        ty if ty.as_labeled_array().is_some() => ty.as_labeled_array().unwrap().0.clone(),
         other => other.clone(),
     }
 }

@@ -1454,3 +1454,140 @@ kernel Scale:
     assert!(wgsl.contains("/* unsupported here:") && wgsl.contains(".min(...) needs 'actor'global/'actor'unified"),
         "expected a visible unsupported-position marker, not silently wrong WGSL;\ngot:\n{wgsl}");
 }
+
+// ─── Host-side codegen for `Type::LabeledArray` fields (regressions found ───
+// while regenerating examples/{matrix_mul_gpu,vector_add_gpu,plasma_metal}_wgpu
+// for 0.9.5 — see CHANGELOG's "Known Issues"/"Fixed" entries). The device
+// (WGSL) side already recognized `LabeledArray` fields correctly (the tests
+// above); these check the *host* Rust side, which a fixed-shape multi-dim
+// array field ('global) fell straight through as if it weren't a buffer
+// field at all.
+
+#[test]
+fn host_labeled_array_field_gets_real_buffer_not_dropped_or_cast_to_i64() {
+    let src = r#"
+kernel Img:
+    let [float32, width = 4, height = 4]'global a
+    mut [float32, width = 4, height = 4]'unified c
+
+    init([float32, width = 4, height = 4]'global input_a):
+        a = input_a
+
+    def ():
+        let col = gpu.thread.x
+        let row = gpu.thread.y
+        c[width = col, height = row] = a[width = col, height = row] * 2.0
+
+var [float32] data = [float32(i) for i in 0..16]
+mut k = Img(data.reshape(width = 4, height = 4))
+kernel:
+    k(block = (4, 4))
+"#;
+    let (_wgsl, rs) = wgpu_codegen("labeled_field_host_buffer", src);
+    assert!(rs.contains("a_buf: std::sync::Arc<wgpu::Buffer>,"),
+        "a `[T, width=.., height=..]'global` field must still get a host struct buffer field;\ngot:\n{rs}");
+    assert!(rs.contains("k.copy_a_to_device(&data.iter().map(|&x| x as f32).collect::<Vec<f32>>());"),
+        "the constructor argument must be uploaded via copy_a_to_device, not cast straight to a scalar;\ngot:\n{rs}");
+    assert!(!rs.contains("k.a = "),
+        "must not fall back to a bare (wrongly-typed) field assignment for a LabeledArray buffer field;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_array_comprehension_loop_var_is_isize_not_i64() {
+    // `int`/`uint` transpile to `isize`/`usize` as of this release (previously
+    // `i64`/`u64`) -- this comprehension's implicit loop var was the one
+    // codegen path that never followed, producing a `Vec<i64>` that didn't
+    // match an explicitly `[int]`-typed (`Vec<isize>`) binding.
+    let src = r#"
+kernel Dummy:
+    mut [int]'unified out
+    init([int]'unified data):
+        out = data
+    def ():
+        let tid = gpu.thread.x
+        out[tid] = out[tid] * 2
+
+var [int] host = [i for i in 0..8]
+mut k = Dummy(host)
+kernel:
+    k(block = 8)
+"#;
+    let (_wgsl, rs) = wgpu_codegen("array_comp_isize", src);
+    assert!(rs.contains("let mut host: Vec<isize>") && rs.contains("let i = __boring_i as isize; i "),
+        "expected the comprehension's loop var cast `as isize`, matching the `Vec<isize>` binding it initializes;\ngot:\n{rs}");
+    assert!(!rs.contains("as i64; i "),
+        "must not cast the comprehension loop var to i64 (stale pre-isize-migration codegen);\ngot:\n{rs}");
+}
+
+#[test]
+fn host_kernel_output_fill_count_resolves_promoted_top_level_const() {
+    // `result = [0 for ..n]` inside `init()` refers to a top-level `let n =
+    // ...`, not an init parameter -- `substitute_and_emit`'s fallback used to
+    // reproduce the boring-source name verbatim, but a GPU-target top-level
+    // scalar `let` is promoted to an uppercased Rust `const`
+    // (`gpu_top_level_const_names`), leaving a dangling lowercase reference.
+    let src = r#"
+let n = 4
+
+kernel Filler:
+    let [int]'global a
+    mut [int]'unified out
+
+    init([int]'global input_a):
+        a = input_a
+        out = [0 for ..n]
+
+    def ():
+        let i = gpu.thread.x
+        if i < n:
+            out[i] = a[i]
+
+var [int] host_a = [i for i in 0..n]
+mut k = Filler(host_a)
+kernel:
+    k(block = 4)
+"#;
+    let (_wgsl, rs) = wgpu_codegen("kernel_output_fill_const_promoted", src);
+    assert!(rs.contains("k.copy_out_to_device(&vec![(0) as i32; (N) as usize]);"),
+        "expected the fill count to reference the uppercased promoted const N;\ngot:\n{rs}");
+    assert!(!rs.contains("(n) as usize"),
+        "must not leave a dangling lowercase reference to the pre-promotion name;\ngot:\n{rs}");
+}
+
+#[test]
+fn host_bare_float_scalar_field_assign_casts_to_f64_not_f32() {
+    // `float(expr)` is a pure alias of `float64`, not its own type (see
+    // CLAUDE.md/host_scalar_type) -- `var float t` gets an `f64` host struct
+    // field, so `k.t = float(screen.time)` must cast to `f64`, not join
+    // `float32(expr)`'s `as f32` narrowing.
+    let src = r#"
+let width = 4
+let height = 4
+let screen = Screen(Dimension(width, height), title = "test")
+
+kernel T:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var float t
+
+    init(Dimension d):
+        pixels = [0 for ..d.width * d.height]
+        dim = d
+        t = 0.0
+
+    def ():
+        pass
+
+var mut k = T(Dimension(width, height))
+kernel:
+    loop:
+        k.t = float(screen.time)
+        k(block = (4, 4))
+        break
+"#;
+    let (_wgsl, rs) = wgpu_codegen("float_alias_scalar_field", src);
+    assert!(rs.contains("k.t = (") && rs.contains("__start_time.elapsed().as_secs_f32() as f64);"),
+        "expected bare float(...) to cast to f64, matching `var float t`'s f64 host field;\ngot:\n{rs}");
+    assert!(!rs.contains("__start_time.elapsed().as_secs_f32() as f32);"),
+        "must not narrow a bare float(...) scalar-field assignment to f32;\ngot:\n{rs}");
+}

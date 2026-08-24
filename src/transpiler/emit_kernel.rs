@@ -40,6 +40,19 @@ use super::*;
 use super::Transpiler;
 use crate::ast::{Arg, GpuQual, InitDecl, KernelBlockStmt, KernelDecl, KernelFieldDecl, Stmt, Type};
 
+/// True for a boring array type usable as a `'unified`/`'global`/`'actor*` GPU
+/// buffer field: a plain `[T]`/`[T; N]`, or a fixed- or dynamic-shape labeled
+/// multi-dimensional array (`Type::LabeledArray`). The multi-dim-array feature
+/// added `LabeledArray` alongside `Array`/`ArrayN` but several of this file's
+/// "is this field a GPU buffer" checks were never updated to recognize it —
+/// a `[T, width = .., height = ..]'global` field silently fell through every
+/// one of them as if it weren't a buffer field at all (matrix_mul_gpu.br's
+/// wgpu regression: the field vanished from the generated host struct, and
+/// its constructor argument got cast straight to `i64` instead of uploaded).
+fn is_gpu_buffer_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Array(_) | Type::ArrayN(_, _)) || ty.as_labeled_array().is_some()
+}
+
 /// How a `'unified`/`'global` output field's initial device buffer contents are
 /// derived from its `init()`-body assignment — see `Transpiler::kernel_output_fill_map`.
 enum KernelOutputInit {
@@ -89,8 +102,7 @@ impl Transpiler {
             // a scalar or other-qualified field is just an ordinary field access.
             let is_gpu_array_field = self.kernel_decls.get(kname)
                 .and_then(|decl| decl.fields.iter().find(|f| &f.name == field))
-                .map(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global)
-                    && matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _)))
+                .map(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global) && is_gpu_buffer_ty(&f.ty))
                 .unwrap_or(false);
             if !is_gpu_array_field { return false; }
         }
@@ -267,7 +279,7 @@ impl Transpiler {
                 let decl = self.kernel_decls.get(kname)?;
                 let field_decl = decl.fields.iter().find(|f| &f.name == field)?;
                 let is_gpu_array_field = matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
-                    && matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _));
+                    && is_gpu_buffer_ty(&field_decl.ty);
                 is_gpu_array_field.then(|| (kvar.clone(), field.clone()))
             }
             _ => None,
@@ -340,7 +352,7 @@ impl Transpiler {
             };
 
             let is_buffer = matches!(field.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
-                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+                && is_gpu_buffer_ty(&field.ty);
 
             // A resident source for this argument — either a same-scope alias
             // (`let fc = k1.y` — `gpu_resident_vars`, no Rust binding of its own) or a
@@ -504,7 +516,17 @@ impl Transpiler {
         len_subst: &std::collections::HashMap<&str, String>,
     ) -> String {
         match &expr.kind {
-            ExprKind::Var(name) => subst.get(name.as_str()).cloned().unwrap_or_else(|| name.clone()),
+            // An init()-param reference substitutes to the constructor call's own
+            // arg expression; anything else (e.g. this kernel's `n` in `result =
+            // [0 for ..n]`, referring to a top-level `let n = 1000` rather than an
+            // init param) must still go through `map_builtin_var` — a bare
+            // `name.clone()` fallback used to reproduce the boring-source name
+            // verbatim even when that top-level `let` was promoted to an
+            // uppercased Rust `const` (`gpu_top_level_const_names`), leaving a
+            // stale lowercase reference the const's own uppercased declaration
+            // doesn't satisfy (vector_add_gpu.br's wgpu regression: "cannot find
+            // value `n`").
+            ExprKind::Var(name) => subst.get(name.as_str()).cloned().unwrap_or_else(|| self.map_builtin_var(name)),
             ExprKind::Int(n) => n.to_string(),
             ExprKind::Float(f) => f.to_string(),
             ExprKind::BinOp(op, l, r) => {
@@ -746,7 +768,7 @@ impl Transpiler {
         let decl = self.kernel_decls.get(kname)?;
         let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| f.name == field)?;
         if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal)
-            || !matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _))
+            || !is_gpu_buffer_ty(&field_decl.ty)
         {
             return None;
         }
@@ -777,7 +799,7 @@ impl Transpiler {
         let decl = self.kernel_decls.get(kname)?;
         let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| &f.name == field)?;
         if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
-            || !matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _))
+            || !is_gpu_buffer_ty(&field_decl.ty)
         {
             return None;
         }
@@ -808,7 +830,7 @@ impl Transpiler {
             let decl = self.kernel_decls.get(kname)?;
             let field_decl: &KernelFieldDecl = decl.fields.iter().find(|f| &f.name == field)?;
             if !matches!(field_decl.qual, GpuQual::Unified | GpuQual::Global)
-                || !matches!(field_decl.ty, Type::Array(_) | Type::ArrayN(_, _))
+                || !is_gpu_buffer_ty(&field_decl.ty)
             {
                 return None;
             }
@@ -856,6 +878,7 @@ impl Transpiler {
 pub(crate) fn array_inner_type(ty: &Type) -> Type {
     match ty {
         Type::Array(inner) | Type::ArrayN(inner, _) => (**inner).clone(),
+        ty if ty.as_labeled_array().is_some() => ty.as_labeled_array().unwrap().0.clone(),
         other => other.clone(),
     }
 }
