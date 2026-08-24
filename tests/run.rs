@@ -344,6 +344,13 @@ interp_test!(json_untagged_enum);
 interp_test!(json_serde_shapes);
 interp_test!(enum_derive_no_debug);
 
+// tests/cases/json_serde_rename.br's own doc comment covers the two `@derive(Serialize,
+// Deserialize)` transpiler bugs it pins; it was transpile-only because the interpreter's
+// `json(v)` was still a stub printing its own Value repr instead of real JSON (see
+// eval_json in src/interpreter/json.rs). Now that `json(v)` really serializes, this
+// registers here too, against the same .expected file as tests/transpile.rs.
+interp_test!(json_serde_rename);
+
 // docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
 // `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`
 // the interpreter matches the compiled output byte-for-byte, so the same .expected

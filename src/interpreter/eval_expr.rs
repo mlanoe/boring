@@ -408,11 +408,12 @@ impl Interpreter {
                 }
                 return Ok(Value::Nil);
             }
-            // json(v) — interpreter stub: convert value to its debug string representation
+            // json(v) — real serializer, symmetric with fromJson<T>: walk the value into
+            // a serde_json::Value (src/interpreter/json.rs) and print it compactly.
             if name.as_str() == "json" {
                 if let Some(arg) = args.first() {
                     let v = self.eval_expr(&arg.value, Rc::clone(&env))?;
-                    return Ok(Value::Str(format!("{:?}", v)));
+                    return Ok(Value::Str(self.eval_json(&v, &env)));
                 }
                 return Ok(Value::Str("null".into()));
             }

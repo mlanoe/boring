@@ -17,9 +17,14 @@ path = "src/main.rs"
 [dependencies]
 thiserror = "1"
 rayon = "1"
-# Used only by the interpreter's `fromJson<T>()` builtin: `serde_json::Value` is the
-# generic JSON tree the type-directed materializer in `src/interpreter/json.rs` walks.
-# The *transpiler* never needs this crate — it emits `serde`/`serde_json` into the
-# generated project's own Cargo.toml instead.
-serde_json = "1"
+# Used only by the interpreter's `fromJson<T>()`/`json()` builtins: `serde_json::Value`
+# is the generic JSON tree the type-directed materializer/serializer in
+# `src/interpreter/json.rs` walks. The *transpiler* never needs this crate — it emits
+# `serde`/`serde_json` into the generated project's own Cargo.toml instead.
+# `preserve_order` matters for `json(v)`: real serde writes a `#[derive(Serialize)]`
+# struct's fields straight to the output in declaration order regardless of map
+# representation, but `json(v)` builds a `serde_json::Value::Object` first, whose
+# default `Map` is a `BTreeMap` (alphabetical) — without this feature every struct's
+# fields would come out sorted instead of matching real serde's declaration order.
+serde_json = { version = "1", features = ["preserve_order"] }
 

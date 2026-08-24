@@ -592,10 +592,9 @@ transpile_test!(mem_borrow_builtins);
 // json_serde_rename.br's own doc comment for the two real bugs this pins (a bare,
 // as-documented `@derive(Serialize, Deserialize)` never compiled at all: no serde
 // import was ever emitted, and the auto Display impl assumed Debug unconditionally)
-// plus the field-level `@serde(rename = "...")` addition. Still not registered in
-// tests/run.rs -- the interpreter's `fromJson` is real now (see json_untagged_enum
-// below), but its `json(v)` *serializer* is still a stub that prints the interpreter's
-// own value repr, so this case's second line can't be shared with `boring run`.
+// plus the field-level `@serde(rename = "...")` addition. Now registered in
+// tests/run.rs too -- both `fromJson` and `json(v)` are real on the interpreter side
+// (src/interpreter/json.rs), so this case's second line agrees between backends too.
 transpile_test!(json_serde_rename);
 
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins

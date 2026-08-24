@@ -29,9 +29,18 @@
 //!
 //! Not supported (materialization refuses, so `fromJson` yields the absent optional rather
 //! than a silently-wrong value): serde's internally-/adjacently-tagged enum representations
-//! (`@serde(tag = "...")`, with or without `content`), `@serde(flatten)`, non-string dict
-//! keys, and the `json(v)` *serializer* in the other direction (still a stub — see
-//! `eval_expr.rs`'s `json` builtin).
+//! (`@serde(tag = "...")`, with or without `content`), `@serde(flatten)`, and non-string
+//! dict keys.
+//!
+//! The other direction, `json(v)` (the serializer `eval_expr.rs`'s `json` builtin calls
+//! into via [`Interpreter::eval_json`]), walks the interpreter's own `Value` into a
+//! `serde_json::Value` and prints it with `serde_json::to_string`, reusing the same
+//! `@serde(...)` attribute helpers below so field/variant key naming matches the
+//! materializer above and real serde. It shares that materializer's tag-mode gap
+//! (`@serde(tag = "...")` isn't recognized, so those enums serialize externally-tagged
+//! instead) but has no equivalent to the "refuse rather than guess wrong" fallback: every
+//! `Value` a `@derive(Serialize)` type can actually hold has a well-defined JSON shape, so
+//! there is nothing to fail on at the top level.
 
 use std::rc::Rc;
 
@@ -427,6 +436,150 @@ impl Interpreter {
                 }
                 Some(out)
             }
+        }
+    }
+
+    // ─── Serialization (`json(v)`) ───────────────────────────────────────────
+
+    /// Entry point for `json(v)`: serialize `v` to a compact JSON string, matching
+    /// what `serde_json::to_string(&v)` would print for the compiled equivalent.
+    pub(crate) fn eval_json(&self, v: &Value, env: &EnvRef) -> String {
+        serde_json::to_string(&self.value_to_json(v, env)).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Look up the `StructDecl` a `Value::Object`'s `type_name` was built from —
+    /// mirrors `json_to_value`'s `Type::Named` branch, but keyed by the value's own
+    /// recorded type name rather than a static `Type`, since that's all an `Object`
+    /// carries at runtime.
+    fn lookup_struct_decl(&self, name: &str, env: &EnvRef) -> Option<StructDecl> {
+        match env.borrow().get(name) {
+            Some(Value::Struct { decl, .. }) => Some(decl),
+            _ => match self.global.borrow().get(name) {
+                Some(Value::Struct { decl, .. }) => Some(decl),
+                _ => None,
+            },
+        }
+    }
+
+    /// Build a `serde_json::Value` out of an interpreter `Value`, honoring the same
+    /// `@serde(rename = "...")` / `@serde(rename_all = "...")` attrs `json_to_value`
+    /// reads for the opposite direction.
+    fn value_to_json(&self, v: &Value, env: &EnvRef) -> Json {
+        match v {
+            Value::Uninitialized | Value::Moved(_) | Value::Nil | Value::Void => Json::Null,
+            Value::Bool(b) => Json::Bool(*b),
+
+            Value::Int(n) | Value::Int64(n) => Json::from(*n),
+            Value::Int8(n) => Json::from(*n),
+            Value::Int16(n) => Json::from(*n),
+            Value::Int32(n) => Json::from(*n),
+            // No native 128-bit JSON number -- same i64/u64 ceiling `json_to_value`'s
+            // `Type::Int128`/`Type::Uint128` branches already accept on the way in.
+            Value::Int128(n) => Json::from(*n as i64),
+            Value::Uint(n) | Value::Uint64(n) => Json::from(*n),
+            Value::Uint8(n) => Json::from(*n),
+            Value::Uint16(n) => Json::from(*n),
+            Value::Uint32(n) => Json::from(*n),
+            Value::Uint128(n) => Json::from(*n as u64),
+
+            Value::Float32(f) => {
+                serde_json::Number::from_f64(*f as f64).map(Json::Number).unwrap_or(Json::Null)
+            }
+            Value::Float64(f) => {
+                serde_json::Number::from_f64(*f).map(Json::Number).unwrap_or(Json::Null)
+            }
+
+            Value::Str(s) => Json::String(s.clone()),
+
+            Value::Array(a) => Json::Array(a.iter().map(|x| self.value_to_json(x, env)).collect()),
+            Value::Tuple(t) => Json::Array(t.iter().map(|x| self.value_to_json(x, env)).collect()),
+            Value::Set(s) => Json::Array(s.iter().map(|x| self.value_to_json(x, env)).collect()),
+
+            // JSON object keys are always strings -- the same restriction `json_to_value`'s
+            // `Type::Dict` branch enforces on the way in. A non-`Str` key (already outside
+            // what `fromJson` can ever produce) falls back to its Display form rather than
+            // silently dropping the entry.
+            Value::Dict(pairs) => {
+                let mut obj = serde_json::Map::with_capacity(pairs.len());
+                for (k, val) in pairs {
+                    let key = match k {
+                        Value::Str(s) => s.clone(),
+                        other => format!("{other}"),
+                    };
+                    obj.insert(key, self.value_to_json(val, env));
+                }
+                Json::Object(obj)
+            }
+
+            Value::Object(inner) => {
+                let inner = inner.borrow();
+                match self.lookup_struct_decl(&inner.type_name, env) {
+                    Some(decl) => {
+                        let mut obj = serde_json::Map::with_capacity(decl.fields.len());
+                        for f in &decl.fields {
+                            if let Some((_, val)) = inner.fields.iter().find(|(n, _)| *n == f.name) {
+                                let key = json_key(&f.name, &f.attrs, &decl.attrs);
+                                obj.insert(key, self.value_to_json(val, env));
+                            }
+                        }
+                        Json::Object(obj)
+                    }
+                    // No declaration on record (shouldn't happen for a `@derive(Serialize)`
+                    // type) -- fall back to the raw field list, undecorated.
+                    None => {
+                        let mut obj = serde_json::Map::with_capacity(inner.fields.len());
+                        for (k, val) in &inner.fields {
+                            obj.insert(k.clone(), self.value_to_json(val, env));
+                        }
+                        Json::Object(obj)
+                    }
+                }
+            }
+
+            Value::EnumVariant { type_name, variant, fields } => match self.enums.get(type_name) {
+                Some(decl) => self.enum_variant_to_json(decl, variant, fields, env),
+                None => Json::Null,
+            },
+
+            // Not JSON-representable -- functions, channels, screens, ranges, and the rest
+            // never appear in a field of a `@derive(Serialize)` type, so this is dead in
+            // practice; `null` is the least-surprising fallback if it's ever hit.
+            _ => Json::Null,
+        }
+    }
+
+    /// Serialize one enum variant's payload per serde's rules: `@serde(untagged)` writes
+    /// just the payload (or `null` for a field-less variant, mirroring `try_variant_payload`'s
+    /// read side); otherwise the default externally-tagged shape (bare string tag for a
+    /// field-less variant, `{"tag": payload}` otherwise).
+    fn enum_variant_to_json(
+        &self,
+        decl: &EnumDecl,
+        variant_name: &str,
+        fields: &[Value],
+        env: &EnvRef,
+    ) -> Json {
+        let empty: Vec<Attr> = Vec::new();
+        let variant_attrs = decl.variants.iter()
+            .find(|v| v.name == variant_name)
+            .map(|v| v.attrs.as_slice())
+            .unwrap_or(&empty);
+        let tag = json_key(variant_name, variant_attrs, &decl.attrs);
+
+        let payload = match fields.len() {
+            0 => None,
+            1 => Some(self.value_to_json(&fields[0], env)),
+            _ => Some(Json::Array(fields.iter().map(|f| self.value_to_json(f, env)).collect())),
+        };
+
+        if has_serde_flag(&decl.attrs, "untagged") {
+            payload.unwrap_or(Json::Null)
+        } else if fields.is_empty() {
+            Json::String(tag)
+        } else {
+            let mut obj = serde_json::Map::with_capacity(1);
+            obj.insert(tag, payload.unwrap_or(Json::Null));
+            Json::Object(obj)
         }
     }
 }
