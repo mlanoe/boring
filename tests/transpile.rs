@@ -9,14 +9,35 @@
 //   3. Compares stdout to the same `<case>.expected` used by the interpreter tests
 //
 // Run with:
-//   cargo test --test transpile
+//   cargo test --test transpile -- --test-threads=1
 //
 // The first run compiles all generated Rust projects from scratch (slow).
 // Subsequent runs reuse the cargo build cache (fast, < 2s per test).
+//
+// IMPORTANT: always pass `--test-threads=1`. Every generated project's inner `cargo
+// run`/`cargo build` is pointed at one shared build directory (see `shared_target_dir`
+// below) to avoid duplicating tokio/serde's build output per fixture. Cargo's own
+// locking on that shared dir serializes concurrent builds anyway, so the default
+// multi-threaded test runner buys no real parallelism -- it just piles up N test
+// threads all queued on the same build lock. Measured: with the default thread count
+// this queuing degraded into an effective multi-hour stall (one thread parked over 60s
+// on a single build, the whole run ultimately killed after 10+ hours); run serially,
+// the full 416-test suite passes in ~5 minutes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Every generated fixture project used to get its own `target/` dir (each one pulling in
+// tokio and/or serde as real dependencies, ~100-300MB apiece) -- across 400+ tests that
+// blew past 40GB on a full cold run and once filled the disk outright. Point every inner
+// `cargo run`/`cargo build` spawned by this suite at one shared build directory instead;
+// different generated packages have distinct names so they coexist fine there, and cargo's
+// own locking serializes concurrent builds against it. This must NOT be set on the *outer*
+// `cargo test` process (only on these inner spawned commands) -- the outer cargo already
+// holds a lock on its own target dir, so pointing both at the same path risks a deadlock.
+fn shared_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("transpile-cases")
+}
 
 fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &str) {
     let bin = env!("CARGO_BIN_EXE_boring");
@@ -47,6 +68,7 @@ fn run_transpile_case_with_config(name: &str, mode_str: &str, threading_str: &st
         .args(["run", "--quiet", "--manifest-path"])
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_TARGET_DIR", shared_target_dir())
         .output()
         .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke cargo: {}", name, mode_str, threading_str, e));
 
@@ -212,6 +234,7 @@ fn run_transpile_project_case(name: &str, mode_str: &str, threading_str: &str) {
         .args(["run", "--quiet", "--manifest-path"])
         .arg(rust_dir.join("Cargo.toml"))
         .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_TARGET_DIR", shared_target_dir())
         .output()
         .unwrap_or_else(|e| panic!("[{}@{}+{}] failed to invoke cargo: {}", name, mode_str, threading_str, e));
 
