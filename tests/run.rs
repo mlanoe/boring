@@ -358,6 +358,12 @@ interp_test!(json_serde_rename);
 // stays transpiler-only: the interpreter's `json(v)` *serializer* is still a stub.)
 interp_test!(try_wrap_double_handling);
 
+// docs/self-field-loop-match-borrow-bug.md -- transpiler-only bug (the interpreter
+// never had a borrow-checker to violate: bare/implicit self-field reads always just
+// worked dynamically). Registered here too since the interpreter's output is the
+// semantic baseline `transpile_test!` below is pinned against.
+interp_test!(self_field_loop_match_borrow);
+
 // ── Error / rejection tests ──────────────────────────────────────────────────
 
 // `use boring.<module>` for an unrecognized module name is a hard error,

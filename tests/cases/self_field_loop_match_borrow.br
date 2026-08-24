@@ -1,0 +1,64 @@
+# docs/self-field-loop-match-borrow-bug.md -- a `for`/`match` directly over a
+# bare struct field (implicit `self.field`, no explicit `self.` prefix) inside
+# a `req`/`def` method generated Rust that tried to *consume* the field even
+# though the method only holds a borrowed `&self`/`&mut self`:
+#   - `for s in items:` over a `[T]` field emitted `self.items.into_iter()`
+#     (E0507: moves out of a shared reference).
+#   - `match status:` over an enum field bound arms by value out of the same
+#     borrow (same E0507 shape).
+#   - `for k, v in scores:` over a `{K=V}` field mis-transpiled through the
+#     array-style auto-enumerate path (`.enumerate().map(|(i, v)| (i as isize,
+#     v))`), binding the loop var to the whole `(k, v)` pair instead of just
+#     the value.
+# All three read a field only through a `req` (`&self`) method -- never moved,
+# never reassigned -- so the field must still be usable afterward.
+
+enum Status:
+    Active
+    Inactive
+
+struct Bag:
+    [string] items
+    Status status
+    {string=int} scores
+
+    # Repro 1: `for` loop consuming a borrowed `[T]` field.
+    req string? first_match(string needle):
+        for s in items:
+            if s == needle:
+                return s
+        nil
+
+    # Match over a borrowed enum field.
+    req string describe():
+        match status:
+            Active: "on"
+            Inactive: "off"
+
+    # Repro 2: `{K=V}` field, 2-variable destructuring. Plain `int` accumulator
+    # (not `int?`) -- an `int` vs. `int?` comparison is a separate, unrelated
+    # gap; this test is only about the destructuring/borrow codegen.
+    req int highest():
+        var int best = 0
+        for id, score in scores:
+            if score > best:
+                best = score
+        best
+
+def main():
+    let bag = Bag(["apple", "banana", "cherry"], Status.Active, {"a" = 3, "b" = 7, "c" = 1})
+
+    match bag.first_match("banana"):
+        Some(x): print "first_match: {x}"
+        None: print "first_match: nil"
+
+    match bag.first_match("mango"):
+        Some(x): print "first_match: {x}"
+        None: print "first_match: nil"
+
+    print "describe: {bag.describe()}"
+
+    print "highest: {bag.highest()}"
+
+    # The field itself must still be intact after all three borrow-only calls.
+    print "items.length: {bag.items.length}"

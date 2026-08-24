@@ -22,9 +22,16 @@ impl Transpiler {
     /// "definitely not a dict/tuple-array".
     fn resolve_iterable_type(&self, expr: &Expr) -> Option<Type> {
         match &expr.kind {
+            // `.or_else(bare_self_field_type)`: a bare identifier naming one of the
+            // struct's own fields (implicit `self.field`) isn't in `var_types`/
+            // `fn_current_params` at all — without this fallback a `{K=V}` dict field
+            // referenced bare was invisible to the dict-shape check below, so a 2-var
+            // `for k, v in dict_field:` wrongly fell through to the array auto-enumerate
+            // path. See docs/self-field-loop-match-borrow-bug.md (repro 2).
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
-                .cloned(),
+                .cloned()
+                .or_else(|| self.bare_self_field_type(v)),
             ExprKind::Field(inner, field) => {
                 let owner_ty = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(owner_ty.as_str())?
@@ -401,11 +408,29 @@ impl Transpiler {
         // transpiler has to decide statically since Rust has no such thing as
         // "iterate a Vec<T> as index+value only when T happens not to be a tuple".
         let needs_auto_enumerate = s.vars.len() == 2 && !self.iterable_yields_tuples(&s.iterable);
+        // A field only borrowed through `&self`/`&mut self` — explicit `self.field` or
+        // the far more common implicit bare `field` spelling — is never safe to move out
+        // of directly. See docs/self-field-loop-match-borrow-bug.md: `.into_iter()` moves
+        // out of `&self`, and (for a `{K=V}` dict) `.iter().cloned()` doesn't even compile
+        // — `Iterator::cloned` only applies when the item is a plain `&T`, not a HashMap's
+        // `(&K, &V)` pair — so dict fields get their own owned-pair path below.
+        let self_field_ty = self.resolve_self_field_type(&s.iterable).map(|t| t.without_mut().clone());
+        let is_borrowed_collection_field = self_field_ty.as_ref()
+            .is_some_and(|t| matches!(t, Type::Dict(..) | Type::Array(_) | Type::Set(_)));
         let iter_expr = match &s.iterable.kind {
             ExprKind::Range { .. } => iter,
-            ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
-                format!("{}.iter().cloned()", iter)
-            }
+            _ if is_borrowed_collection_field => match &self_field_ty {
+                // Single var over a dict binds the key only (docs/book.md's "`for` over a
+                // dict" rule) — `.keys().cloned()` matches that arity directly.
+                Some(Type::Dict(_, _)) if s.vars.len() <= 1 => format!("{}.keys().cloned()", iter),
+                // 2-var `for k, v in dict_field:` needs owned `(K, V)` pairs; clone the
+                // whole map first (mirrors the manual `.clone()` workaround this bug
+                // forced from Boring source) rather than `.iter()` + per-slot `.clone()`.
+                Some(Type::Dict(_, _)) => format!("{}.clone().into_iter()", iter),
+                // Array/Set field: `.iter().cloned()` borrows without consuming, same as
+                // the local-variable case just below.
+                _ => format!("{}.iter().cloned()", iter),
+            },
             // Local variable iteration: use iter().cloned() so the variable is not moved
             // and can be reused after the loop. into_iter() would consume the collection.
             // Exception: multi-var (dict/tuple) iteration needs into_iter() to get owned pairs

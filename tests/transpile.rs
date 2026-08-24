@@ -625,3 +625,17 @@ transpile_test!(try_wrap_double_handling);
 transpile_test!(json_untagged_enum);
 transpile_test!(json_serde_shapes);
 transpile_test!(enum_derive_no_debug);
+
+// docs/self-field-loop-match-borrow-bug.md -- a `for`/`match` directly over a bare
+// struct field (implicit `self.field`) inside a `req`/`def` method generated Rust
+// that consumed the field by value even though the method only holds a borrowed
+// `&self`/`&mut self`: `for s in items:` over a `[T]` field emitted
+// `self.items.into_iter()` (E0507), `match status:` over an enum field bound arms
+// by value out of the same borrow, and `for k, v in scores:` over a `{K=V}` field
+// mis-transpiled through the array-style auto-enumerate path
+// (`.enumerate().map(|(i, v)| (i as isize, v))`), binding the loop var to the
+// whole `(k, v)` pair instead of just the value. See tests/cases/
+// self_field_loop_match_borrow.br's own doc comment. Also registered in
+// tests/run.rs -- the interpreter's output is the semantic baseline this pins
+// the compiled output against.
+transpile_test!(self_field_loop_match_borrow);

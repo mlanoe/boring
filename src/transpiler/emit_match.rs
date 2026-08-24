@@ -865,7 +865,15 @@ impl Transpiler {
 
         let subj_raw = self.emit_expr(&s.subject);
         // Auto-clone: field accesses used as match subject would be moved out of the struct.
-        let subj_raw = if matches!(&s.subject.kind, ExprKind::Field(..))
+        // Covers both the explicit `self.field`/`obj.field` spelling (`ExprKind::Field`) and
+        // the far more common implicit bare `field` spelling inside a method body (parsed as
+        // a plain `ExprKind::Var`, indistinguishable from a real local at this syntax level) —
+        // without the latter, `match some_field:` over a borrowed `&self`/`&mut self` field
+        // tried to bind arms by value straight out of the borrow. See
+        // docs/self-field-loop-match-borrow-bug.md.
+        let subject_is_field_like = matches!(&s.subject.kind, ExprKind::Field(..))
+            || self.resolve_self_field_type(&s.subject).is_some();
+        let subj_raw = if subject_is_field_like
             && !subj_raw.ends_with(".clone()")
             && !subj_raw.starts_with('&')
             && !subj_raw.starts_with("Arc::")

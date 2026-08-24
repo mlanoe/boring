@@ -103,6 +103,49 @@ impl Transpiler {
         }
     }
 
+    /// The declared type of a bare identifier that resolves to an implicit `self.field`
+    /// access — i.e. `name` is one of the current struct's own fields, referenced without
+    /// an explicit `self.` prefix, and not shadowed by a local variable/parameter of the
+    /// same name. Mirrors the precedence rule `emit_expr`'s `ExprKind::Var` arm already
+    /// applies when lowering such a reference to `self.<name>` Rust code — this lets
+    /// codegen paths that need to inspect the iterable/subject's *type* before `emit_expr`
+    /// renders anything (for-loop and match borrow-safety, see `resolve_self_field_type`
+    /// below) recognize the same implicit-self-field case. `None` for a genuine local, a
+    /// method-type-param, or any name that isn't a field of `self_type` at all.
+    pub(crate) fn bare_self_field_type(&self, name: &str) -> Option<Type> {
+        if self.known_local_vars.contains(name) { return None; }
+        let struct_name = self.self_type.as_ref()?;
+        self.struct_fields.get(struct_name.as_str())?
+            .iter().find(|(f, _)| f == name)
+            .map(|(_, ty)| ty.clone())
+    }
+
+    /// The declared type of `expr` when it names one of the struct's own fields under a
+    /// borrowed `self` — either written explicitly (`self.field`) or bare (`field`, via
+    /// `bare_self_field_type` above). `None` for anything else: a field of some other
+    /// object (`other.field`), a local variable, a method-call result, etc.
+    ///
+    /// Used by for-loop/match codegen to detect "the iterated/matched expression is a
+    /// field only borrowed through `&self`/`&mut self`, never safe to move out of or bind
+    /// by value directly" — see docs/self-field-loop-match-borrow-bug.md. Before this
+    /// existed, that borrow-safety check only recognized the explicit `self.field`
+    /// spelling (`ExprKind::Field`); the far more common bare spelling (`field`, parsed as
+    /// a plain `ExprKind::Var` exactly like a real local variable) fell through
+    /// undetected, so a `for`/`match` directly over a bare field never got the
+    /// clone-before-consuming treatment its explicit-`self.`-prefixed twin already got.
+    pub(crate) fn resolve_self_field_type(&self, expr: &Expr) -> Option<Type> {
+        match &expr.kind {
+            ExprKind::Field(obj, field) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => {
+                let struct_name = self.self_type.as_ref()?;
+                self.struct_fields.get(struct_name.as_str())?
+                    .iter().find(|(f, _)| f == field)
+                    .map(|(_, ty)| ty.clone())
+            }
+            ExprKind::Var(v) => self.bare_self_field_type(v),
+            _ => None,
+        }
+    }
+
     /// Fallback for `external_fn_arg_borrows`'s receiver-type lookup when `resolve_expr_struct_type`
     /// declines. That function deliberately resolves only a Boring-*known* user struct/enum type
     /// (`is_known_user_type`/`struct_fields`) — by design, to avoid misattributing one type's
