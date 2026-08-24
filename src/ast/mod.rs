@@ -1394,16 +1394,20 @@ impl Type {
     /// the "Transpiler honesty" invariant from "Interactions and invariants" in that
     /// doc, not a change to what Boring source is allowed to do.
     ///
-    /// Deliberately narrower than `index_element_type` — dict values (`{K = mut V}`)
-    /// are NOT covered here. That case has a separate, worse bug (the transpiler
-    /// mutates a throwaway clone of the fetched value, silently losing the write —
-    /// see "Known implementation bugs" in the doc) that a `let mut` on the `HashMap`
-    /// binding alone would not fix and could make easier to miss.
+    /// Also covers dict values (`{K = mut V}`): `d.get_mut(key)` needs the
+    /// underlying `HashMap` binding itself to be `mut` in Rust, same as
+    /// `arr.get_mut`/`arr[i]` needs it for arrays — independent of whatever
+    /// Boring binding keyword (`let`/`var`) was written on `d` itself. Paired
+    /// with the `emit_expr.rs` fix routing a `def` call through a dict value
+    /// (`d[k].method()`) to `get_mut` instead of `.get(k).cloned()` — see
+    /// "Known implementation bugs" in the doc for the full writeup of that
+    /// (worse, silent) bug this alone would not have fixed.
     pub fn nested_slot_grants_mut(&self) -> bool {
         match self {
             Type::Tuple(elems) => elems.iter().any(Type::grants_mut),
             Type::Array(elem) | Type::ArrayN(elem, _) | Type::ArrayNExpr(elem, _)
                 | Type::LabeledArray(elem, _) => elem.grants_mut(),
+            Type::Dict(_, val) => val.grants_mut(),
             Type::Mut(inner) | Type::Optional(inner) | Type::Qualified(inner, _) => {
                 inner.nested_slot_grants_mut()
             }

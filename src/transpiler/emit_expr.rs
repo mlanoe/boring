@@ -1239,9 +1239,23 @@ impl Transpiler {
         // Dict vars (HashMap): use .get().cloned().unwrap() for bare access.
         // When wrapped in `else` (ExprKind::Else), that handler rebuilds the get
         // directly as .unwrap_or_else() to avoid a double-unwrap.
+        //
+        // When this index expression is itself a place expression (`in_lhs_assign`
+        // — set by `emit_method_call_fallback` for `d[k].method()`, and by the
+        // compound-assign codegen for `d[k] += ...`), `.get(k).cloned()` must NOT
+        // be used: it hands back a throwaway clone, so a `def` (mutating) method
+        // called on it silently mutates the clone and never touches the actual
+        // map entry (the map read afterwards still shows the old value, even
+        // though `boring run` and `cargo build` both succeed with no error).
+        // `.get_mut(k)` yields the real place instead; the leading `*` turns the
+        // `&mut V` into an lvalue so both `(*d.get_mut(k)...).method()` and
+        // `(*d.get_mut(k)...) += rhs` compile.
         if let ExprKind::Var(obj_var) = &obj.kind {
             if self.dict_vars.contains(obj_var.as_str()) {
                 let key_ref = self.emit_dict_key_borrow(idx);
+                if self.in_lhs_assign.get() {
+                    return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_var, key_ref);
+                }
                 return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_var, key_ref);
             }
         }
@@ -1268,6 +1282,10 @@ impl Transpiler {
                     if is_dict_field || idx_is_string {
                         let obj_s2 = self.emit_expr(obj);
                         let key_ref = self.emit_dict_key_borrow(idx);
+                        // Same throwaway-clone hazard as the plain dict-var case above.
+                        if self.in_lhs_assign.get() {
+                            return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_s2, key_ref);
+                        }
                         return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s2, key_ref);
                     }
                 }

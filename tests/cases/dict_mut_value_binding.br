@@ -1,0 +1,14 @@
+struct Counter:
+    var int value
+
+    def inc():
+        value += 1
+
+def run():
+    let {string = mut Counter} counters = {"a" = Counter(value = 0), "b" = Counter(value = 10)}
+    counters["a"].inc()
+    counters["a"].inc()
+    counters["b"].inc()
+    print "{counters["a"].value} {counters["b"].value}"
+
+run()

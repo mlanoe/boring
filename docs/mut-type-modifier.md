@@ -575,18 +575,17 @@ until specifically checked.
    rules for `boring run`, confirmed empirically for every case in (2)
    except the owning-binding gap noted there, which is unenforced in the
    interpreter too.
-4. **Shipped for tuples/arrays; still silently wrong for dicts.**
+4. **Shipped for tuples, arrays, and dicts.**
    `src/transpiler/emit_let.rs`'s `emit_let` now forces `let mut` on the
    Rust binding whenever `Type::nested_slot_grants_mut` (`src/ast/mod.rs`)
    is true for the declared type — a tuple with any `mut`-qualified slot
-   (`(mut Point, string) t`) or an array/`ArrayN` with a `mut`-qualified
-   element type (`[mut Point] arr`) — so `t.0.move_to(...)` /
-   `arr[0].move_to(...)` now compiles, matching the "Transpiler honesty"
-   invariant this document already stated. Dict value mutation
-   (`{K = mut V}`) is a separate, worse bug, deliberately not touched by
-   this fix: it compiles and runs, but transpiles to a
-   clone-then-mutate-then-drop that silently loses the write. See
-   "Known implementation bugs" below.
+   (`(mut Point, string) t`), an array/`ArrayN` with a `mut`-qualified
+   element type (`[mut Point] arr`), or a dict with a `mut`-qualified value
+   type (`{K = mut V}`) — so `t.0.move_to(...)` / `arr[0].move_to(...)` /
+   `d[k].move_to(...)` all compile, matching the "Transpiler honesty"
+   invariant this document already stated. Dict value mutation used to be a
+   separate, worse bug even after the Rust binding gets `let mut` — see
+   "Known implementation bugs" below for the write-loss half of that fix.
 5. `boring/interpreter/*.br` (self-hosted interpreter) — not verified as
    part of this status pass; still open.
 6. **Shipped.** `CLAUDE.md`'s cheat sheet now documents `mut` on a scalar as
@@ -637,14 +636,24 @@ None of these are mentioned anywhere else in this document.
   shipped, and regression tests in `tests/tuple_array_mut_slot_binding.rs`
   (`tests/cases/tuple_mut_slot_binding.br`,
   `tests/cases/array_mut_element_binding.br`).
-- **Dict value mutation (`{K = mut V}`) silently loses the write.** The
-  checker/interpreter side is correct, but the transpiler emits
-  `d.get(k).cloned().expect(...).move_to(...)` — mutating a throwaway clone
-  of the fetched value, never the map entry itself. This *compiles and
-  runs* with no error of any kind: `boring run` prints the mutated value,
-  the compiled binary prints the original, unmutated one. Confirmed via a
-  `boring run` vs. compiled-binary A/B comparison. This is worse than the
-  tuple/array bug above — it's silent, not a build failure.
+- **Fixed.** Dict value mutation (`{K = mut V}`) used to silently lose the
+  write. The checker/interpreter side was already correct, but the
+  transpiler emitted `d.get(k).cloned().expect(...).move_to(...)` —
+  mutating a throwaway clone of the fetched value, never the map entry
+  itself. This *compiled and ran* with no error of any kind: `boring run`
+  printed the mutated value, the compiled binary printed the original,
+  unmutated one. Confirmed via a `boring run` vs. compiled-binary A/B
+  comparison — worse than the tuple/array bug above, since it was silent,
+  not a build failure. Fixed in two parts: `emit_expr.rs`'s dict-indexing
+  codegen now honors `in_lhs_assign` (already used by the array-indexing
+  case just below it) and routes a `def` call or compound-assignment
+  through `d.get_mut(key)` instead of `.get(key).cloned()`; and
+  `Type::nested_slot_grants_mut` (`src/ast/mod.rs`) now also covers
+  `Type::Dict`, so the underlying Rust `HashMap` binding itself gets `let
+  mut` — `get_mut` doesn't compile without it, the same "Transpiler
+  honesty" gap the tuple/array fix above closed for those two shapes.
+  Regression test: `tests/dict_mut_value_binding.rs`
+  (`tests/cases/dict_mut_value_binding.br`).
 - **`{mut T}` (set element mutability) isn't rejected at all**, in either
   `boring run` or `boring build` — it should be a hard checker error per
   §3 (no Rust API exists to honor it, see the out-of-scope entry above)
