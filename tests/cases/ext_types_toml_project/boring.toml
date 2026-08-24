@@ -1,0 +1,10 @@
+[project]
+name = "ext_types_toml_project"
+version = "0.1.0"
+main = "src/main.br"
+
+[dependencies]
+ext_tuple = { path = "../../../fixtures/ext_tuple" }
+
+[external_types]
+tuple_structs = ["ExtOpaque"]

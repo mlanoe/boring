@@ -1,0 +1,11 @@
+# Regression fixture for `tests/emit_rust_explicit_path.rs`: `ExtOpaque` is an external
+# tuple struct (see tests/cases/fixtures/ext_tuple/src/lib.rs) that is NOT in the
+# compiler's built-in `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS` list -- only this
+# project's own `boring.toml` `[external_types]` `tuple_structs = ["ExtOpaque"]` entry
+# makes bare `ExtOpaque(5)` construction transpile correctly (as a literal tuple-struct
+# call) instead of the nonexistent `ExtOpaque::new(5)`.
+use ext_tuple.ExtOpaque
+
+def main():
+    let e = ExtOpaque(5)
+    print "{e.0}"

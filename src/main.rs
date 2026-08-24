@@ -1424,7 +1424,45 @@ fn parse_build_command(build_args: &[String]) {
 
     if emit_rust {
         match file {
-            Some(path) => print_rust(path, config),
+            Some(path) => {
+                // Same `[external_types]`/`[derives]`/`external_fns` merge as the `None`
+                // branch below — needed here too since `boring build --emit-rust some/file.br`
+                // (file passed explicitly) and `boring build --emit-rust` (relying on
+                // boring.toml's `main` field pointing at that same file) must produce the
+                // same transpile config for the same source file. `find_project_root` is the
+                // same helper `print_rust`'s own `[deps]` resolution below already uses to
+                // locate this file's `boring.toml`.
+                let config = if let Some(root) = find_project_root(Path::new(path)) {
+                    match std::fs::read_to_string(root.join("boring.toml")) {
+                        Ok(toml_src) => {
+                            let mut toml = BoringToml::parse(&toml_src);
+                            if let Err(e) = toml.resolve_external_types_includes(&root) {
+                                eprintln!("error: {}", e);
+                                process::exit(1);
+                            }
+                            if let Err(e) = toml.resolve_derive_includes(&root) {
+                                eprintln!("error: {}", e);
+                                process::exit(1);
+                            }
+                            if let Err(e) = toml.resolve_external_fns_includes(&root) {
+                                eprintln!("error: {}", e);
+                                process::exit(1);
+                            }
+                            transpiler::TranspileConfig {
+                                external_tuple_structs: toml.external_tuple_structs.clone(),
+                                external_const_fns: toml.external_const_fns.clone(),
+                                known_derives: toml.derive_traits.clone(),
+                                external_fns: toml.external_fns.clone(),
+                                ..config
+                            }
+                        }
+                        Err(_) => config,
+                    }
+                } else {
+                    config
+                };
+                print_rust(path, config)
+            }
             None => {
                 let (toml, _) = load_project_toml();
                 // Same `[external_types]` merge as `build_project_with_config` — needed

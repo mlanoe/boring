@@ -37,3 +37,13 @@ impl Default for ClearColor {
         ClearColor(0)
     }
 }
+
+// Deliberately NOT in `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS` -- stands in for a
+// third-party tuple struct a project must whitelist itself via its own `boring.toml`
+// `[external_types]` `tuple_structs = [...]` entry (see
+// `tests/emit_rust_explicit_path.rs`), as opposed to `Mesh2d`/`TextColor`/`ClearColor`
+// above, which the compiler already knows about built-in. No inherent `new()`, same
+// shape as the others, so a project that forgot to apply its `[external_types]`
+// supplement would wrongly rewrite `ExtOpaque(5)` to the nonexistent `ExtOpaque::new(5)`
+// (E0599).
+pub struct ExtOpaque(pub i64);
