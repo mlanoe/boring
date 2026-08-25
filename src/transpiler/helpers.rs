@@ -1730,6 +1730,28 @@ pub(crate) fn is_specific_numeric_type(ty: &str) -> bool {
                | "f32" | "f64")
 }
 
+/// Returns true if the Rust type string is a specific *integer* type (i.e.
+/// `is_specific_numeric_type` minus the floats) — used to decide whether
+/// `+`/`-`/`*` should emit wrapping arithmetic (see `emit_expr_binop`'s
+/// integer-overflow branch), matching the interpreter's `wrapping_add`/
+/// `wrapping_sub`/`wrapping_mul` semantics for the same operators.
+pub(crate) fn is_integer_rust_type(ty: &str) -> bool {
+    is_specific_numeric_type(ty) && ty != "f32" && ty != "f64"
+}
+
+/// Returns true if the Rust integer type string is signed (`i8`..`i128`/`isize`).
+/// `eval_expr.rs`'s interpreter deliberately does NOT wrap unsigned subtraction —
+/// `Value::Uint*(a) - Value::Uint*(b)` raises a catchable "subtraction underflow"
+/// error instead of wrapping around (unsigned underflow is almost always a bug,
+/// e.g. a miscomputed length/index), unlike Add/Mul and unlike signed Sub, which
+/// all wrap unconditionally. So the transpiler's Sub-wrapping branch must only
+/// fire for signed integer types — for unsigned types, the existing plain `-`
+/// (checked subtraction, panics on underflow in a debug build) is the closer
+/// match to the interpreter's own "this is a bug, stop" behavior.
+pub(crate) fn is_signed_integer_rust_type(ty: &str) -> bool {
+    matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128" | "isize")
+}
+
 /// Returns the wider of two numeric types (the one that can hold both values).
 pub(crate) fn wider_numeric_type(a: &str, b: &str) -> String {
     // Rank: i8 < i16 < i32 < i64 < isize; u8 < u16 < u32 < u64 < usize; f32 < f64

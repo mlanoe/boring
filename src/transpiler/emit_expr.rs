@@ -1402,6 +1402,48 @@ impl Transpiler {
             let fmt = parts.iter().map(|_| "{}").collect::<Vec<_>>().join("");
             return format!("{}::<str>::from(format!(\"{}\", {}))", self.str_ptr(), fmt, parts.join(", "));
         }
+        // Integer overflow: `boring run`'s interpreter wraps on `+`/`*` overflow
+        // (two's-complement wraparound, via explicit `wrapping_add`/`wrapping_mul`
+        // per integer type — see eval_expr.rs), and on `-` too but ONLY for signed
+        // types (unsigned Sub deliberately raises a catchable underflow error
+        // instead — see `is_signed_integer_rust_type`'s doc comment). Plain Rust
+        // `+`/`-`/`*` is *checked* arithmetic in a debug build (panics on overflow
+        // instead of wrapping), so emitting the infix operator here would diverge
+        // from the interpreter outside release builds. Intercept before the
+        // width-coercion and catch-all paths below emit a plain operator for this
+        // case. `Div`/`Rem` are deliberately excluded — both backends already panic
+        // identically on division by zero, so there's no divergence to fix there.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+            let wrap_on_sub_ok = |ty: &str| !matches!(op, BinOp::Sub) || is_signed_integer_rust_type(ty);
+            if let Some(int_ty) = self.integer_binop_type(l, r).filter(|t| wrap_on_sub_ok(t)) {
+                let wrap_method = match op {
+                    BinOp::Add => "wrapping_add",
+                    BinOp::Sub => "wrapping_sub",
+                    BinOp::Mul => "wrapping_mul",
+                    _ => unreachable!(),
+                };
+                // Cast to `int_ty` on any side whose type isn't *confirmed* to
+                // already be exactly `int_ty` — not just the "known but
+                // different width" case. Method-call syntax (`recv.wrapping_add`)
+                // can't lean on Rust's usual literal/inference-driven defaulting
+                // the way an infix `+` can: a receiver that's a bare untyped
+                // int literal (`0.wrapping_sub(n)`) or an unannotated local
+                // (`let mut sum = 0; sum = sum.wrapping_add(n)`) is otherwise
+                // "ambiguous numeric type" (E0689) — rustc needs a method's
+                // receiver type pinned down before it can even look the method
+                // up, unlike operator-trait resolution. An explicit `as int_ty`
+                // is always valid here (the checker already guarantees both
+                // operands are compatible numeric types by the time we emit
+                // this), and a same-type cast is a harmless no-op.
+                let l_ty = self.get_expr_rust_type(l);
+                let r_ty = self.get_expr_rust_type(r);
+                let ls_raw = self.emit_expr(l);
+                let rs_raw = self.emit_expr(r);
+                let ls = if l_ty.as_deref() == Some(int_ty.as_str()) { ls_raw } else { format!("({} as {})", ls_raw, int_ty) };
+                let rs = if r_ty.as_deref() == Some(int_ty.as_str()) { rs_raw } else { format!("({} as {})", rs_raw, int_ty) };
+                return format!("{}.{}({})", ls, wrap_method, rs);
+            }
+        }
         // Numeric type coercion: when adding/subtracting/multiplying/comparing typed
         // numeric vars of different widths (i8 + i16, uint == int, etc.), cast both
         // to the wider type — Rust's `==`/`<`/etc. require identical operand types.
@@ -2205,6 +2247,40 @@ impl Transpiler {
                             .map(|t| matches!(t, Type::Named(n) if n == "string"))
                             .unwrap_or(false)));
             if !is_string_add {
+                // Integer overflow (same rationale as emit_expr_binop's wrapping
+                // branch): `x += y`/`-=`/`*=` must wrap on overflow like the
+                // interpreter, but Rust has no `wrapping_add_assign` — desugar to a
+                // full reassignment `x = x.wrapping_add(y)` instead of `x += y`.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+                    let wrap_on_sub_ok = |ty: &str| !matches!(op, BinOp::Sub) || is_signed_integer_rust_type(ty);
+                    if let Some(int_ty) = self.integer_binop_type(lhs_copy, rhs).filter(|t| wrap_on_sub_ok(t)) {
+                        let wrap_method = match op {
+                            BinOp::Add => "wrapping_add",
+                            BinOp::Sub => "wrapping_sub",
+                            BinOp::Mul => "wrapping_mul",
+                            _ => unreachable!(),
+                        };
+                        self.in_lhs_assign.set(true);
+                        let target_s = self.emit_expr(target);
+                        let lhs_s    = self.emit_expr(lhs_copy);
+                        self.in_lhs_assign.set(false);
+                        if target_s == lhs_s {
+                            // Same "cast unless confirmed already `int_ty`" rule as
+                            // emit_expr_binop's wrapping branch (see its comment) —
+                            // needed for the receiver too, e.g. an unannotated
+                            // `let mut sum = 0` local reassigned as `sum += n`
+                            // would otherwise leave `sum.wrapping_add(...)`
+                            // ambiguous (E0689). The plain `target_s` (uncast)
+                            // still has to be used as the assignment's own lvalue.
+                            let lhs_ty = self.get_expr_rust_type(lhs_copy);
+                            let recv_s = if lhs_ty.as_deref() == Some(int_ty.as_str()) { target_s.clone() } else { format!("({} as {})", target_s, int_ty) };
+                            let rhs_ty  = self.get_expr_rust_type(rhs);
+                            let rhs_raw = self.emit_expr_owned(rhs);
+                            let rhs_s = if rhs_ty.as_deref() == Some(int_ty.as_str()) { rhs_raw } else { format!("({} as {})", rhs_raw, int_ty) };
+                            return format!("{} = {}.{}({})", target_s, recv_s, wrap_method, rhs_s);
+                        }
+                    }
+                }
                 let compound_op = match op {
                     BinOp::Add => Some("+="),
                     BinOp::Sub => Some("-="),

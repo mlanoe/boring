@@ -782,6 +782,26 @@ impl Transpiler {
         }
     }
 
+    /// Returns the Rust integer type that `l op r` (`op` one of Add/Sub/Mul) should
+    /// wrap in, if at least one side resolves to a known specific *integer* type
+    /// (`is_integer_rust_type` — excludes f32/f64). When both sides are known and
+    /// differ in width, returns the wider of the two (mirroring the existing
+    /// numeric-coercion cast). When only one side is known (e.g. the other is a bare
+    /// int literal), returns that side's type — Rust's own literal-inference already
+    /// unifies an untyped literal argument to `wrapping_add`/etc. with `Self`, so no
+    /// cast is needed there. Returns `None` for float-only or fully-untyped operands,
+    /// leaving those to the existing plain-operator paths.
+    pub(crate) fn integer_binop_type(&self, l: &Expr, r: &Expr) -> Option<String> {
+        let l_ty = self.get_expr_rust_type(l).filter(|t| is_integer_rust_type(t));
+        let r_ty = self.get_expr_rust_type(r).filter(|t| is_integer_rust_type(t));
+        match (l_ty, r_ty) {
+            (Some(lt), Some(rt)) => Some(if lt == rt { lt } else { wider_numeric_type(&lt, &rt) }),
+            (Some(lt), None) => Some(lt),
+            (None, Some(rt)) => Some(rt),
+            (None, None) => None,
+        }
+    }
+
     /// Returns the Rust type string for a simple expression (Var with known type, or a
     /// binary op result of same-type numeric ops).
     pub(crate) fn get_expr_rust_type(&self, expr: &Expr) -> Option<String> {
