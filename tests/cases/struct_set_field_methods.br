@@ -1,0 +1,40 @@
+# Regression test: `.add()`/`.contains()`/`.remove()` on a `{T}` (Set) struct
+# field, in both shapes the transpiler dispatches differently from a local
+# Set variable:
+#   - the bare field name, referenced with implicit self inside one of the
+#     struct's own methods (`seen.add(x)` inside `mark`/`has`/`unmark`)
+#   - the external field-chain form, from outside the struct (`f.seen.contains(...)`)
+#
+# The transpiler's Boring-name -> Rust-name remapping for set methods (`add`
+# -> `insert`, plus the `contains`/`remove` reference-vs-index handling) only
+# recognized a receiver that was a bare `Var` tracked in `set_vars` -- a set
+# populated only from local `let`/`var` declarations, never from struct
+# fields. Both call shapes above fell through to the generic method fallback
+# and emitted `.add(...)`/`.remove(...)` verbatim in the generated Rust, which
+# doesn't exist on `HashSet` -- fails to compile (E0599), never caught by
+# `boring run`'s untyped interpreter (see tests/transpile.rs's registration
+# for the real regression coverage; this file's `boring run` value is just
+# pinning down the runtime output too). Fixed by having `expr_is_set` (used
+# elsewhere for Set dispatch) also resolve a struct-field receiver via
+# `struct_fields`/`self_type`, the same way its `expr_is_dict` sibling already
+# did — see `expr_is_set` in src/transpiler/emit_methods.rs.
+struct Foo:
+    var {string} seen = {}
+
+    def mark(string x):
+        seen.add(x)
+
+    req bool has(string x):
+        seen.contains(x)
+
+    def unmark(string x):
+        seen.remove(x)
+
+mut f = Foo()
+f.mark("a")
+f.mark("b")
+print f.has("a")
+print f.has("z")
+f.unmark("a")
+print f.has("a")
+print f.seen.contains("b")

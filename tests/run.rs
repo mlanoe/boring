@@ -285,6 +285,15 @@ interp_test!(struct_count_field);
 // this bug (see tests/transpile.rs's registration for the real regression
 // coverage) -- kept here anyway so the runtime values stay locked in.
 interp_test!(struct_field_array_interp);
+// `.add()`/`.contains()`/`.remove()` on a `{T}` (Set) struct field, called both
+// as a bare field name from inside the struct's own methods (`seen.add(x)`)
+// and from outside it (`f.seen.contains(...)`). The interpreter never had this
+// bug -- it only affected `--emit-rust` output, where the transpiler's
+// set-method remapping (`add` -> `insert`) only recognized a bare local
+// variable tracked in `set_vars`, not a struct field of Set type (see
+// tests/transpile.rs's registration for the real regression coverage).
+// Kept here anyway so the runtime values stay pinned down too.
+interp_test!(struct_set_field_methods);
 // Dict `[key]` indexing (read + write) with a string key, as a function
 // parameter and as an implicit-self struct field. The interpreter (this
 // test) never caught the underlying bugs -- both were only visible in

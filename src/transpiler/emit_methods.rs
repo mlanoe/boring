@@ -2113,10 +2113,12 @@ impl Transpiler {
         // Map boring method names → Rust equivalents
         // For HashSet vars, `add` maps to `insert` (not Vec::push).
         // For dict vars, `contains` maps to `contains_key` (HashMap has no `contains`).
-        let receiver_is_set_var = matches!(&obj.kind, ExprKind::Var(v)
-            if self.set_vars.contains(v.as_str()));
-        let receiver_is_dict_var = matches!(&obj.kind, ExprKind::Var(v)
-            if self.dict_vars.contains(v.as_str()));
+        // Uses expr_is_set/expr_is_dict (not a bare Var check) so a Set/Dict-typed
+        // struct field — `self.seen.add(x)` from inside the struct, or
+        // `some_struct.seen.add(x)` from outside it — is recognized too, not just
+        // a local variable tracked in set_vars/dict_vars.
+        let receiver_is_set_var = self.expr_is_set(obj);
+        let receiver_is_dict_var = self.expr_is_dict(obj);
         // Declared param types of the struct method actually being called, used below to
         // resolve `.Variant` enum shorthand args by the *parameter's* type rather than
         // falling back to the transpiler's flat "last enum registered wins" lookup — see
@@ -2250,8 +2252,9 @@ impl Transpiler {
         ];
         // HashSet::insert takes T (not usize), so exclude set vars from usize coercion.
         // HashMap::insert takes (K, V) — also exclude dict vars from usize coercion.
-        let receiver_is_set = matches!(&obj.kind, ExprKind::Var(v)
-            if self.set_vars.contains(v.as_str()));
+        // (Set/Dict-typed struct fields included via expr_is_set/expr_is_dict — see
+        // receiver_is_set_var/receiver_is_dict_var above.)
+        let receiver_is_set = receiver_is_set_var;
         let args_s: Vec<String> = if USIZE_INDEX_METHODS.contains(&rust_method.as_str()) && !args_s.is_empty() && !receiver_is_set && !receiver_is_dict_var {
             let mut v = args_s;
             v[0] = format!("({} as usize)", v[0]);
@@ -2261,8 +2264,7 @@ impl Transpiler {
             // Vec::remove(usize) and all other cases (field-accessed vecs, etc.) take usize.
             let self_is_hash = matches!(self.self_type.as_deref(),
                 Some("HashMap") | Some("HashSet"));
-            let receiver_is_set = matches!(&obj.kind, ExprKind::Var(v)
-                if self.set_vars.contains(v.as_str()));
+            let receiver_is_set = receiver_is_set_var;
             let mut v = args_s;
             if self_is_hash || receiver_is_set || receiver_is_dict_var {
                 // For dict vars, the key must be a &String (same Borrow rule as .get())
@@ -3135,15 +3137,28 @@ impl Transpiler {
 
     /// Return true when `expr` produces a `HashSet` value.
     ///
-    /// Analogous to `expr_is_dict`:
-    ///   1. `Var(v)` tracked in `set_vars`
+    /// Analogous to `expr_is_dict` (mirrors its five cases, including the
+    /// `.without_mut()` unwrap so a `mut {T}`/`var mut {T}` field still
+    /// matches):
+    ///   1. `Var(v)` tracked in `set_vars`, or a bare field name resolved
+    ///      against `self_type`'s `struct_fields` (used inside the struct's
+    ///      own methods, e.g. `seen.add(x)` for a `var {string} seen` field)
     ///   2. A set literal `{ a, b, … }`
-    ///   3. Chained set → set methods: `union`, `intersection`, `difference`,
+    ///   3. Field access from outside the struct: `obj.field.add(x)`
+    ///   4. Chained set → set methods: `union`, `intersection`, `difference`,
     ///      `add`, `remove`
-    ///   4. Function call returning `Set(…)`
-    fn expr_is_set(&self, expr: &Expr) -> bool {
+    ///   5. Function call returning `Set(…)`
+    pub(crate) fn expr_is_set(&self, expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::Var(v) => self.set_vars.contains(v.as_str()),
+            ExprKind::Var(v) => {
+                if self.set_vars.contains(v.as_str()) { return true; }
+                // Struct fields accessed as bare vars inside method bodies.
+                self.self_type.as_ref()
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == v.as_str()))
+                    .map(|(_, ty)| matches!(ty.without_mut(), crate::ast::Type::Set(_)))
+                    .unwrap_or(false)
+            }
             ExprKind::Set(_) => true,
             // Field access: look up the field type in struct_fields
             ExprKind::Field(obj, field_name) => {
@@ -3156,7 +3171,7 @@ impl Transpiler {
                 };
                 struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
                     .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
-                    .map(|(_, ty)| matches!(ty, crate::ast::Type::Set(_)))
+                    .map(|(_, ty)| matches!(ty.without_mut(), crate::ast::Type::Set(_)))
                     .unwrap_or(false)
             }
             ExprKind::MethodCall(inner, m, _) => {

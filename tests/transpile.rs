@@ -455,6 +455,17 @@ transpile_test!(struct_count_field);
 // transpiler's `BoringFmt` shim. This case's real value is the `cargo run`
 // compile, same rationale as `struct_count_field` above.
 transpile_test!(struct_field_array_interp);
+// `.add()`/`.contains()`/`.remove()` on a `{T}` (Set) struct field: the
+// transpiler's set-method remapping (`add` -> `HashSet::insert`, etc.) only
+// recognized a bare local variable tracked in `set_vars`, never a struct
+// field of Set type -- neither the bare-field-name form used inside the
+// struct's own methods (`seen.add(x)`) nor the external field-chain form
+// (`f.seen.contains(...)`). Both fell through to the generic method-name
+// fallback and emitted `.add(...)`/`.remove(...)` verbatim, which doesn't
+// exist on `HashSet` -- fails to compile (E0599), only caught by `cargo run`
+// (this test), not `boring run`. See tests/cases/struct_set_field_methods.br's
+// own doc comment and expr_is_set in src/transpiler/emit_methods.rs.
+transpile_test!(struct_set_field_methods);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`
