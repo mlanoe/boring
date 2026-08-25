@@ -2,4 +2,5 @@ first_match: banana
 first_match: nil
 describe: on
 highest: 7
+bump_highest a: 8
 items.length: 3

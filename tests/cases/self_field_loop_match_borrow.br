@@ -12,6 +12,22 @@
 #     the value.
 # All three read a field only through a `req` (`&self`) method -- never moved,
 # never reassigned -- so the field must still be usable afterward.
+#
+# Repro 2b (`counts` field + `bump_highest` method below): repro 2's exact
+# shape still mis-transpiled the same way when the dict field is
+# content-mutable (`var mut {K=V}`, not a plain `{K=V}`) *and* the loop lives
+# inside one of that struct's own `def` (mutating) methods -- the real-world
+# case that surfaced it (`scratch-boring`'s `LayerOrders.go_to_front`, a
+# `Resource` struct managing its own `var mut {string=int}` field). Root
+# cause: `iterable_yields_tuples`'s dict-shape check matched a bare
+# `Type::Dict`, but a content-mutable field resolves as `Type::Mut(Dict(K,
+# V))` -- the wrapper was never stripped before the match, so the check
+# reported "not tuple-shaped" and `needs_auto_enumerate` wrongly re-wrapped
+# the (already-correct, elsewhere) `.clone().into_iter()` base in
+# `.enumerate().map(|(i, v)| (i as isize, v))`, binding the value loop
+# variable to the whole `(id, v)` pair instead of just the value -- same
+# broken shape as repro 2, different trigger. Confirmed via `cargo build`
+# (E0308: expected `(Arc<str>, isize)`, found integer) before the fix.
 
 enum Status:
     Active
@@ -21,6 +37,7 @@ struct Bag:
     [string] items
     Status status
     {string=int} scores
+    var mut {string=int} counts
 
     # Repro 1: `for` loop consuming a borrowed `[T]` field.
     req string? first_match(string needle):
@@ -45,8 +62,22 @@ struct Bag:
                 best = score
         best
 
+    # Repro 2b: same 2-var destructuring as `highest()` above, but the field
+    # is content-mutable (`var mut`) and this is a `def` (mutating) method
+    # that both reads the key (to exclude it from the scan) and writes the
+    # field back afterward -- the exact shape of `LayerOrders.go_to_front`.
+    def bump_highest(string exclude_id):
+        var max_order = 0
+        var found = false
+        for id, v in counts:
+            if id != exclude_id:
+                if !found or v > max_order:
+                    max_order = v
+                    found = true
+        counts[exclude_id] = max_order + 1
+
 def main():
-    let bag = Bag(["apple", "banana", "cherry"], Status.Active, {"a" = 3, "b" = 7, "c" = 1})
+    mut bag = Bag(["apple", "banana", "cherry"], Status.Active, {"a" = 3, "b" = 7, "c" = 1}, {"a" = 3, "b" = 7})
 
     match bag.first_match("banana"):
         Some(x): print "first_match: {x}"
@@ -59,6 +90,10 @@ def main():
     print "describe: {bag.describe()}"
 
     print "highest: {bag.highest()}"
+
+    bag.bump_highest("a")
+    let bumped = bag.counts["a"] else -1
+    print "bump_highest a: {bumped}"
 
     # The field itself must still be intact after all three borrow-only calls.
     print "items.length: {bag.items.length}"

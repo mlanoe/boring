@@ -104,8 +104,26 @@ impl Transpiler {
         // wrongly `.enumerate()`-wrapped, since `Query`/`Res`-style types have
         // no `.iter()` returning `(usize, Item)` pairs — see the regression
         // this guards, `tests/for_loop_mut_tuple.rs`.
+        // `.without_mut()` before the `Dict` match below: a content-mutable dict field
+        // (`mut {K=V}` / `var mut {K=V}` — the common resource-struct idiom, e.g.
+        // `var mut {string=int} table`) resolves through `resolve_iterable_type` (both
+        // the bare-self-field and the explicit `obj.field` branches) as
+        // `Type::Mut(Dict(K, V))`, not a bare `Type::Dict`. Matching the wrapped form
+        // directly always missed, and `tuple_slot_mut_flags()` doesn't fill the gap
+        // either — it unwraps `Mut` but has no `Type::Dict` arm of its own (by design;
+        // dicts have no per-slot `mut` to report there), so it falls through to `None`
+        // for a dict either way. Net effect: a 2-var `for id, v in table:` loop over
+        // such a field wrongly fell through to the array-style auto-enumerate rewrite
+        // below (`v` ending up bound to the whole `(id, v)` tuple instead of just the
+        // value) even though the field access itself was correctly identified as a
+        // borrowed dict elsewhere (`emit_for`'s own `self_field_ty`/`is_borrowed_
+        // collection_field`, which already calls `.without_mut()`) — that later,
+        // correctly-typed `.clone().into_iter()` base then got re-wrapped in
+        // `.enumerate().map(|(i, v)| (i as isize, v))` by `needs_auto_enumerate` here.
+        // See docs/self-field-loop-match-borrow-bug.md (repro 2b: a *content-mutable*
+        // dict field specifically, as opposed to repro 2's plain, non-`mut` one).
         let resolved = self.resolve_iterable_type(iterable);
-        matches!(resolved, Some(Type::Dict(_, _)))
+        matches!(resolved.as_ref().map(|ty| ty.without_mut()), Some(Type::Dict(_, _)))
             || resolved.as_ref().is_some_and(|ty| ty.tuple_slot_mut_flags().is_some())
     }
 

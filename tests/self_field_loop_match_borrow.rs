@@ -92,7 +92,7 @@ fn bare_self_field_for_loop_and_match_stay_borrow_safe() {
     );
 
     // ── Repro 2: `for id, score in scores:` over a bare `{K=V}` field ─────────
-    let highest_body = body_of("fn highest", "\n}\n");
+    let highest_body = body_of("fn highest", "fn bump_highest");
     assert!(
         highest_body.contains("self.scores.clone().into_iter()"),
         "expected the bare-field `{{K=V}}` 2-var destructuring to iterate an owned \
@@ -105,6 +105,23 @@ fn bare_self_field_for_loop_and_match_stay_borrow_safe() {
          `.enumerate().map(|(i, v)| (i as isize, v))` auto-enumerate rewrite — a \
          dict value never needs a reconstructed index — generated function:\n{}",
         highest_body
+    );
+
+    // ── Repro 2b: same shape, but a content-mutable (`var mut`) dict field, \
+    // read/written from a `def` method ─────────────────────────────────────
+    let bump_highest_body = body_of("fn bump_highest", "\n}\n");
+    assert!(
+        bump_highest_body.contains("self.counts.clone().into_iter()"),
+        "expected the bare-field `var mut {{K=V}}` 2-var destructuring to iterate \
+         an owned clone, not the borrowed field directly — generated function:\n{}",
+        bump_highest_body
+    );
+    assert!(
+        !bump_highest_body.contains("enumerate"),
+        "a content-mutable (`var mut`) `{{K=V}}` dict field must never go through \
+         the array-style `.enumerate().map(|(i, v)| (i as isize, v))` \
+         auto-enumerate rewrite either — generated function:\n{}",
+        bump_highest_body
     );
 
     // ── Real `boring build` + `cargo build`, end to end ───────────────────────
