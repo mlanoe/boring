@@ -1,8 +1,8 @@
 # Plan: porting the Rust interpreter to Boring
 
 **Date:** 2026-06-10  
-**Updated:** 2026-07-04  
-**Status:** Complete — 65/65 tests passing, single-thread and multi-thread modes  
+**Updated:** 2026-08-25 — real `use` module-import support, §8.2  
+**Status:** Complete — 78/78 tests passing, single-thread and multi-thread modes  
 **Goal:** rewrite the interpreter (`src/interpreter/`) in Boring, transpile it to Rust, and have it pass the existing test suite.
 
 ---
@@ -189,11 +189,35 @@ Comparison run on 2026-07-04 against the native Rust interpreter (`boring run`) 
 
 **Workaround in use:** regular `[Value]` array with `remove(0)` for pop-front. Performance is O(n) but acceptable for the interpreter's simulation-only channels.
 
+### 8.2 `use` module imports (fixed 2026-08-25 — reduced scope, not full parity)
+
+For most of this port's life, `Item::Use` had a populated AST (`ast.br`'s `UseDecl`) but no real parser or exec support: every `use` form except the unrelated `use X as Y` type-alias shorthand was lexically consumed and replaced with a no-op — silently, not an error. `tests/cases/modules.br`'s `use std.collections.HashMap[, HashSet]` lines only appeared to work because `HashMap`/`HashSet` are unconditionally registered as global native constructors regardless of any `use`.
+
+**Fixed:** real parsing (`parse_use_import_decl` in `parser_core.br`, mirroring `Parser::parse_use_decl` in `src/parser/mod.rs`) and real exec-time resolution (`exec_use` in `stdlib.br`, mirroring `Interpreter::exec_use`/`exec_use_decl` in `src/interpreter/mod.rs`/`eval_expr.rs`) for relative sibling-`.br`-file imports:
+
+- `use a.b.c` — whole module (all named items)
+- `use a.b.c.*` — glob (same effect as whole-module)
+- `use a.b.c.X, Y` — selective, validated against each name's `pub`-ness
+
+Resolution walks `Interpreter.search_paths` (seeded in `main.br` with just the entry file's own directory — see below), with `loaded_modules` (a `[string]`, not `{string}` — see the transpiler-gap note in `stdlib.br`) deduping circular/repeat imports.
+
+**Deliberately not ported** (no fallback, no test coverage either way — errors fast instead of no-oping if hit):
+- **`boring.*` first-party stdlib** — the real compiler embeds actual Boring stdlib source (`src/stdlib_embed.rs`); nothing here embeds it. `exec_use` raises a clear error naming the real compiler as the workaround.
+- **`boring.toml [deps]` named cross-project dependencies** (`src/git_deps.rs`) — nothing here parses `[deps]` or resolves them; a `use somedep.X` where `somedep` isn't a real subdirectory just silently no-ops (indistinguishable, at this scope, from an unresolvable external reference — same fallback `std.*`/`crate.*` get, both here and in the real interpreter).
+- **Project `src/` root and `BORING_PATH`** — the real interpreter's `run_file` also searches the enclosing project's `src/` directory and `BORING_PATH` entries; `search_paths` here is seeded with only the entry file's own directory.
+- **True per-module scoping for selective imports** — `Item::Fn`/`Item::Struct`/`Item::Enum` registration in this interpreter (`exec_item`) always writes directly into global state (no scoped env to merge selectively from, unlike the real interpreter's `module_env`), so a selective import still registers every item in the module; it only additionally validates that each named item exists and is `pub`. Matches this interpreter's pre-existing whole-import behavior ("all symbols in a project are accessible; `pub` only gates external-package visibility") rather than contradicting it.
+
+Tested by `tests/cases/use_modules/` (real multi-file resolution: whole/selective/glob imports, a module importing another module, duplicate-import dedup) and `tests/cases/use_boring_stdlib_unsupported/` (the fast-fail path) — both invoke the compiled interpreter binary with a real file argument (`use_modules`/`use_boring_stdlib_unsupported` in `tests/interpreter_functional.rs`), unlike every other fixture in `tests/cases/` which is piped in over stdin as a single in-memory file with no real path, and so can't exercise relative-file resolution at all.
+
+**Transpiler gap found along the way, not fixed:** `set.add(...)` only transpiles to Rust's `HashSet::insert` when the receiver is a bare local variable the transpiler tracked as a set-typed (`receiver_is_set_var` in `src/transpiler/emit_methods.rs`); it doesn't extend to a struct field reached as `x.field.add(...)` from outside the struct, nor to a bare field name inside one of the struct's own methods. `loaded_modules` was changed from `{string}` to `[string]` (`.contains()`/`.push()`, which don't need that tracking) to work around it rather than fix the transpiler.
+
 ### Summary table
 
 | Gap | Impact | Has workaround | Action |
 |---|---|---|---|
 | `VecDeque<T>` | Low | Yes (`[T]` + remove(0)) | Nice-to-have — add to `stdlib/collections.br` |
+| `use boring.*` / `[deps]` | Medium (only affects programs relying on first-party stdlib or named cross-project deps) | No — fails fast (`boring.*`) or silently no-ops (`[deps]`, same as unresolvable `std.*`/`crate.*`) | Would need embedded stdlib source and `boring.toml [deps]` parsing ported into the self-hosted interpreter itself |
+| `set.add()` on a struct field (transpiler) | Low (has a simple workaround: use `[T]` instead) | Yes (`[T]` + `.contains()`/`.push()`) | Extend `receiver_is_set_var` in `src/transpiler/emit_methods.rs` to track struct-field types, not just local vars |
 
 ---
 

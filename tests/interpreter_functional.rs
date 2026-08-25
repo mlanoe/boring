@@ -180,3 +180,96 @@ itest!(error_match);
 itest!(try_else_block);
 itest!(nil_assign);
 itest!(transpiler_coerce);
+
+// ─── Real, on-disk `use` module resolution ─────────────────────────────────
+//
+// Every case above is piped in over stdin as a single in-memory "file" with
+// no real path (see run_case_with_bin) — there's no entry-file directory for
+// `use`'s relative sibling-file resolution (exec_use in
+// boring/interpreter/stdlib.br) to resolve against. These cases instead
+// invoke the compiled interpreter binary with a real file argument, from a
+// fixture directory under tests/cases/ that has actual sibling `.br` files.
+
+fn run_file_case_with_bin(dir: &str, entry: &str, bin: &Path, label: &str) -> std::process::Output {
+    assert!(
+        bin.exists(),
+        "[{}@{}] binary not found at {} — run `cargo test --test interpreter_build` first",
+        dir, label, bin.display()
+    );
+    let entry_path = Path::new("tests/cases").join(dir).join(entry);
+    Command::new(bin)
+        .arg(&entry_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap_or_else(|e| panic!("[{}@{}] failed to spawn: {}", dir, label, e))
+}
+
+/// Runs `dir/entry` against all 4 interpreter binaries and checks stdout
+/// against `dir/expected_name`. Mirrors `run_case_with_bin`, but via a real
+/// file argument instead of stdin.
+fn run_file_case_ok(dir: &str, entry: &str, expected_name: &str) {
+    for (mode, threading, rust_dir) in MODES {
+        let label = format!("{}+{}", mode, threading);
+        let bin = find_bin_in(rust_dir);
+        let out = run_file_case_with_bin(dir, entry, &bin, &label);
+
+        assert!(
+            out.status.success(),
+            "[{}@{}] interpreter exited with error:\n{}",
+            dir, label,
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let actual = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+        let expected_file = Path::new("tests/cases").join(dir).join(expected_name);
+        let expected = std::fs::read_to_string(&expected_file)
+            .unwrap_or_else(|_| panic!("missing expected file: {}", expected_file.display()))
+            .replace("\r\n", "\n");
+
+        assert_eq!(
+            actual.trim_end(),
+            expected.trim_end(),
+            "[{}@{}] output mismatch\n--- expected ---\n{}\n--- actual ---\n{}",
+            dir, label,
+            expected.trim_end(),
+            actual.trim_end(),
+        );
+    }
+}
+
+/// Runs `dir/entry` against all 4 interpreter binaries and asserts it fails
+/// fast (nonzero exit) with `expected_stderr_substr` somewhere in stderr —
+/// for `use` forms that are deliberately unsupported (see
+/// `use_boring_stdlib_unsupported` below).
+fn run_file_case_err(dir: &str, entry: &str, expected_stderr_substr: &str) {
+    for (mode, threading, rust_dir) in MODES {
+        let label = format!("{}+{}", mode, threading);
+        let bin = find_bin_in(rust_dir);
+        let out = run_file_case_with_bin(dir, entry, &bin, &label);
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "[{}@{}] expected a failure, but the interpreter exited successfully (stdout:\n{})",
+            dir, label,
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            stderr.contains(expected_stderr_substr),
+            "[{}@{}] stderr did not contain {:?}:\n{}",
+            dir, label, expected_stderr_substr, stderr
+        );
+    }
+}
+
+#[test]
+fn use_modules() {
+    run_file_case_ok("use_modules", "main.br", "main.expected");
+}
+
+#[test]
+fn use_boring_stdlib_unsupported() {
+    run_file_case_err("use_boring_stdlib_unsupported", "main.br", "boring.*");
+}

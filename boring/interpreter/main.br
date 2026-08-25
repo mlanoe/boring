@@ -107,10 +107,14 @@ def void main() throws:
     # yet; --gpu is accepted (for CLI compatibility with `boring run --gpu
     # <profile>`) but currently has no effect.
     var string source = ""
+    var string? source_path = nil
     if let f = parsed.file:
-        source = fs.read(f)
+        source = fs.read(f.clone())
+        source_path = f
     elif fs.exists("boring.toml"):
-        source = fs.read(resolve_project_main())
+        let main_file = resolve_project_main()
+        source = fs.read(main_file.clone())
+        source_path = main_file
     else:
         # No file, no project — read the script from stdin (pipe or redirect).
         while let ln = readLine():
@@ -118,4 +122,13 @@ def void main() throws:
     let prog = parse(source)
     var interp = new_interpreter()
     interp.cli_args = parsed.script_args
+    # Seed `use` resolution with the entry file's own directory — mirrors the
+    # real compiler's `run_file` adding `path.parent()` to `search_paths`
+    # (src/main.rs). Unlike the real compiler, this doesn't also add the
+    # project's `src/` dir or `BORING_PATH` entries — see exec_use in
+    # stdlib.br for the full scope of what's supported here.
+    if let sp = source_path:
+        let entry_dir = use_dirname(sp)
+        if entry_dir.length > 0:
+            interp.add_search_path(entry_dir)
     run_program(interp, prog)

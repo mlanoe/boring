@@ -1,0 +1,13 @@
+# A sibling module `use`-ing another sibling module (`greet`) — exercises
+# transitive resolution: main.br also `use greet` directly, and must not
+# re-run/re-register greet.br a second time (loaded_modules dedup guard).
+use greet
+
+pub def int square(int x):
+    x * x
+
+pub def int cube(int x):
+    x * x * x
+
+pub def string math_greeting():
+    greet("Math")

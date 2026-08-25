@@ -20,6 +20,21 @@ struct Interpreter:
     var [Value] stream_yields = []
     var bool in_kernel_context = false
     var [string] cli_args = []
+    # `use a.b.c` resolution state — a reduced-scope port of the real
+    # compiler's `search_paths`/`loaded` (src/interpreter/mod.rs). See
+    # `exec_use` below for exactly what's supported.
+    var [string] search_paths = []
+    # A `[string]` (not `{string}`) despite being pure membership-tracking —
+    # `set.add(...)` only transpiles to Rust's `HashSet::insert` when the
+    # transpiler can track the receiver as a local variable of set type (see
+    # `receiver_is_set_var` in src/transpiler/emit_methods.rs); it doesn't
+    # extend that tracking to a struct field reached as a bare name from
+    # within one of the struct's own methods, so `loaded_modules.add(...)`
+    # here would transpile to a nonexistent `HashSet::add` and fail to
+    # compile. A handful of loaded module paths is small enough that O(n)
+    # `.contains()`/`.push()` (which need no such tracking — Vec/HashSet
+    # share those method names verbatim) is a fine, simple workaround.
+    var [string] loaded_modules = []
     # Stack of the currently executing function/method's declared return type (one frame
     # per call_fn invocation, pushed/popped around body execution — see push_return_ty/
     # pop_return_ty below, defined as free functions just after this struct). Lets
@@ -126,6 +141,31 @@ struct Interpreter:
         if let d = r:
             return d
         nil
+
+    # ── `use` module resolution state ──────────────────────────────────────
+    # Mutating `search_paths`/`loaded_modules` through struct methods (rather
+    # than an external `interp.search_paths.push(...)` field chain) matches
+    # every other field in this struct — and sidesteps a real transpiler gap:
+    # `set.add(...)` only maps to Rust's `HashSet::insert` when the receiver
+    # is a bare local variable the transpiler tracked as a set (see
+    # `receiver_is_set_var` in src/transpiler/emit_methods.rs), not a
+    # `x.field.add(...)` chain reached from outside the struct.
+    def void add_search_path(string path):
+        if not search_paths.contains(path):
+            search_paths.push(path)
+
+    req string? find_module_file(string rel):
+        for base in search_paths:
+            let candidate = use_join_path(base, rel.clone())
+            if fs.exists(candidate):
+                return candidate
+        nil
+
+    req bool is_module_loaded(string path):
+        loaded_modules.contains(path)
+
+    def void mark_module_loaded(string path):
+        loaded_modules.push(path)
 
 # ─── return_ty_stack helpers ──────────────────────────────────────────────────
 #
@@ -613,7 +653,9 @@ def Interpreter'actor new_interpreter():
         stream_yields = [],
         in_kernel_context = false,
         cli_args = [],
-        return_ty_stack = []
+        return_ty_stack = [],
+        search_paths = [],
+        loaded_modules = []
     )
     register_stdlib(interp)
     interp
@@ -672,6 +714,147 @@ def void register_free_fn(mut Interpreter interp, mut Env'actor target_env, FnDe
         target_env.define(fn_name, Value.Fn(fn_name, target_env.clone()))
 
 # ─── exec_item ────────────────────────────────────────────────────────────────
+
+# ─── use import resolution ─────────────────────────────────────────────────
+#
+# Real, relative-file `use` resolution for the self-hosted interpreter — a
+# reduced-scope port of the real compiler's `Interpreter::exec_use`/
+# `exec_use_decl` (src/interpreter/mod.rs, src/interpreter/eval_expr.rs).
+#
+# Supported: sibling `.br` files resolved from `interp.search_paths` via
+# dotted relative paths — `use a.b.c` (whole module), `use a.b.c.*` (glob,
+# same effect), `use a.b.c.X, Y` (selective). Circular/duplicate imports are
+# deduped via `loaded_modules`, same as the real interpreter's `loaded` set.
+#
+# NOT supported: first-party `boring.*` stdlib (real, embedded Boring
+# source, src/stdlib_embed.rs — nothing here embeds it) fails fast with a
+# clear error instead of silently no-oping, unlike the previous dead
+# `Item.Use` branch this replaces. `std.*`/`crate.*` (opaque Rust-type
+# stand-ins in the real interpreter — this one has no `Value::RustType`
+# equivalent) and `boring.toml [deps]` named cross-project dependencies
+# (src/git_deps.rs — nothing here parses `[deps]` or resolves them) get no
+# special-casing at all: they fall straight into the generic file-resolution
+# path below, which — since "std/..."/"crate/..." essentially never exists
+# as a real sibling file — silently no-ops exactly like the real
+# interpreter's fallback for an unresolvable external/native import (and
+# exactly like this interpreter's own pre-existing behavior; see
+# `use std.collections.HashMap[, HashSet]` in tests/cases/modules.br, which
+# relies on this being a no-op — those names work anyway because HashMap/
+# HashSet are unconditionally registered as global native constructors,
+# `use` or not).
+#
+# Also unlike the real interpreter: `Item.Fn`/`Item.Struct`/`Item.Enum`
+# registration in this interpreter (see exec_item below) always writes
+# directly into global state — there is no per-module scoped env to merge
+# selectively from. So a *selective* import (`use a.b.c.X`) still registers
+# every item the module declares (globally visible), it just additionally
+# validates that each explicitly named item exists and is `pub` — it does
+# NOT hide the module's other names from the importer the way the real
+# interpreter's `module_env` does. This matches the spirit of the real
+# interpreter's own non-selective-import comment ("within a project, all
+# symbols from sibling files are accessible; pub only controls external-
+# package visibility") rather than contradicting it.
+def string? item_name(Item item):
+    match item:
+        Item.Fn(d): d.name
+        Item.Struct(d): d.name
+        Item.Enum(d): d.name
+        Item.Let(d): d.name
+        Item.Mod(d): d.name
+        _: nil
+
+def bool item_is_pub(Item item):
+    match item:
+        Item.Fn(d): d.is_pub
+        Item.Struct(d): d.is_pub
+        Item.Enum(d): d.is_pub
+        Item.Let(d): d.is_pub
+        _: false
+
+def string use_join_path(string base, string rel):
+    if base.length == 0:
+        return rel
+    if base.endsWith("/"):
+        return base + rel
+    base + "/" + rel
+
+# `use a.b.c` → relative path `a/b/c.br`
+def string use_module_rel_path(UseDecl decl):
+    var string rel = decl.path[0]
+    var int i = 1
+    while i < decl.path.length:
+        rel = rel + "/" + decl.path[i]
+        i = i + 1
+    rel + ".br"
+
+def string use_dirname(string path):
+    let parts = path.split("/")
+    if parts.length <= 1:
+        return ""
+    var string out = parts[0]
+    var int i = 1
+    while i < parts.length - 1:
+        out = out + "/" + parts[i]
+        i = i + 1
+    out
+
+def void exec_use(mut Interpreter interp, UseDecl decl):
+    if decl.path.length == 0:
+        return
+    let prefix = decl.path[0]
+    if prefix == "boring":
+        error "use: 'boring.*' first-party stdlib imports are not supported by the self-hosted interpreter (boring/interpreter) — only relative sibling-module imports like `use a.b.c` are. Run this program with the native `boring` compiler (`boring run` / `boring build`) instead."
+        exit(1)
+        return
+    let rel = use_module_rel_path(decl)
+    let found = interp.find_module_file(rel)
+    guard let abs = found else:
+        # No .br file found on any search path — treat as an unresolvable
+        # native/external reference and ignore, same as the real interpreter.
+        return
+    if interp.is_module_loaded(abs.clone()):
+        return
+    interp.mark_module_loaded(abs.clone())
+    # Make the module's own directory searchable too, so it can `use` its
+    # own siblings transitively.
+    let mod_dir = use_dirname(abs.clone())
+    if mod_dir.length > 0:
+        interp.add_search_path(mod_dir)
+
+    let source = fs.read(abs.clone())
+    # `parse` throws (lex/parse errors) — caught locally rather than
+    # propagated, so `exec_use`/`exec_item`/`run_program` don't all need to
+    # become `throws` themselves. A bad module is a fatal, non-catchable
+    # load error here, same as the real compiler's `report_error` + exit.
+    var Program? loaded_program = nil
+    try:
+        loaded_program = parse(source)
+    catch:
+        error "use: failed to parse module '{abs.clone()}': {error}"
+        exit(1)
+    guard let program = loaded_program else:
+        return
+    # Single pass: register every item (see the doc comment above for why
+    # this interpreter can't scope registration to only the requested
+    # names), while also recording which names are `pub` — so a selective
+    # import's validation below doesn't need a second pass over
+    # `program.items` (which `for item in program.items` already consumes).
+    var {string} pub_names = {}
+    for item in program.items:
+        if let nm = item_name(item.clone()):
+            if item_is_pub(item.clone()):
+                pub_names.add(nm)
+        exec_item(interp, item)
+
+    if decl.items.length > 0:
+        # Selective import — validate each requested name is actually
+        # declared `pub` (see the doc comment above for what this does and
+        # doesn't enforce).
+        let module_name = decl.path.join(".")
+        for wanted in decl.items:
+            if not pub_names.contains(wanted):
+                error "'{wanted}' is not exported by module '{module_name}'"
+                exit(1)
 
 def void exec_item(mut Interpreter interp, Item item):
     match item:
@@ -735,7 +918,7 @@ def void exec_item(mut Interpreter interp, Item item):
         Item.Stmt(stmt):
             exec_stmt(interp, stmt)
         Item.Use(decl):
-            env_define(interp.current_env, "__use__", Value.Nil, true)
+            exec_use(interp, decl)
         Item.Ext(decl):
             # Register extension methods on the target type. An `ext` method
             # overrides an *existing* method only when they share the same

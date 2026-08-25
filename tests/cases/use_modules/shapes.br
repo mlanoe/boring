@@ -1,0 +1,5 @@
+pub struct Square:
+    pub int side
+
+    pub req int area():
+        side * side

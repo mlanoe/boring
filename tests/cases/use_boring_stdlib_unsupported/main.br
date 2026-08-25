@@ -1,0 +1,7 @@
+# `boring.*` first-party stdlib imports have no counterpart in the
+# self-hosted interpreter (no embedded stdlib source) — this must fail
+# fast with a clear error, not silently no-op. See exec_use in
+# boring/interpreter/stdlib.br.
+use boring.collections.Stack
+
+print "unreachable"

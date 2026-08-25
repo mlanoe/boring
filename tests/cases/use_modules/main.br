@@ -1,0 +1,22 @@
+# Real, self-hosted-interpreter multi-file `use` resolution — see
+# `boring/interpreter` stdlib.br's `exec_use`. Unlike every other fixture in
+# `tests/cases/` (piped in over stdin as a single in-memory file, no real
+# path — see run_case_with_bin in tests/interpreter_functional.rs), this one
+# is invoked with a real file argument via `use_modules` in that same file,
+# specifically so `use`'s relative sibling-file resolution has an actual
+# entry-file directory to resolve against.
+use greet                          # whole-module import (single segment)
+use mathmod.square, cube, math_greeting   # selective import
+use shapes.*                       # glob import
+
+print greet("World")
+
+let g = Greeter(prefix = "Hi")
+print g.say("Boring")
+
+print square(5)
+print cube(3)
+print math_greeting()
+
+let sq = Square(side = 4)
+print sq.area()

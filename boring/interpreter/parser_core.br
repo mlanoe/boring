@@ -1394,9 +1394,7 @@ def Item parse_item(mut Parser p) throws:
                         p.advance()
                     Item.Stmt(Stmt.Expr(Expr(kind= ExprKind.Nil, line= 0)))
             else:
-                while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
-                    p.advance()
-                Item.Stmt(Stmt.Expr(Expr(kind= ExprKind.Nil, line= 0)))
+                Item.Use(parse_use_import_decl(p))
         TokenKind.Pub:
             p.advance()
             if parser_check(p, "Struct"):
@@ -2173,6 +2171,36 @@ def AliasDecl parse_alias_decl(mut Parser p) throws:
     parser_expect(p, "As")
     let ty = parse_type(p)
     AliasDecl(name= name, ty= ty, type_params= [], newtype= false, line= p.pos)
+
+# Parses a `use a.b.c` / `use a.b.c.*` / `use a.b.c.X, Y` import path —
+# assumes the leading `use` token has already been consumed by the caller
+# (mirrors the call site in `parse_item`'s `TokenKind.Use` branch). Ports
+# the real compiler's `Parser::parse_use_decl` (src/parser/mod.rs) so the
+# self-hosted interpreter can actually resolve module imports instead of
+# silently discarding the line — see `exec_use` in exec.br for what happens
+# with the resulting `UseDecl`.
+def UseDecl parse_use_import_decl(mut Parser p) throws:
+    let line = parser_line(p)
+    var [string] path = [parser_expect_ident_or_keyword(p)]
+    while parser_eat(p, "Dot"):
+        if parser_eat(p, "Star"):
+            # use a.b.c.*  — glob import (exec-time: same as no `items` filter)
+            parser_expect_newline(p)
+            return UseDecl(path= path, glob= true, items= [], line= line)
+        path.push(parser_expect_ident_or_keyword(p))
+    if path.length == 1:
+        # use a  — single-segment whole-module import
+        parser_expect_newline(p)
+        return UseDecl(path= path, glob= false, items= [], line= line)
+    # The last segment is always the first imported item.
+    # use a.b.c.X     → path=[a,b,c], items=[X]
+    # use a.b.c.X, Y  → path=[a,b,c], items=[X,Y]
+    let first_item = path.pop()
+    var [string] items = [first_item]
+    while parser_eat(p, "Comma"):
+        items.push(parser_expect_ident(p))
+    parser_expect_newline(p)
+    UseDecl(path= path, glob= false, items= items, line= line)
 
 def GuardStmt parse_guard_stmt(mut Parser p) throws:
     let line = p.current_line()
