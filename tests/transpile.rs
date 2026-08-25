@@ -355,6 +355,7 @@ transpile_test!(inline_match);
 transpile_test!(supertraits);
 transpile_test!(type_cast);
 transpile_test!(int_literal_overflow_cast);
+transpile_test!(array_index_as_cast);
 transpile_test!(builtin_error_enum);
 transpile_test!(typed_catch_match_error);
 // A type-level method's (`type def`/`type req`/`type set`) `throws` was previously

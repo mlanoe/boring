@@ -1,0 +1,36 @@
+# Regression test for a transpiler bug: `arr[i] as WiderType` (an
+# array/dict-indexed expression cast inline, no intermediate binding) used to
+# fall through `emit_expr_cast`'s numeric-source dispatch (`ExprKind::Index`
+# isn't a `Var`/`BinOp`/`Call`/`UnaryOp`/`MethodCall`) all the way to the
+# string-parsing fallback meant for `"42" as int`, emitting the bogus
+# `bytes[16].trim().parse::<u32>().ok()` — invalid Rust, since `.trim()`
+# doesn't exist on an already-numeric element. Fixed in `emit_expr.rs`'s
+# `emit_expr_cast` by recognizing an `Index` whose base is a known
+# numeric-element `[T]`/`{K=V}` as numeric, same as a bare numeric variable.
+#
+# `let width = (bytes[16] as uint32) * ... ` inline (this is the exact shape
+# `scratch-boring`'s `png_dimensions` originally hit before working around it
+# with an explicitly-`uint8`-typed local binding — see that project's
+# `assets.br`).
+
+def uint32 widen_let([uint8] bytes):
+    let width = (bytes[0] as uint32) * 16777216 + (bytes[1] as uint32) * 65536 + (bytes[2] as uint32) * 256 + (bytes[3] as uint32)
+    width
+
+# Same cast, but used directly inline in an expression — no `let` binding at
+# all — to cover the non-let call site too (a `let` target and a bare
+# expression go through different codegen paths upstream of `emit_expr_cast`).
+def uint32 widen_inline([uint8] bytes):
+    (bytes[0] as uint32) * 16777216 + (bytes[1] as uint32) * 65536 + (bytes[2] as uint32) * 256 + (bytes[3] as uint32)
+
+# Dict-indexed numeric element, same bug surface (`Type::Dict`'s value type).
+def uint32 widen_dict_let({string=uint8} scores):
+    let doubled = (scores["a"] as uint32) * 2
+    doubled
+
+def main():
+    let [uint8] bytes = [1, 0, 1, 44]
+    print widen_let(bytes)
+    print widen_inline(bytes)
+    let {string=uint8} scores = {"a" = 200}
+    print widen_dict_let(scores)

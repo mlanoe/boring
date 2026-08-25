@@ -2,6 +2,27 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+/// Is `ty` one of Boring's known numeric scalar types (bare `int`/`uint`, every
+/// fixed-width int alias, and both float widths) — by `Type` variant or by its
+/// `Type::Named` string alias? Shared by `emit_expr_cast`'s numeric-source
+/// checks: a bare numeric variable (`n as uint32`) and a numeric-element
+/// array/dict index expression (`bytes[16] as uint32`, see
+/// `src_is_numeric_index`) both need the exact same "is this already a number"
+/// test so an `as` cast on either emits a plain `as T` widen, not the
+/// string-parsing codegen (`.trim().parse::<T>()`) meant for `string` sources.
+fn is_known_numeric_scalar_type(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
+        | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+        | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
+    || matches!(ty, Type::Named(n) if matches!(n.as_str(),
+        "int" | "uint" | "uint8" | "float" | "float32" | "float64"
+        | "int8" | "int16" | "int32" | "int64" | "int128"
+        | "uint16" | "uint32" | "uint64" | "uint128"
+        | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+        | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+        | "f32" | "f64"))
+}
+
 impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
         match &expr.kind {
@@ -988,22 +1009,41 @@ impl Transpiler {
         }
         // Known-numeric variable (tracked in var_types as Int/Float/Uint/...) → cast with `as T`
         let src_var_is_numeric = matches!(&e.kind, ExprKind::Var(v) if {
-            let vt = self.var_types.get(v.as_str());
-            matches!(vt, Some(Type::Int | Type::Uint | Type::Uint8 | Type::Float32 | Type::Float64
-                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
-                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128))
-            || matches!(vt, Some(Type::Named(n)) if matches!(n.as_str(),
-                "int" | "uint" | "uint8" | "float" | "float32" | "float64"
-                | "int8" | "int16" | "int32" | "int64" | "int128"
-                | "uint16" | "uint32" | "uint64" | "uint128"
-                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                | "f32" | "f64"))
+            self.var_types.get(v.as_str()).map(is_known_numeric_scalar_type).unwrap_or(false)
         });
         if src_var_is_numeric && is_float_ty {
             return format!("({} as {})", src, dst);
         }
         if src_var_is_numeric && is_fixed_int_ty {
+            return format!("({} as {})", src, dst);
+        }
+        // Indexing into a known-numeric-element array/dict (`bytes[16] as uint32`,
+        // `scores[k] as uint32`) → same numeric path as the bare-variable case above.
+        // `ExprKind::Index` isn't a Var/BinOp/Call/UnaryOp/MethodCall, so without this
+        // check it falls through every branch above and every branch below all the way
+        // to the string-parsing fallback near the bottom of this function, which wrongly
+        // emits `.trim().parse::<T>()` on an already-numeric element — that fails to
+        // compile with `no method named 'trim' found for type 'u8'` (or whatever the
+        // element type is) since `.trim()` only exists on strings.
+        let src_is_numeric_index = matches!(&e.kind, ExprKind::Index(base, _) if match &base.kind {
+            ExprKind::Var(v) => match self.var_types.get(v.as_str()) {
+                Some(Type::Array(elem)) | Some(Type::ArrayN(elem, _)) | Some(Type::Dict(_, elem)) => {
+                    let elem = match elem.as_ref() {
+                        // `[mut uint8]`/`{K = mut V}` — unwrap the permission marker to
+                        // get at the underlying numeric type.
+                        Type::Mut(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    is_known_numeric_scalar_type(elem)
+                }
+                _ => false,
+            },
+            _ => false,
+        });
+        if src_is_numeric_index && is_float_ty {
+            return format!("({} as {})", src, dst);
+        }
+        if src_is_numeric_index && is_fixed_int_ty {
             return format!("({} as {})", src, dst);
         }
 
