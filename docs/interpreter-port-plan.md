@@ -209,7 +209,7 @@ Resolution walks `Interpreter.search_paths` (seeded in `main.br` with just the e
 
 Tested by `tests/cases/use_modules/` (real multi-file resolution: whole/selective/glob imports, a module importing another module, duplicate-import dedup) and `tests/cases/use_boring_stdlib_unsupported/` (the fast-fail path) — both invoke the compiled interpreter binary with a real file argument (`use_modules`/`use_boring_stdlib_unsupported` in `tests/interpreter_functional.rs`), unlike every other fixture in `tests/cases/` which is piped in over stdin as a single in-memory file with no real path, and so can't exercise relative-file resolution at all.
 
-**Transpiler gap found along the way, not fixed:** `set.add(...)` only transpiles to Rust's `HashSet::insert` when the receiver is a bare local variable the transpiler tracked as a set-typed (`receiver_is_set_var` in `src/transpiler/emit_methods.rs`); it doesn't extend to a struct field reached as `x.field.add(...)` from outside the struct, nor to a bare field name inside one of the struct's own methods. `loaded_modules` was changed from `{string}` to `[string]` (`.contains()`/`.push()`, which don't need that tracking) to work around it rather than fix the transpiler.
+**Transpiler gap found along the way, fixed 2026-08-25:** `set.add(...)` only transpiled to Rust's `HashSet::insert` when the receiver was a bare local variable the transpiler tracked as set-typed (`receiver_is_set_var` in `src/transpiler/emit_methods.rs`); it didn't extend to a struct field reached as `x.field.add(...)` from outside the struct, nor to a bare field name inside one of the struct's own methods. `loaded_modules` was changed from `{string}` to `[string]` (`.contains()`/`.push()`, which don't need that tracking) as a workaround at the time. Since fixed by mirroring `expr_is_dict`'s struct-field resolution into `expr_is_set` (and reusing both helpers at the four `receiver_is_set`/`receiver_is_dict_var` call sites) — see `tests/cases/struct_set_field_methods.br`. `loaded_modules`'s `[string]` workaround was left in place (no need to revert a working, equally-valid representation).
 
 ### Summary table
 
@@ -217,7 +217,7 @@ Tested by `tests/cases/use_modules/` (real multi-file resolution: whole/selectiv
 |---|---|---|---|
 | `VecDeque<T>` | Low | Yes (`[T]` + remove(0)) | Nice-to-have — add to `stdlib/collections.br` |
 | `use boring.*` / `[deps]` | Medium (only affects programs relying on first-party stdlib or named cross-project deps) | No — fails fast (`boring.*`) or silently no-ops (`[deps]`, same as unresolvable `std.*`/`crate.*`) | Would need embedded stdlib source and `boring.toml [deps]` parsing ported into the self-hosted interpreter itself |
-| `set.add()` on a struct field (transpiler) | Low (has a simple workaround: use `[T]` instead) | Yes (`[T]` + `.contains()`/`.push()`) | Extend `receiver_is_set_var` in `src/transpiler/emit_methods.rs` to track struct-field types, not just local vars |
+| `set.add()` on a struct field (transpiler) | Fixed 2026-08-25 | N/A | `expr_is_set` now resolves struct-field Set types the same way `expr_is_dict` already did |
 
 ---
 
