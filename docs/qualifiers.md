@@ -9,7 +9,7 @@ Every Boring type carries an optional **qualifier** that describes how the value
 ```boring
 let Counter'actor  c = Counter()   # Arc<Mutex<Counter>>
 let Counter'shared r = Counter()   # Arc<Counter>
-let Counter'stack  s = Counter()   # Counter  (on the stack)
+let Counter'inline s = Counter()   # Counter  (no indirection)
 ```
 
 Qualifiers are resolved at transpile time. The interpreter ignores them (all values are reference-counted by the runtime). In generated Rust the qualifier determines the exact wrapper type.
@@ -20,8 +20,8 @@ Qualifiers are resolved at transpile time. The interpreter ignores them (all val
 
 | Boring | Rust (multi-thread) | Rust (single-thread) | Mutable | Notes |
 |---|---|---|---|---|
-| `'stack` | `T` | `T` | via `mut` binding | Rust default, no wrapper |
-| `'heap` / `T'` | `Box<T>` | `Box<T>` | via `mut` binding | heap-allocated, exclusive |
+| `'inline` | `T` | `T` | via `mut` binding | Rust default, no wrapper |
+| `'owned` | `Box<T>` | `Box<T>` | via `mut` binding | heap-allocated, exclusive |
 | `'shared` | `Arc<T>` | `Rc<T>` | no | read-only shared ownership |
 | `'actor` | `Arc<std::sync::Mutex<T>>` | `Rc<RefCell<T>>` | interior mutability | sync, no tokio required |
 | `'actor'task` / `'task` | `Arc<tokio::sync::Mutex<T>>` | `Rc<RefCell<T>>` | interior mutability | async context |
@@ -186,8 +186,8 @@ let b = a.clone()  # deep copy — a and b are independent
 
 | Qualifier | `.clone()` cost | Result |
 |---|---|---|
-| `'stack` | deep copy — allocates new value | independent copy |
-| `'heap` | deep copy — allocates new `Box<T>` + clones content | independent heap allocation |
+| `'inline` | deep copy — allocates new value | independent copy |
+| `'owned` | deep copy — allocates new `Box<T>` + clones content | independent heap allocation |
 | `'shared` | O(1) — increments `Arc` refcount | shared reference to the same value |
 | `'actor` | O(1) — increments `Arc` refcount | shared reference to the same mutex |
 | `'guard` | O(1) — increments `Arc` refcount | shared reference to the same rwlock |
@@ -204,27 +204,27 @@ A value can be promoted to a richer qualifier at construction time. These are **
 
 | From | To | Boring | Rust emitted | Notes |
 |---|---|---|---|---|
-| `'stack` | `'heap` | `let b'heap = a` | `Box::new(a)` | move into heap |
-| `'stack` | `'shared` | `let b'shared = a` | `Arc::new(a.clone())` | source is cloned, not moved, in the emitted Rust |
-| `'stack` | `'actor` | `let b'actor = a` | `Arc::new(std::sync::Mutex::new(a.clone()))` | source is cloned, not moved, in the emitted Rust |
-| `'stack` | `'guard` | `let b'guard = a` | `Arc::new(std::sync::RwLock::new(a.clone()))` | source is cloned, not moved, in the emitted Rust |
-| `'heap` | `'shared` | `let b'shared = a` | `Arc::from(a)` | no double allocation — Rust optimisation |
-| `'heap` | `'actor` | `let b'actor = a` | `Arc::new(Mutex::new(*a))` | unboxes then wraps |
-| `'heap` | `'guard` | `let b'guard = a` | `Arc::new(RwLock::new(*a))` | unboxes then wraps |
-| `'heap` | `'stack` | `let b'stack = a` | `a.clone()` | clones the boxed value; `a` remains a valid, unmoved `Box<Counter>` in the emitted Rust |
+| `'inline` | `'owned` | `let b'owned = a` | `Box::new(a)` | move into heap |
+| `'inline` | `'shared` | `let b'shared = a` | `Arc::new(a.clone())` | source is cloned, not moved, in the emitted Rust |
+| `'inline` | `'actor` | `let b'actor = a` | `Arc::new(std::sync::Mutex::new(a.clone()))` | source is cloned, not moved, in the emitted Rust |
+| `'inline` | `'guard` | `let b'guard = a` | `Arc::new(std::sync::RwLock::new(a.clone()))` | source is cloned, not moved, in the emitted Rust |
+| `'owned` | `'shared` | `let b'shared = a` | `Arc::from(a)` | no double allocation — Rust optimisation |
+| `'owned` | `'actor` | `let b'actor = a` | `Arc::new(Mutex::new(*a))` | unboxes then wraps |
+| `'owned` | `'guard` | `let b'guard = a` | `Arc::new(RwLock::new(*a))` | unboxes then wraps |
+| `'owned` | `'inline` | `let b'inline = a` | `a.clone()` | clones the boxed value; `a` remains a valid, unmoved `Box<Counter>` in the emitted Rust |
 
-At the Boring-semantics level, all upgrades consume the source value — the interpreter marks the source binding as moved, and reading it afterward raises "use of moved value". However, this is not always a move in the *emitted Rust*: for `'stack` → `'shared`/`'actor`/`'guard` and `'heap` → `'stack`, the transpiler emits `.clone()` on the source, so the original Rust variable remains alive and valid under the hood even though Boring forbids reading it. `Arc::from(box_val)` (used for `'heap` → `'shared`) is the idiomatic Rust way to convert `Box<T>` into `Arc<T>` without a double allocation — the `Arc` reuses the existing heap allocation, and this is the one upgrade that is a true move in the emitted Rust.
+At the Boring-semantics level, all upgrades consume the source value — the interpreter marks the source binding as moved, and reading it afterward raises "use of moved value". However, this is not always a move in the *emitted Rust*: for `'inline` → `'shared`/`'actor`/`'guard` and `'owned` → `'inline`, the transpiler emits `.clone()` on the source, so the original Rust variable remains alive and valid under the hood even though Boring forbids reading it. `Arc::from(box_val)` (used for `'owned` → `'shared`) is the idiomatic Rust way to convert `Box<T>` into `Arc<T>` without a double allocation — the `Arc` reuses the existing heap allocation, and this is the one upgrade that is a true move in the emitted Rust.
 
 ### Downgrade
 
-Downgrades (e.g. `'shared` → `'stack`) are not available implicitly. Shared references (`Arc`) cannot be converted back to owned values without an explicit `.clone()` or `.try_unwrap()` (which fails if other references exist).
+Downgrades (e.g. `'shared` → `'inline`) are not available implicitly. Shared references (`Arc`) cannot be converted back to owned values without an explicit `.clone()` or `.try_unwrap()` (which fails if other references exist).
 
 ```boring
 let a'shared = Counter(0)
 let b = a.clone()    # Arc::clone — b is still 'shared (Arc<Counter>), sharing the same value as a
 ```
 
-`.clone()` on an `'shared` value is a pointer clone (see the clone-cost table above), not a deep copy — there is no implicit way to obtain an independent `'stack` copy from an `'shared` value. To get one, deref and clone the inner value explicitly (e.g. via a method that returns an owned copy).
+`.clone()` on an `'shared` value is a pointer clone (see the clone-cost table above), not a deep copy — there is no implicit way to obtain an independent `'inline` copy from an `'shared` value. To get one, deref and clone the inner value explicitly (e.g. via a method that returns an owned copy).
 
 ---
 
@@ -236,8 +236,8 @@ let b = a.clone()    # Arc::clone — b is still 'shared (Arc<Counter>), sharing
 |---|---|---|
 | `Counter c` | inferred — see [Inference](#inference) | qualifier inferred from body; or `Counter&` / `mut Counter&` if no storage signal |
 | `mut Counter c` | inferred — see [Inference](#inference) | mutable; infers `mut Counter&` if no storage, mutable qualifier otherwise |
-| `Counter'stack c` | `Counter` | move (or copy for primitives) |
-| `Counter'heap c` | `Box<Counter>` | move |
+| `Counter'inline c` | `Counter` | move (or copy for primitives) |
+| `Counter'owned c` | `Box<Counter>` | move |
 | `Counter'shared c` | `&Arc<Counter>` | auto-ref, transparent to the developer |
 | `Counter'actor c` | `&Arc<Mutex<Counter>>` | auto-ref, callee controls lock granularity |
 | `Counter'guard c` | `&Arc<RwLock<Counter>>` | auto-ref, callee controls lock granularity |
@@ -247,7 +247,7 @@ let b = a.clone()    # Arc::clone — b is still 'shared (Arc<Counter>), sharing
 | `Counter& c` | `&Counter` | universal borrow, any qualifier, no move, no storage |
 | `mut Counter& c` | `&mut Counter` | universal mutable borrow, any mutable qualifier |
 
-`'stack` and `'heap` follow standard Rust move semantics. `'shared`, `'actor`, and `'guard` are always passed by reference — the reference is fully transparent to the developer, who writes and reads these parameters as owned values.
+`'inline` and `'owned` follow standard Rust move semantics. `'shared`, `'actor`, and `'guard` are always passed by reference — the reference is fully transparent to the developer, who writes and reads these parameters as owned values.
 
 ### Auto-ref for `'shared`, `'actor`, `'guard`
 
@@ -279,8 +279,8 @@ store(x)     # x is still valid — clone was inserted, not a move
 
 | Parameter | Rust emitted |
 |---|---|
-| `var Counter'stack c` | `&mut Counter` |
-| `var Counter'heap c` | `&mut Box<Counter>` |
+| `var Counter'inline c` | `&mut Counter` |
+| `var Counter'owned c` | `&mut Box<Counter>` |
 | `var Counter'shared c` | `&mut Arc<Counter>` |
 | `var Counter'actor c` | `&mut Arc<Mutex<Counter>>` |
 | `var Counter'guard c` | `&mut Arc<RwLock<Counter>>` |
@@ -301,9 +301,9 @@ swap(v)   # call site emits: swap(&mut v)
 req display(Counter& c):
     print c.value
 
-let a'stack = Counter(0)
+let a'inline = Counter(0)
 let b'actor = Counter(0)
-let c'heap = Counter(0)
+let c'owned = Counter(0)
 let d'shared = Counter(0)
 
 display(a)   # &a
@@ -338,7 +338,7 @@ def process_batch(Counter'actor c):
 def reset(mut Counter& c):
     c.value = 0
 
-mut a'stack = Counter(0)
+mut a'inline = Counter(0)
 let b'actor = Counter(0)
 
 reset(a)   # &mut a
@@ -393,12 +393,12 @@ Each unqualified local variable starts with a candidate set of all possible qual
 
 | Declaration form | Initial candidate set | Fallback (multiple remaining) |
 |---|---|---|
-| `T` (bare, no qualifier) | `{Stack, Owned, Shared, Actor, Guard}` | priority-ordered fallback (see below) |
-| `T'` (tick, indirection hint) | `{Owned, Shared, Actor, Guard}` | `'heap` (`Box<T>`) |
-| `T?` (optional, bare) | `{Stack, Owned, Shared, Actor, Guard}` | same priority-ordered fallback |
-| `T'?` (optional tick) | `{Owned, Shared, Actor, Guard}` | `Option<Box<T>>` |
+| `T` (bare, no qualifier) | `{Inline, Owned, Shared, Actor, Guard}` | priority-ordered fallback (see below) |
+| `T'new` (indirection hint) | `{Owned, Shared, Actor, Guard}` | `'owned` (`Box<T>`) |
+| `T?` (optional, bare) | `{Inline, Owned, Shared, Actor, Guard}` | same priority-ordered fallback |
+| `T'new?` (optional, indirection hint) | `{Owned, Shared, Actor, Guard}` | `Option<Box<T>>` |
 
-`T'` and `T'?` restrict the initial set to indirection qualifiers. For optional forms, the inferred qualifier is applied to the **inner type** of the `Option` — `T?` with inferred `'actor` emits `Option<Arc<Mutex<T>>>`, not `Arc<Mutex<Option<T>>>`.
+`T'new` and `T'new?` restrict the initial set to indirection qualifiers. For optional forms, the inferred qualifier is applied to the **inner type** of the `Option` — `T?` with inferred `'actor` emits `Option<Arc<Mutex<T>>>`, not `Arc<Mutex<Option<T>>>`.
 
 #### Signal table
 
@@ -407,14 +407,14 @@ Each unqualified local variable starts with a candidate set of all possible qual
 | Call site demanding `T'shared` | `{Shared}` |
 | Call site demanding `T'actor` | `{Actor}` |
 | Call site demanding `T'guard` | `{Guard}` |
-| Call site demanding `T'stack` | `{Stack}` |
-| Call site demanding `T'heap` | `{Owned}` |
-| `def` method call on the variable | `{Stack, Owned, Actor, Guard}` |
-| `mut` binding (`mut x = …`) | `{Stack, Owned, Actor, Guard}` |
-| `var` binding reassigned (`x = …`, `x.field = …`, `x.a.b.c = …`, `x[i] = …`) | `{Stack, Owned, Actor, Guard}` |
+| Call site demanding `T'inline` | `{Inline}` |
+| Call site demanding `T'owned` | `{Owned}` |
+| `def` method call on the variable | `{Inline, Owned, Actor, Guard}` |
+| `mut` binding (`mut x = …`) | `{Inline, Owned, Actor, Guard}` |
+| `var` binding reassigned (`x = …`, `x.field = …`, `x.a.b.c = …`, `x[i] = …`) | `{Inline, Owned, Actor, Guard}` |
 | Closure capturing `x` as method receiver | `{Actor, Guard}` |
 | Closure capturing `x` read-only | `{Shared, Actor, Guard}` |
-| `set` property setter body | `{Stack, Owned, Actor, Guard}` |
+| `set` property setter body | `{Inline, Owned, Actor, Guard}` |
 | Task capture as method receiver | `{Actor, Guard}` |
 | Task capture, read-only | `{Shared, Actor, Guard}` |
 | `req` method call | *(no constraint — all qualifiers remain)* |
@@ -425,21 +425,21 @@ Each signal intersects the current candidate set. The order of signals does not 
 
 When the candidate set still contains multiple qualifiers after all signals are applied:
 
-**Step 1 — `'stack` candidate**
+**Step 1 — `'inline` candidate**
 
 | Context | Decision |
 |---|---|
-| Struct field (any binding) | `'stack` — field bytes are part of the parent allocation |
-| Local variable, sizeof(T) ≤ `--stack-auto-bytes` | `'stack` |
-| Local variable, sizeof(T) > `--stack-auto-bytes` | skip `'stack`; continue to step 2 |
+| Struct field (any binding) | `'inline` — field bytes are part of the parent allocation |
+| Local variable, sizeof(T) ≤ `--inline-auto-bytes` | `'inline` |
+| Local variable, sizeof(T) > `--inline-auto-bytes` | skip `'inline`; continue to step 2 |
 
-The threshold is configurable: `boring build --stack-auto-bytes 512` (default: 256 bytes).
+The threshold is configurable: `boring build --inline-auto-bytes 512` (default: 256 bytes).
 
 **Step 2 — ordered chain**
 
-If `'stack` was not selected, pick the first qualifier from the remaining set:
+If `'inline` was not selected, pick the first qualifier from the remaining set:
 
-`'heap` > `'shared` > `'actor` > `'guard`
+`'owned` > `'shared` > `'actor` > `'guard`
 
 ### Examples
 
@@ -450,13 +450,13 @@ share_read(c)           # expects Counter'shared → c infers 'shared
 
 ```boring
 let c = Counter(0)
-c.inc()                 # def call → {Stack, Owned, Actor, Guard}
-                        # no further signal → size fallback → 'stack (if small)
+c.inc()                 # def call → {Inline, Owned, Actor, Guard}
+                        # no further signal → size fallback → 'inline (if small)
 ```
 
 ```boring
 let c = Counter(0)
-c.inc()                 # def call → {Stack, Owned, Actor, Guard}
+c.inc()                 # def call → {Inline, Owned, Actor, Guard}
 share_read(c)           # 'shared → intersect → {}  → ERROR
 ```
 
@@ -515,7 +515,7 @@ def process(Counter c):   # no qualifier written
 
 After each function body is emitted, `fn_sigs` is updated with the inferred parameter qualifiers. Functions defined later in the file that call this function see the qualified signature and propagate the constraint.
 
-**`'stack` is not propagated** — it would poison callers with a spurious constraint from file-ordering artifacts.
+**`'inline` is not propagated** — it would poison callers with a spurious constraint from file-ordering artifacts.
 
 **Return-type–driven parameter inference:** when a constructor returns `T'actor`, the transpiler records `T` as an actor source type. Subsequent bare `T` parameters automatically infer `'actor`:
 
@@ -549,7 +549,7 @@ struct Service:
 A parameter can accept a restricted but not singleton set of qualifiers using a pipe-separated union:
 
 ```boring
-def process(Counter'stack|heap c):   # accepts 'stack or 'heap, not 'shared or 'actor
+def process(Counter'inline|owned c):   # accepts 'inline or 'owned, not 'shared or 'actor
     c.inc()
 ```
 
@@ -557,9 +557,9 @@ Named qualifier groups expand to the corresponding member sets:
 
 | Group | Members |
 |---|---|
-| `'one` | `'stack`, `'heap` |
+| `'one` | `'inline`, `'owned` |
 | `'many` | `'shared`, `'actor`, `'guard` |
-| `'mut` | `'stack`, `'heap`, `'actor`, `'guard` |
+| `'mut` | `'inline`, `'owned`, `'actor`, `'guard` |
 | `'req` | `'shared` |
 
 **Scope: parameters only.** Qualifier groups are not useful on local variables — the inference starting set already covers the same information.
@@ -640,7 +640,7 @@ Struct field inference scans only the methods defined in the **same file** as th
 This is a deliberate constraint, not a gap to fill later:
 
 - Mutable fields already require an explicit `mut` or `var` keyword; adding a qualifier annotation is a small additional step.
-- `'stack` / `'heap` field qualifiers are part of the module API and must not be silently changed by remote usage signals.
+- `'inline` / `'owned` field qualifiers are part of the module API and must not be silently changed by remote usage signals.
 - Full cross-file inference would require a two-phase compilation model (parse all → infer globally → emit), which complicates incremental builds.
 
 **Expected pattern:** write explicit qualifier annotations on fields whose qualifier depends on external callers. The inference handles everything within a file automatically.
@@ -695,7 +695,7 @@ The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables d
 | Local variable, return-type demand | ✅ implemented |
 | Local variable, task capture | ✅ implemented |
 | Local variable, alias propagation | ✅ implemented |
-| `T'` (tick) variables with inference | ✅ implemented |
+| `T'new` (indirection hint) variables with inference | ✅ implemented |
 | `mut` keyword as mutation signal | ✅ implemented |
 | `var` reassignment as mutation signal (incl. nested fields) | ✅ implemented |
 | `set` setter body as mutation signal (struct fields) | ✅ implemented |
@@ -720,7 +720,7 @@ The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables d
 
 #### Polonius — next-generation borrow checker
 
-Polonius replaces NLL with a path-based analysis that eliminates false positives. Targeting stabilisation in 2026 H2. Some patterns today requiring `'actor` may become expressible with `'stack` or `'heap` under Polonius.
+Polonius replaces NLL with a path-based analysis that eliminates false positives. Targeting stabilisation in 2026 H2. Some patterns today requiring `'actor` may become expressible with `'inline` or `'owned` under Polonius.
 
 #### View types / field projections
 

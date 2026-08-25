@@ -380,7 +380,8 @@ impl Parser {
         }
     }
 
-    /// `Dog'`        → Qualified(Dog, Owned)
+    /// `Dog'owned`   → Qualified(Dog, Owned)
+    /// `Dog'new`     → Qualified(Dog, Union([Owned, Shared, Actor, Guard])) — replaces bare tick
     /// `Dog'copy`    → Qualified(Dog, Copy)
     /// `Dog'const`   → Qualified(Dog, Const)
     /// `Dog'shared`  → Qualified(Dog, Shared) — Arc<T> (multi) / Rc<T> (single), threading-aware
@@ -445,9 +446,8 @@ impl Parser {
             TokenKind::Ident(ref s) => match s.as_str() {
                 "shared" => { self.advance(); OwnerQual::Shared }
                 "weak"   => { self.advance(); OwnerQual::Weak }
-                "stack"  => { self.advance(); OwnerQual::Stack }
-                "heap"   => { self.advance(); OwnerQual::Owned }
-                "new"    => { self.advance(); OwnerQual::New }
+                "inline" => { self.advance(); OwnerQual::Inline }
+                "owned"  => { self.advance(); OwnerQual::Owned }
                 // GPU memory qualifiers (kernel-context and host-context).
                 "unified" => { self.advance(); OwnerQual::GpuUnified }
                 "global"  => { self.advance(); OwnerQual::GpuGlobal }
@@ -504,14 +504,26 @@ impl Parser {
                     }
                 }
                 // Named qualifier groups — sugar for qualifier unions.
-                "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned]) }
+                "one"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned]) }
                 "many" => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard]) }
-                "mut"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
+                "mut"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::Guard]) }
                 "req"  => { self.advance(); OwnerQual::Union(vec![OwnerQual::Shared]) }
-                _ => OwnerQual::Owned,  // unknown word → bare owned (don't consume it)
+                // Bare tick with no recognized qualifier word after it is no longer
+                // supported — `T'` used to silently default to `'owned` (don't consume
+                // the following ident, e.g. the variable name in `let BigData' backup`).
+                // Write the qualifier explicitly; `'new` covers what bare tick used to mean
+                // ("any indirection, inferred" — see OwnerQual::Union's doc comment).
+                _ => return Err(ParseError::Generic {
+                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
+                    line: self.line(), col: self.col(), len: self.tok_len(),
+                }),
             },
-            // `T'new` — `new` is a keyword, not an ident: pseudo-qualifier "infer excluding 'stack"
-            TokenKind::New => { self.advance(); OwnerQual::New }
+            // `T'new` — `new` is a keyword, not an ident: candidate-set pseudo-qualifier,
+            // "any indirection, inferred" ('inline excluded from the candidate set) —
+            // replaces the old bare-tick `T'` spelling. NOT a caller-facing acceptance
+            // group like 'one/'many/'mut/'req (see OwnerQual::Union's doc comment) —
+            // it must keep narrowing by usage on local variables too, not just parameters.
+            TokenKind::New => { self.advance(); OwnerQual::Union(OwnerQual::NEW_MEMBERS.to_vec()) }
             // `T'guard` — `guard` is a reserved keyword, not an ident: Arc<std::sync::RwLock<T>>
             TokenKind::Guard => {
                 self.advance();
@@ -530,9 +542,14 @@ impl Parser {
             }
             // `T'task` — alias for `T'actor'task`: Arc<tokio::sync::Mutex<T>>
             TokenKind::Task => { self.advance(); OwnerQual::ActorTask }
-            _ => OwnerQual::Owned,
+            // Truly bare tick — nothing recognizable follows `'` at all. Same rule as
+            // the ident catch-all above: no longer supported, `'new` is the replacement.
+            _ => return Err(ParseError::Generic {
+                msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'inline, 'new, 'weak, 'copy, 'const) — bare tick is no longer supported, use 'new for \"any indirection, inferred\"".into(),
+                line: self.line(), col: self.col(), len: self.tok_len(),
+            }),
         };
-        // `T'stack|heap|actor` — qualifier union (pipe-separated list).
+        // `T'inline|owned|actor` — qualifier union (pipe-separated list).
         // A Union qualifier is a Boring-level constraint; emits as a plain generic in Rust.
         // Also handles the case where the first qual was already a Union (named group).
         let qual = if matches!(self.peek(), TokenKind::Pipe) && !matches!(qual, OwnerQual::Union(_)) {
@@ -541,8 +558,8 @@ impl Parser {
             while self.eat(&TokenKind::Pipe) {
                 let member = match self.peek().clone() {
                     TokenKind::Ident(ref s) => match s.as_str() {
-                        "stack"  => { self.advance(); OwnerQual::Stack }
-                        "heap"   => { self.advance(); OwnerQual::Owned }
+                        "inline" => { self.advance(); OwnerQual::Inline }
+                        "owned"  => { self.advance(); OwnerQual::Owned }
                         "shared" => { self.advance(); OwnerQual::Shared }
                         "actor"  => { self.advance(); OwnerQual::Actor }
                         _        => break,
@@ -557,7 +574,7 @@ impl Parser {
             qual
         };
         // Postfix `&` after a qualifier.
-        // `T'shared&`, `T'actor&`, `T'guard&`, `T'heap&` are removed — auto-ref handles
+        // `T'shared&`, `T'actor&`, `T'guard&`, `T'owned&` are removed — auto-ref handles
         // 'shared/'actor/'guard in parameter position, and Counter& is the universal borrow.
         if self.check(&TokenKind::Ampersand) {
             // Check for lifetime immediately after `&`: `T'qual&a name`

@@ -75,7 +75,7 @@ kernel-struct field qualifier.
 | `mut [float, N] tile` | `'local` implicit — thread-local | no | `float tile[N]` |
 | `mut [int]'actor'global bins` | device DRAM, atomic access | via `gpu.copy()` | `int64_t* bins` |
 | `mut [int]'actor'unified bins` | unified DRAM, atomic access | direct | `int64_t* bins` |
-| CPU qualifiers (`'heap`, `'shared`…) | — | — | compile-time error |
+| CPU qualifiers (`'owned`, `'shared`…) | — | — | compile-time error |
 
 ---
 

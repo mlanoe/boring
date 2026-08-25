@@ -193,9 +193,9 @@
     "ownership-qualifier": {
       "patterns": [
         {
-          "comment": "qualified: 'heap, 'task, 'shared, 'actor, 'auto, 'weak, 'copy, 'const, 'stack",
+          "comment": "qualified: 'owned, 'new, 'task, 'shared, 'actor, 'auto, 'weak, 'copy, 'const, 'inline",
           "name": "storage.modifier.ownership.boring",
-          "match": "'(?:heap|task|shared|actor|auto|weak|copy|const|stack|guard)\\b"
+          "match": "'(?:owned|new|task|shared|actor|auto|weak|copy|const|inline|guard)\\b"
         },
         {
           "comment": "bare tick before identifier or opening paren — ownership inferred from RHS",

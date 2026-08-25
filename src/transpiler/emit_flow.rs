@@ -93,8 +93,8 @@ impl Transpiler {
                         } else {
                             self.wrap_managed(&inner)
                         }
-                    } else if matches!(ret_ty, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) {
-                        // Strict mode T'new / T' return: wrap in Box::new().
+                    } else if matches!(ret_ty, Type::Qualified(_, q) if q.is_owned_or_new()) {
+                        // Strict mode T'new / T'owned return: wrap in Box::new().
                         let inner = self.emit_expr_owned(e);
                         if inner.starts_with("Box::new(") { inner } else { format!("Box::new({})", inner) }
                     } else if matches!(&e.kind, ExprKind::DotIdent(_)) {

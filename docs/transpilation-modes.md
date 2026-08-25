@@ -17,8 +17,8 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 
 | Qualifier          | `--threading multi` (default)        | `--threading single`       |
 |--------------------|--------------------------------------|----------------------------|
-| `T'stack`          | `T`                                  | `T`                        |
-| `T'heap`           | `Box<T>`                             | `Box<T>`                   |
+| `T'inline`         | `T`                                  | `T`                        |
+| `T'owned`          | `Box<T>`                             | `Box<T>`                   |
 | `T'shared`         | `Arc<T>`                             | `Rc<T>`                    |
 | `T'actor`          | `Arc<std::sync::Mutex<T>>`           | `Rc<RefCell<T>>`           |
 | `T'guard`          | `Arc<std::sync::RwLock<T>>`          | `Rc<RefCell<T>>`           |
@@ -38,17 +38,17 @@ Explicit qualifiers are **contracts** — neither `--mode` nor `--threading` aff
 
 ---
 
-## Anonymous forms — `T` and `T'`
+## Anonymous forms — `T` and `T'new`
 
 Both forms delegate the memory decision to the inference pass, then to the active flags as a last resort.
 
 | Form  | Meaning                                                         |
 |-------|-----------------------------------------------------------------|
 | `T`   | Anonymous — inference decides; fallback to flags               |
-| `T'`  | Anonymous with indirection hint — inference decides; fallback `Box<T>` |
+| `T'new` | Anonymous with indirection hint — inference decides; fallback `Box<T>` |
 | `T?`  | Always `Option<T>` — flag-independent                          |
 
-The difference between `T` and `T'`: `T'` restricts the inference candidate set to `{Owned, Shared, Actor, Guard}` (Stack and Const are excluded). If inference cannot resolve a unique qualifier, the fallback is `'heap` instead of `'stack`.
+The difference between `T` and `T'new`: `T'new` restricts the inference candidate set to `{Owned, Shared, Actor, Guard}` (Inline and Const are excluded). If inference cannot resolve a unique qualifier, the fallback is `'owned` instead of `'inline`.
 
 See [qualifiers.md](qualifiers.html) — **Inference** section — for the full inference algorithm.
 
@@ -56,10 +56,10 @@ See [qualifiers.md](qualifiers.html) — **Inference** section — for the full 
 
 |                       | `--threading multi`          | `--threading single`         |
 |-----------------------|------------------------------|------------------------------|
-| **`--mode strict`**   | `T` → `T`, `T'` → `Box<T>`  | `T` → `T`, `T'` → `Box<T>`  |
-| **`--mode managed`**  | `T`/`T'` → `Arc<Mutex<T>>`  | `T`/`T'` → `RefCell<T>`     |
+| **`--mode strict`**   | `T` → `T`, `T'new` → `Box<T>`  | `T` → `T`, `T'new` → `Box<T>`  |
+| **`--mode managed`**  | `T`/`T'new` → `Arc<Mutex<T>>`  | `T`/`T'new` → `RefCell<T>`     |
 
-Threading does not affect the `T`/`T'` fallback in strict mode — stack and heap are thread-agnostic. It only matters in managed mode and for explicit `T'shared`, `T'actor`, `T'guard` qualifiers.
+Threading does not affect the `T`/`T'new` fallback in strict mode — inline storage and heap allocation are thread-agnostic. It only matters in managed mode and for explicit `T'shared`, `T'actor`, `T'guard` qualifiers.
 
 ---
 
@@ -73,7 +73,7 @@ Before applying flag defaults, the transpiler runs a series of inference passes.
 | 2 | Recursive type position | `Box<T>` inserted on the recursive field/variant |
 | 3 | `dyn Trait` position | `Box<dyn Trait>` |
 | 4 | Use-site qualifier inference | qualifier demanded by call sites — all modes |
-| 5 | `sizeof(T) > --stack-auto-bytes` in strict mode | `T` promoted to `Box<T>` |
+| 5 | `sizeof(T) > --inline-auto-bytes` in strict mode | `T` promoted to `Box<T>` |
 
 Priorities 2–3 are correctness constraints — they are never overridden. Priority 4 (use-site inference) runs before size-based decisions and applies in all flag combinations. Priority 5 applies only in `--mode strict` when priority 4 yields no result. Flag defaults are applied last.
 
@@ -83,14 +83,14 @@ Priorities 2–3 are correctness constraints — they are never overridden. Prio
 
 Targets production code. After inference, unresolved anonymous forms:
 
-- `T` → plain `T` (stack, single owner)
-- `T'` → `Box<T>`
+- `T` → plain `T` (inline, single owner)
+- `T'new` → `Box<T>`
 
 ---
 
 ## `--mode managed`
 
-Targets prototyping and scripting. After inference, both `T` and `T'` map to the thread-appropriate wrapped type — `Arc<Mutex<T>>` with `--threading multi`, `RefCell<T>` with `--threading single`.
+Targets prototyping and scripting. After inference, both `T` and `T'new` map to the thread-appropriate wrapped type — `Arc<Mutex<T>>` with `--threading multi`, `RefCell<T>` with `--threading single`.
 
 **Managed mode and field access.** `std::sync::Mutex` is non-reentrant. Accessing the same managed variable's fields multiple times in one expression would normally require multiple `lock()` calls, causing deadlock. The transpiler avoids this by emitting a shadow guard immediately after each managed variable is declared:
 
@@ -101,7 +101,7 @@ let mut __ap_mg = ap.lock().unwrap();   // shadow guard — emitted automaticall
 println!("{}", (__ap_mg.x + __ap_mg.y)); // uses guard, not ap.lock() twice
 ```
 
-The shadow guard is emitted for both function parameters and local `T`/`T'` declarations, but only under `--threading multi` (where the managed wrapper is `Mutex`). Under `--threading single` the managed wrapper is `RefCell`, which supports independent `.borrow()`/`.borrow_mut()` calls without a deadlock risk, so no shadow guard is emitted — field accesses go through `managed_refcell_vars`-based `.borrow()`/`.borrow_mut()` calls directly instead.
+The shadow guard is emitted for both function parameters and local `T`/`T'new` declarations, but only under `--threading multi` (where the managed wrapper is `Mutex`). Under `--threading single` the managed wrapper is `RefCell`, which supports independent `.borrow()`/`.borrow_mut()` calls without a deadlock risk, so no shadow guard is emitted — field accesses go through `managed_refcell_vars`-based `.borrow()`/`.borrow_mut()` calls directly instead.
 
 **Typical workflow:**
 
@@ -185,14 +185,14 @@ When use-site inference (priority 5) does not resolve a qualifier for an anonymo
 
 | Estimated size | Action |
 |---|---|
-| ≤ `--stack-auto-bytes` (default: 256 B) | leave as `T` (stack) |
-| > `--stack-auto-bytes` | silently promote to `Box<T>` |
+| ≤ `--inline-auto-bytes` (default: 256 B) | leave as `T` (inline) |
+| > `--inline-auto-bytes` | silently promote to `Box<T>` |
 
-Configurable: `boring build --stack-auto-bytes N`.
+Configurable: `boring build --inline-auto-bytes N`.
 
 **Suppressed for bare `T` struct fields, regardless of rebindability.** When a struct field uses the bare anonymous form `T` (no qualifier), size-based promotion does not apply and no warning is emitted — this holds for `let`, `mut`, and `var` fields alike. A struct field is always inline in the parent's allocation — boxing it would add an indirection without reducing the parent's layout.
 
-This suppression applies only to bare `T`. A `T'` field (indirection hint) is **not** suppressed: its fallback remains `'heap` (`Box<T>`) regardless of size, because the developer explicitly requested indirection.
+This suppression applies only to bare `T`. A `T'new` field (indirection hint) is **not** suppressed: its fallback remains `'owned` (`Box<T>`) regardless of size, because the developer explicitly requested indirection.
 
 ```boring
 struct BigData:
@@ -201,19 +201,19 @@ struct BigData:
 
 struct Wrapper:
     var BigData inner         # bare T (var too) — sizeof(BigData) folds into sizeof(Wrapper), no promotion
-    let BigData' backup       # T' — always Box<BigData>, even on a let field
+    let BigData'new backup    # T'new — always Box<BigData>, even on a let field
 ```
 
 ## Enum size warnings (strict mode only)
 
 ```
 # Level 1 — overall enum too large
-warning: `Message` is 260 bytes on the stack (largest variant: `Data`);
-         consider `Message'heap` to heap-allocate the whole enum
+warning: `Message` is 260 bytes inline (largest variant: `Data`);
+         consider `Message'owned` to heap-allocate the whole enum
 
 # Level 2 — one variant disproportionate
 warning: variant `Data` (256 bytes) dominates `Message` (4 bytes median);
-         consider boxing the payload: Data(u8[256]'heap)
+         consider boxing the payload: Data(u8[256]'owned)
 ```
 
-Level 2 keeps the enum on the stack while boxing only the heavy payload.
+Level 2 keeps the enum inline while boxing only the heavy payload.

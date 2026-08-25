@@ -5,8 +5,8 @@ Boring is a high-level language that transpiles to Rust. Source files use `.br` 
 ## Core syntax rules
 
 - Type is written **before** the name: `let int x = 42`
-- Qualifier is written **after** the type: `let int'stack x = 42`
-- Qualifier after variable name when type is inferred: `let x'stack = 42`
+- Qualifier is written **after** the type: `let int'inline x = 42`
+- Qualifier after variable name when type is inferred: `let x'inline = 42`
 - Indentation-based blocks (Python-style), no braces
 - `#` for comments
 
@@ -98,12 +98,13 @@ mut o = Outer(...)      # reading/writing ANY field also needs `o` itself
 | `'shared` | `Rc<T>` / `Arc<T>` | no | immutable shared ref |
 | `'actor` | `Rc<RefCell<T>>` / `Arc<Mutex<T>>` | yes | interior mutability |
 | `'guard` | `Mutex<T>` / `RwLock<T>` | under lock | |
-| `'stack` | `T` | neutral | stack allocation hint |
-| `'heap` | `Box<T>` | neutral | heap allocation hint |
+| `'inline` | `T` | neutral | no indirection (Rust default) |
+| `'owned` | `Box<T>` | neutral | exclusive heap ownership |
+| `'new` | `Box`/`Arc`/`Arc<Mutex>`/`Arc<RwLock>`<`T`> | neutral | candidate-set qualifier — any indirection, inferred (`'inline` excluded) |
 
 ```boring
 let Counter'actor c = Counter(0)
-let int'stack n = 10
+let int'inline n = 10
 ```
 
 ## Binding × mutability

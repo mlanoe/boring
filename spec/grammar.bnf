@@ -921,7 +921,7 @@ type            ::= primitive_type
                   | "{" type "=" type "}"              # dict: {K = V}  →  HashMap<K,V>
                   | "{" type "}"                       # set: {T}  →  HashSet<T>
                   | type "(" type_list? ")"            # function type: ReturnType (ParamTypes)
-                  | type "'" owner_qual                # heap / smart-pointer ownership qualifier
+                  | type "'" owner_qual                # smart-pointer ownership qualifier
                   | type "&" borrow_qual               # borrow / reference qualifier
                   | "mut"? type "&" borrow_qual        # mut Type& → &mut Type (always valid — the
                                                        #   borrowed form has an existing Rust type to
@@ -960,10 +960,15 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 # The tick `'` is exclusively an OWNERSHIP qualifier — it never produces a reference.
 # Lifetimes are written only in borrow position (see borrow_qual below).
 #
-# Default: stack allocation (T).  Heap allocation is always explicit.
+# Default: inline storage, no indirection (T).  Indirection is always explicit.
 #
-#   T  /  T'stack   →  T                   stack-owned (Rust default)
-#   T' /  T'heap    →  Box<T>              heap-owned, exclusive move
+#   T  /  T'inline  →  T                   inline, no indirection (Rust default)
+#   T'owned         →  Box<T>              heap-owned, exclusive move
+#   T'new           →  Box<T> / Arc<T> / Arc<Mutex<T>> / Arc<RwLock<T>>
+#                                          candidate-set qualifier — any indirection,
+#                                          inferred from usage ('inline excluded); NOT
+#                                          a group like 'one/'many/'mut/'req below —
+#                                          see docs/book.md §21 "Placement operator — new"
 #   T'copy          →  T (Copy)            copied on every use: int, float, bool, …
 #   T'const         →  &'static T          compile-time constant / string literal
 #   T'shared        →  Rc<T>              ref-counted, single-thread
@@ -980,9 +985,13 @@ labeled_axis    ::= IDENT                              # dynamic axis — shape 
 #   float32 → Float32'copy  →  f32
 #   bool   →  Bool'copy     →  bool
 #
-owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "weak"
-                  | owner_qual "|" owner_qual   # qualifier union: T'stack|heap (resolved at inference time)
-                  | ε                           # bare tick → same as 'heap (Box<T>)
+owner_qual      ::= "owned" | "inline" | "copy" | "shared" | "actor" | "guard" | "weak"
+                  | owner_qual "|" owner_qual   # qualifier union: T'inline|owned (resolved at inference time)
+                  # NOTE: bare tick (no qualifier after `'`) is a parse error — write
+                  # the qualifier explicitly, e.g. T'new for "any indirection, inferred".
+                  # "new" and "guard" are reserved keyword tokens, not part of this
+                  # ident-string list, but are valid in this position — see T'new/T'guard
+                  # above and borrow_qual below for the equivalent "guard" case.
 
 # ─── Borrow qualifiers ────────────────────────────────────────────────────────
 #
@@ -992,7 +1001,7 @@ owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "
 # Prefix forms (T& or T&qual):
 #   T&              →  &T             plain immutable borrow
 #   var T&          →  &mut T         mutable borrow (`var` prefix absorbed into type)
-#   T&heap          →  &Box<T>        borrow a heap value
+#   T&owned         →  &Box<T>        borrow an owned (boxed) value
 #   T&shared        →  &Rc<T>         borrow an Rc (use sparingly)
 #   T&option        →  &Option<T>     borrow an optional
 #   T&weak          →  &Weak<T>       borrow a weak pointer
@@ -1005,7 +1014,7 @@ owner_qual      ::= "heap" | "stack" | "copy" | "shared" | "actor" | "guard" | "
 # Declared automatically from usage — no explicit `<&a>` needed in function signatures.
 # `<&a>` is only written explicitly in struct/enum type params.
 #
-borrow_qual     ::= "heap" | "stack" | "shared" | "actor" | "guard" | "option" | "weak"
+borrow_qual     ::= "owned" | "inline" | "shared" | "actor" | "guard" | "option" | "weak"
                   | LOWERCASE_IDENT    # single lowercase letter → lifetime: &a, &b, …
                   | ε                  # plain borrow &T
 

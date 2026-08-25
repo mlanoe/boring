@@ -34,7 +34,7 @@ regardless of qualifier.
 
 ## Qualifiers
 
-Qualifiers are placed after the type (`let T'stack a`) or after the variable name if the type is inferred (`let a'stack`).
+Qualifiers are placed after the type (`let T'inline a`) or after the variable name if the type is inferred (`let a'inline`).
 
 They carry three kinds of information: the Rust mapping, the passing semantics between variables, and constraints on mutability. The decision is always made at the **usage site**, not at the struct declaration — the transpiler inserts `.clone()` as needed.
 
@@ -43,15 +43,15 @@ They carry three kinds of information: the Rust mapping, the passing semantics b
 | `'shared` | `Arc<T>` (multi) / `Rc<T>` (single) | pointer shared | forbidden |
 | `'actor` | `Arc<std::sync::Mutex<T>>` (multi) / `Rc<RefCell<T>>` (single) | pointer shared | allowed |
 | `'guard` | `Arc<std::sync::RwLock<T>>` (multi) / `Rc<RefCell<T>>` (single) | pointer shared | under lock only |
-| `'stack` | `T` on stack | move | determined by `let`/`mut`/`var` |
-| `'heap` | `Box<T>` | move | determined by `let`/`mut`/`var` |
+| `'inline` | `T`, no indirection | move | determined by `let`/`mut`/`var` |
+| `'owned` | `Box<T>` | move | determined by `let`/`mut`/`var` |
 | `'weak` | `sync::Weak<T>` (multi) / `Rc::Weak<T>` (single) | non-owning pointer | none (no interior mutability) |
 
 `'weak` is a compound qualifier used with an owning qualifier: `T'shared'weak`, `T'actor'weak`, `T'guard'weak`. It holds a non-owning reference to the inner value of the corresponding owning smart pointer and must be upgraded before use.
 
 > **`'actor'task` / `'guard'task`:** these are multi-thread only qualifiers (`Arc<tokio::sync::Mutex<T>>` and `Arc<tokio::sync::RwLock<T>>` respectively) and do not fall back to a single-thread form. They require explicit annotation inside `task` functions — qualifier inference does not automatically promote `'actor` or `'guard` to their `'task` variants.
 
-`'stack` and `'heap` are the only qualifiers where `mut` has its full meaning — and where compiler optimizations from `mut` are most impactful.
+`'inline` and `'owned` are the only qualifiers where `mut` has its full meaning — and where compiler optimizations from `mut` are most impactful.
 
 ## Valid combinations
 
@@ -61,7 +61,7 @@ promises" — for `mut`/`var mut`, that's content mutation (`def` calls); for
 special case**: `'actor`/`'guard` are checked exactly like any other type,
 not given their own exception the way an earlier draft of this table did.
 
-| Binding | `'shared` | `'actor` | `'guard` | `'stack` | `'heap` |
+| Binding | `'shared` | `'actor` | `'guard` | `'inline` | `'owned` |
 |---|---|---|---|---|---|
 | `let` (no mutation) | yes | yes | yes | yes | yes |
 | `mut` (content-mutable, fixed) | **error** | yes | yes | yes | yes |
@@ -121,7 +121,7 @@ Conceptually, the hierarchy `var` ≥ `mut` ≥ `let` is intended to apply: a ca
 | `let` | yes | not enforced | not enforced |
 | `var` | yes | not enforced | yes |
 
-**`'actor`, `'guard`, `'stack`, `'heap`** (full three levels):
+**`'actor`, `'guard`, `'inline`, `'owned`** (full three levels):
 
 | Caller | Param `let` | Param `mut` | Param `var` |
 |---|---|---|---|

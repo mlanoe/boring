@@ -195,9 +195,9 @@
     "ownership-qualifier": {
       "patterns": [
         {
-          "comment": "qualified: 'heap, 'stack, 'shared, 'actor, 'guard, 'weak, 'copy; GPU: 'sync, 'unified, 'global, 'local, 'const; borrow: &option",
+          "comment": "qualified: 'owned, 'new, 'inline, 'shared, 'actor, 'guard, 'weak, 'copy; GPU: 'sync, 'unified, 'global, 'local, 'const; borrow: &option",
           "name": "storage.modifier.ownership.boring",
-          "match": "'(?:heap|stack|shared|actor|guard|weak|copy|sync|unified|global|local)\\b|&(?:heap|stack|shared|actor|guard|option|weak)\\b"
+          "match": "'(?:owned|new|inline|shared|actor|guard|weak|copy|sync|unified|global|local)\\b|&(?:owned|inline|shared|actor|guard|option|weak)\\b"
         },
         {
           "comment": "bare tick before identifier or opening paren — ownership inferred from RHS",

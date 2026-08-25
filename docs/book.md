@@ -752,7 +752,7 @@ print "{a === c}"   # false — same value, different object
 
 For `'shared`, `'actor`, and `'guard` qualifiers, assignment is always an **implicit alias** — the reference count is incremented automatically, and both bindings stay valid. No `.clone()` needed.
 
-For unqualified structs and `'stack`/`'heap` types, plain assignment **moves** the value (see "Move semantics" above).
+For unqualified structs and `'inline`/`'owned` types, plain assignment **moves** the value (see "Move semantics" above).
 
 For primitive types (`int`, `float`, `bool`) which have value semantics, `===` behaves like `==`.
 
@@ -5337,19 +5337,19 @@ The qualifier-on-name form is especially concise when the type is obvious from c
 
 ### Placement operator — `new`
 
-`new` is a placement operator that signals non-stack allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'stack`):
+`new` is a placement operator that signals non-inline allocation without naming a qualifier. The transpiler infers the qualifier from usage (excluding `'inline`):
 
 ```boring
-let v = Counter()       # inferred — 'stack included in candidates
-let v = new Counter()   # inferred — 'stack excluded from candidates
+let v = Counter()       # inferred — 'inline included in candidates
+let v = new Counter()   # inferred — 'inline excluded from candidates
 let v'actor = Counter() # explicit qualifier
 ```
 
 For delayed initialisation, `'new` is the equivalent pseudo-qualifier:
 
 ```boring
-let Counter v           # delayed init — 'stack included
-let Counter'new v       # delayed init — 'stack excluded
+let Counter v           # delayed init — 'inline included
+let Counter'new v       # delayed init — 'inline excluded
 let Counter'actor v     # delayed init — explicit qualifier
 ```
 
@@ -5361,18 +5361,25 @@ new(g0) Counter()   # GPU device g0
 
 Ownership transfer between bindings is implicit — see "Move semantics" below; there is no explicit move-marker syntax.
 
+`'new` is a **candidate-set qualifier**, not a caller-facing acceptance group (contrast with `'one`/`'many`/`'mut`/`'req` below): it seeds the same candidate-elimination inference used for a bare `T`, just with `'inline` excluded from the starting set. That is why, unlike those four groups, `'new` keeps narrowing by usage on **local variables** too, not only on parameters:
+
+```boring
+let v = new Counter()
+spawn_actor(v)   # demands 'actor → v narrows all the way to 'actor, not just "some indirection"
+```
+
 Shorthands cover the most common cases without writing a qualifier explicitly:
 
 | Boring shorthand | Strict mode (`--mode strict`) | Managed mode (`--mode managed`) | Meaning |
 |------------------|-------------------------------|----------------------------------|---------|
-| `T`  | `T` (stack) | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous — transpiler decides |
-| `T'new` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Non-stack placement, qualifier inferred by transpiler |
+| `T`  | `T` (inline) | `Arc<Mutex<T>>` / `RefCell<T>` | Anonymous — transpiler decides |
+| `T'new` | `Box<T>` | `Arc<Mutex<T>>` / `RefCell<T>` | Non-inline placement, qualifier inferred by transpiler |
 | `T?` | `Option<T>` | `Option<T>` | Optional value |
 | `[T]` | `Vec<T>` | `Vec<T>` | Dynamic array |
 | `{T}` | `HashSet<T>` | `HashSet<T>` | Unordered set |
 | `{K=V}` | `HashMap<K, V>` | `HashMap<K, V>` | Key-value map |
 
-`T` and `T'new` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'stack`, `T'heap`, etc.) are **contracts** and are never affected by the mode.
+`T` and `T'new` are **anonymous forms** — the transpiler resolves them based on the active flags. Explicit qualifiers (`T'inline`, `T'owned`, etc.) are **contracts** and are never affected by the mode.
 
 In managed mode, `Arc<Mutex<T>>` is used with `--threading multi` (default) and `RefCell<T>` with `--threading single`.
 
@@ -5380,8 +5387,8 @@ All ownership qualifiers:
 
 | Boring type        | `--threading multi`                   | `--threading single`  | Semantics                             |
 |--------------------|---------------------------------------|-----------------------|---------------------------------------|
-| `T'stack`          | `T`                                   | `T`                   | Stack allocation — copied on pass for primitives |
-| `T'heap`           | `Box<T>`                              | `Box<T>`              | Exclusive heap ownership              |
+| `T'inline`         | `T`                                   | `T`                   | Inline, no indirection — copied on pass for primitives |
+| `T'owned`          | `Box<T>`                              | `Box<T>`              | Exclusive heap ownership              |
 | `T'shared`         | `Arc<T>`                              | `Rc<T>`               | Shared ref-counted, read-only         |
 | `T'actor`          | `Arc<std::sync::Mutex<T>>`            | `Rc<RefCell<T>>`      | Shared mutable — sync, no tokio required |
 | `T'actor'task` / `T'task` | `Arc<tokio::sync::Mutex<T>>`   | not supported         | Shared mutable — async, hold lock across `.await` |
@@ -5397,22 +5404,22 @@ All ownership qualifiers:
 On function parameters, a qualifier group expresses "this parameter accepts any qualifier from this set". The transpiler narrows the set further using the same inference signals as for anonymous variables.
 
 ```boring
-def process(Counter'mut c):   # 'mut → accepts 'stack, 'heap, 'actor, 'guard
+def process(Counter'mut c):   # 'mut → accepts 'inline, 'owned, 'actor, 'guard
     spawn_actor(c)            # demands 'actor → infers 'actor for c
 ```
 
 | Group | Accepted qualifiers |
 |---|---|
-| `T'one` | `'stack`, `'heap` — single-owner forms |
+| `T'one` | `'inline`, `'owned` — single-owner forms |
 | `T'many` | `'shared`, `'actor`, `'guard` — shared-owner forms |
-| `T'mut` | `'stack`, `'heap`, `'actor`, `'guard` — any mutable form |
+| `T'mut` | `'inline`, `'owned`, `'actor`, `'guard` — any mutable form |
 | `T'req` | `'shared` — always immutable |
 
-Pipe-separated unions are also valid: `T'stack|heap` accepts only `'stack` or `'heap`.
+Pipe-separated unions are also valid: `T'inline|owned` accepts only `'inline` or `'owned`.
 
 Groups have no Rust representation — no trait bound is emitted. The constraint is enforced at the Boring level: the transpiler rejects callers that pass a qualifier outside the declared group, and uses the body's inference signals to resolve to a single concrete qualifier for emission. If inference cannot resolve to one qualifier, the first member of the group is used as fallback.
 
-> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer.
+> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer. `'new` (above) is a different kind of thing — a candidate-set qualifier, not an acceptance group — which is why it's documented separately and does narrow on local variables.
 
 ### Transpilation flags
 
@@ -5429,7 +5436,7 @@ Each qualifier imposes constraints on `mut`. `mut`/`var mut` are forbidden with 
 
 `'actor`/`'guard` get no special case in the table below — they're checked exactly like every other type ([§2](#2-variables-and-mutability)): `var` alone is rebind-only, never content-mutable, full stop. (An earlier revision of Boring let `var T'actor x` unlock `def` calls on the strength of the qualifier alone; that exception is retired — see `var mut`.)
 
-| Binding | `'shared` | `'actor` | `'guard` | `'stack` | `'heap` |
+| Binding | `'shared` | `'actor` | `'guard` | `'inline` | `'owned` |
 |---|---|---|---|---|---|
 | `let` | yes | yes | yes | yes | yes |
 | `mut` | **error** | yes | yes | yes | yes |
@@ -5444,8 +5451,8 @@ Qualifiers carry three kinds of information: Rust mapping, passing semantics, an
 | `'shared` | by reference (`&Arc<T>`) — no refcount increment | forbidden — immutable shared ref |
 | `'actor` | by reference (`&Arc<Mutex<T>>`) — no refcount increment | interior mutability — exclusive lock (Mutex) |
 | `'guard` | by reference (`&Arc<RwLock<T>>`) — no refcount increment | interior mutability — shared reads / exclusive writes (RwLock) |
-| `'stack` | move | determined by `let`/`mut`/`var` |
-| `'heap` | move | determined by `let`/`mut`/`var` |
+| `'inline` | move | determined by `let`/`mut`/`var` |
+| `'owned` | move | determined by `let`/`mut`/`var` |
 
 ### `let`, `mut`, `var` with `T'shared` and `T'actor`
 
@@ -6678,16 +6685,16 @@ unreachable("variant {v} should have been handled above")
 
 | Boring            | Alias for       | Rust                                  |
 |-------------------|-----------------|---------------------------------------|
-| `int`             | `Int'stack`     | `isize`                               |
-| `uint`            | `Uint'stack`    | `usize`                               |
-| `float`           | `Float64'stack` | `f64` (pure alias of `float64`)       |
-| `float32`         | `Float32'stack` | `f32`                                 |
-| `float64`         | `Float64'stack` | `f64`                                 |
-| `bool`            | `Bool'stack`    | `bool`                                |
+| `int`             | `Int'inline`     | `isize`                               |
+| `uint`            | `Uint'inline`    | `usize`                               |
+| `float`           | `Float64'inline` | `f64` (pure alias of `float64`)       |
+| `float32`         | `Float32'inline` | `f32`                                 |
+| `float64`         | `Float64'inline` | `f64`                                 |
+| `bool`            | `Bool'inline`    | `bool`                                |
 | `string` (literal)         | —               | `&str` — zero allocation; promoted to `Rc<str>`/`Arc<str>` when stored |
 | `string` (stored/computed) | —               | `Rc<str>` (single-thread) / `Arc<str>` (multi-thread)                 |
-| `T`     | `T'stack`   | `T` (stack, Rust default)             |
-| `T'`    | `T'heap`    | `Box<T>`                              |
+| `T`     | `T'inline`  | `T` (inline, Rust default)            |
+| `T'new` | —           | `Box<T>` / `Arc<T>` / `Arc<Mutex<T>>` / `Arc<RwLock<T>>` — any indirection, inferred |
 | `T?`    | —           | `Option<T>`                           |
 | `T?&`   | —           | `&Option<T>`                          |
 | `[T]`      | `Vec<T>`    | `Vec<T>` — dynamic array              |
@@ -6695,7 +6702,7 @@ unreachable("variant {v} should have been handled above")
 | `{K=V}` | `Dict<K,V>` | `HashMap<K, V>`                       |
 | `{T}`   | `Set<T>`    | `HashSet<T>`                          |
 | `(T1, T2)`         | —           | `(T1, T2)`                            |
-| `T'stack`          | —           | `T` — stack (read only), copied on pass |
+| `T'inline`         | —           | `T` — inline (read only), copied on pass |
 | `T'shared`         | —           | `Arc<T>` (multi) / `Rc<T>` (single)  |
 | `T'actor`          | —           | `Arc<std::sync::Mutex<T>>` — shared mutable, sync lock |
 | `T'actor'task`     | —           | `Arc<tokio::sync::Mutex<T>>` — shared mutable, async lock |
@@ -6843,7 +6850,7 @@ When an undefined variable name is close to a name in scope, Boring suggests the
 Warnings use the same format but print in yellow with a `warning:` prefix instead of `error:`:
 
 ```
-warning: `BigStruct` is 320 bytes on the stack; consider `BigStruct'heap` to heap-allocate
+warning: `BigStruct` is 320 bytes inline; consider `BigStruct'owned` to heap-allocate
  --> main.br:12:1
   |
 12 | struct BigStruct:
@@ -6985,7 +6992,7 @@ Borrow forms with lifetime:
 | Boring | Rust | Meaning |
 |--------|------|---------|
 | `T&a` | `&'a T` | borrow a value |
-| `T'&a` | `&'a Box<T>` | borrow a heap-allocated value |
+| `T'owned&a` | `&'a Box<T>` | borrow a heap-allocated value |
 
 #### Borrowed tuple slots: `mut Type&`
 
@@ -7596,7 +7603,7 @@ let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 
 ## 30. Qualifier Inference
 
-Boring's ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
+Boring's ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`) describe how a value is stored and shared at runtime. In most code you never write them — the compiler infers the right one from how each variable is used. This chapter explains the full inference system.
 
 ### The zero-annotation goal
 
@@ -7611,17 +7618,17 @@ The emitted Rust is identical to what you would write by hand, but you never had
 
 ### Constraint elimination
 
-Each unqualified local variable starts as a candidate for every qualifier: `{Stack, Owned, Shared, Actor, Guard}`. Every usage signal narrows the set by eliminating qualifiers that are incompatible. When exactly one candidate remains, it is chosen. When none remain, the constraints are contradictory and the compiler reports an error. When several remain, the compiler applies a priority-ordered fallback (see below).
+Each unqualified local variable starts as a candidate for every qualifier: `{Inline, Owned, Shared, Actor, Guard}`. Every usage signal narrows the set by eliminating qualifiers that are incompatible. When exactly one candidate remains, it is chosen. When none remain, the constraints are contradictory and the compiler reports an error. When several remain, the compiler applies a priority-ordered fallback (see below).
 
 | Signal | Compatible qualifiers |
 |---|---|
 | Call site demanding `T'shared` | `{Shared}` |
 | Call site demanding `T'actor` | `{Actor}` |
 | Call site demanding `T'guard` | `{Guard}` |
-| Call site demanding `T'stack` | `{Stack}` |
-| Call site demanding `T'heap` | `{Owned}` |
-| `def` method call on the variable | `{Stack, Owned, Actor, Guard}` |
-| `mut` binding (`mut x = ...`) | `{Stack, Owned, Actor, Guard}` |
+| Call site demanding `T'inline` | `{Inline}` |
+| Call site demanding `T'owned` | `{Owned}` |
+| `def` method call on the variable | `{Inline, Owned, Actor, Guard}` |
+| `mut` binding (`mut x = ...`) | `{Inline, Owned, Actor, Guard}` |
 | Task capture as method receiver | `{Actor, Guard}` |
 | Task capture, read-only | `{Shared, Actor, Guard}` |
 | `req` method call | *(no constraint — all qualifiers remain)* |
@@ -7632,44 +7639,44 @@ Each signal intersects the current candidate set. The order of signals does not 
 
 When the candidate set still contains multiple qualifiers after all signals are applied, the transpiler resolves the tie using the following algorithm:
 
-**Step 1 — `'stack` candidate.** If `'stack` is in the candidate set:
+**Step 1 — `'inline` candidate.** If `'inline` is in the candidate set:
 
 | Context | Decision |
 |---|---|
-| Struct field (any binding — `let`, `mut`, `var`) | `'stack` — field bytes are part of the parent allocation; no indirection regardless of size |
-| Local variable, sizeof(T) ≤ `--stack-auto-bytes` | `'stack` |
-| Local variable, sizeof(T) > `--stack-auto-bytes` | skip `'stack`; continue with step 3 |
+| Struct field (any binding — `let`, `mut`, `var`) | `'inline` — field bytes are part of the parent allocation; no indirection regardless of size |
+| Local variable, sizeof(T) ≤ `--inline-auto-bytes` | `'inline` |
+| Local variable, sizeof(T) > `--inline-auto-bytes` | skip `'inline`; continue with step 3 |
 
-All bare-T struct fields suppress size-based auto-boxing. This applies to `var` fields as well as `let`/`mut` fields — a `var` field is still stored in-place inside the struct. Boxing it would add unnecessary indirection and fragment the allocation. `T'` fields are not affected: an indirection hint always produces `Box<T>`.
+All bare-T struct fields suppress size-based auto-boxing. This applies to `var` fields as well as `let`/`mut` fields — a `var` field is still stored in-place inside the struct. Boxing it would add unnecessary indirection and fragment the allocation. `T'new` fields are not affected: an indirection hint always produces `Box<T>` when no other signal narrows it further.
 
 ```boring
 struct Wrapper:
-    let BigData inner    # bare T — always inline regardless of size
-    var BigData heavy    # var field — also inline, no size-based Box
-    let BigData' backup  # T' — always Box<BigData>
+    let BigData inner       # bare T — always inline regardless of size
+    var BigData heavy       # var field — also inline, no size-based Box
+    let BigData'new backup  # T'new — Box<BigData> (no narrowing signal to pick otherwise)
 ```
 
-**Step 2 — ordered chain.** If `'stack` was not selected, the transpiler picks the first qualifier present in the remaining candidates, in this order:
+**Step 2 — ordered chain.** If `'inline` was not selected, the transpiler picks the first qualifier present in the remaining candidates, in this order:
 
-`'heap` > `'shared` > `'actor` > `'guard`
+`'owned` > `'shared` > `'actor` > `'guard`
 
 ### Threshold
 
-The stack size threshold is configurable:
+The inline size threshold is configurable:
 
 ```
-boring build --stack-auto-bytes 512  # promote locals > 512 bytes to Box<T>
+boring build --inline-auto-bytes 512  # promote locals > 512 bytes to Box<T>
 ```
 
 Default: 256 bytes.
 
-> The size estimate is best-effort: it sums struct fields recursively but treats `Vec`, `HashMap`, and pointer-sized types as 8–16 bytes. The estimate is conservative — when in doubt the transpiler prefers `'heap` over a potentially large stack frame.
+> The size estimate is best-effort: it sums struct fields recursively but treats `Vec`, `HashMap`, and pointer-sized types as 8–16 bytes. The estimate is conservative — when in doubt the transpiler prefers `'owned` over a potentially large inline frame.
 
 ### Example: sharing + mutation → conflict
 
 ```boring
 let c = Counter(0)
-c.inc()             # def call → eliminates Shared → {Stack, Owned, Actor, Guard}
+c.inc()             # def call → eliminates Shared → {Inline, Owned, Actor, Guard}
 share_with(c)       # demands 'shared → intersect to {Shared}
                     # result: {} → error: no qualifier satisfies all constraints
 ```
@@ -7711,20 +7718,20 @@ task:
 
 ### Parameter auto-apply
 
-Parameters without an explicit qualifier, with a tick (`T'`), or with a qualifier group (`T'mut`, `T'many`, …) are all subject to body inference. The inferred qualifier is applied automatically at emission — the Rust function signature carries the correct type even if the Boring source does not.
+Parameters without an explicit qualifier, with `'new` (the candidate-set qualifier), or with a qualifier group (`T'mut`, `T'many`, …) are all subject to body inference. The inferred qualifier is applied automatically at emission — the Rust function signature carries the correct type even if the Boring source does not.
 
 ```boring
 def process(Counter c):     # bare — full candidate set
     spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
 
-def process(Counter' c):    # tick — {Owned, Shared, Actor, Guard}
+def process(Counter'new c): # 'new — {Owned, Shared, Actor, Guard}
     spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
 
-def process(Counter'mut c): # group — {Stack, Owned, Actor, Guard}
+def process(Counter'mut c): # group — {Inline, Owned, Actor, Guard}
     spawn_actor(c)          # demands 'actor → fn process(c: Arc<Mutex<Counter>>)
 ```
 
-If the body provides no narrowing signal, the fallback for bare `T` is size-based, for `T'` is `'heap`, and for a group is the first member of the group.
+If the body provides no narrowing signal, the fallback for bare `T` is size-based, for `T'new` is `'owned`, and for a group is the first member of the group.
 
 ### Universal borrow as inference output
 
@@ -7751,7 +7758,7 @@ A **storage signal** (field assignment, task capture, return with ownership qual
 | `Counter c` | qualifier demand | concrete qualifier |
 | `Counter c` | storage | concrete qualifier |
 
-The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), tick parameters (`Counter' c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a method parameter.
+The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a method parameter.
 
 ### Cross-function propagation
 
@@ -7789,7 +7796,7 @@ Results are applied at emit time: the field is emitted with the inferred Rust wr
 `mut x = expr` marks a fixed binding with a mutable instance. It contributes a mutation signal at the declaration site — equivalent to a `def` method call on the same line, but earlier. This allows the compiler to narrow the candidate set before any method calls are seen.
 
 ```boring
-mut c = Counter(0)      # eliminates Shared → {Stack, Owned, Actor, Guard}
+mut c = Counter(0)      # eliminates Shared → {Inline, Owned, Actor, Guard}
 spawn_actor(c)          # demands 'actor → infers 'actor
 ```
 
@@ -7803,26 +7810,26 @@ let Counter'guard c = Counter(0)   # developer decides: RwLock
 
 An explicit qualifier has the highest priority and overrides all inference signals. The compiler will still validate that the declared qualifier is compatible with the usage in the body.
 
-### `T'` — the indirection hint
+### `T'new` — the indirection hint
 
-`T'` (a type followed by a lone tick) signals that the value must not live on the stack, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Stack` from the start.
+`T'new` signals that the value must not be inline, but leaves the exact kind of indirection to the inference pass. It restricts the initial candidate set to `{Owned, Shared, Actor, Guard}`, eliminating `Inline` from the start. It is a **candidate-set qualifier**, not a caller-facing acceptance group like `'one`/`'many`/`'mut`/`'req` (§21) — which is why, like a bare `T`, it keeps narrowing by usage on local variables, not just on parameters.
 
 ```boring
-let c' = Counter(0)        # tick → candidates: {Owned, Shared, Actor, Guard}
+let c'new = Counter(0)     # 'new → candidates: {Owned, Shared, Actor, Guard}
 spawn_actor(c)             # demands 'actor → {Actor} → emits Arc<Mutex<Counter>>
 ```
 
-If no signal further constrains the set, the fallback is `'heap` (`Box<T>`):
+If no signal further constrains the set, the fallback is `'owned` (`Box<T>`):
 
 ```boring
-let c' = Counter(0)        # tick, no further signal → Box<Counter>
+let c'new = Counter(0)     # 'new, no further signal → Box<Counter>
 ```
 
-This is distinct from the plain `T` fallback, which is `'stack` for small types. `T'` is the right form when you know a value should live on the heap or be shared, but the specific qualifier depends on how it is used.
+This is distinct from the plain `T` fallback, which is `'inline` for small types. `T'new` is the right form when you know a value should live on the heap or be shared, but the specific qualifier depends on how it is used.
 
-### Optional forms — `T?` and `T'?`
+### Optional forms — `T?` and `T'new?`
 
-Optional variables (`T?` and `T'?`) participate in inference the same way as their non-optional counterparts. The inferred qualifier is applied to the **inner type** of the `Option`, not to the `Option` itself.
+Optional variables (`T?` and `T'new?`) participate in inference the same way as their non-optional counterparts. The inferred qualifier is applied to the **inner type** of the `Option`, not to the `Option` itself.
 
 ```boring
 let c? = some(Counter(0))   # T? → full candidate set
@@ -7831,8 +7838,8 @@ spawn_actor(c?)             # demands Counter'actor → infers 'actor
 ```
 
 ```boring
-let c'? = some(Counter(0))  # T'? → restricted set {Owned, Shared, Actor, Guard}
-                             # no signal → fallback → Option<Box<Counter>>
+let c'new? = some(Counter(0))  # T'new? → restricted set {Owned, Shared, Actor, Guard}
+                                # no signal → fallback → Option<Box<Counter>>
 ```
 
 `T?` with inferred `'actor` becomes `Option<Arc<Mutex<Counter>>>` — the `Option` wraps the qualified value, not the other way around. Conflict detection works the same as for bare variables.
@@ -8193,7 +8200,7 @@ The following documents cover topics in greater depth or address areas still und
 ### Ownership and qualifiers
 
 **[Qualifiers — Complete Reference](qualifiers.html)**
-All ownership qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'stack`→`'heap`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
+All ownership qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, `'guard`, `'weak`): semantics, Rust mapping, thread-safety, move semantics, qualifier upgrade coercions (`'inline`→`'owned`→`'shared`→`'actor`), parameter passing, zero-annotation inference algorithm, and known limitations.
 
 **[Binding and mutability](binding-mutability.html)**
 Deep dive into the three binding forms (`let` / `mut` / `var`), their interaction with qualifiers, and how they map to Rust's ownership and mutability model.

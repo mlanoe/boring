@@ -2706,8 +2706,8 @@ impl Transpiler {
                         }
                     }
                     match arg_qual {
-                        Some(Type::Qualified(_, OwnerQual::Stack)) =>
-                            format!("{}{}", ref_prefix, emitted),   // &val (T on stack, no deref needed)
+                        Some(Type::Qualified(_, OwnerQual::Inline)) =>
+                            format!("{}{}", ref_prefix, emitted),   // &val (T inline, no deref needed)
                         Some(Type::Qualified(_, OwnerQual::Owned)) =>
                             format!("{}*{}", ref_prefix, emitted),  // &*box_val (Box<T> → T)
                         Some(Type::Qualified(_, OwnerQual::Shared)) =>

@@ -1519,11 +1519,11 @@ impl Transpiler {
             if f.name == "eq" || f.name == "lt" {
                 // We need PartialEq for PartialOrd to work.
                 // Emit `impl PartialEq for TypeName` based on field-wise equality.
-                // When the method param is Box<T> (strict T'), we must Box::new(rhs.clone()).
-                // In managed mode, T' → Arc<Mutex<T>>, so wrap with Arc::new(Mutex::new(...)).
+                // When the method param is Box<T> (strict T'owned), we must Box::new(rhs.clone()).
+                // In managed mode, T'owned → Arc<Mutex<T>>, so wrap with Arc::new(Mutex::new(...)).
                 let param_ty = f.params.first().and_then(|p| p.ty.as_ref());
                 let param_is_box = param_ty
-                    .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)))
+                    .map(|t| matches!(t, Type::Qualified(_, q) if q.is_owned_or_new()))
                     .unwrap_or(false);
                 let param_is_managed = param_is_box && param_ty.map(|t|
                     crate::transpiler::Transpiler::is_managed_user_owned(

@@ -1224,7 +1224,7 @@ fn parse_build_command(build_args: &[String]) {
     let mut target_wgpu   = false;
     let mut mode = TranspileMode::Strict;
     let mut threading = ThreadingMode::Multi;
-    let mut stack_auto_bytes: usize = 256;
+    let mut inline_auto_bytes: usize = 256;
     let mut instrument = false;
     let mut sanitize: Option<&'static str> = None;
     let mut emit_rust = false;
@@ -1296,12 +1296,12 @@ fn parse_build_command(build_args: &[String]) {
                     }
                 }
             }
-            "--stack-auto-bytes" => {
+            "--inline-auto-bytes" => {
                 i += 1;
                 match build_args.get(i).and_then(|s| s.parse::<usize>().ok()) {
-                    Some(n) => stack_auto_bytes = n,
+                    Some(n) => inline_auto_bytes = n,
                     None => {
-                        eprintln!("error: --stack-auto-bytes requires a positive integer");
+                        eprintln!("error: --inline-auto-bytes requires a positive integer");
                         process::exit(1);
                     }
                 }
@@ -1420,7 +1420,7 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
-    let config = TranspileConfig { mode, threading, stack_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
+    let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), is_gpu_target: false, gpu_top_level_handled_by_host: false, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new() };
 
     if emit_rust {
         match file {

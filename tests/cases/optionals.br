@@ -77,11 +77,11 @@ print oirel
 struct OUser:
     string ouname
 
-let OUser'? ouu = OUser("Alice")
+let OUser'owned? ouu = OUser("Alice")
 let outname = ouu?.ouname
 print outname
 
-let OUser'? oun = nil
+let OUser'owned? oun = nil
 let ounn = oun?.ouname
 let ounn2 = ounn else "nil"
 print ounn2
@@ -90,17 +90,17 @@ print ounn2
 struct OGreeter:
     def string ohello(): "hello!"
 
-let OGreeter'? ogg = OGreeter()
+let OGreeter'owned? ogg = OGreeter()
 let ogres = ogg?.ohello()
 print ogres
 
-let OGreeter'? ognn = nil
+let OGreeter'owned? ognn = nil
 let ognres = ognn?.ohello()
 let ognres2 = ognres else "nil"
 print ognres2
 
 # optional chaining with else
-let OUser'? ouEl = nil
+let OUser'owned? ouEl = nil
 let ouElr = ouEl?.ouname else "anonymous"
 print ouElr
 

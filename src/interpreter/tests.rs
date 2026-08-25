@@ -551,7 +551,7 @@ fn test_optional_chaining_field() {
 struct User:
     string name
 
-let User'? u = User("Alice")
+let User'owned? u = User("Alice")
 let _result = u?.name
 let _nil = nil?.name
 "#;
@@ -567,7 +567,7 @@ fn test_optional_chaining_method() {
 struct Greeter:
     def string hello(): "hello!"
 
-let Greeter'? g = Greeter()
+let Greeter'owned? g = Greeter()
 let _result = g?.hello()
 let _nil = nil?.hello()
 "#;
@@ -583,7 +583,7 @@ fn test_optional_chaining_with_else() {
 struct User:
     string name
 
-let User'? u = nil
+let User'owned? u = nil
 let _result = u?.name else "anonymous"
 "#;
     let (interp, res) = run(src);
@@ -600,7 +600,7 @@ fn test_owned_param_invalidates_source() {
 struct Dog:
     string name
 
-def string pet(Dog' d): d.name
+def string pet(Dog'owned d): d.name
 
 let d = Dog("Rex")
 let _r = pet(d)
@@ -617,7 +617,7 @@ fn test_double_use_same_call_errors() {
 struct Dog:
     string name
 
-def string feed(Dog' a, Dog' b): a.name + b.name
+def string feed(Dog'owned a, Dog'owned b): a.name + b.name
 
 let d = Dog("Rex")
 let _r = feed(d, d)
@@ -635,7 +635,7 @@ struct Dog:
 
 let d1 = Dog("Ace")
 let d2 = Dog("Bolt")
-let [Dog'] pack = [d1, d2]
+let [Dog'owned] pack = [d1, d2]
 let _stale = d1
 "#;
     let (_, res) = run(src);
@@ -649,7 +649,7 @@ fn test_owned_collection_push_invalidates_source() {
 struct Dog:
     string name
 
-var [Dog'] pack = []
+var [Dog'owned] pack = []
 let d = Dog("Chase")
 pack.push(d)
 let _stale = d
@@ -660,12 +660,12 @@ let _stale = d
 
 #[test]
 fn test_task_cannot_capture_unqualified_collection() {
-    // An unqualified array (no 'rc/'static/'copy/') cannot be captured by a task
+    // An unqualified array (no 'rc/'static/'copy/'owned) cannot be captured by a task
     let src = r#"
 struct Dog:
     string name
 
-let [Dog'] pack = []
+let [Dog'owned] pack = []
 let f = task: pack
 "#;
     let (_, res) = run(src);
@@ -674,12 +674,12 @@ let f = task: pack
 
 #[test]
 fn test_task_can_capture_owned_value() {
-    // A value declared Dog' can be moved into a task (exclusive ownership)
+    // A value declared Dog'owned can be moved into a task (exclusive ownership)
     let src = r#"
 struct Dog:
     string name
 
-let Dog' d = Dog("Rex")
+let Dog'owned d = Dog("Rex")
 let f = task: d.name
 let _result = f.value
 "#;
@@ -695,7 +695,7 @@ fn test_task_owned_capture_invalidates_source() {
 struct Dog:
     string name
 
-let Dog' d = Dog("Rex")
+let Dog'owned d = Dog("Rex")
 let f = task: d.name
 let _stale = d
 "#;
@@ -709,7 +709,7 @@ let _stale = d
 fn test_alias_declaration() {
     // User-defined alias: uppercase so it's recognised as a type name
     let src = r#"
-use Kg as Float'stack
+use Kg as Float'inline
 let Kg weight = 72.5
 let _result = weight + 1.0
 "#;

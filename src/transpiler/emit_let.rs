@@ -1272,7 +1272,7 @@ impl Transpiler {
             });
         if already_opt { return inner_val; }
         // `T'? (Box<T>?)` or managed-mode `T'?`: wrap the value appropriately.
-        let wrapped = if matches!(inner, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) {
+        let wrapped = if matches!(inner, Type::Qualified(_, q) if q.is_owned_or_new()) {
             // Managed mode: wrap in Arc<std::sync::Mutex<T>> or RefCell<T>
             if self.is_managed_owned_user(inner) {
                 if inner_val.starts_with("Arc::new(std::sync::Mutex::new(")
@@ -1296,7 +1296,7 @@ impl Transpiler {
     /// `let T'task/'actor/'guard name = value` (any Arc-qualified type) → `Arc<T>`, or
     /// `Arc<Mutex<T>>`/`Arc<RwLock<T>>` for actor/guard (`Rc<RefCell<T>>`/`Rc<T>` in
     /// single-thread mode). Clones an existing Arc/Rc var instead of moving it; unboxes
-    /// a `'heap` source with `*` before wrapping; `.clone()`s a `'stack` source so the
+    /// a `'owned` source with `*` before wrapping; `.clone()`s an `'inline` source so the
     /// original binding stays valid.
     fn emit_let_value_arc_qualified(&self, t: &Type, value: &Expr) -> String {
         let is_actor = Self::is_mutex_binding(false, t);
@@ -1370,7 +1370,7 @@ impl Transpiler {
                 format!("Arc::new(*{})", inner)
             }
         } else if matches!(&value.kind, ExprKind::Var(_)) {
-            // 'stack source: wrap with lock + .clone() to preserve the original binding.
+            // 'inline source: wrap with lock + .clone() to preserve the original binding.
             if is_actor {
                 self.emit_actor_new(&format!("{}.clone()", inner))
             } else if is_guard {
@@ -1413,7 +1413,7 @@ impl Transpiler {
         }
         // Context-aware DotIdent: `.Variant` with a known Named enum type → `EnumType::Variant`.
         // This ensures `.South` resolves to `Direction::South` (not a later enum with same variant).
-        // Also handles qualified types (e.g. Direction'stack inferred by cross-fn propagation).
+        // Also handles qualified types (e.g. Direction'inline inferred by cross-fn propagation).
         if let ExprKind::DotIdent(variant) = &value.kind {
             if let Some(Type::Named(enum_type)) = declared_ty {
                 let enum_rust = normalize_type_name(enum_type, self.use_rc_str());
@@ -1422,7 +1422,7 @@ impl Transpiler {
             if let Some(Type::Qualified(inner, qual)) = declared_ty {
                 if let Type::Named(enum_type) = inner.as_ref() {
                     let enum_rust = normalize_type_name(enum_type, self.use_rc_str());
-                    if matches!(qual, OwnerQual::Owned | OwnerQual::New) {
+                    if qual.is_owned_or_new() {
                         return format!("Box::new({}::{})", enum_rust, variant);
                     } else {
                         return format!("{}::{}", enum_rust, variant);
@@ -1623,8 +1623,8 @@ impl Transpiler {
                 }
             }
             // T'shared → Arc<T> (multi) or Rc<T> (single): wrap accordingly.
-            // 'stack source: wrap with .clone() to avoid moving the original binding.
-            // 'heap source (Box<T>): dereference with * to move out of the box before wrapping.
+            // 'inline source: wrap with .clone() to avoid moving the original binding.
+            // 'owned source (Box<T>): dereference with * to move out of the box before wrapping.
             Some(Type::Qualified(_, OwnerQual::Shared)) => {
                 let inner = self.emit_expr(value);
                 let is_heap = self.arg_is_heap_var(value);
@@ -1685,8 +1685,8 @@ impl Transpiler {
                 }
             }
             // T'task / T'actor → Arc<T> (or Arc<Mutex<T>> for actor, Rc<RefCell<T>> in single).
-            // 'stack source: wrap contents with .clone().
-            // 'heap source (Box<T>): dereference with * to move out of the box before wrapping.
+            // 'inline source: wrap contents with .clone().
+            // 'owned source (Box<T>): dereference with * to move out of the box before wrapping.
             Some(t) if Self::is_arc_qualified(t) => self.emit_let_value_arc_qualified(t, value),
             // Tuple type: coerce each element to its declared slot type.
             // `let (int, string) t = (0, "hello")` → `let t: (i64, Arc<str>) = (0, Arc::from("hello".to_string()))`
@@ -1701,8 +1701,8 @@ impl Transpiler {
                     self.emit_expr(value)
                 }
             }
-            // T'owned (Box<T> in strict, Arc<Mutex<T>>/RefCell<T> in managed): wrap accordingly.
-            Some(ty @ Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) => {
+            // T'owned (Box<T> in strict, Arc<Mutex<T>>/RefCell<T> in managed) or T'new: wrap accordingly.
+            Some(ty @ Type::Qualified(_, q)) if q.is_owned_or_new() => {
                 let inner = self.emit_expr(value);
                 if self.is_managed_owned_user(ty) {
                     if inner.starts_with("Arc::new(std::sync::Mutex::new(")
@@ -1731,7 +1731,7 @@ impl Transpiler {
         let s = self.emit_expr(value);
         // Implicit clone for 'shared / 'actor / 'guard: cloning an Rc/Arc is just a
         // refcount increment, not a deep copy — assignment is always an alias.
-        // 'stack and 'heap are owned types; move is the default there.
+        // 'inline and 'owned are owned types; move is the default there.
         if let ExprKind::Var(v) = &value.kind {
             if self.arc_vars.contains(v.as_str()) && !s.ends_with(".clone()") {
                 return if self.rc_vars.contains(v.as_str()) {

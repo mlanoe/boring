@@ -528,7 +528,7 @@ enum OwnerQual:
     Guard
     Shared
     Weak
-    Stack
+    Inline
     Lifetime(string name)
     BorrowShared
     Borrow

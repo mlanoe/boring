@@ -17,29 +17,29 @@ Existing qualifier syntax is unchanged and complemented, not replaced.
 ### Initialized bindings
 
 ```boring
-let v = Counter()             # inferred — 'stack included in candidates
-let v = new Counter()         # inferred — 'stack excluded from candidates
+let v = Counter()             # inferred — 'inline included in candidates
+let v = new Counter()         # inferred — 'inline excluded from candidates
 let v'actor = Counter()       # explicit qualifier
 ```
 
-`let v'new = new Counter()` is redundant — `new` on the right already excludes `'stack`. `'new` does not exist as a qualifier on an initialized binding.
+`let v'new = new Counter()` is redundant — `new` on the right already excludes `'inline`. `'new` does not exist as a qualifier on an initialized binding.
 
 ### Delayed init (no `=`)
 
 ```boring
-let Counter v                 # inferred — 'stack included in candidates
-let Counter'new v             # inferred — 'stack excluded from candidates
+let Counter v                 # inferred — 'inline included in candidates
+let Counter'new v             # inferred — 'inline excluded from candidates
 let Counter'actor v           # explicit qualifier
 ```
 
-`'new` is a pseudo-qualifier meaning "inferred, excluding `'stack`" — the mirror of `new` on the right-hand side. It carries no Rust representation; it only constrains the inference starting set.
+`'new` is a pseudo-qualifier meaning "inferred, excluding `'inline`" — the mirror of `new` on the right-hand side. It carries no Rust representation of its own; it only constrains the inference starting set (`Union([Owned, Shared, Actor, Guard])`), and the transpiler resolves it to a concrete qualifier the same way it resolves a bare `T`.
 
 ### Symmetry
 
 | Intent | Initialized | Delayed init |
 |---|---|---|
-| Inferred, `'stack` included | `let v = Counter()` | `let Counter v` |
-| Inferred, `'stack` excluded | `let v = new Counter()` | `let Counter'new v` |
+| Inferred, `'inline` included | `let v = Counter()` | `let Counter v` |
+| Inferred, `'inline` excluded | `let v = new Counter()` | `let Counter'new v` |
 | Explicit qualifier | `let v'actor = Counter()` | `let Counter'actor v` |
 
 ---
@@ -49,7 +49,7 @@ let Counter'actor v           # explicit qualifier
 `new` has two overloads. `Constructor<T>` is a compile-time token — the constructor call passed as the last argument.
 
 ```boring
-def T new(Constructor<T>)               # qualifier inferred, excluding 'stack
+def T new(Constructor<T>)               # qualifier inferred, excluding 'inline
 def T new(Arena& arena, Constructor<T>) # GPU placement, CPU qualifier from binding
 ```
 
@@ -58,7 +58,7 @@ There is no `Arena` trait in the implementation. `GPU(n)` is a built-in runtime 
 ### Examples
 
 ```boring
-new Counter()       # qualifier inferred, excluding 'stack
+new Counter()       # qualifier inferred, excluding 'inline
 new(g0) Scale(n)    # GPU device g0 — only works when Scale is a `kernel`-declared type
 ```
 
@@ -70,11 +70,11 @@ new(g0) Scale(n)    # GPU device g0 — only works when Scale is a `kernel`-decl
 
 ### `new` is additive
 
-`new` does not replace existing qualifier syntax. It adds two capabilities: inference excluding `'stack`, and GPU arena placement.
+`new` does not replace existing qualifier syntax. It adds two capabilities: inference excluding `'inline`, and GPU arena placement.
 
 ### `Counter'` (bare tick) removed
 
-`Counter'` without a qualifier name carried no inference signal — the right-hand side and usage context already determine the qualifier. It is replaced by `Counter'new` for the delayed-init case where `'stack` should be excluded.
+`Counter'` without a qualifier name carried no inference signal — the right-hand side and usage context already determine the qualifier. It is replaced by `Counter'new` for the delayed-init case where `'inline` should be excluded.
 
 ### `v'qualifier` kept for initialized bindings only
 
@@ -83,7 +83,7 @@ new(g0) Scale(n)    # GPU device g0 — only works when Scale is a `kernel`-decl
 
 ### Named arenas rejected
 
-`let a = arena(g0, 'heap)` then `new(a) Scale(n)` was considered and **rejected** — storing an `Arena` in a variable would make placement runtime-dependent, preventing Rust type emission.
+`let a = arena(g0, 'owned)` then `new(a) Scale(n)` was considered and **rejected** — storing an `Arena` in a variable would make placement runtime-dependent, preventing Rust type emission.
 
 ### Future qualifiers
 

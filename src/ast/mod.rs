@@ -947,7 +947,7 @@ pub enum ExprKind {
     // Desugars at emit time: if f is in fn_sigs → f(lhs, args), else → lhs.f(args)
     Pipe(Box<Expr>, String, Vec<Arg>),
 
-    /// `new Constructor()` — placement expression, qualifier inferred excluding 'stack.
+    /// `new Constructor()` — placement expression, qualifier inferred excluding 'inline.
     /// `new(arena) Constructor()` — GPU arena placement; arena expression stored but not yet emitted.
     /// `ctor` is the constructor call expression (e.g. `Counter()`).
     /// `arena` is the expression inside `new(...)` if present.
@@ -1094,13 +1094,15 @@ pub enum UnaryOp {
 
 /// Ownership / allocation qualifier for boring types.
 ///
-/// Boring defaults to stack allocation (like Rust). Heap allocation is explicit.
+/// Boring defaults to inline storage, no indirection (like Rust). Indirection is explicit.
 ///
-/// `Dog`         → (no qual)       (Dog        — stack-owned, default; Rust default)
+/// `Dog`         → (no qual)       (Dog        — inline, default; Rust default)
 /// `Dog&`        → Borrow          (&Dog       — borrow / reference, alias-compatible)
-/// `Dog'`        → Owned           (Box<Dog>   — heap-owned; same as Dog'heap)
-/// `Dog'heap`    → Owned           (Box<Dog>   — explicit heap alias for bare tick)
-/// `Dog'stack`   → Stack           (Dog        — explicit stack, equivalent to bare Dog)
+/// `Dog'owned`   → Owned           (Box<Dog>   — heap-owned, exclusive move)
+/// `Dog'inline`  → Inline          (Dog        — explicit inline, equivalent to bare Dog)
+/// `Dog'new`     → Union([Owned, Shared, Actor, Guard])
+///                                 (Box/Rc/Arc/Mutex/RwLock<Dog> — any indirection, inferred;
+///                                  bare tick `Dog'` is removed, this is its replacement)
 /// `Dog'const`   → Const           (&'static D — compile-time constant / string literal)
 /// `Dog'shared`  → Shared          (Arc<Dog> multi / Rc<Dog> single — threading-aware)
 /// `Dog'weak`    → Weak            (Weak<Dog>  — non-owning ref, must upgrade to Dog'shared)
@@ -1123,14 +1125,10 @@ pub enum OwnerQual {
     /// Replaces the deprecated `T'auto` and `T'task` qualifiers.
     Shared,
     Weak,
-    /// Force stack allocation for the Rust transpiler: `Point'stack` → plain `Point` in Rust.
-    /// By default structs are heap-allocated (`Box<T>`); `'stack` opts out of that.
+    /// Force inline allocation for the Rust transpiler: `Point'inline` → plain `Point` in Rust.
+    /// By default structs are heap-allocated (`Box<T>`); `'inline` opts out of that.
     /// The interpreter treats this identically to `Owned` at runtime (no difference).
-    Stack,
-    /// Pseudo-qualifier written as `'new` (or implied by `new Constructor()` on the RHS).
-    /// Means "infer excluding 'stack" — identical inference starting set to the bare `T'` tick.
-    /// Used in delayed-init position: `Counter'new v`.
-    New,
+    Inline,
     /// Explicit lifetime annotation for Rust transpilation: `string'a` → `&'a str`.
     /// The interpreter treats this identically to a plain borrow (no runtime enforcement).
     Lifetime(String),
@@ -1139,8 +1137,8 @@ pub enum OwnerQual {
     BorrowShared,
     /// Universal borrow: `T&` → `&T`. The transpiler coerces any qualifier at the call site.
     Borrow,
-    /// Internal: borrow of a heap (Box) value → `&Box<T>`.
-    /// No longer produced by the parser (`T'heap&` / `T&heap` are removed).
+    /// Internal: borrow of an owned (Box) value → `&Box<T>`.
+    /// No longer produced by the parser (`T'owned&` / `T&owned` are removed).
     BorrowOwned,
     /// Borrow of an optional value: `Dog?&` → `&Option<Dog>` in Rust.
     BorrowOption,
@@ -1169,12 +1167,52 @@ pub enum OwnerQual {
     GpuActorUnified,
     /// `T'surface` — pixel buffer with backend-differentiated placement.
     GpuSurface,
-    /// Qualifier union: `T'stack|heap|actor` — restricts which qualifiers callers may provide.
+    /// Qualifier union: `T'inline|owned|actor` — restricts which qualifiers callers may provide.
     /// At the Rust emission level this is a plain generic (no wrapping); the Boring compiler
     /// validates that every call site provides one of the listed qualifiers.
-    /// Also used for the named groups: `'one` (`Stack|Owned`), `'many`
-    /// (`Shared|Actor|Guard`), `'mut` (`Stack|Owned|Actor|Guard`), `'req` (`Shared`).
+    /// Also used for the named groups: `'one` (`Inline|Owned`), `'many`
+    /// (`Shared|Actor|Guard`), `'mut` (`Inline|Owned|Actor|Guard`), `'req` (`Shared`).
+    ///
+    /// `'new` (the candidate-set pseudo-qualifier written as `T'new`, or implied by
+    /// `new Ctor()` on a `let` RHS) is ALSO represented as a `Union` — specifically
+    /// `Union([Owned, Shared, Actor, Guard])`, i.e. "any indirection, inferred,
+    /// `'inline` excluded". Unlike the four groups above, `'new` is not a caller-facing
+    /// acceptance contract (meaningful only on parameters) — it's a candidate-set seed,
+    /// the same category as a bare `T`, so it must also narrow by usage on local
+    /// variables (see `OwnerQual::is_owned_or_new` and its call sites in
+    /// `infer_qualifiers.rs`/`collect_anonymous_vars`, which special-case exactly this
+    /// shape to preserve that local-narrowing behavior).
     Union(Vec<OwnerQual>),
+}
+
+impl OwnerQual {
+    /// The four members of the `'new` candidate-set qualifier, in canonical order —
+    /// see the `Union` variant's doc comment above.
+    pub const NEW_MEMBERS: [OwnerQual; 4] =
+        [OwnerQual::Owned, OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard];
+
+    /// True for `'owned` (a single, committed indirect qualifier) and for `'new`
+    /// (`Union([Owned, Shared, Actor, Guard])`) — i.e. any *declared* qualifier that
+    /// guarantees indirection (never `'inline`) before per-usage inference has
+    /// resolved it to one concrete member. Replaces the old `Owned | New` match arms
+    /// from when `'new` had its own dedicated enum variant instead of being a `Union`.
+    pub fn is_owned_or_new(&self) -> bool {
+        match self {
+            OwnerQual::Owned => true,
+            OwnerQual::Union(members) => members.as_slice() == Self::NEW_MEMBERS,
+            _ => false,
+        }
+    }
+
+    /// True specifically for `'new` (`Union([Owned, Shared, Actor, Guard])`) — narrower
+    /// than `is_owned_or_new`, which also matches a committed `'owned`. A committed
+    /// `'owned` is a fixed contract (like `'shared`/`'actor`/`'guard`) and must NOT be
+    /// seeded for per-usage inference the way `'new` is — see the inference-seeding
+    /// call sites in `infer_qualifiers.rs` (parameter seeding and `collect_anonymous_vars`)
+    /// that use this predicate specifically instead of `is_owned_or_new`.
+    pub fn is_new(&self) -> bool {
+        matches!(self, OwnerQual::Union(members) if members.as_slice() == Self::NEW_MEMBERS)
+    }
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1291,10 +1329,10 @@ pub enum Type {
 }
 
 /// Copy-ness of a single owner qualifier, matching the rules in `Type::is_copy`.
-/// Used to evaluate the members of an `OwnerQual::Union` (`'stack|actor`, `'mut`, ...).
+/// Used to evaluate the members of an `OwnerQual::Union` (`'inline|actor`, `'mut`, ...).
 fn owner_qual_is_copy(q: &OwnerQual) -> bool {
     match q {
-        OwnerQual::Owned | OwnerQual::Stack => false,
+        OwnerQual::Owned | OwnerQual::Inline => false,
         OwnerQual::Union(quals) => quals.iter().all(owner_qual_is_copy),
         _ => true,
     }
@@ -1428,11 +1466,11 @@ impl Type {
             Type::ConstInt(_) => true,
             Type::Fn(..) => true,  // functions are copy (shared under the hood)
             // Owned = exclusive move → never copy
-            Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => false,
+            Type::Qualified(_, OwnerQual::Owned | OwnerQual::Inline) => false,
             // Lifetime refs and borrows of smart pointers are copy at the borrow level
             Type::Qualified(_, OwnerQual::Lifetime(_) | OwnerQual::BorrowShared | OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
             // A qualifier union is only Copy if every member qualifier it allows is Copy —
-            // e.g. `'stack|actor` includes 'stack (move-only), so the union as a whole is not Copy.
+            // e.g. `'inline|actor` includes 'inline (move-only), so the union as a whole is not Copy.
             Type::Qualified(_, OwnerQual::Union(quals)) => quals.iter().all(owner_qual_is_copy),
             // All other qualifiers give copy/shared semantics
             Type::Qualified(_, _) => true,
@@ -1463,7 +1501,7 @@ impl Type {
             Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
             Type::ConstInt(_) => true,
             // Qualifiers
-            Type::Qualified(_, OwnerQual::Owned | OwnerQual::Stack) => true,  // exclusive move → source invalidated
+            Type::Qualified(_, OwnerQual::Owned | OwnerQual::Inline) => true,  // exclusive move → source invalidated
             Type::Qualified(_, OwnerQual::Shared)     => true,  // Arc<T> (multi) / Rc<T> (single) — qualifier intent is task-safe
             Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask) => true,
             Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask) => true,
@@ -1483,7 +1521,6 @@ impl Type {
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
             Type::SelfAssoc(_)  => false, // conservative, like Named
             Type::AssocOf(_, _) => false, // conservative, like Named
-            Type::Qualified(_, OwnerQual::New) => false, // pseudo-qualifier: conservative, like Named
             Type::Qualified(_, OwnerQual::GpuUnified | OwnerQual::GpuGlobal | OwnerQual::GpuLocal | OwnerQual::GpuConst | OwnerQual::GpuActorGlobal | OwnerQual::GpuActorUnified | OwnerQual::GpuSurface) => false,
         }
     }

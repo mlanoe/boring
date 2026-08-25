@@ -173,7 +173,7 @@ impl Interpreter {
 
     /// Alias-resolve `ty` and strip the wrappers that carry no JSON meaning.
     ///
-    /// `'stack`/`'heap`/`'shared`/... and `mut` are representation/permission hints only —
+    /// `'inline`/`'owned`/`'shared`/... and `mut` are representation/permission hints only —
     /// the interpreter stores the same `Value` either way. This has to loop: the built-in
     /// alias table already maps `Named("string")`/`Named("int")` onto *qualified* types
     /// (`Type::Qualified(Type::Str, Copy)` and friends), so a single unwrap is not enough

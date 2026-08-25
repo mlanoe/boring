@@ -180,7 +180,7 @@ print read_stack(ii) + read_borrow(ii) + read_heap(ii)
 struct ADog:
     init(pub string name)
 
-use ADog2 as ADog'stack
+use ADog2 as ADog'inline
 let ad = ADog2("rex")
 print ad.name
 

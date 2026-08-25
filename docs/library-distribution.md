@@ -6,7 +6,7 @@
 
 When a Boring library is distributed to third parties, two structural constraints must be satisfied simultaneously:
 
-1. **Stack allocation** — to place a struct on the stack (qualifier `'stack`), the compiler must know its exact size at compile time. This requires the full struct layout, including private fields.
+1. **Inline allocation** — to place a struct inline (qualifier `'inline`), the compiler must know its exact size at compile time. This requires the full struct layout, including private fields.
 2. **Generics** — monomorphization requires access to the source of generic functions and types. There is no way to pre-compile all instantiations.
 
 These two constraints both push toward distributing source code, or at minimum a rich interface representation that includes struct layouts and generic bodies.
@@ -77,7 +77,7 @@ This is not a loss: since Boring transpiles to Rust, a consumer who receives the
 
 ## Header + Binary Distribution (Confidentiality Without Full Source)
 
-For libraries that meet all three conditions — no generics, no `'stack` structs with inferred layout, and all qualifiers written explicitly (no inference) — it would be theoretically possible to ship a **header file** (public declarations only) paired with a **compiled binary**, without exposing any Boring source.
+For libraries that meet all three conditions — no generics, no `'inline` structs with inferred layout, and all qualifiers written explicitly (no inference) — it would be theoretically possible to ship a **header file** (public declarations only) paired with a **compiled binary**, without exposing any Boring source.
 
 The header would use existing Boring syntax. Two candidates exist:
 
@@ -100,7 +100,7 @@ Until Rust stabilises an ABI (e.g. via the [Stable ABI initiative](https://githu
 
 If confidentiality of the Boring source becomes a real requirement, a `.bri` (Boring Interface) format could be introduced, inspired by Swift's `.swiftinterface`:
 
-- Public struct declarations with full field layout (required for `'stack`).
+- Public struct declarations with full field layout (required for `'inline`).
 - Private fields replaced by opaque placeholders preserving size and alignment.
 - Generic function and type signatures with their bodies (required for monomorphization).
 - Private implementation details stripped.
@@ -113,12 +113,12 @@ Including full Boring source (`.br` files) alongside the generated Rust crate un
 
 ### Qualifier propagation across library boundaries
 
-The Boring transpiler infers qualifiers (`'stack`, `'heap`, `'shared`, `'actor`, …) from usage context. When a library function returns a value whose qualifier depends on how *its* dependencies are qualified, the transpiler needs to see the full call graph to propagate constraints correctly.
+The Boring transpiler infers qualifiers (`'inline`, `'owned`, `'shared`, `'actor`, …) from usage context. When a library function returns a value whose qualifier depends on how *its* dependencies are qualified, the transpiler needs to see the full call graph to propagate constraints correctly.
 
 Without source, a consumer importing the library sees only Rust types (`Box<T>`, `Arc<T>`, …) — the qualifier intent is erased. With source, the transpiler can:
 
 - Re-infer qualifiers end-to-end across the library boundary.
-- Detect qualifier conflicts early (e.g. a `'stack` expectation colliding with a `'heap` return).
+- Detect qualifier conflicts early (e.g. a `'inline` expectation colliding with a `'owned` return).
 - Produce more precise diagnostics that name the originating `.br` file and line, not a generated Rust artifact.
 
 ### Cross-file analyses enabled by full source inclusion
@@ -137,7 +137,7 @@ These analyses are additive — they do not block the current "follow Rust" posi
 
 | Concern | Solution |
 |---|---|
-| Stack allocation (`'stack`) | Struct layout must be visible → follow Rust, expose layout in generated crate |
+| Inline allocation (`'inline`) | Struct layout must be visible → follow Rust, expose layout in generated crate |
 | Generics / monomorphization | Source required → follow Rust, ship generated Rust source |
 | Qualifier inference across boundaries | Full `.br` source enables cross-file propagation and precise diagnostics |
 | Cross-file analyses | Mutability audit, ownership cycles, dead-code — all require full source graph |

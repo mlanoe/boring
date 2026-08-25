@@ -2221,7 +2221,7 @@ impl Interpreter {
         aliases.insert("float64".into(), Type::Float64);
         aliases.insert("bool".into(),   Type::Bool);
         aliases.insert("string".into(), Type::Qualified(Box::new(Type::Str),   OwnerQual::Shared));
-        aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Stack));
+        aliases.insert("str".into(),    Type::Qualified(Box::new(Type::Str),   OwnerQual::Inline));
         // Rust-specific numeric types — distinct real types (each a real Value variant),
         // preserved by name for the transpiler to emit the exact integer width. `isize`/
         // `usize` alias to the bare `int`/`uint` types, which now transpile to isize/usize.

@@ -407,9 +407,9 @@ impl Transpiler {
                 let Some(sig) = self.fn_sigs.get_mut(&key) else { continue };
                 for (i, param) in f.params.iter().enumerate() {
                     let Some(inferred_qual) = pre_inferred.get(&param.name).cloned() else { continue };
-                    // Do not propagate 'stack: it's the default fallback, not a real signal
+                    // Do not propagate 'inline: it's the default fallback, not a real signal
                     // (see the identical exclusion in emit_fn's post-emit_body propagation).
-                    if matches!(inferred_qual, crate::ast::OwnerQual::Stack) { continue; }
+                    if matches!(inferred_qual, crate::ast::OwnerQual::Inline) { continue; }
                     let Some(param_ty) = sig.get_mut(i) else { continue };
                     let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
                         && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
@@ -1478,10 +1478,10 @@ impl Transpiler {
             if let Some(sig) = self.fn_sigs.get_mut(&f.name) {
                 for (i, param) in f.params.iter().enumerate() {
                     if let Some(inferred_qual) = pre_inferred_param_quals.get(&param.name).cloned() {
-                        // Do not propagate 'stack back into fn_sigs: it is the default fallback and
+                        // Do not propagate 'inline back into fn_sigs: it is the default fallback and
                         // would prevent actor_source_types inference from propagating downstream.
-                        // Only non-default qualifiers (actor/guard/shared/heap) are meaningful signals.
-                        if matches!(inferred_qual, crate::ast::OwnerQual::Stack) {
+                        // Only non-default qualifiers (actor/guard/shared/owned) are meaningful signals.
+                        if matches!(inferred_qual, crate::ast::OwnerQual::Inline) {
                             continue;
                         }
                         if let Some(param_ty) = sig.get_mut(i) {
@@ -2248,7 +2248,7 @@ impl Transpiler {
         // `mut T'actor` etc. wraps the whole qualified type in `Type::Mut`
         // (docs/mut-type-modifier.md §1) — strip it first, same as every other
         // qualifier-dispatch helper below. `mut` itself is never an `OwnerQual`.
-        if let Type::Qualified(_, q) = ty.without_mut() { q } else { &OwnerQual::Stack }
+        if let Type::Qualified(_, q) = ty.without_mut() { q } else { &OwnerQual::Inline }
     }
 
     /// Only applies to user-defined struct types (PascalCase names), not primitives or `string`.
@@ -2707,10 +2707,10 @@ impl Transpiler {
                     return format!("Box<dyn {}>", normalize_type_name(n, self.use_rc_str()));
                 }
                 // Priority 6: size-based auto-boxing (strict mode only).
-                // If the type exceeds stack_auto_bytes, silently promote to Box<T>.
+                // If the type exceeds inline_auto_bytes, silently promote to Box<T>.
                 if self.config.mode == crate::transpiler::TranspileMode::Strict {
                     if let Some(&size) = self.type_sizes.get(n.as_str()) {
-                        if size > self.config.stack_auto_bytes {
+                        if size > self.config.inline_auto_bytes {
                             return format!("Box<{}>", normalize_type_name(n, self.use_rc_str()));
                         }
                     }
@@ -2786,9 +2786,9 @@ impl Transpiler {
                 format!("impl {}({}) -> {}", trait_name, ps, r)
             }
             Type::Qualified(inner, qual) => match qual {
-                OwnerQual::Owned | OwnerQual::Stack => {
-                    // Managed mode: T' → Arc<Mutex<T>> (multi) or RefCell<T> (single).
-                    // Strict mode: Owned = Box<T>, Stack = T (default).
+                OwnerQual::Owned | OwnerQual::Inline => {
+                    // Managed mode: T'owned → Arc<Mutex<T>> (multi) or RefCell<T> (single).
+                    // Strict mode: Owned = Box<T>, Inline = T (default).
                     if matches!(qual, OwnerQual::Owned) && self.config.mode == crate::transpiler::TranspileMode::Managed
                         && !matches!(inner.as_ref(), Type::Named(n) if self.unit_enums.contains(n.as_str()))
                     {
@@ -2796,7 +2796,7 @@ impl Transpiler {
                     } else if matches!(qual, OwnerQual::Owned) {
                         format!("Box<{}>", self.emit_type(inner))
                     } else {
-                        // T'stack: explicit stack — skip auto-boxing even if size > threshold.
+                        // T'inline: explicit inline — skip auto-boxing even if size > threshold.
                         match inner.as_ref() {
                             Type::Named(n) => normalize_type_name(n, self.use_rc_str()),
                             _ => self.emit_type(inner),
@@ -2881,11 +2881,36 @@ impl Transpiler {
                     if is_str_slice { format!("&'{} str", lt) }
                     else { format!("&'{} {}", lt, self.emit_type(inner)) }
                 }
+                // 'new pseudo-qualifier (Union([Owned, Shared, Actor, Guard]) — replaces the
+                // old dedicated OwnerQual::New variant): a struct field's resolved qualifier
+                // only gets a dedicated registry entry (struct_mutex_fields/struct_rwlock_fields,
+                // see this file's field-type emission) for an Actor/Guard outcome — an
+                // Owned/Shared/Inline outcome has none ("no registry needed", per
+                // infer_qualifiers.rs's struct-field resolution loop), so THIS call is what
+                // must reproduce the fallback-chain default for those un-registered cases
+                // (struct fields, and method/fn return types — see emit_struct.rs's
+                // `emit_fn_sig`/method-signature emission, which — unlike `emit_param` — emits
+                // a return type's raw declared type directly with no `apply_inferred_qual`
+                // substitution step first). The fallback chain picks 'owned first when nothing
+                // narrows it further, so this mirrors the `OwnerQual::Owned` arm above exactly
+                // (same managed-mode check) rather than hardcoding `Box<T>` unconditionally —
+                // otherwise a `T'new` field/return type would silently skip managed-mode
+                // wrapping while a `T'new` parameter (which does go through
+                // `apply_inferred_qual`) correctly picks it up, a real mismatch a caller can
+                // observe (e.g. `.borrow()` on what's actually a `Box<T>`). Must come before
+                // the generic Union arm below (checked first — Rust match order matters here).
+                OwnerQual::Union(members) if members.as_slice() == OwnerQual::NEW_MEMBERS => {
+                    if self.config.mode == crate::transpiler::TranspileMode::Managed
+                        && !matches!(inner.as_ref(), Type::Named(n) if self.unit_enums.contains(n.as_str()))
+                    {
+                        self.emit_managed_actor(inner)
+                    } else {
+                        format!("Box<{}>", self.emit_type(inner))
+                    }
+                }
                 // Qualifier union / named group (`'one`, `'many`, `'mut`, `'req`, `T'a|b|c`).
                 // Emits as the plain inner type — the union is a Boring-level constraint only.
                 OwnerQual::Union(_) => self.emit_type(inner),
-                // 'new pseudo-qualifier: infer-excluding-stack, emits as Box<T> (same as Owned).
-                OwnerQual::New => format!("Box<{}>", self.emit_type(inner)),
                 // Host-context `'gpu'unified`/`'gpu'global`: emits as the plain inner
                 // type. Confirmed against real usage (`examples/saxpy.br`'s
                 // `var [float]'gpu'unified x = [0.0 for ..N]`, freely indexed/assigned

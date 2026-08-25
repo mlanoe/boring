@@ -1201,7 +1201,7 @@ impl Interpreter {
                 }
                 // If the name is a type alias pointing to a struct or enum, return
                 // the underlying constructor so `Dog2("rex")` works when
-                // `use Dog2 as Dog'stack` has been declared.
+                // `use Dog2 as Dog'inline` has been declared.
                 // The qualifier (stack, auto, task, …) only matters for the Rust
                 // transpiler — the interpreter creates the same value regardless.
                 if let Some(alias_ty) = self.aliases.get(name).cloned() {

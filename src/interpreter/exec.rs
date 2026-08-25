@@ -1044,7 +1044,7 @@ impl Interpreter {
     // ─── Type utilities ──────────────────────────────────────────────────────
 
     /// Extracts the base struct / enum name from a type, stripping any ownership qualifier.
-    /// Returns `Some("Dog")` for `Dog'stack`, `Dog'auto`, `Dog`, etc.
+    /// Returns `Some("Dog")` for `Dog'inline`, `Dog'auto`, `Dog`, etc.
     /// Used to resolve type aliases to their underlying constructors.
     pub(crate) fn type_base_name(ty: &Type) -> Option<String> {
         match ty {
@@ -1169,23 +1169,22 @@ impl Interpreter {
             }
             Type::Qualified(inner, qual) => {
                 let qual_str = match qual {
-                    OwnerQual::Owned        => "'".to_string(),
+                    OwnerQual::Owned        => "'owned".to_string(),
                     OwnerQual::Actor        => "'actor".to_string(),
                     OwnerQual::ActorTask    => "'task".to_string(),
                     OwnerQual::Guard        => "'guard".to_string(),
                     OwnerQual::GuardTask    => "'guard'task".to_string(),
                     OwnerQual::Shared       => "'shared".to_string(),
                     OwnerQual::Weak         => "'weak".to_string(),
-                    OwnerQual::Stack        => "'stack".to_string(),
+                    OwnerQual::Inline       => "'inline".to_string(),
                     OwnerQual::Lifetime(lt) => format!("'{}", lt),
                     OwnerQual::BorrowShared => "&shared".to_string(),
-                    OwnerQual::BorrowOwned  => "&heap".to_string(),
+                    OwnerQual::BorrowOwned  => "&owned".to_string(),
                     OwnerQual::BorrowOption    => "?&".to_string(),
                     OwnerQual::BorrowOptionMut => "mut ?&".to_string(),
                     OwnerQual::BorrowWeak   => "&weak".to_string(),
                     OwnerQual::Borrow       => "&".to_string(),
                     OwnerQual::BorrowMut    => "var &".to_string(),
-                    OwnerQual::New          => "'new".to_string(),
                     OwnerQual::GpuUnified   => "'gpu'unified".to_string(),
                     OwnerQual::GpuGlobal    => "'gpu'global".to_string(),
                     OwnerQual::GpuSurface   => "surface".to_string(),
@@ -1193,10 +1192,15 @@ impl Interpreter {
                     OwnerQual::GpuActorUnified => "'actor'unified".to_string(),
                     OwnerQual::GpuLocal     => "'local".to_string(),
                     OwnerQual::GpuConst     => "'gpu'const".to_string(),
+                    // `'new` (candidate-set qualifier, replaces the old bare tick) is
+                    // represented as this exact Union shape — display it as `'new`
+                    // rather than spelling out its members, matching source syntax.
+                    OwnerQual::Union(members) if members.as_slice() == OwnerQual::NEW_MEMBERS =>
+                        "'new".to_string(),
                     OwnerQual::Union(members) => {
                         let names: Vec<&str> = members.iter().map(|q| match q {
-                            OwnerQual::Stack  => "stack",
-                            OwnerQual::Owned  => "heap",
+                            OwnerQual::Inline => "inline",
+                            OwnerQual::Owned  => "owned",
                             OwnerQual::Shared => "shared",
                             OwnerQual::Actor  => "actor",
                             OwnerQual::Guard  => "guard",
@@ -1729,7 +1733,7 @@ impl Interpreter {
                     return Err(err(
                         format!(
                             "parametric enum '{}': variant field cannot use \
-                             'shared qualifier (use ', 'copy or 'stack)",
+                             'shared qualifier (use 'new, 'copy or 'inline)",
                             decl.name
                         ),
                         decl.line,

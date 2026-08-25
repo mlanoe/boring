@@ -13,14 +13,14 @@ use super::{run, run_src, get_var};
 use super::*;
 
 #[test]
-fn test_stack_qualifier_return() {
-    // 'stack as return type qualifier
+fn test_inline_qualifier_return() {
+    // 'inline as return type qualifier
     let src = r#"
 struct Pair:
     int a
     int b
 
-def Pair'stack make(int a, int b):
+def Pair'inline make(int a, int b):
     return Pair(a, b)
 
 let p = make(20, 22)
@@ -314,7 +314,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' add(Vec2' rhs):
+    def Vec2'owned add(Vec2'owned rhs):
         return Vec2(self.x + rhs.x, self.y + rhs.y)
 
 let a = Vec2(1.0, 2.0)
@@ -333,7 +333,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' add(Vec2' rhs):
+    def Vec2'owned add(Vec2'owned rhs):
         return Vec2(self.x + rhs.x, self.y + rhs.y)
 
 let a = Vec2(1.0, 2.0)
@@ -352,7 +352,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' sub(Vec2' rhs):
+    def Vec2'owned sub(Vec2'owned rhs):
         return Vec2(self.x - rhs.x, self.y - rhs.y)
 
 let a = Vec2(5.0, 8.0)
@@ -371,7 +371,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' mul(float rhs):
+    def Vec2'owned mul(float rhs):
         return Vec2(self.x * rhs, self.y * rhs)
 
 let a = Vec2(2.0, 3.0)
@@ -389,7 +389,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    def Vec2' neg():
+    def Vec2'owned neg():
         return Vec2(-self.x, -self.y)
 
 let a = Vec2(1.0, 2.0)
@@ -407,7 +407,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    req bool eq(Vec2' rhs):
+    req bool eq(Vec2'owned rhs):
         return self.x == rhs.x and self.y == rhs.y
 
 let a = Vec2(1.0, 2.0)
@@ -426,7 +426,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    req bool eq(Vec2' rhs):
+    req bool eq(Vec2'owned rhs):
         return self.x == rhs.x and self.y == rhs.y
 
 let a = Vec2(1.0, 2.0)
@@ -444,7 +444,7 @@ struct Vec2:
     float y
 
 ext Vec2:
-    req bool eq(Vec2' rhs):
+    req bool eq(Vec2'owned rhs):
         return self.x == rhs.x and self.y == rhs.y
 
 let a = Vec2(1.0, 2.0)
@@ -461,7 +461,7 @@ struct Wrapper:
     int val
 
 ext Wrapper:
-    req bool lt(Wrapper' rhs):
+    req bool lt(Wrapper'owned rhs):
         return self.val < rhs.val
 
 let a = Wrapper(3)
@@ -478,7 +478,7 @@ struct Mod:
     int n
 
 ext Mod:
-    def Mod' rem(Mod' rhs):
+    def Mod'owned rem(Mod'owned rhs):
         return Mod(self.n % rhs.n)
 
 let a = Mod(10)
@@ -677,7 +677,7 @@ enum Color:
     Green
     Blue
 
-def string name(Color' c):
+def string name(Color'owned c):
     match c:
         Red: "red"
         Green: "green"
@@ -732,7 +732,7 @@ enum Inner:
     B
 
 enum Outer:
-    Wrap(Inner' v)
+    Wrap(Inner'owned v)
     Empty
 
 let o = Outer.Wrap(Inner.A(42))
@@ -818,7 +818,7 @@ struct Item:
 
 def int read_stack(Item i): i.v
 def int read_borrow(Item& i): i.v
-def int read_heap(Item' i): i.v
+def int read_heap(Item'owned i): i.v
 
 let Item i = Item(10)
 let _result = read_stack(i) + read_borrow(i) + read_heap(i)
@@ -828,14 +828,14 @@ let _result = read_stack(i) + read_borrow(i) + read_heap(i)
 
 // ─── Type alias as constructor ────────────────────────────────────────────────
 
-// `use Dog2 as Dog'stack` then `Dog2("rex")` as constructor call.
+// `use Dog2 as Dog'inline` then `Dog2("rex")` as constructor call.
 #[test]
-fn test_alias_constructor_stack() {
+fn test_alias_constructor_inline() {
     let src = r#"
 struct Dog:
     init(pub string name)
 
-use Dog2 as Dog'stack
+use Dog2 as Dog'inline
 let d = Dog2("rex")
 let _result = d.name
 "#;
@@ -844,12 +844,12 @@ let _result = d.name
 
 // Alias for heap variant works the same way.
 #[test]
-fn test_alias_constructor_heap() {
+fn test_alias_constructor_owned() {
     let src = r#"
 struct Point:
     init(pub int x, pub int y)
 
-use P as Point'
+use P as Point'owned
 let p = P(3, 4)
 let _result = p.x + p.y
 "#;

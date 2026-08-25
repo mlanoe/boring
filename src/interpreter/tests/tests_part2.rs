@@ -1023,7 +1023,7 @@ struct Point:
     pub int y
 
 def void main():
-    use Pt as Point'
+    use Pt as Point'owned
     def int describe(Pt p): p.x + p.y
     let p = Point(x = 10, y = 32)
     assert_eq(describe(p), 42)
@@ -2045,12 +2045,12 @@ let _result = first("hello", "world")
 
 #[test]
 fn test_owned_single_letter_param_not_lifetime() {
-    // `Dog' d` — bare tick (owned) + param named `d` must NOT consume `d` as a lifetime.
+    // `Dog'owned d` — single-letter param named `d` must NOT be consumed as a lifetime.
     let src = r#"
 struct Dog:
     string name
 
-def string pet(Dog' d):
+def string pet(Dog'owned d):
     d.name
 
 let d = Dog("Rex")
@@ -2156,17 +2156,17 @@ let _result = try safe(7) else -1
     assert_eq!(run_src(src), Value::Int(7));
 }
 
-// ─── T'stack qualifier ───────────────────────────────────────────────────────
+// ─── T'inline qualifier ──────────────────────────────────────────────────────
 
 #[test]
-fn test_stack_qualifier_field() {
-    // 'stack on a field: transparent at runtime, meaningful for the transpiler
+fn test_inline_qualifier_field() {
+    // 'inline on a field: transparent at runtime, meaningful for the transpiler
     let src = r#"
 struct Inner:
     int val
 
 struct Outer:
-    Inner'stack inner
+    Inner'inline inner
 
 let o = Outer(Inner(42))
 let _result = o.inner.val
@@ -2175,14 +2175,14 @@ let _result = o.inner.val
 }
 
 #[test]
-fn test_stack_qualifier_param() {
-    // 'stack on a parameter: accepted by the type checker, transparent at runtime
+fn test_inline_qualifier_param() {
+    // 'inline on a parameter: accepted by the type checker, transparent at runtime
     let src = r#"
 struct Point:
     int x
     int y
 
-def int sum(Point'stack p):
+def int sum(Point'inline p):
     return p.x + p.y
 
 let _result = sum(Point(10, 32))

@@ -168,12 +168,12 @@ impl KernelTranspiler {
             }
 
             Type::Qualified(inner, qual) => match qual {
-                // T' → Box<T, kernel::alloc::KVmalloc>
+                // T'owned → Box<T, kernel::alloc::KVmalloc>
                 OwnerQual::Owned => {
                     format!("Box<{}, kernel::alloc::KVmalloc>", self.emit_type(inner))
                 }
-                // T'stack → T
-                OwnerQual::Stack => self.emit_type(inner),
+                // T'inline → T
+                OwnerQual::Inline => self.emit_type(inner),
                 // T'shared → Arc<T>  (no Rc in kernel — single-thread mode not applicable)
                 OwnerQual::Shared => {
                     format!("Arc<{}>", self.emit_type(inner))

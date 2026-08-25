@@ -2390,7 +2390,7 @@ impl Interpreter {
 
             // Bare named type → stack-owned (the default in boring).
             // `Dog d` = `Dog` on the stack, same as Rust's default.
-            // Use `Dog&` for a borrow, `Dog'` / `Dog'heap` for Box<Dog>.
+            // Use `Dog&` for a borrow, `Dog'owned` for Box<Dog>.
             Type::Named(_) => Ok(()),
 
             // Optional — check the wrapped type

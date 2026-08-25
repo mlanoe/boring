@@ -35,5 +35,5 @@ This directory contains everything needed to submit Boring to
 - Function definitions: `def`, `req`, `stream`, `task` forms + shorthand
 - Function calls: highlighted with a distinct scope
 - Attributes: `@derive`, `@test`, `@error`, etc.
-- Ownership qualifiers: `'task`, `'actor`, `'shared`, `'heap`, `'weak`, etc.
+- Ownership qualifiers: `'task`, `'actor`, `'shared`, `'owned`, `'weak`, etc.
 - Operators: `|>`, `..`, `..<`, `->`, `?=`, `?.`, compound assignments

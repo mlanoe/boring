@@ -42,9 +42,9 @@ impl Transpiler {
                 // Bare T parameter — full candidate set.
                 // Only include parameters whose type is a user-defined struct or enum
                 // (present in type_sizes). Primitives, traits, type aliases, fn-type aliases,
-                // and type parameters are excluded: the fallback would infer 'stack and
-                // emit_param would wrap them incorrectly (Addable'stack → "Addable" instead
-                // of impl Addable, Pt'stack bypasses the non-fn alias expansion, etc.).
+                // and type parameters are excluded: the fallback would infer 'inline and
+                // emit_param would wrap them incorrectly (Addable'inline → "Addable" instead
+                // of impl Addable, Pt'inline bypasses the non-fn alias expansion, etc.).
                 Type::Named(n) if self.type_sizes.contains_key(n.as_str())
                     || self.all_struct_types.contains(n.as_str()) => {
                     anonymous_vars.insert(name.clone());
@@ -79,12 +79,11 @@ impl Transpiler {
                         }
                     }
                 }
-                // T' parameter — indirection-only candidate set.
-                Type::Qualified(_, OwnerQual::Owned) => {
-                    anonymous_vars.insert(name.clone());
-                    tick_bindings.insert(name.clone());
-                }
-                // T'<group> parameter — Union members as candidate set.
+                // T'<group> parameter (includes T'new — Union([Owned, Shared, Actor, Guard]),
+                // the candidate-set qualifier that replaced bare tick) — Union members as
+                // candidate set. A committed `T'owned` parameter is NOT seeded here — like
+                // `'shared`/`'actor`/`'guard`, it's a fixed contract, not inferred (see
+                // OwnerQual::is_new's doc comment for why 'owned and 'new are distinguished).
                 Type::Qualified(_, OwnerQual::Union(members)) => {
                     anonymous_vars.insert(name.clone());
                     union_initial.insert(name.clone(), members.clone());
@@ -117,7 +116,7 @@ impl Transpiler {
         for var_name in &mut_bindings {
             constrain_candidates(
                 &mut candidates, var_name,
-                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                 &alias_of,
             );
         }
@@ -250,7 +249,7 @@ impl Transpiler {
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
                     if let Some(q) = resolve_fallback(
-                        &remaining, false, type_size, self.config.stack_auto_bytes,
+                        &remaining, false, type_size, self.config.inline_auto_bytes,
                     ) {
                         self.inferred_qualifiers.insert(var_name.clone(), q);
                     }
@@ -426,7 +425,7 @@ impl Transpiler {
                     self.walk_expr_for_qualifiers(walk_target, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
                 // Call site with a concrete qualifier demand: intersect to the compatible set.
-                // For 'shared/'actor/'guard demands, 'stack and 'heap are also compatible
+                // For 'shared/'actor/'guard demands, 'inline and 'owned are also compatible
                 // because a plain T or Box<T> can be wrapped at the call site.
                 if let ExprKind::Var(fn_name) = &callee.kind {
                     let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
@@ -526,7 +525,7 @@ impl Transpiler {
                             }
                             constrain_candidates(
                                 candidates, var_name,
-                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                                &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
                             // A def call on a non-mut auto-ref param is a constraint signal
@@ -582,7 +581,7 @@ impl Transpiler {
                         if anonymous_vars.contains(var_name) {
                             constrain_candidates(
                                 candidates, var_name,
-                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                                &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
                             if auto_ref_param_vars.contains(var_name) {
@@ -836,11 +835,11 @@ impl Transpiler {
                 _ => {
                     // Multi-candidate fallback for struct fields.
                     // Struct fields are always laid out inline in the parent allocation,
-                    // so 'stack is always preferred when available.
+                    // so 'inline is always preferred when available.
                     let type_size = target_fields.get(field_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))
                         .copied();
-                    match resolve_fallback(&remaining, true, type_size, self.config.stack_auto_bytes) {
+                    match resolve_fallback(&remaining, true, type_size, self.config.inline_auto_bytes) {
                         Some(q) => q,
                         None => continue,
                     }
@@ -961,7 +960,7 @@ impl Transpiler {
                         if !is_req {
                             constrain_candidates(
                                 candidates, field_name,
-                                &[OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+                                &[OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
                                 alias_of,
                             );
                         }
@@ -1293,25 +1292,25 @@ fn disambiguate_task_variant(remaining: &mut Vec<OwnerQual>, has_task_call: bool
     }
 }
 
-/// For 'shared/'actor/'guard demands, 'stack and 'heap are also acceptable
+/// For 'shared/'actor/'guard demands, 'inline and 'owned are also acceptable
 /// because a plain T or Box<T> can be wrapped at the call site.
-/// For 'stack/'heap demands, only the exact qualifier is accepted.
+/// For 'inline/'owned demands, only the exact qualifier is accepted.
 fn coercible_from(demanded: OwnerQual) -> Vec<OwnerQual> {
     match demanded {
         OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard =>
-            vec![OwnerQual::Stack, OwnerQual::Owned, demanded],
+            vec![OwnerQual::Inline, OwnerQual::Owned, demanded],
         // Universal immutable borrow: any qualifier is accepted — no constraint on caller.
         OwnerQual::Borrow => all_qualifiers(),
         // Universal mutable borrow: any mutable qualifier ('shared excluded).
         OwnerQual::BorrowMut =>
-            vec![OwnerQual::Stack, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
+            vec![OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask],
         _ => vec![demanded],
     }
 }
 
 fn all_qualifiers() -> Vec<OwnerQual> {
     vec![
-        OwnerQual::Stack,
+        OwnerQual::Inline,
         OwnerQual::Owned,
         OwnerQual::Shared,
         OwnerQual::Actor,
@@ -1322,22 +1321,22 @@ fn all_qualifiers() -> Vec<OwnerQual> {
 /// Priority-ordered fallback when multiple qualifier candidates remain after constraint
 /// elimination.
 ///
-/// 1. If `Stack` ∈ candidates:
-///    - struct field (any binding) → `'stack` (bytes are part of parent allocation)
-///    - local variable, sizeof(T) ≤ stack_auto_bytes → `'stack`
-///    - type too large → skip `'stack`, go to ordered chain
+/// 1. If `Inline` ∈ candidates:
+///    - struct field (any binding) → `'inline` (bytes are part of parent allocation)
+///    - local variable, sizeof(T) ≤ inline_auto_bytes → `'inline`
+///    - type too large → skip `'inline`, go to ordered chain
 ///
-/// 2. Ordered chain: `'heap` > `'shared` > `'actor`(/`'actor'task`) > `'guard`(/`'guard'task`)
+/// 2. Ordered chain: `'owned` > `'shared` > `'actor`(/`'actor'task`) > `'guard`(/`'guard'task`)
 fn resolve_fallback(
     candidates: &[OwnerQual],
     is_struct_field: bool,
     type_size: Option<usize>,
-    stack_auto_bytes: usize,
+    inline_auto_bytes: usize,
 ) -> Option<OwnerQual> {
     let has = |q: &OwnerQual| candidates.iter().any(|c| quals_equal(c, q));
-    let fits = type_size.is_none_or(|s| s <= stack_auto_bytes);
+    let fits = type_size.is_none_or(|s| s <= inline_auto_bytes);
 
-    // Ordered chain: 'heap > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
+    // Ordered chain: 'owned > 'shared > 'actor(/'actor'task) > 'guard(/'guard'task).
     // The 'task variant is checked first at each slot so that it wins when it's the one
     // that survived constraint elimination (e.g. after `disambiguate_task_variant`) —
     // by that point at most one of {Actor, ActorTask} and one of {Guard, GuardTask} remain.
@@ -1351,22 +1350,22 @@ fn resolve_fallback(
         None
     }
 
-    // Step 1: 'stack — struct field of any binding, or small local variable.
-    if has(&OwnerQual::Stack) {
+    // Step 1: 'inline — struct field of any binding, or small local variable.
+    if has(&OwnerQual::Inline) {
         if is_struct_field {
-            return Some(OwnerQual::Stack);
+            return Some(OwnerQual::Inline);
         }
         if fits {
-            return Some(OwnerQual::Stack);
+            return Some(OwnerQual::Inline);
         }
         return tail_pick(&has);
     }
 
-    // Step 2: neither 'stack nor other stack-allocated in candidates — first from the ordered chain.
+    // Step 2: 'inline not in candidates — first from the ordered chain.
     tail_pick(&has)
 }
 
-/// Candidate set for T' (tick) variables: indirection is certain, kind is inferred.
+/// Candidate set for T'new variables: indirection is certain, kind is inferred.
 fn indirection_qualifiers() -> Vec<OwnerQual> {
     vec![
         OwnerQual::Owned,
@@ -1386,9 +1385,12 @@ fn collect_anonymous_vars(
 ) {
     match stmt {
         Stmt::Let(s) => {
+            // NOTE: only `'new` (Union([Owned, Shared, Actor, Guard])) is tick-like here —
+            // a committed `'owned` is a fixed contract, like `'shared`/`'actor`/`'guard`,
+            // and must NOT be seeded for inference (see OwnerQual::is_new's doc comment).
             let is_tick = match &s.ty {
-                Some(Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)) => true,
-                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)),
+                Some(Type::Qualified(_, q)) if q.is_new() => true,
+                Some(Type::Optional(inner)) => matches!(inner.as_ref(), Type::Qualified(_, q) if q.is_new()),
                 _ => false,
             };
             let is_anonymous = is_tick || match &s.ty {
@@ -1399,7 +1401,7 @@ fn collect_anonymous_vars(
             };
             if is_anonymous {
                 anonymous_vars.insert(s.name.clone());
-                // T' or T'? binding: indirection hint, restricts to {Owned, Shared, Actor, Guard}.
+                // T'new or T'new? binding: indirection hint, restricts to {Owned, Shared, Actor, Guard}.
                 if is_tick {
                     tick_bindings.insert(s.name.clone());
                 }
@@ -1409,7 +1411,7 @@ fn collect_anonymous_vars(
                 }
                 if let Some(val) = &s.value {
                     // `new Constructor()` on RHS without arena: treat as tick binding
-                    // (infer excluding 'stack), same as T' bare tick.
+                    // (infer excluding 'inline), same as T'new.
                     if !is_tick {
                         if let ExprKind::New { arena: None, ctor } = &val.kind {
                             tick_bindings.insert(s.name.clone());
@@ -1504,7 +1506,7 @@ fn mutation_root(expr: &Expr) -> Option<&str> {
 fn qual_of_type(ty: &Type) -> Option<OwnerQual> {
     match ty.without_mut() {
         Type::Qualified(_, q) => match q {
-            OwnerQual::Stack | OwnerQual::Owned | OwnerQual::Shared
+            OwnerQual::Inline | OwnerQual::Owned | OwnerQual::Shared
             | OwnerQual::Actor | OwnerQual::Guard => Some(q.clone()),
             OwnerQual::Union(_) => None,
             _ => None,
@@ -1541,8 +1543,8 @@ fn quals_equal(a: &OwnerQual, b: &OwnerQual) -> bool {
 
 fn qual_name(q: &OwnerQual) -> &'static str {
     match q {
-        OwnerQual::Stack     => "stack",
-        OwnerQual::Owned     => "heap",
+        OwnerQual::Inline    => "inline",
+        OwnerQual::Owned     => "owned",
         OwnerQual::Shared    => "shared",
         OwnerQual::Actor     => "actor",
         OwnerQual::ActorTask => "actor'task",

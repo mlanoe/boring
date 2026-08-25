@@ -557,15 +557,15 @@ impl Transpiler {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }
 
-    /// Returns true if `value` is a variable whose qualifier is 'heap (Box<T>).
+    /// Returns true if `value` is a variable whose qualifier is 'owned (Box<T>).
     /// Used at call sites to emit *x dereference instead of x.clone() when wrapping in Rc/Arc.
     pub(crate) fn arg_is_heap_var(&self, value: &Expr) -> bool {
         let ExprKind::Var(v) = &value.kind else { return false };
         if let Some(q) = self.inferred_qualifiers.get(v.as_str()) {
-            return matches!(q, OwnerQual::Owned | OwnerQual::New);
+            return q.is_owned_or_new();
         }
         if let Some(ty) = self.var_types.get(v.as_str()) {
-            return matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Owned | OwnerQual::New));
+            return matches!(ty.without_mut(), Type::Qualified(_, q) if q.is_owned_or_new());
         }
         false
     }
@@ -690,7 +690,7 @@ impl Transpiler {
     pub(crate) fn is_str_ref_type(ty: &Type) -> bool {
         let ty = ty.without_mut();
         matches!(ty, Type::Named(n) if n == "str")
-            || matches!(ty, Type::Qualified(inner, OwnerQual::Stack) if matches!(**inner, Type::Str))
+            || matches!(ty, Type::Qualified(inner, OwnerQual::Inline) if matches!(**inner, Type::Str))
     }
 
     /// Returns true if the expression produces a string (Arc<str>) value.

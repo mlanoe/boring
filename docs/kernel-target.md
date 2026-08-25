@@ -54,12 +54,12 @@ The Linux kernel imposes constraints that make the standard Rust backend unusabl
 
 | Boring | Rust std | Rust-kernel | Notes |
 |--------|----------|-------------|-------|
-| `T'` | `Box<T>` | `Box<T, KVmalloc>` | kernel allocator |
+| `T'new` | `Box<T>` | `Box<T, KVmalloc>` | kernel allocator |
 | `T'shared` | `Arc<T>` / `Rc<T>` | `Arc<T>` (`kernel::prelude::Arc`) | `Rc` unavailable in `no_std` |
 | `T'actor` | `Arc<Mutex<T>>` / `Rc<RefCell<T>>` | `Arc<kernel::sync::Mutex<T>>` | |
 | `T'guard` | `Arc<RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` | |
 | `T'weak` | `Weak<T>` | `Weak<T>` | |
-| `T'stack` | `T` | `T` | |
+| `T'inline` | `T` | `T` | |
 | `T&` / `var T&` | `&T` / `&mut T` | `&T` / `&mut T` | |
 
 ### Print
@@ -109,7 +109,7 @@ fn fetch_page(url: CString) -> KernelFuture<Page> { … }
 fn fetch_page_body(url: CString) -> Result<Page, kernel::error::Error> { … }
 ```
 
-**Constraint on `self`:** `task def` as an instance method is only allowed on `'shared`, `'actor`, and `'guard` receivers — the only qualifiers with a lifetime compatible with a work item. `T&`, `T&mut`, and `T'` are rejected by the validator.
+**Constraint on `self`:** `task def` as an instance method is only allowed on `'shared`, `'actor`, and `'guard` receivers — the only qualifiers with a lifetime compatible with a work item. `T&`, `T&mut`, and `T'new` are rejected by the validator.
 
 ### `KernelFuture<T>`
 
@@ -306,7 +306,7 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 |-----------|--------|
 | `float`, floating-point math | FPU disabled |
 | `panic(…)` | kernel oops/crash — use `throws` / `Result` |
-| `task def` on `self` with `T&`, `T&mut`, `T'` | lifetime incompatible with a work item |
+| `task def` on `self` with `T&`, `T&mut`, `T'new` | lifetime incompatible with a work item |
 | `kernel Foo: ...` (GPU kernel struct) | no host/device split under `no_std` — GPU kernels require `--target cuda`, `--target metal`, `--target wgpu`, or `--target rocm` |
 
 **Warnings** — emitted, but explicit specification is recommended:

@@ -61,8 +61,8 @@ pub struct TranspileConfig {
     pub mode: TranspileMode,
     pub threading: ThreadingMode,
     /// Stack size threshold for auto-boxing (default: 256 bytes). Types larger than this
-    /// are silently promoted to Box<T>. Configurable via `--stack-auto-bytes N`.
-    pub stack_auto_bytes: usize,
+    /// are silently promoted to Box<T>. Configurable via `--inline-auto-bytes N`.
+    pub inline_auto_bytes: usize,
     /// When true, every function body is wrapped with a `__boring_instrument::Span` guard that
     /// records call counts and wall-clock durations.  On program exit the guard writes
     /// `boring_coverage.json` (aggregated stats) and `boring_trace.json` (Chrome Trace Format).
@@ -146,7 +146,7 @@ impl Default for TranspileConfig {
         Self {
             mode: TranspileMode::Strict,
             threading: ThreadingMode::Multi,
-            stack_auto_bytes: 256,
+            inline_auto_bytes: 256,
             instrument: false,
             sanitize: None::<&'static str>,
             source_dir: std::path::PathBuf::new(),
@@ -353,15 +353,15 @@ struct Transpiler {
     /// `..Default::default()` that needs it. Not populated for/consulted on external
     /// types (e.g. Bevy's `Transform`) — those already implement `Default` themselves.
     pub(crate) structs_needing_default: std::collections::HashSet<String>,
-    /// Estimated stack sizes (bytes) for user-defined types, computed during pre_scan.
-    /// Used for strict-mode auto-boxing (> stack_auto_bytes → Box<T>).
+    /// Estimated inline sizes (bytes) for user-defined types, computed during pre_scan.
+    /// Used for strict-mode auto-boxing (> inline_auto_bytes → Box<T>).
     pub(crate) type_sizes: std::collections::HashMap<String, usize>,
-    /// Structs that have at least one explicitly-qualified field ('actor, 'shared, 'guard, 'heap).
+    /// Structs that have at least one explicitly-qualified field ('actor, 'shared, 'guard, 'owned).
     /// These are eligible for T? parameter qualifier inference.
     pub(crate) qualified_struct_types: std::collections::HashSet<String>,
     /// Types T for which at least one function declares return type `T'actor` or `T'guard`.
     /// Bare `T` parameters of these types default to 'actor during qualifier inference instead
-    /// of falling back to 'stack, enabling automatic propagation without explicit annotation.
+    /// of falling back to 'inline, enabling automatic propagation without explicit annotation.
     pub(crate) actor_source_types: std::collections::HashSet<String>,
     /// All user-defined struct names, including those whose size cannot be estimated (dynamic fields).
     /// Used to determine qualifier inference eligibility, separate from `type_sizes` which only
@@ -1145,8 +1145,17 @@ impl Transpiler {
 
     // ── Managed-mode helpers ──────────────────────────────────────────────────
 
-    /// Returns true when `ty` is `T'` (OwnerQual::Owned) in managed mode over a user-defined
-    /// type that is NOT a unit enum. Suitable for field/method dispatch and param seeding.
+    /// Returns true when `ty` is `T'owned` or `T'new` (`OwnerQual::is_owned_or_new`) in managed
+    /// mode over a user-defined type that is NOT a unit enum. Suitable for field/method dispatch
+    /// and param seeding.
+    ///
+    /// Must match `T'new` here, not just a committed `T'owned` — a raw, not-yet-inference-resolved
+    /// `'new` (`Union([Owned, Shared, Actor, Guard])`) declared type reaches this check directly at
+    /// some call sites (e.g. operator-overload RHS wrapping in `emit_expr.rs`, which looks at the
+    /// method's raw declared param type, not its `inferred_qualifiers`-resolved one). Missing that
+    /// shape here would silently emit `Box::new(...)` instead of the managed wrapper even though
+    /// the function *signature* for that same parameter resolves through inference and correctly
+    /// picks up managed-mode wrapping — see `emit_param`'s `needs_inference` handling of `Union`.
     pub(crate) fn is_managed_user_owned(config: &TranspileConfig,
         user_types: &std::collections::HashSet<String>,
         unit_enums: &std::collections::HashSet<String>,
@@ -1154,7 +1163,7 @@ impl Transpiler {
     {
         if config.mode != TranspileMode::Managed { return false; }
         match ty {
-            Type::Qualified(inner, crate::ast::OwnerQual::Owned) => match inner.as_ref() {
+            Type::Qualified(inner, q) if q.is_owned_or_new() => match inner.as_ref() {
                 Type::Named(n) => user_types.contains(n.as_str()) && !unit_enums.contains(n.as_str()),
                 _ => false,
             },
@@ -1188,7 +1197,7 @@ impl Transpiler {
 
     fn field_type_has_qualifier(ty: &Type) -> bool {
         match ty {
-            Type::Qualified(_, q) => !matches!(q, crate::ast::OwnerQual::Owned | crate::ast::OwnerQual::Stack),
+            Type::Qualified(_, q) => !(q.is_owned_or_new() || matches!(q, crate::ast::OwnerQual::Inline)),
             Type::Optional(inner) => Self::field_type_has_qualifier(inner),
             _ => false,
         }
@@ -1226,7 +1235,7 @@ impl Transpiler {
             Type::Named(n) if matches!(n.as_str(), "int128" | "uint128" | "i128" | "u128") => Some(16),
             Type::Named(n) if n.as_str() == "bool" => Some(1),
             Type::Named(n) if matches!(n.as_str(), "str" | "string") => Some(16),
-            Type::Qualified(inner, OwnerQual::Stack) => Self::estimate_size_inner(inner, program, visiting),
+            Type::Qualified(inner, OwnerQual::Inline) => Self::estimate_size_inner(inner, program, visiting),
             // Pointer-sized types (Box, Arc, Rc, Option<Box>) — always 8 or 16 bytes
             Type::Qualified(_, OwnerQual::Owned | OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => Some(16),
             Type::Optional(inner) => Self::estimate_size_inner(inner, program, visiting).map(|s| s + 8), // discriminant
@@ -2937,7 +2946,7 @@ impl Transpiler {
                     }
                     // Size-based warning for enums (strict mode only).
                     if self.config.mode == TranspileMode::Strict && !self.unit_enums.contains(&e.name) {
-                        let auto_bytes = self.config.stack_auto_bytes;
+                        let auto_bytes = self.config.inline_auto_bytes;
                         let variant_sizes: Vec<Option<usize>> = e.variants.iter().map(|v| {
                             v.fields.iter().try_fold(0usize, |acc, f| {
                                 Self::estimate_size(&f.ty, program).map(|s| acc + s)
@@ -2952,7 +2961,7 @@ impl Transpiler {
                                     .filter_map(|(v, s)| s.map(|sz| (v.name.as_str(), sz)))
                                     .max_by_key(|(_, sz)| *sz)
                                     .map(|(n, _)| n).unwrap_or("?");
-                                self.push_warning(e.line, e.col, format!("`{}` is {} bytes on the stack (largest variant: `{}`); consider `{}'heap` to heap-allocate", e.name, total_size, largest, e.name));
+                                self.push_warning(e.line, e.col, format!("`{}` is {} bytes inline (largest variant: `{}`); consider `{}'owned` to heap-allocate", e.name, total_size, largest, e.name));
                             }
                             // Disproportionate variant warning: one variant dominates the median.
                             if known_sizes.len() > 1 {
@@ -2963,10 +2972,10 @@ impl Transpiler {
                                 {
                                     let field_ty_s = if dom_variant.fields.len() == 1 {
                                         let ft = self.emit_type(&dom_variant.fields[0].ty);
-                                        format!("{}({}'heap)", dom_name, ft)
+                                        format!("{}({}'owned)", dom_name, ft)
                                     } else {
                                         let fts: Vec<String> = dom_variant.fields.iter()
-                                            .map(|f| format!("{}'heap", self.emit_type(&f.ty)))
+                                            .map(|f| format!("{}'owned", self.emit_type(&f.ty)))
                                             .collect();
                                         format!("{}({})", dom_name, fts.join(", "))
                                     };
@@ -2989,10 +2998,10 @@ impl Transpiler {
                     }
                     // Size-based warning (strict mode only).
                     if self.config.mode == TranspileMode::Strict {
-                        let auto_bytes = self.config.stack_auto_bytes;
+                        let auto_bytes = self.config.inline_auto_bytes;
                         if let Some(size) = Self::estimate_size(&Type::Named(s.name.clone()), program) {
                             if size > auto_bytes {
-                                self.push_warning(s.line, s.col, format!("`{}` is {} bytes on the stack; consider `{}'heap` to heap-allocate", s.name, size, s.name));
+                                self.push_warning(s.line, s.col, format!("`{}` is {} bytes inline; consider `{}'owned` to heap-allocate", s.name, size, s.name));
                             }
                         }
                     }
@@ -3900,27 +3909,27 @@ mod tests {
 
     #[test]
     fn test_managed_multi_wraps_owned() {
-        // T' (Owned) → Arc<Mutex<T>> in managed+multi; plain Named is NOT wrapped.
-        let src = "struct Counter:\n    init(pub int n)\ndef Counter' make(): Counter(n = 5)\n";
+        // T'owned → Arc<Mutex<T>> in managed+multi; plain Named is NOT wrapped.
+        let src = "struct Counter:\n    init(pub int n)\ndef Counter'owned make(): Counter(n = 5)\n";
         let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("Arc<std::sync::Mutex<Counter>>"),
-            "T' should become Arc<std::sync::Mutex> in managed+multi:\n{}", code);
+            "T'owned should become Arc<std::sync::Mutex> in managed+multi:\n{}", code);
     }
 
     #[test]
     fn test_managed_single_wraps_owned() {
-        // T' (Owned) → RefCell<T> in managed+single; plain Named is NOT wrapped.
-        let src = "struct Counter:\n    init(pub int n)\ndef Counter' make(): Counter(n = 5)\n";
+        // T'owned → RefCell<T> in managed+single; plain Named is NOT wrapped.
+        let src = "struct Counter:\n    init(pub int n)\ndef Counter'owned make(): Counter(n = 5)\n";
         let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Single, ..TranspileConfig::default() };
         let code = transpile_src_with_config(src, config);
         assert!(code.contains("RefCell<Counter>"),
-            "T' should become RefCell in managed+single:\n{}", code);
+            "T'owned should become RefCell in managed+single:\n{}", code);
     }
 
     #[test]
     fn test_managed_named_not_wrapped() {
-        // Plain Named (Type::Named) is NOT wrapped in managed mode — only T' (Owned) is.
+        // Plain Named (Type::Named) is NOT wrapped in managed mode — only T'owned is.
         let src = "struct Counter:\n    init(pub int n)\n\nlet Counter c = Counter(n = 0)\n";
         let config = TranspileConfig { mode: TranspileMode::Managed, threading: ThreadingMode::Multi, ..TranspileConfig::default() };
         let code = transpile_src_with_config(src, config);

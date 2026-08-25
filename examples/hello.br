@@ -607,8 +607,8 @@ print "uid={uid}  order={oid}  email={email}  raw={raw_id}"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Shorthands (aliases):
-# T        = T'stack      → T               (stack, Rust default)
-# T'       = T'heap       → Box<T>          (exclusive heap ownership)
+# T        = T'inline     → T               (inline, no indirection — Rust default)
+# T'new                   → Box/Rc/Arc/Mutex/RwLock<T>  (any indirection, inferred)
 # T?                      → Option<T>       (optional value)
 # str                     → &str            (borrowed string slice)
 # string                  → Arc<str>        (thread-safe shared string)
@@ -617,6 +617,7 @@ print "uid={uid}  order={oid}  email={email}  raw={raw_id}"
 # float                   → f64
 # bool                    → bool
 # Ownership qualifiers:
+# T'owned    → Box<T>             (exclusive heap ownership)
 # T'shared   → Arc<T>             (multi-thread shared, read-only)
 # T'actor    → Arc<Mutex<T>>      (multi-thread shared, interior mutable — sync)
 # T'actor'task / T'task → Arc<tokio::sync::Mutex<T>>  (async context)
@@ -873,7 +874,7 @@ print "drop: released"
 
 # ── 21: Explicit lifetimes ──────────────────────────────────────────────────
 # T&a = &'a T  — a borrow with an explicit lifetime.
-# The lifetime 'a appears only in the borrow position: T&a, T'heap&a, etc.
+# The lifetime 'a appears only in the borrow position: T&a, T'owned&a, etc.
 # It is declared as a type parameter with the <'a> syntax, just like in Rust.
 #
 # Classic example: both parameters must outlive the returned reference.

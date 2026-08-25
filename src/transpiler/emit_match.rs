@@ -890,7 +890,7 @@ impl Transpiler {
         } else {
             None
         };
-        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Owned | OwnerQual::New)));
+        let is_smart_ptr = matches!(&subj_ty, Some(Type::Qualified(_, q)) if matches!(q, OwnerQual::Shared) || q.is_owned_or_new());
         // Shared/actor params are passed as &Rc<T> / &Arc<T> — need double deref to reach T.
         let is_shared_ref_param = if let ExprKind::Var(vname) = &s.subject.kind {
             self.shared_ref_params.contains(vname.as_str())
@@ -1380,7 +1380,7 @@ impl Transpiler {
         let mut nested: Vec<(String, Pattern)> = vec![];
         for (i, sub_pat) in fields.iter().enumerate() {
             let is_box = field_types.get(i)
-                .map(|t| matches!(t, Type::Qualified(_, OwnerQual::Owned | OwnerQual::New)))
+                .map(|t| matches!(t, Type::Qualified(_, q) if q.is_owned_or_new()))
                 .unwrap_or(false);
             let is_nested_variant = matches!(sub_pat, Pattern::Variant(_, _));
             if is_box && is_nested_variant {

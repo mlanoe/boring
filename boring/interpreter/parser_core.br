@@ -424,7 +424,7 @@ def bool parser_is_type_start_before_ident(mut Parser p):
         let k2 = token_kind_name(parser_peek_token_at(p, 2).kind)
         return k2 == "Ident"
     if k1 == "Tick":
-        # T'qual Ident or T'? Ident or T'shared'weak Ident
+        # T'qual Ident or T'? Ident or T'qual? Ident or T'shared'weak Ident
         var scan = 2
         while true:
             let ks = token_kind_name(parser_peek_token_at(p, scan).kind)
@@ -433,6 +433,9 @@ def bool parser_is_type_start_before_ident(mut Parser p):
                 let kn = token_kind_name(parser_peek_token_at(p, scan).kind)
                 if kn == "Tick":
                     scan = scan + 1
+                elif kn == "Question":
+                    let kn2 = token_kind_name(parser_peek_token_at(p, scan + 1).kind)
+                    return kn2 == "Ident"
                 else:
                     return kn == "Ident"
             elif ks == "Question":
@@ -2749,15 +2752,15 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
         return base
     # Only consume the ident if it's a known qualifier keyword
     let peeked_name = parser_peek_ident(p)
-    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "stack" and peeked_name != "heap" and peeked_name != "weak" and peeked_name != "new":
+    if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "inline" and peeked_name != "owned" and peeked_name != "weak" and peeked_name != "new":
         return base
     let qual_name = parser_expect_ident(p)
     let qual = match qual_name:
         "actor": OwnerQual.Actor
         "shared": OwnerQual.Shared
         "guard": OwnerQual.Guard
-        "stack": OwnerQual.Stack
-        "heap": OwnerQual.Owned
+        "inline": OwnerQual.Inline
+        "owned": OwnerQual.Owned
         "new": OwnerQual.Owned
         "weak": OwnerQual.Weak
         _: OwnerQual.Actor
@@ -2771,7 +2774,7 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
             qualified = Type.Qualified(qualified, OwnerQual.Guard)
         elif next_k == "Ident":
             let peek_q = parser_peek_token_at(p, 1).text()
-            if peek_q != "actor" and peek_q != "shared" and peek_q != "guard" and peek_q != "stack" and peek_q != "heap" and peek_q != "weak" and peek_q != "new":
+            if peek_q != "actor" and peek_q != "shared" and peek_q != "guard" and peek_q != "inline" and peek_q != "owned" and peek_q != "weak" and peek_q != "new":
                 break
             p.eat(TokenKind.Tick)
             let q2_name = parser_expect_ident(p)
@@ -2779,8 +2782,8 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
                 "actor": OwnerQual.Actor
                 "shared": OwnerQual.Shared
                 "guard": OwnerQual.Guard
-                "stack": OwnerQual.Stack
-                "heap": OwnerQual.Owned
+                "inline": OwnerQual.Inline
+                "owned": OwnerQual.Owned
                 "new": OwnerQual.Owned
                 "weak": OwnerQual.Weak
                 _: OwnerQual.Weak

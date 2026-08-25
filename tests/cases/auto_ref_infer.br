@@ -14,7 +14,7 @@ struct ARCounter:
 req int read_n(ARCounter c):
     c.value()
 
-let ARCounter'stack s = ARCounter(10)
+let ARCounter'inline s = ARCounter(10)
 let ARCounter'shared sh = ARCounter(20)
 
 print read_n(s)
@@ -39,7 +39,7 @@ def int take_actor(ARCounter'actor c):
 def int relay(ARCounter c):
     take_actor(c)
 
-let relay_c = ARCounter(99)   # infers 'stack — compatible with relay's 'stack param
+let relay_c = ARCounter(99)   # infers 'inline — compatible with relay's 'inline param
 print relay(relay_c)
 
 # --- Case 4: read-only usage + explicit borrow pass → still auto-ref ---
