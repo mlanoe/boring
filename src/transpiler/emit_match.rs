@@ -13,6 +13,20 @@ use super::*;
 use super::Transpiler;
 use super::helpers::*;
 
+/// How a nested-variant sub-pattern's temp binding must be dereferenced before the inner
+/// `match` can see through it — see `Transpiler::rewrite_boxed_nested_variant`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NestedFieldUnwrap {
+    /// `Box<T>` (strict-mode `'owned`/`'new`, or any auto-boxed recursive field) → `.as_ref()`.
+    Box,
+    /// `Arc<Mutex<T>>` (multi) / `RefCell<T>` (single) — managed-mode `'owned`/`'new`, or an
+    /// explicit `'actor` field → `.lock().unwrap()` / `.borrow()` (`actor_read_access`).
+    Actor,
+    /// `Arc<RwLock<T>>` (multi) / `RefCell<T>` (single) — explicit `'guard` field →
+    /// `.read().unwrap()` / `.borrow()` (`guard_read_access`).
+    Guard,
+}
+
 impl Transpiler {
     pub(crate) fn emit_if(&mut self, s: &IfStmt, is_last: bool) {
         // When this if/else is the last statement in a value-returning function,
@@ -1119,13 +1133,14 @@ impl Transpiler {
         // e.g. `Wrap(A(n))` where Wrap's field is Box<NInner> → `Wrap(__boring_b0)` + nested match.
         let subj_enum_ref2 = self.match_subject_enum.as_deref();
         let mut box_counter = 0usize;
-        let mut all_nested: Vec<(String, Pattern)> = vec![];
-        let rewritten_pats: Vec<Pattern> = arm.patterns.iter().map(|p| {
-            let (rp, nested) = Self::rewrite_boxed_nested_variant(
+        let mut all_nested: Vec<(String, Pattern, NestedFieldUnwrap)> = vec![];
+        let mut rewritten_pats: Vec<Pattern> = Vec::with_capacity(arm.patterns.len());
+        for p in &arm.patterns {
+            let (rp, nested) = self.rewrite_boxed_nested_variant(
                 p, &self.enum_variant_field_types, subj_enum_ref2, &mut box_counter);
             all_nested.extend(nested);
-            rp
-        }).collect();
+            rewritten_pats.push(rp);
+        }
         let effective_pats: &[Pattern] = if all_nested.is_empty() { &arm.patterns } else { &rewritten_pats };
 
         // Emit patterns, promoting mutated bindings to `mut name`.
@@ -1207,16 +1222,19 @@ impl Transpiler {
         for p in &arm.patterns {
             Self::collect_boxed_bindings(p, &self.enum_variant_field_types, &self.recursive_fields, subj_enum_ref, &mut boxed_bindings);
         }
-        // When there are nested Box<T> variant sub-patterns, wrap the arm in nested matches.
-        // e.g. `Wrap(__boring_b0)` with nested [("__boring_b0", Pattern::Variant("A", [...]))]
-        // emits: `Wrap(__boring_b0) => match __boring_b0.as_ref() { A(n) => body, _ => unreachable!() }`
+        // When there are nested indirection-wrapped variant sub-patterns, wrap the arm in
+        // nested matches. e.g. `Wrap(__boring_b0)` with nested
+        // [("__boring_b0", Pattern::Variant("A", [...]), Box)] emits:
+        // `Wrap(__boring_b0) => match __boring_b0.as_ref() { A(n) => body, _ => unreachable!() }`
+        // — or, for an Actor/Guard-wrapped field, `match __boring_b0.lock().unwrap() { ... }`
+        // / `.borrow()` / `.read().unwrap()` instead of `.as_ref()` (see `NestedFieldUnwrap`).
         if !all_nested.is_empty() {
             self.line(&format!("{}{} => {{", pat_s, guard));
             self.indent += 1;
             // Emit nested matches, innermost first — each wraps the next.
             // For simplicity with one level of nesting, just emit one nested match.
             // Record the bound vars from the nested pattern so emit_body can see them.
-            for (tmp_var, inner_pat) in &all_nested {
+            for (tmp_var, inner_pat, unwrap_kind) in &all_nested {
                 // Save/restore match_subject_enum for inner context.
                 let inner_enum = if let Pattern::Variant(vname, _) = inner_pat {
                     // Look up which enum this variant belongs to.
@@ -1237,7 +1255,15 @@ impl Transpiler {
                 let mut inner_bound_types: Vec<(String, Type)> = Vec::new();
                 Self::collect_pattern_var_types(inner_pat, &self.enum_variant_field_types, self.match_subject_enum.as_deref(), &mut inner_bound_types);
                 for (n, t) in &inner_bound_types { self.var_types.insert(n.clone(), t.clone()); }
-                self.line(&format!("match {}.as_ref() {{", tmp_var));
+                // Actor/Guard access yields a lock guard (MutexGuard/RwLockReadGuard) or a
+                // Ref<T> (RefCell::borrow()) — an extra `*` is needed to match through it to
+                // the underlying T, unlike `.as_ref()` which already yields `&T`.
+                let unwrap_expr = match unwrap_kind {
+                    NestedFieldUnwrap::Box => format!("{}.as_ref()", tmp_var),
+                    NestedFieldUnwrap::Actor => format!("*{}", self.actor_read_access(tmp_var)),
+                    NestedFieldUnwrap::Guard => format!("*{}", self.guard_read_access(tmp_var)),
+                };
+                self.line(&format!("match {} {{", unwrap_expr));
                 self.indent += 1;
                 // Body of inner arm — temporarily disable in_throws so we don't emit Ok(...).
                 let prev_throws = self.in_throws;
@@ -1341,18 +1367,22 @@ impl Transpiler {
         }
     }
 
-    /// Rewrite a match pattern that contains nested variant sub-patterns inside Box<T> fields.
+    /// Rewrite a match pattern that contains nested variant sub-patterns inside an
+    /// indirection-wrapped field (`Box<T>`, or — in managed mode / explicit `'actor`/`'guard`
+    /// — `Arc<Mutex<T>>`/`RefCell<T>`/`Arc<RwLock<T>>`).
     ///
-    /// When a variant field type is `Box<T>` (OwnerQual::Owned/New) and the sub-pattern is
-    /// itself a non-trivial Variant (not Bind/Wildcard), Rust cannot match directly. We
-    /// replace the sub-pattern with a temp binding `__boring_bN` and return the (binding, original)
-    /// pairs so the caller can emit a nested `match __boring_bN.as_ref() { inner => body }`.
+    /// When a variant field type carries such a wrapper and the sub-pattern is itself a
+    /// non-trivial Variant (not Bind/Wildcard), Rust cannot match directly. We replace the
+    /// sub-pattern with a temp binding `__boring_bN` and return `(binding, original, unwrap_kind)`
+    /// triples so the caller can emit a nested `match <unwrap>(__boring_bN) { inner => body }`,
+    /// using the unwrap access appropriate to how that field is actually wrapped.
     fn rewrite_boxed_nested_variant(
+        &self,
         pat: &Pattern,
         enum_variant_field_types: &std::collections::HashMap<String, Vec<Type>>,
         subject_enum: Option<&str>,
         counter: &mut usize,
-    ) -> (Pattern, Vec<(String, Pattern)>) {
+    ) -> (Pattern, Vec<(String, Pattern, NestedFieldUnwrap)>) {
         let Pattern::Variant(name, fields) = pat else {
             return (pat.clone(), vec![]);
         };
@@ -1377,17 +1407,42 @@ impl Transpiler {
         };
         let field_types = &enum_variant_field_types[&key];
         let mut new_fields = fields.clone();
-        let mut nested: Vec<(String, Pattern)> = vec![];
+        let mut nested: Vec<(String, Pattern, NestedFieldUnwrap)> = vec![];
         for (i, sub_pat) in fields.iter().enumerate() {
-            let is_box = field_types.get(i)
-                .map(|t| matches!(t, Type::Qualified(_, q) if q.is_owned_or_new()))
-                .unwrap_or(false);
+            // A field that transitively references its own enum is always auto-boxed by
+            // `emit_enum` (`Box<T>`, unconditionally — see emit_struct.rs's `emit_enum`),
+            // regardless of its declared qualifier or the transpile mode.
+            let rec_key = format!("{}::{}", key, i);
+            let is_recursive = self.recursive_fields.contains(&rec_key);
+            let unwrap_kind = if is_recursive {
+                Some(NestedFieldUnwrap::Box)
+            } else {
+                match field_types.get(i) {
+                    // `'owned`/`'new` (OwnerQual::is_owned_or_new): in managed mode this
+                    // resolves to the Actor wrapper (`Arc<Mutex<T>>` multi / `RefCell<T>`
+                    // single — see emit_top.rs's `emit_type` Union(NEW_MEMBERS) arm and
+                    // `emit_managed_actor`), not `Box<T>` — `.as_ref()` doesn't exist on
+                    // Mutex/RefCell. In strict mode it's still plain `Box<T>`.
+                    Some(Type::Qualified(_, q)) if q.is_owned_or_new() => {
+                        if self.config.mode == crate::transpiler::TranspileMode::Managed {
+                            Some(NestedFieldUnwrap::Actor)
+                        } else {
+                            Some(NestedFieldUnwrap::Box)
+                        }
+                    }
+                    // Explicit `'actor` / `'guard` on a variant field — always wrapped
+                    // (Mutex/RefCell or RwLock/RefCell), independent of mode.
+                    Some(Type::Qualified(_, OwnerQual::Actor)) => Some(NestedFieldUnwrap::Actor),
+                    Some(Type::Qualified(_, OwnerQual::Guard)) => Some(NestedFieldUnwrap::Guard),
+                    _ => None,
+                }
+            };
             let is_nested_variant = matches!(sub_pat, Pattern::Variant(_, _));
-            if is_box && is_nested_variant {
+            if let (Some(kind), true) = (unwrap_kind, is_nested_variant) {
                 let tmp = format!("__boring_b{}", *counter);
                 *counter += 1;
                 new_fields[i] = Pattern::Bind(tmp.clone());
-                nested.push((tmp, sub_pat.clone()));
+                nested.push((tmp, sub_pat.clone(), kind));
             }
         }
         (Pattern::Variant(name.clone(), new_fields), nested)

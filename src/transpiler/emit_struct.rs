@@ -912,9 +912,20 @@ impl Transpiler {
         let is_unit_enum = self.unit_enums.contains(&e.name);
         // Non-unit enums can derive PartialEq only when no variant field is actor/shared
         // (those map to Rc<RefCell<T>>/Arc<Mutex<T>> which don't implement PartialEq).
+        // A non-recursive `'owned`/`'new` field (OwnerQual::is_owned_or_new) is included too
+        // when in managed mode: it resolves to the same Actor wrapper there (see emit_type's
+        // Union(NEW_MEMBERS) arm / `emit_managed_actor`), not `Box<T>` — a recursive field is
+        // excluded since `emit_enum` always boxes those unconditionally (`Box<T>` does
+        // implement PartialEq when T does).
         let has_actor_field = !is_unit_enum && e.variants.iter().any(|v| {
-            v.fields.iter().any(|f| matches!(&f.ty,
-                Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Shared)))
+            v.fields.iter().enumerate().any(|(fi, f)| match &f.ty {
+                Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Shared) => true,
+                Type::Qualified(_, q) if q.is_owned_or_new() => {
+                    self.config.mode == crate::transpiler::TranspileMode::Managed
+                        && !self.recursive_fields.contains(&format!("{}::{}::{}", e.name, v.name, fi))
+                }
+                _ => false,
+            })
         });
         if !has_clone_derive {
             // When thiserror will auto-inject Debug below, omit Debug here to avoid duplicates.
