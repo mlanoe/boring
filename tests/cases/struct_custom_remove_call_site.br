@@ -1,0 +1,55 @@
+# Regression test: calling a user struct's own `remove(...)` method from
+# OUTSIDE the struct (`instance.remove(key)`) mis-transpiled the argument as
+# a Vec-style negative-index-wrapping usize, even though the receiver is a
+# struct with its own user-defined `remove` method (not a Vec/HashMap/HashSet).
+#
+# The transpiler's call-site dispatch for the Rust-mapped method name
+# "remove" (src/transpiler/emit_methods.rs) checked only `self.self_type`
+# (HashMap/HashSet, for calls made *inside* a HashMap/HashSet's own impl) and
+# a tracked set/dict-var receiver -- never `is_user_struct_receiver`, unlike
+# the sibling `contains`/`contains_key` branch just above it which already
+# had that guard. So `positions.remove(target_id)` where `positions` is a
+# struct with its own `remove(string)` method fell into the "must be
+# Vec::remove(usize)" branch and wrapped `target_id` (a string) in:
+#   { let __boring_idx = target_id as i64; ... as usize }
+# which fails to compile (E0605 non-primitive cast, E0308 mismatched types).
+# Note the struct's *own method body* (`table.remove(target_id)` inside
+# `Positions::remove`) was never affected -- only the outside call site was
+# broken, since the body's receiver (`table`, a dict field) already resolved
+# via `receiver_is_dict_var` correctly. Fixed by guarding the Vec/HashMap/Set
+# `remove` branch on `!is_user_struct_receiver`, same as the `contains`
+# branch above it.
+#
+# Covers both a content-mutable (`var mut {K=V}`) and a plain (`var {K=V}`)
+# dict field -- confirmed the bug (and the fix) apply to both, not just the
+# content-mutable shape some earlier bugs in this same bug-family were
+# specific to.
+struct Position:
+    float x
+    float y
+
+struct Positions:
+    var mut {string=Position} table
+
+    def remove(string target_id):
+        table.remove(target_id)
+
+struct Names:
+    var {string=string} table
+
+    def remove(string key):
+        table.remove(key)
+
+mut positions = Positions({=})
+positions.table["a"] = Position(1.0, 2.0)
+positions.table["b"] = Position(3.0, 4.0)
+print positions.table.len()
+positions.remove("a")
+print positions.table.len()
+
+mut names = Names({=})
+names.table["x"] = "one"
+names.table["y"] = "two"
+print names.table.len()
+names.remove("x")
+print names.table.len()

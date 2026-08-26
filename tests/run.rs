@@ -294,6 +294,15 @@ interp_test!(struct_field_array_interp);
 // tests/transpile.rs's registration for the real regression coverage).
 // Kept here anyway so the runtime values stay pinned down too.
 interp_test!(struct_set_field_methods);
+// `instance.remove(key)` called from outside a struct that has its own
+// user-defined `remove(...)` method backed by a dict field. The interpreter
+// never had this bug either -- it only affected `--emit-rust` output, where
+// the call-site "remove" dispatch mistook the struct's own method for
+// Vec::remove and wrapped its string argument in negative-index-wrapping
+// usize codegen (see tests/transpile.rs's registration for the real
+// regression coverage). Kept here anyway so the runtime values stay pinned
+// down too.
+interp_test!(struct_custom_remove_call_site);
 // Dict `[key]` indexing (read + write) with a string key, as a function
 // parameter and as an implicit-self struct field. The interpreter (this
 // test) never caught the underlying bugs -- both were only visible in

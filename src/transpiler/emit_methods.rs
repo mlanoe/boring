@@ -2259,9 +2259,14 @@ impl Transpiler {
             let mut v = args_s;
             v[0] = format!("({} as usize)", v[0]);
             v
-        } else if rust_method == "remove" && !args_s.is_empty() {
+        } else if !is_user_struct_receiver && rust_method == "remove" && !args_s.is_empty() {
             // HashMap::remove(&K) and HashSet::remove(&T) take a reference.
             // Vec::remove(usize) and all other cases (field-accessed vecs, etc.) take usize.
+            // Guarded on `!is_user_struct_receiver` so a user struct's own `remove` method
+            // (preserved as-is above) isn't mistaken for the builtin Vec/HashMap/HashSet
+            // remove and given bogus negative-index-wrapping codegen for its argument —
+            // same false-positive-by-name bug class as the `contains`/`contains_key` guard
+            // just above.
             let self_is_hash = matches!(self.self_type.as_deref(),
                 Some("HashMap") | Some("HashSet"));
             let receiver_is_set = receiver_is_set_var;

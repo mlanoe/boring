@@ -467,6 +467,16 @@ transpile_test!(struct_field_array_interp);
 // (this test), not `boring run`. See tests/cases/struct_set_field_methods.br's
 // own doc comment and expr_is_set in src/transpiler/emit_methods.rs.
 transpile_test!(struct_set_field_methods);
+// Calling a user struct's own `remove(...)` method from *outside* the
+// struct (`instance.remove(key)`) -- the call-site "remove" dispatch only
+// checked for a HashMap/HashSet `self_type` or a tracked set/dict-var
+// receiver, never `is_user_struct_receiver`, so a struct's own `remove`
+// method got the Vec-style negative-index-wrapping treatment applied to its
+// (non-index) argument -- fails to compile (E0605/E0308), only caught by
+// `cargo run` (this test), not `boring run`. See
+// tests/cases/struct_custom_remove_call_site.br's own doc comment and the
+// `remove` branch in src/transpiler/emit_methods.rs.
+transpile_test!(struct_custom_remove_call_site);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`
