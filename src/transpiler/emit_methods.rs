@@ -212,11 +212,20 @@ impl Transpiler {
                     // (emit_let.rs's "Track enum type for variables initialized from enum
                     // constructors"). Fall back to `var_types` for exactly that case, mirroring
                     // the same struct-then-enum fallback emit_expr.rs's field-access `is_getter`
-                    // check already uses.
+                    // check already uses. Also fall back to `transparent_wrapper_inner_name` so a
+                    // Bevy system parameter declared `Res<T>`/`ResMut<T>`/`Single<T, F>`/`Mut<T>`
+                    // resolves to `T` the same way `resolve_expr_struct_type` already does --
+                    // otherwise a call like `widgets.remove(...)` on a `mut ResMut<Widgets>
+                    // widgets` parameter falls through to the builtin Vec/HashMap/HashSet
+                    // `.remove` codegen below instead of dispatching to `Widgets`'s own `remove`
+                    // method, even though the wrapper is fully deref-transparent to `Widgets`.
                     let type_name = self.var_struct_types.get(v.as_str()).cloned()
                         .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
                             if let Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
-                        }));
+                        }))
+                        .or_else(|| self.var_types.get(v.as_str())
+                            .and_then(transparent_wrapper_inner_name)
+                            .map(|n| n.to_string()));
                     type_name.map(|t| self.is_known_user_type(t.as_str())).unwrap_or(false)
                 }
             }

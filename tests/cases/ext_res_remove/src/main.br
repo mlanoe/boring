@@ -1,0 +1,40 @@
+# Regression test: follow-up to struct_custom_remove_call_site.br (`ff7d29b`, "struct's
+# own remove() method call site mis-transpiled as Vec::remove"). That fix guarded the
+# builtin Vec/HashMap/HashSet `.remove(...)` codegen on `!is_user_struct_receiver`, but
+# `is_user_struct_receiver` (`expr_receiver_is_known_user_type` in
+# src/transpiler/emit_methods.rs) resolved a `Var` receiver's type from `var_struct_types`/
+# `var_types` alone -- it never saw through a `Res<T>`/`ResMut<T>` system-param wrapper the
+# way `resolve_expr_struct_type` already does (see `TRANSPARENT_WRAPPER_GENERICS`, added
+# for tests/cases/ext_res_field's field-access bug). So a call site like
+# `widgets.remove(key)` where `widgets` is a `ResMut<Widgets>` system parameter -- the
+# realistic, common shape for a Bevy resource written to -- still fell into the
+# "must be Vec::remove(usize)" branch and wrapped the string key in a bogus
+# negative-index-wrapping usize cast, even though `struct_custom_remove_call_site.br`'s
+# bare-struct-receiver shape (`positions.remove(target_id)`, no wrapper) was already
+# fixed.
+#
+# `ext_res.ResMut` (tests/cases/fixtures/ext_res) stands in for real bevy's `ResMut<T>` --
+# a `Deref`/`DerefMut`-transparent wrapper around a real `T`, so `widgets.remove(key)` is a
+# genuine call to `Widgets::remove` via auto-deref, and must compile -- not the Vec-style
+# codegen, which doesn't compile here at all (`Widgets`/`ResMut<Widgets>` has no `.len()`,
+# and `HashMap::remove` doesn't take a cast `usize`). `transpile_project_test!` (real
+# `cargo run`) is needed for the same reason as `ext_res_field`: this is a codegen-only
+# bug, `boring run`'s interpreter never resolves a `Res`/`ResMut` wrapper type at all.
+use ext_res.ResMut
+
+struct Widgets:
+    var mut {string=int} table
+
+    def remove(string key):
+        table.remove(key)
+
+def despawn(mut ResMut<Widgets> widgets):
+    print widgets.table.len()
+    widgets.remove("a")
+    print widgets.table.len()
+
+def main():
+    var mut w = Widgets({=})
+    w.table["a"] = 1
+    w.table["b"] = 2
+    despawn(ResMut(w))

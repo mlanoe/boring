@@ -586,6 +586,17 @@ transpile_project_test!(ext_tuple_construct);
 // codegen-only bug.
 transpile_project_test!(ext_res_field);
 
+// Follow-up to `ext_res_field` above and to `struct_custom_remove_call_site` (ff7d29b):
+// that fix's `is_user_struct_receiver` guard (`expr_receiver_is_known_user_type` in
+// src/transpiler/emit_methods.rs) still resolved a `Var` receiver's type from
+// `var_struct_types`/`var_types` alone -- unlike `resolve_expr_struct_type`, it never saw
+// through a `Res<T>`/`ResMut<T>` system-param wrapper (`TRANSPARENT_WRAPPER_GENERICS`), so
+// a struct's own `remove(...)` method called on a `ResMut<T>`-wrapped receiver (the
+// realistic Bevy-system shape) still mis-transpiled as the builtin Vec/HashMap `.remove`.
+// See tests/cases/ext_res_remove/src/main.br's own doc comment. Needs project mode/a real
+// `cargo run` for the same reason as `ext_res_field`.
+transpile_project_test!(ext_res_remove);
+
 // `TextColor` specifically (bevy::prelude::TextColor, bevy_text 0.19) -- the concrete
 // case that motivated auditing/extending `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`
 // beyond `Mesh2d`/`MeshMaterial2d` above; see tests/cases/text_color_construct/src/
