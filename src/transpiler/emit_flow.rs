@@ -37,6 +37,19 @@ impl Transpiler {
                     let raw = self.emit_expr_owned(e);
                     self.want_raw_option_pop.set(false);
                     raw
+                } else if is_optional_return && matches!(&e.kind,
+                    ExprKind::Index(dict_obj, _) if self.expr_is_dict(dict_obj))
+                {
+                    // Bare `return dict[key]` with a declared `T?` return: pass
+                    // `HashMap::get(...).cloned()`'s own `Option<V>` straight through
+                    // raw — skip `emit_expr_index`'s default panic-on-missing-key
+                    // suffix and don't re-wrap in `Some(...)` below (see emit_stmt.rs's
+                    // tail-return twin of this check). See
+                    // docs/dict-index-optional-return-bug.md.
+                    self.want_raw_dict_get.set(true);
+                    let raw = self.emit_expr_owned(e);
+                    self.want_raw_dict_get.set(false);
+                    raw
                 } else if is_optional_return && !self.is_option_expr(e) {
                     let inner = self.emit_expr_owned(e);
                     // Check if the return expression is already an Option.

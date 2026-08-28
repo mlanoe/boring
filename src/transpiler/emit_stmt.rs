@@ -192,6 +192,20 @@ impl Transpiler {
                         let raw = self.emit_expr_owned(e);
                         self.want_raw_option_pop.set(false);
                         raw
+                    } else if is_optional_return && matches!(&e.kind,
+                        ExprKind::Index(dict_obj, _) if self.expr_is_dict(dict_obj))
+                    {
+                        // Bare `dict[key]` tail expression with a declared `T?` return:
+                        // pass `HashMap::get(...).cloned()`'s own `Option<V>` straight
+                        // through raw (skip `emit_expr_index`'s default
+                        // `.expect("dict key not found")` panic-on-missing-key suffix,
+                        // and don't re-wrap in `Some(...)` below — it's already
+                        // Option-shaped). Mirrors the `is_bare_pop_call` case above.
+                        // See docs/dict-index-optional-return-bug.md.
+                        self.want_raw_dict_get.set(true);
+                        let raw = self.emit_expr_owned(e);
+                        self.want_raw_dict_get.set(false);
+                        raw
                     } else if is_optional_return && !self.is_option_expr(e) {
                         // Function returns Option<T>; expression is not already Option-typed.
                         // Wrap scalar/integer/variable values in Some() so Rust is happy.

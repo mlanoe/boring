@@ -1,0 +1,60 @@
+# Regression test: a `req`/`def` method (or a `let T?` binding) whose declared
+# return type is `T?` and whose value is a bare dict-index (`table[key]`, no
+# `else` fallback) mis-transpiled to broken Rust: `expr_is_declared_optional`
+# (src/transpiler/emit_methods.rs) had no case for `ExprKind::Index`, so the
+# "already Option-shaped, don't re-wrap" check in emit_stmt.rs/emit_flow.rs/
+# emit_let.rs missed it -- and separately, `emit_expr_index`'s bare-`Var`
+# dict-access branch checked only `dict_vars` (tracked *local* dict vars), not
+# an implicit self dict-field accessed by bare name, so it fell through to the
+# generic Vec-style `[(key) as usize]` indexing instead of `HashMap::get`.
+# Combined, `req string? get_it(string key): table[key]` emitted
+# `Some(self.table[(key) as usize].clone())` -- fails to compile (E0605 non-
+# primitive cast, E0308 mismatched types, and a spurious `Option<Option<T>>`
+# double-wrap).
+#
+# The sibling `table[key] else "fallback"` shape (a non-Optional return) was
+# never affected -- it already resolves via a separate `ExprKind::Else`
+# rebuild in emit_expr.rs. This case covers the three call-site shapes that
+# share the fix: a bare method tail expression, an explicit `return`, and a
+# `let T?` binding off a local dict var -- each against both a present and a
+# missing key, so a regression that panics on the missing-key path (instead
+# of yielding `nil`) would also be caught, not just a compile failure.
+struct Lookup:
+    var mut {string=string} table
+
+    req string? get_it(string key):
+        table[key]
+
+    req string? get_it_explicit(string key):
+        return table[key]
+
+def main():
+    mut l = Lookup(table = {"a" = "1"})
+
+    if let v = l.get_it("a"):
+        print "{v}"
+    else:
+        print "nothing"
+
+    if let v = l.get_it("missing"):
+        print "{v}"
+    else:
+        print "nothing"
+
+    if let v = l.get_it_explicit("a"):
+        print "{v}"
+    else:
+        print "nothing"
+
+    mut plain_table = {"x" = "1"}
+    let string? bound = plain_table["x"]
+    if let v = bound:
+        print "{v}"
+    else:
+        print "nothing"
+
+    let string? missing_bound = plain_table["missing"]
+    if let v = missing_bound:
+        print "{v}"
+    else:
+        print "nothing"

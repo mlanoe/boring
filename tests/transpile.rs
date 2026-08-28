@@ -477,6 +477,22 @@ transpile_test!(struct_set_field_methods);
 // tests/cases/struct_custom_remove_call_site.br's own doc comment and the
 // `remove` branch in src/transpiler/emit_methods.rs.
 transpile_test!(struct_custom_remove_call_site);
+// A `T?`-returning method (or `let T?` binding) whose value is a bare
+// dict-index (`table[key]`, no `else` fallback) mis-transpiled to broken
+// Rust: `expr_is_declared_optional` had no case for `ExprKind::Index`, so
+// the tail-return/`return`/`let` "already Option-shaped, don't re-wrap in
+// Some(...)" checks all missed it, and separately `emit_expr_index`'s bare
+// dict-access branch only recognized a tracked local `dict_vars` entry, not
+// an implicit self dict-field accessed by bare name -- so it fell through
+// to Vec-style `[(key) as usize]` indexing. Combined:
+// `req string? get_it(string key): table[key]` emitted
+// `Some(self.table[(key) as usize].clone())` (E0605/E0308), only caught by
+// `cargo run` (this test), not `boring run`. See
+// tests/cases/dict_index_optional_return.br's own doc comment,
+// `expr_is_declared_optional` in src/transpiler/emit_methods.rs, and the new
+// `want_raw_dict_get` flag threaded through emit_stmt.rs/emit_flow.rs/
+// emit_let.rs/emit_expr.rs.
+transpile_test!(dict_index_optional_return);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --
 // whenever the dict-typed receiver wasn't recognized as a dict: `dict_vars`

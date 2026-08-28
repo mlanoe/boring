@@ -1287,6 +1287,16 @@ impl Transpiler {
         // When wrapped in `else` (ExprKind::Else), that handler rebuilds the get
         // directly as .unwrap_or_else() to avoid a double-unwrap.
         //
+        // `expr_is_dict` (not a plain `dict_vars`-only check) so an implicit
+        // self-field bare identifier (`table[key]` inside a method body, with
+        // no `self.` prefix) is recognized too, not just a tracked local dict
+        // var — `self.emit_expr(obj)` resolves that case to `self.table` on its
+        // own. Before this used `dict_vars.contains(obj_var)` alone, a bare
+        // struct-field dict access fell through to the generic numeric-index
+        // codegen below (an `as usize` cast + raw `[]` indexing), which doesn't
+        // type-check against a `HashMap` key at all — see
+        // docs/dict-index-optional-return-bug.md.
+        //
         // When this index expression is itself a place expression (`in_lhs_assign`
         // — set by `emit_method_call_fallback` for `d[k].method()`, and by the
         // compound-assign codegen for `d[k] += ...`), `.get(k).cloned()` must NOT
@@ -1297,14 +1307,21 @@ impl Transpiler {
         // `.get_mut(k)` yields the real place instead; the leading `*` turns the
         // `&mut V` into an lvalue so both `(*d.get_mut(k)...).method()` and
         // `(*d.get_mut(k)...) += rhs` compile.
-        if let ExprKind::Var(obj_var) = &obj.kind {
-            if self.dict_vars.contains(obj_var.as_str()) {
-                let key_ref = self.emit_dict_key_borrow(idx);
-                if self.in_lhs_assign.get() {
-                    return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_var, key_ref);
-                }
-                return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_var, key_ref);
+        if matches!(&obj.kind, ExprKind::Var(_)) && self.expr_is_dict(obj) {
+            let obj_s = self.emit_expr(obj);
+            let key_ref = self.emit_dict_key_borrow(idx);
+            if self.in_lhs_assign.get() {
+                return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_s, key_ref);
             }
+            // A bare dict-index tail flowing directly into an Optional-typed
+            // return/let (`want_raw_dict_get`, set by emit_stmt.rs/emit_let.rs):
+            // pass `.get(...).cloned()`'s own `Option<V>` through raw instead of
+            // `.expect(...)`-panicking on a missing key and having the caller
+            // wrap it in a redundant `Some(...)`.
+            if self.want_raw_dict_get.get() {
+                return format!("{}.get({}).cloned()", obj_s, key_ref);
+            }
+            return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s, key_ref);
         }
         // self.field[key] where field is a dict-type struct field (HashMap): use dict-style access.
         // Detect by checking if the index key is a string-typed var or the field type is Dict.
@@ -1332,6 +1349,10 @@ impl Transpiler {
                         // Same throwaway-clone hazard as the plain dict-var case above.
                         if self.in_lhs_assign.get() {
                             return format!("(*{}.get_mut({}).expect(\"dict key not found\"))", obj_s2, key_ref);
+                        }
+                        // See the `want_raw_dict_get` branch above (plain dict-var case).
+                        if self.want_raw_dict_get.get() {
+                            return format!("{}.get({}).cloned()", obj_s2, key_ref);
                         }
                         return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s2, key_ref);
                     }

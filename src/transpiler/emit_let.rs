@@ -1165,6 +1165,20 @@ impl Transpiler {
             self.want_raw_option_pop.set(false);
             return raw;
         }
+        // Bare `let T? x = dict[key]`: pass `HashMap::get(...).cloned()`'s own
+        // `Option<V>` straight through raw — skip `emit_expr_index`'s default
+        // panic-on-missing-key suffix and don't wrap it in `Some(...)` below (it's
+        // already Option-shaped). Mirrors the `is_bare_pop_call` check above and
+        // its twins in emit_stmt.rs/emit_flow.rs. See
+        // docs/dict-index-optional-return-bug.md.
+        if let ExprKind::Index(dict_obj, _) = &value.kind {
+            if self.expr_is_dict(dict_obj) {
+                self.want_raw_dict_get.set(true);
+                let raw = self.emit_expr_owned(value);
+                self.want_raw_dict_get.set(false);
+                return raw;
+            }
+        }
         // If-expression with mixed branches (some nil, some non-optional): emit via a
         // sub-transpiler that has fn_return_ty = Optional(inner) so each branch
         // independently wraps non-nil values in Some() and nil → None.

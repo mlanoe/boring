@@ -3366,6 +3366,7 @@ impl Transpiler {
             managed_mutex_fn_return_vars: self.managed_mutex_fn_return_vars.clone(),
             in_lhs_assign: std::cell::Cell::new(false),
             want_raw_option_pop: std::cell::Cell::new(false),
+            want_raw_dict_get: std::cell::Cell::new(false),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),

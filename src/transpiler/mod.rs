@@ -291,6 +291,16 @@ struct Transpiler {
     /// (nil if empty) instead of discarding `None` — see helpers.rs's `map_method` doc.
     /// Uses Cell<bool> because emit_expr takes &self.
     pub(crate) want_raw_option_pop: std::cell::Cell<bool>,
+    /// True while emitting an expression that will flow directly into an Optional-typed
+    /// function return or `let T?` binding, exactly like `want_raw_option_pop` above but
+    /// for a bare dict-index tail (`table[key]`) instead of a bare `.pop()` call. Lets
+    /// `emit_expr_index`'s dict-access branch skip its `.expect("dict key not found")`
+    /// suffix so the raw `Option<V>` `HashMap::get(...).cloned()` already produces flows
+    /// through unwrapped, instead of panicking on a missing key and then being wrapped in
+    /// a redundant `Some(...)` by the caller. Without this, `req T? get(K k): table[k]`
+    /// mis-transpiled to array-style `table[(k) as usize]` indexing wrapped in `Some(...)`
+    /// — see docs/dict-index-optional-return-bug.md.
+    pub(crate) want_raw_dict_get: std::cell::Cell<bool>,
     /// Are we inside a `req` (non-mutating, &self) function body?
     pub(crate) in_req_fn: bool,
     /// Are we emitting a struct/enum method (self_ty.is_some())?
@@ -948,6 +958,7 @@ impl Transpiler {
             in_throws: false,
             in_lhs_assign: std::cell::Cell::new(false),
             want_raw_option_pop: std::cell::Cell::new(false),
+            want_raw_dict_get: std::cell::Cell::new(false),
             in_req_fn: false,
             in_struct_method: false,
             in_async: false,

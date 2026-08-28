@@ -303,6 +303,13 @@ interp_test!(struct_set_field_methods);
 // regression coverage). Kept here anyway so the runtime values stay pinned
 // down too.
 interp_test!(struct_custom_remove_call_site);
+// A `T?`-returning method/`let` whose value is a bare dict-index (`table[key]`,
+// no `else` fallback) mis-transpiled to broken Rust in `--emit-rust` output
+// (array-style `as usize` indexing double-wrapped in `Some(...)`) -- the
+// interpreter (this test) never had the bug; kept here anyway so the runtime
+// values stay pinned down too (see tests/transpile.rs's registration for the
+// real regression coverage).
+interp_test!(dict_index_optional_return);
 // Dict `[key]` indexing (read + write) with a string key, as a function
 // parameter and as an implicit-self struct field. The interpreter (this
 // test) never caught the underlying bugs -- both were only visible in
