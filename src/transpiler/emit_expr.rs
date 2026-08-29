@@ -3929,13 +3929,19 @@ impl Transpiler {
                 let a = self.emit_expr(&args[0].value);
                 format!("drop({})", a)
             }
+            // args() — argv-style CLI arguments, C/Python convention: args()[0] is
+            // the program name (the binary's own path, exactly as the OS was asked
+            // to invoke it — reflects renames/symlinks/aliases), args()[1..] are its
+            // real arguments. No `.skip(1)`: unlike `boring run` (interpreter/mod.rs),
+            // there is no `boring`-prefix to strip here — `std::env::args()`'s own
+            // argv[0] already is this program's name.
             "args" => {
-                format!("std::env::args().skip(1).map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
+                format!("std::env::args().map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
             }
             // raw_args() — same as args() in compiled binaries (there is no `boring run`
             // prefix to strip, and no implicit `--` filtering either way).
             "raw_args" => {
-                format!("std::env::args().skip(1).map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
+                format!("std::env::args().map(|s| {}::<str>::from(s)).collect::<Vec<_>>()", self.str_ptr())
             }
             "ord" => {
                 let s = self.emit_expr(&args[0].value);

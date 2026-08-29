@@ -22,6 +22,10 @@ use stdlib
 # its own pass-through arguments and truncates everything before a `--`,
 # which would swallow our own --gpu/file flags whenever a script also
 # receives args after `--`. raw_args() returns everything, unfiltered.
+#
+# argv[0] convention: raw_args()[0] is this program's own name (the compiled
+# binary's invoked path — see docs/book.md's "Global functions" entry), so
+# our own flags/file/`--help` start at index 1, not 0.
 
 struct RunArgs:
     string? gpu_profile
@@ -99,29 +103,42 @@ def string resolve_project_main() throws:
 
 def void main() throws:
     let raw = raw_args()
-    if raw.length > 0 and (raw[0] == "--help" or raw[0] == "-h"):
+    if raw.length > 1 and (raw[1] == "--help" or raw[1] == "-h"):
         print_help()
         exit(0)
-    let parsed = parse_run_args(raw)
+    let parsed = parse_run_args(raw.slice(1, raw.length))
     # GPU profile simulation isn't implemented in the self-hosted interpreter
     # yet; --gpu is accepted (for CLI compatibility with `boring run --gpu
     # <profile>`) but currently has no effect.
     var string source = ""
     var string? source_path = nil
+    # argv[0] convention (see docs/book.md): the guest script's own args()
+    # builtin (parser_core.br) forwards `interp.cli_args` verbatim, so index 0
+    # must be the guest script's own name here, exactly like `main.rs::run_file`
+    # does for the Rust interpreter's `args()`. Stays "" when the source came
+    # from stdin (no file/project path to name it after). Kept as a separate
+    # plain string (not re-derived from `source_path` below) because `if let`
+    # on an Optional string moves it — it can only be destructured once.
+    var string program_name = ""
     if let f = parsed.file:
         source = fs.read(f.clone())
-        source_path = f
+        source_path = f.clone()
+        program_name = f
     elif fs.exists("boring.toml"):
         let main_file = resolve_project_main()
         source = fs.read(main_file.clone())
-        source_path = main_file
+        source_path = main_file.clone()
+        program_name = main_file
     else:
         # No file, no project — read the script from stdin (pipe or redirect).
         while let ln = readLine():
             source = source + ln + "\n"
     let prog = parse(source)
     var interp = new_interpreter()
-    interp.cli_args = parsed.script_args
+    var [string] full_args = [program_name]
+    for a in parsed.script_args:
+        full_args.push(a)
+    interp.cli_args = full_args
     # Seed `use` resolution with the entry file's own directory — mirrors the
     # real compiler's `run_file` adding `path.parent()` to `search_paths`
     # (src/main.rs). Unlike the real compiler, this doesn't also add the

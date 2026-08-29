@@ -1973,42 +1973,40 @@ fn register_result_and_args_builtins(e: &mut Env) {
         },
     });
 
-    // args() — returns the user-facing CLI arguments for the script.
-    // For `boring run file.br -- arg1 arg2`, returns [arg1, arg2].
-    // For `boring run file.br arg1 arg2`, returns [arg1, arg2] (skips boring + file).
+    // args() — argv-style CLI arguments for the script, C/Python convention:
+    // args()[0] is the program name (this script, exactly as passed to
+    // `boring run`), args()[1..] are its own arguments. Mirrors `sys.argv` in
+    // Python — useful when the program name itself carries information (e.g.
+    // it was invoked through an alias/rename). For `boring run file.br --
+    // arg1 arg2`, returns [file.br, arg1, arg2].
+    //
+    // Backed by `PROGRAM_ARGS`, populated from `Interpreter::user_args` at the
+    // top of `exec_program` (see that field's doc comment) — NOT read directly
+    // from `std::env::args()`, since that would also pick up `boring`'s own
+    // `run`/`--gpu` prefix, which the caller has already stripped.
     e.define("args", Value::NativeFn {
         name: "args".into(),
         func: |_args, _line| {
-            let all: Vec<String> = std::env::args().collect();
-            let argv: Vec<Value> = if let Some(sep) = all.iter().position(|s| s == "--") {
-                all.into_iter().skip(sep + 1).map(Value::Str).collect()
-            } else {
-                // boring run file.br → user args start at index 3
-                all.into_iter().skip(3).map(Value::Str).collect()
-            };
+            let argv: Vec<Value> = PROGRAM_ARGS.with(|a| {
+                a.borrow().iter().cloned().map(Value::Str).collect()
+            });
             Ok(Value::Array(argv.into()))
         },
     });
 
-    // raw_args() — every CLI argument passed to this program, with no `--`
-    // filtering. Unlike args() (meant for a script to read its own pass-through
-    // arguments), this is for programs that parse their own command-line syntax
-    // — e.g. the self-hosted Boring interpreter, which needs to see `--gpu`,
-    // the file path, and `--` all at once instead of having `--` swallow them.
+    // raw_args() — same as args() under `boring run` today: there is no `--`
+    // filtering left to differ on, since `Interpreter::user_args` already is
+    // "program name + whatever the caller resolved as this script's own
+    // trailing arguments". Kept as a distinct builtin for symmetry with
+    // compiled binaries (see transpiler/emit_expr.rs), where it's args()'s
+    // exact synonym for the same reason (no `boring run` prefix to strip
+    // there either).
     e.define("raw_args", Value::NativeFn {
         name: "raw_args".into(),
         func: |_args, _line| {
-            let all: Vec<String> = std::env::args().collect();
-            // boring run file.br → this program's own args start at index 3.
-            // A lone leading `--` is dropped if present — it only exists to
-            // escape `boring run`'s single-positional-file parser (e.g.
-            // `boring run main.br -- --gpu v100 script.br`); everything after
-            // it passes through untouched, with no further `--` filtering.
-            let mut rest: Vec<String> = all.into_iter().skip(3).collect();
-            if rest.first().map(|s| s == "--").unwrap_or(false) {
-                rest.remove(0);
-            }
-            let argv: Vec<Value> = rest.into_iter().map(Value::Str).collect();
+            let argv: Vec<Value> = PROGRAM_ARGS.with(|a| {
+                a.borrow().iter().cloned().map(Value::Str).collect()
+            });
             Ok(Value::Array(argv.into()))
         },
     });
@@ -2103,6 +2101,22 @@ fn register_stdlib(env: &EnvRef) {
     register_concurrency_builtins(&mut e);
     register_result_and_args_builtins(&mut e);
     register_misc_globals(&mut e);
+}
+
+thread_local! {
+    /// Backing store for the `args()`/`raw_args()` builtins — see their doc
+    /// comments in `register_result_and_args_builtins`. Mirrored from
+    /// `Interpreter::user_args` at the top of `exec_program`.
+    ///
+    /// `NativeFn`'s `func` is a bare `fn` pointer (no captures — see the
+    /// `Value::NativeFn` variant), so the builtins can't read `self.user_args`
+    /// directly; this thread-local is the workaround. It's thread-local
+    /// rather than a process-global so that running multiple interpreters on
+    /// different threads (e.g. the test suite, one `#[test]` per thread)
+    /// never cross-contaminates each other's argv — `main.rs` only ever runs
+    /// one script per worker thread, so this is always set before any
+    /// `args()`/`raw_args()` call can observe it.
+    static PROGRAM_ARGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
 }
 
 // ─── Interpreter ─────────────────────────────────────────────────────────────
@@ -2381,6 +2395,10 @@ impl Interpreter {
     }
 
     pub fn exec_program(&mut self, program: &Program) -> Result<(), RuntimeError> {
+        // Make `user_args` (set by `main.rs::run_file` before calling here) visible
+        // to the `args()`/`raw_args()` builtins — see `PROGRAM_ARGS`'s doc comment.
+        PROGRAM_ARGS.with(|a| *a.borrow_mut() = self.user_args.clone());
+
         // Register built-in stdlib types before any user code runs, so `Error.Variant`
         // resolves regardless of where/whether the user declares their own enums.
         let builtin_error = Self::builtin_error_enum_decl();

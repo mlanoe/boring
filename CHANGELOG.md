@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: `args()` now follows the C/Python argv[0] convention** — `args()[0]` is the program name (the `.br` script path under `boring run`, the binary's own invoked path under a `boring build` binary — so it reflects renames/symlinks/aliases), and `args()[1..]` are the program's real arguments. Previously `args()[0]` was already the first real argument (the program name was silently excluded in every mode). `raw_args()` is aligned the same way, for consistency. Every existing `args()`/`raw_args()` call site needs its indices shifted by one (or its loop changed to skip index 0) — see `docs/book.md`'s "Global functions" entry for the exact new contract.
+
+---
+
 ## [0.9.5] — 2026-08-21 *(interpreter: 642/642 · functional: 76/76 × 4 modes)*
 
 ### Added

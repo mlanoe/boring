@@ -4464,7 +4464,7 @@ empty **set**, `{=}` is an empty **dict**.
 
 **Global functions** — pre-loaded, no `use` needed.
 
-- I/O: `print(msg)`, `write(msg)` (no trailing newline), `readLine()`, `args()`
+- I/O: `print(msg)`, `write(msg)` (no trailing newline), `readLine()`, `args()` / `raw_args()` — CLI arguments, argv[0]-style: `args()[0]` is the program name (the `.br` script under `boring run`, the binary's own invoked path in a `boring build` binary — reflects renames/aliases), `args()[1..]` are its real arguments. `raw_args()` is the same today; it exists for symmetry with `boring run`'s own flag parsing (`--gpu`, `--`), which never reaches user code either way.
 - Process: `exit(code)`
 - Characters: `ord(c)`, `chr(code)`
 - Conversion: `int(v)`, `uint(v)`, `float(v)` (alias of `float64`), `float32(v)`, `float64(v)`, `str(v)`

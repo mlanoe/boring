@@ -2643,6 +2643,9 @@ def Value call_native(Interpreter interp, string name, Value func, [Value] args)
             _: exit(0)
         Value.Void
     if name == "args":
+        # argv[0] convention: `interp.cli_args[0]` is already the guest script's
+        # own name (set by main.br before running it) — forwarded verbatim, not
+        # recomputed here.
         var [Value] out = []
         for a in interp.cli_args:
             out.push(Value.Str(a))

@@ -1089,9 +1089,17 @@ fn run() {
             // Parse optional: --gpu <profile>  before the file path.
             let run_args = &args[2..];
             let (gpu_profile_name, file_arg) = parse_run_flags(run_args);
+            // Everything after a `--` separator is the script's own argv, passed
+            // through untouched (see args()'s doc comment in interpreter/mod.rs).
+            // `parse_run_flags` already rejects any bare positional beyond the file,
+            // so `--` is the only way script args reach here.
+            let script_args: Vec<String> = match run_args.iter().position(|s| s == "--") {
+                Some(sep) => run_args[sep + 1..].to_vec(),
+                None => Vec::new(),
+            };
             match file_arg {
-                Some(path) => run_file(path, gpu_profile_name.as_deref()),
-                None       => run_project(),
+                Some(path) => run_file(path, gpu_profile_name.as_deref(), &script_args),
+                None       => run_project(&script_args),
             }
         }
         Some("build") => {
@@ -1099,7 +1107,7 @@ fn run() {
             parse_build_command(build_args);
         }
 
-        Some(path) => run_file(path, None),
+        Some(path) => run_file(path, None, &args[2..]),
         None => {
             print_help();
             process::exit(1);
@@ -1185,9 +1193,9 @@ fn new_project(name: &str) {
 }
 
 /// `boring run` â€” run the project described by `boring.toml` in the current directory.
-fn run_project() {
+fn run_project(script_args: &[String]) {
     let (toml, _) = load_project_toml();
-    run_file(&toml.main, None);
+    run_file(&toml.main, None, script_args);
 }
 
 /// `boring build` — emit a Cargo project from the `boring.toml` main file.
@@ -1537,7 +1545,11 @@ fn run_cargo_build(project_dir: &PathBuf, rust_options: &[String]) {
 
 // â”€â”€â”€ Core: interpret â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-fn run_file(path: &str, gpu_profile: Option<&str>) {
+fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
+    // argv[0]-style convention (see interpreter/mod.rs's `args()` doc comment):
+    // the script's own path is the "program name", exactly as typed on the
+    // command line — mirrors `sys.argv[0]` in Python for an interpreted script.
+    let program_name = path.to_string();
     let path = PathBuf::from(path);
 
     let source = match std::fs::read_to_string(&path) {
@@ -1570,6 +1582,15 @@ fn run_file(path: &str, gpu_profile: Option<&str>) {
     }
 
     let mut interp = interpreter::Interpreter::new();
+
+    // Forwarded to the `args()`/`raw_args()` builtins — see `user_args`'s doc
+    // comment on `Interpreter`. argv[0] is the program name (this script), then
+    // whatever the caller resolved as the script's own trailing arguments.
+    interp.user_args = {
+        let mut v = vec![program_name];
+        v.extend(script_args.iter().cloned());
+        v
+    };
 
     if let Some(name) = gpu_profile {
         match interpreter::gpu_profile::GpuProfile::load(name) {
